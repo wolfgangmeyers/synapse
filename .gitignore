@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Editor
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Supervisor workflow artifacts (never commit)
+TASK.md
+TASK-*.md
+REDIRECT.md
+VERIFY.md
+.claude/cache/
