@@ -49,5 +49,5 @@ Examples: `30s`, `10m`, `1h`, `1h30m`, `2h15m30s`
 
 ## Storage
 
-Reminders are stored in `~/.mecha-wolfgang/reminders.json`.
+Reminders are stored in `~/.mecha-developer/reminders.json`.
 The cron job `reminder_cron.py` runs every minute and fires due reminders via mailbox.

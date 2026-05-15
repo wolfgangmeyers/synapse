@@ -27,9 +27,9 @@ from _tmux import send_text_and_enter, window_exists, window_idle_seconds
 SUPERVISOR_WINDOW = os.environ.get("MECHA_SUPERVISOR_WINDOW", "supervisor")
 SUPERVISOR_MIN_IDLE = 30  # seconds — only notify if supervisor has been quiet this long
 
-LOCK_FILE = os.path.expanduser("~/.mecha-wolfgang/idle-notify.lock")
+LOCK_FILE = os.path.expanduser("~/.mecha-developer/idle-notify.lock")
 LOCK_MAX_AGE = 30  # seconds — lock older than this is assumed stale
-LOG_FILE = os.path.expanduser("~/.mecha-wolfgang/idle-notify.log")
+LOG_FILE = os.path.expanduser("~/.mecha-developer/idle-notify.log")
 
 
 def setup_logging():

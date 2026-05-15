@@ -111,7 +111,7 @@ def parse_responsibilities(text):
 
 def migrate(dry_run=False):
     """Read responsibilities.md and produce supervisor-state.json."""
-    input_path = os.path.expanduser("~/.mecha-wolfgang/responsibilities.md")
+    input_path = os.path.expanduser("~/.mecha-developer/responsibilities.md")
 
     if not os.path.isfile(input_path):
         print(f"Error: file not found: {input_path}", file=sys.stderr)
@@ -138,7 +138,7 @@ def migrate(dry_run=False):
     if dry_run:
         print(output, end="")
     else:
-        output_path = os.path.expanduser("~/.mecha-wolfgang/supervisor-state.json")
+        output_path = os.path.expanduser("~/.mecha-developer/supervisor-state.json")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(output)

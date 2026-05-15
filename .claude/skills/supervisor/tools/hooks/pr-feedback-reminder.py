@@ -58,7 +58,7 @@ python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \\
 
 Replace <branch> and <number> with the actual values. \
 If you already mailed the supervisor about this push, ignore this reminder. \
-Exception: pushes to main on mecha-wolfgang or other non-PR branches don't need feedback reminders."""
+Exception: pushes to main on mecha-developer or other non-PR branches don't need feedback reminders."""
 
 REMINDER_PR_CREATE = """\
 📬 [PR Feedback Reminder] You just created a PR. \

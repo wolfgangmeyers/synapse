@@ -15,7 +15,7 @@ Creates a message file in <MAILBOX_DIR>/<to>/<uuid>.json. The recipient
 will see the message the next time they make a tool call (via the PreToolUse
 hook) or when the idle cron job wakes them up.
 
-The mailbox base directory defaults to ~/.mecha-wolfgang/mailboxes/ and can
+The mailbox base directory defaults to ~/.mecha-developer/mailboxes/ and can
 be overridden with MECHA_MAILBOX_DIR_OVERRIDE (used by tests).
 
 Examples:
@@ -46,13 +46,13 @@ from datetime import datetime, timezone
 
 MAILBOX_DIR = os.environ.get(
     "MECHA_MAILBOX_DIR_OVERRIDE",
-    os.path.expanduser("~/.mecha-wolfgang/mailboxes"),
+    os.path.expanduser("~/.mecha-developer/mailboxes"),
 )
 
 # SMTP config path — overridable for tests.
 MAIL_CONFIG = os.environ.get(
     "MECHA_MAIL_CONFIG",
-    os.path.expanduser("~/.mecha-wolfgang/mail.json"),
+    os.path.expanduser("~/.mecha-developer/mail.json"),
 )
 
 # Valid agent names: alphanumeric, hyphens, underscores. No slashes, no dots.

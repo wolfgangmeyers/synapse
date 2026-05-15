@@ -9,7 +9,7 @@ Usage:
   python3 supervisor_start.py [--dir DIR]
 
 Options:
-  --dir DIR   Working directory for Claude (default: ~/code/mecha-wolfgang)
+  --dir DIR   Working directory for Claude (default: ~/code/mecha-developer)
 
 The script exits immediately after sending the bootstrap prompt. Attach to
 the session to interact:
@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _tmux import SESSION, ensure_session, send_text, send_enter, session_exists
 
 SUPERVISOR_WINDOW = "supervisor"
-DEFAULT_DIR = os.path.expanduser("~/code/mecha-wolfgang")
+DEFAULT_DIR = os.path.expanduser("~/code/mecha-developer")
 
 BOOTSTRAP_PROMPT = """/supervisor
 
@@ -56,7 +56,7 @@ def main():
     ensure_session()
     print(f"Created tmux session '{SESSION}' with window '{SUPERVISOR_WINDOW}'.")
 
-    # Launch Claude: cd to mecha-wolfgang, set supervisor identity, start Claude
+    # Launch Claude: cd to mecha-developer, set supervisor identity, start Claude
     cmd = (
         f"cd {work_dir}"
         f" && unset CLAUDECODE"

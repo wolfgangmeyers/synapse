@@ -13,8 +13,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
-LOG_FILE = pathlib.Path.home() / ".mecha-wolfgang" / "reminder-cron.log"
-LOCK_FILE = pathlib.Path.home() / ".mecha-wolfgang" / ".reminder-cron.lock"
+LOG_FILE = pathlib.Path.home() / ".mecha-developer" / "reminder-cron.log"
+LOCK_FILE = pathlib.Path.home() / ".mecha-developer" / ".reminder-cron.lock"
 
 # supervisor/tools is sibling of reminders/tools: go up 2 dirs then into supervisor/tools
 SUPERVISOR_TOOLS = pathlib.Path(__file__).parent.parent.parent / "supervisor" / "tools"

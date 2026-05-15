@@ -5,7 +5,7 @@ Usage:
   python remote_send.py --host HOST --to RECIPIENT --body TEXT [--from SENDER] [--subject SUBJECT]
 
 Runs mailbox_send.py on the remote machine via SSH. The remote machine must
-be reachable over Tailscale SSH and have mecha-wolfgang installed.
+be reachable over Tailscale SSH and have mecha-developer installed.
 
 Examples:
   # Send a task to a subordinate's supervisor

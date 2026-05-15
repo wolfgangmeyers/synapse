@@ -13,7 +13,7 @@ import fcntl
 def workflows_path():
     return os.environ.get(
         "MECHA_WORKFLOWS_FILE",
-        os.path.expanduser("~/.mecha-wolfgang/workflows.json"),
+        os.path.expanduser("~/.mecha-developer/workflows.json"),
     )
 
 
