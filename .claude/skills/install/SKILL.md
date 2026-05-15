@@ -1,0 +1,494 @@
+---
+name: install
+description: "Set up or reinstall mecha-wolfgang by symlinking personas, skills, and hooks to the home directory. Trigger: user runs /install or explicitly asks to set up or reinstall mecha-wolfgang. Do NOT use for routine operations — this is a one-time setup utility."
+---
+
+# Install Skill
+
+Set up mecha-wolfgang by symlinking personas and skills to the user's home directory.
+
+## Usage
+
+```
+/install
+```
+
+## What It Does
+
+1. **Cleans up** old-style skill symlinks (`.md` files) from `~/.claude/skills/`
+2. **Symlinks personas** to `~/personas/` so they're accessible from any project
+3. **Symlinks skill folders** to `~/.claude/skills/` so they're available globally in Claude Code
+4. **Symlinks CLI scripts** (`ai`, `mecha-supervisor`) to `~/.local/bin/`
+
+## Process
+
+### 1. Determine Paths
+
+```bash
+# Get the repo root (where this skill lives)
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# Fallback: if running from Claude Code, use the working directory
+REPO_ROOT="${REPO_ROOT:-$(pwd)}"
+```
+
+The repo root is the mecha-wolfgang project directory. Detect it from the current working directory.
+
+### 2. Clean Up Old Skill Symlinks
+
+Remove any old-style `.md` file symlinks in `~/.claude/skills/` that point into this project. These are leftovers from before skills were restructured into directories.
+
+```bash
+for f in ~/.claude/skills/*.md; do
+  if [ -L "$f" ]; then
+    target=$(readlink "$f")
+    if echo "$target" | grep -q "mecha-wolfgang"; then
+      unlink "$f"
+      echo "cleaned up old symlink: $f -> $target"
+    fi
+  fi
+done
+```
+
+### 3. Symlink Personas
+
+```bash
+# Create ~/personas if it doesn't exist
+mkdir -p ~/personas
+
+# Symlink each persona file
+for f in personas/*.md; do
+  [ -e "$f" ] || continue
+  name=$(basename "$f")
+  target="$(pwd)/personas/$name"
+  link="$HOME/personas/$name"
+
+  if [ -L "$link" ]; then
+    ln -sf "$target" "$link"
+    echo "updated: $link -> $target"
+  elif [ -e "$link" ]; then
+    echo "skipped: $link already exists (not a symlink)"
+  else
+    ln -s "$target" "$link"
+    echo "linked: $link -> $target"
+  fi
+done
+```
+
+### 4. Symlink Skill Folders
+
+Each skill is a directory containing a `SKILL.md`. Symlink the entire directory.
+
+```bash
+# Create ~/.claude/skills if it doesn't exist
+mkdir -p ~/.claude/skills
+
+# Symlink each skill directory (except install itself)
+for d in .claude/skills/*/; do
+  name=$(basename "$d")
+  [ "$name" = "install" ] && continue
+
+  target="$(pwd)/.claude/skills/$name"
+  link="$HOME/.claude/skills/$name"
+
+  if [ -L "$link" ]; then
+    ln -sf "$target" "$link"
+    echo "updated: $link -> $target"
+  elif [ -e "$link" ]; then
+    echo "skipped: $link already exists (not a symlink)"
+  else
+    ln -s "$target" "$link"
+    echo "linked: $link -> $target"
+  fi
+done
+```
+
+### 5. Symlink Workflows
+
+The workflows database lives at `~/.mecha-wolfgang/workflows.json` at runtime, but the canonical copy is in the repo. Symlink it so all machines share the same workflows and additions are committed back automatically.
+
+```bash
+mkdir -p ~/.mecha-wolfgang
+
+WORKFLOWS_SRC="$(pwd)/.claude/skills/workflows/workflows.json"
+WORKFLOWS_LINK="$HOME/.mecha-wolfgang/workflows.json"
+
+if [ -L "$WORKFLOWS_LINK" ]; then
+  ln -sf "$WORKFLOWS_SRC" "$WORKFLOWS_LINK"
+  echo "updated: $WORKFLOWS_LINK -> $WORKFLOWS_SRC"
+elif [ -e "$WORKFLOWS_LINK" ]; then
+  echo "skipped: $WORKFLOWS_LINK already exists (not a symlink)"
+else
+  ln -s "$WORKFLOWS_SRC" "$WORKFLOWS_LINK"
+  echo "linked: $WORKFLOWS_LINK -> $WORKFLOWS_SRC"
+fi
+```
+
+### 6. Symlink Skills for Codex
+
+Codex looks for skills in `~/.agents/skills/`. Create a symlink so it finds the same skills as Claude Code.
+
+```bash
+mkdir -p ~/.agents
+
+if [ -L "$HOME/.agents/skills" ]; then
+  ln -sfn "$HOME/.claude/skills" "$HOME/.agents/skills"
+  echo "updated: ~/.agents/skills -> ~/.claude/skills"
+elif [ -e "$HOME/.agents/skills" ]; then
+  echo "skipped: ~/.agents/skills already exists (not a symlink)"
+else
+  ln -s "$HOME/.claude/skills" "$HOME/.agents/skills"
+  echo "linked: ~/.agents/skills -> ~/.claude/skills"
+fi
+```
+
+### 6. Symlink CLI Scripts
+
+Create `~/.local/bin/` if needed and symlink CLI entry points:
+
+```bash
+mkdir -p ~/.local/bin
+
+# ai — wrapper for claude --dangerously-skip-permissions
+AI_SRC="$(pwd)/bin/ai"
+AI_LINK="$HOME/.local/bin/ai"
+if [ -L "$AI_LINK" ]; then
+  ln -sf "$AI_SRC" "$AI_LINK"
+  echo "updated: $AI_LINK -> $AI_SRC"
+elif [ -e "$AI_LINK" ]; then
+  echo "skipped: $AI_LINK already exists (not a symlink)"
+else
+  ln -s "$AI_SRC" "$AI_LINK"
+  echo "linked: $AI_LINK -> $AI_SRC"
+fi
+
+# mecha-supervisor — launches the supervisor tmux session
+SUP_SRC="$(pwd)/.claude/skills/supervisor/tools/supervisor_start.py"
+SUP_LINK="$HOME/.local/bin/mecha-supervisor"
+if [ -L "$SUP_LINK" ]; then
+  ln -sf "$SUP_SRC" "$SUP_LINK"
+  echo "updated: $SUP_LINK -> $SUP_SRC"
+elif [ -e "$SUP_LINK" ]; then
+  echo "skipped: $SUP_LINK already exists (not a symlink)"
+else
+  ln -s "$SUP_SRC" "$SUP_LINK"
+  echo "linked: $SUP_LINK -> $SUP_SRC"
+fi
+```
+
+### 7. Symlink Hooks
+
+
+Symlink hook scripts from the skills directory into `~/.claude/hooks/`:
+
+```bash
+mkdir -p ~/.claude/hooks
+
+# Mailbox delivery hook (PreToolUse — all tools)
+HOOK_SRC="$(pwd)/.claude/skills/supervisor/tools/hooks/mailbox-deliver.py"
+HOOK_LINK="$HOME/.claude/hooks/mailbox-deliver.py"
+
+if [ -L "$HOOK_LINK" ]; then
+  ln -sf "$HOOK_SRC" "$HOOK_LINK"
+  echo "updated: $HOOK_LINK -> $HOOK_SRC"
+elif [ -e "$HOOK_LINK" ]; then
+  echo "skipped: $HOOK_LINK already exists (not a symlink)"
+else
+  ln -s "$HOOK_SRC" "$HOOK_LINK"
+  echo "linked: $HOOK_LINK -> $HOOK_SRC"
+fi
+
+# PR feedback reminder hook (PostToolUse — Bash)
+HOOK_SRC="$(pwd)/.claude/skills/supervisor/tools/hooks/pr-feedback-reminder.py"
+HOOK_LINK="$HOME/.claude/hooks/pr-feedback-reminder.py"
+
+if [ -L "$HOOK_LINK" ]; then
+  ln -sf "$HOOK_SRC" "$HOOK_LINK"
+  echo "updated: $HOOK_LINK -> $HOOK_SRC"
+elif [ -e "$HOOK_LINK" ]; then
+  echo "skipped: $HOOK_LINK already exists (not a symlink)"
+else
+  ln -s "$HOOK_SRC" "$HOOK_LINK"
+  echo "linked: $HOOK_LINK -> $HOOK_SRC"
+fi
+```
+
+Then verify `~/.claude/settings.json` has the PostToolUse mailbox delivery hook registered and prompt suggestions disabled. Use Python to safely merge these into the existing file rather than overwriting it:
+
+```python
+import json, os
+
+settings_path = os.path.expanduser("~/.claude/settings.json")
+settings = {}
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        settings = json.load(f)
+
+# Disable prompt suggestions (they confuse the watchdog LLM)
+settings["promptSuggestionEnabled"] = False
+
+# Ensure PostToolUse hook for mailbox delivery exists
+post_hooks = settings.setdefault("hooks", {}).setdefault("PostToolUse", [])
+mailbox_hook_entry = {
+    "matcher": "",
+    "hooks": [{"type": "command", "command": "~/.claude/hooks/mailbox-deliver.py"}]
+}
+# Check if already registered (match on command path)
+already_registered = any(
+    any(h.get("command", "").endswith("mailbox-deliver.py") for h in entry.get("hooks", []))
+    for entry in post_hooks
+)
+if not already_registered:
+    post_hooks.append(mailbox_hook_entry)
+    print("added: PostToolUse mailbox delivery hook")
+else:
+    print("skipped: PostToolUse mailbox delivery hook already registered")
+
+# Ensure PostToolUse hook for PR feedback reminder exists
+pr_reminder_entry = {
+    "matcher": "Bash",
+    "hooks": [{"type": "command", "command": "~/.claude/hooks/pr-feedback-reminder.py"}]
+}
+pr_already = any(
+    any(h.get("command", "").endswith("pr-feedback-reminder.py") for h in entry.get("hooks", []))
+    for entry in post_hooks
+)
+if not pr_already:
+    post_hooks.append(pr_reminder_entry)
+    print("added: PostToolUse PR feedback reminder hook")
+else:
+    print("skipped: PostToolUse PR feedback reminder hook already registered")
+
+with open(settings_path, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+print(f"set: promptSuggestionEnabled = false in {settings_path}")
+```
+
+### 8. Set Up Dashboard Venv
+
+The supervisor dashboard (`tools/responsibilities-server.py`) runs Flask. Create a venv with Flask installed so `dashboard_start.py` can activate it.
+
+```bash
+VENV_DIR="$(pwd)/tools/.venv"
+
+if [ -d "$VENV_DIR" ] && "$VENV_DIR/bin/python3" -c "import flask" 2>/dev/null; then
+  echo "skipped: dashboard venv already exists with Flask"
+else
+  python3 -m venv "$VENV_DIR"
+  "$VENV_DIR/bin/pip" install --quiet flask
+  echo "created: $VENV_DIR with Flask installed"
+fi
+```
+
+### 9. Set Up Crontab
+
+Add cron jobs for mailbox idle delivery, memory monitoring, and stuck-worker detection:
+
+```bash
+TOOLS="$(pwd)/.claude/skills/supervisor/tools"
+
+# Ensure crontab has a PATH that includes ~/.local/bin (claude), homebrew bin (tmux, etc.),
+# and homebrew sbin (logrotate is installed under sbin on macOS).
+if ! crontab -l 2>/dev/null | grep -q "^PATH="; then
+  (echo 'PATH=/Users/'"$USER"'/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin'; crontab -l 2>/dev/null) | crontab -
+  echo "added: PATH to crontab"
+else
+  echo "skipped: crontab PATH already set"
+fi
+
+# Mailbox idle delivery — runs every 10 seconds (6 staggered per-minute entries)
+if ! crontab -l 2>/dev/null | grep -q "mailbox_cron.py"; then
+  CRON_CMD="/usr/bin/python3 $TOOLS/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1"
+  (crontab -l 2>/dev/null; \
+    echo "* * * * * $CRON_CMD"; \
+    echo "* * * * * sleep 10; $CRON_CMD"; \
+    echo "* * * * * sleep 20; $CRON_CMD"; \
+    echo "* * * * * sleep 30; $CRON_CMD"; \
+    echo "* * * * * sleep 40; $CRON_CMD"; \
+    echo "* * * * * sleep 50; $CRON_CMD" \
+  ) | crontab -
+  echo "added: mailbox idle delivery cron job (runs every 10 seconds)"
+else
+  echo "skipped: mailbox cron job already exists"
+fi
+
+# Purelymail IMAP poller — materializes inbound mail into the supervisor mailbox.
+if ! crontab -l 2>/dev/null | grep -q "purelymail_poll.py"; then
+  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $TOOLS/purelymail_poll.py >> ~/.mecha-wolfgang/purelymail-poll.log 2>&1") | crontab -
+  echo "added: Purelymail IMAP poll cron job (runs every minute)"
+else
+  echo "skipped: Purelymail IMAP poll cron job already exists"
+fi
+
+# Memory monitor — runs every 5 minutes
+if ! crontab -l 2>/dev/null | grep -q "memory_monitor.py"; then
+  (crontab -l 2>/dev/null; echo "*/5 * * * * /usr/bin/python3 $TOOLS/memory_monitor.py >> ~/.mecha-wolfgang/memory-monitor.log 2>&1") | crontab -
+  echo "added: memory monitor cron job (runs every 5 minutes)"
+else
+  echo "skipped: memory monitor cron job already exists"
+fi
+
+# Watchdog — checks for stuck workers every 30 minutes, mails supervisor if found.
+# Wrapped in `launchctl asuser $UID` so the watchdog inherits Wolfgang's GUI login
+# session. Required because the claude CLI stores credentials in the macOS keychain
+# ("Claude Code-credentials"), which is unreachable from cron's stripped environment.
+# `bash -lc` additionally sources login profiles so PATH and env vars match an
+# interactive shell. DO NOT strip this wrapper — doing so silently breaks the
+# watchdog whenever credentials are keychain-backed (e.g. claude after a relogin).
+EXISTING_WATCHDOG="$(crontab -l 2>/dev/null | grep "watchdog.py" || true)"
+if [ -z "$EXISTING_WATCHDOG" ]; then
+  USER_UID="$(id -u)"
+  WATCHDOG_CMD="launchctl asuser $USER_UID /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-wolfgang/watchdog.log 2>&1'"
+  (crontab -l 2>/dev/null; echo "*/30 * * * * $WATCHDOG_CMD") | crontab -
+  echo "added: watchdog cron job (runs every 30 minutes, via launchctl asuser for keychain access)"
+elif ! echo "$EXISTING_WATCHDOG" | grep -q "launchctl asuser"; then
+  echo ""
+  echo "================================================================"
+  echo "WARNING: existing watchdog cron entry is missing the"
+  echo "  'launchctl asuser \$UID /bin/bash -lc ...' wrapper."
+  echo ""
+  echo "On macOS the watchdog cannot reach the keychain without it, so"
+  echo "claude auth lookups silently fail every 30 minutes."
+  echo ""
+  echo "Current entry:"
+  echo "  $EXISTING_WATCHDOG"
+  echo ""
+  echo "Fix: run \`crontab -e\` and replace the watchdog line with:"
+  echo "  */30 * * * * launchctl asuser \$(id -u) /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-wolfgang/watchdog.log 2>&1'"
+  echo "================================================================"
+  echo ""
+else
+  echo "skipped: watchdog cron job already exists (wrapped correctly)"
+fi
+
+# Reminder cron — fires due reminders every minute
+if ! crontab -l 2>/dev/null | grep -q "reminder_cron.py"; then
+  REMINDER_CRON="$REPO_ROOT/.claude/skills/reminders/tools/reminder_cron.py"
+  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $REMINDER_CRON >> ~/.mecha-wolfgang/reminder-cron.log 2>&1") | crontab -
+  echo "added: reminder cron job (runs every minute)"
+else
+  echo "skipped: reminder cron job already exists"
+fi
+
+# Log rotation — runs daily, keeps 1 backup, discards logs older than 24 hours.
+# Requires `logrotate` (not bundled with macOS). Install via brew if missing,
+# and write a default config covering ~/.mecha-wolfgang/*.log if absent.
+if ! command -v logrotate >/dev/null 2>&1 && [ ! -x /opt/homebrew/sbin/logrotate ] && [ ! -x /usr/local/sbin/logrotate ]; then
+  if command -v brew >/dev/null 2>&1; then
+    brew install logrotate
+    echo "installed: logrotate via brew"
+  else
+    echo "WARN: logrotate not installed and brew unavailable — log rotation will not run"
+  fi
+else
+  echo "skipped: logrotate already installed"
+fi
+
+LOGROTATE_CONF="$HOME/.mecha-wolfgang/logrotate.conf"
+if [ ! -e "$LOGROTATE_CONF" ]; then
+  cat > "$LOGROTATE_CONF" <<'CONF'
+/Users/USERNAME/.mecha-wolfgang/*.log {
+    daily
+    rotate 1
+    maxage 1
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+}
+CONF
+  # Substitute the actual username (logrotate does not expand ~ or env vars).
+  sed -i.bak "s|/Users/USERNAME/|$HOME/|" "$LOGROTATE_CONF" && rm -f "$LOGROTATE_CONF.bak"
+  echo "wrote: $LOGROTATE_CONF"
+else
+  echo "skipped: $LOGROTATE_CONF already exists"
+fi
+
+if ! crontab -l 2>/dev/null | grep -q "logrotate"; then
+  (crontab -l 2>/dev/null; echo "@daily logrotate --state ~/.mecha-wolfgang/logrotate.status ~/.mecha-wolfgang/logrotate.conf") | crontab -
+  echo "added: logrotate cron job (runs daily)"
+else
+  echo "skipped: logrotate cron job already exists"
+fi
+```
+
+The cron jobs:
+- **mailbox_cron.py**: Runs every 10 seconds (6 staggered entries). Checks all agent mailboxes for unread messages older than 30 seconds and delivers to tmux windows.
+- **purelymail_poll.py**: Runs every minute. Polls the machine's Purelymail IMAP inbox, writes unseen messages into the supervisor mailbox, then marks them seen.
+- **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
+- **watchdog.py**: Runs every 30 minutes. Captures all tmux window output, asks an LLM to evaluate whether any workers are stuck (idle without being told to wait), and mails the supervisor if so.
+
+  **LLM config (optional)**: `~/.mecha-wolfgang/watchdog-llm.json` selects which CLI the watchdog uses. Schema: `{"cli": "claude" | "codex", "model": "<model>", "extra_args": []}`. If the file is missing, defaults are `claude` + `claude-sonnet-4-6` + `[]`. An invalid `cli` value is rejected with a loud ntfy notification rather than silent fallback. If the configured CLI returns "Not logged in" (or the codex equivalent), the watchdog sends an ntfy push to topic `mecha-wolfgang-notify` and exits 0 so cron does not flood email.
+- **reminder_cron.py**: Runs every minute. Checks `~/.mecha-wolfgang/reminders.json` for due reminders, delivers them via mailbox, and removes them.
+- **logrotate**: Runs daily. Rotates logs in `~/.mecha-wolfgang/` when they exceed size limits; keeps 1 backup, discards anything older than 24 hours.
+
+### 9b. Preflight: Watchdog LLM Login Check
+
+Run a tiny ping against the configured watchdog CLI to surface auth issues at install time rather than 30 minutes later when the first cron tick happens.
+
+```bash
+WATCHDOG_CFG="$HOME/.mecha-wolfgang/watchdog-llm.json"
+WATCHDOG_CLI="claude"
+if [ -f "$WATCHDOG_CFG" ]; then
+  WATCHDOG_CLI="$(/usr/bin/python3 -c "import json; print(json.load(open('$WATCHDOG_CFG')).get('cli', 'claude'))" 2>/dev/null || echo claude)"
+fi
+
+if [ "$WATCHDOG_CLI" = "codex" ]; then
+  PING_OUT="$(codex exec ping 2>&1 || true)"
+else
+  PING_OUT="$(claude -p ping 2>&1 || true)"
+fi
+
+if echo "$PING_OUT" | grep -qiE "not logged in|please run /login|codex login"; then
+  echo ""
+  echo "================================================================"
+  echo "WARNING: $WATCHDOG_CLI is not logged in."
+  echo "Run \`$WATCHDOG_CLI /login\` (claude) or \`$WATCHDOG_CLI login\` (codex)"
+  echo "before the watchdog cron tick or it will silently fail every 30 min."
+  echo "================================================================"
+  echo ""
+else
+  echo "preflight: $WATCHDOG_CLI ping succeeded (or returned a non-auth error — continuing)"
+fi
+```
+
+This is a non-fatal check — any non-auth error (model unavailable, network blip) is ignored. The watchdog itself will surface auth failures via ntfy at runtime.
+
+### 10. Verify
+
+List what was installed:
+
+```bash
+echo ""
+echo "=== Personas ==="
+ls -la ~/personas/*.md 2>/dev/null || echo "none"
+
+echo ""
+echo "=== Skills ==="
+ls -la ~/.claude/skills/ 2>/dev/null || echo "none"
+
+echo ""
+echo "=== CLI Scripts ==="
+ls -la ~/.local/bin/ai ~/.local/bin/mecha-supervisor 2>/dev/null || echo "none"
+
+echo ""
+echo "=== Dashboard Venv ==="
+if [ -d "tools/.venv" ] && tools/.venv/bin/python3 -c "import flask" 2>/dev/null; then
+  echo "ok: tools/.venv exists with Flask"
+else
+  echo "MISSING: tools/.venv or Flask not installed"
+fi
+
+echo ""
+echo "=== Crontab ==="
+crontab -l 2>/dev/null | grep "mailbox_cron.py" || echo "no mailbox cron job"
+crontab -l 2>/dev/null | grep "purelymail_poll.py" || echo "no Purelymail IMAP poll cron job"
+crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
+crontab -l 2>/dev/null | grep "watchdog.py" || echo "no watchdog cron job"
+crontab -l 2>/dev/null | grep "reminder_cron.py" || echo "no reminder cron job"
+```
+
+### 11. Report
+
+Print a summary of what was cleaned up, linked, updated, and skipped. If anything was skipped because a non-symlink file already existed, warn the user.
