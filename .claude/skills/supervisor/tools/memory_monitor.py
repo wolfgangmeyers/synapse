@@ -19,7 +19,7 @@ from pathlib import Path
 WARN_THRESHOLD_PCT = 85.0
 KILL_THRESHOLD_PCT = 90.0
 COOLDOWN_MINUTES = 30
-COOLDOWN_FILE = Path(os.path.expanduser("~/.mecha-wolfgang/memory_monitor_last_alert.json"))
+COOLDOWN_FILE = Path(os.path.expanduser("~/.mecha-developer/memory_monitor_last_alert.json"))
 
 MAILBOX_SEND = Path(__file__).parent / "mailbox_send.py"
 

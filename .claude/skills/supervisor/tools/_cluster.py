@@ -1,6 +1,6 @@
 """Shared utility module for cluster configuration.
 
-Loads and validates cluster topology from ~/.mecha-wolfgang/cluster.json.
+Loads and validates cluster topology from ~/.mecha-developer/cluster.json.
 If the file does not exist, the system operates in single-machine mode.
 
 Cluster config schema:
@@ -37,7 +37,7 @@ import sys
 
 CLUSTER_FILE = os.environ.get(
     "MECHA_CLUSTER_FILE",
-    os.path.expanduser("~/.mecha-wolfgang/cluster.json"),
+    os.path.expanduser("~/.mecha-developer/cluster.json"),
 )
 
 # Only these commands may be executed on remote machines via SSH.

@@ -1,7 +1,7 @@
 """Shared utility module for supervisor state management.
 
 Provides loading, saving, querying, and rendering of the supervisor
-state stored in ~/.mecha-wolfgang/supervisor-state.json.
+state stored in ~/.mecha-developer/supervisor-state.json.
 """
 
 import contextlib
@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 STATE_FILE = os.environ.get(
     "MECHA_STATE_FILE",
-    os.path.expanduser("~/.mecha-wolfgang/supervisor-state.json"),
+    os.path.expanduser("~/.mecha-developer/supervisor-state.json"),
 )
 
 REQUIRED_FIELDS = ["alias", "type", "project", "description"]

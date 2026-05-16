@@ -53,7 +53,7 @@ from _tmux import (
 # Messages that must NOT be prefixed (hook-matched phrases, slash commands)
 _NO_PREFIX_PATTERNS = {"git authorized", "gh authorized"}
 
-SEND_TIMESTAMPS_PATH = os.path.expanduser("~/.mecha-wolfgang/worker_send_timestamps.json")
+SEND_TIMESTAMPS_PATH = os.path.expanduser("~/.mecha-developer/worker_send_timestamps.json")
 
 
 def _should_prefix(text):
