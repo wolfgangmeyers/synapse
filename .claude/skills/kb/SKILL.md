@@ -1,11 +1,11 @@
 ---
 name: kb
-description: "Manage the persistent markdown knowledge base at ~/.mecha-wolfgang/kb/. Trigger: user asks to save, look up, search, or organize information in the knowledge base. Do NOT use for temporary notes or one-off context — only for persistent, reusable knowledge worth keeping across sessions."
+description: "Manage the persistent markdown knowledge base at ~/.mecha-developer/kb/. Trigger: user asks to save, look up, search, or organize information in the knowledge base. Do NOT use for temporary notes or one-off context — only for persistent, reusable knowledge worth keeping across sessions."
 ---
 
 # Knowledge Base
 
-Manage a persistent markdown knowledge base at `~/.mecha-wolfgang/kb/`. Ingest information, search it, and keep it organized.
+Manage a persistent markdown knowledge base at `~/.mecha-developer/kb/`. Ingest information, search it, and keep it organized.
 
 ## Usage
 
@@ -22,7 +22,7 @@ Manage a persistent markdown knowledge base at `~/.mecha-wolfgang/kb/`. Ingest i
 ## Storage
 
 ```
-~/.mecha-wolfgang/kb/
+~/.mecha-developer/kb/
   INDEX.md                # Central index -- all topics grouped by domain
   <topic-slug>.md         # One file per topic (flat by default)
   <domain>/               # Created during reorganization when a domain grows
@@ -32,7 +32,7 @@ Manage a persistent markdown knowledge base at `~/.mecha-wolfgang/kb/`. Ingest i
 
 **Slugs**: lowercase, hyphen-separated, 2-4 words max. Derive from the topic title. Examples: `jwt-authentication.md`, `deploy-checklist.md`, `redis-caching.md`.
 
-On first use, create `~/.mecha-wolfgang/kb/` and `INDEX.md` if they don't exist:
+On first use, create `~/.mecha-developer/kb/` and `INDEX.md` if they don't exist:
 
 ```markdown
 # Knowledge Base Index
@@ -103,7 +103,7 @@ Parse the argument: if it's a file/directory path that exists, read it. Otherwis
 Process:
 1. Read `INDEX.md` to understand current KB topology.
 2. Analyze the content. Identify the topic(s), key facts, and relevant domain.
-3. Search existing topic files for overlap -- check titles, tags, summaries. Use Grep across `~/.mecha-wolfgang/kb/`.
+3. Search existing topic files for overlap -- check titles, tags, summaries. Use Grep across `~/.mecha-developer/kb/`.
 4. **If a matching topic exists**: integrate the new information into the existing content structure. Add new subsections under `## Content` if the info is a distinct subtopic. Do not create dated subsections -- the `Updated` field tracks recency. The goal is a clean reference document, not a changelog. Update the `Updated` field. Add new tags if applicable.
 5. **If new topic**: create a new file using the topic file format. Add it to INDEX.md under `Ungrouped` unless it clearly belongs to an existing domain section already in INDEX.md. Never create a new domain section during ingest -- domains emerge during `/kb reorganize`.
 6. Add `See Also` links to related topics that already exist in the KB.
@@ -122,7 +122,7 @@ Process:
 ### search
 
 1. Read `INDEX.md` -- scan topic titles, domain names, descriptions for matches.
-2. Grep all `*.md` files in `~/.mecha-wolfgang/kb/` for query terms (use Grep tool).
+2. Grep all `*.md` files in `~/.mecha-developer/kb/` for query terms (use Grep tool).
 3. Rank: title match > tag match > summary match > body match.
 4. Display top 10 results with topic title, summary, file path, and matching context.
 5. If no results: report "No results for '<query>'." Suggest alternative terms if obvious.

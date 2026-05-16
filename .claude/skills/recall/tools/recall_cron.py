@@ -23,7 +23,7 @@ from recall_lib import (
 )
 
 
-LOG_FILE = Path(os.path.expanduser("~/.mecha-wolfgang/recall-cron.log"))
+LOG_FILE = Path(os.path.expanduser("~/.mecha-developer/recall-cron.log"))
 
 
 def setup_logging():

@@ -17,19 +17,19 @@ import sys
 
 MAIL_CONFIG = os.environ.get(
     "MECHA_MAIL_CONFIG",
-    os.path.expanduser("~/.mecha-wolfgang/mail.json"),
+    os.path.expanduser("~/.mecha-developer/mail.json"),
 )
 MAILBOX_DIR = os.environ.get(
     "MECHA_MAILBOX_DIR_OVERRIDE",
-    os.path.expanduser("~/.mecha-wolfgang/mailboxes"),
+    os.path.expanduser("~/.mecha-developer/mailboxes"),
 )
 LOG_FILE = os.environ.get(
     "MECHA_PURELYMAIL_POLL_LOG",
-    os.path.expanduser("~/.mecha-wolfgang/purelymail-poll.log"),
+    os.path.expanduser("~/.mecha-developer/purelymail-poll.log"),
 )
 LOCK_FILE = os.environ.get(
     "MECHA_PURELYMAIL_POLL_LOCK",
-    os.path.expanduser("~/.mecha-wolfgang/.purelymail-poll.lock"),
+    os.path.expanduser("~/.mecha-developer/.purelymail-poll.lock"),
 )
 
 

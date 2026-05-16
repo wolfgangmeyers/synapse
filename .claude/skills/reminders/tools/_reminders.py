@@ -8,7 +8,7 @@ import pathlib
 import uuid
 
 
-DEFAULT_REMINDERS_FILE = pathlib.Path.home() / ".mecha-wolfgang" / "reminders.json"
+DEFAULT_REMINDERS_FILE = pathlib.Path.home() / ".mecha-developer" / "reminders.json"
 
 
 def reminders_file():

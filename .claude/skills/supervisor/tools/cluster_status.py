@@ -88,7 +88,7 @@ def main():
 
     cluster = load_cluster()
     if cluster is None:
-        print("No cluster configuration found (~/.mecha-wolfgang/cluster.json).")
+        print("No cluster configuration found (~/.mecha-developer/cluster.json).")
         print("Operating in single-machine mode.")
         sys.exit(0)
 

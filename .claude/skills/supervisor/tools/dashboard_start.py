@@ -42,7 +42,7 @@ def main():
     new_window(WINDOW)
 
     cmd = (
-        "cd ~/code/mecha-wolfgang"
+        "cd ~/code/mecha-developer"
         " && source tools/.venv/bin/activate"
         " && python tools/responsibilities-server.py"
     )

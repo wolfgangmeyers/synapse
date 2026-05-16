@@ -12,7 +12,7 @@ Agent identity is resolved in priority order:
 
 Sessions with neither env var are silently ignored (non-agent context).
 
-The mailbox base directory defaults to ~/.mecha-wolfgang/mailboxes/ and can
+The mailbox base directory defaults to ~/.mecha-developer/mailboxes/ and can
 be overridden with MECHA_MAILBOX_DIR_OVERRIDE (used by tests).
 
 PostToolUse hook stdin fields: tool_name, tool_input, tool_response, session_id
@@ -32,9 +32,9 @@ from datetime import datetime, timezone
 
 MAILBOX_DIR = os.environ.get(
     "MECHA_MAILBOX_DIR_OVERRIDE",
-    os.path.expanduser("~/.mecha-wolfgang/mailboxes"),
+    os.path.expanduser("~/.mecha-developer/mailboxes"),
 )
-LOG_FILE = os.path.expanduser("~/.mecha-wolfgang/mailbox-hook.log")
+LOG_FILE = os.path.expanduser("~/.mecha-developer/mailbox-hook.log")
 
 
 def log(msg):

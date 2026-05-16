@@ -77,7 +77,7 @@ These are UI hints — NOT commands anyone typed, NOT pending work, NOT evidence
 
 If the supervisor explicitly told a worker to wait (park phrases: "sit tight", "hold here", "don't proceed until", "park here", "wait for my signal", "I'll let you know", "don't proceed", "waiting for your signal"), check whether a pending reminder exists for that worker.
 
-Load reminders from `~/.mecha-wolfgang/reminders.json` and check if any reminder message references the worker's alias or window name. If a parked worker has **no pending reminder**, flag it as STUCK with reason: "worker is parked but no follow-up reminder exists — supervisor may have forgotten about this worker. Set a reminder to check on it."
+Load reminders from `~/.mecha-developer/reminders.json` and check if any reminder message references the worker's alias or window name. If a parked worker has **no pending reminder**, flag it as STUCK with reason: "worker is parked but no follow-up reminder exists — supervisor may have forgotten about this worker. Set a reminder to check on it."
 
 A parked worker WITH a matching pending reminder is OK — the supervisor has a follow-up scheduled.
 
@@ -165,7 +165,7 @@ The remote watchdog sends its own alerts via mailbox. The local watchdog does no
 
 19. **Unincorporated PR feedback**: When the supervisor receives external review feedback on a PR (Greptile, human reviewers, Devin, Cursor, etc.) and addresses the findings by fixing the code, check whether those findings have also been incorporated back into the robot-review skill. The feedback loop is: external reviewer catches something → fix the code → update robot-review so it catches the pattern locally next time.
 
-    **MANDATORY verification before flagging this criterion:** Do NOT rely on tmux pane scans alone — supervisor windows scroll off their most recent activity. You MUST run an actual git log check first. From `/home/wolfgang/code/mecha-wolfgang`, run:
+    **MANDATORY verification before flagging this criterion:** Do NOT rely on tmux pane scans alone — supervisor windows scroll off their most recent activity. You MUST run an actual git log check first. From `/home/wolfgang/code/mecha-developer`, run:
 
     ```
     git log --oneline --since="24 hours ago" -- .claude/skills/robot-review/

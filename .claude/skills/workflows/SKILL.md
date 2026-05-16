@@ -21,7 +21,7 @@ Use this skill when the user asks to:
 ## Scripts Reference
 
 All scripts live in `.claude/skills/workflows/tools/`.
-Run these commands from the mecha-wolfgang repository root.
+Run these commands from the mecha-developer repository root.
 
 - `python3 .claude/skills/workflows/tools/list_workflows.py`
   - Lists all workflows as `<name> <description>` (one per line)
