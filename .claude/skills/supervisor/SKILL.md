@@ -190,7 +190,7 @@ When a `cluster.json` is configured, the head supervisor can delegate tasks to s
 
 ### Cluster Configuration
 
-Config in `~/.mecha-wolfgang/cluster.json`. Absent = single-machine mode (backwards compatible). Head lists subordinates with capabilities/capacity. Subordinate knows its role and head's hostname.
+Config in `~/.mecha-developer/cluster.json`. Absent = single-machine mode (backwards compatible). Head lists subordinates with capabilities/capacity. Subordinate knows its role and head's hostname.
 
 ### Delegation Flow
 
@@ -868,9 +868,9 @@ Workers that run automated UI tests (browser automation via BCB, Playwright, etc
 
 2. **If "No friction found"** — no action needed. Note in state that the session was clean.
 
-3. **If there are concrete improvement suggestions** — apply them to the relevant UI testing skill file (e.g. `~/.claude/skills/<project>-ui-testing/SKILL.md`, or whichever skill the worker used). This is a supervisor inline operation (editing skill files in the mecha-wolfgang repo is permitted).
+3. **If there are concrete improvement suggestions** — apply them to the relevant UI testing skill file (e.g. `~/.claude/skills/<project>-ui-testing/SKILL.md`, or whichever skill the worker used). This is a supervisor inline operation (editing skill files in the mecha-developer repo is permitted).
 
-4. **Commit the changes** to mecha-wolfgang with a message like:
+4. **Commit the changes** to mecha-developer with a message like:
    `improve(<project>-ui-testing): apply session analysis feedback — <brief summary>`
 
 5. **Reply to the mailbox** (or note in state) that improvements were applied.
@@ -1266,7 +1266,7 @@ Shows all windows in the mecha session. Use during startup/resume to reconcile w
 
 ## Supervisor State
 
-Persistent state at `~/.mecha-wolfgang/supervisor-state.json`. Managed via Python scripts in `~/.claude/skills/supervisor/tools/`.
+Persistent state at `~/.mecha-developer/supervisor-state.json`. Managed via Python scripts in `~/.claude/skills/supervisor/tools/`.
 
 ### Reading state
 
@@ -1556,7 +1556,7 @@ python3 ~/.claude/skills/supervisor/tools/dashboard_start.py
 python3 ~/.claude/skills/supervisor/tools/dashboard_stop.py
 ```
 
-The dashboard runs in the `dashboard` window of the mecha tmux session. `dashboard_start.py` is idempotent — safe to run even if already running. The dashboard venv is at `~/code/mecha-wolfgang/tools/.venv` with Flask pre-installed. All other supervisor Python scripts use only stdlib and don't need the venv.
+The dashboard runs in the `dashboard` window of the mecha tmux session. `dashboard_start.py` is idempotent — safe to run even if already running. The dashboard venv is at `~/code/mecha-developer/tools/.venv` with Flask pre-installed. All other supervisor Python scripts use only stdlib and don't need the venv.
 
 ## PR Merge Policy
 
@@ -1679,7 +1679,7 @@ claude --dangerously-skip-permissions
 
 ## Archive File
 
-Completed and abandoned tasks are moved to `~/.mecha-wolfgang/supervisor-state-archive.json` to keep the main state file lean. The archive has the same JSON structure as the main file:
+Completed and abandoned tasks are moved to `~/.mecha-developer/supervisor-state-archive.json` to keep the main state file lean. The archive has the same JSON structure as the main file:
 
 ```json
 {
@@ -1694,7 +1694,7 @@ The `state_read.py` tool only reads the current state file — it will not show 
 # Search archive by alias or description
 python3 -c "
 import json
-with open(os.path.expanduser('~/.mecha-wolfgang/supervisor-state-archive.json')) as f:
+with open(os.path.expanduser('~/.mecha-developer/supervisor-state-archive.json')) as f:
     data = json.load(f)
 for t in data['tasks']:
     if 'keyword' in str(t).lower():
@@ -1702,7 +1702,7 @@ for t in data['tasks']:
 "
 
 # Or use jq
-jq '.tasks[] | select(.alias == "my-old-task")' ~/.mecha-wolfgang/supervisor-state-archive.json
+jq '.tasks[] | select(.alias == "my-old-task")' ~/.mecha-developer/supervisor-state-archive.json
 ```
 
 Archiving is a manual or scripted operation — tasks are not auto-archived. When the archive file grows stale with many old entries, it can be pruned directly (it is not read by any supervisor tooling).

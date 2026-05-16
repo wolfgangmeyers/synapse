@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _state import STATE_FILE, locked_state
 
-ARCHIVE_FILE = os.path.expanduser("~/.mecha-wolfgang/supervisor-state-archive.json")
+ARCHIVE_FILE = os.path.expanduser("~/.mecha-developer/supervisor-state-archive.json")
 
 
 def parse_date(s):

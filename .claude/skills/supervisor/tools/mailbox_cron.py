@@ -10,14 +10,14 @@ they go stale. The cron job is the fallback for idle agents and for any messages
 the hook missed.
 
 Crontab entry (run every 10 seconds):
-  * * * * * /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1
-  * * * * * sleep 10; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1
-  * * * * * sleep 20; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1
-  * * * * * sleep 30; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1
-  * * * * * sleep 40; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1
-  * * * * * sleep 50; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1
+  * * * * * /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1
+  * * * * * sleep 10; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1
+  * * * * * sleep 20; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1
+  * * * * * sleep 30; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1
+  * * * * * sleep 40; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1
+  * * * * * sleep 50; /usr/bin/python3 ~/.claude/skills/supervisor/tools/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1
 
-The mailbox base directory defaults to ~/.mecha-wolfgang/mailboxes/ and can
+The mailbox base directory defaults to ~/.mecha-developer/mailboxes/ and can
 be overridden with MECHA_MAILBOX_DIR_OVERRIDE (used by tests).
 """
 
@@ -35,10 +35,10 @@ from _tmux import send_text_and_enter, window_exists
 
 MAILBOX_DIR = os.environ.get(
     "MECHA_MAILBOX_DIR_OVERRIDE",
-    os.path.expanduser("~/.mecha-wolfgang/mailboxes"),
+    os.path.expanduser("~/.mecha-developer/mailboxes"),
 )
-LOG_FILE = os.path.expanduser("~/.mecha-wolfgang/mailbox-cron.log")
-LOCK_FILE = os.path.expanduser("~/.mecha-wolfgang/.mailbox-cron-delivery.lock")
+LOG_FILE = os.path.expanduser("~/.mecha-developer/mailbox-cron.log")
+LOCK_FILE = os.path.expanduser("~/.mecha-developer/.mailbox-cron-delivery.lock")
 
 # A message must be unread for at least this many seconds before the cron delivers it.
 # Below this age, the message is "fresh" and the PreToolUse hook will deliver it soon.

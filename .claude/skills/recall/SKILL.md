@@ -15,7 +15,7 @@ Proactive memory surfacing. A PostToolUse hook schedules deferred recall checks;
 
 ## Configuration
 
-Config file: `~/.mecha-wolfgang/recall/config.json`
+Config file: `~/.mecha-developer/recall/config.json`
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -39,8 +39,8 @@ python3 tools/recall_config.py show                          # Show config
 python3 tools/recall_config.py set --delay-seconds 30        # Change a value
 python3 tools/recall_config.py add-store \
   --name kb \
-  --index-path ~/.mecha-wolfgang/kb/MEMORY.md \
-  --base-path ~/.mecha-wolfgang/kb \
+  --index-path ~/.mecha-developer/kb/MEMORY.md \
+  --base-path ~/.mecha-developer/kb \
   --instructions "Focus on action items and decisions"       # Add a store
 python3 tools/recall_config.py enable                        # Enable
 python3 tools/recall_config.py disable                       # Disable
@@ -62,10 +62,10 @@ python3 tools/recall_cleanup.py reset-all                    # Delete all
 
 ## State Files
 
-- `~/.mecha-wolfgang/recall/config.json` — configuration
-- `~/.mecha-wolfgang/recall/scheduled.json` — pending scheduled events
-- `~/.mecha-wolfgang/recall/sessions/<window>.json` — per-session cooldown state
-- `~/.mecha-wolfgang/recall/active_stores.json` — per-window store activation state
+- `~/.mecha-developer/recall/config.json` — configuration
+- `~/.mecha-developer/recall/scheduled.json` — pending scheduled events
+- `~/.mecha-developer/recall/sessions/<window>.json` — per-session cooldown state
+- `~/.mecha-developer/recall/active_stores.json` — per-window store activation state
 
 ## Installation
 
@@ -88,7 +88,7 @@ Add to `PostToolUse` hooks:
 ```bash
 if ! crontab -l 2>/dev/null | grep -q "recall_cron.py"; then
   RECALL_CRON="$REPO_ROOT/.claude/skills/recall/tools/recall_cron.py"
-  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $RECALL_CRON >> ~/.mecha-wolfgang/recall-cron.log 2>&1") | crontab -
+  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $RECALL_CRON >> ~/.mecha-developer/recall-cron.log 2>&1") | crontab -
 fi
 ```
 

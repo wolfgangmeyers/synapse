@@ -5,7 +5,7 @@ description: Mecha-wolfgang async mailbox — delivery format, mandatory pre-rea
 
 # Mailbox Skill
 
-Async messages between agents live under `~/.mecha-wolfgang/mailboxes/<window-name>/` (one JSON file per message). Delivery to Claude Code is implemented by a **PreToolUse hook** (`mailbox-deliver.py`); idle agents may also receive mail via **`mailbox_cron.py`** into tmux.
+Async messages between agents live under `~/.mecha-developer/mailboxes/<window-name>/` (one JSON file per message). Delivery to Claude Code is implemented by a **PreToolUse hook** (`mailbox-deliver.py`); idle agents may also receive mail via **`mailbox_cron.py`** into tmux.
 
 ## Load ordering
 
@@ -25,7 +25,7 @@ Skipping Step 1 when the mandatory block is present is a **protocol violation** 
 
 Full requirements, JSON schema, hook behavior, and cron behavior:
 
-**`MAILBOX_REQUIREMENTS.md`** at the **mecha-wolfgang repository root** (same repo that contains `.claude/skills/`).
+**`MAILBOX_REQUIREMENTS.md`** at the **mecha-developer repository root** (same repo that contains `.claude/skills/`).
 
 ## Tools (supervisor tools path)
 
@@ -35,7 +35,7 @@ Full requirements, JSON schema, hook behavior, and cron behavior:
 | `hooks/mailbox-deliver.py` | PreToolUse delivery (stdout → model; messages marked read) |
 | `mailbox_cron.py` | Idle tmux delivery (cron) |
 
-Installed layout: `~/.claude/skills/supervisor/tools/…` (or your mecha-wolfgang checkout).
+Installed layout: `~/.claude/skills/supervisor/tools/…` (or your mecha-developer checkout).
 
 ## Supervisor window identity
 

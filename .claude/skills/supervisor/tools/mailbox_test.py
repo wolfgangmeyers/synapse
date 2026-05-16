@@ -11,7 +11,7 @@ Usage:
   python3 mailbox_test.py --live-only  # skip unit tests
 
 All tests use MECHA_MAILBOX_DIR_OVERRIDE to redirect to temp directories.
-No test reads from or writes to ~/.mecha-wolfgang/mailboxes/.
+No test reads from or writes to ~/.mecha-developer/mailboxes/.
 
 Exit codes:
   0 - all tests passed

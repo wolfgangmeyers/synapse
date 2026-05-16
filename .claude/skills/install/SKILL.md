@@ -1,11 +1,11 @@
 ---
 name: install
-description: "Set up or reinstall mecha-wolfgang by symlinking personas, skills, and hooks to the home directory. Trigger: user runs /install or explicitly asks to set up or reinstall mecha-wolfgang. Do NOT use for routine operations — this is a one-time setup utility."
+description: "Set up or reinstall mecha-developer by symlinking personas, skills, and hooks to the home directory. Trigger: user runs /install or explicitly asks to set up or reinstall mecha-developer. Do NOT use for routine operations — this is a one-time setup utility."
 ---
 
 # Install Skill
 
-Set up mecha-wolfgang by symlinking personas and skills to the user's home directory.
+Set up mecha-developer by symlinking personas and skills to the user's home directory.
 
 ## Usage
 
@@ -31,7 +31,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 ```
 
-The repo root is the mecha-wolfgang project directory. Detect it from the current working directory.
+The repo root is the mecha-developer project directory. Detect it from the current working directory.
 
 ### 2. Clean Up Old Skill Symlinks
 
@@ -41,7 +41,7 @@ Remove any old-style `.md` file symlinks in `~/.claude/skills/` that point into 
 for f in ~/.claude/skills/*.md; do
   if [ -L "$f" ]; then
     target=$(readlink "$f")
-    if echo "$target" | grep -q "mecha-wolfgang"; then
+    if echo "$target" | grep -q "mecha-developer"; then
       unlink "$f"
       echo "cleaned up old symlink: $f -> $target"
     fi
@@ -104,13 +104,13 @@ done
 
 ### 5. Symlink Workflows
 
-The workflows database lives at `~/.mecha-wolfgang/workflows.json` at runtime, but the canonical copy is in the repo. Symlink it so all machines share the same workflows and additions are committed back automatically.
+The workflows database lives at `~/.mecha-developer/workflows.json` at runtime, but the canonical copy is in the repo. Symlink it so all machines share the same workflows and additions are committed back automatically.
 
 ```bash
-mkdir -p ~/.mecha-wolfgang
+mkdir -p ~/.mecha-developer
 
 WORKFLOWS_SRC="$(pwd)/.claude/skills/workflows/workflows.json"
-WORKFLOWS_LINK="$HOME/.mecha-wolfgang/workflows.json"
+WORKFLOWS_LINK="$HOME/.mecha-developer/workflows.json"
 
 if [ -L "$WORKFLOWS_LINK" ]; then
   ln -sf "$WORKFLOWS_SRC" "$WORKFLOWS_LINK"
@@ -298,7 +298,7 @@ fi
 
 # Mailbox idle delivery — runs every 10 seconds (6 staggered per-minute entries)
 if ! crontab -l 2>/dev/null | grep -q "mailbox_cron.py"; then
-  CRON_CMD="/usr/bin/python3 $TOOLS/mailbox_cron.py >> ~/.mecha-wolfgang/mailbox-cron.log 2>&1"
+  CRON_CMD="/usr/bin/python3 $TOOLS/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1"
   (crontab -l 2>/dev/null; \
     echo "* * * * * $CRON_CMD"; \
     echo "* * * * * sleep 10; $CRON_CMD"; \
@@ -314,7 +314,7 @@ fi
 
 # Purelymail IMAP poller — materializes inbound mail into the supervisor mailbox.
 if ! crontab -l 2>/dev/null | grep -q "purelymail_poll.py"; then
-  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $TOOLS/purelymail_poll.py >> ~/.mecha-wolfgang/purelymail-poll.log 2>&1") | crontab -
+  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $TOOLS/purelymail_poll.py >> ~/.mecha-developer/purelymail-poll.log 2>&1") | crontab -
   echo "added: Purelymail IMAP poll cron job (runs every minute)"
 else
   echo "skipped: Purelymail IMAP poll cron job already exists"
@@ -322,7 +322,7 @@ fi
 
 # Memory monitor — runs every 5 minutes
 if ! crontab -l 2>/dev/null | grep -q "memory_monitor.py"; then
-  (crontab -l 2>/dev/null; echo "*/5 * * * * /usr/bin/python3 $TOOLS/memory_monitor.py >> ~/.mecha-wolfgang/memory-monitor.log 2>&1") | crontab -
+  (crontab -l 2>/dev/null; echo "*/5 * * * * /usr/bin/python3 $TOOLS/memory_monitor.py >> ~/.mecha-developer/memory-monitor.log 2>&1") | crontab -
   echo "added: memory monitor cron job (runs every 5 minutes)"
 else
   echo "skipped: memory monitor cron job already exists"
@@ -338,7 +338,7 @@ fi
 EXISTING_WATCHDOG="$(crontab -l 2>/dev/null | grep "watchdog.py" || true)"
 if [ -z "$EXISTING_WATCHDOG" ]; then
   USER_UID="$(id -u)"
-  WATCHDOG_CMD="launchctl asuser $USER_UID /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-wolfgang/watchdog.log 2>&1'"
+  WATCHDOG_CMD="launchctl asuser $USER_UID /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-developer/watchdog.log 2>&1'"
   (crontab -l 2>/dev/null; echo "*/30 * * * * $WATCHDOG_CMD") | crontab -
   echo "added: watchdog cron job (runs every 30 minutes, via launchctl asuser for keychain access)"
 elif ! echo "$EXISTING_WATCHDOG" | grep -q "launchctl asuser"; then
@@ -354,7 +354,7 @@ elif ! echo "$EXISTING_WATCHDOG" | grep -q "launchctl asuser"; then
   echo "  $EXISTING_WATCHDOG"
   echo ""
   echo "Fix: run \`crontab -e\` and replace the watchdog line with:"
-  echo "  */30 * * * * launchctl asuser \$(id -u) /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-wolfgang/watchdog.log 2>&1'"
+  echo "  */30 * * * * launchctl asuser \$(id -u) /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-developer/watchdog.log 2>&1'"
   echo "================================================================"
   echo ""
 else
@@ -364,7 +364,7 @@ fi
 # Reminder cron — fires due reminders every minute
 if ! crontab -l 2>/dev/null | grep -q "reminder_cron.py"; then
   REMINDER_CRON="$REPO_ROOT/.claude/skills/reminders/tools/reminder_cron.py"
-  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $REMINDER_CRON >> ~/.mecha-wolfgang/reminder-cron.log 2>&1") | crontab -
+  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $REMINDER_CRON >> ~/.mecha-developer/reminder-cron.log 2>&1") | crontab -
   echo "added: reminder cron job (runs every minute)"
 else
   echo "skipped: reminder cron job already exists"
@@ -372,7 +372,7 @@ fi
 
 # Log rotation — runs daily, keeps 1 backup, discards logs older than 24 hours.
 # Requires `logrotate` (not bundled with macOS). Install via brew if missing,
-# and write a default config covering ~/.mecha-wolfgang/*.log if absent.
+# and write a default config covering ~/.mecha-developer/*.log if absent.
 if ! command -v logrotate >/dev/null 2>&1 && [ ! -x /opt/homebrew/sbin/logrotate ] && [ ! -x /usr/local/sbin/logrotate ]; then
   if command -v brew >/dev/null 2>&1; then
     brew install logrotate
@@ -384,10 +384,10 @@ else
   echo "skipped: logrotate already installed"
 fi
 
-LOGROTATE_CONF="$HOME/.mecha-wolfgang/logrotate.conf"
+LOGROTATE_CONF="$HOME/.mecha-developer/logrotate.conf"
 if [ ! -e "$LOGROTATE_CONF" ]; then
   cat > "$LOGROTATE_CONF" <<'CONF'
-/Users/USERNAME/.mecha-wolfgang/*.log {
+/Users/USERNAME/.mecha-developer/*.log {
     daily
     rotate 1
     maxage 1
@@ -406,7 +406,7 @@ else
 fi
 
 if ! crontab -l 2>/dev/null | grep -q "logrotate"; then
-  (crontab -l 2>/dev/null; echo "@daily logrotate --state ~/.mecha-wolfgang/logrotate.status ~/.mecha-wolfgang/logrotate.conf") | crontab -
+  (crontab -l 2>/dev/null; echo "@daily logrotate --state ~/.mecha-developer/logrotate.status ~/.mecha-developer/logrotate.conf") | crontab -
   echo "added: logrotate cron job (runs daily)"
 else
   echo "skipped: logrotate cron job already exists"
@@ -419,16 +419,16 @@ The cron jobs:
 - **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
 - **watchdog.py**: Runs every 30 minutes. Captures all tmux window output, asks an LLM to evaluate whether any workers are stuck (idle without being told to wait), and mails the supervisor if so.
 
-  **LLM config (optional)**: `~/.mecha-wolfgang/watchdog-llm.json` selects which CLI the watchdog uses. Schema: `{"cli": "claude" | "codex", "model": "<model>", "extra_args": []}`. If the file is missing, defaults are `claude` + `claude-sonnet-4-6` + `[]`. An invalid `cli` value is rejected with a loud ntfy notification rather than silent fallback. If the configured CLI returns "Not logged in" (or the codex equivalent), the watchdog sends an ntfy push to topic `mecha-wolfgang-notify` and exits 0 so cron does not flood email.
-- **reminder_cron.py**: Runs every minute. Checks `~/.mecha-wolfgang/reminders.json` for due reminders, delivers them via mailbox, and removes them.
-- **logrotate**: Runs daily. Rotates logs in `~/.mecha-wolfgang/` when they exceed size limits; keeps 1 backup, discards anything older than 24 hours.
+  **LLM config (optional)**: `~/.mecha-developer/watchdog-llm.json` selects which CLI the watchdog uses. Schema: `{"cli": "claude" | "codex", "model": "<model>", "extra_args": []}`. If the file is missing, defaults are `claude` + `claude-sonnet-4-6` + `[]`. An invalid `cli` value is rejected with a loud ntfy notification rather than silent fallback. If the configured CLI returns "Not logged in" (or the codex equivalent), the watchdog sends an ntfy push to topic `mecha-wolfgang-notify` and exits 0 so cron does not flood email.
+- **reminder_cron.py**: Runs every minute. Checks `~/.mecha-developer/reminders.json` for due reminders, delivers them via mailbox, and removes them.
+- **logrotate**: Runs daily. Rotates logs in `~/.mecha-developer/` when they exceed size limits; keeps 1 backup, discards anything older than 24 hours.
 
 ### 9b. Preflight: Watchdog LLM Login Check
 
 Run a tiny ping against the configured watchdog CLI to surface auth issues at install time rather than 30 minutes later when the first cron tick happens.
 
 ```bash
-WATCHDOG_CFG="$HOME/.mecha-wolfgang/watchdog-llm.json"
+WATCHDOG_CFG="$HOME/.mecha-developer/watchdog-llm.json"
 WATCHDOG_CLI="claude"
 if [ -f "$WATCHDOG_CFG" ]; then
   WATCHDOG_CLI="$(/usr/bin/python3 -c "import json; print(json.load(open('$WATCHDOG_CFG')).get('cli', 'claude'))" 2>/dev/null || echo claude)"

@@ -38,7 +38,7 @@ def now_utc():
 
 
 def recall_base_dir():
-    return Path(os.environ.get("MECHA_RECALL_DIR", os.path.expanduser("~/.mecha-wolfgang/recall")))
+    return Path(os.environ.get("MECHA_RECALL_DIR", os.path.expanduser("~/.mecha-developer/recall")))
 
 
 def config_file():

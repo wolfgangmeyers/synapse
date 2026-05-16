@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Watchdog cron job for the mecha-wolfgang supervisor system.
+"""Watchdog cron job for the mecha-developer supervisor system.
 
 Runs every 30 minutes. Captures all tmux windows in the mecha session,
 asks an LLM to identify stuck workers (idle without being told to wait),
 and mails the supervisor if any are found.
 
-The LLM CLI is configurable via ~/.mecha-wolfgang/watchdog-llm.json:
+The LLM CLI is configurable via ~/.mecha-developer/watchdog-llm.json:
   {"cli": "claude" | "codex", "model": "<model>", "extra_args": []}
 Defaults: claude + claude-sonnet-4-6 + [].
 
@@ -15,7 +15,7 @@ Usage:
   python3 watchdog.py --self-test
 
 Crontab entry:
-  */30 * * * * /usr/bin/python3 /home/wolfgang/code/mecha-wolfgang/.claude/skills/supervisor/tools/watchdog.py >> ~/.mecha-wolfgang/watchdog.log 2>&1
+  */30 * * * * /usr/bin/python3 /home/wolfgang/code/mecha-developer/.claude/skills/supervisor/tools/watchdog.py >> ~/.mecha-developer/watchdog.log 2>&1
 """
 
 import argparse
@@ -42,9 +42,9 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 ALLOWED_CLIS = ("claude", "codex")
 LLM_TIMEOUT = 90  # seconds
 CAPTURE_LINES = 80
-LLM_CONFIG_PATH = os.path.expanduser("~/.mecha-wolfgang/watchdog-llm.json")
+LLM_CONFIG_PATH = os.path.expanduser("~/.mecha-developer/watchdog-llm.json")
 NTFY_TOPIC = "mecha-wolfgang-notify"
-AUTH_ALERT_SENTINEL = os.path.expanduser("~/.mecha-wolfgang/watchdog-auth-alerted")
+AUTH_ALERT_SENTINEL = os.path.expanduser("~/.mecha-developer/watchdog-auth-alerted")
 AUTH_ALERT_DEBOUNCE_SEC = 6 * 60 * 60  # 6h — avoid 48 pushes/day while logged out
 AUTH_FAILURE_MARKERS = (
     "not logged in",
@@ -118,7 +118,7 @@ def _fallback_guidance():
 
 def _load_supervisor_state():
     """Load and parse supervisor-state.json. Returns dict or empty dict on failure."""
-    state_path = os.path.expanduser("~/.mecha-wolfgang/supervisor-state.json")
+    state_path = os.path.expanduser("~/.mecha-developer/supervisor-state.json")
     if not os.path.isfile(state_path):
         return {}
 
@@ -165,7 +165,7 @@ def load_standing_orders(state=None):
 
 def load_send_timestamps():
     """Load the last-sent timestamps from worker_send.py's sidecar file."""
-    path = os.path.expanduser("~/.mecha-wolfgang/worker_send_timestamps.json")
+    path = os.path.expanduser("~/.mecha-developer/worker_send_timestamps.json")
     try:
         with open(path) as f:
             return json.load(f)
