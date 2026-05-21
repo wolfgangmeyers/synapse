@@ -3,13 +3,15 @@
 
 Creates the 'mecha' tmux session, opens the supervisor window, sets
 MECHA_AGENT_WINDOW=supervisor so the mailbox hook can deliver messages,
-launches Claude Code, and sends the bootstrap prompt to activate supervisor mode.
+launches Codex by default, and sends the bootstrap prompt to activate supervisor
+mode.
 
 Usage:
-  python3 supervisor_start.py [--dir DIR]
+  python3 supervisor_start.py [--dir DIR] [--agent codex|claude]
 
 Options:
-  --dir DIR   Working directory for Claude (default: ~/code/mecha-developer)
+  --dir DIR       Working directory for the supervisor (default: ~/code/mecha-developer)
+  --agent AGENT   Agent to launch: codex (default) or claude
 
 The script exits immediately after sending the bootstrap prompt. Attach to
 the session to interact:
@@ -18,6 +20,7 @@ the session to interact:
 
 import argparse
 import os
+import shlex
 import sys
 import time
 
@@ -27,9 +30,31 @@ from _tmux import SESSION, ensure_session, send_text, send_enter, session_exists
 SUPERVISOR_WINDOW = "supervisor"
 DEFAULT_DIR = os.path.expanduser("~/code/mecha-developer")
 
-BOOTSTRAP_PROMPT = """/supervisor
+CODEX_BOOTSTRAP_PROMPT = """Load the supervisor skill and mailbox skill from ~/.agents/skills, then operate as the supervisor.
+
+Bootstrap now: read ~/personas/wolfgang.md, read the Codex supervisor memory indexes required by the supervisor skill, read supervisor state, discover running workers, reconcile state, and report current status. This machine is Codex-only for now: launch Codex workers when workers are needed, not Claude Code workers."""
+
+CLAUDE_BOOTSTRAP_PROMPT = """/supervisor
 
 Check the current supervisor state and resume all active work. Review any in-progress tasks, check on workers, and pick up where we left off."""
+
+
+def agent_command(agent, prompt):
+    if agent == "codex":
+        return " ".join(
+            [
+                "codex",
+                "--no-alt-screen",
+                "-a",
+                "never",
+                "-s",
+                "danger-full-access",
+                shlex.quote(prompt),
+            ]
+        )
+    if agent == "claude":
+        return "claude --dangerously-skip-permissions"
+    raise ValueError(f"unsupported agent: {agent}")
 
 
 def main():
@@ -37,7 +62,13 @@ def main():
     parser.add_argument(
         "--dir",
         default=DEFAULT_DIR,
-        help=f"Working directory for Claude (default: {DEFAULT_DIR})",
+        help=f"Working directory for the supervisor (default: {DEFAULT_DIR})",
+    )
+    parser.add_argument(
+        "--agent",
+        choices=["codex", "claude"],
+        default="codex",
+        help="Agent to launch: codex (default) or claude",
     )
     args = parser.parse_args()
 
@@ -56,27 +87,21 @@ def main():
     ensure_session()
     print(f"Created tmux session '{SESSION}' with window '{SUPERVISOR_WINDOW}'.")
 
-    # Launch Claude: cd to mecha-developer, set supervisor identity, start Claude
+    prompt = CODEX_BOOTSTRAP_PROMPT if args.agent == "codex" else CLAUDE_BOOTSTRAP_PROMPT
+    command = agent_command(args.agent, prompt)
+
+    # Launch the supervisor agent with mailbox identity.
     cmd = (
-        f"cd {work_dir}"
+        f"cd {shlex.quote(work_dir)}"
         f" && unset CLAUDECODE"
         f" && export MECHA_AGENT_WINDOW={SUPERVISOR_WINDOW}"
-        f" && claude --dangerously-skip-permissions"
+        f" && {command}"
     )
     send_text(SUPERVISOR_WINDOW, cmd)
     time.sleep(0.5)
     send_enter(SUPERVISOR_WINDOW)
 
-    print("Launched Claude Code in supervisor window.")
-    print("Waiting for Claude to initialize...")
-    time.sleep(15)
-
-    # Send bootstrap prompt
-    send_text(SUPERVISOR_WINDOW, BOOTSTRAP_PROMPT)
-    time.sleep(5)  # large text — give Claude Code time to render paste dialog
-    send_enter(SUPERVISOR_WINDOW)
-
-    print("Bootstrap prompt sent.")
+    print(f"Launched {args.agent} in supervisor window.")
     print()
     print(f"Attach to the session to interact:")
     print(f"  tmux attach -t {SESSION}")
