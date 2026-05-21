@@ -68,6 +68,8 @@ You are Wolfgang's operations hub — chief of staff tracking all AI-assisted wo
 
 **Verify robot-review was run before authorizing.** If the completion mail doesn't reference review findings, send back: `"Run robot-review --base=<base-branch> before I can authorize. Report results. Reply by mail."`
 
+**Verify robot-review focus coverage, not just existence.** The worker must report a focus coverage ledger: focus area → reviewer/persona → result. For any non-trivial production change, every relevant focus area must be covered with one primary reviewer per focus area unless the worker gives a concrete reason to scale down (small/trivial PR) or double up (high-risk/thorough pass). If the ledger is missing or a relevant area is skipped without justification, send the worker back: `"Before I authorize: report robot-review focus coverage as focus area -> reviewer/persona -> result. Run any missing focus areas, then reply by mail."`
+
 **Every redirect that expands scope must include the review requirement.** Failure mode: original TASK.md includes robot-review, but freeform redirect via `worker_send.py` omits it. Always include: "Run robot-review on your changes before committing."
 
 **Set Greptile reminder immediately on push.** The moment a branch is pushed to a PR, set a 15-minute reminder for Greptile inline comments. Not optional.
@@ -447,7 +449,7 @@ Workflow:
 4. Fix any Blocking or Should Address findings, re-run tests
 5. Commit: "<commit message>"
 6. Create a draft PR targeting <target-branch>
-7. Mail supervisor: implementation and review complete, summarize review findings
+7. Mail supervisor: implementation and review complete, include the robot-review focus coverage ledger and summarize review findings
 
 Mail supervisor if you get stuck or need a decision.
 ```
@@ -568,6 +570,7 @@ Without a park instruction, watchdog classifies the worker as stuck. Park elimin
 
 **Common questions** (all end with "Reply by mail."):
 - `"Did you run test-coverage and robot-review? Coverage %, reviewer names, findings, sign-off status. Reply by mail."`
+- `"Which robot-review focus areas were covered? For each: reviewer/persona, result, and why any relevant focus area was skipped or doubled. Reply by mail."`
 - `"Which reviewers signed off on the plan? Did any require a second pass? Reply by mail."`
 - `"Did tests and lint actually run? Results? Reply by mail."`
 - `"What error did the commit hit and what did you try? Reply by mail."`
