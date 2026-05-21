@@ -2,7 +2,7 @@
 """Launch a new worker in a tmux window.
 
 Usage:
-  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent claude|codex|cursor]
+  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent codex|claude|cursor]
 
 Creates a tmux window, starts the agent in the specified directory,
 and waits for it to initialize. Does NOT send instructions — use
@@ -56,10 +56,10 @@ def _cursor_pretrust_workspace(work_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Launch Claude Code in a new tmux window."
+        description="Launch an agent in a new tmux window."
     )
     parser.add_argument("--window", required=True, help="Tmux window name")
-    parser.add_argument("--dir", required=True, help="Working directory for Claude")
+    parser.add_argument("--dir", required=True, help="Working directory for the agent")
     parser.add_argument("--resume", default=None, help="Session ID to resume")
     parser.add_argument(
         "--skip-permissions",
@@ -83,9 +83,9 @@ def main():
 
     parser.add_argument(
         "--agent",
-        default="claude",
+        default="codex",
         choices=["claude", "codex", "cursor"],
-        help="Agent to launch: 'claude' (default), 'codex', or 'cursor'",
+        help="Agent to launch: 'codex' (default), 'claude', or 'cursor'",
     )
 
     parser.add_argument(
@@ -119,7 +119,7 @@ def main():
 
     # Build the agent command
     if args.agent == "codex":
-        parts = ["codex"]
+        parts = ["codex", "--no-alt-screen"]
         if args.skip_permissions:
             parts.extend(["-a", "never", "-s", "danger-full-access"])
         if args.resume:
