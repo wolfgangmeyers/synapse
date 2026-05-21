@@ -12,6 +12,7 @@ import fcntl
 import imaplib
 import json
 import os
+import re
 import sys
 
 
@@ -107,6 +108,49 @@ def html_to_text(html):
     return parser.text()
 
 
+REPLY_HEADER_RE = re.compile(r"^On .+ wrote:\s*$", re.IGNORECASE)
+ORIGINAL_MESSAGE_RE = re.compile(r"^-+\s*Original Message\s*-+\s*$", re.IGNORECASE)
+
+
+def strip_quoted_reply(text):
+    """Remove quoted prior-message content from email replies."""
+    if not text:
+        return ""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if (
+            REPLY_HEADER_RE.match(stripped)
+            or ORIGINAL_MESSAGE_RE.match(stripped)
+            or stripped == "________________________________"
+        ):
+            return "\n".join(lines[:idx]).rstrip()
+
+    end = len(lines)
+    while end > 0 and lines[end - 1].strip() == "":
+        end -= 1
+
+    idx = end
+    saw_quote = False
+    while idx > 0:
+        stripped = lines[idx - 1].lstrip()
+        if stripped.startswith(">"):
+            saw_quote = True
+            idx -= 1
+            continue
+        if saw_quote and lines[idx - 1].strip() == "":
+            idx -= 1
+            continue
+        break
+
+    if saw_quote:
+        return "\n".join(lines[:idx]).rstrip()
+    return normalized.strip()
+
+
 def message_body(message):
     plain = None
     html = None
@@ -136,9 +180,9 @@ def message_body(message):
                 plain = ""
 
     if plain is not None:
-        return str(plain).strip()
+        return strip_quoted_reply(str(plain))
     if html is not None:
-        return html_to_text(str(html)).strip()
+        return strip_quoted_reply(html_to_text(str(html)))
     return ""
 
 

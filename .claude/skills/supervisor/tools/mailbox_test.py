@@ -626,6 +626,43 @@ def run_unit_tests(runner):
 
     runner.test("purelymail_poll falls back to stripped HTML body", test_purelymail_poll_html_fallback)
 
+    def test_purelymail_poll_strips_gmail_reply_quote():
+        module = load_purelymail_poll_module()
+        msg = EmailMessage()
+        msg["From"] = "Wolfgang Meyers <wolfgangmeyers@gmail.com>"
+        msg["Subject"] = "Re: Robot-review focus coverage skill audit"
+        msg.set_content(
+            "Odd. What's with the untracked files? Any idea why they are untracked?\n\n\n"
+            "On Wed, May 20, 2026, 7:59 PM <hippie@agents.meyers.life> wrote:\n\n"
+            "> I checked both skills.\\n\\nrobot-review already mostly had the intended\n"
+            "> rule: all relevant focus areas should be covered.\n"
+            ">\n"
+        )
+
+        mailbox_msg = module.mailbox_message(msg.as_bytes(), "test-id")
+        assert mailbox_msg["body"] == (
+            "Odd. What's with the untracked files? Any idea why they are untracked?"
+        )
+
+    runner.test("purelymail_poll strips Gmail reply-to quoted prior message", test_purelymail_poll_strips_gmail_reply_quote)
+
+    def test_purelymail_poll_strips_trailing_quoted_block():
+        module = load_purelymail_poll_module()
+        msg = EmailMessage()
+        msg["From"] = "wolfgangmeyers@gmail.com"
+        msg["Subject"] = "Re: Example"
+        msg.set_content(
+            "New answer stays.\n"
+            "So does > inline punctuation.\n\n"
+            "> quoted old message\n"
+            "> more old message\n"
+        )
+
+        mailbox_msg = module.mailbox_message(msg.as_bytes(), "test-id")
+        assert mailbox_msg["body"] == "New answer stays.\nSo does > inline punctuation."
+
+    runner.test("purelymail_poll strips trailing quoted-line block only", test_purelymail_poll_strips_trailing_quoted_block)
+
     def test_purelymail_poll_delivers_and_marks_seen():
         module = load_purelymail_poll_module()
         with tempfile.TemporaryDirectory() as tmp:
