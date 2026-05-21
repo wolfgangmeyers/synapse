@@ -916,7 +916,7 @@ def run_unit_tests(runner):
 
     runner.test("hook uses MECHA_AGENT_WINDOW when MECHA_WORKER_WINDOW not set (supervisor support)", test_hook_uses_agent_window_fallback)
 
-    def test_hook_supervisor_state_update_uses_from_alias():
+    def test_hook_supervisor_email_sender_omits_state_update_block():
         with tempfile.TemporaryDirectory() as tmp:
             mailbox_dir = os.path.join(tmp, "mailboxes")
             msg = make_message(
@@ -937,11 +937,14 @@ def run_unit_tests(runner):
                 stdin_data=hook_stdin(),
             )
             assert rc == 0
-            assert "python3 state_update_status.py wolfgang" in stdout
+            assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in stdout
+            assert "state_update_status.py" not in stdout
             assert "python3 state_update_status.py wolfgangmeyers@gmail.com" not in stdout
             assert "From: wolfgangmeyers@gmail.com" in stdout
+            context = json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
+            assert SMTP_REPLY_BLOCK_HEADER in context
 
-    runner.test("hook supervisor state-update prompt uses from_alias while displaying raw email", test_hook_supervisor_state_update_uses_from_alias)
+    runner.test("hook supervisor email sender omits state-update block", test_hook_supervisor_email_sender_omits_state_update_block)
 
     def test_hook_mandatory_smtp_block_for_email_sender():
         with tempfile.TemporaryDirectory() as tmp:
@@ -1115,7 +1118,7 @@ def run_unit_tests(runner):
         test_message_age_seconds_malformed_timestamp,
     )
 
-    def test_cron_supervisor_state_update_uses_from_alias():
+    def test_cron_supervisor_email_sender_omits_state_update_block():
         import importlib.util
         spec = importlib.util.spec_from_file_location("mailbox_cron", CRON_SCRIPT)
         cron = importlib.util.module_from_spec(spec)
@@ -1128,14 +1131,15 @@ def run_unit_tests(runner):
             body="Inbound email",
         )
         output = cron.format_delivery_text([("/tmp/message.json", msg)], agent_name="supervisor")
-        assert "python3 state_update_status.py wolfgang" in output
+        assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in output
+        assert "state_update_status.py" not in output
         assert "python3 state_update_status.py wolfgangmeyers@gmail.com" not in output
         assert "From: wolfgangmeyers@gmail.com" in output
         assert SMTP_REPLY_BLOCK_HEADER in output
 
     runner.test(
-        "mailbox_cron supervisor state-update prompt uses from_alias while displaying raw email",
-        test_cron_supervisor_state_update_uses_from_alias,
+        "mailbox_cron supervisor email sender omits state-update block",
+        test_cron_supervisor_email_sender_omits_state_update_block,
     )
 
     def test_cron_mandatory_smtp_block_for_email_sender():
