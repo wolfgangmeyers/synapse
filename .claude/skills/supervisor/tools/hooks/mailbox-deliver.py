@@ -103,8 +103,12 @@ def message_sender_hint(msg):
     return msg.get("from_alias") or msg.get("from", "")
 
 
+def is_email_message(msg):
+    return "@" in msg.get("from", "")
+
+
 def has_email_sender(messages):
-    return any("@" in msg.get("from", "") for _, msg in messages)
+    return any(is_email_message(msg) for _, msg in messages)
 
 
 def smtp_reply_block():
@@ -122,22 +126,26 @@ def format_messages(messages, is_supervisor=False):
     count = len(messages)
     noun = "message" if count == 1 else "messages"
 
-    # Collect unique senders to pre-fill the state update command.
+    # Collect unique non-email senders to pre-fill the state update command.
+    # Email-originated messages use from_alias for display/reply routing, but that
+    # alias is not a supervisor task alias and must not drive state updates.
     senders = []
     seen = set()
     for _, msg in messages:
+        if is_email_message(msg):
+            continue
         s = message_sender_hint(msg)
         if s and s not in seen:
             senders.append(s)
             seen.add(s)
-    sender_hint = senders[0] if len(senders) == 1 else (senders[0] if senders else "<window>")
+    sender_hint = senders[0] if senders else None
 
     lines = []
 
     # System senders that aren't workers — no state_update_status needed
     SYSTEM_SENDERS = {"reminders", "watchdog", "memory-monitor", "system", "user"}
 
-    if is_supervisor and sender_hint not in SYSTEM_SENDERS:
+    if is_supervisor and sender_hint and sender_hint not in SYSTEM_SENDERS:
         lines += [
             "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***",
             "Step 1: Run state update now:",
