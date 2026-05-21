@@ -143,7 +143,17 @@ Async mail and watchdog reminders arrive as **`[MAILBOX]`** blocks with a **mand
 
 ## Memory (Codex supervisors only)
 
-Claude Code auto-injects persistent memory into every session; Codex does not. **If you are a Codex supervisor, read `~/.claude/skills/codex-memory/SKILL.md` at startup** — it points to the same shared memory store Claude Code uses, so memories saved by either agent are visible to both. Skipping it means the Codex supervisor runs blind to accumulated user feedback, project context, and references.
+Claude Code auto-injects persistent memory into every session; Codex does not. **If you are a Codex supervisor, read the memory indexes at startup, not only when you remember to search.**
+
+Mandatory startup memory reads for Codex supervisors:
+
+1. Read the Claude-style memory index: `~/.claude/projects/-home-wolfgang-code-mecha-wolfgang/memory/MEMORY.md`
+2. Read the KB discovery index: `~/.mecha-developer/kb/INDEX.md`
+3. Lazy-load topic files only when an index entry is relevant to the current task.
+
+These index files are intentionally descriptive and small enough to load eagerly. The KB skill is useful for explicit lookup, but it is not a substitute for the always-loaded index behavior Wolfgang expects. Skipping the indexes means the Codex supervisor runs blind to accumulated user feedback, project context, and references.
+
+The legacy `codex-memory` skill lives in `~/code/mecha-wolfgang/.claude/skills/codex-memory/SKILL.md` after the repo split. If `~/.claude/skills/codex-memory/SKILL.md` exists, it may be a symlink to that file.
 
 Claude Code supervisors do not need this skill — the auto-memory system handles it.
 
@@ -154,6 +164,7 @@ On every activation, bootstrap situational awareness:
 ```bash
 # 0. Persona: ~/personas/wolfgang.md — full session identity (read the file, not just this comment).
 # 0b. Mailbox skill: ~/.claude/skills/mailbox/SKILL.md — see "Mailbox (companion)" above.
+# 0c. Codex memory indexes: ~/.claude/projects/-home-wolfgang-code-mecha-wolfgang/memory/MEMORY.md and ~/.mecha-developer/kb/INDEX.md
 
 # 1. Load persistent state (shows blocked tasks at top if any exist)
 python3 ~/.claude/skills/supervisor/tools/state_read.py 2>/dev/null || echo "No supervisor state yet."
