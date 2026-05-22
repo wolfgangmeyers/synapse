@@ -12,7 +12,7 @@ When adding or updating a skill, keep this CLAUDE.md's skill table (below) curre
 
 ## Related repos
 
-- `mecha-review` — owns code-review skills (`review-pr`, `robot-review`, `pr-context`, `pr-summary`, `pr-validate`, `generate-reviewer-persona`). Not duplicated here.
+- `mecha-review` — owns self-contained code-review and review-adjacent skills (`review-pr`, `robot-review`, `pr-context`, `pr-summary`, `pr-validate`, `explain`). Not duplicated here.
 - `mecha-developer` — original monorepo; non-review skills were migrated from there into this repo.
 
 ## Skills
@@ -21,7 +21,6 @@ When adding or updating a skill, keep this CLAUDE.md's skill table (below) curre
 |-------|-------------|
 | `augment-persona` | Analyze a persona file for gaps, generate targeted scenario-based questions, and integrate answers back into the persona. Use for improving existing personas, not generating new ones. |
 | `decompose` | Break large tasks into phased dev-loop iterations with clear boundaries, ordering, and inter-phase contracts. |
-| `explain` | Describe code changes in plain English as a complete functional specification — no code in the output, precise enough to evaluate correctness, test coverage, and whether requirements are met without reading the source. |
 | `generate-persona` | Generate a behavioral persona from any data source (chat logs, PR reviews, text files, git history), guided by intended use case. Replaces `generate-reviewer-persona` and `generate-supervisor-persona`. |
 | `generate-supervisor-persona` | **Deprecated** — thin wrapper that redirects to `generate-persona` with `--use supervision --source chat-logs`. |
 | `install` | Set up or reinstall mecha-developer by symlinking personas, skills, and hooks to the home directory. One-time setup utility. |
