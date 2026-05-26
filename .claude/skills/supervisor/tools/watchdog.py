@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -307,17 +308,21 @@ def load_llm_config(path=LLM_CONFIG_PATH):
     return config
 
 
-def build_llm_argv(cli, model, prompt, extra_args):
+def build_llm_argv(cli, model, prompt, extra_args, output_last_message=None):
     """Build the subprocess argv for the chosen CLI.
 
     claude:  claude -p <prompt> --model <model> [extra_args...]
-    codex:   codex exec --model <model> [extra_args...] <prompt>
+    codex:   codex exec --model <model> [extra_args...] [--output-last-message <file>] <prompt>
              (codex uses `exec` for non-interactive runs; prompt is positional.)
     """
     if cli == "claude":
         return ["claude", "-p", prompt, "--model", model, *extra_args]
     if cli == "codex":
-        return ["codex", "exec", "--model", model, *extra_args, prompt]
+        argv = ["codex", "exec", "--model", model, *extra_args]
+        if output_last_message:
+            argv.extend(["--output-last-message", output_last_message])
+        argv.append(prompt)
+        return argv
     raise ValueError(f"unsupported cli: {cli!r}")
 
 
@@ -403,7 +408,18 @@ def call_llm(prompt, config, dry_run=False):
         print("=== END PROMPT ===\n")
         return None, False
 
-    argv = build_llm_argv(config["cli"], config["model"], prompt, config["extra_args"])
+    output_path = None
+    if config["cli"] == "codex":
+        fd, output_path = tempfile.mkstemp(prefix="watchdog-codex-", suffix=".txt")
+        os.close(fd)
+
+    argv = build_llm_argv(
+        config["cli"],
+        config["model"],
+        prompt,
+        config["extra_args"],
+        output_last_message=output_path,
+    )
 
     try:
         env = os.environ.copy()
@@ -426,6 +442,13 @@ def call_llm(prompt, config, dry_run=False):
             log(f"{config['cli']} exited with code {result.returncode}: {err}")
             return None, False
         clear_auth_alert_sentinel()
+        if output_path:
+            try:
+                with open(output_path) as f:
+                    return f.read().strip(), False
+            except OSError as e:
+                log(f"could not read codex last-message output: {e}")
+                return None, False
         return result.stdout.strip(), False
     except FileNotFoundError:
         log(f"{config['cli']} not found in PATH — skipping watchdog check")
@@ -433,6 +456,14 @@ def call_llm(prompt, config, dry_run=False):
     except subprocess.TimeoutExpired:
         log(f"{config['cli']} timed out after {LLM_TIMEOUT}s — skipping watchdog check")
         return None, False
+    finally:
+        if output_path:
+            try:
+                os.unlink(output_path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log(f"could not remove codex last-message output: {e}")
 
 
 def parse_response(raw):
@@ -652,6 +683,12 @@ def _run_self_tests():
     argv = build_llm_argv("codex", "gpt-x", "hello", ["--quiet"])
     check("codex_argv",
           argv == ["codex", "exec", "--model", "gpt-x", "--quiet", "hello"],
+          str(argv))
+
+    # 5b. argv shape — codex with clean final-output file
+    argv = build_llm_argv("codex", "gpt-x", "hello", ["--quiet"], output_last_message="/tmp/out")
+    check("codex_argv_with_output",
+          argv == ["codex", "exec", "--model", "gpt-x", "--quiet", "--output-last-message", "/tmp/out", "hello"],
           str(argv))
 
     # 6. Auth-failure detection
