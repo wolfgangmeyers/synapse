@@ -1,6 +1,6 @@
 ---
 name: watchdog
-description: Watchdog evaluation guidance — loaded programmatically by watchdog.py, not user-invocable.
+description: Watchdog evaluation guidance for the Codex agent wrapper and legacy watchdog.py, not user-invocable.
 user_invocable: false
 ---
 
