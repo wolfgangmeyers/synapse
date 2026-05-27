@@ -36,7 +36,23 @@ injects it as context), or within 30 seconds via cron if they're idle.
 
 - **Done**: notify the supervisor you've finished and are ready to be cleaned up
 - **Stuck / need help**: describe the blocker clearly so the supervisor can unblock you
-- **Status update**: report progress on long-running tasks (only when actively working — do NOT send status mails when idle with no task)
+- **Task accepted**: after reading your task instructions, send a brief "accepted" message if the task will take more than a few minutes
+- **Status update**: report progress every 15-20 minutes during long-running work, and at major phase boundaries such as plan complete, implementation complete, tests running, review running, review fixes complete
+
+Status updates are mandatory for long-running tasks. Do not make the supervisor poll your terminal to learn whether you are on track.
+
+Use this format:
+
+```
+Status update: [brief current state]
+
+Done: [what is complete]
+Next: [what you are doing next]
+Blockers: [none, or the specific blocker / decision needed]
+Evidence so far: [commands, files changed, review status, or "N/A yet"]
+```
+
+Send status only when you have an active task. Do not send status mails when idle with no task.
 
 ### Completion mail format
 
