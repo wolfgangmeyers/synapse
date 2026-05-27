@@ -10,7 +10,9 @@ worker_send.py for that after verifying the agent started.
 """
 
 import argparse
+import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -52,6 +54,54 @@ def _cursor_pretrust_workspace(work_dir):
         }
         with open(trust_file, "w") as f:
             _json.dump(trust_data, f)
+
+
+def _codex_pretrust_workspace(work_dir):
+    """Pre-trust a workspace directory for Codex TUI mode.
+
+    Codex stores workspace trust in ~/.codex/config.toml:
+      [projects."/abs/path"]
+      trust_level = "trusted"
+    """
+    config_file = os.path.join(os.path.expanduser("~/.codex"), "config.toml")
+    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+
+    path_literal = json.dumps(work_dir)
+    header = f"[projects.{path_literal}]"
+
+    try:
+        with open(config_file, "r") as f:
+            config = f.read()
+    except FileNotFoundError:
+        config = ""
+
+    table_pattern = re.compile(
+        rf"(?ms)^(?P<header>\[projects\.{re.escape(path_literal)}\]\s*\n)"
+        rf"(?P<body>.*?)(?=^\[|\Z)"
+    )
+    match = table_pattern.search(config)
+    if match:
+        body = match.group("body")
+        if re.search(r'(?m)^\s*trust_level\s*=\s*"trusted"\s*$', body):
+            return
+
+        if re.search(r"(?m)^\s*trust_level\s*=", body):
+            body = re.sub(
+                r'(?m)^(\s*trust_level\s*=\s*).*$',
+                r'\1"trusted"',
+                body,
+                count=1,
+            )
+        else:
+            body = body.rstrip() + '\ntrust_level = "trusted"\n'
+
+        config = config[: match.start("body")] + body + config[match.end("body") :]
+    else:
+        prefix = "\n\n" if config and not config.endswith("\n\n") else ""
+        config = config + prefix + f'{header}\ntrust_level = "trusted"\n'
+
+    with open(config_file, "w") as f:
+        f.write(config)
 
 
 def main():
@@ -97,7 +147,7 @@ def main():
 
     args = parser.parse_args()
 
-    work_dir = os.path.expanduser(args.dir)
+    work_dir = os.path.abspath(os.path.expanduser(args.dir))
 
     if not os.path.isdir(work_dir):
         print(f"Error: directory does not exist: {work_dir}", file=sys.stderr)
@@ -119,6 +169,7 @@ def main():
 
     # Build the agent command
     if args.agent == "codex":
+        _codex_pretrust_workspace(work_dir)
         parts = ["codex", "--no-alt-screen"]
         if args.skip_permissions:
             parts.extend(["-a", "never", "-s", "danger-full-access"])
@@ -199,7 +250,8 @@ def main():
     print(f"1. Wait 5 seconds, then verify the worker window is ready:")
     print(f"   python3 worker_capture.py --window {args.window}")
     print(f"2. Send instructions to the worker:")
-    print(f"   python3 worker_send.py --window {args.window} --text 'Your task: ...'")
+    print(f"   python3 worker_send.py --window {args.window} --delay 3 \\")
+    print(f"     --text 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
     print(f"3. Record the task in supervisor state:")
     print(f"   python3 state_add.py --alias <alias> --type worker --agent {args.agent} ...")
     if not args.resume:
@@ -220,8 +272,9 @@ def main():
         print(f"   python3 worker_capture.py --window {args.window} --tail 30")
         print(f"  Look for evidence of active work: tool calls, file reads, bash output.")
         print(f"  If you only see the task text sitting at the prompt, the input was not")
-        print(f"  submitted. Use --task-file next time; for now send a short follow-up:")
-        print(f"   python3 worker_send.py --window {args.window} --text 'Read TASK.md for your instructions.'")
+        print(f"  submitted. Use TASK.md next time; for now send a short follow-up:")
+        print(f"   python3 worker_send.py --window {args.window} --delay 3 \\")
+        print(f"     --text 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
         print(f"  Before shutting down, verify the work is correct (background subagent).")
 
 
