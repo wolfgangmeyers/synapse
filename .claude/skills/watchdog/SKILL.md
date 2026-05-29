@@ -45,9 +45,12 @@ Claude Code shows auto-generated placeholder text in the empty input box when a 
 ❯ Try "fix lint errors"
 ❯ Try "write a test for CyberThreadsService.ts"
 ❯ fix the blocking issues
+❯ Summarize recent commits
 ```
 
 These are UI hints — NOT commands anyone typed, NOT pending work, NOT evidence of activity. They appear whenever the prompt is empty and vanish the moment real text is entered. **An idle prompt with a suggestion is just an idle prompt.** Never use input-line text as evidence that a worker is active or processing something.
+
+Known placeholder text includes `Summarize recent commits`. Do not describe it as a "real direct user request" unless there is clear conversation history above the prompt showing Wolfgang actually sent that exact request. The input line alone is never enough evidence.
 
 ## Stuck Criteria — Flag If ANY Apply
 
@@ -110,6 +113,8 @@ A parked worker WITH a matching pending reminder is OK — the supervisor has a 
 
 17. **Supervisor answered at terminal with no user acknowledgment**: If the supervisor provided a substantive response to the user at the terminal (answered a question, reported findings, gave a status update) and the user has not replied or acknowledged within ~10 minutes, the user is likely not at the keyboard. Flag: "supervisor responded to user at the terminal but got no acknowledgment — email the same content via configured SMTP so the user sees it async." The response was only seen at the terminal, which the user may not be watching.
 
+    Do not apply this criterion to supervisor status/cleanup responses delivered in the active chat where Wolfgang is currently sending mailbox/watchdog messages. Those are not terminal-only async misses; repeated "email the same cleanup/status content" alerts in an active chat are false positives.
+
 18. **Deployment declared successful with broken dependencies**: If the supervisor or a worker reports a deployment as "done" or "running" but notes that a dependency is broken (e.g., "web.1 crashed, pre-existing"), check whether the deployed service depends on that broken component. If it does, the deployment is NOT successful — the service can't function. Flag: "deployment reported successful but [dependency] is broken and [deployed service] depends on it — the deployed service cannot function. Fix the dependency or roll back." The test is: does the deployed thing actually work end-to-end? Not just: did the specific artifact land?
 
 ## Err On The Side of Flagging
@@ -165,15 +170,15 @@ The remote watchdog sends its own alerts via mailbox. The local watchdog does no
 
 19. **Unincorporated PR feedback**: When the supervisor receives external review feedback on a PR (Greptile, human reviewers, Devin, Cursor, etc.) and addresses the findings by fixing the code, check whether those findings have also been incorporated back into the robot-review skill. The feedback loop is: external reviewer catches something → fix the code → update robot-review so it catches the pattern locally next time.
 
-    **MANDATORY verification before flagging this criterion:** Do NOT rely on tmux pane scans alone — supervisor windows scroll off their most recent activity. You MUST run an actual git log check first. From `/home/wolfgang/code/mecha-developer`, run:
+    **MANDATORY verification before flagging this criterion:** Do NOT rely on tmux pane scans alone — supervisor windows scroll off their most recent activity. You MUST run an actual git log check first against the authoritative robot-review repo. `mecha-review` owns robot-review/review-pr/pr-context/pr-summary/pr-validate/explain; `mecha-developer` does not duplicate those skills. From `/home/wolfgang/code/mecha-review`, run:
 
     ```
     git log --oneline --since="24 hours ago" -- .claude/skills/robot-review/
     ```
 
-    If this returns ANY commits whose messages reference the PRs / tasks with external feedback (e.g. "robot-review: add N heuristics from PR #436/#437/#438"), the loop has been closed — DO NOT flag criterion 19. Only flag when there is external feedback in the last 24h AND no matching robot-review commit in the same window.
+    If this returns ANY commits whose messages or diff content address the PRs / tasks with external feedback (e.g. "robot-review: add N heuristics from PR #436/#437/#438"), the loop has been closed — DO NOT flag criterion 19. If you are unsure whether a generic heuristic commit covers the feedback, inspect the commit with `git show --stat --oneline <sha>` and `git show <sha> -- .claude/skills/robot-review/` before flagging. Only flag when there is external feedback in the last 24h AND no matching robot-review commit in the authoritative repo.
 
-    When legitimately flagging, use: "PR feedback was addressed in code but not incorporated into robot-review — every external catch we miss locally should become a new heuristic or focus area update. This is continuous, not optional. (Verified via git log: no commits to .claude/skills/robot-review/ match the feedback.)"
+    When legitimately flagging, use: "PR feedback was addressed in code but not incorporated into robot-review — every external catch we miss locally should become a new heuristic or focus area update. This is continuous, not optional. (Verified via git log in /home/wolfgang/code/mecha-review: no commits to .claude/skills/robot-review/ match the feedback.)"
 
 ## Pipeline Advancement
 
