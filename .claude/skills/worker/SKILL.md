@@ -151,10 +151,12 @@ Then wait idle. The supervisor will kill the window when ready.
 
    When the cause of unexpected state is unclear, do not reach for destructive workarounds. Running migrations, seeding data, dropping and recreating data, or modifying deployed state are high-blast-radius operations that warrant escalation if you can't explain why the state is anomalous. Fix the cause, not the symptom — and if you can't identify the cause, escalate.
 
-5. **NEVER use tmux directly**: Do not run `tmux` commands. All process and session management is done via provided scripts that wrap tmux internally. Each dev environment skill provides a `bin/` directory of named scripts:
+5. **Do not use tmux directly for dev-environment process/session management**: Don't run raw `tmux` to start/stop/manage dev environments. That is done via provided scripts that wrap tmux internally. Each dev environment skill provides a `bin/` directory of named scripts:
    - Each project's dev-env skill: `~/.claude/skills/<project>-dev-env/bin/` (e.g. `<project>-dev-start`, `<project>-dev-stop`)
    - Tilt-based environments: `~/.claude/skills/<project>-dev-env/bin/` (e.g. `tilt-start`, `tilt-stop`, `tilt-status`)
    - If a script doesn't exist for what you need, ask the supervisor to create it or run it for you — don't use raw tmux as a workaround.
+
+   **Exception — interactive remote shells:** For an interactive remote shell that has no wrapper script and needs a live TTY — most importantly the staging **ECS exec shell** (`make ecs-exec ECS_ENV=staging CMD="/bin/sh"`), or an SSM/SSH session — **DO use a dedicated tmux window directly**. Open a tmux window, start the ecs-exec session in it, and drive it with `tmux send-keys` + `tmux capture-pane`. Running ecs-exec as a one-shot Bash command does not work well — it's an interactive SSM Session Manager shell. This is the supported, preferred way to reach the ECS shell.
 
 6. **NEVER remove your own worktree**: If a worker deletes its own worktree, it becomes unable to execute any further commands and cleanup fails. The supervisor handles all worktree cleanup after you report completion. When you're done with your work, report completion and wait - do not touch the worktree.
 
