@@ -9,26 +9,20 @@ Runs the test suite with coverage instrumentation, parses per-function coverage 
 
 ## Usage
 
-```
-/test-coverage [--package <pkg_pattern>] [--focus <file_or_dir>] [--lang go]
-```
+This is a SKILL, not a CLI command or binary. You run it by reading this `SKILL.md` and following the Process below yourself — there is no `test-coverage` executable to invoke and no `/test-coverage` slash command. The skill takes three conceptual parameters, described below; they are inputs you apply while following the process, not command-line flags:
 
-### Flags
-
-| Flag | Type | Default | Description |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `--package` | string | `./...` | Package pattern to test, e.g. `./pkg/llm/...` |
-| `--focus` | string | *(none)* | Substring match against full file path. When set, only files whose full path contains this substring are passed to the subagent, regardless of coverage percentage. E.g. `--focus agentrun` matches `pkg/llm/agentrun.go`. |
-| `--lang` | string | auto-detect | Language. Auto-detect checks for `go.mod` → Go. Currently only `go` is supported. If both `go.mod` and other language markers exist, Go takes precedence. |
+| package | string | `./...` | Package pattern to test, e.g. `./pkg/llm/...` |
+| focus | string | *(none)* | Substring match against full file path. When set, only files whose full path contains this substring are passed to the subagent, regardless of coverage percentage. E.g. focus `agentrun` matches `pkg/llm/agentrun.go`. |
+| lang | string | auto-detect | Language. Auto-detect checks for `go.mod` → Go. Currently only `go` is supported. If both `go.mod` and other language markers exist, Go takes precedence. |
 
-### Examples
+### Examples (how the parameters map to behavior)
 
-```
-/test-coverage
-/test-coverage --package ./pkg/llm/...
-/test-coverage --package ./pkg/llm/... --focus agentrun
-/test-coverage --focus pkg/operations/glueai
-```
+- No parameters → cover the whole module (`./...`)
+- package `./pkg/llm/...` → cover just that package pattern
+- package `./pkg/llm/...` + focus `agentrun` → cover that pattern, force-include files whose path contains `agentrun`
+- focus `pkg/operations/glueai` → whole module, force-include files under that path
 
 ---
 
@@ -47,7 +41,7 @@ The subagent is used (rather than direct in-context analysis) because source fil
 
 ### 1. Determine language
 
-- If `--lang` is specified, use it.
+- If the `lang` parameter is specified, use it.
 - Otherwise, auto-detect: if `go.mod` exists in the current directory → Go. Go takes precedence if multiple language markers exist.
 - If language cannot be determined or is not `go`, print:
   `Error: unsupported language '<lang>'. Currently supported: go`
@@ -61,7 +55,7 @@ go test -coverprofile=/tmp/mw-coverage.out -covermode=atomic ./...
 go tool cover -func=/tmp/mw-coverage.out
 ```
 
-Replace `./...` with `--package` if provided. (`-covermode=atomic` is used to correctly handle concurrent tests.)
+Replace `./...` with the `package` parameter if provided. (`-covermode=atomic` is used to correctly handle concurrent tests.)
 
 If the test run exits non-zero but `/tmp/mw-coverage.out` was written, print:
 `Warning: some tests failed — coverage data may be incomplete`
@@ -89,7 +83,7 @@ total:                                (statements)    71.2%
 Include a file in the subagent context if **any** of the following apply:
 
 - Any of its functions has coverage below 50%
-- `--focus` is set and the file's full path contains the `--focus` substring (regardless of coverage %)
+- the `focus` parameter is set and the file's full path contains the `focus` substring (regardless of coverage %)
 
 **Exclude regardless** (see "What to skip" below for the full list).
 
@@ -176,7 +170,7 @@ For each suggestion, name the test and describe in one clause what it asserts.
 
 - **Empty package**: If `go test` produces no coverage output (e.g., all files have build constraints that exclude the current platform), print: `No coverage data produced for <package>` and stop.
 - **No test files**: If a package has no `_test.go` files, `go test` will succeed with 0% coverage. This is valid input — the subagent will flag all exported functions as Blocking Gaps.
-- **Large packages**: When running `./...`, the number of selected files may be large. The 50% threshold and exclusion rules naturally limit the set. If `--focus` is set, only matching files are included regardless of package size.
+- **Large packages**: When running `./...`, the number of selected files may be large. The 50% threshold and exclusion rules naturally limit the set. If the `focus` parameter is set, only matching files are included regardless of package size.
 
 ---
 
