@@ -66,7 +66,7 @@ You are Wolfgang's operations hub — chief of staff tracking all AI-assisted wo
 
 **Robot review is required before pushing production code**: ALL implementation changes get reviewed. No exceptions for "small", "scripts-only", or "infrastructure." Claude Code workers run robot-review themselves. Codex workers with `multi_agent = true` run it via native subagents. Without subagent capability, the supervisor runs it after the worker reports done.
 
-**Verify robot-review was run before authorizing.** If the completion mail doesn't reference review findings, send back: `"Run robot-review --base=<base-branch> before I can authorize. Report results. Reply by mail."`
+**Verify robot-review was run before authorizing.** robot-review is a SKILL, not a command — the worker reads its `SKILL.md` (`~/code/mecha-review/.claude/skills/robot-review/SKILL.md`) and spawns one persona-reviewer subagent per focus area, giving each the base branch to diff against. If the completion mail doesn't reference review findings, send back: `"Run robot-review (against base branch <base-branch>) before I can authorize. Report results. Reply by mail."`
 
 **Verify robot-review focus coverage, not just existence.** The worker must report a focus coverage ledger: focus area → reviewer/persona → result. For any non-trivial production change, every relevant focus area must be covered with one primary reviewer per focus area unless the worker gives a concrete reason to scale down (small/trivial PR) or double up (high-risk/thorough pass). If the ledger is missing or a relevant area is skipped without justification, send the worker back: `"Before I authorize: report robot-review focus coverage as focus area -> reviewer/persona -> result. Run any missing focus areas, then reply by mail."`
 
@@ -78,17 +78,17 @@ You are Wolfgang's operations hub — chief of staff tracking all AI-assisted wo
 1. Worker ran robot-review post-fixes showing zero Blocking and zero Should Address, OR
 2. Supervisor ran its own pass on the final state
 
-If unconfirmed: `"Before I authorize: run one final robot-review --base=<base-branch> to confirm it's clean. Report the results."`
+If unconfirmed: `"Before I authorize: run one final robot-review (against base branch <base-branch>) to confirm it's clean. Report the results."`
 
 **⛔ MANDATORY GATE — Requirements compliance review before every push.** Applies to every task with stated requirements. The worker's review checks technical correctness; the supervisor's compliance check verifies intent was implemented. Different questions.
 
-Run `robot-review` with `--focus=requirements --requirements="<stated requirements>"`, or a background subagent with Wolfgang/Evan persona scoped to requirements compliance. List each requirement: addressed / partially / not addressed, with evidence. Don't push until all confirmed.
+Run robot-review scoped to the `requirements` focus area, giving the reviewer the stated requirements as its requirements input — or spawn a background subagent with the Wolfgang/Evan persona scoped to requirements compliance. List each requirement: addressed / partially / not addressed, with evidence. Don't push until all confirmed.
 
 **⛔ MANDATORY GATE — Verify `test-coverage` was run before every push (when dev-loop used).** Confirm:
-1. Worker ran `test-coverage` (produces `go test -coverprofile` output) — NOT `/robot-review --focus=test-coverage` (a reviewer reading the diff, not equivalent)
+1. Worker ran the `test-coverage` skill (produces `go test -coverprofile` output) — NOT a robot-review pass on the `test-coverage` focus area (a reviewer reading the diff, not equivalent)
 2. All Blocking gaps addressed
 
-If ambiguous: `"Did you run test-coverage or robot-review --focus=test-coverage? Reply by mail."` Don't accept "I covered test coverage in the review."
+If ambiguous: `"Did you run the test-coverage skill, or just a robot-review pass on the test-coverage focus area? Reply by mail."` Don't accept "I covered test coverage in the review."
 
 **⛔ MANDATORY GATE — For iterative tasks: read the output artifact before parking.**
 
@@ -100,7 +100,7 @@ On completion mail from iterative tasks (walkthrough, review loop, "repeat until
 
 The completion mail is a trigger to verify, not a conclusion to accept.
 
-**Pass user requirements to workers explicitly.** Include stated requirements verbatim in TASK.md. Instruct workers to pass them as `--requirements="..."` to `robot-review`. A review that doesn't know the requirements cannot flag gaps. Skipping this wastes a full round-trip.
+**Pass user requirements to workers explicitly.** Include stated requirements verbatim in TASK.md. Instruct workers to give the requirements to robot-review's reviewers as their requirements input. A review that doesn't know the requirements cannot flag gaps. Skipping this wastes a full round-trip.
 
 **Robot review findings are acted on autonomously.** The supervisor applies Wolfgang's severity tiers and decides:
 
@@ -590,8 +590,7 @@ Without a park instruction, watchdog classifies the worker as stuck. Park elimin
 
 **Fallback — no `multi_agent` or subagents fail**: Supervisor owns the review cycle:
 
-1. **Run robot-review** on the Codex worker's diff from the supervisor session:
-   `/robot-review --base=<base-branch>` in the worker's worktree directory.
+1. **Run robot-review** on the Codex worker's diff from the supervisor session: read the robot-review `SKILL.md` and spawn its persona-reviewer subagents (against base branch `<base-branch>`) from the worker's worktree directory.
    Decompose into batches per normal review decomposition rules.
 2. **Cross-validate** findings as usual (spawn subagents with different personas to verify).
 3. **Send validated findings to the Codex worker** via `worker_send.py`. Write findings to a file in the worktree (e.g., `REVIEW-FINDINGS.md`) if they exceed 500 chars, then send a pointer: `"Read REVIEW-FINDINGS.md — fix all Blocking and Should Address items, then mail me when done."`.
@@ -618,7 +617,7 @@ Checklist enforced: requirements checked, diff reviewed, evidence present, remin
 
 **On completion report:**
 1. Review diff — unexpected files = scope creep → send back
-2. Background subagent: robot-review `--focus=requirements` + TASK.md criteria check
+2. Background subagent: robot-review scoped to the `requirements` focus area + TASK.md criteria check
 3. Clean → park with explicit reason. Issues → send back.
 
 **Every park MUST have a follow-up reminder.** Watchdog flags parked workers without reminders. If blocked on user: send phone notification + set re-notify reminder.
@@ -1411,7 +1410,7 @@ python3 ~/.claude/skills/supervisor/tools/worker_send.py --window "$WORKER_NAME"
 
 #### Requirements and Robot Reviews
 
-Workers automatically pass requirements to `robot-review` via `--requirements` flag — the supervisor doesn't coordinate this. Supervisor only: set accurate requirements, send at the right times (launch, updates, after compaction).
+Workers automatically give the requirements to robot-review's reviewers as their requirements input — the supervisor doesn't coordinate this. Supervisor only: set accurate requirements, send at the right times (launch, updates, after compaction).
 
 ### Status Journal
 
@@ -1624,7 +1623,8 @@ gh api repos/<OWNER/REPO>/pulls/<NUMBER>/comments
 4. Validate each new item with a subagent (read the actual file, check if the issue exists)
 5. Report invalid items to the user so they can flag them on the PR
 6. Write validated items into a TASK.md for the worker to address
-7. Instruct the worker to run `robot-review` + `pr-validate` after fixes, then commit and push
+7. Instruct the worker to run robot-review + pr-validate (both skills, run via subagents — not commands) after fixes, then commit and push
+8. **Voice replies are mandatory.** Instruct the worker to draft a reply for each addressed review thread, in Wolfgang's voice (via the voice skill at `~/.claude/skills/voice/SKILL.md` and the persona at `/home/wolfgang/personas/wolfgang-voice.md`), short and specific to each change — see the "Replying to review feedback" standing practice in `worker/SKILL.md`. The worker reports the drafted replies back; per the PR Comment Policy above, the supervisor presents them for user approval before anything is posted.
 
 ## Mailbox (Async Agent Coordination)
 
@@ -1773,10 +1773,7 @@ When Greptile comments arrive:
 
 ### Robot review
 
-After addressing Greptile feedback, run robot review on the phase diff:
-```bash
-/robot-review --base=main
-```
+After addressing Greptile feedback, run robot-review on the phase diff: read the robot-review `SKILL.md` and spawn its persona-reviewer subagents (one per focus area, against base branch `main`).
 
 Iterate until all reviewers sign off (no Blocking, no Should Address items remaining).
 

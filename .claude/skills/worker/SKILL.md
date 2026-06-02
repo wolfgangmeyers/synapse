@@ -194,7 +194,7 @@ The supervisor may send you detailed requirements for your task. These are the s
 3. **Use them to guide** your todo list breakdown
 4. **Reference them** when making implementation decisions
 5. **Verify compliance** - check your work matches each requirement before marking complete
-6. **Pass them to robot reviewers** when running `robot-review` (use `--requirements` flag)
+6. **Pass them to robot reviewers** when running robot-review — give the requirements to each reviewer subagent as its requirements input
 7. **If requirements conflict** with what you observe in the codebase, escalate to the supervisor
 
 **Your implementation must meet the requirements.** If a requirement seems unclear, wrong, or incomplete, escalate to the supervisor rather than interpreting it yourself or skipping it.
@@ -210,45 +210,47 @@ This is the **default workflow**. Follow it unless you have sufficient, clear, a
 1. Receive task and requirements. Break into todos.
 2. **Consider alternatives before committing to an approach.** For non-trivial design decisions (architecture, data model, API shape, abstraction boundaries), generate 2-3 alternative approaches, briefly evaluate each against the requirements and constraints, then proceed with the strongest option — or hybridize the best elements. Don't default to the first idea that works. Document the chosen approach and why in the plan.
 3. Write a structured plan to a file (e.g., `PLAN.md` in the worktree root). Do **NOT** use plan mode — it causes workers to stall. Think through the approach and write it out: what changes, which files, key decisions.
-3. **Assess plan complexity** and decompose review:
-   - For simple plans (single change, clear scope): 1 review batch with 2 reviewers (e.g., `--focus=requirements,architecture,scope` → wolfgang + evan)
+4. **robot-review is a SKILL, not a command.** You do not run `robot-review` as a binary or slash command. You read its `SKILL.md` (at `~/code/mecha-review/.claude/skills/robot-review/SKILL.md`, or `~/.agents/skills/robot-review/SKILL.md` for Codex) and spawn its persona reviewers as your own subagents — one reviewer subagent per focus area — giving each the plan file, the base branch to diff against, and the requirements (when provided). The focus areas and persona mappings below describe *which reviewers to spawn for which areas*; they are not CLI flags. The same applies to `pr-validate` (a skill run via a subagent) and `test-coverage` (a skill that runs `go test -coverprofile`).
+5. **Assess plan complexity** and decompose review:
+   - For simple plans (single change, clear scope): 1 review batch with 2 reviewers (e.g., focus areas requirements + architecture + scope → wolfgang + evan)
    - For complex plans (multi-area, architectural): 2-3 review batches with 2 reviewers each
-   - Example batch 1: `robot-review --focus=requirements,scope` → wolfgang + jason
-   - Example batch 2: `robot-review --focus=architecture` → evan + conrad
-4. **Run focused review batches** on the plan file. For each batch:
-   - Run `robot-review --focus=<area1>,<area2>` (pass `--requirements` if requirements were provided)
+   - Example batch 1: focus areas requirements + scope → wolfgang + jason
+   - Example batch 2: focus area architecture → evan + conrad
+6. **Run focused review batches** on the plan file. For each batch:
+   - Spawn one reviewer subagent per focus area (give them the requirements if requirements were provided)
    - **Cross-validate** blocking/should-address findings: spawn a subagent with a *different* reviewer persona with relevant expertise to verify each finding. Discard false positives. Robot reviewers hallucinate issues.
    - Apply validated feedback from the batch
-5. Repeat step 4 for each batch until all review passes produce no new validated blocking or should-address findings.
-6. Delete the plan file before moving to Phase 2 — do not commit plan artifacts.
+7. Repeat step 6 for each batch until all review passes produce no new validated blocking or should-address findings.
+8. Delete the plan file before moving to Phase 2 — do not commit plan artifacts.
 
 ### Phase 2: Implement (TDD)
 
 1. For each todo: spawn a subagent to implement using TDD (write tests first, then make them pass), review the result, mark complete. For non-code changes (docs, config, workflows), skip TDD with a brief note.
-2. **Assess implementation complexity** and decompose review:
+2. **Run robot-review as a skill, not a command.** As in Phase 1: read the robot-review `SKILL.md` and spawn one persona-reviewer subagent per focus area, giving each the base branch to diff against and the requirements (when applicable). The focus-area → persona mappings below say *which reviewers to spawn for which areas* — they are not CLI flags.
+3. **Assess implementation complexity** and decompose review:
    - For simple implementations (small bug fix, single feature, docs): 1-2 review batches total, ~2 reviewers each
-     - Example: `robot-review --focus=comments-and-docs,conventions` → wolfgang + conrad
+     - Example: focus areas comments-and-docs + conventions → wolfgang + conrad
    - For moderate implementations (feature with tests, multi-file change): 2-3 review batches
-     - Example batch 1: `robot-review --focus=requirements,test-coverage` → wolfgang + michaelk
-     - Example batch 2: `robot-review --focus=api-design,error-handling` → jason + michaelk
+     - Example batch 1: focus areas requirements + test-coverage → wolfgang + michaelk
+     - Example batch 2: focus areas api-design + error-handling → jason + michaelk
    - For complex implementations (architectural change, security-sensitive, large refactor): 3-5 review batches total (1-2 batches per distinct focus area), 2 reviewers each
-     - Example batch 1: `robot-review --focus=architecture` → evan + conrad
-     - Example batch 2: `robot-review --focus=security` → jason + evan
-     - Example batch 3: `robot-review --focus=test-coverage,error-handling` → wolfgang + michaelk
-   > **Important**: `robot-review --focus=test-coverage` (a reviewer reading the diff) is NOT the same as running `test-coverage` (which runs `go test -coverprofile` and produces real per-function line coverage data). If the dev-loop workflow requires `test-coverage`, you must run it as a separate step — `--focus=test-coverage` does not satisfy that requirement.
-3. **Run focused review batches** on the implementation. For each batch:
-   - Run `robot-review --focus=<area1>,<area2> --base=<base-branch>` (pass `--requirements` if applicable)
+     - Example batch 1: focus area architecture → evan + conrad
+     - Example batch 2: focus area security → jason + evan
+     - Example batch 3: focus areas test-coverage + error-handling → wolfgang + michaelk
+   > **Important**: a robot-review pass on the `test-coverage` focus area (a reviewer reading the diff) is NOT the same as running the `test-coverage` skill (which runs `go test -coverprofile` and produces real per-function line coverage data). If the dev-loop workflow requires `test-coverage`, you must run that skill as a separate step — a robot-review focus pass does not satisfy that requirement.
+4. **Run focused review batches** on the implementation. For each batch:
+   - Spawn one reviewer subagent per focus area, diffing against the base branch (give them the requirements if applicable)
    - **Cross-validate** blocking/should-address findings: spawn a subagent with a *different* reviewer persona with relevant expertise to verify each finding. Discard false positives.
    - Apply validated feedback from the batch
-4. Repeat step 3 for each batch until all review passes produce no new validated blocking or should-address findings.
-5. Run pre-commit checklist (below).
-6. Signal ready for human review. State what was done, what the reviewers found, and that the pre-commit checklist passes. Then **wait** — do not commit, push, or create a PR until explicitly told to.
+5. Repeat step 4 for each batch until all review passes produce no new validated blocking or should-address findings.
+6. Run pre-commit checklist (below).
+7. Signal ready for human review. State what was done, what the reviewers found, and that the pre-commit checklist passes. Then **wait** — do not commit, push, or create a PR until explicitly told to.
 
 ### Pre-commit Checklist
 
 - Linters pass (e.g., `make lint` or project-specific lint command)
 - Tests pass (proves functionality works)
-- `test-coverage` has been run and all Blocking gaps addressed (when following the dev-loop workflow — NOT substitutable with `robot-review --focus=test-coverage`)
+- The `test-coverage` skill has been run and all Blocking gaps addressed (when following the dev-loop workflow — NOT substitutable with a robot-review pass on the `test-coverage` focus area)
 - Changes are minimal and focused
 
 **Lint binary version match (Go work):** Before declaring lint clean, verify your lint binary matches CI's pinned version. The version is in `.circleci/config.yml` (or equivalent CI config). If your local binary can't run the project's config (e.g. Go toolchain target mismatch), install the matching binary (typically to `/tmp/golangci-bin`) and re-run — do NOT fall back to `go vet` + `gofmt -l` and call it done. They are not equivalent: e.g. golangci-lint v2.9.0 with go1.26 enforces `interface{}` → `any` rewrites that older `gofmt` doesn't catch. Caught by CI on PR #4201 (2026-04-26).
@@ -310,6 +312,17 @@ git push -u origin HEAD:<source-branch-name>
 This ensures your fixes update the existing PR rather than creating a new branch.
 
 **IMPORTANT**: Always run linters before pushing. Lint failures in CI waste time and review cycles.
+
+### Replying to review feedback (standing practice)
+
+When you address PR review feedback (inline review comments, Greptile/Bugbot findings, or a human reviewer's notes), you must **reply on each review thread** explaining what you changed — not just push a fix silently. Each reply is short, direct, and specific to that thread's change ("Done — moved the nil check ahead of the deref" / "Good catch, switched to the shared helper" / "Not changing this: it's pre-existing and out of scope, filed ABC-123").
+
+Generate the reply text in Wolfgang's voice:
+1. Read the **voice skill** at `~/.claude/skills/voice/SKILL.md` and follow it.
+2. Use the voice persona at `/home/wolfgang/personas/wolfgang-voice.md` as the source of his tone and phrasing.
+3. Keep it short and specific to the actual change — no filler, no restating the reviewer's point back at them.
+
+**Do not post the replies yourself.** Per PR comment policy, posting requires explicit supervisor/user authorization. Prepare the reply text per thread and report it back to the supervisor; post only once authorized.
 
 ### Finding the Source Branch
 If the source branch name isn't obvious:

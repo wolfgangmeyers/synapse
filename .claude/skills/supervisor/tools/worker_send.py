@@ -26,8 +26,8 @@ Examples:
   # First message to a Codex worker (needs longer delay)
   python worker_send.py --window worker-1 --text "Read TASK.md for your instructions." --delay 3
 
-  # Send skill command
-  python worker_send.py --window worker-1 --text "/robot-review"
+  # Ask the worker to run a skill (skills are invoked by reading the SKILL.md, not as a CLI command)
+  python worker_send.py --window worker-1 --text "Run robot-review on your changes."
 
   # Send /exit
   python worker_send.py --window worker-1 --text "/exit"
