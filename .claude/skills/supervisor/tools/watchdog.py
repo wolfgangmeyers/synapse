@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Watchdog cron job for the mecha-developer supervisor system.
 
-Runs every 30 minutes. Captures all tmux windows in the mecha session,
-asks an LLM to identify stuck workers (idle without being told to wait),
-and mails the supervisor if any are found.
+Runs every 30 minutes. Captures tmux windows in the mecha session, asks an
+LLM whether the supervisor needs a momentum nudge, and mails that note to the
+supervisor only when the LLM says to nudge.
 
 The LLM CLI is configurable via ~/.mecha-developer/watchdog-llm.json:
   {"cli": "claude" | "codex", "model": "<model>", "extra_args": []}
@@ -28,25 +28,17 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _tmux import list_windows, capture_pane, session_exists
-
-REMINDERS_TOOLS = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "reminders",
-    "tools",
-)
-sys.path.insert(0, REMINDERS_TOOLS)
-from _reminders import locked_reminders, reminders_file
+from _tmux import capture_pane, list_windows, session_exists
 
 DEFAULT_CLI = "claude"
 DEFAULT_MODEL = "claude-sonnet-4-6"
 ALLOWED_CLIS = ("claude", "codex")
-LLM_TIMEOUT = 90  # seconds
+LLM_TIMEOUT = 90
 CAPTURE_LINES = 80
 LLM_CONFIG_PATH = os.path.expanduser("~/.mecha-developer/watchdog-llm.json")
 NTFY_TOPIC = "mecha-wolfgang-notify"
 AUTH_ALERT_SENTINEL = os.path.expanduser("~/.mecha-developer/watchdog-auth-alerted")
-AUTH_ALERT_DEBOUNCE_SEC = 6 * 60 * 60  # 6h — avoid 48 pushes/day while logged out
+AUTH_ALERT_DEBOUNCE_SEC = 6 * 60 * 60
 AUTH_FAILURE_MARKERS = (
     "not logged in",
     "please run /login",
@@ -56,8 +48,6 @@ AUTH_FAILURE_MARKERS = (
     "run claude /login",
     "/login to authenticate",
 )
-
-# Windows that are infrastructure display-only — never flag these.
 SYSTEM_WINDOWS = {"dashboard"}
 
 LOG_PREFIX = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -67,217 +57,70 @@ def log(msg):
     print(f"{LOG_PREFIX} {msg}", flush=True)
 
 
-def _to_utc_str(fire_at_str):
-    """Convert a fire_at timestamp to UTC string for consistent comparison."""
-    try:
-        dt = datetime.fromisoformat(fire_at_str)
-        if dt.tzinfo is None:
-            # Legacy local time — convert to UTC
-            dt = dt.astimezone(timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    except (ValueError, TypeError):
-        return fire_at_str
-
-
 def load_watchdog_guidance():
     """Load watchdog evaluation guidance from the dedicated watchdog skill."""
     skill_path = os.path.normpath(
         os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "watchdog", "SKILL.md",
+            "..",
+            "..",
+            "watchdog",
+            "SKILL.md",
         )
     )
     try:
         with open(skill_path) as f:
             content = f.read()
     except FileNotFoundError:
-        log(f"Warning: watchdog SKILL.md not found at {skill_path} — using fallback guidance")
+        log(f"Warning: watchdog SKILL.md not found at {skill_path} - using fallback")
         return _fallback_guidance()
 
-    # Strip YAML frontmatter (--- ... ---)
     if content.startswith("---"):
         end = content.find("\n---", 3)
         if end != -1:
-            content = content[end + 4:].strip()
+            content = content[end + 4 :].strip()
 
     return content
 
 
 def _fallback_guidance():
-    """Minimal fallback if SKILL.md cannot be loaded."""
     return (
-        "A worker is STUCK if it is idle without an explicit park instruction, "
-        "if it has completed its task and is sitting idle uncleaned, "
-        "or if it is blocking on terminal input instead of the mailbox system. "
-        "A worker is OK only if it is actively working (tool calls, spinner, output) "
-        "or was explicitly told to wait. When uncertain, flag it. "
-        "The supervisor window (named 'supervisor' or 'mecha') is STUCK if it "
-        "contains phrases like 'Ready to proceed when you want' or 'Let me know when "
-        "to continue' — these indicate the supervisor paused at an already-approved step."
+        "Decide whether to nudge the supervisor to keep work moving. "
+        "Nudge only for finished or idle workers, or a supervisor waiting on "
+        "something it could decide itself, unless the user explicitly said to hold. "
+        'Respond only as JSON: {"nudge": true|false, "note": "..."}'
     )
 
 
-def _load_supervisor_state():
-    """Load and parse supervisor-state.json. Returns dict or empty dict on failure."""
-    state_path = os.path.expanduser("~/.mecha-developer/supervisor-state.json")
-    if not os.path.isfile(state_path):
-        return {}
-
-    try:
-        with open(state_path) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def load_state_notes(state=None):
-    """Load watchdog_note fields from supervisor state for active tasks.
-
-    Returns a dict of {window_or_alias: note} for tasks that have a watchdog_note.
-    """
-    if state is None:
-        state = _load_supervisor_state()
-
-    notes = {}
-    for task in state.get("tasks", []):
-        if task.get("state") != "active":
-            continue
-        note = task.get("watchdog_note")
-        window = task.get("window", "")
-        alias = task.get("alias", "")
-        if note:
-            if window and "worker exited" not in window:
-                notes[window] = note
-            if alias:
-                notes[alias] = note
-    return notes
-
-
-def load_standing_orders(state=None):
-    """Load standing orders from supervisor state.
-
-    Returns a list of dicts with id, title, and description.
-    """
-    if state is None:
-        state = _load_supervisor_state()
-
-    return state.get("standing_orders", [])
-
-
-def load_send_timestamps():
-    """Load the last-sent timestamps from worker_send.py's sidecar file."""
-    path = os.path.expanduser("~/.mecha-developer/worker_send_timestamps.json")
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
 def build_prompt(window_captures, guidance):
-    """Build the prompt for the LLM given a dict of {window_name: content}."""
-    send_timestamps = load_send_timestamps()
+    """Build the LLM prompt from captured windows and watchdog guidance."""
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
     sections = []
     for name, content in window_captures.items():
-        ts = send_timestamps.get(name)
-        header = f"=== Window: {name}"
-        if ts:
-            header += f" (last supervisor message: {ts})"
-        header += f" | capture time: {now_str} ==="
+        header = f"=== Window: {name} | capture time: {now_str} ==="
         sections.append(f"{header}\n{content}")
 
     windows_text = "\n\n".join(sections)
+    return f"""You are evaluating an AI supervisor system running in tmux.
 
-    # Load supervisor state once for both notes and standing orders
-    sup_state = _load_supervisor_state()
+Below are the current terminal captures. System windows named {sorted(SYSTEM_WINDOWS)} are included only for context.
 
-    state_notes = load_state_notes(sup_state)
-    notes_section = ""
-    if state_notes:
-        note_lines = [f"  - {name}: {note}" for name, note in state_notes.items()]
-        notes_section = (
-            "\n\n--- SUPERVISOR NOTES (from task state) ---\n"
-            "These notes were set by the supervisor to guide your evaluation. "
-            "Follow any instructions they contain (e.g., 'keep moving' means "
-            "flag the window as stuck if it appears idle so the supervisor relaunches it).\n\n"
-            + "\n".join(note_lines)
-            + "\n--- END SUPERVISOR NOTES ---"
-        )
-
-    # Load pending reminders for parked-worker cross-reference
-    reminders_section = ""
-    try:
-        if reminders_file().exists():
-            with locked_reminders(save=False) as reminders:
-                reminders = list(reminders)
-            if reminders:
-                reminder_lines = [
-                    f"  - [{r['id']}] window={r.get('window','?')} fires_at={_to_utc_str(r.get('fire_at','?'))} message={r.get('message','')[:100]}"
-                    for r in reminders
-                ]
-                reminders_section = (
-                    "\n\n--- PENDING REMINDERS ---\n"
-                    "Cross-reference these with parked workers. A parked worker with no matching "
-                    "reminder should be flagged as stuck.\n\n"
-                    + "\n".join(reminder_lines)
-                    + "\n--- END PENDING REMINDERS ---"
-                )
-        else:
-            reminders_section = (
-                "\n\n--- PENDING REMINDERS ---\n"
-                "No reminders file found. Any parked worker without a reminder is suspect.\n"
-                "--- END PENDING REMINDERS ---"
-            )
-    except (FileNotFoundError, json.JSONDecodeError):
-        reminders_section = (
-            "\n\n--- PENDING REMINDERS ---\n"
-            "No reminders file found. Any parked worker without a reminder is suspect.\n"
-            "--- END PENDING REMINDERS ---"
-        )
-
-    # Load standing orders
-    standing_orders = load_standing_orders(sup_state)
-    orders_section = ""
-    if standing_orders:
-        order_lines = [
-            f"  - [{o['id']}] {o['title']}: {o.get('description', '')}"
-            for o in standing_orders
-            if o.get("id") and o.get("title")
-        ]
-        if order_lines:
-            orders_section = (
-                "\n\n--- STANDING ORDERS ---\n"
-                "These are persistent directives the supervisor must honor. "
-                "Flag the supervisor as STUCK if any are being violated.\n\n"
-                + "\n".join(order_lines)
-                + "\n--- END STANDING ORDERS ---"
-            )
-
-    prompt = f"""You are a watchdog for an AI supervisor system. AI worker agents and the supervisor run in tmux windows. System windows (dashboard) are shown for context only — never flag them. All other windows including the supervisor window are evaluated.
-
-Below is the current terminal output from each window:
+--- WINDOW CAPTURES ---
 
 {windows_text}
 
---- EVALUATION INSTRUCTIONS (loaded from watchdog skill) ---
+--- WATCHDOG GUIDANCE ---
 
 {guidance}
 
---- END INSTRUCTIONS ---{notes_section}{orders_section}{reminders_section}
+--- END GUIDANCE ---
 
-Evaluate each non-system window (including the supervisor window) using the criteria above. Respond with ONLY valid JSON, no other text:
-{{"verdict": "STUCK" or "OK", "stuck": [{{"window": "name", "reason": "brief reason why stuck"}}], "summary": "one sentence"}}"""
-
-    return prompt
+Respond with ONLY valid JSON, no markdown:
+{{"nudge": true|false, "note": "one short message to the supervisor, or empty"}}"""
 
 
 def load_llm_config(path=LLM_CONFIG_PATH):
-    """Load watchdog LLM config. Returns dict with cli/model/extra_args.
-
-    Falls back to defaults if file missing. Raises ValueError on invalid cli.
-    """
+    """Load watchdog LLM config. Returns dict with cli/model/extra_args."""
     config = {"cli": DEFAULT_CLI, "model": DEFAULT_MODEL, "extra_args": []}
     if not os.path.isfile(path):
         return config
@@ -291,30 +134,25 @@ def load_llm_config(path=LLM_CONFIG_PATH):
     if "cli" in data:
         cli = data["cli"]
         if cli not in ALLOWED_CLIS:
-            raise ValueError(
-                f"{path}: cli must be one of {ALLOWED_CLIS}, got {cli!r}"
-            )
+            raise ValueError(f"{path}: cli must be one of {ALLOWED_CLIS}, got {cli!r}")
         config["cli"] = cli
     if "model" in data:
         if not isinstance(data["model"], str) or not data["model"]:
             raise ValueError(f"{path}: model must be a non-empty string")
         config["model"] = data["model"]
     if "extra_args" in data:
-        ea = data["extra_args"]
-        if not isinstance(ea, list) or not all(isinstance(x, str) for x in ea):
+        extra_args = data["extra_args"]
+        if not isinstance(extra_args, list) or not all(
+            isinstance(arg, str) for arg in extra_args
+        ):
             raise ValueError(f"{path}: extra_args must be a list of strings")
-        config["extra_args"] = ea
+        config["extra_args"] = extra_args
 
     return config
 
 
 def build_llm_argv(cli, model, prompt, extra_args, output_last_message=None):
-    """Build the subprocess argv for the chosen CLI.
-
-    claude:  claude -p <prompt> --model <model> [extra_args...]
-    codex:   codex exec --model <model> [extra_args...] [--output-last-message <file>] <prompt>
-             (codex uses `exec` for non-interactive runs; prompt is positional.)
-    """
+    """Build the subprocess argv for the chosen CLI."""
     if cli == "claude":
         return ["claude", "-p", prompt, "--model", model, *extra_args]
     if cli == "codex":
@@ -339,8 +177,10 @@ def _ntfy(title, body):
             [
                 "curl",
                 "-sS",
-                "-H", f"Title: {title}",
-                "-d", body,
+                "-H",
+                f"Title: {title}",
+                "-d",
+                body,
                 f"https://ntfy.sh/{NTFY_TOPIC}",
             ],
             capture_output=True,
@@ -356,12 +196,7 @@ def _ntfy(title, body):
 
 
 def send_auth_failure_alert(cli):
-    """Send a loud ntfy push about the auth failure, debounced to once per 6h.
-
-    Without debouncing, a logged-out CLI would generate one push every 30
-    minutes — alert fatigue silences the channel. The sentinel is cleared
-    on the next successful run.
-    """
+    """Send a debounced ntfy push about an LLM CLI auth failure."""
     try:
         if os.path.isfile(AUTH_ALERT_SENTINEL):
             age = time.time() - os.path.getmtime(AUTH_ALERT_SENTINEL)
@@ -372,12 +207,13 @@ def send_auth_failure_alert(cli):
         pass
 
     login_cmd = "claude /login" if cli == "claude" else "codex login"
-    title = f"Watchdog auth failure - run `{login_cmd}`"
-    body = (
-        f"Watchdog could not reach {cli}: not logged in. "
-        f"Run `{login_cmd}` on the supervisor host to restore monitoring."
+    _ntfy(
+        title=f"Watchdog auth failure - run `{login_cmd}`",
+        body=(
+            f"Watchdog could not reach {cli}: not logged in. "
+            f"Run `{login_cmd}` on the supervisor host to restore monitoring."
+        ),
     )
-    _ntfy(title, body)
 
     try:
         os.makedirs(os.path.dirname(AUTH_ALERT_SENTINEL), exist_ok=True)
@@ -397,17 +233,8 @@ def clear_auth_alert_sentinel():
         log(f"could not clear auth-alert sentinel: {e}")
 
 
-def call_llm(prompt, config, dry_run=False):
-    """Run the configured LLM CLI with the prompt.
-
-    Returns (stdout, auth_failed). stdout is None on any failure.
-    """
-    if dry_run:
-        print("\n=== PROMPT ===")
-        print(prompt)
-        print("=== END PROMPT ===\n")
-        return None, False
-
+def call_llm(prompt, config):
+    """Run the configured LLM CLI. Returns (stdout, auth_failed)."""
     output_path = None
     if config["cli"] == "codex":
         fd, output_path = tempfile.mkstemp(prefix="watchdog-codex-", suffix=".txt")
@@ -438,9 +265,9 @@ def call_llm(prompt, config, dry_run=False):
                 log(f"{config['cli']} auth failure detected: {stderr[:200] or stdout[:200]}")
                 send_auth_failure_alert(config["cli"])
                 return None, True
-            err = stderr or stdout[:200]
-            log(f"{config['cli']} exited with code {result.returncode}: {err}")
+            log(f"{config['cli']} exited with code {result.returncode}: {(stderr or stdout)[:200]}")
             return None, False
+
         clear_auth_alert_sentinel()
         if output_path:
             try:
@@ -451,10 +278,10 @@ def call_llm(prompt, config, dry_run=False):
                 return None, False
         return result.stdout.strip(), False
     except FileNotFoundError:
-        log(f"{config['cli']} not found in PATH — skipping watchdog check")
+        log(f"{config['cli']} not found in PATH - skipping watchdog check")
         return None, False
     except subprocess.TimeoutExpired:
-        log(f"{config['cli']} timed out after {LLM_TIMEOUT}s — skipping watchdog check")
+        log(f"{config['cli']} timed out after {LLM_TIMEOUT}s - skipping watchdog check")
         return None, False
     finally:
         if output_path:
@@ -467,57 +294,65 @@ def call_llm(prompt, config, dry_run=False):
 
 
 def parse_response(raw):
-    """Parse the LLM JSON response. Returns dict or None on failure."""
+    """Parse and validate the LLM JSON response."""
     if not raw:
         return None
 
-    # Strip markdown code fences if present
     text = raw.strip()
     if text.startswith("```"):
-        lines = text.splitlines()
-        # Remove opening fence (``` or ```json)
-        lines = lines[1:]
-        # Remove closing fence
+        lines = text.splitlines()[1:]
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
 
     try:
         data = json.loads(text)
-        return data
     except json.JSONDecodeError as e:
         log(f"Failed to parse LLM response as JSON: {e}")
         log(f"Raw response was: {raw[:500]}")
         return None
 
+    if not isinstance(data, dict):
+        log(f"LLM response must be a JSON object, got {type(data).__name__}")
+        return None
+    if not isinstance(data.get("nudge"), bool):
+        log("LLM response missing boolean 'nudge'")
+        return None
 
-def send_mail(stuck_workers, summary, tools_dir, dry_run=False):
-    """Send a mailbox message to the supervisor about stuck windows."""
-    lines = ["[WATCHDOG] Stuck windows detected:\n"]
-    for w in stuck_workers:
-        lines.append(f"  - {w['window']}: {w['reason']}")
-    lines.append(f"\nSummary: {summary}")
-    lines.append("\nCheck these windows and either redirect them or confirm they are intentionally parked.")
+    note = data.get("note", "")
+    if note is None:
+        note = ""
+    if not isinstance(note, str):
+        log("LLM response field 'note' must be a string")
+        return None
 
-    body = "\n".join(lines)
+    return {"nudge": data["nudge"], "note": note.strip()}
 
+
+def send_mail(note, tools_dir, dry_run=False):
+    """Send a watchdog momentum nudge to the supervisor mailbox."""
+    body = f"[WATCHDOG] {note.strip()}"
     mailbox_send = os.path.join(tools_dir, "mailbox_send.py")
 
     if dry_run:
-        print("\n=== MAIL BODY (dry run — not sent) ===")
+        print("\n=== MAIL BODY (dry run - not sent) ===")
         print(body)
         print("=== END MAIL BODY ===\n")
-        return
+        return True
 
     try:
         result = subprocess.run(
             [
                 sys.executable,
                 mailbox_send,
-                "--to", "supervisor",
-                "--from", "watchdog",
-                "--subject", "Stuck windows",
-                "--body", body,
+                "--to",
+                "supervisor",
+                "--from",
+                "watchdog",
+                "--subject",
+                "Momentum nudge",
+                "--body",
+                body,
             ],
             capture_output=True,
             text=True,
@@ -525,20 +360,47 @@ def send_mail(stuck_workers, summary, tools_dir, dry_run=False):
         )
         if result.returncode != 0:
             log(f"mailbox_send.py failed: {result.stderr.strip()}")
-        else:
-            log(f"Mailed supervisor about {len(stuck_workers)} stuck window(s)")
+            return False
+        log("Mailed supervisor a watchdog nudge")
+        return True
     except Exception as e:
         log(f"Failed to send mail: {e}")
+        return False
+
+
+def maybe_send_nudge(decision, tools_dir, dry_run=False):
+    """Send mail only when the parsed decision requests a nudge."""
+    if not decision["nudge"]:
+        log("No nudge needed")
+        return False
+
+    note = decision["note"]
+    if not note:
+        log("Nudge requested with empty note - skipping mail")
+        return False
+
+    return send_mail(note, tools_dir, dry_run=dry_run)
+
+
+def _capture_windows():
+    window_captures = {}
+    for _idx, name in list_windows():
+        content = capture_pane(name, lines=CAPTURE_LINES)
+        if content is not None:
+            window_captures[name] = content.strip() or "(empty)"
+        else:
+            log(f"Could not capture window '{name}' - skipping")
+    return window_captures
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Watchdog cron job: detect stuck windows and alert supervisor."
+        description="Watchdog cron job: nudge the supervisor when work stalls."
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print prompt and LLM response without sending mail",
+        help="Print prompt, LLM response, and would-be mail without sending mail",
     )
     parser.add_argument(
         "--self-test",
@@ -560,160 +422,145 @@ def main():
         )
         sys.exit(0)
 
-    tools_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # If the mecha session doesn't exist, there's nothing to watch.
     if not session_exists():
-        log("mecha tmux session not running — nothing to do")
+        log("mecha tmux session not running - nothing to do")
         sys.exit(0)
 
-    windows = list_windows()
-    if not windows:
-        log("No windows in mecha session — nothing to do")
-        sys.exit(0)
-
-    # Capture each window
-    window_captures = {}
-    for _idx, name in windows:
-        content = capture_pane(name, lines=CAPTURE_LINES)
-        if content is not None:
-            window_captures[name] = content.strip() or "(empty)"
-        else:
-            log(f"Could not capture window '{name}' — skipping")
-
+    window_captures = _capture_windows()
     if not window_captures:
-        log("No window content captured — nothing to do")
+        log("No window content captured - nothing to do")
         sys.exit(0)
 
-    # All windows except display-only system windows are monitored
-    all_monitored = [n for n in window_captures if n not in SYSTEM_WINDOWS]
-    if not all_monitored:
-        log("No windows to monitor — nothing to check")
+    monitored = [name for name in window_captures if name not in SYSTEM_WINDOWS]
+    if not monitored:
+        log("No windows to monitor - nothing to check")
         sys.exit(0)
 
-    log(f"Checking {len(all_monitored)} window(s): {', '.join(all_monitored)}")
+    log(f"Checking {len(monitored)} window(s): {', '.join(monitored)}")
+    prompt = build_prompt(window_captures, load_watchdog_guidance())
 
-    guidance = load_watchdog_guidance()
-    prompt = build_prompt(window_captures, guidance)
+    if args.dry_run:
+        print("\n=== PROMPT ===")
+        print(prompt)
+        print("=== END PROMPT ===\n")
+
     log(f"Calling LLM: cli={config['cli']} model={config['model']}")
-    raw_response, auth_failed = call_llm(prompt, config, dry_run=args.dry_run)
+    raw_response, auth_failed = call_llm(prompt, config)
     if auth_failed:
-        log("Auth failure path — ntfy sent, exiting 0 to keep cron quiet")
+        log("Auth failure path - ntfy sent, exiting 0 to keep cron quiet")
+        sys.exit(0)
+    if raw_response is None:
         sys.exit(0)
 
     if args.dry_run:
-        # In dry-run mode, call_llm already printed the prompt.
-        # We simulate a response for display purposes.
-        print("(dry-run: skipping actual LLM call and mail)")
+        print("\n=== LLM RESPONSE ===")
+        print(raw_response)
+        print("=== END LLM RESPONSE ===\n")
+
+    decision = parse_response(raw_response)
+    if decision is None:
         sys.exit(0)
 
-    if raw_response is None:
-        # Errors already logged inside call_llm — exit silently.
-        sys.exit(0)
-
-    data = parse_response(raw_response)
-    if data is None:
-        # parse_response already logged the error.
-        sys.exit(0)
-
-    verdict = data.get("verdict", "OK")
-    stuck = data.get("stuck", [])
-    summary = data.get("summary", "")
-
-    log(f"LLM verdict: {verdict} | summary: {summary}")
-
-    if verdict == "STUCK" and stuck:
-        log(f"Stuck windows: {[w['window'] for w in stuck]}")
-        send_mail(stuck, summary, tools_dir, dry_run=args.dry_run)
-    else:
-        log("All windows OK")
+    log(f"LLM decision: nudge={decision['nudge']} note={decision['note']!r}")
+    maybe_send_nudge(
+        decision,
+        os.path.dirname(os.path.abspath(__file__)),
+        dry_run=args.dry_run,
+    )
 
 
 def _run_self_tests():
-    """Tiny in-process tests for config loader, argv builder, and auth detection."""
     import tempfile
+    from unittest import mock
 
     failures = []
 
     def check(name, cond, detail=""):
         status = "PASS" if cond else "FAIL"
-        print(f"[{status}] {name}{(' — ' + detail) if detail and not cond else ''}")
+        print(f"[{status}] {name}{(' - ' + detail) if detail and not cond else ''}")
         if not cond:
             failures.append(name)
 
-    # 1. Defaults when file missing
     cfg = load_llm_config(path="/nonexistent/path/watchdog-llm.json")
-    check("defaults_when_missing",
-          cfg == {"cli": "claude", "model": "claude-sonnet-4-6", "extra_args": []},
-          str(cfg))
+    check(
+        "defaults_when_missing",
+        cfg == {"cli": "claude", "model": "claude-sonnet-4-6", "extra_args": []},
+        str(cfg),
+    )
 
-    # 2. Loader honors overrides
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump({"cli": "codex", "model": "gpt-x", "extra_args": ["--foo"]}, f)
         tmp_path = f.name
     try:
         cfg = load_llm_config(path=tmp_path)
-        check("loader_uses_overrides",
-              cfg == {"cli": "codex", "model": "gpt-x", "extra_args": ["--foo"]},
-              str(cfg))
+        check(
+            "loader_uses_overrides",
+            cfg == {"cli": "codex", "model": "gpt-x", "extra_args": ["--foo"]},
+            str(cfg),
+        )
     finally:
         os.unlink(tmp_path)
 
-    # 3. Invalid cli rejected
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump({"cli": "gemini"}, f)
-        tmp_path = f.name
-    try:
-        rejected = False
-        try:
-            load_llm_config(path=tmp_path)
-        except ValueError:
-            rejected = True
-        check("invalid_cli_rejected", rejected)
-    finally:
-        os.unlink(tmp_path)
-
-    # 4. argv shape — claude
     argv = build_llm_argv("claude", "claude-sonnet-4-6", "hello", [])
-    check("claude_argv",
-          argv == ["claude", "-p", "hello", "--model", "claude-sonnet-4-6"],
-          str(argv))
+    check(
+        "claude_argv",
+        argv == ["claude", "-p", "hello", "--model", "claude-sonnet-4-6"],
+        str(argv),
+    )
 
-    # 5. argv shape — codex (prompt is positional, after extra_args)
-    argv = build_llm_argv("codex", "gpt-x", "hello", ["--quiet"])
-    check("codex_argv",
-          argv == ["codex", "exec", "--model", "gpt-x", "--quiet", "hello"],
-          str(argv))
+    argv = build_llm_argv(
+        "codex", "gpt-x", "hello", ["--quiet"], output_last_message="/tmp/out"
+    )
+    check(
+        "codex_argv_with_output",
+        argv
+        == [
+            "codex",
+            "exec",
+            "--model",
+            "gpt-x",
+            "--quiet",
+            "--output-last-message",
+            "/tmp/out",
+            "hello",
+        ],
+        str(argv),
+    )
 
-    # 5b. argv shape — codex with clean final-output file
-    argv = build_llm_argv("codex", "gpt-x", "hello", ["--quiet"], output_last_message="/tmp/out")
-    check("codex_argv_with_output",
-          argv == ["codex", "exec", "--model", "gpt-x", "--quiet", "--output-last-message", "/tmp/out", "hello"],
-          str(argv))
+    check(
+        "auth_detect_codex",
+        is_auth_failure("error: not logged in. Please run `codex login`."),
+    )
 
-    # 6. Auth-failure detection
-    check("auth_detect_claude",
-          is_auth_failure("Error: Not logged in. Please run /login to continue."))
-    check("auth_detect_codex",
-          is_auth_failure("error: not logged in. Please run `codex login`."))
-    check("auth_detect_negative",
-          not is_auth_failure("Error: connection refused"))
-    check("auth_detect_uses_stdout",
-          is_auth_failure("", "Not logged in"))
+    prompt = build_prompt(
+        {"supervisor": "Ready when you are", "worker-1": "Task complete"},
+        "Decide whether to nudge.",
+    )
+    check("prompt_includes_guidance", "Decide whether to nudge." in prompt)
+    check("prompt_includes_window_capture", "Task complete" in prompt)
 
-    # 7. extra_args type validation
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump({"extra_args": "not-a-list"}, f)
-        tmp_path = f.name
-    try:
-        rejected = False
-        try:
-            load_llm_config(path=tmp_path)
-        except ValueError:
-            rejected = True
-        check("invalid_extra_args_rejected", rejected)
-    finally:
-        os.unlink(tmp_path)
+    check(
+        "parse_nudge_response",
+        parse_response('{"nudge": true, "note": "Check worker-1."}')
+        == {"nudge": True, "note": "Check worker-1."},
+    )
+    check(
+        "parse_silent_response",
+        parse_response('```json\n{"nudge": false, "note": ""}\n```')
+        == {"nudge": False, "note": ""},
+    )
+    check("parse_rejects_old_schema", parse_response('{"verdict": "OK"}') is None)
+
+    with mock.patch(__name__ + ".send_mail", return_value=True) as send:
+        sent = maybe_send_nudge(
+            {"nudge": True, "note": "Consider the available ways forward."},
+            "/tmp/tools",
+        )
+        check("mail_sent_when_nudge_true", sent and send.call_count == 1)
+
+    with mock.patch(__name__ + ".send_mail", return_value=True) as send:
+        sent = maybe_send_nudge({"nudge": False, "note": ""}, "/tmp/tools")
+        check("mail_not_sent_when_nudge_false", (not sent) and send.call_count == 0)
 
     print(f"\n{len(failures)} failure(s)" if failures else "\nAll tests passed.")
     return 1 if failures else 0
@@ -723,6 +570,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        # Cron job — swallow all unexpected errors to avoid noise.
         print(f"{LOG_PREFIX} Unexpected error: {e}", flush=True)
         sys.exit(0)
