@@ -30,7 +30,7 @@ When adding or updating a skill, keep this CLAUDE.md's skill table (below) curre
 | `recall` | Proactive memory surfacing system — detects when stored knowledge is relevant and delivers it via mailbox before the agent needs to be told. Runs automatically via hook + cron. |
 | `reminders` | Set one-shot reminders that fire via mailbox after a delay. Set, list, or delete reminders for any tmux window. |
 | `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
-| `test-coverage` | Run code coverage analysis and identify gaps with concrete test suggestions. Language-agnostic; Go is the first supported language. |
+| `test-coverage` | Run language-agnostic code coverage analysis and identify gaps with concrete test suggestions across supported project toolchains. |
 | `voice` | Generate a voice profile from writing samples so an LLM can reproduce how someone speaks and writes. Source-agnostic: works with Facebook exports, chat logs, email archives, plain text, or any writing samples. |
 | `watchdog` | Watchdog evaluation guidance for the Codex agent wrapper and legacy `watchdog.py` fallback. Not for direct invocation. |
 | `worker` | Worker agent instructions — injected by the supervisor at launch. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Loaded automatically; do not invoke manually. |
