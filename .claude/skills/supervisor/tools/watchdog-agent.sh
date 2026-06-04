@@ -462,6 +462,12 @@ if ! TMUX_PATH="$(resolve_command "$TMUX_BIN")"; then
 fi
 TMUX_DIR="$(CDPATH= cd -- "$(dirname -- "$TMUX_PATH")" && pwd -P)"
 export PATH="$TMUX_DIR:$PATH"
+TMUX_SOCKET_PATH="$("$TMUX_PATH" display-message -p '#{socket_path}' 2>/dev/null | sed -n '1p' || true)"
+if [ -n "$TMUX_SOCKET_PATH" ]; then
+    TMUX_SOCKET_DIR="$(CDPATH= cd -- "$(dirname -- "$TMUX_SOCKET_PATH")" && pwd -P 2>/dev/null || true)"
+else
+    TMUX_SOCKET_DIR=""
+fi
 
 if [ ! -d "$REPO_ROOT/.git" ]; then
     log "repo root does not look like a git checkout: $REPO_ROOT"
@@ -480,6 +486,7 @@ export MECHA_DEVELOPER_ROOT="$REPO_ROOT"
 export MECHA_STATE_DIR="$STATE_DIR"
 export MECHA_WATCHDOG_WORKDIR="$AGENT_WORKDIR"
 export TMUX_PATH
+export TMUX_SOCKET_DIR
 
 if ! PROMPT_INPUT="$(mktemp "$AGENT_WORKDIR/prompt.XXXXXX")"; then
     log "could not create prompt file in watchdog workspace: $AGENT_WORKDIR"
@@ -496,13 +503,75 @@ if ! ALERT_BODY_FILE="$(mktemp "$AGENT_WORKDIR/alert-body.XXXXXX")"; then
         "$AGENT_WORKDIR"
     exit 0
 fi
-chmod 600 "$PROMPT_INPUT" "$ALERT_BODY_FILE" 2>/dev/null || true
+if ! TMUX_CAPTURE_FILE="$(mktemp "$AGENT_WORKDIR/tmux-capture.XXXXXX")"; then
+    rm -f "$PROMPT_INPUT" "$ALERT_BODY_FILE"
+    log "could not create tmux capture file in watchdog workspace: $AGENT_WORKDIR"
+    send_failure_alert \
+        "watchdog tmux capture temp file could not be created" \
+        "$AGENT_WORKDIR"
+    exit 0
+fi
+chmod 600 "$PROMPT_INPUT" "$ALERT_BODY_FILE" "$TMUX_CAPTURE_FILE" 2>/dev/null || true
 export MECHA_WATCHDOG_ALERT_BODY_FILE="$ALERT_BODY_FILE"
 export MECHA_WATCHDOG_ALERT_HELPER="$ALERT_HELPER"
+export MECHA_WATCHDOG_TMUX_CAPTURE_FILE="$TMUX_CAPTURE_FILE"
 cleanup_prompt() {
-    rm -f "$PROMPT_INPUT" "$ALERT_BODY_FILE"
+    rm -f "$PROMPT_INPUT" "$ALERT_BODY_FILE" "$TMUX_CAPTURE_FILE"
 }
 trap 'cleanup_prompt; release_lock' EXIT INT TERM HUP
+
+capture_tmux_state() {
+    capture_time="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    selected_target="$(
+        "$TMUX_PATH" list-sessions -F '#{session_name}|#{session_group}|#{session_attached}' 2>/dev/null |
+            "$PYTHON_PATH" -c '
+import sys
+attached = None
+fallback = None
+for line in sys.stdin:
+    parts = line.rstrip("\n").split("|")
+    if len(parts) != 3:
+        continue
+    name, group, attached_count = parts
+    if group != "mecha":
+        continue
+    if fallback is None:
+        fallback = name
+    try:
+        is_attached = int(attached_count) > 0
+    except ValueError:
+        is_attached = False
+    if is_attached and attached is None:
+        attached = name
+print(attached or fallback or "")
+'
+    )"
+    if [ -z "$selected_target" ] && "$TMUX_PATH" has-session -t mecha 2>/dev/null; then
+        selected_target="mecha"
+    fi
+
+    {
+        printf 'capture_time=%s\n' "$capture_time"
+        printf '\n=== tmux sessions ===\n'
+        "$TMUX_PATH" list-sessions -F '#{session_name}|group=#{session_group}|attached=#{session_attached}' 2>&1 || true
+        printf '\n=== selected mecha target ===\n'
+        if [ -n "$selected_target" ]; then
+            printf '%s\n' "$selected_target"
+            printf '\n=== windows ===\n'
+            "$TMUX_PATH" list-windows -t "$selected_target" -F '#{window_index}|#{window_name}|active=#{window_active}|activity=#{window_activity}' 2>&1 || true
+            "$TMUX_PATH" list-windows -t "$selected_target" -F '#{window_index}|#{window_name}' 2>/dev/null |
+                while IFS='|' read -r window_index window_name; do
+                    [ -n "$window_index" ] || continue
+                    printf '\n=== Window: %s (index %s) | capture time: %s ===\n' "$window_name" "$window_index" "$capture_time"
+                    "$TMUX_PATH" capture-pane -t "$selected_target:$window_index" -p -S -120 2>&1 || true
+                done
+        else
+            printf 'NO_MECHA_TMUX_TARGET\n'
+        fi
+    } > "$TMUX_CAPTURE_FILE"
+}
+
+capture_tmux_state
 
 {
     printf 'Runtime context from watchdog-agent.sh:\n\n'
@@ -512,8 +581,12 @@ trap 'cleanup_prompt; release_lock' EXIT INT TERM HUP
     printf -- '- Writable mailbox directory for alert delivery: `%s`\n' "$MAILBOX_DIR"
     printf -- '- The wrapper process changed to the repository root before launching Codex. Codex shell commands run from the watchdog workspace so the sandbox can deny project writes; use `MECHA_DEVELOPER_ROOT` for read-only repository paths.\n'
     printf -- '- Tmux path: `%s`\n' "$TMUX_PATH"
+    if [ -n "$TMUX_SOCKET_DIR" ]; then
+        printf -- '- Tmux socket directory allowed through the Codex sandbox: `%s`\n' "$TMUX_SOCKET_DIR"
+    fi
     printf -- '- Alert body file: `%s`\n' "$ALERT_BODY_FILE"
     printf -- '- Alert helper: `%s`\n' "$ALERT_HELPER"
+    printf -- '- Pre-captured tmux state file: `%s`\n' "$TMUX_CAPTURE_FILE"
     printf -- '- When stuck windows are found, write the complete alert body to the alert body file, invoke the alert helper yourself, and exit 0. The helper removes the body file after a successful send.\n\n'
     sed -n '1,$p' "$PROMPT_FILE"
 } > "$PROMPT_INPUT"
@@ -528,6 +601,10 @@ CODEX_ARGS=(
     --sandbox workspace-write
     -c 'approval_policy="never"'
 )
+
+if [ -n "$TMUX_SOCKET_DIR" ]; then
+    CODEX_ARGS+=(--add-dir "$TMUX_SOCKET_DIR")
+fi
 
 if [ -n "${MECHA_WATCHDOG_CODEX_MODEL:-}" ]; then
     CODEX_ARGS+=(--model "$MECHA_WATCHDOG_CODEX_MODEL")
