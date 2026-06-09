@@ -12,7 +12,9 @@ worker_send.py for that after verifying the agent started.
 import argparse
 import json
 import os
+import pathlib
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +22,125 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _tmux import ensure_session, new_window, send_text, send_enter, window_exists
+
+
+POST_LAUNCH_REMINDER_DELAY = "15s"
+POST_LAUNCH_REMINDER_TIMEOUT_SECONDS = 5
+DEFAULT_SUPERVISOR_WINDOW = "supervisor"
+
+
+def _post_launch_reminder_tool():
+    return (
+        pathlib.Path(__file__).parent.parent.parent
+        / "reminders"
+        / "tools"
+        / "set_reminder.py"
+    )
+
+
+def _post_launch_reminder_message(worker_window, action):
+    return (
+        f"Capture/check worker window '{worker_window}' and verify the worker "
+        f"accepted its task instructions after it {action}. Look for active work "
+        f"(tool calls, file reads, command output), not merely that the agent "
+        f"process launched. If the task text is sitting at the prompt, submit it "
+        f"with worker_send.py."
+    )
+
+
+def _quote_command(argv):
+    return " ".join(shlex.quote(part) for part in argv)
+
+
+def _warn_post_launch_reminder_failed(reason, manual_argv):
+    print(
+        f"Warning: could not set post-launch verification reminder: {reason}",
+        file=sys.stderr,
+    )
+    print(f"  Set it manually: {_quote_command(manual_argv)}", file=sys.stderr)
+
+
+def _schedule_post_launch_reminder(
+    worker_window,
+    action,
+    reminder_tool=None,
+    supervisor_window=None,
+):
+    tool = pathlib.Path(reminder_tool) if reminder_tool else _post_launch_reminder_tool()
+    supervisor_window = (
+        supervisor_window
+        or os.environ.get("MECHA_SUPERVISOR_WINDOW")
+        or DEFAULT_SUPERVISOR_WINDOW
+    )
+    message = _post_launch_reminder_message(worker_window, action)
+    reminder_argv = [
+        sys.executable,
+        str(tool),
+        "--window",
+        supervisor_window,
+        "--message",
+        message,
+        "--in",
+        POST_LAUNCH_REMINDER_DELAY,
+    ]
+
+    if not tool.exists():
+        _warn_post_launch_reminder_failed(
+            f"reminder tool not found: {tool}",
+            reminder_argv,
+        )
+        return None
+
+    try:
+        result = subprocess.run(
+            reminder_argv,
+            capture_output=True,
+            text=True,
+            timeout=POST_LAUNCH_REMINDER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        _warn_post_launch_reminder_failed(
+            f"{tool} timed out after {POST_LAUNCH_REMINDER_TIMEOUT_SECONDS}s",
+            reminder_argv,
+        )
+        return None
+    except OSError as e:
+        _warn_post_launch_reminder_failed(f"could not run {tool}: {e}", reminder_argv)
+        return None
+    except subprocess.SubprocessError as e:
+        _warn_post_launch_reminder_failed(f"{tool} failed: {e}", reminder_argv)
+        return None
+
+    if result.returncode != 0:
+        details = []
+        if result.stderr.strip():
+            details.append(f"stderr: {result.stderr.strip()}")
+        if result.stdout.strip():
+            details.append(f"stdout: {result.stdout.strip()}")
+        detail_text = "; ".join(details) if details else "no output"
+        _warn_post_launch_reminder_failed(
+            f"{tool} exited {result.returncode} ({detail_text})",
+            reminder_argv,
+        )
+        return None
+
+    reminder_id = None
+    for line in result.stdout.splitlines():
+        if line.startswith("Reminder set:"):
+            reminder_id = line.split(":", 1)[1].strip()
+            break
+
+    if reminder_id:
+        print(
+            f"Post-launch verification reminder set: {reminder_id} "
+            f"(fires in {POST_LAUNCH_REMINDER_DELAY})."
+        )
+    else:
+        print(
+            "Post-launch verification reminder set "
+            f"(fires in {POST_LAUNCH_REMINDER_DELAY})."
+        )
+    return reminder_id
 
 
 def get_cursor_auth_token():
@@ -243,6 +364,7 @@ def main():
 
     action = "resumed" if args.resume else "launched"
     print(f"Worker ({args.agent}) {action} in window '{args.window}' at {work_dir}")
+    _schedule_post_launch_reminder(args.window, action)
 
     # Reminders
     print()
