@@ -55,6 +55,8 @@ MAIL_CONFIG = os.environ.get(
     os.path.expanduser("~/.mecha-developer/mail.json"),
 )
 
+MAX_MAILBOX_BODY_CHARS = 1000
+
 # Valid agent names: alphanumeric, hyphens, underscores. No slashes, no dots.
 _AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
@@ -72,6 +74,24 @@ def _validate_agent_name(name, field):
 def _is_email(recipient):
     """True if recipient looks like an email address."""
     return "@" in recipient
+
+
+def _validate_mailbox_body_size(body):
+    if len(body) <= MAX_MAILBOX_BODY_CHARS:
+        return
+
+    print(
+        f"Error: mailbox body is {len(body)} characters "
+        f"(limit: {MAX_MAILBOX_BODY_CHARS}).\n"
+        "\n"
+        "Large reports must be written to a file, then sent as a short pointer "
+        "with the file path.\n"
+        "Example:\n"
+        "  python3 mailbox_send.py --to supervisor "
+        '--body "Report written to /path/to/report.md"',
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def _send_via_email(args):
@@ -149,6 +169,7 @@ def main():
         return
 
     _validate_agent_name(args.to, "--to")
+    _validate_mailbox_body_size(args.body)
 
     msg_id = str(uuid.uuid4())
     # Include Z suffix so downstream parsers know this is UTC (not local/naive time).
