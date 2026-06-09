@@ -34,7 +34,12 @@ MAILBOX_DIR = os.environ.get(
     "MECHA_MAILBOX_DIR_OVERRIDE",
     os.path.expanduser("~/.mecha-developer/mailboxes"),
 )
+SYSTEM_SENDERS_CONFIG = os.environ.get(
+    "MECHA_MAILBOX_SYSTEM_SENDERS_CONFIG",
+    os.path.expanduser("~/.mecha-developer/mailbox-system-senders.json"),
+)
 LOG_FILE = os.path.expanduser("~/.mecha-developer/mailbox-hook.log")
+DEFAULT_SYSTEM_SENDERS = {"reminders", "watchdog", "memory-monitor", "system", "user"}
 
 
 def log(msg):
@@ -111,6 +116,28 @@ def has_email_sender(messages):
     return any(is_email_message(msg) for _, msg in messages)
 
 
+def system_senders():
+    """Return mailbox senders that should not require supervisor task updates."""
+    senders = set(DEFAULT_SYSTEM_SENDERS)
+    try:
+        with open(SYSTEM_SENDERS_CONFIG, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return senders
+    except (OSError, json.JSONDecodeError, TypeError) as e:
+        log(f"could not load system senders config {SYSTEM_SENDERS_CONFIG!r}: {e}")
+        return senders
+
+    configured = raw.get("senders", []) if isinstance(raw, dict) else raw
+    if not isinstance(configured, list):
+        log(f"invalid system senders config {SYSTEM_SENDERS_CONFIG!r}: expected list or object with senders list")
+        return senders
+    for sender in configured:
+        if isinstance(sender, str) and sender.strip():
+            senders.add(sender.strip())
+    return senders
+
+
 def smtp_reply_block():
     return [
         "*** MANDATORY — IF YOU REPLY, USE SMTP ***",
@@ -142,10 +169,8 @@ def format_messages(messages, is_supervisor=False):
 
     lines = []
 
-    # System senders that aren't workers — no state_update_status needed
-    SYSTEM_SENDERS = {"reminders", "watchdog", "memory-monitor", "system", "user"}
-
-    if is_supervisor and sender_hint and sender_hint not in SYSTEM_SENDERS:
+    # System/non-task senders do not need state_update_status.
+    if is_supervisor and sender_hint and sender_hint not in system_senders():
         lines += [
             "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***",
             "Step 1: Run state update now:",

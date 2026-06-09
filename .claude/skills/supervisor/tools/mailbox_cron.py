@@ -37,8 +37,13 @@ MAILBOX_DIR = os.environ.get(
     "MECHA_MAILBOX_DIR_OVERRIDE",
     os.path.expanduser("~/.mecha-developer/mailboxes"),
 )
+SYSTEM_SENDERS_CONFIG = os.environ.get(
+    "MECHA_MAILBOX_SYSTEM_SENDERS_CONFIG",
+    os.path.expanduser("~/.mecha-developer/mailbox-system-senders.json"),
+)
 LOG_FILE = os.path.expanduser("~/.mecha-developer/mailbox-cron.log")
 LOCK_FILE = os.path.expanduser("~/.mecha-developer/.mailbox-cron-delivery.lock")
+DEFAULT_SYSTEM_SENDERS = {"reminders", "watchdog", "memory-monitor", "system", "user"}
 
 # A message must be unread for at least this many seconds before the cron delivers it.
 # Below this age, the message is "fresh" and the PreToolUse hook will deliver it soon.
@@ -148,6 +153,31 @@ def has_email_sender(messages):
     return any(is_email_message(msg) for _, msg in messages)
 
 
+def system_senders():
+    """Return mailbox senders that should not require supervisor task updates."""
+    senders = set(DEFAULT_SYSTEM_SENDERS)
+    try:
+        with open(SYSTEM_SENDERS_CONFIG, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return senders
+    except (OSError, json.JSONDecodeError, TypeError) as e:
+        logging.warning("Could not load system senders config %r: %s", SYSTEM_SENDERS_CONFIG, e)
+        return senders
+
+    configured = raw.get("senders", []) if isinstance(raw, dict) else raw
+    if not isinstance(configured, list):
+        logging.warning(
+            "Invalid system senders config %r: expected list or object with senders list",
+            SYSTEM_SENDERS_CONFIG,
+        )
+        return senders
+    for sender in configured:
+        if isinstance(sender, str) and sender.strip():
+            senders.add(sender.strip())
+    return senders
+
+
 def smtp_reply_block():
     return [
         "*** MANDATORY — IF YOU REPLY, USE SMTP ***",
@@ -179,10 +209,8 @@ def format_delivery_text(messages, agent_name=""):
 
     lines = []
 
-    # System senders that aren't workers — no state_update_status needed
-    SYSTEM_SENDERS = {"reminders", "watchdog", "memory-monitor", "system", "user"}
-
-    if agent_name == "supervisor" and sender_hint and sender_hint not in SYSTEM_SENDERS:
+    # System/non-task senders do not need state_update_status.
+    if agent_name == "supervisor" and sender_hint and sender_hint not in system_senders():
         lines += [
             "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***",
             "Step 1: Run state update now:",
