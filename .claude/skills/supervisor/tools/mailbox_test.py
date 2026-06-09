@@ -372,6 +372,41 @@ def run_unit_tests(runner):
 
     runner.test("mailbox_send accepts valid agent names (alphanumeric, hyphens, underscores)", test_send_accepts_valid_agent_names)
 
+    def test_send_accepts_body_at_size_limit():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            body = "x" * 1000
+            stdout, stderr, rc = run_script(
+                SEND_SCRIPT,
+                args=["--to", "worker-1", "--from", "supervisor", "--body", body],
+                env_overrides={"MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir},
+            )
+            assert rc == 0, f"mailbox_send.py should accept 1000 chars: {stderr}"
+
+            agent_dir = os.path.join(mailbox_dir, "worker-1")
+            files = [f for f in os.listdir(agent_dir) if f.endswith(".json")]
+            assert len(files) == 1, f"Expected 1 message file, got {len(files)}"
+
+    runner.test("mailbox_send accepts mailbox body at 1000-character limit", test_send_accepts_body_at_size_limit)
+
+    def test_send_rejects_oversized_body():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            body = "x" * 1001
+            stdout, stderr, rc = run_script(
+                SEND_SCRIPT,
+                args=["--to", "worker-1", "--from", "supervisor", "--body", body],
+                env_overrides={"MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir},
+            )
+            assert rc != 0, "mailbox_send.py should reject bodies over 1000 chars"
+            assert "limit: 1000" in stderr
+            assert "written to a file" in stderr
+            assert not os.path.exists(os.path.join(mailbox_dir, "worker-1")), (
+                "Oversized message should not create recipient mailbox"
+            )
+
+    runner.test("mailbox_send rejects mailbox body over 1000 characters", test_send_rejects_oversized_body)
+
     print("\n[Unit Tests — mailbox_send.py email routing]")
 
     def test_send_email_routes_to_smtp():
@@ -946,6 +981,41 @@ def run_unit_tests(runner):
 
     runner.test("hook supervisor email sender omits state-update block", test_hook_supervisor_email_sender_omits_state_update_block)
 
+    def test_hook_supervisor_configured_system_sender_omits_state_update_block():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            config_path = os.path.join(tmp, "mailbox-system-senders.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"senders": ["board_bot"]}, f)
+            msg = make_message(
+                from_agent="board_bot",
+                to_agent="supervisor",
+                body="Board notification",
+            )
+            seed_mailbox(mailbox_dir, "supervisor", [msg])
+
+            stdout, _, rc = run_script(
+                HOOK_SCRIPT,
+                env_overrides={
+                    "MECHA_WORKER_WINDOW": None,
+                    "MECHA_AGENT_WINDOW": "supervisor",
+                    "MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir,
+                    "MECHA_MAILBOX_SYSTEM_SENDERS_CONFIG": config_path,
+                },
+                stdin_data=hook_stdin(),
+            )
+            assert rc == 0
+            context = json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
+            assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in context
+            assert "state_update_status.py" not in context
+            assert "From: board_bot" in context
+            assert "Board notification" in context
+
+    runner.test(
+        "hook supervisor configured system sender omits state-update block",
+        test_hook_supervisor_configured_system_sender_omits_state_update_block,
+    )
+
     def test_hook_mandatory_smtp_block_for_email_sender():
         with tempfile.TemporaryDirectory() as tmp:
             mailbox_dir = os.path.join(tmp, "mailboxes")
@@ -1140,6 +1210,29 @@ def run_unit_tests(runner):
     runner.test(
         "mailbox_cron supervisor email sender omits state-update block",
         test_cron_supervisor_email_sender_omits_state_update_block,
+    )
+
+    def test_cron_supervisor_configured_system_sender_omits_state_update_block():
+        import importlib.util
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "mailbox-system-senders.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"senders": ["board_bot"]}, f)
+            spec = importlib.util.spec_from_file_location("mailbox_cron", CRON_SCRIPT)
+            cron = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cron)
+            cron.SYSTEM_SENDERS_CONFIG = config_path
+
+            msg = make_message(from_agent="board_bot", to_agent="supervisor", body="Board notification")
+            output = cron.format_delivery_text([("/tmp/message.json", msg)], agent_name="supervisor")
+            assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in output
+            assert "state_update_status.py" not in output
+            assert "From: board_bot" in output
+            assert "Board notification" in output
+
+    runner.test(
+        "mailbox_cron supervisor configured system sender omits state-update block",
+        test_cron_supervisor_configured_system_sender_omits_state_update_block,
     )
 
     def test_cron_mandatory_smtp_block_for_email_sender():
