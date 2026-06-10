@@ -26,6 +26,7 @@ When adding or updating a skill, keep this CLAUDE.md's skill table (below) curre
 | `install` | Set up or reinstall mecha-developer by symlinking personas, skills, and hooks to the home directory. One-time setup utility. |
 | `kb` | Manage the persistent markdown knowledge base at `~/.mecha-developer/kb/`. For persistent, reusable knowledge worth keeping across sessions. |
 | `mailbox` | Mecha-wolfgang async mailbox — delivery format, mandatory pre-read `state_update` blocks, hooks/cron. **Load with supervisor** so `[MAILBOX]` injections are handled correctly. Spec: `MAILBOX_REQUIREMENTS.md` at repo root. |
+| `pr-watch` | Run and maintain the read-only polling GitHub PR watcher used as a lightweight substitute for the webhook PR review bot. |
 | `recall` | Proactive memory surfacing system — detects when stored knowledge is relevant and delivers it via mailbox before the agent needs to be told. Runs automatically via hook + cron. |
 | `reminders` | Set one-shot reminders that fire via mailbox after a delay. Set, list, or delete reminders for any tmux window. |
 | `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
