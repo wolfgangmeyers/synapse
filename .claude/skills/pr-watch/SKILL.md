@@ -1,0 +1,120 @@
+---
+name: pr-watch
+description: "Run and maintain the read-only polling GitHub PR watcher used as a lightweight substitute for the webhook PR review bot. Use when the supervisor needs PR watch triage, PR polling, or maintenance of the watcher."
+---
+
+# PR Watch Skill
+
+Run a read-only polling watcher for PRs that may need Wolfgang's attention while the GitHub webhook review bot is not in use.
+
+This is a polling substitute for review-bot intake, not an external communication mechanism. It does not review PRs by itself and does not post to GitHub, Slack, or any other external channel.
+
+## Start The Watcher
+
+Use the bundled polling script from an installed skill:
+
+```bash
+python3 ~/.claude/skills/pr-watch/tools/watch_prs.py --loop
+```
+
+Or from this repository:
+
+```bash
+python3 .claude/skills/pr-watch/tools/watch_prs.py --loop
+```
+
+Prerequisites:
+
+- `gh` is installed and authenticated for the watched repositories.
+- The mailbox sender exists at `~/.claude/skills/supervisor/tools/mailbox_send.py`.
+- The supervisor window can receive mailbox messages addressed to `supervisor`.
+
+For a read-only check without state writes or mail:
+
+```bash
+python3 ~/.claude/skills/pr-watch/tools/watch_prs.py --dry-run
+```
+
+## What It Watches
+
+Default repositories:
+
+- `Identity-Digital/dnsid`
+- `Identity-Digital/dnsid-infra`
+- `Identity-Digital/dnsid-cookbook`
+- `Identity-Digital/dnsid-go`
+- `Identity-Digital/dnsid-py`
+- `Identity-Digital/dnsid-ts`
+
+The watcher flags PRs that look actionable for Wolfgang:
+
+- open PRs by other authors that are ready for review or changed since prior state
+- PRs where Wolfgang is requested for review
+- PRs where Wolfgang commented/reviewed and the author later responded
+- failing checks that look review-relevant
+- Greptile or other reviewer activity needing follow-up
+- security, auth, OIDC, DNSid SDK, workflow, release, infrastructure, or cookbook changes
+
+It suppresses closed/merged PRs, Wolfgang-authored PRs, ordinary draft PRs, and quiet Dependabot churn unless checks fail or watched areas are touched.
+
+## Mail Behavior
+
+The watcher mails only the supervisor mailbox:
+
+- Subject `PR watch findings` when actionable PRs are found.
+- Subject `PR watch quiet` for hourly no-action heartbeats.
+- Subject `PR watch error` if the loop itself hits an unhandled exception.
+
+Messages include the repo/PR, why it is actionable, what changed, and the recommended next action such as launching `/review-pr`, re-reviewing an existing PR, responding to feedback, or continuing to monitor.
+
+Standing-order safety:
+
+- Do not post to Slack.
+- Do not post GitHub comments, approvals, change requests, commits, pushes, or merges.
+- Keep all external communications technical-only.
+- Use mailbox findings to route supervisor action; do not treat this watcher as user-facing notification infrastructure.
+
+## State And Reports
+
+By default, runtime files are written under:
+
+```text
+~/.mecha-developer/pr-watch/
+  watch-state.json
+  last-report.md
+  reports/pr-watch-*.md
+```
+
+The state file records each open PR's last seen head SHA, review request state, failing-check summary, and external comment/review metadata so repeated passes can distinguish new actionable changes from already-reported ones.
+
+## Tuning
+
+Override the repo list for a run:
+
+```bash
+python3 ~/.claude/skills/pr-watch/tools/watch_prs.py --loop \
+  --repo Identity-Digital/dnsid \
+  --repo Identity-Digital/dnsid-go
+```
+
+Environment alternatives:
+
+```bash
+PR_WATCH_REPOS=Identity-Digital/dnsid,Identity-Digital/dnsid-go
+PR_WATCH_CADENCE_SECONDS=900
+PR_WATCH_HEARTBEAT_SECONDS=3600
+PR_WATCH_STATE_DIR=~/.mecha-developer/pr-watch
+PR_WATCH_VIEWER=wolfgangmeyers
+PR_WATCH_MAIL_TO=supervisor
+```
+
+CLI flags can also tune loop cadence, quiet heartbeat cadence, state directory, viewer login, and mailbox destination. Run `--help` for the full option list.
+
+## Maintenance
+
+When changing the watcher script, validate syntax before committing:
+
+```bash
+python3 -m py_compile .claude/skills/pr-watch/tools/watch_prs.py
+python3 .claude/skills/pr-watch/tools/watch_prs.py --help
+```
