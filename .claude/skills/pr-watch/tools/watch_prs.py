@@ -148,6 +148,7 @@ def review_summary(pr: dict[str, Any]) -> list[dict[str, str]]:
                 "author": author,
                 "state": review.get("state") or "",
                 "submittedAt": review.get("submittedAt") or "",
+                "commitOid": (review.get("commit") or {}).get("oid") or "",
             }
         )
     return reviews
@@ -275,8 +276,26 @@ def latest_time(items: list[dict[str, str]], author: str | None = None) -> str:
     return max(values) if values else ""
 
 
+def latest_review(items: list[dict[str, str]], author: str) -> dict[str, str] | None:
+    reviews = [
+        item for item in items if item.get("author") == author and item.get("submittedAt")
+    ]
+    return max(reviews, key=lambda item: item["submittedAt"]) if reviews else None
+
+
 def external_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
     return [item for item in items if item.get("author") != VIEWER]
+
+
+def external_review_signal(pr: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {
+            "author": review.get("author") or "",
+            "state": review.get("state") or "",
+            "submittedAt": review.get("submittedAt") or "",
+        }
+        for review in external_items(pr.get("reviews") or [])
+    ]
 
 
 def bad_check_signal(pr: dict[str, Any]) -> list[dict[str, str]]:
@@ -318,13 +337,16 @@ def wolfgang_is_current(pr: dict[str, Any]) -> bool:
 
 
 def signature(pr: dict[str, Any]) -> dict[str, Any]:
+    viewer_review = latest_review(pr.get("reviews") or [], VIEWER) or {}
     payload = {
         "headRefOid": pr.get("headRefOid") or "",
         "isDraft": bool(pr.get("isDraft")),
         "reviewRequired": pr.get("reviewDecision") == "REVIEW_REQUIRED",
         "viewerRequested": VIEWER in (pr.get("review_requests") or []),
+        "viewerReviewAt": viewer_review.get("submittedAt") or "",
+        "viewerReviewCommitOid": viewer_review.get("commitOid") or "",
         "badChecks": bad_check_signal(pr),
-        "externalReviews": external_items(pr.get("reviews") or []),
+        "externalReviews": external_review_signal(pr),
         "externalComments": external_items(pr.get("comments_meta") or []),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -344,7 +366,7 @@ def change_notes(pr: dict[str, Any], prior: dict[str, Any] | None) -> list[str]:
         )
     if prior.get("badChecks") != bad_check_signal(pr) and bad_check_signal(pr):
         notes.append("failing checks changed")
-    if prior.get("externalReviews") != external_items(pr.get("reviews") or []):
+    if prior.get("externalReviews") != external_review_signal(pr):
         notes.append("non-Wolfgang reviews changed")
     if prior.get("externalComments") != external_items(pr.get("comments_meta") or []):
         notes.append("non-Wolfgang comments changed")
@@ -357,6 +379,28 @@ def change_notes(pr: dict[str, Any], prior: dict[str, Any] | None) -> list[str]:
     ):
         notes.append("PR became unreviewed/review-required")
     return notes
+
+
+def head_changed_after_viewer_review(pr: dict[str, Any], prior: dict[str, Any] | None) -> bool:
+    if (
+        prior is None
+        or prior.get("headRefOid") == pr.get("headRefOid")
+        or pr.get("isDraft")
+    ):
+        return False
+
+    viewer_review = latest_review(pr.get("reviews") or [], VIEWER)
+    if not viewer_review:
+        return False
+
+    review_commit = viewer_review.get("commitOid") or ""
+    if review_commit:
+        return review_commit != (pr.get("headRefOid") or "")
+
+    prior_review_at = prior.get("viewerReviewAt")
+    if prior_review_at is None:
+        return True
+    return (viewer_review.get("submittedAt") or "") <= prior_review_at
 
 
 def classify(pr: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -385,6 +429,11 @@ def classify(pr: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any]
         reasons.append("checks need attention: " + ", ".join(checks[:3]))
         action = "inspect failing checks; re-review if the failure is product-relevant"
 
+    if head_changed_after_viewer_review(pr, prior):
+        reasons.append("head changed after Wolfgang's latest review")
+        if not checks:
+            action = "re-review updated head"
+
     if any(review["author"] == "greptile-apps" for review in external_items(pr.get("reviews") or [])) and not wolfgang_current:
         reasons.append("Greptile has reviewed/commented")
 
@@ -398,7 +447,12 @@ def classify(pr: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any]
         reasons.append("author replied after Wolfgang's last comment")
         action = "respond to feedback or re-review existing PR"
 
-    if pr.get("reviewDecision") == "APPROVED" and not checks and latest_author_comment <= latest_wolfgang:
+    if (
+        pr.get("reviewDecision") == "APPROVED"
+        and not checks
+        and latest_author_comment <= latest_wolfgang
+        and not reasons
+    ):
         return None
 
     if not reasons:
