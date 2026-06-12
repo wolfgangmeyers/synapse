@@ -407,6 +407,59 @@ def run_unit_tests(runner):
 
     runner.test("mailbox_send rejects mailbox body over 1000 characters", test_send_rejects_oversized_body)
 
+    def test_send_allows_oversized_body_with_explicit_flag():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            body = "x" * 1001
+            stdout, stderr, rc = run_script(
+                SEND_SCRIPT,
+                args=[
+                    "--to", "worker-1",
+                    "--from", "standing-orders-cron",
+                    "--body", body,
+                    "--allow-large-body",
+                ],
+                env_overrides={"MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir},
+            )
+            assert rc == 0, f"mailbox_send.py should accept explicit large body: {stderr}"
+
+            agent_dir = os.path.join(mailbox_dir, "worker-1")
+            files = [f for f in os.listdir(agent_dir) if f.endswith(".json")]
+            assert len(files) == 1, f"Expected 1 message file, got {len(files)}"
+            with open(os.path.join(agent_dir, files[0]), encoding="utf-8") as f:
+                msg = json.load(f)
+            assert msg["body"] == body
+
+    runner.test(
+        "mailbox_send allows oversized mailbox body for standing-orders-cron with explicit flag",
+        test_send_allows_oversized_body_with_explicit_flag,
+    )
+
+    def test_send_rejects_large_body_flag_for_ordinary_sender():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            body = "x" * 1001
+            stdout, stderr, rc = run_script(
+                SEND_SCRIPT,
+                args=[
+                    "--to", "worker-1",
+                    "--from", "supervisor",
+                    "--body", body,
+                    "--allow-large-body",
+                ],
+                env_overrides={"MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir},
+            )
+            assert rc != 0, "ordinary senders should not bypass the mailbox body guard"
+            assert "--allow-large-body is restricted to system senders" in stderr
+            assert not os.path.exists(os.path.join(mailbox_dir, "worker-1")), (
+                "Rejected oversized message should not create recipient mailbox"
+            )
+
+    runner.test(
+        "mailbox_send rejects --allow-large-body for ordinary senders",
+        test_send_rejects_large_body_flag_for_ordinary_sender,
+    )
+
     print("\n[Unit Tests — mailbox_send.py email routing]")
 
     def test_send_email_routes_to_smtp():
@@ -1016,6 +1069,78 @@ def run_unit_tests(runner):
         test_hook_supervisor_configured_system_sender_omits_state_update_block,
     )
 
+    def test_hook_supervisor_standing_orders_sender_omits_state_update_block():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            msg = make_message(
+                from_agent="standing-orders-cron",
+                to_agent="supervisor",
+                body="Standing orders refresh",
+            )
+            seed_mailbox(mailbox_dir, "supervisor", [msg])
+
+            stdout, _, rc = run_script(
+                HOOK_SCRIPT,
+                env_overrides={
+                    "MECHA_WORKER_WINDOW": None,
+                    "MECHA_AGENT_WINDOW": "supervisor",
+                    "MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir,
+                },
+                stdin_data=hook_stdin(),
+            )
+            assert rc == 0
+            context = json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
+            assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in context
+            assert "state_update_status.py" not in context
+            assert "From: standing-orders-cron" in context
+            assert "Standing orders refresh" in context
+
+    runner.test(
+        "hook supervisor standing-orders-cron sender omits state-update block by default",
+        test_hook_supervisor_standing_orders_sender_omits_state_update_block,
+    )
+
+    def test_hook_supervisor_mixed_standing_orders_and_worker_requires_state_update():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            msgs = [
+                make_message(
+                    from_agent="standing-orders-cron",
+                    to_agent="supervisor",
+                    body="Standing orders refresh",
+                    age_seconds=10,
+                ),
+                make_message(
+                    from_agent="worker-1",
+                    to_agent="supervisor",
+                    body="Worker status",
+                    age_seconds=5,
+                ),
+            ]
+            seed_mailbox(mailbox_dir, "supervisor", msgs)
+
+            stdout, _, rc = run_script(
+                HOOK_SCRIPT,
+                env_overrides={
+                    "MECHA_WORKER_WINDOW": None,
+                    "MECHA_AGENT_WINDOW": "supervisor",
+                    "MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir,
+                },
+                stdin_data=hook_stdin(),
+            )
+            assert rc == 0
+            context = json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
+            assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" in context
+            assert "python3 state_update_status.py worker-1" in context
+            assert "python3 state_update_status.py standing-orders-cron" not in context
+            assert "Standing orders refresh" in context
+            assert "Worker status" in context
+
+    runner.test(
+        "hook supervisor mixed standing-orders-cron and worker batch still requires worker state update",
+        test_hook_supervisor_mixed_standing_orders_and_worker_requires_state_update,
+    )
+
     def test_hook_mandatory_smtp_block_for_email_sender():
         with tempfile.TemporaryDirectory() as tmp:
             mailbox_dir = os.path.join(tmp, "mailboxes")
@@ -1233,6 +1358,66 @@ def run_unit_tests(runner):
     runner.test(
         "mailbox_cron supervisor configured system sender omits state-update block",
         test_cron_supervisor_configured_system_sender_omits_state_update_block,
+    )
+
+    def test_cron_supervisor_standing_orders_sender_omits_state_update_block():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mailbox_cron", CRON_SCRIPT)
+        cron = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cron)
+
+        msg = make_message(
+            from_agent="standing-orders-cron",
+            to_agent="supervisor",
+            body="Standing orders refresh",
+        )
+        output = cron.format_delivery_text([("/tmp/message.json", msg)], agent_name="supervisor")
+        assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in output
+        assert "state_update_status.py" not in output
+        assert "From: standing-orders-cron" in output
+        assert "Standing orders refresh" in output
+
+    runner.test(
+        "mailbox_cron supervisor standing-orders-cron sender omits state-update block by default",
+        test_cron_supervisor_standing_orders_sender_omits_state_update_block,
+    )
+
+    def test_cron_supervisor_mixed_standing_orders_and_worker_requires_state_update():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mailbox_cron", CRON_SCRIPT)
+        cron = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cron)
+
+        msgs = [
+            (
+                "/tmp/standing-orders.json",
+                make_message(
+                    from_agent="standing-orders-cron",
+                    to_agent="supervisor",
+                    body="Standing orders refresh",
+                    age_seconds=10,
+                ),
+            ),
+            (
+                "/tmp/worker.json",
+                make_message(
+                    from_agent="worker-1",
+                    to_agent="supervisor",
+                    body="Worker status",
+                    age_seconds=5,
+                ),
+            ),
+        ]
+        output = cron.format_delivery_text(msgs, agent_name="supervisor")
+        assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" in output
+        assert "python3 state_update_status.py worker-1" in output
+        assert "python3 state_update_status.py standing-orders-cron" not in output
+        assert "Standing orders refresh" in output
+        assert "Worker status" in output
+
+    runner.test(
+        "mailbox_cron supervisor mixed standing-orders-cron and worker batch still requires worker state update",
+        test_cron_supervisor_mixed_standing_orders_and_worker_requires_state_update,
     )
 
     def test_cron_mandatory_smtp_block_for_email_sender():

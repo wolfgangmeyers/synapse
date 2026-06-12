@@ -1825,6 +1825,13 @@ python3 ~/.claude/skills/supervisor/tools/state_standing_orders.py add \
 python3 ~/.claude/skills/supervisor/tools/state_standing_orders.py remove so-1
 ```
 
+**Cron refresh**: `standing_orders_cron.py` posts the current standing orders to the supervisor mailbox every 2 hours when installed via the install skill. It reads the live `standing_orders` array from `supervisor-state.json`, sends from the `standing-orders-cron` system sender, and does not use reminders.
+
+```bash
+# Preview exactly what the cron job would send without writing to the mailbox
+python3 ~/.claude/skills/supervisor/tools/standing_orders_cron.py --dry-run
+```
+
 **Lifecycle**: Standing orders should be reviewed periodically. If a standing order's lesson has been codified into SKILL.md or a workflow, it can be removed. If it's no longer relevant (e.g., the project it applied to is done), remove it. Don't let standing orders accumulate indefinitely.
 
 ---

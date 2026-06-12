@@ -2,7 +2,7 @@
 """Send a message to an agent's mailbox.
 
 Usage:
-  python mailbox_send.py --to WINDOW --body TEXT [--subject SUBJECT] [--from WINDOW]
+  python mailbox_send.py --to WINDOW --body TEXT [--subject SUBJECT] [--from WINDOW] [--allow-large-body]
 
 --from defaults to MECHA_WORKER_WINDOW (workers) or MECHA_AGENT_WINDOW (supervisor).
 Workers and the supervisor should never pass --from explicitly — let it default to
@@ -56,6 +56,7 @@ MAIL_CONFIG = os.environ.get(
 )
 
 MAX_MAILBOX_BODY_CHARS = 1000
+LARGE_BODY_ALLOWED_SENDERS = {"standing-orders-cron"}
 
 # Valid agent names: alphanumeric, hyphens, underscores. No slashes, no dots.
 _AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
@@ -76,7 +77,16 @@ def _is_email(recipient):
     return "@" in recipient
 
 
-def _validate_mailbox_body_size(body):
+def _validate_mailbox_body_size(body, from_agent, allow_large=False):
+    if allow_large:
+        if from_agent in LARGE_BODY_ALLOWED_SENDERS:
+            return
+        allowed = ", ".join(sorted(LARGE_BODY_ALLOWED_SENDERS))
+        print(
+            f"Error: --allow-large-body is restricted to system senders: {allowed}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if len(body) <= MAX_MAILBOX_BODY_CHARS:
         return
 
@@ -158,6 +168,14 @@ def main():
     )
     parser.add_argument("--body", required=True, help="Message body text")
     parser.add_argument("--subject", default=None, help="Optional subject line")
+    parser.add_argument(
+        "--allow-large-body",
+        action="store_true",
+        help=(
+            "Allow a mailbox body over the normal size guard. Use only for "
+            "local system jobs whose full content must be delivered inline."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -169,7 +187,11 @@ def main():
         return
 
     _validate_agent_name(args.to, "--to")
-    _validate_mailbox_body_size(args.body)
+    _validate_mailbox_body_size(
+        args.body,
+        args.from_agent,
+        allow_large=args.allow_large_body,
+    )
 
     msg_id = str(uuid.uuid4())
     # Include Z suffix so downstream parsers know this is UTC (not local/naive time).

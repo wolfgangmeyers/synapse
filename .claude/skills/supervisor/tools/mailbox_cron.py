@@ -43,7 +43,14 @@ SYSTEM_SENDERS_CONFIG = os.environ.get(
 )
 LOG_FILE = os.path.expanduser("~/.mecha-developer/mailbox-cron.log")
 LOCK_FILE = os.path.expanduser("~/.mecha-developer/.mailbox-cron-delivery.lock")
-DEFAULT_SYSTEM_SENDERS = {"reminders", "watchdog", "memory-monitor", "system", "user"}
+DEFAULT_SYSTEM_SENDERS = {
+    "reminders",
+    "standing-orders-cron",
+    "watchdog",
+    "memory-monitor",
+    "system",
+    "user",
+}
 
 # A message must be unread for at least this many seconds before the cron delivers it.
 # Below this age, the message is "fresh" and the PreToolUse hook will deliver it soon.
@@ -205,12 +212,13 @@ def format_delivery_text(messages, agent_name=""):
         if s and s not in seen:
             senders.append(s)
             seen.add(s)
-    sender_hint = senders[0] if senders else None
+    system_sender_names = system_senders()
+    sender_hint = next((s for s in senders if s not in system_sender_names), None)
 
     lines = []
 
     # System/non-task senders do not need state_update_status.
-    if agent_name == "supervisor" and sender_hint and sender_hint not in system_senders():
+    if agent_name == "supervisor" and sender_hint:
         lines += [
             "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***",
             "Step 1: Run state update now:",
