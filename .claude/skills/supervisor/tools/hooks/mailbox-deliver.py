@@ -39,7 +39,14 @@ SYSTEM_SENDERS_CONFIG = os.environ.get(
     os.path.expanduser("~/.mecha-developer/mailbox-system-senders.json"),
 )
 LOG_FILE = os.path.expanduser("~/.mecha-developer/mailbox-hook.log")
-DEFAULT_SYSTEM_SENDERS = {"reminders", "watchdog", "memory-monitor", "system", "user"}
+DEFAULT_SYSTEM_SENDERS = {
+    "reminders",
+    "standing-orders-cron",
+    "watchdog",
+    "memory-monitor",
+    "system",
+    "user",
+}
 
 
 def log(msg):
@@ -165,12 +172,13 @@ def format_messages(messages, is_supervisor=False):
         if s and s not in seen:
             senders.append(s)
             seen.add(s)
-    sender_hint = senders[0] if senders else None
+    system_sender_names = system_senders()
+    sender_hint = next((s for s in senders if s not in system_sender_names), None)
 
     lines = []
 
     # System/non-task senders do not need state_update_status.
-    if is_supervisor and sender_hint and sender_hint not in system_senders():
+    if is_supervisor and sender_hint:
         lines += [
             "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***",
             "Step 1: Run state update now:",
