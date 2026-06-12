@@ -282,7 +282,7 @@ fi
 
 ### 9. Set Up Crontab
 
-Add cron jobs for mailbox idle delivery, memory monitoring, and stuck-worker detection:
+Add cron jobs for mailbox idle delivery, inbound mail polling, standing-order refresh, memory monitoring, and stuck-worker detection:
 
 ```bash
 TOOLS="$(pwd)/.claude/skills/supervisor/tools"
@@ -318,6 +318,14 @@ if ! crontab -l 2>/dev/null | grep -q "purelymail_poll.py"; then
   echo "added: Purelymail IMAP poll cron job (runs every minute)"
 else
   echo "skipped: Purelymail IMAP poll cron job already exists"
+fi
+
+# Standing-orders refresh — posts current supervisor standing orders via mailbox every 2 hours.
+if ! crontab -l 2>/dev/null | grep -q "standing_orders_cron.py"; then
+  (crontab -l 2>/dev/null; echo "0 */2 * * * /usr/bin/python3 $TOOLS/standing_orders_cron.py >> ~/.mecha-developer/standing-orders-cron.log 2>&1") | crontab -
+  echo "added: standing-orders refresh cron job (runs every 2 hours)"
+else
+  echo "skipped: standing-orders refresh cron job already exists"
 fi
 
 # Memory monitor — runs every 5 minutes
@@ -416,6 +424,7 @@ fi
 The cron jobs:
 - **mailbox_cron.py**: Runs every 10 seconds (6 staggered entries). Checks all agent mailboxes for unread messages older than 30 seconds and delivers to tmux windows.
 - **purelymail_poll.py**: Runs every minute. Polls the machine's Purelymail IMAP inbox, writes unseen messages into the supervisor mailbox, then marks them seen.
+- **standing_orders_cron.py**: Runs every 2 hours. Reads current supervisor standing orders and posts them to the supervisor mailbox from the `standing-orders-cron` system sender.
 - **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
 - **watchdog.py**: Runs every 30 minutes. Captures all tmux window output, asks an LLM to evaluate whether any workers are stuck (idle without being told to wait), and mails the supervisor if so.
 
@@ -484,6 +493,7 @@ echo ""
 echo "=== Crontab ==="
 crontab -l 2>/dev/null | grep "mailbox_cron.py" || echo "no mailbox cron job"
 crontab -l 2>/dev/null | grep "purelymail_poll.py" || echo "no Purelymail IMAP poll cron job"
+crontab -l 2>/dev/null | grep "standing_orders_cron.py" || echo "no standing-orders refresh cron job"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
 crontab -l 2>/dev/null | grep "watchdog.py" || echo "no watchdog cron job"
 crontab -l 2>/dev/null | grep "reminder_cron.py" || echo "no reminder cron job"
