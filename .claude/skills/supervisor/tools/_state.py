@@ -317,7 +317,7 @@ def next_standing_order_id(state):
     return f"so-{max_num + 1}"
 
 
-def add_standing_order(state, title, description, source=None, priority="normal"):
+def add_standing_order(state, title, description, priority="normal"):
     """Add a standing order to the state. Returns the new order dict."""
     order = {
         "id": next_standing_order_id(state),
@@ -326,8 +326,6 @@ def add_standing_order(state, title, description, source=None, priority="normal"
         "description": description,
         "created": now_timestamp(),
     }
-    if source:
-        order["source"] = source
     state.setdefault("standing_orders", []).append(order)
     return order
 
@@ -443,8 +441,6 @@ def render_markdown(state):
             priority_tag = f" **[{o['priority'].upper()}]**" if o.get("priority", "normal") != "normal" else ""
             lines.append(f"- **{o.get('id', '?')}**: {o.get('title', 'untitled')}{priority_tag}")
             lines.append(f"  {o.get('description', '')}")
-            if o.get("source"):
-                lines.append(f"  _Source: {o['source']}_")
         lines.append("")
 
     # -- Blocked --------------------------------------------------------------
