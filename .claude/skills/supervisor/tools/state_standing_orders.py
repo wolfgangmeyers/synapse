@@ -7,7 +7,7 @@ supervisor is honoring them.
 
 Usage:
   python state_standing_orders.py list
-  python state_standing_orders.py add --title "..." --description "..." [--priority high|normal] [--source "..."]
+  python state_standing_orders.py add --title "..." --description "..." [--priority high|normal]
   python state_standing_orders.py remove <order-id>
   python state_standing_orders.py show <order-id>
   python state_standing_orders.py edit <order-id> --title "..." --description "..."
@@ -37,8 +37,6 @@ def cmd_list(args):
         priority = f" [{o['priority'].upper()}]" if o.get("priority", "normal") != "normal" else ""
         print(f"{o['id']}{priority}: {o['title']}")
         print(f"  {o['description']}")
-        if o.get("source"):
-            print(f"  Source: {o['source']}")
         print()
 
 
@@ -48,7 +46,6 @@ def cmd_add(args):
             state,
             title=args.title,
             description=args.description,
-            source=args.source,
             priority=args.priority or "normal",
         )
     print(f"Added standing order {order['id']}: {order['title']}")
@@ -86,8 +83,6 @@ def cmd_edit(args):
             order["description"] = args.description
         if args.priority:
             order["priority"] = args.priority
-        if args.source:
-            order["source"] = args.source
     print(f"Updated standing order {args.order_id}")
 
 
@@ -101,7 +96,6 @@ def main():
     p_add.add_argument("--title", required=True)
     p_add.add_argument("--description", required=True)
     p_add.add_argument("--priority", choices=["normal", "high"], default="normal")
-    p_add.add_argument("--source")
 
     p_rm = sub.add_parser("remove", help="Remove a standing order")
     p_rm.add_argument("order_id")
@@ -114,7 +108,6 @@ def main():
     p_edit.add_argument("--title")
     p_edit.add_argument("--description")
     p_edit.add_argument("--priority", choices=["normal", "high"])
-    p_edit.add_argument("--source")
 
     args = parser.parse_args()
     if not args.command:

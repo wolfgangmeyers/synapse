@@ -31,7 +31,6 @@ SAMPLE_ORDERS = [
         "priority": "high",
         "title": "No Slack posts without explicit approval.",
         "description": "Do not post directly to Slack channels or DMs without explicit approval.",
-        "source": "Wolfgang request on 2026-06-09",
     },
     {
         "id": "so-2",
@@ -102,6 +101,7 @@ def write_state(path, orders):
 
 def assert_body_contains_orders(body):
     assert "Standing orders refresh:" in body
+    assert "Source:" not in body
     for order in SAMPLE_ORDERS:
         assert order["id"] in body, f"missing order id {order['id']}"
         assert order["title"] in body, f"missing title for {order['id']}"
