@@ -38,10 +38,6 @@ def format_standing_orders(orders):
         if description:
             lines.append(f"  {description}")
 
-        source = str(order.get("source", "")).strip()
-        if source:
-            lines.append(f"  Source: {source}")
-
     return "\n".join(lines)
 
 
