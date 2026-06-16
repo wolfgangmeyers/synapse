@@ -46,6 +46,7 @@ LOCK_FILE = os.path.expanduser("~/.mecha-developer/.mailbox-cron-delivery.lock")
 DEFAULT_SYSTEM_SENDERS = {
     "reminders",
     "standing-orders-cron",
+    "kb-reminder-cron",
     "watchdog",
     "memory-monitor",
     "system",

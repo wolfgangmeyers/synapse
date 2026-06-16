@@ -1100,6 +1100,38 @@ def run_unit_tests(runner):
         test_hook_supervisor_standing_orders_sender_omits_state_update_block,
     )
 
+    def test_hook_supervisor_kb_reminder_sender_omits_state_update_block():
+        with tempfile.TemporaryDirectory() as tmp:
+            mailbox_dir = os.path.join(tmp, "mailboxes")
+            msg = make_message(
+                from_agent="kb-reminder-cron",
+                to_agent="supervisor",
+                subject="KB maintenance reminder",
+                body="KB maintenance reminder",
+            )
+            seed_mailbox(mailbox_dir, "supervisor", [msg])
+
+            stdout, _, rc = run_script(
+                HOOK_SCRIPT,
+                env_overrides={
+                    "MECHA_WORKER_WINDOW": None,
+                    "MECHA_AGENT_WINDOW": "supervisor",
+                    "MECHA_MAILBOX_DIR_OVERRIDE": mailbox_dir,
+                },
+                stdin_data=hook_stdin(),
+            )
+            assert rc == 0
+            context = json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
+            assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in context
+            assert "state_update_status.py" not in context
+            assert "From: kb-reminder-cron" in context
+            assert "KB maintenance reminder" in context
+
+    runner.test(
+        "hook supervisor kb-reminder-cron sender omits state-update block by default",
+        test_hook_supervisor_kb_reminder_sender_omits_state_update_block,
+    )
+
     def test_hook_supervisor_mixed_standing_orders_and_worker_requires_state_update():
         with tempfile.TemporaryDirectory() as tmp:
             mailbox_dir = os.path.join(tmp, "mailboxes")
@@ -1380,6 +1412,29 @@ def run_unit_tests(runner):
     runner.test(
         "mailbox_cron supervisor standing-orders-cron sender omits state-update block by default",
         test_cron_supervisor_standing_orders_sender_omits_state_update_block,
+    )
+
+    def test_cron_supervisor_kb_reminder_sender_omits_state_update_block():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mailbox_cron", CRON_SCRIPT)
+        cron = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cron)
+
+        msg = make_message(
+            from_agent="kb-reminder-cron",
+            to_agent="supervisor",
+            subject="KB maintenance reminder",
+            body="KB maintenance reminder",
+        )
+        output = cron.format_delivery_text([("/tmp/kb-reminder.json", msg)], agent_name="supervisor")
+        assert "*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***" not in output
+        assert "state_update_status.py" not in output
+        assert "From: kb-reminder-cron" in output
+        assert "KB maintenance reminder" in output
+
+    runner.test(
+        "mailbox_cron supervisor kb-reminder-cron sender omits state-update block by default",
+        test_cron_supervisor_kb_reminder_sender_omits_state_update_block,
     )
 
     def test_cron_supervisor_mixed_standing_orders_and_worker_requires_state_update():
