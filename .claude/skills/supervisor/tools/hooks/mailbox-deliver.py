@@ -42,6 +42,7 @@ LOG_FILE = os.path.expanduser("~/.mecha-developer/mailbox-hook.log")
 DEFAULT_SYSTEM_SENDERS = {
     "reminders",
     "standing-orders-cron",
+    "kb-reminder-cron",
     "watchdog",
     "memory-monitor",
     "system",
