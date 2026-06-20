@@ -8,12 +8,16 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 
 from _reminders import locked_reminders
+
+
+SELF_WINDOW_ALIASES = {"me", "self", "current"}
 
 
 def parse_duration(s):
@@ -27,6 +31,19 @@ def parse_duration(s):
     minutes = int(m.group(2) or 0)
     seconds = int(m.group(3) or 0)
     return timedelta(hours=hours, minutes=minutes, seconds=seconds)
+
+
+def resolve_window(window):
+    """Resolve self aliases to the managed agent window that can receive mail."""
+    if window not in SELF_WINDOW_ALIASES:
+        return window, None
+
+    resolved = (
+        os.environ.get("MECHA_AGENT_WINDOW")
+        or os.environ.get("MECHA_WORKER_WINDOW")
+        or "supervisor"
+    )
+    return resolved, window
 
 
 def main():
@@ -58,10 +75,11 @@ def main():
             print(f"Error: invalid ISO datetime '{args.at_time}'. Use format 2026-03-06T15:00:00", file=sys.stderr)
             sys.exit(1)
 
+    target_window, alias = resolve_window(args.window)
     reminder_id = f"r-{time.time_ns()}"
     reminder = {
         "id": reminder_id,
-        "window": args.window,
+        "window": target_window,
         "message": args.message,
         "fire_at": fire_at.isoformat(),
         "created_at": now.isoformat(),
@@ -71,7 +89,9 @@ def main():
         reminders.append(reminder)
 
     print(f"Reminder set: {reminder_id}")
-    print(f"Window:       {args.window}")
+    print(f"Window:       {target_window}")
+    if alias:
+        print(f"Resolved:     {alias} -> {target_window}")
     print(f"Fires at:     {fire_at.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Message:      {args.message}")
 
