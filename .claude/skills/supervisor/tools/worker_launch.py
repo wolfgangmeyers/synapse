@@ -2,7 +2,7 @@
 """Launch a new worker in a tmux window.
 
 Usage:
-  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent codex|claude|cursor]
+  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent codex|claude|cursor] [--reasoning-effort low|medium|high|xhigh]
 
 Creates a tmux window, starts the agent in the specified directory,
 and waits for it to initialize. Does NOT send instructions — use
@@ -265,6 +265,12 @@ def main():
         help="(Unused for cursor TUI — send instructions with worker_send.py --bracketed instead.) "
              "Kept for backwards compatibility.",
     )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=["low", "medium", "high", "xhigh"],
+        default=None,
+        help="Codex-only reasoning effort override for this worker launch.",
+    )
 
     args = parser.parse_args()
 
@@ -292,6 +298,8 @@ def main():
     if args.agent == "codex":
         _codex_pretrust_workspace(work_dir)
         parts = ["codex", "--no-alt-screen"]
+        if args.reasoning_effort:
+            parts.extend(["-c", f'model_reasoning_effort="{args.reasoning_effort}"'])
         if args.skip_permissions:
             parts.extend(["-a", "never", "-s", "danger-full-access"])
         if args.resume:

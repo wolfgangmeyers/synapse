@@ -17,6 +17,11 @@ Set time-based reminders that deliver a mailbox message to any tmux window.
 /reminders delete-all
 ```
 
+`--window me`, `--window self`, and `--window current` resolve to the current
+managed agent window from `MECHA_AGENT_WINDOW` / `MECHA_WORKER_WINDOW`, falling
+back to `supervisor`. Use this when setting a reminder for the current
+supervisor session; it prevents hidden delivery to a literal `me` mailbox.
+
 ## Examples
 
 Set a reminder for 10 minutes from now:
