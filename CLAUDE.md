@@ -10,6 +10,13 @@ A skill is a self-contained instruction set. Any agent (Claude Code, Codex, Curs
 
 When adding or updating a skill, keep this CLAUDE.md's skill table (below) current.
 
+## User input
+
+Wolfgang often uses voice transcription, so requests may include phonetic spellings
+or near-miss names. Infer the likely intended repo, skill, tool, or command from
+context when the meaning is clear; ask or verify before acting when ambiguity
+could affect files, external communication, or destructive operations.
+
 ## Related repos
 
 - `mecha-review` — owns self-contained code-review and review-adjacent skills (`review-pr`, `robot-review`, `pr-context`, `pr-summary`, `pr-validate`, `explain`). Not duplicated here.
