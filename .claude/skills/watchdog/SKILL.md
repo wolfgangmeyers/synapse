@@ -14,6 +14,12 @@ Explicit user holds silence the nudge. Examples: "wait for my input before X", "
 
 If everything is genuinely progressing, the supervisor is correctly holding because the user explicitly said to wait, or the user is talking to a worker directly with no `[Supervisor]` prefix on the human-side messages, send nothing.
 
+If a PR has been repeatedly described as waiting on approval/review but appears open,
+green, and mergeable, nudge the supervisor to reconcile live PR state instead of
+rescheduling passive reminders. The supervisor should check current head, latest
+approval commit, review requests, checks, merge state, and inline comments, then
+merge if authorized or record the exact remaining gate.
+
 Output JSON only:
 
 ```json

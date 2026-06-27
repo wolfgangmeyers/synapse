@@ -149,9 +149,9 @@ When all reviewers sign off with only Suggestions/Nits, **commit and push withou
 
 **Regression tests mandatory for all fixes.** Every bug fix ships with a test that would fail if the bug were reintroduced. After any session with multiple bug fixes, require a dedicated test coverage pass before closing — worker enumerates each fix, runs coverage, identifies behavioral gaps, implements the missing regression tests. "Covered" ≠ "tested": assert on behavior, not just execution. Applies across all languages and codebases.
 
-**`[Supervisor]` prefix**: Messages via `worker_send.py` are auto-prefixed with `[Supervisor]` (except slash commands and auth phrases). Lets watchdog distinguish supervisor from user messages. If a capture shows Q&A without the prefix, the user is talking directly — don't intervene.
+**`[Supervisor]` prefix**: Messages via `worker_send.py` are auto-prefixed with `[Supervisor]` (except slash commands and auth phrases). Lets watchdog distinguish supervisor messages from user messages. If a capture shows Q&A without the prefix, the user is talking directly — don't intervene. For raw terminal/menu input such as selecting an update prompt option (`"2"`, `"3"`, etc.), use `worker_send.py --omit-tag` (alias: `--raw`) so the worker receives exactly the option text and not `[Supervisor] 2`.
 
-Key tools: `worker_launch.py` (start), `worker_send.py` (send, auto-prefixes `[Supervisor]`), `worker_capture.py` (capture output), `worker_kill.py` (kill window, no state/worktree effect), `worker_shutdown.py` (graceful shutdown), `mailbox_send.py` (async messages).
+Key tools: `worker_launch.py` (start), `worker_send.py` (send, auto-prefixes `[Supervisor]`; use `--omit-tag`/`--raw` for raw menu choices), `worker_capture.py` (capture output), `worker_kill.py` (kill window, no state/worktree effect), `worker_shutdown.py` (graceful shutdown), `mailbox_send.py` (async messages).
 
 ## Mailbox (companion — read with this skill)
 
@@ -1210,7 +1210,7 @@ Creates a tmux window, starts Claude Code. Does NOT send instructions — use `w
 ### worker_send.py — Send messages to a worker
 
 ```bash
-python3 ~/.claude/skills/supervisor/tools/worker_send.py --window WINDOW --text TEXT [--escape] [--no-enter] [--delay SECS]
+python3 ~/.claude/skills/supervisor/tools/worker_send.py --window WINDOW --text TEXT [--escape] [--no-enter] [--delay SECS] [--omit-tag]
 ```
 
 Handles the critical sleep-between-text-and-Enter timing automatically. Use `--escape` for hard interventions (cancels in-flight operation first). Use `--no-enter` for multi-part messages.
@@ -1218,6 +1218,8 @@ Handles the critical sleep-between-text-and-Enter timing automatically. Use `--e
 **For any instructions over 500 chars**: write them to `TASK.md` in the worktree using the Write tool first, then send only a short pointer: `--text "Read TASK.md for your instructions."` — the script enforces this with a hard 500-char limit and will error if exceeded. Short messages (auth, corrections, next-phase prompts) can always be sent directly.
 
 **`--delay SECS`**: Override the Enter delay (default 1s). Use `--delay 3` for the first message to a Codex worker — 1s is too short for Codex's TUI to register Enter as submit vs. newline.
+
+**`--omit-tag` / `--raw`**: Suppress the `[Supervisor]` prefix and send text exactly as provided. Use this for raw TUI selections and prompts, such as answering a Codex update menu with `--text "2" --omit-tag`. Do not use it for normal worker instructions, redirects, or status/control messages.
 
 ### worker_capture.py — Capture terminal output
 
@@ -1598,6 +1600,14 @@ The dashboard runs in the `dashboard` window of the mecha tmux session. `dashboa
 2. **Don't tell workers to merge** — workers can push, create PRs, request reviews, and enable auto-merge, but merging requires user approval relayed through the supervisor.
 3. **When the user says "merge"** — you may run `gh pr merge` or instruct a worker to do so. The blocklist hook will verify the user's intent from the transcript.
 4. **Batch merges are fine** — if the user says "merge PRs #1234, #5678, #9012", that's explicit approval for all three.
+
+**Green PR follow-ups require a decision, not passive reminders.** If a tracked task/reminder says to "merge/advance if approved and green", treat that as an instruction to reconcile the PR immediately:
+
+1. Fetch live state: `headRefOid`, `reviewDecision`, `reviewRequests`, `latestReviews`, `mergeStateStatus`, `statusCheckRollup`, `state`, and `isDraft`.
+2. Fetch inline review comments before deciding: `gh api repos/<org>/<repo>/pulls/<N>/comments`.
+3. Compare every human approval's `commit_id` to the current `headRefOid`. If the latest approval is on an older commit but the PR is open, green, and mergeable, do **not** keep marking the task as externally blocked. Classify it as `stale-approval decision required`.
+4. If the transcript or standing-order-derived task gives scoped merge authorization for that PR, complete the normal merge gates and merge. If authorization is ambiguous, escalate once with the exact blocker: current head, latest approval commit, review requests, checks, merge state, and unresolved inline comments. Do not reschedule hourly "waiting for review" reminders for a PR that is otherwise decidable.
+5. When a dependency PR merges, immediately clear the dependent task blocker and re-check downstream work. A merged SDK/support PR should trigger the cookbook/demo update path in the same pass.
 
 **⛔ MANDATORY GATE — Check inline review comments before authorizing a merge.** `mergeStateStatus=CLEAN` and `reviewDecision=APPROVED` only mean required checks pass — they do NOT mean reviewer feedback was addressed. Before every merge authorization, run `gh api repos/<org>/<repo>/pulls/<N>/comments` and verify each inline comment was either resolved in a commit, explicitly deferred (linked to a new ticket), or answered. Greptile/Bugbot post inline; human reviewers often do too. Missing this step = merging unaddressed feedback.
 
