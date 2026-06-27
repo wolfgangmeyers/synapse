@@ -2,7 +2,7 @@
 """Send a message to a running worker.
 
 Usage:
-  python worker_send.py --window WINDOW --text TEXT [--escape] [--no-enter] [--delay SECONDS]
+  python worker_send.py --window WINDOW --text TEXT [--escape] [--no-enter] [--delay SECONDS] [--omit-tag]
 
 Sends text to a tmux window with proper timing. Handles the critical
 sleep-between-text-and-Enter pattern that Claude Code and Codex require.
@@ -34,6 +34,9 @@ Examples:
 
   # Send /compact
   python worker_send.py --window worker-1 --text "/compact"
+
+  # Send raw menu input (no [Supervisor] prefix)
+  python worker_send.py --window worker-1 --text "2" --omit-tag
 """
 
 import argparse
@@ -115,6 +118,12 @@ def main():
         action="store_true",
         help="Send C-j (line feed) instead of Enter",
     )
+    parser.add_argument(
+        "--omit-tag",
+        "--raw",
+        action="store_true",
+        help="Send text exactly as provided without the [Supervisor] prefix. Use for TUI menu selections/options.",
+    )
     args = parser.parse_args()
 
     if not window_exists(args.window):
@@ -156,7 +165,7 @@ def main():
     # Prefix non-command messages with [Supervisor] so the watchdog can
     # distinguish supervisor messages from user-typed input in captures.
     text_to_send = args.text
-    if _should_prefix(args.text):
+    if not args.omit_tag and _should_prefix(args.text):
         text_to_send = f"[Supervisor] {args.text}"
 
     if args.escape:
