@@ -70,6 +70,14 @@ git worktree remove "$PARENT_DIR/$REPO_DIR-<alias>"
 
 Use `--force` only if the worktree has uncommitted changes and the user explicitly confirms.
 
+Before removing any dirty worktree, classify every tracked and untracked source/artifact change:
+
+- **committed/merged** into the destination branch,
+- **intentionally abandoned** because it is obsolete or superseded, or
+- **still needed** and therefore must be committed, copied into the canonical checkout, or tracked as a follow-up task before cleanup.
+
+Do not use `git stash` as a substitute for this classification. A stash is only a temporary recovery archive; keep a state entry/reminder until the stash has been applied, committed, or explicitly abandoned.
+
 ## List
 
 ```bash
@@ -106,7 +114,7 @@ When the supervisor needs to launch a worker for a task on a specific repo:
    tmux send-keys -t mecha:worker-N "cd $WORKTREE_PATH && claude" Enter
    ```
 
-3. **Clean up** after the worker finishes and changes are merged:
+3. **Clean up** after the worker finishes and changes are merged, and only after the dirty worktree cleanup gate above is satisfied:
    ```bash
    cd <repo-path>
    git worktree remove "$WORKTREE_PATH"

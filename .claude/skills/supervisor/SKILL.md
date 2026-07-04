@@ -86,6 +86,8 @@ If unconfirmed: `"Before I authorize: run one final robot-review (against base b
 
 Run robot-review scoped to the `requirements` focus area, giving the reviewer the stated requirements as its requirements input — or spawn a background subagent with the Wolfgang/Evan persona scoped to requirements compliance. List each requirement: addressed / partially / not addressed, with evidence. Don't push until all confirmed.
 
+**⛔ MANDATORY GATE — Live acceptance proof cannot be skipped.** When a stated requirement or acceptance criterion calls for live integration, real service wiring, local server setup, user/workspace/API-key setup, browser walkthrough, end-to-end smoke, or any other concrete runtime proof, the supervisor must verify that proof actually ran before accepting, merging as complete, closing the issue, or cleaning up the worktree. Unit tests, docs, mocked tests, wiring, and robot-review are not substitutes for the live acceptance proof. If the worker reports that the live proof was skipped because credentials, local setup, external permissions, or runtime prerequisites are missing, mark the task **blocked/incomplete**, record the exact missing prerequisite in state and GitHub, set a reminder or follow-up task, and keep the issue open. Do not call the task done until the proof passes or Wolfgang explicitly accepts the blocker/deferral.
+
 **⛔ MANDATORY GATE — Explicit solution-shape requirements are requirements.** When Wolfgang specifies the required approach, layer, architecture, or negative constraint, record it verbatim and verify the final diff against that shape before accepting, authorizing, or pushing. Examples: "make a new V2 prompt," "preserve V1 behavior," "reuse the existing path," "do not add a defensive shim," "no screenshots," or "use the browser console." Behavioral equivalence, passing tests, green checks, or reviewer sign-off do not satisfy the task if the implementation uses a different shape.
 
 If a worker proposes or implements a different approach, treat it as a requirements miss unless Wolfgang explicitly approved the change. Redirect the worker with the original wording, update the task artifact, and re-run requirements verification on the corrected diff. Do not silently accept a wrapper, sanitizer, migration, or shared-path change when the user asked for a new dedicated path.
@@ -687,6 +689,13 @@ git worktree remove "$WORKTREE_PATH"
 
 **Worktrees ONLY removed by supervisor, NEVER by workers.**
 
+**Dirty worktree cleanup gate — classify before stash/remove.** Before stashing, deleting, or removing a dirty worktree as cleanup, classify every tracked and untracked source/artifact change as one of:
+- **committed/merged** into the destination branch,
+- **intentionally abandoned** because it is obsolete or superseded, or
+- **still needed** and therefore must be committed, copied into the canonical checkout, or tracked as a follow-up task before cleanup.
+
+Do not use `git stash` as a substitute for this classification. A stash is only a temporary recovery archive; if you create one, record its name in supervisor state and keep a reminder/state entry until the stash has been applied, committed, or explicitly abandoned. Never mark a task complete merely because dirty work was stashed.
+
 ```bash
 # Move task to completed
 python3 ~/.claude/skills/supervisor/tools/state_update_state.py <alias> completed --result "<result summary>"
@@ -742,7 +751,8 @@ python3 ~/.claude/skills/supervisor/tools/worker_send_requirements.py --alias <a
 When dropping a task entirely (no intent to continue):
 
 1. Shut down the worker (`worker_shutdown.py`)
-2. Remove the worktree:
+2. Run the dirty worktree cleanup gate above. If source/artifact changes remain and are not explicitly classified as abandoned, do not remove the worktree.
+3. Remove the worktree:
 
 ```bash
 cd <project-path>
