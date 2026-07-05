@@ -65,7 +65,7 @@ The watcher mails only the supervisor mailbox:
 - Subject `PR watch quiet` for hourly no-action heartbeats.
 - Subject `PR watch error` if the loop itself hits an unhandled exception.
 
-Messages include the repo/PR, why it is actionable, what changed, and the recommended next action such as launching `/review-pr`, re-reviewing an existing PR, responding to feedback, or continuing to monitor.
+Messages include the repo/PR, why it is actionable, what changed, and the recommended next action such as launching the review-pr workflow, re-reviewing an existing PR, responding to feedback, or continuing to monitor. For Claude Code workers, the workflow may be invoked as `/review-pr`. For Codex workers, send a plain-language instruction to read `~/code/mecha-review/.claude/skills/review-pr/SKILL.md` and execute that workflow for the PR URL; do not send slash commands to Codex.
 
 Standing-order safety:
 
