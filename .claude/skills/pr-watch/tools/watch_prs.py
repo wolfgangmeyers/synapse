@@ -416,7 +416,7 @@ def classify(pr: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any]
         return None
 
     reasons = []
-    action = "launch /review-pr"
+    action = "launch review-pr workflow"
     wolfgang_current = wolfgang_is_current(pr)
 
     if VIEWER in pr.get("review_requests", []) and not wolfgang_current:
