@@ -267,7 +267,7 @@ Map user intent to task type:
 |--------|------|--------|
 | Code changes (fix bug, add feature, refactor) | worker | Create worktree, launch worker |
 | Import existing session | worker | Resume session with `--resume`, adopt as worker |
-| PR review | pipeline | Launch `/review-pr` in project's tmux window |
+| PR review | pipeline | Launch a review pipeline in the project's tmux window. Claude workers may use `/review-pr`; Codex workers must be told to read `~/code/mecha-review/.claude/skills/review-pr/SKILL.md` and execute that workflow for the PR URL. |
 | Persona generation | pipeline | Launch `/generate-supervisor-persona` or `/generate-reviewer-persona` in tmux window |
 | Status / what's happening | direct | Check tmux + supervisor state, report |
 | Questions about a project | direct | Answer from context or investigate |
@@ -813,13 +813,31 @@ This ensures your fixes update the existing PR."
 
 ### Launch
 
-No worktree needed. Run in the project's directory:
+A single sequential pipeline can run in the project's directory. Parallel PR review pipelines must use one isolated worktree per PR, preferably a detached worktree at the PR head SHA, so workers cannot switch branches under each other.
+
+For a Codex PR review pipeline:
+
+```bash
+REPO="<project-path>"
+PR_URL="https://github.com/org/repo/pull/123"
+PR_NUMBER="123"
+HEAD_SHA="$(gh pr view "$PR_URL" --json headRefOid --jq .headRefOid)"
+WORKTREE_PATH="$(dirname "$REPO")/$(basename "$REPO")-review-$PR_NUMBER"
+git -C "$REPO" worktree add --detach "$WORKTREE_PATH" "$HEAD_SHA"
+
+cd "$WORKTREE_PATH"
+for f in .env.development.local google-credentials.json .vscode; do
+  [ -e "../$(basename "$REPO")/$f" ] && cp -R "../$(basename "$REPO")/$f" .
+done
+```
+
+Then launch the worker in the worktree:
 
 ```bash
 WINDOW_NAME="<descriptive-name>"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "$WORKTREE_PATH" --skip-permissions --agent codex
 sleep 5
-python3 ~/.claude/skills/supervisor/tools/worker_send.py --window "$WINDOW_NAME" --text "<command, e.g. /review-pr https://github.com/org/repo/pull/123>"
+python3 ~/.claude/skills/supervisor/tools/worker_send.py --window "$WINDOW_NAME" --delay 3 --text "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
 ```bash
@@ -827,7 +845,9 @@ python3 ~/.claude/skills/supervisor/tools/worker_send.py --window "$WINDOW_NAME"
 python3 ~/.claude/skills/supervisor/tools/state_add.py --alias "<descriptive-name>" --type pipeline --project "<project-path>" --description "<description>" --purpose "<why this pipeline is being run>" --window "$WINDOW_NAME"
 ```
 
-then **verify the pipeline started** — same as worker verification: capture the pane after ~10-15 seconds and confirm Claude is running and accepted the task.
+then **verify the pipeline started** — same as worker verification: capture the pane after ~10-15 seconds and confirm the agent is running and accepted the task. For Codex, active work should show tool calls or file reads after the plain-text skill instruction; a queued slash command sitting at the prompt is not accepted work.
+
+**Claude-only slash commands:** Slash command routing such as `/review-pr ...` works in Claude Code. Codex does not recognize these slash commands. For Codex review workers, send a plain-language instruction to read the relevant skill file and run the workflow.
 
 ### Completion Detection
 
@@ -840,13 +860,18 @@ python3 ~/.claude/skills/supervisor/tools/state_update_state.py <alias> complete
 
 ### Batch PR Review Pipeline
 
-For reviewing multiple PRs in sequence. Runs in the project directory (no worktree). The worker processes each PR using `/review-pr`.
+For reviewing multiple PRs in sequence, use the correct instruction shape for the worker type:
+
+- Claude Code: `/review-pr <PR URL>`
+- Codex: `Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for <PR URL>.`
+
+If the reviews run in parallel, create one detached worktree per PR and launch each worker from its own worktree. Do not run multiple PR review workers in the same repo checkout; they may check out different PR branches and corrupt each other's review context.
 
 ```bash
 WINDOW_NAME="pr-reviews"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions --agent codex
 sleep 5
-python3 ~/.claude/skills/supervisor/tools/worker_send.py --window "$WINDOW_NAME" --text "/review-pr https://github.com/org/repo/pull/123"
+python3 ~/.claude/skills/supervisor/tools/worker_send.py --window "$WINDOW_NAME" --delay 3 --text "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
 To add more PRs to the queue, just send an additive message:
