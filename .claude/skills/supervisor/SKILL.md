@@ -1352,6 +1352,20 @@ python3 ~/.claude/skills/supervisor/tools/state_query.py --alias ddos-duplicatio
 python3 ~/.claude/skills/supervisor/tools/state_query.py --type pipeline --project <project-name>
 ```
 
+### State History Lookup
+
+When Wolfgang asks to "dig into state", "check the journal", "what related tasks exist", or asks about a project/PR/issue history, **do not stop at the first matching task**. Supervisor work is often split into multiple tasks such as original implementation, PR feedback follow-up, re-review, cleanup, and monitor tasks. Treat a single matching task as incomplete evidence until you have checked for siblings.
+
+Required lookup pattern:
+
+1. Search current state broadly by PR URL/number, issue number, branch, task alias words, and key domain terms from the user's question.
+2. Include active, blocked, completed, and abandoned tasks in the search results.
+3. If the question may predate archival, search `~/.mecha-developer/supervisor-state-archive.json` too.
+4. Read the journal for every plausible related task, not just the newest task.
+5. Report the set of related tasks found before giving conclusions, and distinguish code-complete work from still-open human/admin follow-up.
+
+Example: for "PR #1310" or "automation tokens", check both `dnsid-audit-automation-tokens` and `dnsid-pr1310-feedback`; the former contains the `GH_PAT`/personal-access-token scope history, while the latter contains the later review-thread cleanup.
+
 ### Modifying state
 
 ```bash
