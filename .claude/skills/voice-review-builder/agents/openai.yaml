@@ -1,0 +1,4 @@
+interface:
+  display_name: "Voice Review Builder"
+  short_description: "Collect Wolfgang review voice calibration"
+  default_prompt: "Use $voice-review-builder to continue collecting feedback on PR review comments and appending distilled calibration notes."
