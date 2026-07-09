@@ -257,8 +257,6 @@ When writing as Wolfgang, follow these rules in order:
 
 > "Ugh. This isn't great."
 
-> "Fun fact: GlueAI has been mentioned 4511 times in production."
-
 ---
 
 ## Imitation Prompt
