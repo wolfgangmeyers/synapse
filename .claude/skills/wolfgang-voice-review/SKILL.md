@@ -1,11 +1,17 @@
 ---
 name: wolfgang-voice-review
-description: Private Wolfgang-specific PR review rewrite gate. Use after robot-review or pr-validate and before posting GitHub PR review bodies or inline comments as Wolfgang, when Codex must understand, keep/drop/rewrite, and convert validated findings into Wolfgang's concise review voice while preserving technical disposition.
+description: Private Wolfgang-specific PR review rewrite gate. Use after robot-review or pr-validate and before posting GitHub PR review bodies or inline comments as Wolfgang, when Codex must load the Wolfgang voice persona, understand, keep/drop/rewrite, and convert validated findings into Wolfgang's concise review voice while preserving technical disposition.
 ---
 
 # Wolfgang Voice Review
 
 Use this as the final gate before posting PR review comments as Wolfgang. This is not a generic tone pass. Understand every finding, drop weak ones, and rewrite only the comments that should actually be posted.
+
+## Voice Source
+
+Before rewriting, read `personas/wolfgang-voice.md` from this repo and use it as the source of truth for how Wolfgang writes. The rules in this skill are PR-review-specific constraints and quick reminders; they do not replace the persona.
+
+If the persona file is not available, ask the caller to provide it or enough voice guidance before producing postable text.
 
 ## Inputs
 
@@ -33,32 +39,36 @@ Keep this explanation internal unless the caller asks for reasoning. If you cann
 
 ## Workflow
 
-1. Normalize the input.
+1. Load the voice source.
+   - Read `personas/wolfgang-voice.md`.
+   - Keep its general voice rules in mind while applying the PR-specific filters below.
+
+2. Normalize the input.
    - Separate review body from inline findings.
    - Preserve ids, paths, lines, dispositions, and any posting metadata.
    - Treat validation notes as evidence, not as text to post.
 
-2. Gate each finding.
+3. Gate each finding.
    - Keep findings that are true, material, actionable, and tied to the PR.
    - Rewrite findings that are true but verbose, robotic, overexplained, or aimed at the wrong level.
    - Drop false positives, duplicates, speculative noise, weak nits, style preferences without impact, and findings that depend on missing context.
    - Drop local-process narration: "I ran X", "validated locally", "the reviewer found", "high confidence", "line N shows".
    - Do not preserve original text for dropped findings.
 
-3. Correct the technical claim before changing voice.
+4. Correct the technical claim before changing voice.
    - If the original overclaims, rewrite to the smaller true issue.
    - If a bug claim is really an API/documentation ambiguity, say that.
    - If the abstraction must trust an implementation, ask to document the contract/trust boundary instead of demanding impossible proof.
    - If a feature is half-supported, ask whether it is in scope before requiring the full design.
 
-4. Preserve disposition honestly.
+5. Preserve disposition honestly.
    - Keep blockers substantively blocking, but never write `Blocking:`.
    - Keep should-address findings clearly actionable, but never write `Should address:`.
    - Keep optional/nit comments brief; drop them if they are not worth posting.
    - Downgrade only when the technical analysis weakens the claim, and record the changed disposition in the output metadata.
    - Never make a serious issue sound optional just to be casual.
 
-5. Rewrite the surviving comments.
+6. Rewrite the surviving comments.
    - Start with the useful observation or question.
    - Prefer one short paragraph, usually 1-3 sentences.
    - Include the concrete fix or test when it matters.
@@ -66,7 +76,7 @@ Keep this explanation internal unless the caller asks for reasoning. If you cann
    - Cut function-by-function proof trails unless the author needs them to act.
    - Rewrite both review body text and inline comment bodies.
 
-6. Final check.
+7. Final check.
    - The posted text should read like a human reviewer who understands the code.
    - No robotic labels, rubric terms, or review-system narration.
    - No generic "Socratic question" framing.
