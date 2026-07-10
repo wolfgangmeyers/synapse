@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mecha.local/protocol/v1/schema.json",
+  "title": "Mailbox v1 envelope and shared frame definitions",
+  "$ref": "#/$defs/envelope",
+  "$defs": {
+    "frame": {
+      "type": "object",
+      "required": ["version", "frame_id", "type"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "type": "string" }
+      }
+    },
+    "frameId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "agentId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "utcMillis": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "bodySizePolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "max_body_bytes"],
+          "properties": {
+            "name": { "const": "default" },
+            "max_body_bytes": { "const": 4096 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "max_body_bytes"],
+          "properties": {
+            "name": { "const": "configured-producer" },
+            "max_body_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 }
+          }
+        }
+      ]
+    },
+    "envelope": {
+      "type": "object",
+      "required": ["id", "from", "to", "body", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/messageId" },
+        "from": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "to": { "$ref": "#/$defs/agentId" },
+        "subject": { "type": "string", "maxLength": 256 },
+        "body": { "type": "string", "maxLength": 65536, "$comment": "The envelope permits the 64 KiB absolute configured-producer ceiling. Producer policy sets the default 4096-byte or explicit configured-producer (at most 65536-byte) UTF-8 limit; JSON Schema maxLength is character-counted, so the transport uses Buffer.byteLength for the selected byte policy." },
+        "created_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
+    "register": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "register" }, "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/frameId" } }, "required": ["agent_id", "instance_id"] }] },
+    "lease_renew": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "lease_renew" }, "lease_id": { "$ref": "#/$defs/frameId" } }, "required": ["lease_id"] }] },
+    "ack": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "ack" }, "message_id": { "$ref": "#/$defs/messageId" } }, "required": ["message_id"] }] },
+    "nack": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "nack" }, "message_id": { "$ref": "#/$defs/messageId" }, "code": { "type": "string", "minLength": 1, "maxLength": 64 } }, "required": ["message_id", "code"] }] },
+    "ping": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "ping" } } }] },
+    "registered": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "registered" }, "lease_id": { "$ref": "#/$defs/frameId" } }, "required": ["lease_id"] }] },
+    "message": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "message" }, "message": { "$ref": "#/$defs/envelope" }, "attempt": { "type": "integer", "minimum": 1 } }, "required": ["message", "attempt"] }] },
+    "lease_rejected": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "lease_rejected" }, "code": { "type": "string", "minLength": 1, "maxLength": 64 }, "message": { "type": "string", "minLength": 1 }, "correlation_id": { "$ref": "#/$defs/frameId" } }, "required": ["code", "message", "correlation_id"] }] },
+    "error": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "error" }, "code": { "type": "string", "minLength": 1, "maxLength": 64 }, "message": { "type": "string", "minLength": 1 }, "field": { "type": "string", "minLength": 1 }, "correlation_id": { "$ref": "#/$defs/frameId" } }, "required": ["code", "message", "correlation_id"] }] },
+    "pong": { "allOf": [{ "$ref": "#/$defs/frame" }, { "properties": { "type": { "const": "pong" } } }] },
+    "clientFrame": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "oneOf": [{ "$ref": "#/$defs/register" }, { "$ref": "#/$defs/lease_renew" }, { "$ref": "#/$defs/ack" }, { "$ref": "#/$defs/nack" }, { "$ref": "#/$defs/ping" }]
+    },
+    "serverFrame": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "oneOf": [{ "$ref": "#/$defs/registered" }, { "$ref": "#/$defs/message" }, { "$ref": "#/$defs/lease_rejected" }, { "$ref": "#/$defs/error" }, { "$ref": "#/$defs/pong" }]
+    }
+  }
+}

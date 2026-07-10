@@ -23,7 +23,7 @@ These constraints apply to every phase:
 - Use one SQLite database and one router process.
 - Use the six-field v1 message envelope exactly. Reject unknown fields.
 - A durable enqueue is not delivery. `pi.sendMessage()` returning is not acknowledgement.
-- Unclaimed messages expire after one hour. Successful and expired messages leave no body or tombstone in SQLite.
+- Unclaimed messages expire after one hour and leave no body or tombstone in SQLite. Successful-delivery deletion is blocked until a replacement durable acknowledgement boundary is proven.
 - Track agent connection history. Remove all resources for identities disconnected for one hour.
 - Recurring reminders fire only while their target has a live WebSocket lease.
 - Do not add authentication, federation, Redis, NATS, Kafka, browser UI, cron expressions, or speculative abstractions.
@@ -122,7 +122,7 @@ Before Phase 1:
 
 **Worker handoff**:
 
-Report the exact Pi APIs and event fields proven, the history accessor, test commands, router-stack decision, changed specification text, and any blocked guarantee. Phase 2 must not start if correlation or durable history lookup remains unproven unless Wolfgang explicitly accepts weaker semantics and the specification is revised.
+Report the exact Pi APIs and event fields proven, the history accessor, test commands, router-stack decision, changed specification text, and any blocked guarantee. Phase 2 must not start until a revised specification identifies a different documented durable acknowledgement boundary and proves it through the same isolated crash/restart test.
 
 **Estimated complexity**: Complex.
 
@@ -130,9 +130,11 @@ Report the exact Pi APIs and event fields proven, the history accessor, test com
 
 ### Phase 2: Build the durable router and lifecycle tooling
 
-**Goal**: Deliver a standalone, fully tested local router with durable messages, WebSocket leases, expiry, stale-agent cleanup, diagnostics, and LaunchAgent management, without connecting it to production Pi sessions.
+**Blocked**: Phase 1 rejects the only proposed Pi acknowledgement boundary. Do not start this phase until a revised specification identifies a different documented durable boundary and proves it through the same isolated crash/restart test.
 
-**Depends on**: Phase 1 complete with the protocol and acknowledgement contract approved.
+**Goal**: After that gate, deliver a standalone, fully tested local router with durable messages, WebSocket leases, expiry, stale-agent cleanup, diagnostics, and LaunchAgent management, without connecting it to production Pi sessions.
+
+**Depends on**: Phase 1 complete with a replacement acknowledgement contract explicitly approved.
 
 **Produces**:
 
@@ -157,8 +159,8 @@ Report the exact Pi APIs and event fields proven, the history accessor, test com
 - Reserve reminder migration capability, but do not implement reminder scheduling in this phase.
 - Enable WAL mode, foreign keys, busy timeout, and explicit transactions.
 - Persist messages before attempting WebSocket delivery.
-- Implement states and transitions for `queued`, `leased`, `injection_requested`, `acknowledged`, and `dead_letter`.
-- Delete acknowledged messages and attempts atomically.
+- Do not implement an `acknowledged` Pi-delivery state or acknowledgement-driven deletion until the replacement durable boundary is proven. The prior `message_end` plus history candidate is rejected.
+- Reserve any finalization state and atomic deletion design for the replacement contract.
 - Delete unclaimed messages and attempts at `created_at + 1 hour`.
 - Ensure a message that has been claimed is governed by lease/retry semantics rather than expiring during Pi injection.
 - Track `first_seen_at`, `last_connected_at`, and `disconnected_at`.
@@ -192,7 +194,7 @@ Report the exact Pi APIs and event fields proven, the history accessor, test com
    - same ID and different payload returns a conflict;
    - commit occurs before offer.
 5. Implement WebSocket registration, renewal, disconnect, duplicate identity rejection, and stale lease recovery.
-6. Implement offer, claim/injection-requested, ack, nack, timeout, retry, and dead-letter transactions.
+6. Implement offer, claim/injection-requested, nack, timeout, retry, and dead-letter transactions only as permitted by the replacement contract; do not implement Pi acknowledgement/finalization transactions from the rejected candidate.
 7. Implement the expiry and stale-agent sweepers as idempotent database operations callable directly in tests.
 8. Ensure agent cleanup cascades or explicitly removes messages, attempts, leases, and the agent row in one transaction.
 9. Add queue/rate limits before persistence and structured HTTP errors.
@@ -210,8 +212,8 @@ Report the exact Pi APIs and event fields proven, the history accessor, test com
 - A connected recipient is offered the oldest queued message immediately.
 - A disconnected recipient retains it only until reconnect or the fixed one-hour deadline.
 - Expiry deletes the body, envelope, attempts, and row without a tombstone.
-- Ack deletes message and attempts atomically.
-- Lease timeout retries in order and reaches dead letter at the configured attempt limit.
+- Any acknowledgement deletion and acknowledgement-driven retry behavior remains blocked pending the replacement contract.
+- Lease timeout behavior reaches dead letter only under retry semantics approved by that replacement contract.
 - Duplicate live identity registration is rejected without fan-out.
 - One hour after disconnect, no resources remain for that identity.
 - Never-connected resources are removed after one hour.
@@ -231,9 +233,11 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 
 ### Phase 3: Implement the production Pi extension
 
-**Goal**: Connect Pi to the router with visible, model-context delivery, correlated acknowledgement, reconnect deduplication, compact queue status, and clean lifecycle behavior.
+**Blocked**: Do not start until the Phase 1 hard no-go is resolved by a separately approved durable acknowledgement boundary.
 
-**Depends on**: Phases 1 and 2.
+**Goal**: After that gate, connect Pi to the router with visible, model-context delivery, the replacement acknowledgement/deduplication design, compact queue status, and clean lifecycle behavior.
+
+**Depends on**: the replacement acknowledgement contract plus Phases 1 and 2.
 
 **Produces**:
 
@@ -256,11 +260,11 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 - Register protocol/client metadata and renew the identity lease.
 - Validate every frame before use.
 - Process one leased message at a time.
-- Check persistent session history for the routed ID before reinjecting.
-- Emit a stable, model-readable `CustomMessage` with `display: true` and the routed ID.
+- Do not use the rejected `message_end` plus session-history candidate for replay deduplication or acknowledgement.
+- Emit a stable, model-readable `CustomMessage` with `display: true` and the routed ID only under the replacement contract.
 - Always use `deliverAs: "steer"` and `triggerTurn: true`.
 - Send `injection_requested` after invoking `sendMessage()`, never ack on wrapper return.
-- Ack only after correlated `message_end`.
+- Define acknowledgement only after the separately proven durable boundary.
 - Nack validation/injection failures with safe structured reasons.
 - Maintain one compact status line with queue count and one truncated preview.
 - Clear status after final correlated emission.
@@ -280,13 +284,13 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 2. Implement strict configuration parsing and actionable missing-identity errors.
 3. Implement WebSocket connection states and bounded kickstart behavior.
 4. Implement frame IDs, lease renewals, pong handling, and stale-connection closure.
-5. Implement session-history deduplication before every replay.
+5. Implement replay deduplication only after the replacement durable boundary and its crash/restart proof are approved.
 6. Define the stable custom message content and renderer.
 7. Escape or normalize display-only content so terminal escapes/markup cannot execute.
 8. Keep model-visible body content intact within envelope limits.
 9. Implement display-column truncation for the status preview, including empty subject/body and Unicode-width cases.
 10. Test idle-to-busy and busy-to-idle races; correctness must not depend on an earlier `ctx.isIdle()` snapshot.
-11. Test disconnect after lease, after injection request, after Pi emission, and before ack.
+11. Test disconnect after lease, after injection request, after Pi emission, and around the replacement finalization boundary.
 12. Test router restart while Pi remains active and Pi restart while the router retains a message.
 13. Test all shutdown reasons for leaked timers/listeners.
 14. Add an opt-in installation/configuration path scoped to the worktree test environment.
@@ -296,8 +300,8 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 - Idle delivery appears visibly, enters model context, leaves the editor unchanged, and triggers a turn.
 - Busy delivery shows one preview line immediately and enters context at the next agent-call boundary.
 - Queue depth never creates multiple status lines or transcript previews.
-- Ack is emitted only after the matching `message_end`.
-- Crash-after-render/before-ack replay does not create a second visible message when session persistence is enabled.
+- The rejected candidate emits no Pi acknowledgement. A future acknowledgement is emitted only after the replacement durable boundary.
+- A future crash-after-render/finalization replay proof must prevent a second visible message when session persistence is enabled.
 - `--no-session` emits a clear diagnostic that delivery is at-least-once.
 - Duplicate IDs do not render twice.
 - Reconnect reclaims the same identity and replays in durable order.
@@ -316,9 +320,11 @@ Provide extension installation instructions for the isolated test environment, l
 
 ### Phase 4: Add reminders v2 and cleanup semantics
 
-**Goal**: Add durable one-shot and recurring reminders to the router, including connected-only recurrence, missed-occurrence skipping, and stale-agent resource cleanup.
+**Blocked**: Phase 1 rejects the only proposed Pi delivery acknowledgement boundary. Do not start acknowledgement-dependent reminder completion, deletion, retry, or recurrence behavior until a replacement durable boundary is approved.
 
-**Depends on**: Phases 2 and 3.
+**Goal**: After that gate, add durable one-shot and recurring reminders to the router, including connected-only recurrence, missed-occurrence skipping, and stale-agent resource cleanup.
+
+**Depends on**: the replacement acknowledgement contract plus Phases 2 and 3.
 
 **Produces**:
 
@@ -338,7 +344,7 @@ Provide extension installation instructions for the isolated test environment, l
 - Resolve `self|me|current` only from an unambiguous agent environment value.
 - Fire one-shot reminders transactionally into normal mailbox messages.
 - Give reminder-created messages the same one-hour pickup deadline.
-- Delete completed or expired one-shot reminders with their linked message.
+- Delete expired one-shot reminders with their linked message. Completion-driven deletion remains blocked pending the replacement acknowledgement contract.
 - Keep linked dead letters visible as failed reminders.
 - Fire recurring reminders only for a currently connected target.
 - Skip disconnected occurrences without queueing or catch-up.
@@ -362,7 +368,7 @@ Provide extension installation instructions for the isolated test environment, l
 2. Implement API validation and CLI duration/timezone parsing.
 3. Implement scheduler polling/wake logic without cron and with an injectable clock.
 4. Implement one-shot due transaction and deterministic linked message ID.
-5. Implement ack, expiry, dead-letter, retry, and cancellation coupling.
+5. Implement expiry, dead-letter, retry, and cancellation coupling. Implement acknowledgement coupling only after the replacement durable boundary is proven.
 6. Implement recurring due transaction with a live-lease check.
 7. Define interval advancement from the prior scheduled due time, not wall-clock completion, so drift is deterministic.
 8. If multiple intervals elapsed, advance to the first future slot without enqueueing missed occurrences.

@@ -1,0 +1,16 @@
+{
+  "name": "mecha-mailbox-v2-phase-1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/phase1/*.test.mjs",
+    "test:protocol": "node --test tests/phase1/protocol.test.mjs",
+    "test:live": "node --test tests/phase1/live-pi.test.mjs",
+    "check": "node --check tests/phase1/live-pi.test.mjs && node --check tests/phase1/live-lifecycle.test.mjs && node --check tests/phase1/tui-editor.test.mjs && node --check tests/phase1/protocol.test.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "ws": "8.21.0"
+  }
+}

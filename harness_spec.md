@@ -31,7 +31,7 @@ This specification also defines mailbox retirement and reminders v2. It does not
 - One per-user local router on macOS.
 - A Pi extension that subscribes to messages for one agent identity.
 - One command-line sender for Pi mailbox messages.
-- Durable local messages, acknowledgements, retries, and reconnects.
+- Durable local messages, reconnects, and retry investigation. Any delivery-finalizing acknowledgement, replay-deduplication, or acknowledgement-driven retry transition is contingent on the replacement proof required in section 9.1.
 - Migration of current mailbox producers.
 - Reminders v2 using the router rather than mailbox files.
 - Installation, startup, diagnostics, tests, rollout, and retirement gates.
@@ -41,7 +41,8 @@ This specification also defines mailbox retirement and reminders v2. It does not
 - A distributed broker, multi-host federation, cloud service, or internet listener.
 - Replacing tmux as the agent process host.
 - Email transport redesign.
-- Automatically claiming that an agent acted on a message. Transport acknowledgement proves correlated Pi message emission, not semantic completion or guaranteed disk flush.
+- Automatically claiming that an agent acted on a message.
+- Any Pi transport acknowledgement/finalization behavior until a documented durable boundary passes the section 9.1 crash/restart proof. Correlated Pi emission is evidence, not a receipt, semantic completion, or a disk-flush guarantee.
 - Replacing transcript-sensitive control operations before equivalent behavior is verified.
 - Implementing any component in this specification.
 
@@ -137,7 +138,7 @@ Source: Pi `docs/extensions.md`, lines 551-563 and 1006-1008.
 - There is no documented API that mutates an already-open provider stream. Busy delivery takes effect at the next agent-call boundary.
 - `pi.sendMessage()` is typed as `void`. Returning normally proves only that the extension invoked the wrapper; it does not prove queue insertion, rendering, session append, model receipt, or completion.
 - Busy messages remain volatile inside Pi until its steering/follow-up queue is drained. A quit, reload, or crash in that interval can lose the Pi-side copy.
-- Extension errors are routed through Pi's extension error handling; there is no returned delivery receipt. The harness must keep the router lease until it observes a correlated Pi event, as described in section 9.
+- Extension errors are routed through Pi's extension error handling; there is no returned delivery receipt. A correlated Pi event cannot currently release a router lease: the former rule is rejected in section 9.1. Lease release, retry, and acknowledgement behavior are blocked pending a replacement proof.
 - Pi has no first-class API for supervising a background server. Node built-ins or finite process execution must be used.
 - The SDK's in-process `eventBus` is not an external transport.
 - RPC has `prompt`, `steer`, and `follow_up`, but no equivalent of extension `sendMessage()` for a visible custom message.
@@ -168,7 +169,9 @@ The `file-trigger.ts` example demonstrates out-of-band `sendMessage(..., { trigg
 
 ## 4. Decision
 
-Build one loopback-only **Mailbox v2 service** (called the router in implementation-oriented sections) with:
+Phase 1 selects **Node 26.2.0** for the future loopback-only **Mailbox v2 service** (called the router in implementation-oriented sections). This supersedes the earlier preliminary Python-router recommendation in section 20: the installed runtime already supports Pi, while Python 3.14.5 has neither a maintained WebSocket server nor JSON Schema validator installed. The selection is based on router operational/dependency evidence, not on the JavaScript probe. It does not authorize a router implementation while section 9.1 remains blocked, and it does not require existing migration-facing CLI names to determine the router runtime.
+
+The eventual router design uses:
 
 - HTTP POST for one-shot producers;
 - WebSocket subscriptions for live Pi extensions;
@@ -208,7 +211,7 @@ Disposition: reject. Producers and consumers migrate directly to Mailbox v2; the
 
 A future adapter may support a legacy interactive harness without changing the router. It would run as a separate background process, register the legacy agent identity over the same WebSocket protocol, receive messages, and inject them through that harness's supported interface. For a terminal-only harness, the adapter could target one configured tmux pane, use bracketed paste or `load-buffer`/`paste-buffer`, and submit Enter with tested timing.
 
-This is feasible, but acknowledgement is necessarily weaker when the harness exposes no event confirming that the message reached conversation/model context. Such an adapter may acknowledge only the fact it can actually observe—for example, successful terminal submission—and must label that limitation. It must never be built into the router, add tmux fields to the core envelope, or cause the Pi path to branch on recipient type.
+This is feasible, but any future adapter would need an independently specified, explicitly weaker receipt for the fact it can observe—for example, successful terminal submission. It cannot use, override, or unblock the rejected Pi acknowledgement candidate in section 9.1, and it must label that limitation. It must never be built into the router, add tmux fields to the core envelope, or cause the Pi path to branch on recipient type.
 
 Disposition: nice to have, out of scope for v1. Build it only when a concrete legacy integration is needed, as an independently installed client of the clean Mailbox v2 protocol.
 
@@ -246,10 +249,10 @@ Names are proposed and may change during implementation review.
 ```text
 mecha-developer/
   harness/
-    router.py                 # Mailbox v2 HTTP/WebSocket service and scheduling loop
-    db.py                     # SQLite schema and transactions
-    protocol.py               # shared validation and state constants
-    launchd.py                # finite install/status/kickstart helpers
+    router.mjs                # Mailbox v2 HTTP/WebSocket service and scheduling loop
+    db.mjs                    # SQLite schema and transactions
+    protocol.mjs              # shared validation and state constants
+    launchd.mjs               # finite install/status/kickstart helpers
   pi-extensions/
     mecha-messaging.ts        # Pi extension
   tools/
@@ -358,7 +361,7 @@ Proposed minimum API:
 
 - `POST /v1/messages` — validate and enqueue idempotently.
 - `GET /v1/messages/{id}` — inspect state.
-- `POST /v1/messages/{id}/ack` — normally used over WebSocket and retained for diagnostics.
+- `POST /v1/messages/{id}/ack` — a reserved, contingent endpoint; it must not be implemented or treated as Pi delivery acknowledgement until section 9.1 is unblocked.
 - `GET /v1/health` — process, database, schema, and scheduler health.
 - `GET /v1/agents` — loopback-only diagnostic lease list.
 - CRUD endpoints under `/v1/reminders`.
@@ -372,8 +375,8 @@ Delivery rule:
 3. If the recipient is disconnected or has never registered, hold the message until that identity connects or the message expires.
 4. On successful registration, immediately replay unexpired queued messages in durable enqueue order.
 5. When an unclaimed message reaches `expires_at`, atomically delete it and its delivery-attempt rows. Expiration is not a dead letter and does not retain a tombstone.
-6. Once a client has claimed a message lease, it has been picked up; normal acknowledgement/retry semantics apply rather than expiring it mid-injection.
-7. Remove no message merely because a socket disconnected or an offer was attempted; correlated acknowledgement or unclaimed expiry deletes it.
+6. Once a client has claimed a message lease, it has been picked up; the eventual post-proof retry/finalization policy must prevent expiry mid-injection. No current Pi acknowledgement transition is approved.
+7. Remove no message merely because a socket disconnected or an offer was attempted. Unclaimed expiry deletes it; any other deletion/finalization rule is contingent on the replacement proof in section 9.1.
 
 ### 8.4 WebSocket frames
 
@@ -381,8 +384,8 @@ Client to router:
 
 - `register`
 - `lease_renew`
-- `ack`
-- `nack`
+- `ack` (reserved; its Pi delivery-finalization semantics are blocked by section 9.1)
+- `nack` (reserved with the same constraint when used to affect delivery state)
 - `ping`
 
 Router to client:
@@ -393,55 +396,21 @@ Router to client:
 - `error`
 - `pong`
 
-Every frame includes `version` and a frame ID. Message frames include the complete envelope and a delivery-attempt number.
+Every frame includes `version` and a frame ID. Message frames include the complete envelope and a delivery-attempt number. Frame shape is frozen independently of delivery-finalization semantics; the presence of an `ack` frame does not authorize it as a Pi acknowledgement.
 
 ## 9. Delivery semantics
 
-### 9.1 State machine
+### 9.1 Rejected acknowledgement candidate and Phase 2 block
 
-```text
-queued -> leased -> injection_requested -> acknowledged -> deleted
-             |                |
-             +------timeout---+----timeout----+
-             |                                |
-             v                                v
-           queued                         dead_letter
-```
+The former `message_end` plus `ctx.sessionManager.getEntries()` acknowledgement rule is **rejected for Pi 0.80.6**. The Phase 1 live crash probe observed the routed ID through both candidate signals, killed Pi before its first assistant entry, and then found no session file or routed ID in a replacement process. The lookup was in-memory, not a persisted-session guarantee.
 
-Recommended persisted names:
+Consequently, this document does not prescribe an `acknowledged` transition, replay-deduplication transition, or Pi extension acknowledgement behavior for that candidate. A router must not treat `pi.sendMessage()` return, `message_end`, `getEntries()`, a status preview, or any combination of those facts as durable delivery acknowledgement on this version.
 
-- `queued`: durable, no client owns the attempt.
-- `leased`: sent to one registered instance until a deadline.
-- `injection_requested`: extension validated the frame and invoked `pi.sendMessage()`, but Pi has not yet emitted the correlated custom message. This state remains leased and retryable.
-- `acknowledged`: the extension observed Pi's correlated `message_end` event for the custom message containing this message ID. This is a transactional transition used only to complete delivery; the server immediately deletes the message and its delivery-attempt rows in the same transaction.
-- `dead_letter`: retry limit exceeded. This is the only terminal message state retained for operator action.
+Phase 2 is blocked. A future proposal must identify a different documented durable boundary, state its failure and replay semantics precisely, and pass a new isolated crash/restart proof before it is added to the state machine or extension behavior. Until then, `queued`, `leased`, and `injection_requested` are only investigatory state names, not an approved delivery implementation.
 
-If implementation research cannot correlate a routed custom message reliably through `message_end`, v1 must not claim durable Pi delivery. It must either add a verified correlation mechanism using documented events/session entries or keep the message leased and expose the limitation as a release blocker.
+`--no-session` remains diagnostic at-least-once behavior only: it has no durable Pi history and may visibly duplicate after a crash.
 
-### 9.2 Pi extension behavior
-
-On a valid `message` frame:
-
-1. Reject unsupported versions or invalid payloads with `nack`.
-2. Deduplicate by message ID using router state and Pi session history, not an in-memory cache alone. On connection/replay, inspect the current persistent session branch for a prior `CustomMessage` carrying the router ID before reinjecting. The implementation must verify the exact documented session-entry accessor before this guarantee is enabled.
-3. Render the sender and subject in a stable `CustomMessage` shape.
-4. Snapshot `ctx.isIdle()` only for metrics; do not rely on it for correctness.
-5. Always call `pi.sendMessage(customMessage, { deliverAs: "steer", triggerTurn: true })`. Pi ignores `triggerTurn` while streaming and uses `deliverAs` there; if the agent becomes idle between the state check and call, `triggerTurn` prevents the message from being stranded without a turn.
-6. Record/send `injection_requested` after invoking the wrapper, but do not acknowledge delivery yet.
-9. While one or more messages are awaiting Pi emission, update a single compact status line. Proposed format:
-
-   ```text
-   mailbox: 2 queued · alice: Deploy finished; check the…
-   ```
-
-   Show the oldest queued message's sender plus a whitespace-normalized preview. Truncate to a conservative configurable cap (default 80 display columns) with an ellipsis and rely on Pi's status rendering for narrower terminals; never wrap, expand the transcript, or show more than one body preview. If the subject or body is empty, show only the available sender, subject, and count. The full message remains durable in the mailbox and appears normally once emitted.
-10. Listen for Pi's `message_end` event, correlate the emitted `CustomMessage` by the embedded router message ID, remove it from the preview count, and only then send `ack`. On that acknowledgement, the router deletes the persisted message and attempts rather than retaining mailbox history. Clear the mailbox status when no message is waiting.
-
-Because `sendMessage()` returns `void`, wrapper return is not an acceptance signal. A correlated `message_end` proves that Pi consumed and emitted the message; it does not prove semantic handling or guaranteed disk flush. To close the crash-after-render/before-ack window, reconnect deduplication must also find the message ID in Pi's persistent session branch before replay. Implementation must verify both the event payload and session-entry accessor against the installed Pi version before shipping.
-
-Exactly-once visible replay cannot be guaranteed under Pi `--no-session`. In that mode the router provides at-least-once delivery and may visibly duplicate after a process crash. Production harness mode therefore requires Pi session persistence; `--no-session` is diagnostic-only. If event correlation or durable history lookup cannot be proven with documented APIs, the corresponding durability acceptance criteria remain blocked.
-
-The custom message content should include a compact, model-readable header, for example:
+The custom message content may use a compact, model-readable header such as:
 
 ```text
 [Agent message from mecha-harness]
@@ -461,12 +430,7 @@ No global ordering is promised.
 
 ### 9.4 Retry and reconnect
 
-- The extension reconnects with exponential backoff plus jitter, capped at 30 seconds.
-- On refusal, it requests `launchd` kickstart once per backoff window.
-- A lease expires if no acknowledgement arrives.
-- Expired messages return to `queued`.
-- Duplicate delivery is possible after a crash. Message IDs make delivery effectively once for a healthy extension and at-least-once across failures.
-- The extension must not acknowledge on wrapper return; it acknowledges only after observing the correlated Pi `message_end` event.
+Reconnect transport may use exponential backoff plus jitter capped at 30 seconds, and may request `launchd` kickstart once per backoff window. The following former finalization rules are **contingent target behavior, not an approved implementation**: lease expiry for missing acknowledgement, returning a leased message to `queued`, effective-once delivery for a healthy extension, and at-least-once replay after a crash. Phase 2 cannot define a Pi acknowledgement, retry-finalization, or replay-deduplication action until a replacement for the rejected candidate in section 9.1 is proven.
 
 ### 9.5 Backpressure
 
@@ -639,7 +603,7 @@ File mailbox delivery may be removed only when all are true:
 
 - a repository-wide search and runtime audit find zero direct mailbox-file writers;
 - no active agent type depends on the Claude hook or mailbox cron;
-- all queued router messages have explicit terminal state;
+- all queued router messages have explicit terminal state under a separately proven durable finalization boundary; section 9.1 currently blocks this retirement gate;
 - active and idle Pi acceptance tests pass;
 - offline replay, router restart, extension reconnect, lease expiry, and duplicate-ID tests pass;
 - Purelymail, watchdog, PR watch, recall, reminders, standing orders, KB reminders, memory monitor, remote delegation, and all skill instructions have migration tests or validated documentation checks;
@@ -649,6 +613,8 @@ File mailbox delivery may be removed only when all are true:
 - every active mailbox consumer has a tested Pi extension path; rollback restores the file mailbox as a whole rather than introducing a second delivery transport.
 
 ## 13. Reminders v2
+
+**Blocked dependency:** every acknowledgement-dependent reminder state and transition in this section is a contingent target model, not approved behavior. In particular, `acknowledged`, deletion after linked-message acknowledgement, recurring-occurrence completion, and acknowledgement-based reminder acceptance cannot be implemented until section 9.1 has a replacement durable-boundary proof. Queueing and expiry descriptions do not weaken that gate.
 
 ### 13.1 Design
 
@@ -664,7 +630,7 @@ A reminder record includes:
 - next due time in UTC;
 - optional fixed recurrence interval;
 - creation time and creator identity;
-- state (`scheduled`, `due`, `message_queued`, `acknowledged`, `canceled`, `failed`);
+- state (`scheduled`, `due`, `message_queued`, `acknowledged` [contingent], `canceled`, `failed`);
 - linked router message ID and occurrence number;
 - retry/attempt metadata.
 
@@ -677,7 +643,7 @@ For a due one-shot reminder, one SQLite transaction:
 3. records the linked message ID;
 4. marks the reminder `message_queued`.
 
-When the linked message is acknowledged, the server deletes both the delivered mailbox row and the completed one-shot reminder in the same transaction. Completed reminders therefore do not accumulate either. If its message expires before pickup, the one-shot reminder is deleted with it. If the linked message becomes `dead_letter`, the reminder becomes `failed` in the same transaction and remains visible until retried or explicitly dismissed. A crash before or after commit cannot silently lose the reminder; deterministic IDs prevent duplicate logical messages.
+**Contingent after the section 9.1 gate:** when a linked message is validly finalized by a future proven boundary, the server deletes both the delivered mailbox row and the completed one-shot reminder in the same transaction. If its message expires before pickup, the one-shot reminder is deleted with it. If the linked message becomes `dead_letter`, the reminder becomes `failed` in the same transaction and remains visible until retried or explicitly dismissed. A crash before or after commit cannot silently lose the reminder; deterministic IDs prevent duplicate logical messages.
 
 For a recurring reminder:
 
@@ -686,7 +652,7 @@ For a recurring reminder:
 3. If disconnected but `last_connected_at` is less than one hour old, enqueue nothing, skip that occurrence, and advance `next_due_at`; missed occurrences are never replayed or caught up.
 4. If `last_connected_at` is at least one hour old, delete the recurring reminder and all other resources for that agent.
 5. If the identity has never connected, delete the recurring reminder and all other resources for that target on its first due evaluation instead of firing it.
-6. A recurring reminder remains scheduled after an occurrence is acknowledged; only the delivered message row is deleted. Occurrences never overlap.
+6. After a future proven delivery-finalization transition, a recurring reminder remains scheduled and only the delivered message row is deleted. Occurrences never overlap. This acknowledgement-dependent rule is blocked by section 9.1.
 
 Cancellation is allowed only in `scheduled` or `due` before a linked message is committed. After `message_queued`, `delete` returns a conflict containing the linked message state; it does not pretend to recall a delivery. A separate explicit message-cancel operation may be designed later.
 
@@ -743,7 +709,7 @@ Legacy `"delivery": "tmux"` handoff reminders are not imported. The Pi-only repl
 - One-shot reminder messages wait no more than one hour for pickup.
 - Recurring reminders fire only for currently connected targets, skip rather than replay missed occurrences, never overlap, and remain scheduled after successful occurrences.
 - A recurring reminder for a never-connected or hour-stale identity is deleted without firing.
-- A reminder is not complete until its message is acknowledged; completed one-shot reminders are deleted.
+- **Contingent:** after a future proven delivery-finalization transition, a reminder is complete and completed one-shot reminders are deleted. This criterion is blocked by section 9.1.
 - Cancel/due concurrency has deterministic tested behavior.
 - Duplicate scheduler execution is idempotent.
 - Corrupt or malformed records are isolated rather than stopping all scheduling.
@@ -772,7 +738,7 @@ Mailbox rows are queue state, not history:
 
 - every message has a fixed one-hour pickup deadline;
 - expiry atomically deletes an unclaimed message and its delivery-attempt rows;
-- acknowledgement atomically deletes a picked-up message and its delivery-attempt rows;
+- **Contingent:** a future proven delivery-finalization transition atomically deletes a picked-up message and its delivery-attempt rows; section 9.1 currently prohibits treating a Pi event as that transition;
 - no delivered or expired message body, envelope, or tombstone is retained in SQLite;
 - dead letters remain only until an operator retries or dismisses them;
 - diagnostics expose active queue size, dead-letter count, and oldest queue age.
@@ -840,7 +806,7 @@ The local macOS user remains trusted. Protecting against malicious same-user pro
 - email allow-list enforcement and default supervisor routing;
 - duplicate enqueue idempotency;
 - per-recipient ordering;
-- leases, one-hour message expiry, ack, nack, and dead-letter transitions;
+- leases, one-hour message expiry, and dead-letter transitions; `ack`/`nack` finalization tests are contingent on the replacement proof in section 9.1;
 - connected/recently-disconnected/stale/never-connected recurring-reminder behavior;
 - atomic hour-stale agent resource cleanup;
 - queue byte/count limits;
@@ -855,10 +821,10 @@ Use a controllable test router and Pi integration fixture:
 - busy message calls `sendMessage(..., { deliverAs: "steer", triggerTurn: true })`;
 - while busy, one status line shows queue count and a terminal-width-truncated oldest-message preview;
 - multiple queued messages do not add lines or render full bodies;
-- status clears after the final correlated message emission;
+- status clears after the final correlated message emission without treating that emission as acknowledgement;
 - `display: true` appears in transcript and content reaches the next model context;
 - bottom editor contents remain unchanged;
-- duplicate IDs render once;
+- duplicate IDs render once only after replay-deduplication is separately proven; this is blocked by section 9.1;
 - reconnect re-registers identity;
 - shutdown closes sockets and timers;
 - duplicate live identity is rejected visibly.
@@ -888,18 +854,18 @@ Add end-to-end tests for every migrated producer and prove that one logical mess
 
 ## 18. Overall acceptance criteria
 
-The initial implementation is ready for opt-in use when:
+The initial implementation is ready for opt-in use only after section 9.1 is unblocked. Criteria involving finalization, acknowledgement, or replay deduplication below are contingent and are not currently satisfiable:
 
 1. A Pi agent in a tmux window registers under its exact window identity.
 2. `mailbox_send_v2.py` durably posts a mailbox message and reports its ID.
 3. A connected idle Pi agent receives the newly posted message immediately, displays it without changing the bottom editor, and starts a turn.
 4. A connected busy Pi agent receives the newly posted message immediately, shows a one-line truncated queue preview, and consumes it at the next agent-call boundary without corrupting current input. Queue visibility remains one line regardless of depth.
 5. A message posted while its recipient is disconnected remains durable and replays in order immediately after that recipient reconnects.
-6. With Pi session persistence enabled, router and Pi restarts do not lose queued state; acknowledged messages are absent because successful delivery deletes them.
-7. With Pi session persistence enabled, duplicate delivery attempts and crash-after-render/before-ack replay create one visible Pi message. `--no-session` is explicitly reported as at-least-once/diagnostic mode.
+6. **Contingent:** with Pi session persistence enabled, a router and Pi restart preserve queued state and messages finalized by a future proven boundary are absent.
+7. **Contingent:** with Pi session persistence enabled, duplicate delivery attempts and crash-after-render/before-finalization replay create one visible Pi message. `--no-session` remains at-least-once/diagnostic only.
 8. Duplicate agent identities fail visibly rather than fan out.
 9. The router starts through `launchd` when the extension finds it unavailable.
-10. Transport status distinguishes queued, leased, injection-requested, and dead-letter states; acknowledgement is observable as the transition that removes the message.
+10. Transport status may distinguish queued, leased, injection-requested, and dead-letter investigatory states. A transition that removes a message for Pi delivery acknowledgement is contingent on the replacement proof in section 9.1.
 11. Reminders v2 passes the criteria in section 13.6.
 12. The mailbox retirement gates in section 12.5 are machine-checkable and pass before removal.
 13. Every enabled workflow has migrated to a tested Pi-native path; unsupported non-Pi and terminal-control paths are removed at cutover.
@@ -911,37 +877,33 @@ The initial implementation is ready for opt-in use when:
 
 ## 19. Rollout
 
-### Phase 1: protocol and router
+### Phase 1: Pi proof and protocol freeze
 
-Implement schema, SQLite state machine, HTTP enqueue, WebSocket subscription, loopback-only binding, diagnostics, and LaunchAgent management. Test without changing producers.
+**In progress with a hard no-go recorded:** the proposed `message_end` plus session-history acknowledgement is rejected by the isolated crash/restart probe. Phase 1 is not complete, and no router implementation is authorized until a replacement durable boundary is separately approved.
 
-### Phase 2: Pi opt-in
+### Phase 2: durable router and lifecycle tooling
 
-Install the extension for one named Pi agent. Prove live idle, busy, reconnect, and restart behavior while Pi continues to run in tmux. Keep the file mailbox available only as rollback during migration.
+**Blocked pending section 9.1:** after a replacement durable boundary is proven, implement the Node router schema, SQLite state machine, HTTP enqueue, WebSocket subscription, loopback-only binding, diagnostics, sender CLI, and isolated LaunchAgent lifecycle tooling without changing producers.
 
-### Phase 3: sender and backwards compatibility
+### Phase 3: Pi opt-in extension
 
-Add `mailbox_send_v2.py`. Move a small set of non-critical producers to router-first delivery and prove disconnected recipients remain queued until WebSocket reconnection or one-hour expiry.
+**Blocked pending sections 9.1 and Phase 2:** after those gates, install and prove the production Pi extension for one named agent: idle, busy, reconnect, restart, lifecycle, and the replacement acknowledgement/deduplication behavior. Keep the file mailbox available only as rollback during migration.
 
 ### Phase 4: reminders v2
 
-Implement scheduler and CLI, migrate pending reminders under lock, and disable v1 cron after reconciliation.
+**Blocked pending section 9.1 and Phases 2–3:** implement the scheduler and CLI, migrate pending reminders under lock, and disable v1 cron after reconciliation.
 
-### Phase 5: producer migration
+### Phase 5: producer migration and retirement
 
-Move email ingress, watchdog, PR watch, recall, standing orders, remote delegation, and worker status producers. Track direct mailbox writes as a failing audit.
-
-### Phase 6: retirement
-
-After the observation period and all section 12.5 gates pass, remove file mailbox hooks, cron, and `worker_send.py`.
+**Blocked pending section 9.1 and Phases 2–4:** move email ingress, watchdog, PR watch, recall, standing orders, remote delegation, and worker status producers; track direct mailbox writes as a failing audit; then, after the observation period and all section 12.5 gates pass, remove file mailbox hooks, cron, and `worker_send.py`.
 
 ## 20. Unresolved decisions
 
 These require review or implementation evidence:
 
-1. **Implementation language:** Python minimizes integration work with current mecha tools; TypeScript could share types with the Pi extension. Recommendation: Python router plus generated JSON Schema, with TypeScript validation generated or tested against shared fixtures. Do not add a cross-language framework.
-2. **WebSocket dependency:** Python standard library has no WebSocket server. Prefer an already-installed dependency if present; otherwise compare one small dependency against implementing the router in Node. Do not hand-roll WebSocket framing.
-3. **Acknowledgement correlation:** verify that `message_end` exposes the emitted custom message and embedded router message ID reliably in extension code. If it does not, find another documented post-consumption/session-entry event. Wrapper return alone is never an acknowledgement.
+1. **Implementation language (resolved for the router):** the prior Python recommendation was made before Phase 1 runtime evidence. Phase 1 selects Node 26.2.0 for the future router: Pi already requires that runtime; Python 3.14.5 has neither `websockets` nor `jsonschema` installed; and Node can use the pinned maintained `ws@8.21.0`, `ajv@8.20.0`, and `ajv-formats@3.0.1` packages against the shared fixtures. This is a router-stack selection, not an inference from the JavaScript probes or a requirement to rewrite unrelated migration-facing CLIs. No router implementation is authorized while item 3 remains blocked.
+2. **WebSocket and schema dependencies (resolved conditionally):** use the pinned maintained Node dependencies above after the acknowledgement gate is unblocked. Do not hand-roll WebSocket framing or JSON Schema validation.
+3. **Acknowledgement boundary (hard blocker):** the Pi 0.80.6 `message_end` plus session-history candidate is rejected by the Phase 1 crash/restart probe. Identify and prove a different documented durable boundary before unblocking Phase 2. Wrapper return, status preview, `message_end`, and `getEntries()` are never acknowledgement on this version.
 4. **Lease replacement:** decide whether an operator command may forcibly replace a live duplicate or whether only lease expiry can do so. Default should reject.
 5. **Retention periods and queue limits:** choose values from observed mailbox volume rather than guesses.
 6. **Migration observation period:** choose the minimum period covering every scheduled producer, including infrequent jobs.
