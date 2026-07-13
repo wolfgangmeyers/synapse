@@ -2,15 +2,19 @@
 """PostToolUse hook: schedule a delayed recall check for the current window."""
 
 import json
-import os
 import sys
 import traceback
+from pathlib import Path
 
 from recall_lib import increment_message_count, load_config, schedule_window
 
+SUPERVISOR_TOOLS = Path(__file__).resolve().parents[2] / "supervisor" / "tools"
+sys.path.insert(0, str(SUPERVISOR_TOOLS))
+from _tmux import current_agent_id
+
 
 def get_current_window():
-    return os.environ.get("MECHA_WORKER_WINDOW") or os.environ.get("MECHA_AGENT_WINDOW")
+    return current_agent_id()
 
 
 def main():

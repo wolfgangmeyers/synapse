@@ -9,7 +9,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,7 +24,7 @@ DEFAULT_REPOS = [
 ]
 
 DEFAULT_STATE_DIR = Path.home() / ".mecha-developer" / "pr-watch"
-MAILBOX_SEND = Path.home() / ".claude/skills/supervisor/tools/mailbox_send.py"
+MAILBOX_SEND_V2 = Path(__file__).resolve().parents[2] / "supervisor" / "tools" / "mailbox_send.py"
 
 QUIET_BOT_AUTHORS = {"app/dependabot", "dependabot[bot]"}
 SECURITY_KEYWORDS = (
@@ -71,6 +70,8 @@ CADENCE_SECONDS = env_int("PR_WATCH_CADENCE_SECONDS", 15 * 60)
 HEARTBEAT_SECONDS = env_int("PR_WATCH_HEARTBEAT_SECONDS", 60 * 60)
 VIEWER = os.environ.get("PR_WATCH_VIEWER", "wolfgangmeyers")
 MAILBOX_TO = os.environ.get("PR_WATCH_MAIL_TO", "supervisor")
+MAILBOX_FROM = os.environ.get("PR_WATCH_MAIL_FROM", "pr-watch")
+ROUTER_URL = os.environ.get("MECHA_ROUTER_URL")
 
 STATE_DIR = Path(os.environ.get("PR_WATCH_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser()
 STATE_PATH = STATE_DIR / "watch-state.json"
@@ -529,7 +530,13 @@ def write_report(report: str, now: str) -> Path:
 
 
 def send_mail(subject: str, body: str) -> None:
-    run(["python3", str(MAILBOX_SEND), "--to", MAILBOX_TO, "--subject", subject, "--body", body])
+    command = [
+        "python3", str(MAILBOX_SEND_V2), "--to", MAILBOX_TO,
+        "--from", MAILBOX_FROM, "--subject", subject, "--body", body,
+    ]
+    if ROUTER_URL:
+        command.extend(["--router-url", ROUTER_URL])
+    run(command)
 
 
 def try_send_mail(subject: str, body: str) -> None:
@@ -623,7 +630,7 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
 
 
 def apply_args(args: argparse.Namespace) -> None:
-    global REPOS, CADENCE_SECONDS, HEARTBEAT_SECONDS, VIEWER, MAILBOX_TO
+    global REPOS, CADENCE_SECONDS, HEARTBEAT_SECONDS, VIEWER, MAILBOX_TO, MAILBOX_FROM, ROUTER_URL
 
     if args.repo:
         REPOS = args.repo
@@ -637,11 +644,14 @@ def apply_args(args: argparse.Namespace) -> None:
         VIEWER = args.viewer
     if args.mail_to:
         MAILBOX_TO = args.mail_to
+    if args.mail_from:
+        MAILBOX_FROM = args.mail_from
+    if args.router_url:
+        ROUTER_URL = args.router_url
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--loop", action="store_true", help="run continuously")
     parser.add_argument("--dry-run", action="store_true", help="print report without writing state or mail")
     parser.add_argument("--no-mail", action="store_true", help="write state/report without sending mail")
     parser.add_argument("--repo", action="append", help="owner/name repo to watch; repeat to override defaults")
@@ -649,23 +659,22 @@ def main() -> int:
     parser.add_argument("--heartbeat-seconds", type=int, help="seconds between quiet heartbeat messages")
     parser.add_argument("--state-dir", help="directory for watch-state.json and reports")
     parser.add_argument("--viewer", help="GitHub login whose review attention is being watched")
-    parser.add_argument("--mail-to", help="mailbox recipient window")
+    parser.add_argument("--mail-to", help="mailbox recipient agent ID")
+    parser.add_argument("--mail-from", help="explicit V2 sender agent ID")
+    parser.add_argument("--router-url", help="loopback HTTP(S) Mailbox V2 router base URL")
     args = parser.parse_args()
     apply_args(args)
 
-    while True:
-        try:
-            pass_once(send=not args.no_mail, dry_run=args.dry_run)
-        except Exception as exc:  # noqa: BLE001 - long-running watcher should report and keep going.
-            now = utc_now()
-            message = f"PR watch error at {now}: {exc}"
-            print(message, file=sys.stderr)
-            if not args.no_mail and not args.dry_run:
-                try_send_mail("PR watch error", message[:900])
-        if not args.loop or args.dry_run:
-            return 0
-        sys.stdout.flush()
-        time.sleep(CADENCE_SECONDS)
+    try:
+        pass_once(send=not args.no_mail, dry_run=args.dry_run)
+    except Exception as exc:  # noqa: BLE001 - report a single wakeup failure.
+        now = utc_now()
+        message = f"PR watch error at {now}: {exc}"
+        print(message, file=sys.stderr)
+        if not args.no_mail and not args.dry_run:
+            try_send_mail("PR watch error", message[:900])
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

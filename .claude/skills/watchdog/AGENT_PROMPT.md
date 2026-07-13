@@ -41,9 +41,9 @@ Decision rules:
    such as:
    `"$PYTHON_PATH" "$MECHA_DEVELOPER_ROOT/.claude/skills/supervisor/tools/state_read.py"`
    `"$PYTHON_PATH" "$MECHA_DEVELOPER_ROOT/.claude/skills/supervisor/tools/worker_list.py"`
-5. For every run with a mecha tmux target or pre-captured mecha windows, inspect reminders using:
-   `"$PYTHON_PATH" "$MECHA_DEVELOPER_ROOT/.claude/skills/reminders/tools/manage_reminders.py" list`
-   or by reading `$MECHA_STATE_DIR/reminders.json`.
+5. For every run with a mecha tmux target or pre-captured mecha windows, inspect durable reminders using:
+   `"$PYTHON_PATH" "$MECHA_DEVELOPER_ROOT/.claude/skills/reminders/tools/reminders.py" list`.
+   Do not inspect or modify retired V1 reminder JSON state.
 6. For every run with a mecha tmux target or pre-captured mecha windows, inspect mailbox state with read-only
    shell commands against `$MECHA_STATE_DIR/mailboxes`, especially for ignored
    subordinate escalations. Send alerts only through the watchdog alert helper.

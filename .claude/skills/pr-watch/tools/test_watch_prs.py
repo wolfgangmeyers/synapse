@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import watch_prs
 
@@ -53,6 +56,85 @@ def prior_state(**overrides):
     }
     prior.update(overrides)
     return prior
+
+
+class MailboxV2SenderTest(unittest.TestCase):
+    def test_send_mail_uses_the_canonical_v2_sender_once(self):
+        commands = []
+        old_run = watch_prs.run
+        old_to = watch_prs.MAILBOX_TO
+        old_from = watch_prs.MAILBOX_FROM
+        old_router_url = watch_prs.ROUTER_URL
+        try:
+            watch_prs.run = lambda command: commands.append(command) or ""
+            watch_prs.MAILBOX_TO = "supervisor"
+            watch_prs.MAILBOX_FROM = "pr-watch"
+            watch_prs.ROUTER_URL = "http://127.0.0.1:8765"
+
+            watch_prs.send_mail("PR watch findings", "one finding")
+        finally:
+            watch_prs.run = old_run
+            watch_prs.MAILBOX_TO = old_to
+            watch_prs.MAILBOX_FROM = old_from
+            watch_prs.ROUTER_URL = old_router_url
+
+        self.assertEqual(
+            [[
+                "python3", str(watch_prs.MAILBOX_SEND_V2), "--to", "supervisor",
+                "--from", "pr-watch", "--subject", "PR watch findings", "--body", "one finding",
+                "--router-url", "http://127.0.0.1:8765",
+            ]],
+            commands,
+        )
+
+
+class MainOneScanTest(unittest.TestCase):
+    def test_normal_invocation_runs_one_scan(self):
+        calls = []
+        old_argv = sys.argv
+        old_pass_once = watch_prs.pass_once
+        try:
+            sys.argv = ["watch_prs.py", "--router-url", "http://127.0.0.1:8765"]
+            watch_prs.pass_once = lambda **kwargs: calls.append(kwargs) or ([], None)
+
+            self.assertEqual(0, watch_prs.main())
+        finally:
+            sys.argv = old_argv
+            watch_prs.pass_once = old_pass_once
+
+        self.assertEqual([{"send": True, "dry_run": False}], calls)
+
+
+class PassOnceDeliveryTest(unittest.TestCase):
+    def test_actionable_finding_is_sent_once_to_supervisor(self):
+        old_repos = watch_prs.REPOS
+        old_fetch_repo = watch_prs.fetch_repo
+        old_try_send_mail = watch_prs.try_send_mail
+        old_to = watch_prs.MAILBOX_TO
+        old_state_dir = watch_prs.STATE_DIR
+        sent = []
+        try:
+            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.MAILBOX_TO = "supervisor"
+            watch_prs.fetch_repo = lambda _repo: [base_pr(
+                reviewDecision="REVIEW_REQUIRED",
+                comments_meta=[{"author": "jmelloy", "createdAt": "2026-06-10T16:00:00Z"}],
+            )]
+            watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
+            with tempfile.TemporaryDirectory() as directory:
+                watch_prs.configure_paths(Path(directory))
+                findings, _ = watch_prs.pass_once()
+        finally:
+            watch_prs.REPOS = old_repos
+            watch_prs.MAILBOX_TO = old_to
+            watch_prs.fetch_repo = old_fetch_repo
+            watch_prs.try_send_mail = old_try_send_mail
+            watch_prs.configure_paths(old_state_dir)
+
+        self.assertEqual(1, len(findings))
+        self.assertEqual(1, len(sent))
+        self.assertEqual("PR watch findings", sent[0][0])
+        self.assertIn("1 actionable PR(s)", sent[0][1])
 
 
 class ClassifyHeadChangeTest(unittest.TestCase):

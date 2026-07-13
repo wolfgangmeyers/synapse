@@ -5,10 +5,13 @@ All tmux interaction is centralized here so the higher-level scripts
 stay clean and consistent.
 """
 
+import os
+import re
 import subprocess
 import time
 
 SESSION = "mecha"
+_AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 # Claude Code shows a "pasted text #N +N lines" confirmation dialog when it
 # receives large input. A longer delay before sending Enter gives Claude Code
@@ -27,6 +30,23 @@ def run(args, check=True, capture=True):
         text=True,
         check=check,
     )
+
+
+def current_agent_id(environment=None, tmux_run=run):
+    """Return this process's validated tmux window name, or None on failure."""
+    environment = os.environ if environment is None else environment
+    pane = environment.get("TMUX_PANE")
+    if not environment.get("TMUX") or not isinstance(pane, str) or not re.fullmatch(r"%\d+", pane):
+        return None
+    try:
+        result = tmux_run(
+            ["display-message", "-p", "-t", pane, "#{window_name}"],
+            check=False,
+        )
+    except OSError:
+        return None
+    window = result.stdout.strip() if result.returncode == 0 else ""
+    return window if _AGENT_ID.fullmatch(window) else None
 
 
 def session_exists():

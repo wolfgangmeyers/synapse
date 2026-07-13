@@ -369,13 +369,11 @@ else
   echo "skipped: watchdog cron job already exists (wrapped correctly)"
 fi
 
-# Reminder cron — fires due reminders every minute
-if ! crontab -l 2>/dev/null | grep -q "reminder_cron.py"; then
-  REMINDER_CRON="$REPO_ROOT/.claude/skills/reminders/tools/reminder_cron.py"
-  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $REMINDER_CRON >> ~/.mecha-developer/reminder-cron.log 2>&1") | crontab -
-  echo "added: reminder cron job (runs every minute)"
-else
-  echo "skipped: reminder cron job already exists"
+# Mailbox V2 router owns reminder scheduling. Remove any retired V1 cron entry
+# so it cannot create duplicate or filesystem-backed deliveries.
+if crontab -l 2>/dev/null | grep -q "reminder_cron.py"; then
+  crontab -l 2>/dev/null | grep -v "reminder_cron.py" | crontab -
+  echo "removed: retired reminder cron job (Mailbox V2 router owns scheduling)"
 fi
 
 # Log rotation — runs daily, keeps 1 backup, discards logs older than 24 hours.
@@ -429,7 +427,7 @@ The cron jobs:
 - **watchdog.py**: Runs every 30 minutes. Captures all tmux window output, asks an LLM to evaluate whether any workers are stuck (idle without being told to wait), and mails the supervisor if so.
 
   **LLM config (optional)**: `~/.mecha-developer/watchdog-llm.json` selects which CLI the watchdog uses. Schema: `{"cli": "claude" | "codex", "model": "<model>", "extra_args": []}`. If the file is missing, defaults are `claude` + `claude-sonnet-4-6` + `[]`. An invalid `cli` value is rejected with a loud ntfy notification rather than silent fallback. If the configured CLI returns "Not logged in" (or the codex equivalent), the watchdog sends an ntfy push to topic `mecha-wolfgang-notify` and exits 0 so cron does not flood email.
-- **reminder_cron.py**: Runs every minute. Checks `~/.mecha-developer/reminders.json` for due reminders, delivers them via mailbox, and removes them.
+- **Mailbox V2 router**: Persists and schedules durable reminders; no reminder cron job or reminder JSON file is used.
 - **logrotate**: Runs daily. Rotates logs in `~/.mecha-developer/` when they exceed size limits; keeps 1 backup, discards anything older than 24 hours.
 
 ### 9b. Preflight: Watchdog LLM Login Check
@@ -496,7 +494,7 @@ crontab -l 2>/dev/null | grep "purelymail_poll.py" || echo "no Purelymail IMAP p
 crontab -l 2>/dev/null | grep "standing_orders_cron.py" || echo "no standing-orders refresh cron job"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
 crontab -l 2>/dev/null | grep "watchdog.py" || echo "no watchdog cron job"
-crontab -l 2>/dev/null | grep "reminder_cron.py" || echo "no reminder cron job"
+crontab -l 2>/dev/null | grep "reminder_cron.py" && echo "WARN: retired reminder cron job remains" || echo "Mailbox V2 router owns reminder scheduling"
 ```
 
 ### 11. Report

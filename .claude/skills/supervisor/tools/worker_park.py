@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Park a worker with mandatory verification checks.
 
-This is the ONLY way to park a worker. worker_send.py rejects park messages.
+This is the ONLY way to park a worker. It uses Mailbox V2 for delivery.
 Before sending the park instruction, this script prints a mandatory checklist
 that the supervisor must complete.
 
@@ -14,7 +14,6 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _tmux import send_text_and_enter, window_exists
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 PARK_MESSAGE = "Ok, parking you for now."
@@ -25,10 +24,6 @@ def main():
     parser.add_argument("--window", required=True, help="Worker tmux window name")
     parser.add_argument("--alias", required=True, help="Task alias (for state lookup)")
     args = parser.parse_args()
-
-    if not window_exists(args.window):
-        print(f"Error: window '{args.window}' does not exist", file=sys.stderr)
-        sys.exit(1)
 
     # Print mandatory checklist BEFORE parking — uses stdout so it appears
     # as tool output (not stderr which may be hidden), matching the mailbox
@@ -49,10 +44,24 @@ def main():
     print(f"*** END MANDATORY BLOCK ***")
     print("", file=sys.stderr)
 
-    # Send the park message directly via tmux
-    send_text_and_enter(args.window, PARK_MESSAGE)
+    import subprocess
 
-    print(f"Parked worker '{args.window}'.")
+    result = subprocess.run(
+        [
+            sys.executable,
+            os.path.join(TOOLS_DIR, "mailbox_send.py"),
+            "--from", "supervisor",
+            "--to", args.window,
+            "--body", PARK_MESSAGE,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"Error: Mailbox V2 delivery failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(result.returncode)
+
+    print(f"Park instruction sent to '{args.window}' through Mailbox V2.")
 
 
 if __name__ == "__main__":

@@ -2,145 +2,76 @@
 """Launch a new worker in a tmux window.
 
 Usage:
-  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent codex|claude|cursor] [--reasoning-effort low|medium|high|xhigh]
+  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--reasoning-effort low|medium|high|xhigh]
 
 Creates a tmux window, starts the agent in the specified directory,
-and waits for it to initialize. Does NOT send instructions — use
-worker_send.py for that after verifying the agent started.
+and waits for it to initialize. Deliver all instructions with mailbox_send.py
+after verifying the agent registered with Mailbox V2.
 """
 
 import argparse
 import json
 import os
-import pathlib
 import re
 import shlex
 import sqlite3
 import subprocess
 import sys
 import time
+import uuid
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _tmux import ensure_session, new_window, send_text, send_enter, window_exists
 
 
-POST_LAUNCH_REMINDER_DELAY = "15s"
-POST_LAUNCH_REMINDER_TIMEOUT_SECONDS = 5
-DEFAULT_SUPERVISOR_WINDOW = "supervisor"
-
-
-def _post_launch_reminder_tool():
-    return (
-        pathlib.Path(__file__).parent.parent.parent
-        / "reminders"
-        / "tools"
-        / "set_reminder.py"
-    )
-
-
-def _post_launch_reminder_message(worker_window, action):
-    return (
-        f"Capture/check worker window '{worker_window}' and verify the worker "
-        f"accepted its task instructions after it {action}. Look for active work "
-        f"(tool calls, file reads, command output), not merely that the agent "
-        f"process launched. If the task text is sitting at the prompt, submit it "
-        f"with worker_send.py."
-    )
+PI_PROVIDER = "openai-codex"
+PI_MODEL = "gpt-5.6-terra"
+PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
+PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
+PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
+LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 def _quote_command(argv):
     return " ".join(shlex.quote(part) for part in argv)
 
 
-def _warn_post_launch_reminder_failed(reason, manual_argv):
-    print(
-        f"Warning: could not set post-launch verification reminder: {reason}",
-        file=sys.stderr,
+def pi_session_id(work_dir, window):
+    """Return the stable UUID Pi uses for a worker's initial session."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mecha-worker:{work_dir}:{window}"))
+
+
+def resolve_pi_router_url():
+    """Return the configured loopback HTTP(S) Mailbox V2 router base URL."""
+    configured_url = os.environ.get(PI_ROUTER_URL_ENV)
+    if not configured_url:
+        raise ValueError(f"{PI_ROUTER_URL_ENV} is required for Pi workers")
+    parsed = urlparse(configured_url)
+    if (parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in LOOPBACK_ROUTER_HOSTS
+            or parsed.path not in {"", "/"}
+            or parsed.params or parsed.query or parsed.fragment):
+        raise ValueError(
+            f"{PI_ROUTER_URL_ENV} must be a loopback HTTP(S) base URL without a path"
+        )
+    return configured_url.rstrip("/")
+
+
+def resolve_pi_mailbox_extension():
+    """Return the explicit, validated Mailbox V2 extension path for Pi."""
+    extension_path = (
+        os.environ[PI_MAILBOX_EXTENSION_ENV]
+        if PI_MAILBOX_EXTENSION_ENV in os.environ
+        else PI_MAILBOX_EXTENSION_PATH
     )
-    print(f"  Set it manually: {_quote_command(manual_argv)}", file=sys.stderr)
-
-
-def _schedule_post_launch_reminder(
-    worker_window,
-    action,
-    reminder_tool=None,
-    supervisor_window=None,
-):
-    tool = pathlib.Path(reminder_tool) if reminder_tool else _post_launch_reminder_tool()
-    supervisor_window = (
-        supervisor_window
-        or os.environ.get("MECHA_SUPERVISOR_WINDOW")
-        or DEFAULT_SUPERVISOR_WINDOW
-    )
-    message = _post_launch_reminder_message(worker_window, action)
-    reminder_argv = [
-        sys.executable,
-        str(tool),
-        "--window",
-        supervisor_window,
-        "--message",
-        message,
-        "--in",
-        POST_LAUNCH_REMINDER_DELAY,
-    ]
-
-    if not tool.exists():
-        _warn_post_launch_reminder_failed(
-            f"reminder tool not found: {tool}",
-            reminder_argv,
+    if not os.path.isfile(extension_path):
+        raise ValueError(
+            f"{PI_MAILBOX_EXTENSION_ENV} must name a validated extension file. "
+            f"Install the canonical Pi extension first: "
+            f"python3 {os.path.join(os.path.dirname(__file__), 'install_pi_extension.py')}"
         )
-        return None
-
-    try:
-        result = subprocess.run(
-            reminder_argv,
-            capture_output=True,
-            text=True,
-            timeout=POST_LAUNCH_REMINDER_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        _warn_post_launch_reminder_failed(
-            f"{tool} timed out after {POST_LAUNCH_REMINDER_TIMEOUT_SECONDS}s",
-            reminder_argv,
-        )
-        return None
-    except OSError as e:
-        _warn_post_launch_reminder_failed(f"could not run {tool}: {e}", reminder_argv)
-        return None
-    except subprocess.SubprocessError as e:
-        _warn_post_launch_reminder_failed(f"{tool} failed: {e}", reminder_argv)
-        return None
-
-    if result.returncode != 0:
-        details = []
-        if result.stderr.strip():
-            details.append(f"stderr: {result.stderr.strip()}")
-        if result.stdout.strip():
-            details.append(f"stdout: {result.stdout.strip()}")
-        detail_text = "; ".join(details) if details else "no output"
-        _warn_post_launch_reminder_failed(
-            f"{tool} exited {result.returncode} ({detail_text})",
-            reminder_argv,
-        )
-        return None
-
-    reminder_id = None
-    for line in result.stdout.splitlines():
-        if line.startswith("Reminder set:"):
-            reminder_id = line.split(":", 1)[1].strip()
-            break
-
-    if reminder_id:
-        print(
-            f"Post-launch verification reminder set: {reminder_id} "
-            f"(fires in {POST_LAUNCH_REMINDER_DELAY})."
-        )
-    else:
-        print(
-            "Post-launch verification reminder set "
-            f"(fires in {POST_LAUNCH_REMINDER_DELAY})."
-        )
-    return reminder_id
+    return extension_path
 
 
 def get_cursor_auth_token():
@@ -227,7 +158,7 @@ def _codex_pretrust_workspace(work_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Launch an agent in a new tmux window."
+        description="Launch a Pi worker by default in a new tmux window."
     )
     parser.add_argument("--window", required=True, help="Tmux window name")
     parser.add_argument("--dir", required=True, help="Working directory for the agent")
@@ -254,16 +185,15 @@ def main():
 
     parser.add_argument(
         "--agent",
-        default="codex",
-        choices=["claude", "codex", "cursor"],
-        help="Agent to launch: 'codex' (default), 'claude', or 'cursor'",
+        default="pi",
+        choices=["pi", "claude", "codex", "cursor"],
+        help="Agent to launch: 'pi' (default, pinned to OpenAI Codex GPT-5.6 Terra), or a legacy runtime",
     )
 
     parser.add_argument(
         "--message",
         default=None,
-        help="(Unused for cursor TUI — send instructions with worker_send.py --bracketed instead.) "
-             "Kept for backwards compatibility.",
+        help="Unused; deliver instructions through Mailbox V2. Kept for backwards compatibility.",
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -275,6 +205,15 @@ def main():
     args = parser.parse_args()
 
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
+    pi_mailbox_extension = None
+    pi_router_url = None
+    if args.agent == "pi":
+        try:
+            pi_mailbox_extension = resolve_pi_mailbox_extension()
+            pi_router_url = resolve_pi_router_url()
+        except ValueError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
 
     if not os.path.isdir(work_dir):
         print(f"Error: directory does not exist: {work_dir}", file=sys.stderr)
@@ -295,7 +234,31 @@ def main():
             print("  Worktree initialized (mise trust + winit).")
 
     # Build the agent command
-    if args.agent == "codex":
+    if args.agent == "pi":
+        parts = [
+            "pi",
+            "--provider",
+            PI_PROVIDER,
+            "--model",
+            PI_MODEL,
+            "--name",
+            args.window,
+        ]
+        # Load only the validated Mailbox V2 extension. Global discovery may point
+        # to a stale staging checkout and duplicate control-plane client behavior.
+        parts.extend(["--no-extensions", "--extension", pi_mailbox_extension])
+        # Pi has no permission mode. --approve makes the trusted project resources
+        # available without a startup prompt, matching the existing launcher default.
+        if args.skip_permissions:
+            parts.append("--approve")
+        # Pi's --resume opens an interactive picker; --session accepts the supplied
+        # session path or ID and is the supported non-interactive resume mapping.
+        if args.resume:
+            parts.extend(["--session", args.resume])
+        else:
+            parts.extend(["--session-id", pi_session_id(work_dir, args.window)])
+        agent_cmd = _quote_command(parts)
+    elif args.agent == "codex":
         _codex_pretrust_workspace(work_dir)
         parts = ["codex", "--no-alt-screen"]
         if args.reasoning_effort:
@@ -307,9 +270,6 @@ def main():
         agent_cmd = " ".join(parts)
     elif args.agent == "cursor":
         # Cursor agent: interactive TUI mode.
-        # Text is sent via bracketed paste (worker_send.py --bracketed) which bypasses
-        # cursor-agent's Z.current anti-paste guard in its ink key handler.
-        # MECHA_WORKER_WINDOW is exported so cursor's shell commands can run mailbox_send.py.
         token = get_cursor_auth_token()
         if not token:
             print("Error: could not read Cursor auth token from state.vscdb", file=sys.stderr)
@@ -320,10 +280,8 @@ def main():
 
         cursor_bin = os.path.expanduser("~/.local/bin/cursor-agent")
         parts = [f"export CURSOR_AUTH_TOKEN={token}"]
-        parts.append(f"export MECHA_WORKER_WINDOW={args.window}")
 
-        # TUI mode: interactive session, stays alive for follow-up instructions.
-        # Send tasks with: worker_send.py --window WINDOW --bracketed --text "..."
+        # TUI mode: interactive session, stays alive for Mailbox V2 messages.
         agent_parts = [cursor_bin, "--yolo", "--model", "auto"]
         if args.resume:
             agent_parts.extend(["--resume", args.resume])
@@ -356,12 +314,19 @@ def main():
 
     new_window(args.window)
 
-    # cd to dir, set worker identity, start agent
-    # For cursor: agent_cmd already contains env var exports; skip CLAUDECODE/MECHA_WORKER_WINDOW wrappers
+    # Change to the worktree and start the agent. Its tmux window name is its identity.
+    # For cursor: agent_cmd already contains its authentication export.
     if args.agent == "cursor":
         full_cmd = f"cd {work_dir} && {agent_cmd}"
     else:
-        full_cmd = f"cd {work_dir} && unset CLAUDECODE && export MECHA_WORKER_WINDOW={args.window} && {agent_cmd}"
+        router_export = (
+            f"export {PI_ROUTER_URL_ENV}={shlex.quote(pi_router_url)} && "
+            if args.agent == "pi" else ""
+        )
+        full_cmd = (
+            f"cd {work_dir} && unset CLAUDECODE && "
+            f"{router_export}{agent_cmd}"
+        )
     send_text(args.window, full_cmd)
     time.sleep(0.5)
     send_enter(args.window)
@@ -372,40 +337,25 @@ def main():
 
     action = "resumed" if args.resume else "launched"
     print(f"Worker ({args.agent}) {action} in window '{args.window}' at {work_dir}")
-    _schedule_post_launch_reminder(args.window, action)
-
-    # Reminders
     print()
-    print("--- Reminders ---")
-    print(f"1. Wait 5 seconds, then verify the worker window is ready:")
+    print("--- Next steps ---")
+    print("1. Verify the Pi worker registered with Mailbox V2, then inspect its status if needed:")
     print(f"   python3 worker_capture.py --window {args.window}")
-    print(f"2. Send instructions to the worker:")
-    print(f"   python3 worker_send.py --window {args.window} --delay 3 \\")
-    print(f"     --text 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
-    print(f"3. Record the task in supervisor state:")
-    print(f"   python3 state_add.py --alias <alias> --type worker --agent {args.agent} ...")
-    if not args.resume:
-        print(f"4. If the worker didn't start, kill and retry:")
-        print(f"   python3 worker_kill.py --window {args.window}")
-    if args.agent == "cursor":
-        print()
-        print(f"Note (cursor TUI mode):")
-        print(f"  TUI is ready. Send tasks with --bracketed flag:")
-        print(f"   python3 worker_send.py --window {args.window} --bracketed --text 'Your task: ...'")
-        print(f"  Max 500 chars per message. Longer tasks: write to TASK.md, then send a pointer.")
-        print(f"  Monitor: python3 worker_capture.py --window {args.window} --tail 30")
-        print(f"  The cursor worker stays alive and accepts follow-up messages.")
+    print("2. Deliver instructions through Mailbox V2:")
+    print("   python3 mailbox_send.py --from supervisor \\")
+    print(f"     --to {args.window} --body 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
+    print("3. Record the task in supervisor state:")
+    if args.agent == "pi":
+        print(
+            f"   python3 state_add.py --alias <alias> --type worker --agent pi "
+            f"--session {pi_session_id(work_dir, args.window)} ..."
+        )
     else:
-        print()
-        print(f"Note: After sending the task, capture the window to confirm the worker")
-        print(f"  actually started on it — not just that it launched:")
-        print(f"   python3 worker_capture.py --window {args.window} --tail 30")
-        print(f"  Look for evidence of active work: tool calls, file reads, bash output.")
-        print(f"  If you only see the task text sitting at the prompt, the input was not")
-        print(f"  submitted. Use TASK.md next time; for now send a short follow-up:")
-        print(f"   python3 worker_send.py --window {args.window} --delay 3 \\")
-        print(f"     --text 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
-        print(f"  Before shutting down, verify the work is correct (background subagent).")
+        print(f"   python3 state_add.py --alias <alias> --type worker --agent {args.agent} ...")
+    print()
+    print("If the recipient is not registered or is not running, restore it through")
+    print("the managed Pi lifecycle/worker_launch.py. Do not type into its terminal or tmux pane.")
+    print("Before shutting down, verify the work is correct (background subagent).")
 
 
 if __name__ == "__main__":

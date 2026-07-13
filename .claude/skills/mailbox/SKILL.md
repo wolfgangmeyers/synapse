@@ -5,7 +5,7 @@ description: Mecha-wolfgang async mailbox — delivery format, mandatory pre-rea
 
 # Mailbox Skill
 
-Async messages between agents live under `~/.mecha-developer/mailboxes/<window-name>/` (one JSON file per message). Delivery to Claude Code is implemented by a **PreToolUse hook** (`mailbox-deliver.py`); idle agents may also receive mail via **`mailbox_cron.py`** into tmux.
+Mailbox V2 sends durable agent messages through the local router. Normal delivery needs no router environment variable: `python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to <agent> --body "<text>`. It defaults to the local HTTP router; an explicitly configured invalid router URL is rejected.
 
 ## Load ordering
 
@@ -39,7 +39,7 @@ Installed layout: `~/.claude/skills/supervisor/tools/…` (or your mecha-develop
 
 ## Supervisor window identity
 
-For the hook to deliver to the supervisor, **`MECHA_AGENT_WINDOW`** must match the supervisor’s tmux window name (e.g. `supervisor`). Workers use **`MECHA_WORKER_WINDOW`** (set by `worker_launch.py`).
+Agents derive their mailbox identity from the current tmux pane's window name. Name the supervisor window `supervisor` and each worker window with its intended agent ID; names must use letters, digits, `_`, or `-` and start with a letter or digit.
 
 ## See also
 

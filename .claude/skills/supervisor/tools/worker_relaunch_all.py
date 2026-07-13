@@ -5,7 +5,7 @@ Usage:
   python worker_relaunch_all.py [--dry-run]
 
 Reads supervisor state, kills existing worker windows, and relaunches them
-with proper --dangerously-skip-permissions flag and task descriptions.
+with each task's recorded runtime, Pi session semantics, and task descriptions.
 """
 
 import argparse
@@ -34,11 +34,27 @@ def main():
     state = load_state()
     tasks = state.get("tasks", [])
 
-    # Filter to active workers only
-    workers = [t for t in tasks if t.get("state") == "active" and t.get("type") == "worker"]
+    # Recovery is a managed Pi lifecycle operation. Never type recovery
+    # instructions into a terminal, and never guess a resumable session.
+    active_workers = [
+        task for task in tasks
+        if task.get("state") == "active" and task.get("type") == "worker"
+    ]
+    skipped_workers = [
+        task for task in active_workers
+        if task.get("agent") != "pi" or not task.get("session")
+    ]
+    workers = [task for task in active_workers if task not in skipped_workers]
+
+    for task in skipped_workers:
+        print(
+            f"⚠️  {task.get('alias', '?')}: managed recovery requires a Pi worker "
+            "with a recorded session path or ID; leaving its window running"
+        )
 
     if not workers:
-        print("No active workers to relaunch.")
+        if not skipped_workers:
+            print("No active workers to relaunch.")
         return
 
     print(f"Found {len(workers)} active worker(s) to relaunch:")
@@ -95,13 +111,16 @@ def main():
 
         print(f"  Launching {window} in {work_dir}...")
 
-        # Launch worker (--skip-permissions is now default)
+        agent = "pi"
         launch_cmd = [
             "python3",
             os.path.join(os.path.dirname(__file__), "worker_launch.py"),
             "--window", window,
-            "--dir", work_dir
+            "--dir", work_dir,
+            "--agent", agent,
         ]
+        if agent == "pi" and task.get("session"):
+            launch_cmd.extend(["--resume", task["session"]])
 
         result = subprocess.run(launch_cmd, capture_output=True, text=True)
 
@@ -111,17 +130,17 @@ def main():
 
         print(f"    ✓ Launched")
 
-        # Wait for Claude to start
+        # Wait for the worker runtime to start.
         time.sleep(4)
 
         # Build task description
         desc = task.get("description", "Continue your work")
         summary = get_worker_summary(task)
 
-        task_text = f"""You are a worker agent. Rules:
-1. Use subagents (Task tool) for all actual work - keep your context clean
-2. Maintain your todo list constantly
-3. Reference ~/personas/wolfgang.md for decisions
+        task_text = f"""You are a Pi worker. Rules:
+1. Work directly in focused stages; do not use subagents.
+2. Maintain your todo list constantly.
+3. Reference ~/personas/wolfgang.md for decisions.
 
 Your task: {desc}
 
@@ -129,20 +148,20 @@ Current status: {summary}
 
 Continue where you left off based on git status and recent commits."""
 
-        # Send task instructions
+        # Mailbox V2 is the only coordination path after lifecycle recovery.
         send_cmd = [
             "python3",
-            os.path.join(os.path.dirname(__file__), "worker_send.py"),
-            "--window", window,
-            "--text", task_text
+            os.path.join(os.path.dirname(__file__), "mailbox_send.py"),
+            "--from", "supervisor",
+            "--to", window,
+            "--body", task_text,
         ]
-
         send_result = subprocess.run(send_cmd, capture_output=True, text=True)
 
         if send_result.returncode != 0:
-            print(f"    ✗ Failed to send instructions: {send_result.stderr.strip()}")
+            print(f"    ✗ Mailbox delivery failed: {send_result.stderr.strip()}")
         else:
-            print(f"    ✓ Sent instructions")
+            print("    ✓ Sent Mailbox V2 instruction")
 
         time.sleep(1)
 

@@ -545,7 +545,7 @@ class TestHookEarlyExit(RecallTestBase):
         config = recall_lib.default_config()
         config["stores"] = []
         recall_lib.save_config(config)
-        with patch.dict(os.environ, {"MECHA_WORKER_WINDOW": "test-win"}):
+        with patch("recall_hook.current_agent_id", return_value="test-win"):
             self._run_hook()
         data = recall_lib.load_schedule()
         self.assertEqual(data["scheduled"], {})
@@ -555,7 +555,7 @@ class TestHookEarlyExit(RecallTestBase):
         config["enabled"] = False
         config["stores"] = [{"name": "kb", "index_path": "/a", "base_path": "/b"}]
         recall_lib.save_config(config)
-        with patch.dict(os.environ, {"MECHA_WORKER_WINDOW": "test-win"}):
+        with patch("recall_hook.current_agent_id", return_value="test-win"):
             self._run_hook()
         data = recall_lib.load_schedule()
         self.assertEqual(data["scheduled"], {})
@@ -564,7 +564,7 @@ class TestHookEarlyExit(RecallTestBase):
         config = recall_lib.default_config()
         config["stores"] = [{"name": "kb", "index_path": "/a", "base_path": "/b"}]
         recall_lib.save_config(config)
-        with patch.dict(os.environ, {"MECHA_WORKER_WINDOW": "test-win"}):
+        with patch("recall_hook.current_agent_id", return_value="test-win"):
             self._run_hook()
         data = recall_lib.load_schedule()
         self.assertIn("test-win", data["scheduled"])

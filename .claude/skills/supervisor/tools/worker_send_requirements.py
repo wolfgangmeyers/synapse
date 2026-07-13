@@ -2,7 +2,7 @@
 """Send (or re-send) requirements to a worker.
 
 Reads the requirements field from the supervisor state for the given task,
-wraps it in a context message, and sends it to the worker's tmux window.
+wraps it in a context message, and delivers it through Mailbox V2.
 
 Usage:
   python worker_send_requirements.py --alias ALIAS [--update] [--dry-run]
@@ -10,7 +10,7 @@ Usage:
 Modes:
   Default:    Send requirements as initial context
   --update:   Wrap with "Your requirements have been updated:" prefix
-  --dry-run:  Print what would be sent without sending to tmux
+  --dry-run:  Print what would be sent without delivering it
 
 Examples:
   # Send initial requirements
@@ -25,6 +25,7 @@ Examples:
 
 import argparse
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -99,26 +100,29 @@ def main():
     if args.dry_run:
         alias = task.get("alias", args.alias)
         mode = "UPDATE" if args.update else "INITIAL"
-        print(f"[dry-run] Would send {mode} requirements to window '{window}' (task: {alias}):")
+        print(f"[dry-run] Would send {mode} requirements to agent '{window}' (task: {alias}):")
         print()
         print(message)
         return
 
-    from _tmux import send_text_and_enter, window_exists
-
-    if not window_exists(window):
-        print(f"Error: window '{window}' does not exist", file=sys.stderr)
-        sys.exit(1)
-
-    send_text_and_enter(window, message)
+    result = subprocess.run(
+        [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "mailbox_send.py"),
+            "--from", "supervisor",
+            "--to", window,
+            "--body", message,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"Error: Mailbox V2 delivery failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(result.returncode)
 
     alias = task.get("alias", args.alias)
     mode = "updated" if args.update else "initial"
-    print(f"Sent {mode} requirements to '{window}' (task: {alias}).")
-    print()
-    print("--- Reminders ---")
-    print(f"1. Update supervisor state:")
-    print(f'   python3 state_update_status.py {alias} "Sent {mode} requirements to worker"')
+    print(f"Sent {mode} requirements to Mailbox V2 agent '{window}' (task: {alias}).")
 
 
 if __name__ == "__main__":

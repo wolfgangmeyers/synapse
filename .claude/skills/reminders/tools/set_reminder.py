@@ -1,100 +1,20 @@
 #!/usr/bin/env python3
-"""Set a one-shot reminder that fires via mailbox after a delay.
+"""Compatibility entry point for setting a Mailbox V2 reminder.
 
-Usage:
-  python3 set_reminder.py --window supervisor --message "Check PR" --in 10m
-  python3 set_reminder.py --window worker1 --message "Run tests" --in 1h30m
-  python3 set_reminder.py --window supervisor --message "Standup" --at "2026-03-06T15:00:00"
+Prefer `reminders.py set ...`. This wrapper accepts the former set_reminder.py
+arguments but delegates them to the durable V2 router client.
 """
 
-import argparse
-import os
-import re
+from __future__ import annotations
+
 import sys
-import time
-from datetime import datetime, timedelta, timezone
 
-from _reminders import locked_reminders
+import reminders
 
 
-SELF_WINDOW_ALIASES = {"me", "self", "current"}
-
-
-def parse_duration(s):
-    """Parse duration string like 10m, 1h30m, 2h, 45s, 1h30m20s into timedelta."""
-    pattern = r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$'
-    m = re.match(pattern, s.strip())
-    if not m or not any(m.groups()):
-        print(f"Error: invalid duration '{s}'. Use formats like 10m, 1h30m, 2h, 45s", file=sys.stderr)
-        sys.exit(1)
-    hours = int(m.group(1) or 0)
-    minutes = int(m.group(2) or 0)
-    seconds = int(m.group(3) or 0)
-    return timedelta(hours=hours, minutes=minutes, seconds=seconds)
-
-
-def resolve_window(window):
-    """Resolve self aliases to the managed agent window that can receive mail."""
-    if window not in SELF_WINDOW_ALIASES:
-        return window, None
-
-    resolved = (
-        os.environ.get("MECHA_AGENT_WINDOW")
-        or os.environ.get("MECHA_WORKER_WINDOW")
-        or "supervisor"
-    )
-    return resolved, window
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Set a reminder")
-    parser.add_argument("--window", required=True, help="Target window name")
-    parser.add_argument("--message", required=True, help="Reminder message")
-    parser.add_argument("--in", dest="in_duration", metavar="DURATION",
-                        help="Relative time (e.g. 10m, 1h30m)")
-    parser.add_argument("--at", dest="at_time", metavar="ISO",
-                        help="Absolute ISO 8601 datetime (e.g. 2026-03-06T15:00:00)")
-    args = parser.parse_args()
-
-    if args.in_duration and args.at_time:
-        print("Error: specify either --in or --at, not both", file=sys.stderr)
-        sys.exit(1)
-    if not args.in_duration and not args.at_time:
-        print("Error: one of --in or --at is required", file=sys.stderr)
-        sys.exit(1)
-
-    now = datetime.now(timezone.utc)
-
-    if args.in_duration:
-        delta = parse_duration(args.in_duration)
-        fire_at = now + delta
-    else:
-        try:
-            fire_at = datetime.fromisoformat(args.at_time)
-        except ValueError:
-            print(f"Error: invalid ISO datetime '{args.at_time}'. Use format 2026-03-06T15:00:00", file=sys.stderr)
-            sys.exit(1)
-
-    target_window, alias = resolve_window(args.window)
-    reminder_id = f"r-{time.time_ns()}"
-    reminder = {
-        "id": reminder_id,
-        "window": target_window,
-        "message": args.message,
-        "fire_at": fire_at.isoformat(),
-        "created_at": now.isoformat(),
-    }
-
-    with locked_reminders() as reminders:
-        reminders.append(reminder)
-
-    print(f"Reminder set: {reminder_id}")
-    print(f"Window:       {target_window}")
-    if alias:
-        print(f"Resolved:     {alias} -> {target_window}")
-    print(f"Fires at:     {fire_at.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Message:      {args.message}")
+def main(argv: list[str] | None = None) -> int:
+    return reminders.main(["set", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
