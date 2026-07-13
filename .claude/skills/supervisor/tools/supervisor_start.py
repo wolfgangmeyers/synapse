@@ -33,6 +33,7 @@ DEFAULT_DIR = os.path.expanduser("~/code/mecha-developer")
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.6-terra"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
+PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -66,19 +67,16 @@ def resolve_pi_router_url():
 
 
 def resolve_pi_mailbox_extension():
-    """Return the explicitly configured Mailbox V2 extension for Pi."""
-    configured_path = os.environ.get(PI_MAILBOX_EXTENSION_ENV)
-    if not configured_path:
-        raise ValueError(
-            f"{PI_MAILBOX_EXTENSION_ENV} is required for Pi supervisor startup; "
-            "refusing to rely on globally discovered extensions."
-        )
-
+    """Return the explicit override or stable Mailbox V2 extension for Pi."""
+    has_override = PI_MAILBOX_EXTENSION_ENV in os.environ
+    configured_path = os.environ[PI_MAILBOX_EXTENSION_ENV] if has_override else PI_MAILBOX_EXTENSION_PATH
     extension_path = os.path.abspath(os.path.expanduser(configured_path))
-    if not os.path.isfile(extension_path):
+    if not os.path.isfile(extension_path) or os.path.islink(extension_path):
+        source = PI_MAILBOX_EXTENSION_ENV if has_override else "stable Pi extension"
         raise ValueError(
-            f"{PI_MAILBOX_EXTENSION_ENV} does not name a readable extension file: "
-            f"{extension_path}"
+            f"{source} must name a regular, non-symlink extension file: {extension_path}. "
+            f"Install the canonical Pi extension first: python3 "
+            f"{os.path.join(os.path.dirname(__file__), 'install_pi_extension.py')}"
         )
     return extension_path
 

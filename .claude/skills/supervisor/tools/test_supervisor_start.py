@@ -37,6 +37,26 @@ class SupervisorStartTest(unittest.TestCase):
         self.assertEqual(command.count("--extension"), 1)
         self.assertIn("--approve", command)
 
+    def test_no_env_uses_stable_extension_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extension = pathlib.Path(tmpdir) / "mecha-messaging.js"
+            extension.write_text("export default () => {};\n", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True), patch.object(
+                supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(extension)
+            ):
+                self.assertEqual(supervisor_start.resolve_pi_mailbox_extension(), str(extension))
+
+    def test_explicit_extension_override_wins_over_stable_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            override = pathlib.Path(tmpdir) / "override.js"
+            override.write_text("export default () => {};\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {supervisor_start.PI_MAILBOX_EXTENSION_ENV: str(override)},
+                clear=True,
+            ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", "/missing/stable.js"):
+                self.assertEqual(supervisor_start.resolve_pi_mailbox_extension(), str(override))
+
     def test_supervisor_launch_exports_router_configuration_but_not_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             extension = pathlib.Path(tmpdir) / "mecha-messaging.js"
@@ -48,24 +68,24 @@ class SupervisorStartTest(unittest.TestCase):
                 ["supervisor_start.py", "--dir", tmpdir],
             ), patch.dict(
                 os.environ,
-                {
-                    supervisor_start.PI_MAILBOX_EXTENSION_ENV: str(extension),
-                    supervisor_start.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
-                },
-                clear=False,
-            ), patch.object(supervisor_start, "session_exists", return_value=False), patch.object(
-                supervisor_start, "ensure_session"
-            ), patch.object(
+                {supervisor_start.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765"},
+                clear=True,
+            ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(extension)), patch.object(
+                supervisor_start, "session_exists", return_value=False
+            ), patch.object(supervisor_start, "ensure_session"), patch.object(
                 supervisor_start, "send_text", side_effect=lambda _window, command: commands.append(command)
             ), patch.object(supervisor_start, "send_enter"), patch.object(supervisor_start.time, "sleep"):
                 supervisor_start.main()
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--extension") + 1], str(extension))
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])
 
-    def test_missing_extension_exits_before_creating_tmux_session(self):
+    def test_invalid_stable_extension_exits_before_creating_tmux_session(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            missing = pathlib.Path(tmpdir) / "missing.js"
             stderr = io.StringIO()
             with patch.object(
                 supervisor_start.sys,
@@ -73,8 +93,65 @@ class SupervisorStartTest(unittest.TestCase):
                 ["supervisor_start.py", "--dir", tmpdir],
             ), patch.dict(
                 os.environ,
-                {supervisor_start.PI_MAILBOX_EXTENSION_ENV: ""},
-                clear=False,
+                {supervisor_start.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765"},
+                clear=True,
+            ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(missing)), patch.object(
+                supervisor_start, "ensure_session"
+            ) as ensure_session, contextlib.redirect_stderr(stderr), self.assertRaises(
+                SystemExit
+            ) as raised:
+                supervisor_start.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        ensure_session.assert_not_called()
+        self.assertIn("regular, non-symlink", stderr.getvalue())
+
+    def test_empty_env_override_exits_before_creating_tmux_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stable = pathlib.Path(tmpdir) / "mecha-messaging.js"
+            stable.write_text("export default () => {};\n", encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.object(
+                supervisor_start.sys,
+                "argv",
+                ["supervisor_start.py", "--dir", tmpdir],
+            ), patch.dict(
+                os.environ,
+                {
+                    supervisor_start.PI_MAILBOX_EXTENSION_ENV: "",
+                    supervisor_start.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+                },
+                clear=True,
+            ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(stable)), patch.object(
+                supervisor_start,
+                "ensure_session",
+            ) as ensure_session, contextlib.redirect_stderr(stderr), self.assertRaises(
+                SystemExit
+            ) as raised:
+                supervisor_start.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        ensure_session.assert_not_called()
+        self.assertIn(supervisor_start.PI_MAILBOX_EXTENSION_ENV, stderr.getvalue())
+
+    def test_symlinked_env_override_exits_before_creating_tmux_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = pathlib.Path(tmpdir) / "extension.js"
+            target.write_text("export default () => {};\n", encoding="utf-8")
+            symlink = pathlib.Path(tmpdir) / "symlink.js"
+            symlink.symlink_to(target)
+            stderr = io.StringIO()
+            with patch.object(
+                supervisor_start.sys,
+                "argv",
+                ["supervisor_start.py", "--dir", tmpdir],
+            ), patch.dict(
+                os.environ,
+                {
+                    supervisor_start.PI_MAILBOX_EXTENSION_ENV: str(symlink),
+                    supervisor_start.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+                },
+                clear=True,
             ), patch.object(
                 supervisor_start,
                 "ensure_session",
