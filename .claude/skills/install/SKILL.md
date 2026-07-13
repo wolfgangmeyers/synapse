@@ -5,7 +5,7 @@ description: "Set up or reinstall mecha-developer by symlinking personas, skills
 
 # Install Skill
 
-Set up mecha-developer by symlinking personas and skills to the user's home directory.
+Set up mecha-developer by symlinking personas and skills to the user's home directory, and by copying the Pi mailbox extension to its stable local path.
 
 ## Usage
 
@@ -19,6 +19,7 @@ Set up mecha-developer by symlinking personas and skills to the user's home dire
 2. **Symlinks personas** to `~/personas/` so they're accessible from any project
 3. **Symlinks skill folders** to `~/.claude/skills/` so they're available globally in Claude Code
 4. **Symlinks CLI scripts** (`ai`, `mecha-supervisor`) to `~/.local/bin/`
+5. **Copies and registers** the canonical Pi mailbox extension for bare Pi sessions
 
 ## Process
 
@@ -174,6 +175,61 @@ else
   echo "linked: $SUP_LINK -> $SUP_SRC"
 fi
 ```
+
+### Pi mailbox extension (bare Pi)
+
+Do this before launching Pi. It copies—not symlinks—the canonical extension to
+`~/.mecha-developer/extensions/mecha-messaging.js`, then registers that exact
+path once in `~/.pi/agent/settings.json`. The installer uses the
+`pi-extension-maintenance` transaction: it validates regular source/target
+files, stages the copy beside the target, retains rollback copies through
+verification, atomically rewrites settings, preserves unrelated settings and
+packages, and removes duplicate registrations only for the exact stable path.
+It never deletes a differently named or stale extension registration.
+
+```bash
+REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
+SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging.js"
+TARGET="$HOME/.mecha-developer/extensions/mecha-messaging.js"
+SETTINGS="$HOME/.pi/agent/settings.json"
+INSTALLER="$REPO_ROOT/.claude/skills/supervisor/tools/install_pi_extension.py"
+
+# Preflight: stop on any failure without mutating the installed artifact/settings.
+test -f "$SOURCE" && test ! -L "$SOURCE"
+test -f "$REPO_ROOT/tests/pi_extension_silent.test.mjs"
+node --test "$REPO_ROOT/tests/pi_extension_silent.test.mjs"
+node --check "$SOURCE"
+(
+  cd "$REPO_ROOT/.claude/skills/supervisor/tools"
+  python3 -m unittest test_supervisor_start test_install_pi_extension
+)
+python3 "$INSTALLER"
+
+# Final status: target must be regular, byte-identical, and registered exactly once.
+python3 - "$SOURCE" "$TARGET" "$SETTINGS" <<'PY'
+import json, pathlib, sys
+source, target, settings = map(pathlib.Path, sys.argv[1:])
+data = json.loads(settings.read_text())
+packages = data.get("packages", [])
+if not target.is_file() or target.is_symlink() or source.read_bytes() != target.read_bytes():
+    raise SystemExit(f"invalid installed Pi extension: {target}")
+count = packages.count(str(target))
+if count != 1:
+    raise SystemExit(f"expected one stable Pi registration, found {count}")
+stale = [p for p in packages if isinstance(p, str) and p.endswith("/mecha-messaging.js") and p != str(target)]
+print(f"ok: {target}; target registrations: {count}; stale registrations retained: {len(stale)}")
+for path in stale:
+    print(f"stale (not removed): {path}")
+PY
+
+# Only after the final status check succeeds, discard transaction rollback copies.
+rm -f "$TARGET.rollback" "$SETTINGS.mecha-messaging.rollback"
+```
+
+Global registration is for bare Pi only. New supervisor and worker processes
+remain explicitly launched with `--no-extensions --extension "$TARGET"`; they
+do not rely on global extension discovery. If an existing bare Pi process needs
+the update, reload it after the final check.
 
 ### 7. Symlink Hooks
 
@@ -480,6 +536,19 @@ echo "=== CLI Scripts ==="
 ls -la ~/.local/bin/ai ~/.local/bin/mecha-supervisor 2>/dev/null || echo "none"
 
 echo ""
+echo "=== Pi Extension ==="
+TARGET="$HOME/.mecha-developer/extensions/mecha-messaging.js"
+SETTINGS="$HOME/.pi/agent/settings.json"
+if [ -f "$TARGET" ] && [ ! -L "$TARGET" ] && [ -f "$SETTINGS" ]; then
+  python3 - "$TARGET" "$SETTINGS" <<'PY'
+import json, pathlib, sys
+target, settings = map(pathlib.Path, sys.argv[1:])
+print(f"target registrations: {json.loads(settings.read_text()).get('packages', []).count(str(target))}")
+PY
+else
+  echo "MISSING: stable Pi extension or Pi settings"
+fi
+
 echo "=== Dashboard Venv ==="
 if [ -d "tools/.venv" ] && tools/.venv/bin/python3 -c "import flask" 2>/dev/null; then
   echo "ok: tools/.venv exists with Flask"
