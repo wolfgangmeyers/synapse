@@ -1368,7 +1368,7 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
     `).run(nextDueAt, reminder.id);
     return undefined;
   }
-  if (reminder.next_due_at < now) {
+  if (timestampAfter(reminder.next_due_at, reminder.interval_ms) <= now) {
     database.prepare(`
       UPDATE reminders
       SET next_due_at = ?
