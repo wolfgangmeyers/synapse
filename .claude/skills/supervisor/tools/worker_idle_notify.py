@@ -4,9 +4,8 @@
 Designed to run as a Claude Code Stop hook. Posts a message to the
 supervisor tmux window so the supervisor knows the worker is waiting.
 
-Only fires when running inside a managed mecha worker session:
-  - MECHA_WORKER_WINDOW must be set (set by worker_launch.py)
-  - TMUX must be set (confirms we're inside a tmux session)
+Only fires when running inside a managed mecha worker session with a valid
+current tmux window name.
 
 Uses a lockfile to prevent duplicate notifications when the hook
 fires multiple times in quick succession.
@@ -22,7 +21,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _state import load_state, find_task_by_window
-from _tmux import send_text_and_enter, window_exists, window_idle_seconds
+from _tmux import current_agent_id, send_text_and_enter, window_exists, window_idle_seconds
 
 SUPERVISOR_WINDOW = os.environ.get("MECHA_SUPERVISOR_WINDOW", "supervisor")
 SUPERVISOR_MIN_IDLE = 30  # seconds — only notify if supervisor has been quiet this long
@@ -45,16 +44,9 @@ def setup_logging():
 def detect_managed_worker():
     """Return the worker window name if running in a managed mecha session, else None.
 
-    Requires both:
-      MECHA_WORKER_WINDOW — set by worker_launch.py for all managed workers
-      TMUX              — set by tmux for all processes running inside a session
+    The identity is the current pane's validated tmux window name.
     """
-    worker = os.environ.get("MECHA_WORKER_WINDOW")
-    if not worker:
-        return None
-    if not os.environ.get("TMUX"):
-        return None
-    return worker
+    return current_agent_id()
 
 
 def acquire_lock():

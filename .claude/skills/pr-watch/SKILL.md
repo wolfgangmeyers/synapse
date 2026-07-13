@@ -11,17 +11,79 @@ This is a polling substitute for review-bot intake, not an external communicatio
 
 ## Start The Watcher
 
-Use the bundled polling script from an installed skill:
+The watcher is a one-scan program. Pi receives durable router wakeups and invokes it; do not use `--loop` or a direct polling process.
+
+Launch the deterministic Pi service with the stable Mailbox V2 extension:
 
 ```bash
-python3 ~/.claude/skills/pr-watch/tools/watch_prs.py --loop
+# Run this in a tmux window named pr-watch.
+MECHA_ROUTER_URL=http://127.0.0.1:8765 \
+pi --provider openai-codex --model gpt-5.6-terra \
+  --no-extensions --extension "$HOME/.mecha-developer/extensions/mecha-messaging.js"
 ```
 
-Or from this repository:
+### Service startup contract
+
+The running `pr-watch` Pi service owns its single durable recurrence. Its initial
+prompt must first make it read and use this skill, then run exactly:
 
 ```bash
-python3 .claude/skills/pr-watch/tools/watch_prs.py --loop
+python3 ~/.claude/skills/reminders/tools/reminders.py \
+  reconcile-pr-watch --router-url http://127.0.0.1:8765
 ```
+
+This creates or reconciles exactly one **scheduled** V2 recurrence with target
+`pr-watch`, creator `pr-watch`, subject `PR watch wakeup`, and interval
+`900000` milliseconds (15 minutes). It is not a router job: the router only
+persists and delivers visible wakeup envelopes. The Pi agent, not its
+extension, performs the watcher scan after receiving one.
+
+Reconciliation is fail-closed. It first lists the canonical router state. One
+matching scheduled recurrence is retained; duplicate or stale *scheduled*
+records owned by this service are canceled before a replacement is created.
+A due, linked, failed, or otherwise non-scheduled owned record is never
+canceled and no replacement is created, because that could overlap a delivery.
+A deterministic reminder ID makes concurrent startup attempts idempotent; on
+an ID conflict the client lists and verifies the other attempt instead of
+creating a second recurrence. If the router cannot be listed or verified, the
+service reports failure and does not create a reminder.
+
+### Visible wakeup contract
+
+Mailbox V2 is the only scheduler. Never create, replace, or reconcile a
+reminder in response to a wakeup; startup reconciliation above is the sole
+recurrence-management step. Do not use V1 reminders, cron, `worker_send.py`,
+or terminal injection.
+
+When this Pi window visibly receives a Mailbox envelope addressed to
+`pr-watch` with subject exactly `PR watch wakeup`, treat it as one instruction:
+
+```bash
+python3 ~/.claude/skills/pr-watch/tools/watch_prs.py \
+  --router-url http://127.0.0.1:8765
+```
+
+Run that command exactly once for that envelope. Do not run a dry-run first,
+start a loop, retry it by launching another scan, or scan again merely to
+summarize the result. Do not run `watch_prs.py` for any other Mailbox envelope,
+including an operational instruction to read this skill. Normal Mailbox
+injection/ACK only proves the envelope was delivered to Pi; it does not run the
+watcher behind the agent's back.
+
+### Scan reporting contract
+
+Every scan must report its result to `supervisor` through Mailbox V2. Normally
+`watch_prs.py` does this itself: it records its report/state and sends `PR watch
+findings` when actionable PRs are found or an hourly `PR watch quiet` report.
+An unhandled pass error sends `PR watch error` and exits nonzero.
+
+Do not assume terminal output is a supervisor report. If the script cannot send
+its report, send a concise outcome or failure report to `supervisor` yourself
+with `~/.claude/skills/supervisor/tools/mailbox_send.py` and the HTTP router
+URL. If the supervisor says an existing scan report was missed, do not rescan:
+read that scan's existing report and resend its findings once with subject
+exactly `PR watch findings`. Do not create a reminder as recovery; leave the
+existing V2 recurrence to the router and report the failure.
 
 Prerequisites:
 
@@ -89,10 +151,10 @@ The state file records each open PR's last seen head SHA, review request state, 
 
 ## Tuning
 
-Override the repo list for a run:
+Override the repo list for one explicit scan:
 
 ```bash
-python3 ~/.claude/skills/pr-watch/tools/watch_prs.py --loop \
+python3 ~/.claude/skills/pr-watch/tools/watch_prs.py \
   --repo Identity-Digital/dnsid \
   --repo Identity-Digital/dnsid-go
 ```

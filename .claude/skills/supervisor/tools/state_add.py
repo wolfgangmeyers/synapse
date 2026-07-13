@@ -35,8 +35,17 @@ def main():
                         help="Why this task exists — what problem it solves or goal it achieves")
     parser.add_argument("--requirements", default=None,
                         help="Detailed markdown requirements for what the worker should accomplish")
-    parser.add_argument("--agent", default=None,
-                        help="Agent type running the task: 'claude' or 'codex' (omit for supervisor/direct tasks)")
+    parser.add_argument(
+        "--agent",
+        default=None,
+        choices=["pi", "claude", "codex", "cursor"],
+        help="Agent runtime: 'pi', 'claude', 'codex', or 'cursor' (omit for supervisor/direct tasks)",
+    )
+    parser.add_argument(
+        "--session",
+        default=None,
+        help="Pi session path or ID for a resumable Pi worker",
+    )
     parser.add_argument("--remote-host", default=None, dest="remote_host",
                         help="Remote host ID for remote-worker tasks")
     parser.add_argument("--remote-hostname", default=None, dest="remote_hostname",
@@ -47,6 +56,10 @@ def main():
                         help="Task ID on the remote subordinate")
 
     args = parser.parse_args()
+
+    # Validate agent/session consistency before changing state.
+    if args.session and args.agent != "pi":
+        parser.error("--session requires --agent pi")
 
     # Validate type/remote-host consistency
     if args.type == "remote-worker" and not args.remote_host:
@@ -72,6 +85,7 @@ def main():
             "pr": args.pr,
             "linear": args.linear,
             "agent": args.agent,
+            "session": args.session,
             "dev_environment": args.dev_environment,
             "purpose": args.purpose,
             "requirements": args.requirements,

@@ -4,7 +4,11 @@ This repo holds dev-tooling skills for Wolfgang's AI agent workflow. Skills live
 
 ## How skills work
 
-A skill is a self-contained instruction set. Any agent (Claude Code, Codex, Cursor) reads `SKILL.md` and follows the instructions. Skills can reference other skills, but the file is always authoritative — never assume what a skill does, look it up.
+A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, Cursor) reads `SKILL.md` and follows the instructions. Skills can reference other skills, but the file is always authoritative — never assume what a skill does, look it up.
+
+## Worker Runtime
+
+All new managed workers use Pi with provider `openai-codex` and model `gpt-5.6-terra`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. The launchers refuse stale global extension discovery. Do not launch Codex, Claude Code, or Cursor workers unless Wolfgang explicitly overrides this policy. Existing workers are grandfathered and must not be restarted only to change runtimes.
 
 ## Maintenance
 
@@ -33,6 +37,7 @@ could affect files, external communication, or destructive operations.
 | `install` | Set up or reinstall mecha-developer by symlinking personas, skills, and hooks to the home directory. One-time setup utility. |
 | `kb` | Manage the persistent markdown knowledge base at `~/.mecha-developer/kb/`. For persistent, reusable knowledge worth keeping across sessions. |
 | `mailbox` | Mecha-wolfgang async mailbox — delivery format, mandatory pre-read `state_update` blocks, hooks/cron. **Load with supervisor** so `[MAILBOX]` injections are handled correctly. Spec: `MAILBOX_REQUIREMENTS.md` at repo root. |
+| `pi-extension-maintenance` | Safely inspect, install, update, uninstall, and diagnose the copied Mailbox V2 Pi extension lifecycle without touching unrelated Pi configuration. |
 | `pr-watch` | Run and maintain the read-only polling GitHub PR watcher used as a lightweight substitute for the webhook PR review bot. |
 | `recall` | Proactive memory surfacing system — detects when stored knowledge is relevant and delivers it via mailbox before the agent needs to be told. Runs automatically via hook + cron. |
 | `reminders` | Set one-shot reminders that fire via mailbox after a delay. Set, list, or delete reminders for any tmux window. |

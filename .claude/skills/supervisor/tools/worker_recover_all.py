@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Recover all active workers after tmux crash.
 
-Reads supervisor state and relaunches all active workers with --resume,
-attempting to reconnect them to their previous sessions.
+Reads supervisor state and relaunches active workers with their recorded runtime.
+Pi workers resume through their recorded Pi session path or ID.
 
 Usage:
   python worker_recover_all.py [--dry-run]
@@ -24,6 +24,8 @@ def recover_worker(task, dry_run=False):
     window = task.get("window")
     project = task.get("project")
     worktree = task.get("worktree")
+    agent = task.get("agent") or "codex"
+    session = task.get("session")
 
     if not window or not project:
         print(f"⚠️  {alias}: Missing window or project, skipping")
@@ -39,18 +41,37 @@ def recover_worker(task, dry_run=False):
 
     print(f"🔄 {alias}: Recovering in {window} at {work_dir}")
 
+    if agent != "pi":
+        print(
+            f"⚠️  {alias}: legacy runtime recovery is unsupported; restore it through "
+            "the managed Pi launcher."
+        )
+        return False
+
+    if not session:
+        print(f"⚠️  {alias}: Pi recovery requires a recorded session path or ID, skipping")
+        return False
+
     if dry_run:
-        print(f"   [DRY RUN] Would launch: --window {window} --dir {work_dir} --resume")
+        resume_detail = f" --resume {session}" if agent == "pi" else ""
+        print(
+            f"   [DRY RUN] Would launch: --window {window} --dir {work_dir} "
+            f"--agent {agent}{resume_detail}"
+        )
         return True
 
-    # Launch worker without --resume first
+    # Preserve legacy runtime branches. Pi maps --resume to its --session flag
+    # inside worker_launch.py and therefore reconnects without a TUI picker.
     launch_cmd = [
         "python3",
         os.path.join(os.path.dirname(__file__), "worker_launch.py"),
         "--window", window,
         "--dir", work_dir,
-        "--skip-permissions"
+        "--agent", agent,
+        "--skip-permissions",
     ]
+    if agent == "pi":
+        launch_cmd.extend(["--resume", session])
 
     try:
         subprocess.run(launch_cmd, capture_output=True, text=True, check=True)
@@ -59,25 +80,8 @@ def recover_worker(task, dry_run=False):
         print(f"   Error: {e.stderr}")
         return False
 
-    # Wait for Claude to start
-    time.sleep(3)
-
-    # Send interactive resume command
-    send_cmd = [
-        "python3",
-        os.path.join(os.path.dirname(__file__), "worker_send.py"),
-        "--window", window,
-        "--text", "claude --resume"
-    ]
-
-    try:
-        subprocess.run(send_cmd, capture_output=True, text=True, check=True)
-        print(f"✅ {alias}: Launched with resume picker")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"⚠️  {alias}: Launched but resume command failed")
-        print(f"   Error: {e.stderr}")
-        return True  # Window exists, that's the important part
+    print(f"✅ {alias}: Resumed Pi session {session}")
+    return True
 
 
 def main():
@@ -124,7 +128,7 @@ def main():
     if not args.dry_run and recovered > 0:
         print()
         print("Next steps:")
-        print("1. Each worker will show a session picker - select the most recent session")
+        print("1. Pi workers resume their recorded session; legacy workers may show a picker")
         print("2. Verify workers reconnected: python3 worker_list.py")
         print("3. Update supervisor state as needed")
 
