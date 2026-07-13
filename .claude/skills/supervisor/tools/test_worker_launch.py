@@ -1,230 +1,113 @@
 #!/usr/bin/env python3
-"""Tests for worker_launch helper behavior."""
+"""Focused tests for Mailbox V2 worker-launch guidance."""
 
 import contextlib
 import io
-import json
 import os
 import pathlib
+import shlex
 import tempfile
-import textwrap
 import unittest
+import uuid
 from unittest.mock import patch
 
 import worker_launch
 
 
-class WorkerLaunchReminderTest(unittest.TestCase):
+class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.tmp_path = pathlib.Path(self.tmpdir.name)
 
-    def _write_tool(self, body):
-        tool = self.tmp_path / "set_reminder.py"
-        tool.write_text(textwrap.dedent(body), encoding="utf-8")
-        return tool
+    def test_launch_output_uses_mailbox_v2_without_v1_reminder_or_terminal_sender(self):
+        _, output = self._run_main("mailbox-worker")
 
-    def test_post_launch_reminder_invokes_existing_tool(self):
-        args_file = self.tmp_path / "args.json"
-        tool = self._write_tool(
-            f"""
-            import json
-            import sys
+        self.assertIn("mailbox_send.py --from supervisor", output)
+        self.assertIn("--to mailbox-worker", output)
+        self.assertIn("managed Pi lifecycle/worker_launch.py", output)
+        self.assertNotIn("worker_send.py", output)
+        self.assertNotIn("set_reminder.py", output)
+        self.assertNotIn("--- Reminders ---", output)
 
-            with open({str(args_file)!r}, "w", encoding="utf-8") as fh:
-                json.dump(sys.argv[1:], fh)
-            print("Reminder set: r-test")
-            """
-        )
+    def test_main_defaults_to_pinned_pi_terra(self):
+        extension = self._pi_mailbox_extension()
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, output = self._run_main("pi-worker", agent=None)
 
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            reminder_id = worker_launch._schedule_post_launch_reminder(
-                "worker-1",
-                "launched",
-                reminder_tool=tool,
-                supervisor_window="supervisor",
-            )
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
+        self.assertEqual(command[command.index("--extension") + 1], str(extension))
+        self.assertIn("--no-extensions", command)
+        session_id = command[command.index("--session-id") + 1]
+        self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
+        self.assertEqual(str(uuid.UUID(session_id)), session_id)
+        self.assertIn(f"--session {session_id}", output)
 
-        self.assertEqual(reminder_id, "r-test")
-        self.assertIn("Post-launch verification reminder set: r-test", stdout.getvalue())
+    def test_main_maps_resume_to_pi_session(self):
+        extension = self._pi_mailbox_extension()
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", "--resume", "session-123", agent="pi")
 
-        argv = json.loads(args_file.read_text(encoding="utf-8"))
-        self.assertEqual(argv[0:2], ["--window", "supervisor"])
-        self.assertEqual(argv[2], "--message")
-        self.assertIn("worker-1", argv[3])
-        self.assertIn("accepted its task instructions", argv[3])
-        self.assertIn("not merely that the agent process launched", argv[3])
-        self.assertEqual(argv[4:6], ["--in", worker_launch.POST_LAUNCH_REMINDER_DELAY])
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--session") + 1], "session-123")
+        self.assertNotIn("resume", command)
 
-    def test_post_launch_reminder_warns_when_tool_is_missing(self):
-        missing_tool = self.tmp_path / "missing.py"
+    def test_pi_launch_exports_router_configuration_but_not_identity(self):
+        extension = self._pi_mailbox_extension()
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", agent="pi")
 
+        self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
+        self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
+        self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])
+
+    def test_main_refuses_pi_global_extension_discovery(self):
+        argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name]
         stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            reminder_id = worker_launch._schedule_post_launch_reminder(
-                "worker-2",
-                "resumed",
-                reminder_tool=missing_tool,
-                supervisor_window="supervisor",
-            )
+        with patch.object(worker_launch.sys, "argv", argv), \
+             patch.dict(os.environ, {worker_launch.PI_MAILBOX_EXTENSION_ENV: ""}, clear=False), \
+             contextlib.redirect_stderr(stderr), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
 
-        self.assertIsNone(reminder_id)
-        warning = stderr.getvalue()
-        self.assertIn("Warning: could not set post-launch verification reminder", warning)
-        self.assertIn("reminder tool not found", warning)
-        self.assertIn("Set it manually:", warning)
-        self.assertIn("worker-2", warning)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(worker_launch.PI_MAILBOX_EXTENSION_ENV, stderr.getvalue())
 
-    def test_post_launch_reminder_warns_when_tool_fails(self):
-        tool = self._write_tool(
-            """
-            import sys
+    def _pi_mailbox_extension(self):
+        extension = self.tmp_path / "mecha-messaging.js"
+        extension.write_text("export default () => {};\n", encoding="utf-8")
+        return extension
 
-            print("no reminder for you", file=sys.stderr)
-            sys.exit(7)
-            """
-        )
-
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            reminder_id = worker_launch._schedule_post_launch_reminder(
-                "worker-3",
-                "launched",
-                reminder_tool=tool,
-                supervisor_window="supervisor",
-            )
-
-        self.assertIsNone(reminder_id)
-        warning = stderr.getvalue()
-        self.assertIn("exited 7", warning)
-        self.assertIn("stderr: no reminder for you", warning)
-        self.assertIn("Set it manually:", warning)
-        self.assertIn("worker-3", warning)
-
-    def test_post_launch_reminder_warns_when_tool_times_out(self):
-        tool = self._write_tool("")
-
-        stderr = io.StringIO()
-        with patch.object(
-            worker_launch.subprocess,
-            "run",
-            side_effect=worker_launch.subprocess.TimeoutExpired(
-                cmd="set_reminder.py",
-                timeout=worker_launch.POST_LAUNCH_REMINDER_TIMEOUT_SECONDS,
-            ),
-        ), contextlib.redirect_stderr(stderr):
-            reminder_id = worker_launch._schedule_post_launch_reminder(
-                "worker-timeout",
-                "launched",
-                reminder_tool=tool,
-                supervisor_window="supervisor",
-            )
-
-        self.assertIsNone(reminder_id)
-        warning = stderr.getvalue()
-        self.assertIn("timed out", warning)
-        self.assertIn("Set it manually:", warning)
-        self.assertIn("worker-timeout", warning)
-
-    def test_post_launch_reminder_warns_when_tool_cannot_start(self):
-        tool = self._write_tool("")
-
-        stderr = io.StringIO()
-        with patch.object(
-            worker_launch.subprocess,
-            "run",
-            side_effect=OSError("permission denied"),
-        ), contextlib.redirect_stderr(stderr):
-            reminder_id = worker_launch._schedule_post_launch_reminder(
-                "worker-oserror",
-                "launched",
-                reminder_tool=tool,
-                supervisor_window="supervisor",
-            )
-
-        self.assertIsNone(reminder_id)
-        warning = stderr.getvalue()
-        self.assertIn("permission denied", warning)
-        self.assertIn("Set it manually:", warning)
-        self.assertIn("worker-oserror", warning)
-
-    def test_supervisor_window_can_come_from_environment(self):
-        tool = self._write_tool(
-            """
-            import sys
-
-            if sys.argv[sys.argv.index('--window') + 1] != "supervisor-alt":
-                sys.exit(3)
-            print("Reminder set: r-env")
-            """
-        )
-
-        old_value = os.environ.get("MECHA_SUPERVISOR_WINDOW")
-        os.environ["MECHA_SUPERVISOR_WINDOW"] = "supervisor-alt"
-        self.addCleanup(self._restore_env, "MECHA_SUPERVISOR_WINDOW", old_value)
-
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            reminder_id = worker_launch._schedule_post_launch_reminder(
-                "worker-4",
-                "launched",
-                reminder_tool=tool,
-            )
-
-        self.assertEqual(reminder_id, "r-env")
-
-    def test_main_schedules_post_launch_reminder_after_successful_launch(self):
-        calls = self._run_main_with_stubs("worker-main-launch")
-
-        self.assertEqual(calls, [("worker-main-launch", "launched")])
-
-    def test_main_schedules_post_launch_reminder_after_successful_resume(self):
-        calls = self._run_main_with_stubs(
-            "worker-main-resume",
-            "--resume",
-            "session-123",
-        )
-
-        self.assertEqual(calls, [("worker-main-resume", "resumed")])
-
-    def _run_main_with_stubs(self, window, *extra_args):
-        calls = []
-        argv = [
-            "worker_launch.py",
-            "--window",
-            window,
-            "--dir",
-            self.tmpdir.name,
-            "--agent",
-            "claude",
-            *extra_args,
-        ]
-
-        def record_reminder(worker_window, action):
-            calls.append((worker_window, action))
-
+    def _run_main(self, window, *extra_args, agent="claude"):
+        argv = ["worker_launch.py", "--window", window, "--dir", self.tmpdir.name]
+        if agent is not None:
+            argv.extend(["--agent", agent])
+        argv.extend(extra_args)
+        commands = []
+        output = io.StringIO()
         with patch.object(worker_launch.sys, "argv", argv), \
              patch.object(worker_launch, "window_exists", return_value=False), \
              patch.object(worker_launch, "ensure_session", return_value=False), \
              patch.object(worker_launch, "new_window"), \
-             patch.object(worker_launch, "send_text"), \
+             patch.object(worker_launch, "send_text", side_effect=lambda _window, command: commands.append(command)), \
              patch.object(worker_launch, "send_enter"), \
              patch.object(worker_launch.time, "sleep"), \
              patch.object(worker_launch.os, "makedirs"), \
              patch.object(worker_launch.os.path, "exists", return_value=True), \
-             patch.object(worker_launch, "_schedule_post_launch_reminder", record_reminder), \
-             contextlib.redirect_stdout(io.StringIO()):
+             contextlib.redirect_stdout(output):
             worker_launch.main()
-
-        return calls
-
-    def _restore_env(self, key, value):
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
+        return commands, output.getvalue()
 
 
 if __name__ == "__main__":

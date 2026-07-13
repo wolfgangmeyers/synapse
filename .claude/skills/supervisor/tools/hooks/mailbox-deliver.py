@@ -6,11 +6,8 @@ mailbox for unread messages. If any exist, injects them into the agent's context
 via stdout (Claude Code shows PostToolUse hook stdout to the model on exit 0).
 Marks all delivered messages as read.
 
-Agent identity is resolved in priority order:
-  MECHA_WORKER_WINDOW — set by worker_launch.py for managed workers
-  MECHA_AGENT_WINDOW  — set manually for the supervisor session
-
-Sessions with neither env var are silently ignored (non-agent context).
+Agent identity is the current tmux pane's window name. Sessions without a
+valid tmux context are silently ignored (non-agent context).
 
 The mailbox base directory defaults to ~/.mecha-developer/mailboxes/ and can
 be overridden with MECHA_MAILBOX_DIR_OVERRIDE (used by tests).
@@ -28,6 +25,10 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _tmux import current_agent_id
 
 
 MAILBOX_DIR = os.environ.get(
@@ -62,8 +63,8 @@ def log(msg):
 
 
 def get_agent_window():
-    """Return the agent's window name, or None if not a managed agent session."""
-    return os.environ.get("MECHA_WORKER_WINDOW") or os.environ.get("MECHA_AGENT_WINDOW")
+    """Return the current validated tmux window name, or None outside tmux."""
+    return current_agent_id()
 
 
 def read_unread_messages(mailbox_path):
@@ -224,7 +225,7 @@ def main():
 
     agent_window = get_agent_window()
     if not agent_window:
-        log("skip: no agent window (MECHA_WORKER_WINDOW/MECHA_AGENT_WINDOW not set)")
+        log("skip: no valid tmux window identity")
         sys.exit(0)
 
     mailbox_path = os.path.join(MAILBOX_DIR, agent_window)

@@ -171,7 +171,7 @@ Report the exact Pi APIs and event fields proven, the history accessor, test com
 - Bind only to `127.0.0.1` and `::1`; reject browser CORS.
 - Implement structured body-free logs and rotation configuration.
 - Implement `/v1/health`, `/v1/agents`, message inspection, and operator dead-letter retry/dismiss commands.
-- Implement `mailbox_send_v2.py` for agent IDs only.
+- Implement `mailbox_send.py` for agent IDs only.
 - Implement `agent_router.py install/start/stop/status/doctor/uninstall` with finite `launchctl` operations.
 
 **Excluded**:
@@ -244,11 +244,9 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 
 **Included**:
 
-- Resolve `agent_id` in the required precedence order:
-  1. explicit extension configuration;
-  2. `MECHA_AGENT_WINDOW`;
-  3. `MECHA_WORKER_WINDOW`;
-  4. fail closed.
+- Resolve `agent_id` only from the current tmux pane's window name using
+  `TMUX_PANE` and `tmux display-message`; reject invalid names and fail closed
+  outside tmux.
 - Generate one random `instance_id` per extension connection lifecycle.
 - Connect during `session_start`, never in the extension factory.
 - On refusal, invoke the finite router kickstart helper no more than once per backoff window.

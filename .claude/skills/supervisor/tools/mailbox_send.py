@@ -1,232 +1,172 @@
 #!/usr/bin/env python3
-"""Send a message to an agent's mailbox.
+"""Post one durable local Mailbox v2 agent message."""
 
-Usage:
-  python mailbox_send.py --to WINDOW --body TEXT [--subject SUBJECT] [--from WINDOW] [--allow-large-body]
-
---from defaults to MECHA_WORKER_WINDOW (workers) or MECHA_AGENT_WINDOW (supervisor).
-Workers and the supervisor should never pass --from explicitly — let it default to
-the real window identity set by worker_launch.py. If neither env var is set, this
-script will exit with an error — do not pass --from as a workaround. Instead,
-investigate why the env var is missing: check that the session was launched via
-worker_launch.py and that the tmux window name matches the expected value.
-
-Creates a message file in <MAILBOX_DIR>/<to>/<uuid>.json. The recipient
-will see the message the next time they make a tool call (via the PreToolUse
-hook) or when the idle cron job wakes them up.
-
-The mailbox base directory defaults to ~/.mecha-developer/mailboxes/ and can
-be overridden with MECHA_MAILBOX_DIR_OVERRIDE (used by tests).
-
-Examples:
-  # Worker sending to supervisor (--from inferred from MECHA_WORKER_WINDOW)
-  python mailbox_send.py --to supervisor --body "Phase 1 complete, ready for review"
-
-  # Supervisor sending to a worker (--from inferred from MECHA_AGENT_WINDOW)
-  python mailbox_send.py --to worker-1 --body "Please check the lint errors before pushing"
-
-  # With optional subject
-  python mailbox_send.py --to worker-2 --subject "Urgent" --body "Stop — the approach needs to change"
-
-  # --from is only required if both env vars are absent (e.g., in tests)
-  python mailbox_send.py --to supervisor --from test-harness --body "Test message"
-"""
+from __future__ import annotations
 
 import argparse
-from email.message import EmailMessage
-import smtplib
-import ssl
+import errno
 import json
 import os
-import re
-import sys
-import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+from uuid import uuid4
+
+from _tmux import current_agent_id
 
 
-MAILBOX_DIR = os.environ.get(
-    "MECHA_MAILBOX_DIR_OVERRIDE",
-    os.path.expanduser("~/.mecha-developer/mailboxes"),
-)
-
-# SMTP config path — overridable for tests.
-MAIL_CONFIG = os.environ.get(
-    "MECHA_MAIL_CONFIG",
-    os.path.expanduser("~/.mecha-developer/mail.json"),
-)
-
-MAX_MAILBOX_BODY_CHARS = 1000
-LARGE_BODY_ALLOWED_SENDERS = {"standing-orders-cron"}
-
-# Valid agent names: alphanumeric, hyphens, underscores. No slashes, no dots.
-_AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
+DEFAULT_LAUNCHD_LABEL = "life.meyers.mecha-router"
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+MAX_RESPONSE_BYTES = 512 * 1024
 
 
-def _validate_agent_name(name, field):
-    if not _AGENT_NAME_RE.match(name):
-        print(
-            f"Error: invalid {field} agent name '{name}'. "
-            "Must be alphanumeric with hyphens or underscores.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, new_url):
+        return None
 
 
-def _is_email(recipient):
-    """True if recipient looks like an email address."""
-    return "@" in recipient
-
-
-def _validate_mailbox_body_size(body, from_agent, allow_large=False):
-    if allow_large:
-        if from_agent in LARGE_BODY_ALLOWED_SENDERS:
-            return
-        allowed = ", ".join(sorted(LARGE_BODY_ALLOWED_SENDERS))
-        print(
-            f"Error: --allow-large-body is restricted to system senders: {allowed}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if len(body) <= MAX_MAILBOX_BODY_CHARS:
-        return
-
-    print(
-        f"Error: mailbox body is {len(body)} characters "
-        f"(limit: {MAX_MAILBOX_BODY_CHARS}).\n"
-        "\n"
-        "Large reports must be written to a file, then sent as a short pointer "
-        "with the file path.\n"
-        "Example:\n"
-        "  python3 mailbox_send.py --to supervisor "
-        '--body "Report written to /path/to/report.md"',
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-
-def _send_via_email(args):
-    """Send message body via SMTP and log an audit copy."""
-    subject = args.subject or args.body.split("\n", 1)[0]
+def read_json_response(response: Any) -> dict[str, Any]:
+    content = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(content) > MAX_RESPONSE_BYTES:
+        raise ValueError("Router response exceeds local limits.")
     try:
-        with open(MAIL_CONFIG, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        message = EmailMessage()
-        message["From"] = config["address"]
-        message["To"] = args.to
-        message["Subject"] = subject
-        message.set_content(args.body)
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(
-            config["smtp_host"],
-            int(config.get("smtp_port", 465)),
-            timeout=30,
-            context=context,
-        ) as smtp:
-            smtp.login(config["address"], config["password"])
-            smtp.send_message(message)
-    except (KeyError, OSError, json.JSONDecodeError, smtplib.SMTPException) as e:
-        print(f"Error: SMTP email send failed: {e}", file=sys.stderr)
-        sys.exit(1)
 
-    # Log audit copy in sender's mailbox (marked read — not for delivery).
-    msg_id = str(uuid.uuid4())
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    audit_msg = {
-        "id": msg_id,
-        "from": args.from_agent,
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--to", required=True, help="Mailbox v2 agent ID")
+    result.add_argument("--body", required=True, help="Message body")
+    result.add_argument("--subject", help="Optional message subject")
+    result.add_argument("--from", dest="sender", help="Explicit sender agent ID")
+    result.add_argument(
+        "--router-url",
+        default=os.environ.get("MECHA_ROUTER_URL", DEFAULT_ROUTER_URL),
+        help="Loopback router URL (default: %(default)s)",
+    )
+    return result
+
+
+def fail(message: str, code: int = 2) -> int:
+    print(message, file=sys.stderr)
+    return code
+
+
+def resolve_sender(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    sender = current_agent_id()
+    if sender is None:
+        raise ValueError("Missing sender identity: pass --from or run from a tmux window with a valid name.")
+    return sender
+
+
+def router_endpoint(router_url: str, path: str) -> str:
+    parsed = urlparse(router_url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in LOOPBACK_HOSTS:
+        raise ValueError("--router-url must use a loopback http(s) address.")
+    return f"{router_url.rstrip('/')}{path}"
+
+
+def post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with build_opener(NoRedirect()).open(request, timeout=5) as response:
+            return response.status, read_json_response(response)
+    except HTTPError as error:
+        return error.code, read_json_response(error)
+
+
+def connection_refused(error: URLError) -> bool:
+    reason = error.reason
+    return isinstance(reason, ConnectionRefusedError) or getattr(reason, "errno", None) == errno.ECONNREFUSED
+
+
+def kickstart_once() -> str | None:
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("agent_router.py")),
+        "kickstart",
+        "--label",
+        os.environ.get("MECHA_ROUTER_LAUNCHD_LABEL", DEFAULT_LAUNCHD_LABEL),
+    ]
+    try:
+        result = subprocess.run(command, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as error:
+        return f"could not run launchctl: {error.strerror or error}"
+    if result.returncode != 0:
+        return f"exit status {result.returncode}"
+    return None
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    if "@" in args.to:
+        return fail("mailbox_send.py only sends to agent IDs; use mailbox_email.py --to <address> ... for email.")
+    try:
+        sender = resolve_sender(args.sender)
+        body = args.body
+        endpoint = router_endpoint(args.router_url, "/v1/messages")
+    except (OSError, ValueError) as error:
+        return fail(str(error))
+
+    envelope = {
+        "id": str(uuid4()),
+        "from": sender,
         "to": args.to,
-        "body": args.body,
-        "timestamp": timestamp,
-        "read": True,
+        "body": body,
+        "created_at": utc_now(),
     }
     if args.subject is not None:
-        audit_msg["subject"] = args.subject
+        envelope["subject"] = args.subject
 
-    sender_dir = os.path.join(MAILBOX_DIR, args.from_agent)
-    os.makedirs(sender_dir, exist_ok=True)
-    audit_file = os.path.join(sender_dir, f"{msg_id}.json")
-    with open(audit_file, "w", encoding="utf-8") as f:
-        json.dump(audit_msg, f, indent=2)
-        f.write("\n")
+    try:
+        status, response = post_json(endpoint, envelope)
+    except ValueError as error:
+        return fail(f"Router response invalid: {error}", 1)
+    except URLError as error:
+        if not connection_refused(error):
+            return fail(f"Router unavailable: {error.reason}", 1)
+        kickstart_error = kickstart_once()
+        if kickstart_error is not None:
+            print(f"Router kickstart failed ({kickstart_error}); retrying once.", file=sys.stderr)
+        try:
+            status, response = post_json(endpoint, envelope)
+        except ValueError as retry_error:
+            return fail(f"Router response invalid after one kickstart retry: {retry_error}", 1)
+        except URLError as retry_error:
+            return fail(f"Router unavailable after one kickstart retry: {retry_error.reason}", 1)
 
-    print(f"Email sent to {args.to}. Audit logged in {args.from_agent}'s mailbox.")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Send a message to an agent's mailbox."
-    )
-    default_from = os.environ.get("MECHA_WORKER_WINDOW") or os.environ.get("MECHA_AGENT_WINDOW")
-    parser.add_argument("--to", required=True, help="Recipient agent window name or email address")
-    parser.add_argument(
-        "--from",
-        required=default_from is None,
-        default=default_from,
-        dest="from_agent",
-        help="Sender agent window name (defaults to MECHA_WORKER_WINDOW / MECHA_AGENT_WINDOW)",
-    )
-    parser.add_argument("--body", required=True, help="Message body text")
-    parser.add_argument("--subject", default=None, help="Optional subject line")
-    parser.add_argument(
-        "--allow-large-body",
-        action="store_true",
-        help=(
-            "Allow a mailbox body over the normal size guard. Use only for "
-            "local system jobs whose full content must be delivered inline."
-        ),
-    )
-
-    args = parser.parse_args()
-
-    # --from is always an agent name
-    _validate_agent_name(args.from_agent, "--from")
-
-    if _is_email(args.to):
-        _send_via_email(args)
-        return
-
-    _validate_agent_name(args.to, "--to")
-    _validate_mailbox_body_size(
-        args.body,
-        args.from_agent,
-        allow_large=args.allow_large_body,
-    )
-
-    msg_id = str(uuid.uuid4())
-    # Include Z suffix so downstream parsers know this is UTC (not local/naive time).
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    msg = {
-        "id": msg_id,
-        "from": args.from_agent,
-        "to": args.to,
-        "body": args.body,
-        "timestamp": timestamp,
-        "read": False,
-    }
-    if args.subject is not None:
-        msg["subject"] = args.subject
-
-    mailbox_path = os.path.join(MAILBOX_DIR, args.to)
-    os.makedirs(mailbox_path, exist_ok=True)
-
-    msg_file = os.path.join(mailbox_path, f"{msg_id}.json")
-    with open(msg_file, "w", encoding="utf-8") as f:
-        json.dump(msg, f, indent=2)
-        f.write("\n")
-
-    print(f"Message posted to {args.to}'s mailbox.")
-    print(f"  ID:   {msg_id}")
-    print(f"  From: {args.from_agent}")
-    if args.subject:
-        print(f"  Subject: {args.subject}")
-    preview = args.body if len(args.body) <= 80 else args.body[:77] + "..."
-    print(f"  Body: {preview}")
-    print()
-    print("The recipient will see this message on their next tool call (hook delivery)")
-    print("or within 3 minutes if idle (cron delivery).")
+    if status not in {200, 201}:
+        error = response.get("error", {})
+        return fail(f"Router rejected message: {error.get('code', 'unknown_error')} — {error.get('message', 'unknown error')}", 1)
+    message = response.get("message")
+    if (not isinstance(message, dict)
+            or message.get("id") != envelope["id"]
+            or not isinstance(message.get("state"), str)
+            or not message["state"]):
+        return fail("Router returned an invalid acceptance response.", 1)
+    print(f"Message {message['id']} accepted: {message['state']}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

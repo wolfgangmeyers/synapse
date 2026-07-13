@@ -53,7 +53,6 @@ def send_standing_orders(body, recipient, sender, subject):
         subject,
         "--body",
         body,
-        "--allow-large-body",
     ]
     return subprocess.run(cmd).returncode
 

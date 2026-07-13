@@ -175,7 +175,7 @@ Build one loopback-only **Mailbox v2 service** (called the router in implementat
 - SQLite for messages, delivery state, agent leases, and reminders;
 - a per-user `launchd` service on macOS;
 - one Pi extension per Pi process/session;
-- one migration-safe sender CLI named `mailbox_send_v2.py`, with `mailbox_send.py` becoming the stable v2 facade after cutover.
+- one migration-safe sender CLI named `mailbox_send.py`, with `mailbox_send.py` becoming the stable v2 facade after cutover.
 
 This is a local durable mailbox with live subscriptions, not a general pub/sub platform. The mailbox is the product abstraction; WebSocket is only its connected-client delivery mechanism.
 
@@ -223,7 +223,7 @@ Disposition: use `launchd`. The extension does not daemonize the router itself. 
 ## 6. Architecture
 
 ```text
-mailbox_send_v2.py ─────HTTP POST──┐
+mailbox_send.py ─────HTTP POST──┐
 reminders v2 scheduler ──SQLite─────┤
 watchdog/email/other producers ─────┤
                                    ▼
@@ -253,7 +253,7 @@ mecha-developer/
   pi-extensions/
     mecha-messaging.ts        # Pi extension
   tools/
-    mailbox_send_v2.py        # migration-safe Mailbox v2 sender CLI
+    mailbox_send.py        # migration-safe Mailbox v2 sender CLI
     agent_router.py           # install/start/stop/status/doctor CLI
   .claude/skills/reminders-v2/
     SKILL.md
@@ -270,14 +270,14 @@ mecha-developer/
 
 `agent_id` is initially the tmux window name. This preserves the useful existing contract and makes the recipient visible to operators.
 
-Identity sources, in order:
+Identity is the current tmux pane's window name, resolved with `TMUX_PANE` and
+`tmux display-message -p -t <pane> #{window_name}`. The name must satisfy the
+agent-ID grammar; missing tmux context, lookup failure, or an invalid name fails
+closed.
 
-1. explicit extension configuration;
-2. `MECHA_AGENT_WINDOW`;
-3. `MECHA_WORKER_WINDOW`;
-4. fail closed with an actionable startup error.
-
-No fallback to literal `supervisor`, `self`, or the current terminal title is allowed. The current `--window self` misrouting demonstrates why implicit fallback is unsafe.
+No environment override or fallback to literal `supervisor`, `self`, or the
+terminal title is allowed. The current `--window self` misrouting demonstrates
+why implicit fallback is unsafe.
 
 ### 7.2 Session identity and leases
 
@@ -413,7 +413,7 @@ Recommended persisted names:
 - `queued`: durable, no client owns the attempt.
 - `leased`: sent to one registered instance until a deadline.
 - `injection_requested`: extension validated the frame and invoked `pi.sendMessage()`, but Pi has not yet emitted the correlated custom message. This state remains leased and retryable.
-- `acknowledged`: the extension observed Pi's correlated `message_end` event for the custom message containing this message ID. This is a transactional transition used only to complete delivery; the server immediately deletes the message and its delivery-attempt rows in the same transaction.
+- `acknowledged`: after correlating Pi's `message_end`, the extension observed the matching custom-message ID on the persisted current session branch and in its JSONL session file. This is a transactional transition used only to complete delivery; the server immediately deletes the message and its delivery-attempt rows in the same transaction.
 - `dead_letter`: retry limit exceeded. This is the only terminal message state retained for operator action.
 
 If implementation research cannot correlate a routed custom message reliably through `message_end`, v1 must not claim durable Pi delivery. It must either add a verified correlation mechanism using documented events/session entries or keep the message leased and expose the limitation as a release blocker.
@@ -435,11 +435,15 @@ On a valid `message` frame:
    ```
 
    Show the oldest queued message's sender plus a whitespace-normalized preview. Truncate to a conservative configurable cap (default 80 display columns) with an ellipsis and rely on Pi's status rendering for narrower terminals; never wrap, expand the transcript, or show more than one body preview. If the subject or body is empty, show only the available sender, subject, and count. The full message remains durable in the mailbox and appears normally once emitted.
-10. Listen for Pi's `message_end` event, correlate the emitted `CustomMessage` by the embedded router message ID, remove it from the preview count, and only then send `ack`. On that acknowledgement, the router deletes the persisted message and attempts rather than retaining mailbox history. Clear the mailbox status when no message is waiting.
+10. Listen for Pi's `message_end` event and correlate the emitted `CustomMessage` by the embedded router message ID. Do **not** acknowledge from that handler: in the validated Pi source, extension `message_end` handlers run before `SessionManager.appendCustomMessageEntry()` persists the entry. Defer one macrotask, then verify the ID on the documented current session branch (`getBranch()`), verify `isPersisted()` and `getSessionFile()`, and read that documented JSONL session file for the same `custom_message`/`details.message_id` entry. Only this observable durable session checkpoint may send `ack`.
 
-Because `sendMessage()` returns `void`, wrapper return is not an acceptance signal. A correlated `message_end` proves that Pi consumed and emitted the message; it does not prove semantic handling or guaranteed disk flush. To close the crash-after-render/before-ack window, reconnect deduplication must also find the message ID in Pi's persistent session branch before replay. Implementation must verify both the event payload and session-entry accessor against the installed Pi version before shipping.
+Pi has an additional source-validated constraint: a new persisted session does not create or flush its JSONL file until it contains an assistant message. The first custom mailbox message can therefore reach `message_end` while it exists only in the in-memory branch. When the branch contains the ID but the file checkpoint is not yet observable, the extension retains the delivery and keeps at most one checkpoint timer per pending message (currently every 250 ms) until the file contains the entry or the session shuts down. It neither acknowledges nor reinjects during that interval. On acknowledgement, the router deletes the persisted message and attempts rather than retaining mailbox history, and the extension restores its connected status indicator; `session_shutdown` clears that indicator.
 
-Exactly-once visible replay cannot be guaranteed under Pi `--no-session`. In that mode the router provides at-least-once delivery and may visibly duplicate after a process crash. Production harness mode therefore requires Pi session persistence; `--no-session` is diagnostic-only. If event correlation or durable history lookup cannot be proven with documented APIs, the corresponding durability acceptance criteria remain blocked.
+A redelivery first checks the same durable current-branch history. If found, it must not call `sendMessage()` again; it sends `injection_requested` for the current delivery attempt and then `ack` after the durable-history checkpoint. If an earlier injection is still pending in memory but the session file has not flushed yet, the extension updates that pending delivery to the new attempt and records `injection_requested` without a second Pi injection; the checkpoint acknowledges the latest attempt after persistence. If history exists but there is no pending local injection and the persistence check cannot be made, it must neither reinject nor acknowledge. Expected initial-file absence remains a status-only condition; an unreadable or malformed existing session file must also raise one visible diagnostic for that message. The router lease remains retryable. This avoids both an unsafe acknowledgement and a duplicate visible message during a session-file failure.
+
+Because `sendMessage()` returns `void`, wrapper return is not an acceptance signal. A correlated `message_end` proves that Pi consumed and emitted the message; the branch-plus-file check proves Pi session persistence under Pi's documented session-storage contract. It does not prove semantic handling, provider receipt, or durability against an operating-system power loss beyond Pi's own session guarantees. The implementation and regression tests must retain this ordering and initial-session-flush check against the installed Pi version before shipping.
+
+Exactly-once visible replay cannot be guaranteed under Pi `--no-session`. In that mode the extension must not acknowledge an unverified delivery; the router keeps it retryable and diagnostic mode may visibly redeliver after a crash. Production harness mode therefore requires Pi session persistence. If event correlation or durable history lookup cannot be proven with documented APIs, the corresponding durability acceptance criteria remain blocked.
 
 The custom message content should include a compact, model-readable header, for example:
 
@@ -466,7 +470,7 @@ No global ordering is promised.
 - A lease expires if no acknowledgement arrives.
 - Expired messages return to `queued`.
 - Duplicate delivery is possible after a crash. Message IDs make delivery effectively once for a healthy extension and at-least-once across failures.
-- The extension must not acknowledge on wrapper return; it acknowledges only after observing the correlated Pi `message_end` event.
+- The extension must not acknowledge on wrapper return or directly from `message_end`; it acknowledges only after the correlated-message durable session checkpoint described in section 9.2.
 
 ### 9.5 Backpressure
 
@@ -516,7 +520,7 @@ The extension must not block Pi startup indefinitely. After a short initial budg
 
 During `session_shutdown`, idempotently:
 
-- stop reconnect timers;
+- stop reconnect and durable-checkpoint timers;
 - release the lease when possible;
 - close the WebSocket;
 - remove status UI;
@@ -526,13 +530,13 @@ The router remains running as a per-user service.
 
 ## 11. New sender CLI
 
-Migration name: `mailbox_send_v2.py`.
+Migration name: `mailbox_send.py`.
 
 Minimum interface:
 
 ```text
-mailbox_send_v2.py --to <agent-id> --body <text> [--subject <text>]
-mailbox_send_v2.py --to <agent-id> --body-file <path> [--subject <text>]
+mailbox_send.py --to <agent-id> --body <text> [--subject <text>]
+mailbox_send.py --to <agent-id> --body-file <path> [--subject <text>]
 ```
 
 Behavior:
@@ -545,7 +549,7 @@ Behavior:
 - return non-zero for validation, startup, or enqueue failures;
 - optionally request router kickstart before one bounded retry.
 
-Do not infer email transport from an `@` in the recipient. `mailbox_send_v2.py --to` accepts agent IDs only and rejects email addresses with an error that names the explicit email command. Outbound email uses a separate `mailbox_email.py --to <address> ...` command; inbound Purelymail remains a separate adapter that enqueues accepted mail to `supervisor`.
+Do not infer email transport from an `@` in the recipient. `mailbox_send.py --to` accepts agent IDs only and rejects email addresses with an error that names the explicit email command. Outbound email uses a separate `mailbox_email.py --to <address> ...` command; inbound Purelymail remains a separate adapter that enqueues accepted mail to `supervisor`.
 
 This intentionally changes the current `mailbox_send.py` behavior, which switches to SMTP when `--to` contains `@`. Migration is incomplete until every caller, skill, prompt, and test that relies on that behavior is updated. The repository audit must include at least:
 
@@ -592,7 +596,7 @@ Mailbox v2 preserves the abstraction but replaces these legacy implementation de
 
 Mailbox v2 has one delivery path: the addressed Pi extension's WebSocket connection. Disconnected and not-yet-registered recipients retain queued messages until they connect. The router never types messages into tmux.
 
-During migration, existing `mailbox_send.py` may become a compatibility facade over `mailbox_send_v2.py`; after cutover it becomes the normal v2 CLI entry point. This preserves producer command compatibility without preserving the old delivery mechanism. Explicit SMTP behavior remains separate.
+During migration, existing `mailbox_send.py` may become a compatibility facade over `mailbox_send.py`; after cutover it becomes the normal v2 CLI entry point. This preserves producer command compatibility without preserving the old delivery mechanism. Explicit SMTP behavior remains separate.
 
 Required producer/consumer migration matrix:
 
@@ -891,7 +895,7 @@ Add end-to-end tests for every migrated producer and prove that one logical mess
 The initial implementation is ready for opt-in use when:
 
 1. A Pi agent in a tmux window registers under its exact window identity.
-2. `mailbox_send_v2.py` durably posts a mailbox message and reports its ID.
+2. `mailbox_send.py` durably posts a mailbox message and reports its ID.
 3. A connected idle Pi agent receives the newly posted message immediately, displays it without changing the bottom editor, and starts a turn.
 4. A connected busy Pi agent receives the newly posted message immediately, shows a one-line truncated queue preview, and consumes it at the next agent-call boundary without corrupting current input. Queue visibility remains one line regardless of depth.
 5. A message posted while its recipient is disconnected remains durable and replays in order immediately after that recipient reconnects.
@@ -921,7 +925,7 @@ Install the extension for one named Pi agent. Prove live idle, busy, reconnect, 
 
 ### Phase 3: sender and backwards compatibility
 
-Add `mailbox_send_v2.py`. Move a small set of non-critical producers to router-first delivery and prove disconnected recipients remain queued until WebSocket reconnection or one-hour expiry.
+Add `mailbox_send.py`. Move a small set of non-critical producers to router-first delivery and prove disconnected recipients remain queued until WebSocket reconnection or one-hour expiry.
 
 ### Phase 4: reminders v2
 

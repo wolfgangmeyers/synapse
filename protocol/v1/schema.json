@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mecha.local/protocol/v1/schema.json",
+  "title": "Mailbox v1 envelope and shared frame definitions",
+  "$ref": "#/$defs/envelope",
+  "$defs": {
+    "frame": {
+      "type": "object",
+      "required": ["version", "frame_id", "type"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "type": "string" }
+      }
+    },
+    "frameId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "agentId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "instanceId": { "$ref": "#/$defs/frameId" },
+    "leaseId": { "$ref": "#/$defs/frameId" },
+    "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "attemptNumber": { "type": "integer", "minimum": 1 },
+    "failureReason": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$" },
+    "utcMillis": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "leaseIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "instance_id", "lease_id"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" }
+      }
+    },
+    "deliveryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "instance_id", "lease_id", "message_id", "attempt_number"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "attempt_number": { "$ref": "#/$defs/attemptNumber" }
+      }
+    },
+    "registerFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "register" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" }
+      }
+    },
+    "leaseRenewFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "lease_renew" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" }
+      }
+    },
+    "pingFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "ping" }
+      }
+    },
+    "injectionRequestedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "message_id", "attempt_number"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "injection_requested" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "attempt_number": { "$ref": "#/$defs/attemptNumber" }
+      }
+    },
+    "ackFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "message_id", "attempt_number"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "ack" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "attempt_number": { "$ref": "#/$defs/attemptNumber" }
+      }
+    },
+    "nackFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "message_id", "attempt_number", "reason"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "nack" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "attempt_number": { "$ref": "#/$defs/attemptNumber" },
+        "reason": { "$ref": "#/$defs/failureReason" }
+      }
+    },
+    "clientFrame": {
+      "oneOf": [
+        { "$ref": "#/$defs/registerFrame" },
+        { "$ref": "#/$defs/leaseRenewFrame" },
+        { "$ref": "#/$defs/injectionRequestedFrame" },
+        { "$ref": "#/$defs/ackFrame" },
+        { "$ref": "#/$defs/nackFrame" },
+        { "$ref": "#/$defs/pingFrame" }
+      ]
+    },
+    "registeredFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "request_id", "agent_id", "instance_id", "lease_id", "expires_at", "recovered"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "registered" },
+        "request_id": { "$ref": "#/$defs/frameId" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "expires_at": { "$ref": "#/$defs/utcMillis" },
+        "recovered": { "type": "boolean" }
+      }
+    },
+    "leaseRejectedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "request_id", "code", "agent_id", "instance_id", "active_instance_id"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "lease_rejected" },
+        "request_id": { "$ref": "#/$defs/frameId" },
+        "code": { "const": "duplicate_identity" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "active_instance_id": { "$ref": "#/$defs/instanceId" }
+      }
+    },
+    "errorFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "code"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "error" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "request_id": { "$ref": "#/$defs/frameId" }
+      }
+    },
+    "pongFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "request_id"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "pong" },
+        "request_id": { "$ref": "#/$defs/frameId" }
+      }
+    },
+    "messageFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "message", "attempt_number", "delivery_expires_at"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "message" },
+        "message": { "$ref": "#/$defs/envelope" },
+        "attempt_number": { "$ref": "#/$defs/attemptNumber" },
+        "delivery_expires_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
+    "serverFrame": {
+      "oneOf": [
+        { "$ref": "#/$defs/registeredFrame" },
+        { "$ref": "#/$defs/leaseRejectedFrame" },
+        { "$ref": "#/$defs/errorFrame" },
+        { "$ref": "#/$defs/pongFrame" },
+        { "$ref": "#/$defs/messageFrame" }
+      ]
+    },
+    "envelope": {
+      "type": "object",
+      "required": ["id", "from", "to", "body", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/messageId" },
+        "from": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "to": { "$ref": "#/$defs/agentId" },
+        "subject": { "type": "string", "maxLength": 256 },
+        "body": { "type": "string", "maxLength": 65536 },
+        "created_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    }
+  }
+}
