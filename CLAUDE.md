@@ -39,7 +39,6 @@ could affect files, external communication, or destructive operations.
 | `mailbox` | Mecha-wolfgang async mailbox — delivery format, mandatory pre-read `state_update` blocks, hooks/cron. **Load with supervisor** so `[MAILBOX]` injections are handled correctly. Spec: `MAILBOX_REQUIREMENTS.md` at repo root. |
 | `pi-extension-maintenance` | Safely inspect, install, update, uninstall, and diagnose the copied Mailbox V2 Pi extension lifecycle without touching unrelated Pi configuration. |
 | `pr-watch` | Run and maintain the read-only polling GitHub PR watcher used as a lightweight substitute for the webhook PR review bot. |
-| `recall` | Proactive memory surfacing system — detects when stored knowledge is relevant and delivers it via mailbox before the agent needs to be told. Runs automatically via hook + cron. |
 | `reminders` | Set one-shot reminders that fire via mailbox after a delay. Set, list, or delete reminders for any tmux window. |
 | `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
 | `test-coverage` | Run language-agnostic code coverage analysis and identify gaps with concrete test suggestions across supported project toolchains. |
