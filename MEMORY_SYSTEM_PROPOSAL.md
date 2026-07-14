@@ -1,165 +1,174 @@
 # Unified Memory System Proposal
 
-**Status:** Proposal
-**Date:** 2026-07-11
+**Status:** Proposed
+**Date:** 2026-07-13
 
 ## Goal
 
-Provide durable, useful memory across Claude and Codex sessions without relying
-on a global cron, a specific terminal window, or duplicate knowledge stores.
-The system should capture important information as conversations evolve and
-surface only the few memories that are useful to the current work.
+Keep one durable, human-readable memory system that captures useful knowledge in
+one place and recalls only what directly matters to current work. It works
+across agent sessions without eager memory loading, duplicate stores, terminal
+scraping, or unrestricted local-file access.
 
-## Current State
+## Binding Decisions
 
-Three existing pieces each solve part of the problem:
+- KB Markdown under `~/.mecha-developer/kb/` is the only durable memory. Normal
+  KB updates remain the canonical capture and edit path.
+- There is no agent-memory tier, Codex-memory or Claude-memory clone, generated
+  eager-load index, or automatic migration. Material from an old store may be
+  deliberately incorporated through a normal KB update.
+- A rebuildable SQLite catalog supports recall but is not memory: it contains
+  only canonical KB frontmatter and is always derivable from Markdown.
+- Runtime recall state, including cooldown, coalescing, and pending evaluation,
+  is router SQLite state, never KB-record data.
+- The old tmux/cron/Claude recall system is discarded. It is removed as an
+  initial independently shippable phase; the new system does not coexist with
+  it.
 
-| Component | Strength | Gap |
-|---|---|---|
-| KB | Rich, human-readable, source-attributed project knowledge | Ingestion and retrieval are mostly manual and lexical |
-| Codex memory | Compact typed facts and an eager session-start index | It is a separate small store, captured manually; its hard-coded store path does not match this machine |
-| Recall | Debounced relevance evaluation and duplicate cooldown | It has no configured stores, so it currently does no recall; it captures terminal panes and chooses from index summaries |
+## Canonical Record Format
 
-The current split risks duplicate facts and stale entries. Recall is not a
-working memory service yet: its configuration has an empty `stores` array.
+Each KB record is Markdown with frontmatter containing exactly these fields:
 
-## Decision
-
-Build one memory service with two views over a single catalog:
-
-- **Agent memory:** concise, high-priority facts that should be loaded at
-  session start: user preferences, corrections, standing rules, and external
-  references.
-- **Knowledge base:** longer, curated project and domain knowledge: decisions,
-  investigations, architecture, and reusable operating lessons.
-
-Keep Markdown as the human-editable source of truth. Maintain a derived SQLite
-index for retrieval; the index is rebuildable and must never become the only
-copy of a memory.
-
-The existing `MEMORY.md` and `INDEX.md` remain compatibility views generated
-from the same catalog. Existing skills can become thin interfaces to the new
-service rather than independent stores.
-
-## Memory Record
-
-Every record has common metadata in frontmatter or a sidecar record:
-
-```text
-id, tier, type, scope, title, summary, tags,
-source_ref, source_span, confidence, sensitivity,
-created_at, updated_at, last_verified_at, expires_at,
-supersedes, content_hash
+```yaml
+id: dnsid-release-process
+title: DNSid release process
+summary: Short recall-safe description of the record.
+relevant_at: 2026-07-13T00:00:00Z
+related:
+  - dnsid-deployment-checks
 ```
 
-`type` starts with the useful Codex-memory categories: `user`, `feedback`,
-`project`, and `reference`. `scope` permits global, user, repository, and
-session-local visibility. `source_ref` and `source_span` provide provenance;
-`supersedes` prevents contradictory facts from accumulating.
+The body holds supporting detail, context, links, and human-readable sources.
+Do not add provenance, type, scope, tags, confidence, sensitivity, expiry,
+supersession, hashes, scores, or any other frontmatter field.
 
-Agent-memory records stay short. KB records may have structured sections,
-source links, and supporting detail. Neither tier stores secrets, raw terminal
-transcripts, temporary task state, or facts that should be read from current
-code or GitHub.
+`relevant_at` is the sole ordering field and there is exactly one
+ordering/list: `relevant_at DESC, id ASC`. New or edited KB records set it to
+now. A record selected by recall is touched through the router API and also sets
+it to now. No separate recency or relevance field exists.
 
-## Capture and Reconciliation
+`related` is the sole recall graph: an explicit list of record IDs. Normal KB
+updates alone create or edit these links. Recall may follow links but never
+writes them. A Markdown `See Also` section may exist for people, but is not part
+of recall.
 
-Use a structured extraction pipeline, not direct freeform writes by a model.
+## Catalog, Lookup, And Policy
 
-1. A conversation checkpoint supplies only the new, unprocessed transcript
-   span.
-2. An extractor returns JSON candidates conforming to the record schema.
-3. A reconciler deduplicates candidates, updates a matching record, creates a
-   new record, or rejects the candidate.
-4. The writer updates Markdown and the derived index in one durable operation.
-
-Capture triggers:
-
-- immediately after an explicit user correction, preference, or durable
-  decision;
-- immediately before a manual or automatic compaction, while the complete
-  context still exists;
-- after a configurable idle threshold if new conversation content remains
-  unprocessed;
-- after a worker/task completion;
-- at session shutdown when the transcript is available.
-
-Extraction before compaction is important. A post-compaction summary may omit
-the non-obvious decision or correction that should have become memory. If a
-pre-compaction hook is unavailable for an agent surface, process the persisted
-transcript using an idempotent cursor rather than scraping a terminal pane.
-
-Automatic writes should be limited to high-confidence user preferences,
-corrections, and clearly stated durable decisions. Lower-confidence project
-knowledge becomes a reviewable candidate. Reconciliation uses content hashes,
-scope/type keys, and supersession links so repeated extraction improves a
-record instead of appending duplicates.
-
-## Retrieval and Recall
-
-At session start, load only the compact agent-memory index. Load detailed
-records on demand.
-
-For proactive recall:
-
-1. Filter records by scope, expiry, sensitivity, and relevance to the active
-   project or user.
-2. Use SQLite full-text search and embeddings over record summaries and bodies
-   to retrieve a small candidate set.
-3. Use a small model to rerank those candidates against the recent structured
-   conversation context.
-4. Inject at most one to three records, each with a short reason and source.
-5. Persist per-session cooldown and acknowledgement state to avoid repetition.
-
-Most recall checks should produce nothing. Precision matters more than showing
-that the system is active.
-
-The server-owned job system should own idle extraction, periodic staleness
-checks, index rebuilds, and proactive recall. Jobs use closed, repository-owned
-handlers and durable run state; they do not execute arbitrary commands or
-depend on global cron, tmux, or a legacy supervisor process.
-
-## Storage Layout
+The router owns the rebuildable catalog, narrow memory lookup and touch APIs,
+central recall policy, and per-session cooldown/coalescing state. It does not
+run the evaluator or inject recall messages. Its catalog contains only:
 
 ```text
-~/.mecha-developer/memory/
-  records/                    # canonical Markdown records
-  knowledge/                  # canonical long-form KB records
-  agent-index.md              # generated eager-load view
-  knowledge-index.md          # generated KB view
-  memory.sqlite               # derived FTS, embedding, provenance, and job state
+id, title, summary, relevant_at, related
 ```
 
-Migration should import the existing KB topics and current Claude/Codex memory
-records exactly once, retaining their source paths in provenance metadata.
-Existing locations can be compatibility symlinks or generated read-only views
-until all agent surfaces use the unified API.
+The router has one `recall` policy block; no second recall configuration file is
+allowed. It is supplied to Pi extensions and provides these defaults and hard,
+configurable expansion bounds:
 
-## First Implementation Slice
+```yaml
+recall:
+  enabled_for:
+    supervisor: true
+    managed_worker: true # worker launch may explicitly opt out
+  inactivity_seconds: 30
+  maximum_window_seconds: 120
+  candidate_limit: 100
+  evaluator: openai-codex/gpt-5.6-luna
+  maximum_messages: 3
+  expansion:
+    maximum_ids: 6
+    maximum_terms: 3
+    maximum_matched_records: 12
+    maximum_bytes: 16384
+    maximum_related_edges: 24
+    maximum_graph_depth: 2
+```
 
-1. Establish the server-owned scheduled-job foundation already underway for
-   Mailbox V2.
-2. Add a unified catalog reader and rebuildable SQLite FTS index without moving
-   existing files yet.
-3. Make the session-start agent index a generated view of existing compact
-   facts; fix the incorrect hard-coded Codex memory path as part of this work.
-4. Add an idempotent transcript-cursor extraction job in dry-run mode, with
-   candidate JSON and no automatic writes.
-5. Add reviewed promotion plus a retrieval test harness.
-6. Configure proactive recall only after the catalog has real stores and
-   precision/false-positive tests.
+Normal lookup returns at most `candidate_limit` entries in the sole canonical
+order. Bounded expansion accepts only requested stable IDs and literal terms;
+the router controller validates every request, enforces all policy bounds, and
+returns only the approved matching records and permitted `related` traversal.
+This API never exposes paths, commands, unrestricted files, or the corpus.
+
+There is no vector search, embedding model, Sentence Transformers, FTS, or
+full-text index. Literal matching may inspect record bodies inside the router to
+produce the bounded expansion, but bodies are not normally returned.
+
+## Recall Flow
+
+The Pi extension owns activity observation and timing. For each active window,
+it starts a 30-second inactivity debounce after activity and fixes a maximum
+2-minute evaluation deadline from that window's first activity. New activity
+resets the 30-second timer but never extends the 2-minute deadline. It uses the
+router policy rather than duplicated constants and consults router-owned
+per-session cooldown/coalescing state.
+
+When evaluation is permitted, the extension launches an isolated,
+noninteractive local Pi evaluator. It supplies a short bounded context snapshot
+and up to 100 normal candidates, each with stable `id`, `title`, `summary`,
+`relevant_at`, and `related`. It supplies no Markdown bodies by default.
+
+The evaluator may request catalog expansion through the extension and
+controller-validated router API, but has no direct path, file, shell, or command
+access. Its fixed instructions require it to:
+
+- default to no-op;
+- select only directly relevant records, never merely thematic similarities;
+- produce concise factual results grounded in supplied records;
+- make no KB writes, link creation, or command requests; and
+- emit JSON only.
+
+After a valid selection, the extension calls the router touch API for the
+selected records, then directly calls its local `pi.sendMessage()` with at most
+three concise recall messages. Recall never uses Mailbox V2. Neither evaluator
+nor router logs raw context snapshots or Markdown bodies.
+
+## Maintainability Constraints
+
+Keep router and extension work in small, cohesive modules: catalog rebuild and
+lookup/touch APIs, policy and session state, activity timing, evaluator launch,
+and message delivery. Do not turn an existing router or extension file into a
+memory monolith. Keep catalog rebuilding and bounded literal search simple,
+local operations over the KB.
+
+## Phased Implementation
+
+Each phase is independently shippable and preserves KB Markdown as the sole
+durable memory.
+
+1. **Retire legacy recall.** Remove the tmux/cron/Claude recall path and its
+   configuration; do not retain a compatibility or parallel recall path.
+2. **Define records and catalog.** Validate the five-field frontmatter contract,
+   make normal KB writes set `relevant_at`, and build/rebuild the derived
+   five-field SQLite catalog with deterministic ordering.
+3. **Add router control-plane APIs.** Implement the central policy block,
+   bounded lookup/expansion and touch APIs, plus durable per-session cooldown
+   and coalescing state. Keep runtime state out of KB records.
+4. **Add extension recall.** Implement policy-driven activity debounce and fixed
+   window timing, local noninteractive evaluator launch, validated expansion,
+   record touches, and direct `pi.sendMessage()` delivery.
 
 ## Acceptance Criteria
 
-- Claude and Codex read the same canonical agent-memory and knowledge records.
-- A durable extraction cursor prevents processing the same conversation span
-  twice.
-- A compaction or idle checkpoint produces deduplicated, provenance-backed
-  candidates.
-- A relevant memory can be retrieved from either tier without loading the full
-  corpus into every session.
-- Recall has configured stores, durable cooldowns, and tests proving both
-  relevant delivery and non-delivery for unrelated context.
-- The system operates from repository-local/server-owned processes with no
-  required global cron or terminal-pane scraping path.
-- All memory writes and retrieval decisions are traceable and reversible.
+- Every canonical KB record has exactly `id`, `title`, `summary`,
+  `relevant_at`, and `related` frontmatter; `relevant_at DESC, id ASC` is the
+  only ordering/list.
+- Creating, editing, or selecting a record sets `relevant_at` to now. Recall
+  never creates or edits `related` links.
+- Deleting and rebuilding the SQLite catalog loses no memory and recreates only
+  the five catalog fields.
+- The old recall implementation is removed before new recall implementation;
+  no legacy/coexisting delivery path remains.
+- The router owns catalog, narrow lookup/touch APIs, the sole policy block, and
+  session state, but neither evaluator execution nor recall-message injection.
+- The extension follows the supplied policy: 30-second resettable inactivity,
+  a non-extendable two-minute window deadline, up to 100 candidates, and at
+  most three direct local `pi.sendMessage()` recalls.
+- Evaluator input includes only bounded context and normal candidate metadata;
+  it sees no bodies by default, has no direct filesystem or command access, and
+  produces JSON-only, directly relevant, factual no-op-or-recall results.
+- Expansion is controller-validated and bounded by IDs, terms, matched records,
+  bytes, related edges, and graph depth; it cannot expose the corpus.
+- No vector, embedding, Sentence Transformers, FTS, or full-text index is
+  created or required. Logs omit raw context snapshots and Markdown bodies.
