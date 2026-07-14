@@ -557,7 +557,7 @@ This intentionally changes the current `mailbox_send.py` behavior, which switche
 - supervisor and worker skill examples;
 - Purelymail polling and reply handling;
 - mailbox cron/hook output that currently tells an agent to reply with `mailbox_send.py --to <sender-email>`;
-- watchdog, PR watch, recall, reminders, standing orders, KB reminders, memory monitor, remote delegation, and any other direct `mailbox_send.py` caller;
+- watchdog, PR watch, reminders, standing orders, KB reminders, memory monitor, remote delegation, and any other direct `mailbox_send.py` caller;
 - installer/package copies of those skills and tools;
 - tests and fixtures covering email-address recipients.
 
@@ -604,7 +604,7 @@ Required producer/consumer migration matrix:
 |---|---|---|
 | Pi/worker/supervisor | agent ID | WebSocket delivery to the addressed Pi identity |
 | reminders v2 | `reminders` | WebSocket delivery to the addressed Pi identity |
-| watchdog/PR watch/recall | service name | WebSocket delivery to the addressed Pi identity |
+| watchdog/PR watch | service name | WebSocket delivery to the addressed Pi identity |
 | Purelymail | allowed normalized email address | supervisor mailbox; same steer/wake behavior as every message |
 | remote delegation | remote adapter/agent name | explicit Pi recipient |
 
@@ -619,7 +619,7 @@ Migrate direct writers and callers including:
 - reminders; handoff workflows must be redesigned around documented Pi APIs before migration;
 - standing-order and KB maintenance jobs;
 - watchdog and remote watchdog;
-- memory monitor and recall;
+- memory monitor;
 - PR watcher;
 - remote delegation and SSH forwarding.
 
@@ -646,7 +646,7 @@ File mailbox delivery may be removed only when all are true:
 - all queued router messages have explicit terminal state;
 - active and idle Pi acceptance tests pass;
 - offline replay, router restart, extension reconnect, lease expiry, and duplicate-ID tests pass;
-- Purelymail, watchdog, PR watch, recall, reminders, standing orders, KB reminders, memory monitor, remote delegation, and all skill instructions have migration tests or validated documentation checks;
+- Purelymail, watchdog, PR watch, reminders, standing orders, KB reminders, memory monitor, remote delegation, and all skill instructions have migration tests or validated documentation checks;
 - repository and installed-skill audits find no instruction or caller that uses `mailbox_send.py --to <email-address>`; outbound email uses `mailbox_email.py` explicitly;
 - allowed email senders route to the configured supervisor identity and remain durable if that identity is unavailable; disallowed senders never enter Mailbox v2;
 - pending v1 reminders are imported or explicitly classified;
@@ -933,7 +933,7 @@ Implement scheduler and CLI, migrate pending reminders under lock, and disable v
 
 ### Phase 5: producer migration
 
-Move email ingress, watchdog, PR watch, recall, standing orders, remote delegation, and worker status producers. Track direct mailbox writes as a failing audit.
+Move email ingress, watchdog, PR watch, standing orders, remote delegation, and worker status producers. Track direct mailbox writes as a failing audit.
 
 ### Phase 6: retirement
 

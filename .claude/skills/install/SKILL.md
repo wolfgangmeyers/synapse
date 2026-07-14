@@ -50,6 +50,94 @@ for f in ~/.claude/skills/*.md; do
 done
 ```
 
+### 2a. Retire Legacy Recall
+
+Recall's tmux/cron/Claude-hook implementation is retired. This cleanup is
+idempotent and deliberately removes only its canonical runtime producers and
+state; it does not create or configure a replacement.
+
+```bash
+# Remove only crontab lines that invoke the retired recall producer.
+RECALL_CRON_FRAGMENT="/.claude/skills/recall/tools/recall_cron.py"
+CURRENT_CRONTAB="$(crontab -l 2>/dev/null || true)"
+FILTERED_CRONTAB="$(printf '%s\n' "$CURRENT_CRONTAB" | grep -Fv "$RECALL_CRON_FRAGMENT" || true)"
+if [ "$CURRENT_CRONTAB" != "$FILTERED_CRONTAB" ]; then
+  printf '%s\n' "$FILTERED_CRONTAB" | crontab -
+  echo "removed: retired recall cron job"
+else
+  echo "skipped: retired recall cron job is absent"
+fi
+
+# Remove only the exact legacy PostToolUse command; preserve every other hook
+# and every other setting.
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+settings_path = Path.home() / ".claude/settings.json"
+legacy_command = "~/.claude/hooks/recall-hook.py"
+if not settings_path.exists():
+    print("skipped: Claude settings file is absent")
+    raise SystemExit
+
+settings = json.loads(settings_path.read_text())
+post_hooks = settings.get("hooks", {}).get("PostToolUse", [])
+updated = []
+removed = 0
+for entry in post_hooks:
+    hooks = entry.get("hooks", [])
+    kept = [
+        hook for hook in hooks
+        if not (hook.get("type") == "command" and hook.get("command") == legacy_command)
+    ]
+    removed += len(hooks) - len(kept)
+    if kept or not hooks:
+        if len(kept) != len(hooks):
+            entry = {**entry, "hooks": kept}
+        updated.append(entry)
+if removed:
+    settings["hooks"]["PostToolUse"] = updated
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    print(f"removed: {removed} retired recall PostToolUse hook registration(s)")
+else:
+    print("skipped: retired recall PostToolUse hook registration is absent")
+PY
+
+# Remove legacy symlinks only. Non-symlink files are deliberately preserved.
+for link in \
+  "$HOME/.claude/skills/recall" \
+  "$HOME/.agents/skills/recall" \
+  "$HOME/.claude/hooks/recall-hook.py"; do
+  if [ -L "$link" ]; then
+    unlink "$link"
+    echo "removed legacy symlink: $link"
+  elif [ -e "$link" ]; then
+    echo "skipped non-symlink legacy path: $link"
+  fi
+done
+
+# Remove only Recall's runtime state and log. Do not follow symlinks or remove
+# an unexpected non-file/non-directory path.
+RECALL_STATE="$HOME/.mecha-developer/recall"
+if [ -L "$RECALL_STATE" ]; then
+  unlink "$RECALL_STATE"
+elif [ -d "$RECALL_STATE" ]; then
+  rm -rf "$RECALL_STATE"
+elif [ -e "$RECALL_STATE" ]; then
+  echo "skipped unexpected non-directory recall state path: $RECALL_STATE"
+fi
+
+RECALL_LOG="$HOME/.mecha-developer/recall-cron.log"
+if [ -L "$RECALL_LOG" ]; then
+  unlink "$RECALL_LOG"
+elif [ -f "$RECALL_LOG" ]; then
+  rm -f "$RECALL_LOG"
+elif [ -e "$RECALL_LOG" ]; then
+  echo "skipped unexpected non-file recall log path: $RECALL_LOG"
+fi
+```
+
 ### 3. Symlink Personas
 
 ```bash
