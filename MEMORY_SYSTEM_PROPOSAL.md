@@ -1,28 +1,39 @@
 # Unified Memory System Proposal
 
-**Status:** Proposed
+**Status:** Approved
 **Date:** 2026-07-13
 
 ## Goal
 
 Keep one durable, human-readable memory system that captures useful knowledge in
 one place and recalls only what directly matters to current work. It works
-across agent sessions without eager memory loading, duplicate stores, terminal
-scraping, or unrestricted local-file access.
+across agent sessions without eager memory loading, terminal scraping, or
+unrestricted local-file access.
 
 ## Binding Decisions
 
-- KB Markdown under `~/.mecha-developer/kb/` is the only durable memory. Normal
-  KB updates remain the canonical capture and edit path.
+- KB Markdown under `~/.mecha-developer/kb/` is the only durable memory. The
+  default store is the existing KB record layout directly under that directory;
+  `INDEX.md` is not a record. Optional named domain stores are reserved under
+  `~/.mecha-developer/kb/stores/<store-id>/`, leaving the default layout intact.
+  Normal KB updates remain the canonical capture and edit path.
+- Store is derived from a record path, never record frontmatter: default-layout
+  records belong to `default`, and records below `stores/<store-id>/` belong to
+  that validated store ID. The catalog rejects duplicate IDs across every store,
+  preserving globally deterministic record IDs and plain-ID `related` links.
 - There is no agent-memory tier, Codex-memory or Claude-memory clone, generated
-  eager-load index, or automatic migration. Material from an old store may be
-  deliberately incorporated through a normal KB update.
+  eager-load index, or automatic migration. Noncanonical existing KB files are
+  not implicitly migrated or cataloged; making one canonical is an explicit
+  normal KB edit. Material from an old store may likewise be deliberately
+  incorporated through a normal KB update.
 - A rebuildable SQLite catalog supports recall but is not memory: it contains
-  canonical frontmatter plus a derived copy of each record's Markdown body and
-  is always rebuildable from Markdown.
-- Recall activation and runtime state—including timers, cooldown, coalescing,
-  and pending evaluation—exist only in the local Pi extension for that agent
-  process. They are never router, KB-record, or durable session state.
+  canonical frontmatter, derived store data, and a derived copy of each record's
+  Markdown body and is always rebuildable from Markdown.
+- Recall activation, selected stores, and runtime state—including timers,
+  cooldown, coalescing, and pending evaluation—exist only in the local Pi
+  extension for that agent process. They are never router, KB-record, or
+  durable session state. The router neither persists enabled stores nor enables
+  recall globally.
 - The old tmux/cron/Claude recall system is discarded. It is removed as an
   initial independently shippable phase; the new system does not coexist with
   it.
@@ -53,20 +64,26 @@ ordering/list: `relevant_at DESC, id ASC`. New or edited KB records set it to
 now. A record selected by recall is touched through the router API and also sets
 it to now. No separate recency or relevance field exists.
 
-`related` is the sole recall graph: an explicit list of record IDs. Normal KB
-updates alone create or edit these links. Recall may follow links but never
-writes them. A Markdown `See Also` section may exist for people, but is not part
-of recall.
+`related` is the sole recall graph: an explicit list of globally unique record
+IDs. Normal KB updates alone create or edit these links, including explicit
+relationships across stores. Recall may follow links but never writes them. A
+Markdown `See Also` section may exist for people, but is not part of recall.
 
 ## Catalog, Lookup, And Policy
 
 The router owns the rebuildable catalog, narrow memory lookup and touch APIs,
-and central shared recall policy. It does not own activation or runtime state,
-run the evaluator, or inject recall messages. Its catalog contains only:
+and central shared recall policy. It does not own activation, selected-store
+configuration, runtime state, run the evaluator, or inject recall messages. Its
+catalog contains the canonical fields plus derived store data:
 
 ```text
-id, title, memory, relevant_at, related
+id, title, memory, relevant_at, related, store
 ```
+
+Catalog discovery includes only canonical four-field records in the default
+layout and validated named-store subtrees; it excludes `INDEX.md` and
+noncanonical files. `store` is derived from the record path and is not written
+back to Markdown.
 
 The router has one `recall` policy block; no second recall configuration file is
 allowed. It is supplied to Pi extensions and provides these defaults and hard,
@@ -88,11 +105,16 @@ recall:
     maximum_graph_depth: 2
 ```
 
-Normal lookup returns at most `candidate_limit` entries in the sole canonical
+Lookup, expansion, and touch each receive an explicit selected-store set from
+the extension. The router validates each store ID and its path mapping, operates
+only inside those stores, and rejects invalid selections. Normal lookup returns
+at most `candidate_limit` entries from the selected stores in the sole canonical
 order. Bounded expansion accepts only requested stable IDs and literal terms;
 the router controller validates every request, enforces all policy bounds, and
-returns only the approved matching records and permitted `related` traversal.
-This API never exposes paths, commands, unrestricted files, or the corpus.
+returns only the approved matching records and permitted `related` traversal
+within the selected stores. A disabled store is never returned or traversed,
+even when a selected record relates to it. This API never exposes paths,
+commands, unrestricted files, or the corpus.
 
 There is no vector search, embedding model, Sentence Transformers, FTS, or
 full-text index. Literal matching may inspect record bodies inside the router to
@@ -102,16 +124,19 @@ exposes an unrestricted corpus or filesystem path.
 
 ## Recall Activation And Flow
 
-The extension exposes `mecha_recall` with `enable`, `disable`, and `status`
-actions. Invoking it changes only that loaded extension instance's in-memory
-state. Recall is disabled by default for every new Pi process and after an
-extension reload.
+The extension exposes one `mecha_recall` tool with `enable`, `disable`, and
+`status` actions. Invoking it changes only that loaded extension instance's
+in-memory state. `enable` accepts an optional explicit, complete store
+selection, replacing any prior local selection; with no selection it enables
+`default`. A session may select `default`, named stores, or any explicit
+combination. `status` reports the locally selected stores. `disable` clears
+local recall and store selection. Recall is disabled by default for every new
+Pi process and after an extension reload.
 
-The supervisor must enable its own recall when it starts. For every managed
-worker launch, it decides whether the assigned task could benefit from prior
-knowledge; if so, it uses the worker-launch recall option to initialize recall
-in that worker's local extension instance. This option is process-local startup
-input, not router configuration or persisted state.
+The supervisor enables recall for itself when useful and chooses stores per
+worker and task. The worker launcher will support a process-local default-recall
+startup option and repeatable named-store selection; these set only initial
+extension state, not router configuration or persisted state.
 
 When enabled, the Pi extension owns activity observation, timing, cooldown, and
 coalescing. For each active window, it starts a 30-second inactivity debounce
@@ -159,18 +184,22 @@ durable memory.
 1. **Retire legacy recall.** Remove the tmux/cron/Claude recall path and its
    configuration; do not retain a compatibility or parallel recall path.
 2. **Define records and catalog.** Validate the four-field frontmatter
-   contract, treat the Markdown body as the memory, make normal KB writes set
-   `relevant_at`, and build/rebuild the derived five-column SQLite catalog with
-   deterministic ordering.
+   contract; discover default-layout and named-store records while excluding
+   `INDEX.md` and noncanonical files; derive store from path; reject global ID
+   collisions; treat the Markdown body as the memory; make normal KB writes set
+   `relevant_at`; and build/rebuild the derived catalog with deterministic
+   ordering.
 3. **Add router control-plane APIs.** Implement the central shared-policy block
-   and bounded lookup/expansion and touch APIs. The router has no recall
-   activation, cooldown, coalescing, or other per-agent session state.
-4. **Add extension recall.** Implement the local activation tool and
-   worker-launch option, policy-driven activity debounce and fixed window
-   timing, local cooldown/coalescing and noninteractive evaluator launch,
-   validated expansion, record touches, and direct `pi.sendMessage()` delivery.
-   Update supervisor instructions to enable itself and to choose recall per
-   worker launch.
+   and bounded lookup/expansion and touch APIs with explicit validated selected
+   stores. The router has no recall activation, selected-store configuration,
+   cooldown, coalescing, or other per-agent session state.
+4. **Add extension recall.** Implement the local activation tool, optional
+   complete store selection, and worker-launch initial-state options;
+   policy-driven activity debounce and fixed window timing, local
+   cooldown/coalescing and noninteractive evaluator launch, validated
+   expansion, record touches, and direct `pi.sendMessage()` delivery. Update
+   supervisor instructions to enable itself when useful and choose stores per
+   worker and task.
 
 ## Acceptance Criteria
 
@@ -180,17 +209,28 @@ durable memory.
   body to `memory`; `relevant_at DESC, id ASC` is the only ordering/list.
 - Creating, editing, or selecting a record sets `relevant_at` to now. Recall
   never creates or edits `related` links.
-- Deleting and rebuilding the SQLite catalog loses no memory and recreates only
-  the five catalog fields.
+- The default store preserves the existing record paths under
+  `~/.mecha-developer/kb/`; named stores are only under the reserved
+  `stores/<store-id>/` subtree. Store is derived from path, never added to
+  canonical frontmatter. Discovery excludes `INDEX.md` and noncanonical files;
+  noncanonical existing files require an explicit normal KB edit to migrate.
+- Deleting and rebuilding the SQLite catalog loses no memory and recreates the
+  five canonical-derived fields plus derived `store`; duplicate IDs across all
+  stores are rejected.
 - The old recall implementation is removed before new recall implementation;
   no legacy/coexisting delivery path remains.
 - The router owns the catalog, narrow lookup/touch APIs, and the sole shared
-  policy block, but neither activation, per-agent runtime state, evaluator
-  execution, nor recall-message injection.
-- The extension exposes local `enable`, `disable`, and `status` activation;
-  starts disabled; and loses all recall state at process exit or reload. The
-  supervisor enables itself and chooses whether to initialize recall per worker
-  launch.
+  policy block, but neither activation, selected-store configuration, per-agent
+  runtime state, evaluator execution, nor recall-message injection. Its
+  lookup, expansion, and touch interfaces require explicit validated selected
+  stores and never return or traverse a disabled store.
+- The extension exposes one local `mecha_recall` `enable`, `disable`, and
+  `status` tool; starts disabled; and loses all recall and store-selection state
+  at process exit or reload. `enable` defaults to `default` or replaces local
+  selection with its explicit complete store set; `status` reports that set and
+  `disable` clears it. The supervisor enables itself when useful and chooses
+  stores for each worker/task; launcher options provide initial local state
+  only.
 - When locally enabled, the extension follows the supplied policy: 30-second
   resettable inactivity, a non-extendable two-minute window deadline, up to 100
   candidates, and at most three direct local `pi.sendMessage()` recalls.
