@@ -12,14 +12,13 @@ import sys
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import quote
-from uuid import uuid4
 
 from pathlib import Path
 
 SUPERVISOR_TOOLS = Path(__file__).resolve().parents[2] / "supervisor" / "tools"
 sys.path.insert(0, str(SUPERVISOR_TOOLS))
 from agent_router import request_json, router_url
-from mailbox_send import post_json, router_endpoint
+from mailbox_send import nanoid, post_json, router_endpoint
 from _tmux import current_agent_id
 
 
@@ -150,7 +149,7 @@ def set_reminder(args: argparse.Namespace) -> int:
             interval_ms = parse_duration(args.recurrence)
             due_at = due_after(now, interval_ms)
         payload = {
-            "id": str(uuid4()),
+            "id": nanoid(),
             "target": target,
             "creator": creator,
             "body": args.message,

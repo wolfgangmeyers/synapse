@@ -659,7 +659,9 @@ test("router and SQLite recover timed-out delivery attempts and complete one-sho
     send({ type: "register", agent_id: "worker", instance_id: instanceId });
     const registration = await registered;
     assert.equal(registration.type, "registered");
+    assert.match(registration.frame_id, /^[A-Za-z0-9_-]{21}$/);
     const leaseId = registration.lease_id;
+    assert.match(leaseId, /^[A-Za-z0-9_-]{21}$/);
 
     const firstOffer = nextRouterFrame(socket);
     router.enqueueMessage(envelope("delivery-1"));

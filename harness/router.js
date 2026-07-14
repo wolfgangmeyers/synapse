@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { nanoid } from "nanoid";
 import { createServer } from "node:http";
 import { once } from "node:events";
 
@@ -61,7 +61,7 @@ export function createAgentRouter({
   deliveryLeaseDurationMs = DEFAULT_DELIVERY_LEASE_DURATION_MS,
   maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
   timeoutSweepIntervalMs = 1_000,
-  generateFrameId = randomUUID,
+  generateFrameId = nanoid,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
   maxRequestsPerWindow = DEFAULT_MAX_REQUESTS_PER_WINDOW,

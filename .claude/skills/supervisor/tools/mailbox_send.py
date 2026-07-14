@@ -7,6 +7,7 @@ import argparse
 import errno
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -15,7 +16,6 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-from uuid import uuid4
 
 from _tmux import current_agent_id
 
@@ -24,6 +24,11 @@ DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 DEFAULT_LAUNCHD_LABEL = "life.meyers.mecha-router"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 MAX_RESPONSE_BYTES = 512 * 1024
+NANOID_ALPHABET = "_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def nanoid(size: int = 21) -> str:
+    return "".join(secrets.choice(NANOID_ALPHABET) for _ in range(size))
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -129,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         return fail(str(error))
 
     envelope = {
-        "id": str(uuid4()),
+        "id": nanoid(),
         "from": sender,
         "to": args.to,
         "body": body,
