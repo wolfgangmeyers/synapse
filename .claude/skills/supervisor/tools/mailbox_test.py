@@ -95,6 +95,7 @@ class MailboxSendV2Test(unittest.TestCase):
             self.assertEqual(message["subject"], "Task update")
             self.assertEqual(message["body"], "x" * 1_500)
             self.assertIn("created_at", message)
+            self.assertRegex(message["id"], r"^[A-Za-z0-9_-]{21}$")
             self.assertIn(f"Message {message['id']} accepted: queued", result.stdout)
             self.assertFalse(legacy_mailbox.exists())
 
