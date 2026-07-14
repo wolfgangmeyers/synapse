@@ -18,9 +18,11 @@ scraping, or unrestricted local-file access.
   eager-load index, or automatic migration. Material from an old store may be
   deliberately incorporated through a normal KB update.
 - A rebuildable SQLite catalog supports recall but is not memory: it contains
-  only canonical KB frontmatter and is always derivable from Markdown.
-- Runtime recall state, including cooldown, coalescing, and pending evaluation,
-  is router SQLite state, never KB-record data.
+  canonical frontmatter plus a derived copy of each record's Markdown body and
+  is always rebuildable from Markdown.
+- Recall activation and runtime state—including timers, cooldown, coalescing,
+  and pending evaluation—exist only in the local Pi extension for that agent
+  process. They are never router, KB-record, or durable session state.
 - The old tmux/cron/Claude recall system is discarded. It is removed as an
   initial independently shippable phase; the new system does not coexist with
   it.
@@ -32,13 +34,17 @@ Each KB record is Markdown with frontmatter containing exactly these fields:
 ```yaml
 id: dnsid-release-process
 title: DNSid release process
-summary: Short recall-safe description of the record.
 relevant_at: 2026-07-13T00:00:00Z
 related:
   - dnsid-deployment-checks
 ```
 
-The body holds supporting detail, context, links, and human-readable sources.
+The Markdown body is the memory. It is the complete reusable learned assertion
+or contract, including material conditions, limits, exceptions, decisions,
+evidence, and links; it is not a separate supporting appendix to a frontmatter
+summary. The catalog and APIs may call the derived body value `memory`, but no
+`memory` frontmatter field exists.
+
 Do not add provenance, type, scope, tags, confidence, sensitivity, expiry,
 supersession, hashes, scores, or any other frontmatter field.
 
@@ -55,11 +61,11 @@ of recall.
 ## Catalog, Lookup, And Policy
 
 The router owns the rebuildable catalog, narrow memory lookup and touch APIs,
-central recall policy, and per-session cooldown/coalescing state. It does not
-run the evaluator or inject recall messages. Its catalog contains only:
+and central shared recall policy. It does not own activation or runtime state,
+run the evaluator, or inject recall messages. Its catalog contains only:
 
 ```text
-id, title, summary, relevant_at, related
+id, title, memory, relevant_at, related
 ```
 
 The router has one `recall` policy block; no second recall configuration file is
@@ -68,9 +74,6 @@ configurable expansion bounds:
 
 ```yaml
 recall:
-  enabled_for:
-    supervisor: true
-    managed_worker: true # worker launch may explicitly opt out
   inactivity_seconds: 30
   maximum_window_seconds: 120
   candidate_limit: 100
@@ -93,21 +96,36 @@ This API never exposes paths, commands, unrestricted files, or the corpus.
 
 There is no vector search, embedding model, Sentence Transformers, FTS, or
 full-text index. Literal matching may inspect record bodies inside the router to
-produce the bounded expansion, but bodies are not normally returned.
+produce bounded candidates and expansions. A candidate's `memory` value is its
+Markdown body, bounded by the candidate and expansion limits; the router never
+exposes an unrestricted corpus or filesystem path.
 
-## Recall Flow
+## Recall Activation And Flow
 
-The Pi extension owns activity observation and timing. For each active window,
-it starts a 30-second inactivity debounce after activity and fixes a maximum
-2-minute evaluation deadline from that window's first activity. New activity
-resets the 30-second timer but never extends the 2-minute deadline. It uses the
-router policy rather than duplicated constants and consults router-owned
-per-session cooldown/coalescing state.
+The extension exposes `mecha_recall` with `enable`, `disable`, and `status`
+actions. Invoking it changes only that loaded extension instance's in-memory
+state. Recall is disabled by default for every new Pi process and after an
+extension reload.
+
+The supervisor must enable its own recall when it starts. For every managed
+worker launch, it decides whether the assigned task could benefit from prior
+knowledge; if so, it uses the worker-launch recall option to initialize recall
+in that worker's local extension instance. This option is process-local startup
+input, not router configuration or persisted state.
+
+When enabled, the Pi extension owns activity observation, timing, cooldown, and
+coalescing. For each active window, it starts a 30-second inactivity debounce
+after activity and fixes a maximum 2-minute evaluation deadline from that
+window's first activity. New activity resets the 30-second timer but never
+extends the 2-minute deadline. It uses router-supplied shared limits rather
+than duplicated constants.
 
 When evaluation is permitted, the extension launches an isolated,
 noninteractive local Pi evaluator. It supplies a short bounded context snapshot
-and up to 100 normal candidates, each with stable `id`, `title`, `summary`,
-`relevant_at`, and `related`. It supplies no Markdown bodies by default.
+and up to 100 normal candidates, each with stable `id`, `title`, `memory`,
+`relevant_at`, and `related`, where `memory` is the bounded Markdown body
+content. The evaluator receives no filesystem paths or unrestricted body
+access.
 
 The evaluator may request catalog expansion through the extension and
 controller-validated router API, but has no direct path, file, shell, or command
@@ -122,7 +140,8 @@ access. Its fixed instructions require it to:
 After a valid selection, the extension calls the router touch API for the
 selected records, then directly calls its local `pi.sendMessage()` with at most
 three concise recall messages. Recall never uses Mailbox V2. Neither evaluator
-nor router logs raw context snapshots or Markdown bodies.
+nor router logs raw context snapshots or Markdown bodies. The extension drops
+all activation and runtime state when its Pi process exits.
 
 ## Maintainability Constraints
 
@@ -139,35 +158,45 @@ durable memory.
 
 1. **Retire legacy recall.** Remove the tmux/cron/Claude recall path and its
    configuration; do not retain a compatibility or parallel recall path.
-2. **Define records and catalog.** Validate the five-field frontmatter contract,
-   make normal KB writes set `relevant_at`, and build/rebuild the derived
-   five-field SQLite catalog with deterministic ordering.
-3. **Add router control-plane APIs.** Implement the central policy block,
-   bounded lookup/expansion and touch APIs, plus durable per-session cooldown
-   and coalescing state. Keep runtime state out of KB records.
-4. **Add extension recall.** Implement policy-driven activity debounce and fixed
-   window timing, local noninteractive evaluator launch, validated expansion,
-   record touches, and direct `pi.sendMessage()` delivery.
+2. **Define records and catalog.** Validate the four-field frontmatter
+   contract, treat the Markdown body as the memory, make normal KB writes set
+   `relevant_at`, and build/rebuild the derived five-column SQLite catalog with
+   deterministic ordering.
+3. **Add router control-plane APIs.** Implement the central shared-policy block
+   and bounded lookup/expansion and touch APIs. The router has no recall
+   activation, cooldown, coalescing, or other per-agent session state.
+4. **Add extension recall.** Implement the local activation tool and
+   worker-launch option, policy-driven activity debounce and fixed window
+   timing, local cooldown/coalescing and noninteractive evaluator launch,
+   validated expansion, record touches, and direct `pi.sendMessage()` delivery.
+   Update supervisor instructions to enable itself and to choose recall per
+   worker launch.
 
 ## Acceptance Criteria
 
-- Every canonical KB record has exactly `id`, `title`, `summary`,
-  `relevant_at`, and `related` frontmatter; `relevant_at DESC, id ASC` is the
-  only ordering/list.
+- Every canonical KB record has exactly `id`, `title`, `relevant_at`, and
+  `related` frontmatter. Its Markdown body is the complete reusable memory,
+  not a lossy synopsis or supporting appendix. The derived catalog maps that
+  body to `memory`; `relevant_at DESC, id ASC` is the only ordering/list.
 - Creating, editing, or selecting a record sets `relevant_at` to now. Recall
   never creates or edits `related` links.
 - Deleting and rebuilding the SQLite catalog loses no memory and recreates only
   the five catalog fields.
 - The old recall implementation is removed before new recall implementation;
   no legacy/coexisting delivery path remains.
-- The router owns catalog, narrow lookup/touch APIs, the sole policy block, and
-  session state, but neither evaluator execution nor recall-message injection.
-- The extension follows the supplied policy: 30-second resettable inactivity,
-  a non-extendable two-minute window deadline, up to 100 candidates, and at
-  most three direct local `pi.sendMessage()` recalls.
-- Evaluator input includes only bounded context and normal candidate metadata;
-  it sees no bodies by default, has no direct filesystem or command access, and
-  produces JSON-only, directly relevant, factual no-op-or-recall results.
+- The router owns the catalog, narrow lookup/touch APIs, and the sole shared
+  policy block, but neither activation, per-agent runtime state, evaluator
+  execution, nor recall-message injection.
+- The extension exposes local `enable`, `disable`, and `status` activation;
+  starts disabled; and loses all recall state at process exit or reload. The
+  supervisor enables itself and chooses whether to initialize recall per worker
+  launch.
+- When locally enabled, the extension follows the supplied policy: 30-second
+  resettable inactivity, a non-extendable two-minute window deadline, up to 100
+  candidates, and at most three direct local `pi.sendMessage()` recalls.
+- Evaluator input includes only bounded context and bounded candidate bodies
+  derived from Markdown; it has no filesystem or command access and produces
+  JSON-only, directly relevant, factual no-op-or-recall results.
 - Expansion is controller-validated and bounded by IDs, terms, matched records,
   bytes, related edges, and graph depth; it cannot expose the corpus.
 - No vector, embedding, Sentence Transformers, FTS, or full-text index is

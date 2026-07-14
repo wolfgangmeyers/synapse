@@ -409,7 +409,7 @@ Provide schema migration details, scheduler invariants, CLI examples, fake-clock
 - All agent-message producers using the Mailbox v2 facade.
 - Explicit outbound-email CLI and migrated email callers.
 - PurelyMail ingress using Mailbox v2 with the exact existing allowlist.
-- Updated supervisor, worker, mailbox, reminders, watchdog, recall, PR watch, and related skills.
+- Updated supervisor, worker, mailbox, reminders, watchdog, PR watch, and related skills.
 - Pi-native redesign or explicit removal of terminal-control-dependent workflows.
 - Removal of `worker_send.py`, file mailbox, mailbox hooks, mailbox cron, reminder cron, and stale requirements.
 - Repository/runtime audit tooling and cutover checklist.
@@ -431,7 +431,6 @@ Provide schema migration details, scheduler invariants, CLI examples, fake-clock
   - supervisor and worker status messaging;
   - watchdog and remote watchdog;
   - PR watch;
-  - recall;
   - standing orders;
   - KB reminders;
   - memory monitor;
