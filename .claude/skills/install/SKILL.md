@@ -425,11 +425,15 @@ else
   echo "skipped: watchdog cron job already exists (wrapped correctly)"
 fi
 
-# Mailbox V2 router owns reminder scheduling. Remove any retired V1 cron entry
-# so it cannot create duplicate or filesystem-backed deliveries.
-if crontab -l 2>/dev/null | grep -q "reminder_cron.py"; then
-  crontab -l 2>/dev/null | grep -v "reminder_cron.py" | crontab -
+# Mailbox V2 router owns reminder scheduling. Remove retired cron producers
+# so they cannot create duplicate or filesystem-backed deliveries.
+if crontab -l 2>/dev/null | grep -q "reminders/tools/reminder_cron.py"; then
+  crontab -l 2>/dev/null | grep -v "reminders/tools/reminder_cron.py" | crontab -
   echo "removed: retired reminder cron job (Mailbox V2 router owns scheduling)"
+fi
+if crontab -l 2>/dev/null | grep -q "kb_reminder_cron.py"; then
+  crontab -l 2>/dev/null | grep -v "kb_reminder_cron.py" | crontab -
+  echo "removed: retired KB maintenance reminder cron job (router owns scheduling)"
 fi
 
 # Log rotation — runs daily, keeps 1 backup, discards logs older than 24 hours.
@@ -563,7 +567,8 @@ crontab -l 2>/dev/null | grep "purelymail_poll.py" || echo "no Purelymail IMAP p
 crontab -l 2>/dev/null | grep "standing_orders_cron.py" || echo "no standing-orders refresh cron job"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
 crontab -l 2>/dev/null | grep "watchdog.py" || echo "no watchdog cron job"
-crontab -l 2>/dev/null | grep "reminder_cron.py" && echo "WARN: retired reminder cron job remains" || echo "Mailbox V2 router owns reminder scheduling"
+crontab -l 2>/dev/null | grep "reminders/tools/reminder_cron.py" && echo "WARN: retired reminder cron job remains" || echo "Mailbox V2 router owns reminder scheduling"
+crontab -l 2>/dev/null | grep "kb_reminder_cron.py" && echo "WARN: retired KB maintenance reminder cron job remains" || echo "Router owns KB maintenance reminder scheduling"
 ```
 
 ### 11. Report
