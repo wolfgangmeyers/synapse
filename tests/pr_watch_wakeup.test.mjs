@@ -27,6 +27,40 @@ test("ordinary mailbox messages use the same injection path", () => {
   assert.deepEqual(injected, [message]);
 });
 
+test("client defaults use NanoIDs for instance, frames, and replies", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+  socket.close = () => { socket.readyState = 3; };
+  let replyPayload;
+  const client = createMailboxClient({
+    agentId: "pr-watch",
+    onEnvelope: () => {},
+    webSocketFactory: () => socket,
+    fetchImpl: async (_url, options) => {
+      replyPayload = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ message: { ...replyPayload, state: "queued" } }) };
+    },
+  });
+
+  assert.match(client.instanceId, /^[A-Za-z0-9_-]{21}$/);
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      type: "registered", agent_id: "pr-watch", instance_id: client.instanceId, lease_id: "lease",
+    }),
+  }));
+  await connected;
+  assert.match(socket.sent[0].frame_id, /^[A-Za-z0-9_-]{21}$/);
+
+  await client.sendReply({ to: "supervisor", body: "Done." });
+  assert.match(replyPayload.id, /^[A-Za-z0-9_-]{21}$/);
+  client.close();
+});
+
 test("client delivery does not acknowledge merely because injection was requested", async () => {
   const socket = new EventTarget();
   socket.readyState = 0;

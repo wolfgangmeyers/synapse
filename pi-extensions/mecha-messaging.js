@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { nanoid } from "nanoid";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -123,7 +123,7 @@ export function createMailboxClient({
   log = () => {},
   webSocketFactory = (url) => new WebSocket(url),
   fetchImpl = fetch,
-  generateId = randomUUID,
+  generateId = nanoid,
   renewIntervalMs = 10_000,
   reconnectInitialDelayMs = DEFAULT_RECONNECT_INITIAL_DELAY_MS,
   reconnectMaxDelayMs = DEFAULT_RECONNECT_MAX_DELAY_MS,

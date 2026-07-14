@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { nanoid } from "nanoid";
 
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
@@ -78,7 +78,7 @@ export function validateDeliveryIdentity(identity) {
 
 export function createEnvelope({ from, to, subject, body }, {
   now = () => new Date(),
-  generateId = randomUUID,
+  generateId = nanoid,
 } = {}) {
   const envelope = {
     id: generateId(),
