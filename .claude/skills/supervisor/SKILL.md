@@ -41,7 +41,7 @@ Existing Claude Code, Codex, and Cursor windows are grandfathered. Preserve them
 
 **Process Reminders**: At session start and after compaction, set three self-renewing hourly reminders: (1) dev-loop checklist — explain --overview, test-coverage, robot-review before authorizing production code, (2) don't block on terminal — email/phone user instead, (3) simplicity — check for over-engineering against Wolfgang persona. Each message includes "Set this reminder again in 60m" for self-renewal.
 
-**Set a reminder for every async action.** Any time something is kicked off in the background — deploys, CI runs, subagent tasks, pushes that trigger workflows — set a reminder to check on it. Subagents notify on completion, but their downstream effects (deploys, CI, external reviews) do not. The cost of a reminder is zero; the cost of a missed failure is hours.
+**Set a reminder for every async action.** Any time something is kicked off in the background — deploys, CI runs, subagent tasks, pushes that trigger workflows — set a reminder to check on it. For every worker expected to run longer than five minutes, set the required recurring Mailbox V2 supervisor reminder at launch with `--every 20m`; this replaces a one-shot worker follow-up. Use one-shot reminders for genuinely one-off external events. Subagents notify on completion, but their downstream effects (deploys, CI, external reviews) do not. The cost of a reminder is zero; the cost of a missed failure is hours.
 
 **Use Provided Tools**: ALWAYS use Python scripts in `~/.claude/skills/supervisor/tools/` for worker management and state. Deliver every worker instruction through `mailbox_send.py`; never use terminal or tmux input. If an agent is unregistered or not running, restore it through the managed Pi lifecycle/`worker_launch.py`, not terminal typing. Never manipulate `supervisor-state.json` directly.
 
@@ -343,6 +343,12 @@ python3 ~/.claude/skills/supervisor/tools/state_add.py \
 
 Set requirements at creation time when possible (can add later via `state_update_field.py`).
 
+**At launch, for every worker expected to run longer than five minutes, set this recurring Mailbox V2 supervisor reminder — not a one-shot follow-up:**
+```bash
+/reminders set --window supervisor --every 20m --message "Check activity for worker $ALIAS. Unblock any idle or errored worker through Mailbox V2. Cancel this recurrence when the worker is parked, completed, or shut down."
+```
+Record the reminder ID so it can be cancelled at disposition. Workers expected to finish within five minutes do not need this recurring worker-monitoring reminder.
+
 After Pi registers with Mailbox V2, send instructions and requirements:
 
 ```bash
@@ -402,9 +408,9 @@ After every delegation, ask: *"Did I give the worker everything it needs to succ
 
 > "Send me a status update by mail every 15-20 minutes while working. Include: what's done, what's next, any blockers."
 
-**Supervisor sets reminder to check.** After launching a worker, set a 15-20 minute reminder. If no status mail has arrived by then, ask: `"Status update? What's done, what's left, any blockers? Reply by mail."`
+**Supervisor sets recurring monitoring at launch.** For every worker expected to run longer than five minutes, set the required Mailbox V2 supervisor reminder with `--every 20m` at launch. On each recurrence, check activity; if the worker is idle or errored, unblock it through Mailbox V2. If no status mail has arrived, ask: `"Status update? What's done, what's left, any blockers? Reply by mail."` Cancel the recurrence when the worker is parked, completed, or shut down.
 
-This replaces relying on tmux capture for progress monitoring. Mail-based updates are reliable, searchable, and give the supervisor a clear picture of whether the worker is on track or drifting. Redirect immediately if a status report reveals the worker has gone off-track — don't wait for completion.
+This replaces relying on tmux capture or a one-shot worker reminder for progress monitoring. Mail-based updates are reliable, searchable, and give the supervisor a clear picture of whether the worker is on track or drifting. Redirect immediately if a status report reveals the worker has gone off-track — don't wait for completion.
 
 ### Verification Standards
 
@@ -632,7 +638,7 @@ Checklist enforced: requirements checked, diff reviewed, evidence present, remin
 2. Background subagent: robot-review scoped to the `requirements` focus area + TASK.md criteria check
 3. Clean → park with explicit reason. Issues → send back.
 
-**Every park MUST have a follow-up reminder.** Watchdog flags parked workers without reminders. If blocked on user: send phone notification + set re-notify reminder.
+**Cancel the worker-monitoring recurrence on every park.** If the worker is parked pending a genuinely one-off external event (for example, human intervention), set a separate one-shot follow-up reminder; if it is completed, do not leave a stale reminder. Watchdog flags blocked parked workers without follow-up reminders. If blocked on user: send phone notification + set re-notify reminder.
 
 ### Kill vs. Park Decision Rule
 
@@ -1760,7 +1766,11 @@ Archiving is a manual or scripted operation — tasks are not auto-archived. Whe
 Use the `/reminders` skill to set deferred follow-up checks without holding the supervisor turn open.
 
 ```bash
+# One-shot follow-up for a genuinely one-off external event
 /reminders set --window supervisor --in <duration> --message "<what to check>"
+
+# Recurring worker monitoring; required at launch when a worker should run >5m
+/reminders set --window supervisor --every 20m --message "Check activity for worker <alias>. Unblock any idle or errored worker through Mailbox V2. Cancel this recurrence when the worker is parked, completed, or shut down."
 ```
 
 **Examples:**
@@ -1772,18 +1782,18 @@ Use the `/reminders` skill to set deferred follow-up checks without holding the 
 /reminders set --window supervisor --in 15m --message "Check CI status on dnsid-phase2 PR. If green, authorize push."
 ```
 
-**Proactive reminder setting:** Every time you delegate work to a worker, send a message and wait for a response, or kick off any async process, set a reminder to check on it. Don't rely on the worker mailing back or the watchdog catching it — set your own follow-up. The reminder is your safety net; the mail is the happy path. If the mail arrives before the reminder fires, cancel the reminder and proceed. Examples:
-- Launched a worker → set 30m reminder to check if it's making progress
-- Sent worker back for a final review pass → set 30m reminder to check results
-- Pushed a PR and waiting for CI/Greptile → set 30m reminder to poll
-- Asked a worker a question → set 15m reminder in case it doesn't respond
+**Proactive reminder setting:** Every time you delegate work to a worker, send a message and wait for a response, or kick off any async process, set the appropriate reminder. Don't rely on the worker mailing back or the watchdog catching it — the reminder is the safety net; mail is the happy path. Examples:
+- Launched a worker expected to run >5m → immediately set the required `--every 20m` worker-monitoring recurrence
+- Sent worker back for a final review pass → keep its recurrence active; do not replace it with a one-shot reminder
+- Pushed a PR and waiting for CI/Greptile → set a one-shot external-event follow-up and re-arm only while that external event remains pending
+- Asked a worker a question → its existing recurrence covers the check; for a short-lived worker without one, set a 15m one-shot reminder
 
 **Key rules:**
-- Reminders fire **once** — if you still need the check after handling, re-arm immediately.
-- For polling loops, the reminder message should include a self-referencing instruction: "If nothing yet, set next reminder in 30m." This keeps the loop going without manual re-arming.
-- Cancel reminders when the event they're checking for has already happened. Don't let stale reminders accumulate.
-- Good use cases: Greptile feedback polling, PR review follow-up, waiting for CI, checking back after a worker parks, verifying a worker picked up its task.
-- Do not use for urgent events where a phone notification is more appropriate.
+- A `--every` reminder recurs until cancelled. Use it for every worker expected to run longer than five minutes, starting at launch.
+- Each recurring worker reminder must say to check activity, unblock idle or errored workers through Mailbox V2, and cancel the recurrence when the worker is parked, completed, or shut down.
+- `--in` reminders fire once. Reserve them for genuinely one-off external events or short-lived workers; re-arm an external-event check only if it remains pending.
+- Cancel reminders when their event has happened, and cancel the worker recurrence at park, completion, or shutdown. Don't let stale reminders accumulate.
+- Good one-shot use cases: Greptile feedback polling, PR review follow-up, and waiting for CI. Do not use for urgent events where a phone notification is more appropriate.
 
 ---
 
