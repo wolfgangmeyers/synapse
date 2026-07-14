@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Send a dedicated KB maintenance reminder to the supervisor mailbox.
+"""Retired compatibility utility for sending a KB maintenance reminder.
 
-Intended cron entry:
-  17 */6 * * * /usr/bin/python3 ~/.claude/skills/supervisor/tools/kb_reminder_cron.py >> ~/.mecha-developer/kb-reminder-cron.log 2>&1
+Do not schedule this script with cron. The router-owned
+``kb-maintenance-reminder`` job is the canonical scheduler. This utility
+remains only for explicit, compatible manual invocation.
 """
 
 import argparse
@@ -46,7 +47,10 @@ def send_reminder(body, recipient, sender, subject):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Send a KB maintenance reminder to the supervisor mailbox."
+        description=(
+            "Retired compatibility utility; do not schedule it. "
+            "The router-owned kb-maintenance-reminder job is canonical."
+        )
     )
     parser.add_argument(
         "--dry-run",
