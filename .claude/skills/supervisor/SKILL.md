@@ -351,7 +351,7 @@ python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to
 2. For large tasks (many files, multiple phases, long implementations), break into subagents aggressively — one subagent per logical chunk. Never do large batches of work inline.
 3. Maintain your todo list constantly
 4. Reference ~/personas/wolfgang.md for decisions
-5. Send supervisor a mailbox message if you get stuck so they can unblock you.
+5. If blocked, immediately send the supervisor a Mailbox V2 message with the command/error, observed state, and proposed next step. Do not leave a blocker only in terminal output or for a later periodic status update.
 
 Your task: <TASK DESCRIPTION>
 
