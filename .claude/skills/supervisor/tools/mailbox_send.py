@@ -24,7 +24,7 @@ DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 DEFAULT_LAUNCHD_LABEL = "life.meyers.mecha-router"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 MAX_RESPONSE_BYTES = 512 * 1024
-NANOID_ALPHABET = "_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+NANOID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 def nanoid(size: int = 21) -> str:

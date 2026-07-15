@@ -1,4 +1,3 @@
-import { nanoid } from "nanoid";
 import { createServer } from "node:http";
 import { once } from "node:events";
 
@@ -19,6 +18,7 @@ import {
   validateReminder,
 } from "./db.js";
 import { registeredServerJobs, serverJobEnvelope } from "./server_jobs.js";
+import { createNanoId } from "./id.js";
 import {
   ABSOLUTE_MAX_BODY_BYTES,
   DEFAULT_MAX_BODY_BYTES,
@@ -61,7 +61,7 @@ export function createAgentRouter({
   deliveryLeaseDurationMs = DEFAULT_DELIVERY_LEASE_DURATION_MS,
   maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
   timeoutSweepIntervalMs = 1_000,
-  generateFrameId = nanoid,
+  generateFrameId = createNanoId,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
   maxRequestsPerWindow = DEFAULT_MAX_REQUESTS_PER_WINDOW,
