@@ -48,6 +48,7 @@ an ID conflict the client lists and verifies the other attempt instead of
 creating a second recurrence. If the router cannot be listed or verified, the
 service reports failure and does not create a reminder.
 
+
 ### Visible wakeup contract
 
 Mailbox V2 is the only scheduler. Never create, replace, or reconcile a
@@ -72,10 +73,10 @@ watcher behind the agent's back.
 
 ### Scan reporting contract
 
-Every scan must report its result to `supervisor` through Mailbox V2. Normally
-`watch_prs.py` does this itself: it records its report/state and sends `PR watch
-findings` when actionable PRs are found or an hourly `PR watch quiet` report.
-An unhandled pass error sends `PR watch error` and exits nonzero.
+Every scan records its report/state locally. Send Mailbox V2 to `supervisor`
+only when actionable PRs are found (`PR watch findings`) or a scan fails (`PR
+watch error`). Quiet scans are local state only: do not send `PR watch quiet`,
+scan-heartbeat, or throttle-status messages to the supervisor.
 
 Do not assume terminal output is a supervisor report. If the script cannot send
 its report, send a concise outcome or failure report to `supervisor` yourself
@@ -124,8 +125,8 @@ It suppresses closed/merged PRs, Wolfgang-authored PRs, ordinary draft PRs, and 
 The watcher mails only the supervisor mailbox:
 
 - Subject `PR watch findings` when actionable PRs are found.
-- Subject `PR watch quiet` for hourly no-action heartbeats.
 - Subject `PR watch error` if the loop itself hits an unhandled exception.
+- Do not send quiet, scan-heartbeat, or throttle-status messages.
 
 Messages include the repo/PR, why it is actionable, what changed, and the recommended next action such as launching the review-pr workflow, re-reviewing an existing PR, responding to feedback, or continuing to monitor. For Claude Code workers, the workflow may be invoked as `/review-pr`. For Codex workers, send a plain-language instruction to read `~/code/mecha-review/.claude/skills/review-pr/SKILL.md` and execute that workflow for the PR URL; do not send slash commands to Codex.
 

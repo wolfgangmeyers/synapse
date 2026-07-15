@@ -41,7 +41,7 @@ Existing Claude Code, Codex, and Cursor windows are grandfathered. Preserve them
 
 **Process Reminders**: At session start and after compaction, set three self-renewing hourly reminders: (1) dev-loop checklist — explain --overview, test-coverage, robot-review before authorizing production code, (2) don't block on terminal — email/phone user instead, (3) simplicity — check for over-engineering against Wolfgang persona. Each message includes "Set this reminder again in 60m" for self-renewal.
 
-**Set a reminder for every async action.** Any time something is kicked off in the background — deploys, CI runs, subagent tasks, pushes that trigger workflows — set a reminder to check on it. For every worker expected to run longer than five minutes, set the required recurring Mailbox V2 supervisor reminder at launch with `--every 20m`; this replaces a one-shot worker follow-up. Use one-shot reminders for genuinely one-off external events. Subagents notify on completion, but their downstream effects (deploys, CI, external reviews) do not. The cost of a reminder is zero; the cost of a missed failure is hours.
+**Set a reminder for every async action.** Any time something is kicked off in the background — deploys, CI runs, subagent tasks, pushes that trigger workflows — set a reminder to check on it. For every worker expected to run longer than five minutes, require the worker at launch to create two recurring Mailbox V2 self-reminders: a five-minute momentum heartbeat that repeats the task's concrete goal, and a 20-minute substantive status update to the supervisor. Keep the supervisor's own 20-minute monitoring recurrence as a backstop. Use one-shot reminders for genuinely one-off external events. Subagents notify on completion, but their downstream effects (deploys, CI, external reviews) do not. The cost of a reminder is zero; the cost of a missed failure is hours.
 
 **Use Provided Tools**: ALWAYS use Python scripts in `~/.claude/skills/supervisor/tools/` for worker management and state. Deliver every worker instruction through `mailbox_send.py`; never use terminal or tmux input. If an agent is unregistered or not running, restore it through the managed Pi lifecycle/`worker_launch.py`, not terminal typing. Never manipulate `supervisor-state.json` directly.
 
@@ -357,7 +357,8 @@ python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to
 2. For large tasks (many files, multiple phases, long implementations), break into subagents aggressively — one subagent per logical chunk. Never do large batches of work inline.
 3. Maintain your todo list constantly
 4. Reference ~/personas/wolfgang.md for decisions
-5. If blocked, immediately send the supervisor a Mailbox V2 message with the command/error, observed state, and proposed next step. Do not leave a blocker only in terminal output or for a later periodic status update.
+5. If this task may run longer than five minutes, immediately create two recurring Mailbox V2 self-reminders and mail their IDs to the supervisor: (a) every five minutes, restate the task goal and continue the next concrete task action; (b) every 20 minutes, send a substantive status update with files changed, validation, next executable action, and exact blockers. Cancel both only when the task is parked or complete.
+6. If blocked, immediately send the supervisor a Mailbox V2 message with the command/error, observed state, and proposed next step. Do not leave a blocker only in terminal output or for a later periodic status update.
 
 Your task: <TASK DESCRIPTION>
 
@@ -404,9 +405,9 @@ After every delegation, ask: *"Did I give the worker everything it needs to succ
 
 ### Worker Status Reports
 
-**Workers must send regular status updates by mail during long-running tasks.** Include this in every TASK.md and initial delegation message:
+**Workers must create their own recurring momentum and status reminders during long-running tasks.** Include this in every TASK.md and initial delegation message:
 
-> "Send me a status update by mail every 15-20 minutes while working. Include: what's done, what's next, any blockers."
+> "If this task may run longer than five minutes, create and report two recurring Mailbox V2 self-reminders: every five minutes, repeat the task goal and continue the next concrete action; every 20 minutes, send the supervisor a substantive update with files changed, validation, next executable action, and exact blockers. Cancel both when parked or complete."
 
 **Supervisor sets recurring monitoring at launch.** For every worker expected to run longer than five minutes, set the required Mailbox V2 supervisor reminder with `--every 20m` at launch. On each recurrence, check activity; if the worker is idle or errored, unblock it through Mailbox V2. If no status mail has arrived, ask: `"Status update? What's done, what's left, any blockers? Reply by mail."` Cancel the recurrence when the worker is parked, completed, or shut down.
 
