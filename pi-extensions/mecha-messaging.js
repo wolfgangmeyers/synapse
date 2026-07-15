@@ -1,8 +1,19 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const WebSocket = globalThis.WebSocket;
+const NANOID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+function createNanoId() {
+  let id = "";
+  while (id.length < 21) {
+    for (const byte of randomBytes(21 - id.length)) {
+      if (byte < 248) id += NANOID_ALPHABET[byte % NANOID_ALPHABET.length];
+    }
+  }
+  return id;
+}
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]"]);
 const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
@@ -123,7 +134,7 @@ export function createMailboxClient({
   log = () => {},
   webSocketFactory = (url) => new WebSocket(url),
   fetchImpl = fetch,
-  generateId = randomUUID,
+  generateId = createNanoId,
   renewIntervalMs = 10_000,
   reconnectInitialDelayMs = DEFAULT_RECONNECT_INITIAL_DELAY_MS,
   reconnectMaxDelayMs = DEFAULT_RECONNECT_MAX_DELAY_MS,

@@ -7,6 +7,7 @@ managed router nor create Mailbox V1 filesystem messages.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,8 @@ from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent
 SEND_SCRIPT = TOOLS_DIR / "mailbox_send.py"
+sys.path.insert(0, str(TOOLS_DIR))
+import mailbox_send
 
 
 class RecordingRouter:
@@ -72,6 +75,12 @@ def run_send(args, env=None):
 
 
 class MailboxSendV2Test(unittest.TestCase):
+    def test_nanoid_helper_generates_unique_protocol_safe_ids(self):
+        generated = [mailbox_send.nanoid() for _ in range(100)]
+
+        self.assertEqual(len(set(generated)), len(generated))
+        self.assertTrue(all(re.fullmatch(r"[A-Za-z0-9]{21}", value) for value in generated))
+
     def test_posts_a_v2_envelope_without_a_filesystem_mailbox(self):
         with tempfile.TemporaryDirectory() as tmp, RecordingRouter() as router:
             legacy_mailbox = Path(tmp) / "mailboxes"
@@ -95,6 +104,7 @@ class MailboxSendV2Test(unittest.TestCase):
             self.assertEqual(message["subject"], "Task update")
             self.assertEqual(message["body"], "x" * 1_500)
             self.assertIn("created_at", message)
+            self.assertRegex(message["id"], r"^[A-Za-z0-9]{21}$")
             self.assertIn(f"Message {message['id']} accepted: queued", result.stdout)
             self.assertFalse(legacy_mailbox.exists())
 
