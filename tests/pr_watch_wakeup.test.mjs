@@ -44,7 +44,7 @@ test("client defaults use NanoIDs for instance, frames, and replies", async () =
     },
   });
 
-  assert.match(client.instanceId, /^[A-Za-z0-9_-]{21}$/);
+  assert.match(client.instanceId, /^[A-Za-z0-9]{21}$/);
   const connected = client.connect();
   socket.readyState = 1;
   socket.dispatchEvent(new Event("open"));
@@ -54,10 +54,11 @@ test("client defaults use NanoIDs for instance, frames, and replies", async () =
     }),
   }));
   await connected;
-  assert.match(socket.sent[0].frame_id, /^[A-Za-z0-9_-]{21}$/);
+  assert.match(socket.sent[0].frame_id, /^[A-Za-z0-9]{21}$/);
 
   await client.sendReply({ to: "supervisor", body: "Done." });
-  assert.match(replyPayload.id, /^[A-Za-z0-9_-]{21}$/);
+  assert.match(replyPayload.id, /^[A-Za-z0-9]{21}$/);
+  assert.equal(new Set([client.instanceId, socket.sent[0].frame_id, replyPayload.id]).size, 3);
   client.close();
 });
 

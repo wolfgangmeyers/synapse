@@ -29,7 +29,7 @@ class ReminderIdTest(unittest.TestCase):
         with patch.object(reminders, "post_json", side_effect=post_json):
             self.assertEqual(reminders.set_reminder(args), 0)
 
-        self.assertRegex(payloads[0]["id"], r"^[A-Za-z0-9_-]{21}$")
+        self.assertRegex(payloads[0]["id"], r"^[A-Za-z0-9]{21}$")
 
 
 if __name__ == "__main__":
