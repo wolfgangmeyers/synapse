@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { nanoid } from "nanoid";
-
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+
+import { createNanoId } from "./id.js";
 
 const schemaUrl = new URL("../protocol/v1/schema.json", import.meta.url);
 const schema = JSON.parse(await readFile(schemaUrl, "utf8"));
@@ -78,7 +78,7 @@ export function validateDeliveryIdentity(identity) {
 
 export function createEnvelope({ from, to, subject, body }, {
   now = () => new Date(),
-  generateId = nanoid,
+  generateId = createNanoId,
 } = {}) {
   const envelope = {
     id: generateId(),

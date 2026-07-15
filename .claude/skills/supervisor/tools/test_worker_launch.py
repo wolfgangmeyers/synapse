@@ -20,6 +20,12 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.tmp_path = pathlib.Path(self.tmpdir.name)
 
+    def test_pi_session_id_remains_a_stable_uuid5(self):
+        self.assertEqual(
+            worker_launch.pi_session_id("/tmp/worktree", "worker"),
+            "740eb880-f670-5970-8e5f-3b7d401758c2",
+        )
+
     def test_launch_output_uses_mailbox_v2_without_v1_reminder_or_terminal_sender(self):
         _, output = self._run_main("mailbox-worker")
 
