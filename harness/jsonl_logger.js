@@ -3,6 +3,9 @@ import { dirname } from "node:path";
 
 const STRING_FIELDS = new Set([
   "message_id",
+  "occurrence_id",
+  "attempt_id",
+  "sentinel_child_occurrence_id",
   "agent_id",
   "instance_id",
   "lease_id",
@@ -54,7 +57,8 @@ const EVENT_SCHEMAS = Object.freeze({
   agent_disconnected: schema(["agent_id", "instance_id", "lease_id", "released"]),
   agent_registration_rejected: schema(["agent_id", "instance_id", "error_code"]),
   agent_lease_renewed: schema(["agent_id", "instance_id", "lease_id"]),
-  message_enqueued: schema(["message_id", "from", "to", "agent_id", "state", "created"]),
+  message_enqueued: schema(["message_id", "from", "to", "agent_id", "state", "created"], ["sentinel_child_occurrence_id"]),
+  sentinel_state_recorded: schema(["occurrence_id", "attempt_id", "state"], ["message_id"]),
   delivery_offered: schema(["message_id", "agent_id", "attempt", "lease_id", "delivery_expires_at"]),
   delivery_injection_requested: schema(["message_id", "agent_id", "attempt", "lease_id"]),
   delivery_acknowledged: schema(["message_id", "agent_id", "attempt", "lease_id"]),
