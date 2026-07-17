@@ -77,6 +77,7 @@ export function createAgentRouter({
     || typeof repository.acquireAgentLease !== "function"
     || typeof repository.renewAgentLease !== "function"
     || typeof repository.releaseAgentLease !== "function"
+    || typeof repository.leaseFor !== "function"
     || typeof repository.claimNextMessage !== "function"
     || typeof repository.recordInjectionRequested !== "function"
     || typeof repository.acknowledgeDelivery !== "function"
@@ -154,7 +155,7 @@ export function createAgentRouter({
     socket.on("message", (payload, isBinary) => {
       try {
         if (isBinary) throw new ProtocolValidationError();
-        const frame = validateClientFrame(JSON.parse(payload.toString("utf8")));
+        const frame = validateClientFrame(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload)));
         if (frame.type === "register") {
           if (session !== undefined) {
             sendError(socket, generateFrameId, "already_registered", frame.frame_id);
@@ -229,6 +230,10 @@ export function createAgentRouter({
           agentId: frame.agent_id,
           instanceId: frame.instance_id,
           leaseId,
+          agentRole: frame.agent_role ?? "agent",
+          clientType: frame.client_type,
+          ackConfirmation: frame.ack_confirmation,
+          connectedAt: lease.acquired_at,
         };
         session.offer = () => offerNextMessage(currentSocket, session);
         sessions.set(frame.agent_id, session);
@@ -237,6 +242,11 @@ export function createAgentRouter({
           instance_id: lease.instance_id,
           lease_id: lease.lease_id,
           recovered: lease.recovered,
+          agent_role: session.agentRole,
+          ...(session.clientType === undefined ? {} : { client_type: session.clientType }),
+          ...(session.ackConfirmation === undefined
+            ? {}
+            : { ack_confirmation: session.ackConfirmation }),
         });
         if (replacement !== undefined && replacement.socket !== currentSocket) {
           sendError(replacement.socket, generateFrameId, "lease_expired");
@@ -250,6 +260,10 @@ export function createAgentRouter({
           lease_id: lease.lease_id,
           expires_at: lease.expires_at,
           recovered: lease.recovered,
+          agent_role: session.agentRole,
+          ...(session.ackConfirmation === undefined
+            ? {}
+            : { ack_confirmation: session.ackConfirmation }),
         });
         offerSession(session);
       } catch (error) {
@@ -303,6 +317,10 @@ export function createAgentRouter({
           lease_id: lease.lease_id,
           expires_at: lease.expires_at,
           recovered: false,
+          agent_role: session.agentRole,
+          ...(session.ackConfirmation === undefined
+            ? {}
+            : { ack_confirmation: session.ackConfirmation }),
         });
       } catch (error) {
         if (error instanceof LeaseNotActiveError) {
@@ -343,13 +361,25 @@ export function createAgentRouter({
           return;
         }
         if (frame.type === "ack") {
-          repository.acknowledgeDelivery({ ...receipt, maxDeliveryAttempts });
+          const acknowledged = repository.acknowledgeDelivery({ ...receipt, maxDeliveryAttempts });
           emit("delivery_acknowledged", {
             message_id: receipt.messageId,
             agent_id: receipt.agentId,
             attempt: receipt.attemptNumber,
             lease_id: receipt.leaseId,
           });
+          if (session.ackConfirmation === "correlated_v1") {
+            sendFrame(currentSocket, generateFrameId, {
+              type: "delivery_acknowledged",
+              request_id: frame.frame_id,
+              agent_id: receipt.agentId,
+              instance_id: receipt.instanceId,
+              lease_id: receipt.leaseId,
+              message_id: acknowledged.message_id,
+              message_incarnation_id: acknowledged.message_incarnation_id,
+              attempt_number: receipt.attemptNumber,
+            });
+          }
           offerNextMessage(currentSocket, session);
           return;
         }
@@ -412,6 +442,7 @@ export function createAgentRouter({
         sendFrame(currentSocket, generateFrameId, {
           type: "message",
           message: toEnvelope(delivery.message),
+          message_incarnation_id: delivery.message.message_incarnation_id,
           attempt_number: delivery.attempt_number,
           delivery_expires_at: delivery.delivery_expires_at,
         });
@@ -672,11 +703,31 @@ export function createAgentRouter({
     if (session !== undefined) offerSession(session);
   }
 
+  function connectedAgentsSnapshot() {
+    const generatedAt = new Date(currentTimeMs(clock)).toISOString();
+    const agents = [];
+    for (const session of sessions.values()) {
+      const lease = repository.leaseFor(session.agentId);
+      if (session.socket.readyState !== WebSocket.OPEN
+        || lease === undefined
+        || lease.lease_id !== session.leaseId
+        || lease.instance_id !== session.instanceId
+        || lease.expires_at <= generatedAt) continue;
+      agents.push({
+        agent_id: session.agentId,
+        agent_role: session.agentRole,
+        connected_at: session.connectedAt,
+        lease_expires_at: lease.expires_at,
+      });
+    }
+    agents.sort((left, right) => left.agent_id < right.agent_id ? -1 : left.agent_id > right.agent_id ? 1 : 0);
+    return { generated_at: generatedAt, agents };
+  }
+
   function enqueueMessage(envelope) {
     const result = repository.enqueue(envelope);
     emit("message_enqueued", {
       message_id: result.message.id,
-      from: result.message.from,
       to: result.message.to,
       agent_id: result.message.to,
       state: result.message.state,
@@ -698,6 +749,10 @@ export function createAgentRouter({
         version: "v1",
         schema_migrations: repository.migrationIds(),
       });
+      return;
+    }
+    if (request.method === "GET" && requestUrl.pathname === "/v1/agents") {
+      sendHttpJson(response, 200, connectedAgentsSnapshot());
       return;
     }
     if (request.method === "POST" && requestUrl.pathname === "/v1/messages") {
@@ -1049,7 +1104,7 @@ function readJsonRequest(request, maxRequestBytes) {
     request.on("end", () => {
       if (settled) return;
       try {
-        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
         settled = true;
         resolve(payload);
       } catch {
