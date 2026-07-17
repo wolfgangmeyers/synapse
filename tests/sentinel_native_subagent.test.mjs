@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  captureNativeSentinelSpawner,
   createPiMailboxDeliveryCoordinator,
   spawnNativeSentinel,
   transientChildAgentId,
@@ -32,6 +33,36 @@ test("native Sentinel adapter uses the documented target Pi service channel with
     assert.deepEqual(calls, [["general-purpose", "private scheduled prompt", {
       description: "Scheduled Sentinel work", model: "caller-selected-model", inheritContext: true,
     }]]);
+  } finally {
+    if (previous === undefined) delete globalThis[serviceKey];
+    else globalThis[serviceKey] = previous;
+  }
+});
+
+test("captured parent service retains later scheduled children after child service replacement", async () => {
+  const serviceKey = Symbol.for("@gotgenes/pi-subagents:service");
+  const previous = globalThis[serviceKey];
+  const parentRecords = [];
+  const parentService = {
+    spawn: () => {
+      const id = `parent-child-${parentRecords.length + 1}`;
+      parentRecords.push({ id, status: "completed" });
+      return id;
+    },
+    getRecord: (id) => parentRecords.find((record) => record.id === id),
+  };
+  globalThis[serviceKey] = parentService;
+  try {
+    const spawn = captureNativeSentinelSpawner();
+    globalThis[serviceKey] = { spawn: () => "child-service-record" };
+    const first = await spawn({ ...sentinelMessage, id: "first" });
+    delete globalThis[serviceKey];
+    const second = await spawn({ ...sentinelMessage, id: "second" });
+    assert.deepEqual([first, second], ["parent-child-1", "parent-child-2"]);
+    assert.deepEqual(parentRecords, [
+      { id: "parent-child-1", status: "completed" },
+      { id: "parent-child-2", status: "completed" },
+    ]);
   } finally {
     if (previous === undefined) delete globalThis[serviceKey];
     else globalThis[serviceKey] = previous;
