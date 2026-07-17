@@ -34,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -282,7 +283,15 @@ class MainActivity : ComponentActivity() {
                         .toString(),
                 )
             }
+            scheduleAtFixedRate(60_000, 60_000) {
+                if (generation != connectionGeneration || leaseId.isBlank()) return@scheduleAtFixedRate
+                discoverPeers(generation)
+            }
         }
+    }
+
+    private fun refreshPeers() {
+        if (leaseId.isNotBlank()) discoverPeers(connectionGeneration)
     }
 
     private fun discoverPeers(generation: Int) = Thread {
@@ -549,7 +558,7 @@ class MainActivity : ComponentActivity() {
                         onSelect = ::switchRouter,
                         onRemove = ::removeRouter,
                     )
-                    selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, ::selectPeer, { showProfileEditor = true }, { showRouterManager = true })
+                    selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
                         BackHandler(onBack = ::returnHome)
                         Conversation(selectedPeer, messages, draft, { draft = it }, ::send, ::returnHome)
@@ -568,6 +577,7 @@ private fun PeerHome(
     activeRouter: String,
     peers: List<String>,
     onPeer: (String) -> Unit,
+    onRefresh: () -> Unit,
     onEditProfile: () -> Unit,
     onManageRouters: () -> Unit,
 ) {
@@ -581,6 +591,9 @@ private fun PeerHome(
             Column(Modifier.weight(1f)) {
                 Text("Mecha", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text("Your agent network", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
+            }
+            IconButton(onRefresh, Modifier.size(48.dp)) {
+                Icon(Icons.Default.Refresh, "Refresh agents", tint = Periwinkle)
             }
             IconButton(onEditProfile, Modifier.size(48.dp)) {
                 Icon(Icons.Default.Edit, "Edit username", tint = Periwinkle)
