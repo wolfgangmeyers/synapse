@@ -592,14 +592,6 @@ private fun MessageBubble(message: ChatMessage) {
         ) {
             Column(Modifier.padding(14.dp)) {
                 Text(message.body, color = if (outgoing) Ink else TextPrimary, style = MaterialTheme.typography.bodyLarge)
-                if (!outgoing) {
-                    Text(
-                        "Reply via mailbox to ${message.sender}",
-                        Modifier.padding(top = 10.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Teal,
-                    )
-                }
             }
         }
     }

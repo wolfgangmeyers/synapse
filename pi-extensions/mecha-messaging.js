@@ -443,7 +443,7 @@ function mailboxCustomMessage(message) {
   const subject = message.subject === undefined ? "" : `\nSubject: ${message.subject}`;
   return {
     customType: MAILBOX_MESSAGE_TYPE,
-    content: `[Agent message from ${message.from}]${subject}\nMessage-ID: ${message.id}\n\n${message.body}`,
+    content: `Mailbox message from ${message.from}${subject}\n\n${message.body}`,
     display: true,
     details: { message_id: message.id, from: message.from, to: message.to },
   };
