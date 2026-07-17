@@ -38,10 +38,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
     def test_main_defaults_to_pinned_pi_terra(self):
         extension = self._pi_mailbox_extension()
-        subagents_extension = self._pi_subagents_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
-            worker_launch.PI_SUBAGENTS_EXTENSION_ENV: str(subagents_extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, output = self._run_main("pi-worker", agent=None)
@@ -49,20 +47,37 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
-        extension_paths = [command[index + 1] for index, value in enumerate(command) if value == "--extension"]
-        self.assertEqual(extension_paths, [str(extension), str(subagents_extension)])
+        self.assertIn(str(extension), command)
         self.assertIn("--no-extensions", command)
         session_id = command[command.index("--session-id") + 1]
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
         self.assertIn(f"--session {session_id}", output)
 
-    def test_main_maps_resume_to_pi_session(self):
+    def test_managed_pi_command_uses_only_explicit_subagents_and_mailbox_extensions(self):
         extension = self._pi_mailbox_extension()
-        subagents_extension = self._pi_subagents_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
-            worker_launch.PI_SUBAGENTS_EXTENSION_ENV: str(subagents_extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", agent="pi")
+
+        command = shlex.split(commands[0])
+        extensions = [
+            command[index + 1]
+            for index, part in enumerate(command)
+            if part == "--extension"
+        ]
+        self.assertEqual(
+            extensions,
+            [worker_launch.PI_SUBAGENTS_EXTENSION, str(extension)],
+        )
+        self.assertIn("--no-extensions", command)
+
+    def test_main_maps_resume_to_pi_session(self):
+        extension = self._pi_mailbox_extension()
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", "--resume", "session-123", agent="pi")
@@ -73,16 +88,13 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
     def test_pi_launch_exports_router_configuration_but_not_identity(self):
         extension = self._pi_mailbox_extension()
-        subagents_extension = self._pi_subagents_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
-            worker_launch.PI_SUBAGENTS_EXTENSION_ENV: str(subagents_extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
-        self.assertIn(f"export {worker_launch.PI_SUBAGENTS_EXTENSION_ENV}={subagents_extension}", commands[0])
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])
 
@@ -100,11 +112,6 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
     def _pi_mailbox_extension(self):
         extension = self.tmp_path / "mecha-messaging.js"
-        extension.write_text("export default () => {};\n", encoding="utf-8")
-        return extension
-
-    def _pi_subagents_extension(self):
-        extension = self.tmp_path / "pi-subagents.ts"
         extension.write_text("export default () => {};\n", encoding="utf-8")
         return extension
 
