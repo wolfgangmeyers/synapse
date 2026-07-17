@@ -143,14 +143,14 @@ class MailboxSendV2Test(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("must use a loopback", result.stderr)
 
-    def test_retires_smtp_recipients_and_v1_large_body_override(self):
-        email = run_send(["--to", "person@example.com", "--from", "supervisor", "--body", "Status"])
+    def test_rejects_non_agent_recipients_and_v1_large_body_override(self):
+        non_agent = run_send(["--to", "person@example.com", "--from", "supervisor", "--body", "Status"])
         legacy_flag = run_send(
             ["--to", "worker-1", "--from", "supervisor", "--body", "Status", "--allow-large-body"]
         )
 
-        self.assertEqual(email.returncode, 2)
-        self.assertIn("only sends to agent IDs", email.stderr)
+        self.assertEqual(non_agent.returncode, 2)
+        self.assertIn("only sends to agent IDs", non_agent.stderr)
         self.assertEqual(legacy_flag.returncode, 2)
         self.assertIn("unrecognized arguments: --allow-large-body", legacy_flag.stderr)
 

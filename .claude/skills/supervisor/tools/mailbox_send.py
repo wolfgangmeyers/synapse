@@ -125,7 +125,7 @@ def utc_now() -> str:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if "@" in args.to:
-        return fail("mailbox_send.py only sends to agent IDs; use mailbox_email.py --to <address> ... for email.")
+        return fail("mailbox_send.py only sends to agent IDs.")
     try:
         sender = resolve_sender(args.sender)
         body = args.body
