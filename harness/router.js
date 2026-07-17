@@ -15,7 +15,6 @@ import {
   ReminderCancellationConflictError,
   ReminderIdempotencyConflictError,
   ReminderValidationError,
-  SentinelOccurrenceConflictError,
   validateReminder,
 } from "./db.js";
 import { registeredServerJobs, serverJobEnvelope } from "./server_jobs.js";
@@ -26,7 +25,6 @@ import {
   ProtocolValidationError,
   validateClientFrame,
   validateEnvelope,
-  validateSentinelAdmission,
   validateServerFrame,
 } from "./protocol.js";
 
@@ -37,8 +35,6 @@ const MAX_REQUEST_BYTES = 512 * 1024;
 const DEFAULT_MAX_REQUEST_BYTES = MAX_REQUEST_BYTES;
 const DEFAULT_MAX_REQUESTS_PER_WINDOW = 60;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const DEFAULT_SENTINEL_CHILD_TIMEOUT_MS = 180_000;
-const DEFAULT_SENTINEL_RESULT_GRACE_MS = 5_000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
 const HTTP_ERROR_MESSAGES = Object.freeze({
   invalid_request: "Request does not match the mailbox protocol.",
@@ -70,9 +66,6 @@ export function createAgentRouter({
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
   maxRequestsPerWindow = DEFAULT_MAX_REQUESTS_PER_WINDOW,
   rateLimitWindowMs = DEFAULT_RATE_LIMIT_WINDOW_MS,
-  sentinelReceiverPolicies = {},
-  sentinelLaunchDeadlineMs = 60_000,
-  sentinelResultDeadlineMs = DEFAULT_SENTINEL_CHILD_TIMEOUT_MS + DEFAULT_SENTINEL_RESULT_GRACE_MS,
   clock = () => new Date(),
   eventLogger = () => {},
   onOfferError = defaultOfferError,
@@ -118,12 +111,6 @@ export function createAgentRouter({
   }
   if (!Number.isSafeInteger(rateLimitWindowMs) || rateLimitWindowMs <= 0) {
     throw new TypeError("rateLimitWindowMs must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(sentinelLaunchDeadlineMs) || sentinelLaunchDeadlineMs <= 0) {
-    throw new TypeError("sentinelLaunchDeadlineMs must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(sentinelResultDeadlineMs) || sentinelResultDeadlineMs < DEFAULT_SENTINEL_CHILD_TIMEOUT_MS + DEFAULT_SENTINEL_RESULT_GRACE_MS) {
-    throw new TypeError("sentinelResultDeadlineMs must include the bounded post-completion relay grace");
   }
   if (typeof clock !== "function") throw new TypeError("clock must be a function");
   if (typeof eventLogger !== "function") throw new TypeError("eventLogger must be a function");
@@ -183,10 +170,6 @@ export function createAgentRouter({
         }
         if (["injection_requested", "ack", "nack"].includes(frame.type)) {
           receiveDeliveryReceipt(socket, frame);
-          return;
-        }
-        if (["sentinel_claim", "sentinel_launching", "sentinel_spawn_failed", "sentinel_launched", "sentinel_exited"].includes(frame.type)) {
-          receiveSentinelLifecycle(socket, frame);
           return;
         }
         sendFrame(socket, generateFrameId, {
@@ -438,80 +421,6 @@ export function createAgentRouter({
       }
     }
 
-    function receiveSentinelLifecycle(currentSocket, frame) {
-      if (session === undefined
-        || sessions.get(session.agentId) !== session
-        || session.agentId !== frame.agent_id
-        || session.instanceId !== frame.instance_id
-        || session.leaseId !== frame.lease_id) {
-        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
-        closeSocket(currentSocket, 4003, "lease not active");
-        return;
-      }
-      const delivery = frame.type === "sentinel_exited" ? undefined : {
-        agentId: frame.agent_id,
-        instanceId: frame.instance_id,
-        leaseId: frame.lease_id,
-        messageId: frame.message_id,
-        attemptNumber: frame.attempt_number,
-      };
-      try {
-        const state = frame.type === "sentinel_claim"
-          ? repository.claimSentinel(
-            frame.message_id,
-            frame.occurrence_id,
-            frame.attempt_id,
-            { launchDeadlineAt: sentinelDeadlineAt(clock, sentinelLaunchDeadlineMs), delivery },
-          )
-          : repository.transitionSentinel(
-            frame.occurrence_id,
-            frame.attempt_id,
-            frame.type.slice("sentinel_".length),
-            {
-              actorId: frame.agent_id,
-              lease: { agentId: frame.agent_id, instanceId: frame.instance_id, leaseId: frame.lease_id },
-              ...(frame.child_identity === undefined ? {} : { childIdentity: frame.child_identity }),
-              ...(frame.exit_code === undefined ? {} : { exitCode: frame.exit_code }),
-              ...(delivery === undefined ? {} : { delivery }),
-            },
-          );
-        if (state === undefined) {
-          sendError(currentSocket, generateFrameId, "sentinel_not_found", frame.frame_id);
-          return;
-        }
-        if (frame.type === "sentinel_launched" && state.state === "launched") {
-          const capability = repository.createSentinelRelayCapability({
-            occurrenceId: state.occurrence_id, relayToken: generateFrameId(),
-            expiresAt: sentinelDeadlineAt(clock, sentinelResultDeadlineMs),
-          });
-          state.relay_token = capability?.relay_token;
-        }
-        emit("sentinel_state_recorded", {
-          ...(frame.message_id === undefined ? {} : { message_id: frame.message_id }),
-          occurrence_id: state.occurrence_id,
-          attempt_id: state.attempt_id,
-          state: state.state,
-        });
-        sendFrame(currentSocket, generateFrameId, {
-          type: "sentinel_state",
-          request_id: frame.frame_id,
-          occurrence_id: state.occurrence_id,
-          state: state.state,
-          transition_sequence: state.transition_sequence,
-          ...(state.child_identity === undefined ? {} : { child_identity: state.child_identity }),
-          ...(state.exit_code === undefined ? {} : { exit_code: state.exit_code }),
-          ...(state.outcome === undefined ? {} : { outcome: state.outcome }),
-          ...(state.relay_token === undefined ? {} : { relay_token: state.relay_token }),
-        });
-      } catch (error) {
-        if (error instanceof LeaseNotActiveError || error instanceof DeliveryNotActiveError || error instanceof SentinelOccurrenceConflictError) {
-          sendError(currentSocket, generateFrameId, error.code, frame.frame_id);
-          return;
-        }
-        throw error;
-      }
-    }
-
     function offerNextMessage(currentSocket, currentSession) {
       if (sessions.get(currentSession.agentId) !== currentSession
         || currentSocket.readyState !== WebSocket.OPEN) return;
@@ -625,9 +534,6 @@ export function createAgentRouter({
   }
 
   function sweepDeliveryTimeouts() {
-    // Sentinel owns its active-launch deadline; normal delivery recovery must not decide it.
-    const sentinelExpired = repository.recoverSentinelDeadlines?.() ?? 0;
-    repository.cleanupSentinelTombstones?.();
     const recovered = repository.recoverTimedOutDeliveries({ maxDeliveryAttempts });
     for (const outcome of recovered) {
       emit("delivery_timed_out", {
@@ -823,7 +729,8 @@ export function createAgentRouter({
 
   function deliveryEnvelope(recipientSession, message) {
     const envelope = toEnvelope(message);
-    if (message.from === recipientSession.agentId) return envelope;
+    // Sentinel hands the stored opaque prompt to Pi unchanged; Mailbox reply text is parent-chat-only metadata.
+    if (message.sentinel !== undefined || message.from === recipientSession.agentId) return envelope;
 
     const senderSession = sessions.get(message.from);
     const now = new Date(currentTimeMs(clock)).toISOString();
@@ -878,11 +785,6 @@ export function createAgentRouter({
       await enqueueHttpMessage(request, response);
       return;
     }
-    if (request.method === "POST" && requestUrl.pathname === "/v1/sentinel-child-results") {
-      await enqueueSentinelChildResult(request, response);
-      return;
-    }
-
     if (requestUrl.pathname === "/v1/reminders") {
       await handleReminderCollection(request, response);
       return;
@@ -900,12 +802,7 @@ export function createAgentRouter({
       if (request.method === "GET" && action === undefined) {
         const message = repository.messageFor(messageId);
         if (message === undefined) sendHttpError(response, 404, "not_found");
-        else sendHttpJson(response, 200, {
-          message: redactSentinelBody(message),
-          ...(message.sentinel === undefined || typeof repository.sentinelState !== "function"
-            ? {}
-            : { sentinel_status: repository.sentinelState(message.id) }),
-        });
+        else sendHttpJson(response, 200, { message });
         return;
       }
       if (request.method === "POST" && action === "retry") {
@@ -950,7 +847,7 @@ export function createAgentRouter({
 
   async function handleReminderCollection(request, response) {
     if (request.method === "GET") {
-      sendHttpJson(response, 200, { reminders: repository.reminders().map(redactSentinelBody) });
+      sendHttpJson(response, 200, { reminders: repository.reminders() });
       return;
     }
     if (request.method === "DELETE") {
@@ -979,11 +876,6 @@ export function createAgentRouter({
       const candidate = validateReminder(reminder, {
         maxBodyBytes: repository.admissionLimits?.().maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
       });
-      validateSentinelAdmission({
-        from: candidate.creator,
-        to: candidate.target,
-        ...(candidate.sentinel === undefined ? {} : { sentinel: candidate.sentinel }),
-      }, sentinelReceiverPolicies);
       if (repository.reminderFor(candidate.id) === undefined) {
         enforceRateLimit(candidate.creator);
       }
@@ -1038,23 +930,6 @@ export function createAgentRouter({
     }
   }
 
-  async function enqueueSentinelChildResult(request, response) {
-    if (!isJsonContentType(request.headers["content-type"])) return sendHttpError(response, 400, "invalid_request");
-    try {
-      const result = await readJsonRequest(request, maxRequestBytes);
-      if (result === null || typeof result !== "object" || Array.isArray(result)
-        || Object.keys(result).some((key) => !["occurrence_id", "relay_token", "body"].includes(key))
-        || typeof result.occurrence_id !== "string" || typeof result.relay_token !== "string" || typeof result.body !== "string") throw new ProtocolValidationError();
-      const queued = repository.relaySentinelChildResult({ occurrenceId: result.occurrence_id, relayToken: result.relay_token, body: result.body, id: generateFrameId(), createdAt: clock().toISOString() });
-      if (queued === undefined) throw new ProtocolValidationError("invalid_sentinel_policy");
-      emit("message_enqueued", { message_id: queued.message.id, from: queued.message.from, to: queued.message.to, agent_id: queued.message.to, state: queued.message.state, created: queued.created, sentinel_child_occurrence_id: result.occurrence_id });
-      offerQueuedMessages(queued.message.to);
-      sendHttpJson(response, queued.created ? 201 : 200, { message: queued.message });
-    } catch (error) {
-      sendHttpError(response, error instanceof ProtocolValidationError ? 400 : 500, error instanceof ProtocolValidationError ? error.code : "internal_error");
-    }
-  }
-
   async function enqueueHttpMessage(request, response) {
     if (!isJsonContentType(request.headers["content-type"])) {
       sendHttpError(response, 400, "invalid_request");
@@ -1077,12 +952,8 @@ export function createAgentRouter({
     }
 
     try {
-      validateSentinelAdmission(envelope, sentinelReceiverPolicies);
       if (repository.messageFor(envelope.id) === undefined) enforceRateLimit(envelope.from);
-      const admittedEnvelope = envelope.sentinel === undefined
-        ? envelope
-        : { ...envelope, sentinel: { ...envelope.sentinel, origin_sender: envelope.from } };
-      const result = enqueueMessage(admittedEnvelope);
+      const result = enqueueMessage(envelope);
       sendHttpJson(response, result.created ? 201 : 200, { message: result.message });
     } catch (error) {
       if (error instanceof IdempotencyConflictError) {
@@ -1323,16 +1194,6 @@ function closeSocket(socket, code, reason) {
   if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
     socket.close(code, reason);
   }
-}
-
-function redactSentinelBody(record) {
-  if (record?.sentinel === undefined) return record;
-  const { body, ...bodyFree } = record;
-  return bodyFree;
-}
-
-function sentinelDeadlineAt(clock, deadlineMs) {
-  return new Date(currentTimeMs(clock) + deadlineMs).toISOString();
 }
 
 function toEnvelope(message) {
