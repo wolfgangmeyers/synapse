@@ -2,9 +2,12 @@ package life.meyers.mecha
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -81,6 +84,8 @@ import kotlin.concurrent.scheduleAtFixedRate
 private const val DEFAULT_ROUTER_PORT = 8765
 private const val ROUTER_RECORD_SEPARATOR = "\u001f"
 private const val PREFS = "mecha"
+private const val MESSAGE_NOTIFICATION_CHANNEL = "messages"
+private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1
 private val AGENT_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]*")
 private val ROUTER_ENDPOINT = Regex("^([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)(?::([0-9]{1,5}))?$")
 private val Ink = Color(0xFF0B0D14)
@@ -141,6 +146,7 @@ class MainActivity : ComponentActivity() {
         peers = knownPeers().sorted()
         intent.getStringExtra("peer_id")?.takeIf { it.isNotBlank() && activeRouter.isNotBlank() }?.let(::selectPeer)
         setContent { MechaApp() }
+        ensureNotificationsEnabled()
         if (activeRouter.isNotBlank()) connect()
     }
 
@@ -516,16 +522,35 @@ class MainActivity : ComponentActivity() {
             ?: UUID.randomUUID().toString().also { prefs().edit().putString(key, it).commit() }
     }
 
+    private fun ensureNotificationsEnabled() {
+        createMessageNotificationChannel()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST_CODE)
+        }
+    }
+
+    private fun createMessageNotificationChannel() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(
+            NotificationChannel(MESSAGE_NOTIFICATION_CHANNEL, "Messages", NotificationManager.IMPORTANCE_DEFAULT),
+        )
+    }
+
     private fun postInboundNotification(from: String, body: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return
         val conversationId = conversationId(from)
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(NotificationChannel("messages", "Messages", NotificationManager.IMPORTANCE_DEFAULT))
+        createMessageNotificationChannel()
         val intent = Intent(this, MainActivity::class.java)
             .setAction("mecha.conversation.$conversationId")
             .setData(android.net.Uri.parse("mecha://conversation/$conversationId"))
             .putExtra("peer_id", from)
         val pending = PendingIntent.getActivity(this, conversationId.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification = android.app.Notification.Builder(this, "messages")
+        val notification = android.app.Notification.Builder(this, MESSAGE_NOTIFICATION_CHANNEL)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentTitle(humanName(from))
             .setContentText(body)
