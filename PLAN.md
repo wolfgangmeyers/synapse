@@ -1,96 +1,202 @@
-# Sentinel implementation plan
+# Sentinel target-worker subagent plan
 
-Implements every behavior in `SPEC.md` while preserving the existing Mailbox V2 queue and reminder scheduler. No production code changes occur until this plan has completed review and validation.
+## Delivery contract
 
-## 1. Define the generic Sentinel contract
+**Outcome:** replace the current policy-driven detached Sentinel with a generic
+unauthenticated scheduler that asks any target Pi worker to create a hidden,
+context-inheriting native subagent. Sentinel does not inject or persist the raw
+scheduled prompt in the target parent; its native final completion returns there.
 
-**Files:** `protocol/v1/schema.json`, `harness/protocol.js`, `harness/db.js`, `harness/migrations/005_sentinel.sql`
+**Non-goals:** no deployment, shared-router mutation, extension installation,
+process launch/RPC host, child result relay, fixed supervisor path, receiver
+profile, sender authorization, or watchdog-specific behavior.
 
-1. Add one optional, closed `sentinel` descriptor to the existing envelope schema and reminder input schema. Its only caller-selected fields are a generic receiver policy key and an allowed model key. All existing envelopes remain valid and unchanged when the descriptor is absent.
-2. Add one shared Sentinel validator and static receiver-policy registry. The registry has no template, watchdog, or prompt-semantic fields exposed to requests. It maps a policy key to receiver identity, sender allowlist, allowed models, and fixed launch configuration. The router validates policy/model admission. The extension independently checks the delivered descriptor's policy key, receiver, origin sender, model, fixed supervisor, and sole tool against its locally installed receiver policy before claim; it records a body-free policy-drift failure and launches nothing on any mismatch. Claim responses remain lifecycle-only. This makes the installed extension artifact, rather than router-local implication, the execution-policy authority.
-3. Persist the descriptor with the existing durable message/reminder data and add per-occurrence Sentinel lifecycle storage: deterministic occurrence identity, idempotent launch claim, launch attempt/child identity, timestamps, and only transport/process facts (claimed, launched, exited, process success/failure, or launch failure). The occurrence row stores no body and must survive acknowledgement cleanup: identify its originating message by immutable text ID (or an `ON DELETE SET NULL` reference), not a cascading foreign key. Create occurrence and message atomically. Do not add a second prompt-body column, a child-message table, a semantic result field, or a generic child-message protocol.
-4. Define a Sentinel ACK barrier. Receipt/injection-requested and body-free parent-session status may complete first, but the existing message row—the sole prompt-body store—must remain queued/replayable until the parent extension has durably reported a spawned child PID/session and the router has recorded `launched`. Do not acknowledge it merely because parent status persisted or `launching` was recorded. A crash before parent launch evidence replays the same durable body and reconciles status/claim; a crash after `launched` but before ACK observes that state and acknowledges without relaunch. Known pre-spawn failure releases the active attempt while retaining the original message body for replay. No branch copies the body into Sentinel lifecycle data or parent history.
-5. Define bounded terminal lifecycle retention. On terminal process/launch state, retain a body-free tombstone for 24 hours through the existing router lifecycle sweep, then delete it. It retains only occurrence/message IDs, attempt/transition sequence, policy revision/model, child identity, timestamps, transport/process state, and bounded code; it contains no credential verifier and never contains prompt body. An uncertain `launching` attempt that reaches its bounded parent-launch-evidence deadline transitions atomically to terminal launch failure/dead-letter: it deletes the still-queued sole-body message row and retains only this tombstone. Explicit known pre-spawn failure is the sole retryable exception and retains the message row. The tombstone rejects/answers late control replay without launch, while normal recurrence advances independently. After its expiry, a late control frame is safely not found/no-launch; deterministic reminder occurrence IDs prevent conflation with a later occurrence. Tests cover cleanup, late replay/status, recurrence after prior tombstone expiry, and retained no-duplicate evidence through the bound.
-6. Persist the original direct-client sender separately from reminder mechanics for Sentinel admission/audit. At due time, the normal reminder-created delivery retains its scheduler/reminder transport provenance and existing generated sender behavior; it is never treated as an ordinary client message or given a reply hint. Sender/profile authorization is evaluated against the stored originating client sender, not `reminders`.
-7. Keep message and reminder idempotency transactional. A repeated identical Sentinel request returns the existing row; changed descriptor/body conflicts. Reminder firing creates the existing deterministic message occurrence with its Sentinel descriptor and preserves current connected-only/no-overlap/no-catch-up behavior.
-8. Add repository methods for atomic claim, launch state recording, ACK-barrier eligibility, bounded tombstone cleanup, and read-only Sentinel state lookup. A claim can be acquired once per active attempt; only an explicit `sentinel_spawn_failed` transition with no child identity releases that attempt and permits the next retry claim. Every other recovery path reads the claim and known child identity before deciding that a new launch is allowed.
+This plan implements `SPEC.md` and nothing beyond it.
 
-## 2. Extend existing router paths, not delivery infrastructure
+## Evidence-led design choice
 
-**Files:** `harness/router.js`, `harness/db.js`, `harness/jsonl_logger.js` if its event contract needs no code change
+### Options considered
 
-1. Extend `POST /v1/messages` and `POST /v1/reminders` validation/admission to accept the optional generic descriptor, enforce sender/receiver-policy/model compatibility, and return existing message/reminder representations plus body-free Sentinel status fields.
-2. Preserve normal enqueue, offer, receipt, acknowledgement, retry, replay, dead-letter, expiry, rate limit, and HTTP behavior for messages without Sentinel metadata.
-3. When a due Sentinel reminder fires, retain the existing scheduler and enqueue transaction; tag the normal linked message rather than adding a Sentinel timer, route, queue, or producer.
-4. Add the minimum authenticated parent-extension control frames to the existing WebSocket protocol for `sentinel_claim`, `sentinel_launching`, `sentinel_spawn_failed`, `sentinel_launched`, and `sentinel_exited`. Each parent transition carries current parent lease identity, message ID, occurrence ID, child-attempt ID where applicable, and frame ID. Each response is a `sentinel_state` server frame with `request_id`, occurrence ID, state, stable transition sequence, child PID/session when known, and a bounded code for rejected/stale/unknown transitions. Repository transitions are idempotent and return current state for replay. There is no child registration/session/lease protocol. The existing router lifecycle sweep observes a bounded launching deadline and marks a parent-crash-uncertain attempt terminally unknown/failure without retry; it adds no scheduler or producer. A stale/unknown response requires a read-before-retry and can never authorize a second launch. This extends the existing router connection; it is not a delivery API route or second transport.
-5. Add only the fixed transport provenance needed for child ordinary V2 messages: an environment-scoped child-send mode marks the message as `sentinel_child` for reply-hint suppression. It is not a capability, identity verifier, authentication scheme, lifecycle handshake, or report protocol; the existing same-user trust boundary remains unchanged. Router stores/forwards that kind so the extension can render without a hint, while treating body content as ordinary opaque V2 data. Posts without this fixed provenance retain baseline envelope schema and non-empty `from` behavior.
-6. Define the Sentinel-aware delivery-timeout handoff atomically. While the linked occurrence is active `claimed` or `launching`, `recoverTimedOutDeliveries` must leave its current leased/injection-requested message and delivery attempt intact; it neither requeues nor dead-letters it, and the stored Sentinel deadline owns recovery. A `claimed` deadline proves no spawn was authorized, atomically releases its delivery attempt back to `queued`, and permits a fresh claim with the retained sole body. An explicit known `sentinel_spawn_failed` does the same. A `launching` deadline is uncertain and marks the message dead-letter/terminal, updates the linked reminder with existing failed/recurrence semantics, and leaves the body-free tombstone. All transitions lock/check active occurrence plus delivery attempt together so the normal sweep and Sentinel deadline cannot both terminalize or requeue. Tests race normal delivery sweep against spawn failure and deadline for one-shot and recurring occurrences.
-7. Emit body-free JSONL lifecycle events for claim, launch, exit, and failure. Existing router event fields must never receive the prompt body, preview, hash, template name, or watchdog-specific values.
-8. Add only a read-only status route if the existing message/reminder reads cannot represent occurrence lifecycle unambiguously. There is no child-message/outcome endpoint or schema.
+1. **Keep the current detached Pi/RPC runner and add more context.** Reject. It
+   strips the target context/tools/skills/permissions, makes a private relay
+   protocol necessary, and conflicts with the required native completion path.
+2. **Have the router run a child.** Reject. It moves target-worker context and
+   Pi runtime ownership into the scheduler, which must only route and schedule.
+3. **Use the installed `@gotgenes/pi-subagents` service from the target
+   extension.** Choose. It is already enabled in the local Pi configuration and
+   documented as an in-process native subagent integration. Its public service
+   can spawn a background `general-purpose` child with a model and inherited
+   target context; the package owns completion notification.
 
-## 3. Add the reply hint only to ordinary client-originated visible messages
+The implementation must dynamically import `getSubagentsService()` in the
+extension, fail as an ordinary pre-handoff delivery failure if unavailable, and
+otherwise make one background native spawn. It must not substitute a custom
+subprocess implementation.
 
-**Files:** `harness/db.js`, migration/schema as needed for message provenance, `harness/router.js`, `pi-extensions/mecha-messaging.js`, existing delivery tests
+The present managed-worker command explicitly uses `--no-extensions` with only
+the Mailbox extension, so the service is absent despite the package being
+installed locally. The implementation must add the validated native package as
+a second explicit `--extension` path. Pi documents that `--extension` may be
+used multiple times. It must not re-enable global extension discovery.
 
-1. Add the smallest explicit transport provenance/kind delivered to the extension that distinguishes an ordinary visible message from another client from reminders, recurring scheduler occurrences, router/system notices, Sentinel-derived delivery/status, and Sentinel-child messages. Preserve it through durable storage and offer/replay wherever that is required to make extension rendering deterministic. Set it at the producer boundary; do not infer it from a sender name. Do not add or reproduce `reply_requested`, a caller `--reply-requested` option, conditional caller behavior, or stricter ordinary-envelope sender validation: the baseline accepts any non-empty `from` and normal delivery remains compatible.
-2. Centralize parent-visible rendering so only an ordinary visible message from another client preserves its existing body/subject formatting and always ends with a blank line followed by `Replies to <sender> should be sent using mailbox_send.py.` The sender is the validated envelope sender identity. This is unconditional for that qualifying transport kind: no caller or extension option can suppress it.
-3. Do not append the hint to reminders (including recurring occurrences), scheduler/router/system notices, or any Sentinel-derived delivery or status regardless of origin/naming. Sentinel status must retain body isolation: no hidden prompt body, preview, hash, or body-derived diagnostic.
-4. A child message launched by Sentinel remains Sentinel-derived for rendering/provenance purposes and has no hint. Sentinel itself does not inspect or rewrite its content.
+## Implementation stages
 
-## 4. Make the Pi extension a body-isolating, at-most-once launcher
+### 1. Collapse Sentinel transport to scheduling metadata
 
-**Files:** `pi-extensions/mecha-messaging.js`, `tests/mailbox_v2_delivery.test.mjs`, `tests/pi_extension_silent.test.mjs`, `tests/pi_extension_standalone.test.mjs`
+**Files:** `protocol/v1/schema.json`, `harness/protocol.js`, `harness/db.js`,
+`harness/router.js`, current Sentinel migrations plus a new forward-only cleanup
+migration if persistent columns/tables must be removed safely.
 
-1. Keep the current coordinator unchanged for ordinary envelopes. Branch only on generic Sentinel metadata after durable receipt handling.
-2. For Sentinel delivery, persist a parent custom message containing only sender, subject, message ID, occurrence ID, policy/model label, and transport lifecycle. Never call the ordinary body-rendering path and never put body-derived content into parent session data, notification text, status, or logs.
-3. Add a narrowly scoped extension launch adapter. It invokes an isolated Pi process using only registry-fixed execution settings. Pass the opaque prompt through protected stdin or a private 0600 temporary file with verified cleanup, never argv or inherited environment. The implementation uses the Pi-supported isolated child mechanism verified from installed Pi API/examples; it does not use tmux input, shell interpolation, caller-selected flags, or parent-session injection.
-4. Claim launch through the new lease-bound parent control frame before creating the child. The extension creates a durable child-attempt ID and sends `sentinel_launching` before spawn; it may never spawn from merely `claimed`. It captures PID/session immediately when spawn returns and sends `sentinel_launched`; child exit sends `sentinel_exited`. A locally observed synchronous/asynchronous spawn error before PID sends idempotent `sentinel_spawn_failed` and releases only that unstarted attempt for normal replay. If parent crashes after `launching`, recovery observes a bounded unknown/failure state and never automatically retries or respawns. This deliberately prefers explicit failure over duplicate child risk. Child reports remain ordinary opaque V2 messages.
-5. Add fixed child-send mode to existing `mailbox_send.py`, enabled only by sanitized Sentinel environment. It forces fixed router URL, sender, recipient, and `sentinel_child` transport provenance; conflicting CLI settings are rejected/ignored. It never invokes launchctl kickstart on refusal. Its sole added purpose is routing/provenance so the reply hint is suppressed, not authentication or lifecycle. Child messages remain opaque to Sentinel.
-6. Launch with fixed argv and sanitized environment: remove parent `TMUX`, `TMUX_PANE`, mailbox identity, router/extension discovery, and parent session identity; provide only fixed profile extension/skills/context policy, dedicated router URL, fixed sender/recipient, child transport provenance, attempt ID, protected prompt input, and disabled kickstart. Add the smallest opt-in managed `worker_launch.py` isolated-runtime flag that exports exactly `MECHA_ROUTER_KICKSTART=disabled` (or a validated exact test-only label) to Pi. For every normal launch, `worker_launch.py` clears/overrides any ambient `MECHA_ROUTER_KICKSTART`; normal managed-worker behavior remains unchanged. Wire extension and `mailbox_send.py` to suppress kickstart only for that exact value; malformed/other values retain normal kickstart behavior. The isolated test parent and test-supervisor must be launched only through this managed flag, never an ad hoc Pi command. Tests cover generated managed launch command/environment for isolated workers versus unchanged production workers, prompt-file permissions/cleanup, and refused dedicated-router behavior proving no participant can invoke the shared launchctl label.
-7. Ensure parent session persistence precedes acknowledgement/status completion under the same durability discipline as current mailbox delivery. Give every body-free router-confirmed Sentinel parent entry `details` containing the message ID, occurrence ID, transition sequence, and state. Persist the initial accepted entry before acknowledgement; append one body-free entry for each later durable transition, deduplicated by occurrence ID plus transition sequence after reconnect/restart. Recovery requeues only persisted `exited_pending` outcomes; the lease-bound, idempotent router transition is the lifecycle reconciliation authority and returns current state on replay. A parent-session persistence failure and an explicitly known pre-launch spawn failure remain retryable; uncertain `launching` state is never retried and must not become a duplicate-child path.
+1. Define the optional Sentinel request metadata as model selection only; the
+   existing message `to` and reminder `target` select the target worker.
+2. Remove `receiver_policy`, `origin_sender`, `sentinel_child`, relay token, and
+   all fixed-recipient/capability fields from protocol validation, persistence,
+   reads, and responses.
+3. Remove Sentinel admission/policy validation from the router. Preserve normal
+   shape/body/queue/rate-limit validation only. Do not use sender identity to
+   gate Sentinel or prevent cross-agent targets.
+4. Remove Sentinel claim/launch/exit lifecycle frames and repository state.
+   Sentinel delivery is one existing mailbox delivery: the target extension
+   hands it to Pi's native subagent service, then acknowledges through the
+   existing receipt path.
+5. Delete the child-result HTTP endpoint and all relay capability data. Do not
+   replace either with another endpoint, table, queue, or message format.
+6. Preserve migrations safely. Existing databases must continue opening; any
+   removal happens through a new forward-only migration, never by editing a
+   migration that may already have run.
 
-## 5. Add the caller and first supervisor-owned template
+### 2. Load the native integration in managed target workers
 
-**Files:** new `tools/sentinel_dispatch.py` (or the smallest existing supervisor-tool location consistent with current launcher/send tooling), new template beneath `.claude/skills/supervisor/`, supervisor instructions that reference it, and focused script tests
+**Files:** `.claude/skills/supervisor/tools/worker_launch.py`, its focused
+launcher tests, and the target-extension installation/validation path.
 
-1. Provide one caller interface with named `--template` and explicit `--prompt` modes, normal recipient/sender/subject inputs, allowed `--model`, and one-time/recurring scheduling inputs. Exactly one prompt source is required.
-2. Resolve named templates locally under the supervisor skill into the opaque body before calling the existing message/reminder HTTP APIs. Template lookup is caller-only: neither generic router metadata nor receiver policy receives a template name/path.
-3. Validate model against the receiver policy before submitting. Reject caller attempts to pass cwd, skills, tools, permissions, flags, extension paths, or other child configuration.
-4. Add the first watchdog template beneath the supervisor skill and update the watchdog skill to require it. Both artifacts include the `SPEC.md` managed-evidence requirement verbatim: state/inventory first; task-to-window/session mapping; fresh bounded `worker_capture.py --window <alias> --tail <n>` capture and timestamp; evidence correlation; unknown stale/missing capture; no raw tmux or mutation; and what caller versus child supplies. Update current watchdog compatibility wording that expects a caller-provided opaque snapshot and says it never gathers evidence: the Sentinel child gathers the listed fresh evidence itself through fixed read-only supervisor tools. Add the smallest read-only `worker_capture.py` mode that obtains the required bounded capture without the normal state-update mutation guard; it must not write task state, inject tmux, or mutate workers. The template alone instructs its child about watchdog reports.
+1. Resolve a validated local `@gotgenes/pi-subagents` extension entry point and
+   pass it as a second explicit `--extension` argument after `--no-extensions`
+   and the validated Mailbox extension.
+2. Keep global extension discovery disabled. This adds the required native
+   integration without allowing stale globally discovered extensions back into
+   managed workers.
+3. Test that a managed Pi command has exactly the two required explicit
+   extensions, that both paths are validated before tmux creation, and that
+   legacy/non-Sentinel worker launch behavior is otherwise unchanged.
 
-## 6. Behavioral tests
+### 3. Make the target extension a native-service adapter
 
-**Files:** existing router/protocol/reminder/extension suites plus focused new caller tests
+**Files:** `pi-extensions/mecha-messaging.js`; delete
+`pi-extensions/sentinel-child.js` and `pi-extensions/sentinel-receiver-policies.json`.
 
-Map `SPEC.md` behavior to tests:
+1. Keep ordinary mailbox delivery unchanged.
+2. Identify Sentinel before the ordinary body-rendering route. Write only a
+   body-free custom status entry in the parent session.
+3. Dynamically import `@gotgenes/pi-subagents`, obtain its published
+   `getSubagentsService()` service, and call:
 
-- Existing ordinary message and reminder fixtures prove absent Sentinel metadata has byte-for-byte/API-compatible behavior, except for the explicitly required presentation-only reply hint on ordinary visible messages from another client.
-- Schema/repository/router tests cover valid generic descriptor, bad policy/model/sender/recipient rejection, idempotent repeat, conflicting repeat, durable restart/replay, body-free reads/events, lease-bound claim/launch/exit transitions, stale claim recovery, fixed child transport provenance, ACK barrier crash boundaries before parent launch evidence/after launched-before-ACK, bounded tombstone cleanup and late replay, and unchanged baseline non-empty-sender acceptance without a Sentinel capability.
-- Reminder fake-clock tests cover one-time and multiple recurring Sentinel occurrences while preserving existing connected-only, skip, and no-overlap behavior, and prove stored origin authorization survives scheduler firing while the visible reminder transport gets no reply hint.
-- Extension tests prove an ordinary visible message from another client preserves existing body/subject formatting and ends unconditionally with a blank line plus `Replies to <sender> should be sent using mailbox_send.py.` They cover sender and subject edge cases and prove no caller flag can suppress the hint.
-- Provenance tests cover ordinary client messages, reminders and recurring occurrences, scheduler/router/system notices, Sentinel status, and Sentinel-child messages; only the ordinary client case has the hint, and classification never relies on a sender string.
-- Extension tests prove the Sentinel parent custom message and durable session omit the original body, preview, hash, body-derived diagnostic, and reply hint; the isolated child receives the body; fixed profile settings win over prompt content; launch failure/exit are observable; and replay cannot make a second child.
-- Tests prove the fixed child `mailbox_send.py` mode sets fixed `sentinel_child` provenance and sender/recipient routing, rejects conflicting CLI/environment identity configuration, and that the sanitized launch environment/argv cannot inherit parent tmux, mailbox identity, global extension discovery, or parent session identity. Managed-launcher tests prove an isolated flag carries exactly the disable value, a normal launch strips an ambient disable value, and extension/`mailbox_send.py` suppress kickstart only for the exact value while malformed values retain normal behavior. Direct child V2 messages preserve their explicit origin and Sentinel does not inspect, parse, validate, deduplicate, require, or synthesize them.
-- Caller tests cover named template resolution, explicit prompt input, scheduling shape, model allowlist, and rejected configuration-selection arguments.
-- Template/instruction tests assert the watchdog template contains the required managed `worker_capture.py` contract and no raw tmux/mutation instruction.
+   ```js
+   service.spawn("general-purpose", message.body, {
+     description: "Scheduled Sentinel work",
+     model: message.sentinel.model,
+     inheritContext: true,
+   })
+   ```
 
-## 7. Required post-implementation proof
+   Do not pass a reduced tool list, private cwd, skills/extensions toggle,
+   fixed recipient, profile, auth file, or subprocess/RPC option. Omit
+   `foreground` so native background behavior applies.
+4. Treat a missing service or a synchronous spawn failure as pre-handoff
+   failure: retain the ordinary delivery for existing retry/replay. Treat a
+   returned native subagent ID as handoff success and acknowledge by the
+   ordinary durable-delivery path.
+5. Persist only message/occurrence ID and native subagent ID/status necessary
+   for observation. Do not persist prompt content, prompt-derived data, model
+   output, or a manual result relay.
+6. Do not observe native lifecycle events merely to create a duplicate result.
+   The installed package already appends its native record and sends its normal
+   `subagent-notification` completion to the target parent.
 
-After code, tests, coverage, and implementation review are complete, launch a **new managed Pi worker only after the updated router and extension are available**. Never test Sentinel by reloading or restarting the supervisor session. First install/copy the updated extension only to an isolated test artifact/path, start updated router code on a dedicated test port/database, then launch both a fresh dedicated managed Pi parent receiver and a fresh dedicated managed Pi test-supervisor receiver configured with that artifact and router. Verify the installed/copied extension path as a required evidence link; source code alone is insufficient. Monitor both workers and the test router throughout proof. The real supervisor only monitors managed capture/router evidence; it is never restarted, reloaded, or made a test receiver.
+### 4. Simplify the caller
 
-The fresh parent first runs the isolated generic Sentinel transport proof: a short one-time delay and short recurrence, hidden original body absent from the parent session, replay with no duplicate child, multiple recurrence process lifecycles, ordinary default mail unchanged apart from the required direct-client hint, and only a direct ordinary client message receiving that hint. After that transport stage passes, run the watchdog template instance against the same isolated parent. It must produce ordinary direct messages at the dedicated test-supervisor receiver, observed through managed capture and test-router evidence, and demonstrate template-required evidence collection: current durable task/worker inventory, task-to-window/session mapping, fresh timestamped bounded `worker_capture.py --window <alias> --tail <n>` captures for live workers, and correlated delivery/artifact/review/validation evidence. Message arrival alone is insufficient. The complete live proof passes only after both stages. It does not start retired cron watchdog or another scheduler. The integrated router, schema/migration, extension, caller, template, and reply-hint work is required before this proof; no extension portion is deferred.
+**Files:** `tools/sentinel_dispatch.py` and focused script tests.
 
-## 8. Supervisor rollout evidence and handoff
+1. Retain the thin existing API client and current immediate/reminder request
+   shapes.
+2. Require `--to`, one `--prompt`, and `--model`; retain optional normal
+   sender/subject/id/schedule inputs only where existing API compatibility needs
+   them.
+3. Delete policy-file/policy/template loading and all profile/model allowlist
+   checks. The caller must not inspect a receiver policy or pick child
+   configuration.
+4. Print the ordinary durable message/reminder ID and endpoint response. It
+   does not wait for, parse, or report a child result.
 
-The implementation worker does not globally install, reload, restart, or mutate the shared router. Before handoff it produces a concise supervisor-run rollout runbook/evidence bundle covering:
+### 5. Delete retired behavior and its tests
 
-1. Canonical-source preflight: source revision/fingerprint, syntax/node check, extension silent test, and the exact isolated artifact fingerprint proven by the fresh worker.
-2. Stable extension artifact/settings registration: expected canonical source-to-stable artifact copy, registered extension path/status, and rollback expectation to the prior known-good artifact/settings if post-check fails.
-3. Shared-router readiness and database preservation: current service/status and schema migration inventory; backup/rollback preconditions; confirmation that schema migration preserves existing queue/reminder data; and pre/post health, migration, connected-agent, queued-message, reminder, and JSONL evidence checks.
-4. Explicit safety boundary: supervisor remains neither a test receiver nor a reload/restart target. The fresh isolated worker is the only live proof receiver. Global extension/router rollout happens only after isolated proof, independent review, and separate supervisor approval.
+**Files:** a new forward Sentinel cleanup migration as needed,
+`tests/sentinel_*`, router/protocol/extension suites, `harness_spec.md`, and
+any current docs that describe removed behavior.
 
-The runbook is evidence for a later supervisor-owned operation, not permission for the implementation worker to perform it.
+1. Delete tests asserting sender allowlists, receiver policies, copied auth,
+   reduced tools/context, fixed supervisor relay, relay tokens, child-result
+   endpoint, or Sentinel lifecycle WebSocket controls.
+2. Replace them with behavior tests below. No test should encode the removed
+   architecture as a compatibility requirement.
+3. Update references that claim Sentinel launches a detached `pi --mode rpc`
+   child or requires a special relay. Do not broaden this into unrelated
+   documentation work.
 
-## Deliberate exclusions
+## Verification matrix
 
-No second queue, scheduler, recurring producer, delivery API, watchdog branch in router/extension, semantic child-message protocol, optional reply-hint flag/field, commit, push, install, shared-router restart, or shared-router mutation.
+### Unit and contract tests
+
+- schema/protocol accepts model-only Sentinel metadata and rejects only invalid
+  data shape, not unknown sender, target profile, or model policy;
+- immediate, one-time, and recurring requests preserve existing durable
+  idempotency and scheduling semantics;
+- managed worker-launch tests prove the validated native package and Mailbox
+  extension are both explicit while `--no-extensions` remains present;
+- target extension hands a valid delivery exactly once to a fake native service
+  with `general-purpose`, the submitted model, and `inheritContext: true`;
+- target parent Sentinel dispatch entries and extension diagnostics omit the raw
+  prompt and all prompt-derived content; native model output is not rewritten;
+- absent/malformed native service and synchronous spawn error leave delivery
+  unacknowledged for normal replay; replay after a successful handoff does not
+  make a second child;
+- ordinary messages/reminders are unchanged;
+- no protocol, router, or extension code retains policy/relay/RPC/capability
+  strings or accepts retired Sentinel lifecycle frames/endpoints.
+
+### Native compatibility probe — required before implementation completion
+
+Run this only against an isolated router/database and a fresh test Pi parent
+with the installed package enabled. The probe must prove from runtime evidence:
+
+1. `getSubagentsService()` is present in the target extension session.
+2. A background service spawn with `general-purpose`, a selected model, and
+   `inheritContext: true` creates a native child.
+3. The child transcript shows target-parent context and target effective cwd,
+   system prompt, extensions, skills, tools, and permission behavior.
+4. The target parent receives the package's ordinary native final completion
+   notification while its persisted parent session contains no scheduled prompt.
+5. An immediate dispatch, delayed dispatch, and two recurring occurrences each
+   obey existing router scheduling/replay behavior.
+
+The probe must also answer this exact API question: can a native background child
+send an arbitrary progress message to its parent through a supported Pi API? The
+currently inspected public service has no such method. If the answer is no,
+record the evidence and stop; do not create a mailbox relay or an equivalent
+side channel.
+
+## Review gates
+
+1. **Design review:** confirm the diff removes every forbidden policy/relay
+   mechanism and does not recreate it under a new name.
+2. **Contract review:** confirm the target extension is only an adapter to the
+   installed native service and that normal mailbox behavior is unchanged.
+3. **Compatibility review:** validate the isolated native probe before any
+   shared-router or extension rollout is proposed.
+
+## Completion criteria
+
+The implementation is ready only when every `SPEC.md` acceptance criterion is
+proven by the listed tests/probe, the three review gates find no blocking issue,
+and the unresolved parent-progress API fact is answered from the installed
+runtime. No deployment is part of this plan.
