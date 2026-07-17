@@ -47,6 +47,30 @@ const migrations = Object.freeze([
     id: "005_message_incarnation",
     sql: readFileSync(new URL("./migrations/005_message_incarnation.sql", import.meta.url), "utf8"),
   },
+  {
+    id: "006_sentinel",
+    sql: readFileSync(new URL("./migrations/006_sentinel.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "007_sentinel_occurrences",
+    sql: readFileSync(new URL("./migrations/007_sentinel_occurrences.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "008_sentinel_deadline",
+    sql: readFileSync(new URL("./migrations/008_sentinel_deadline.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "009_sentinel_tombstones",
+    sql: readFileSync(new URL("./migrations/009_sentinel_tombstones.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "010_sentinel_exit_outcome",
+    sql: readFileSync(new URL("./migrations/010_sentinel_exit_outcome.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "011_sentinel_relay_capabilities",
+    sql: readFileSync(new URL("./migrations/011_sentinel_relay_capabilities.sql", import.meta.url), "utf8"),
+  },
 ]);
 
 export class IdempotencyConflictError extends Error {
@@ -91,6 +115,14 @@ export class DeliveryNotActiveError extends Error {
     this.code = "delivery_not_active";
     this.messageId = messageId;
     this.attemptNumber = attemptNumber;
+  }
+}
+
+export class SentinelOccurrenceConflictError extends Error {
+  constructor(occurrenceId) {
+    super(`Sentinel occurrence ${occurrenceId} belongs to another delivery`);
+    this.name = "SentinelOccurrenceConflictError";
+    this.code = "sentinel_occurrence_conflict";
   }
 }
 
@@ -197,6 +229,144 @@ class MessageRepository {
     });
   }
 
+  claimSentinel(messageId, occurrenceId, attemptId, { launchDeadlineAt, delivery } = {}) {
+    assertTimestamp(launchDeadlineAt, "launchDeadlineAt");
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const existing = this.#database.prepare("SELECT * FROM sentinel_occurrences WHERE occurrence_id = ?").get(occurrenceId);
+      if (existing !== undefined) {
+        if (existing.message_id !== messageId || existing.attempt_id !== attemptId) {
+          throw new SentinelOccurrenceConflictError(occurrenceId);
+        }
+        return toSentinelOccurrence(existing);
+      }
+      if (delivery !== undefined) requireSentinelDelivery(this.#database, delivery, messageId, now);
+      const message = selectMessage(this.#database, messageId);
+      if (message === undefined || message.sentinel === undefined || !["queued", "leased", "injection_requested"].includes(message.state)) return undefined;
+      this.#database.prepare(`
+        INSERT INTO sentinel_occurrences (occurrence_id, message_id, recipient, claim_lease_id, state, attempt_id, launch_deadline_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'claimed', ?, ?, ?, ?)
+      `).run(occurrenceId, messageId, message.to, delivery?.leaseId ?? null, attemptId, launchDeadlineAt, now, now);
+      return toSentinelOccurrence(this.#database.prepare("SELECT * FROM sentinel_occurrences WHERE occurrence_id = ?").get(occurrenceId));
+    });
+  }
+
+  recoverSentinelDeadlines(now = clockTimestamp(this.#clock)) {
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const expired = this.#database.prepare(`SELECT * FROM sentinel_occurrences WHERE (launch_deadline_at <= ? OR launch_deadline_at IS NULL) AND state IN ('claimed', 'launching')`).all(now);
+      for (const row of expired) {
+        if (row.state === "claimed") {
+          releaseSentinelMessage(this.#database, row.message_id, now);
+          this.#database.prepare("DELETE FROM sentinel_occurrences WHERE occurrence_id = ?").run(row.occurrence_id);
+        }
+        else {
+          // Preserve the body-free occurrence tombstone and terminalize linked delivery/reminder state atomically.
+          this.#database.prepare("UPDATE messages SET body = '', state = 'dead_letter' WHERE id = ?").run(row.message_id);
+          this.#database.prepare("UPDATE delivery_attempts SET state = 'timed_out', updated_at = ? WHERE message_id = ? AND state IN ('leased', 'injection_requested')").run(now, row.message_id);
+          this.#database.prepare("UPDATE reminders SET state = 'failed', linked_message_id = NULL WHERE linked_message_id = ? AND interval_ms IS NULL").run(row.message_id);
+          this.#database.prepare("UPDATE reminders SET state = 'scheduled', linked_message_id = NULL WHERE linked_message_id = ? AND interval_ms IS NOT NULL").run(row.message_id);
+          this.#database.prepare("UPDATE sentinel_occurrences SET state = 'failed', terminal_at = ?, transition_sequence = transition_sequence + 1, updated_at = ? WHERE occurrence_id = ?").run(now, now, row.occurrence_id);
+        }
+      }
+      return expired.length;
+    });
+  }
+
+  cleanupSentinelTombstones(now = clockTimestamp(this.#clock), retentionMs = 24 * 60 * 60 * 1000) {
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const cutoff = new Date(Date.parse(now) - retentionMs).toISOString();
+      const rows = this.#database.prepare("SELECT occurrence_id, message_id FROM sentinel_occurrences WHERE terminal_at <= ?").all(cutoff);
+      for (const row of rows) {
+        this.#database.prepare("DELETE FROM sentinel_occurrences WHERE occurrence_id = ?").run(row.occurrence_id);
+        this.#database.prepare("DELETE FROM messages WHERE id = ? AND state = 'dead_letter' AND body = ''").run(row.message_id);
+      }
+      return rows.length;
+    });
+  }
+
+  sentinelState(occurrenceId) {
+    const row = this.#database.prepare("SELECT * FROM sentinel_occurrences WHERE occurrence_id = ?").get(occurrenceId);
+    return row === undefined ? undefined : toSentinelOccurrence(row);
+  }
+
+  createSentinelRelayCapability({ occurrenceId, relayToken, expiresAt }) {
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const occurrence = this.#database.prepare("SELECT sentinel_occurrences.state, messages.recipient, messages.sentinel_json FROM sentinel_occurrences JOIN messages ON messages.id = sentinel_occurrences.message_id WHERE occurrence_id = ?").get(occurrenceId);
+      const recipient = occurrence?.recipient;
+      const supervisor = occurrence?.sentinel_json === null || occurrence === undefined ? undefined : JSON.parse(occurrence.sentinel_json).origin_sender;
+      if (occurrence?.state !== "launched" || typeof recipient !== "string" || typeof supervisor !== "string") return undefined;
+      this.#database.prepare("INSERT OR IGNORE INTO sentinel_relay_capabilities (occurrence_id, relay_token, sender, recipient, expires_at, used_at) VALUES (?, ?, ?, ?, ?, NULL)").run(occurrenceId, relayToken, recipient, supervisor, expiresAt);
+      const capability = this.#database.prepare("SELECT relay_token FROM sentinel_relay_capabilities WHERE occurrence_id = ?").get(occurrenceId);
+      return capability === undefined ? undefined : { occurrence_id: occurrenceId, relay_token: capability.relay_token };
+    });
+  }
+
+  relaySentinelChildResult({ occurrenceId, relayToken, body, id, createdAt }) {
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const capability = this.#database.prepare("SELECT * FROM sentinel_relay_capabilities WHERE occurrence_id = ? AND relay_token = ?").get(occurrenceId, relayToken);
+      if (capability === undefined || capability.used_at !== null || capability.expires_at <= now) return undefined;
+      this.#database.prepare("UPDATE sentinel_relay_capabilities SET used_at = ? WHERE occurrence_id = ? AND relay_token = ? AND used_at IS NULL").run(now, occurrenceId, relayToken);
+      const candidate = prepareEnvelope({ id, from: capability.sender, to: capability.recipient, body, created_at: createdAt, sentinel: { receiver_policy: "sentinel_child", model: "relay", origin_sender: capability.recipient, sentinel_child: { occurrence_id: occurrenceId } } });
+      return enqueueCandidate(this.#database, candidate, { firstSeenAt: now, maxQueuedMessages: this.#maxQueuedMessages, maxQueuedBytes: this.#maxQueuedBytes });
+    });
+  }
+
+  transitionSentinel(occurrenceId, attemptId, transition, { childIdentity, exitCode, delivery, actorId, lease } = {}) {
+    const next = {
+      launching: "launching",
+      launched: "launched",
+      exited: "exited",
+      spawn_failed: "failed",
+    }[transition];
+    if (next === undefined) throw new TypeError("unknown Sentinel transition");
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const current = this.#database.prepare("SELECT * FROM sentinel_occurrences WHERE occurrence_id = ?").get(occurrenceId);
+      if (current === undefined || current.attempt_id !== attemptId) return undefined;
+      if (lease !== undefined) {
+        requireActiveAgentLease(this.#database, lease, now);
+        const reconnectingLaunchedChild = transition === "exited"
+          && current.state === "launched"
+          && current.child_identity !== null;
+        if (current.claim_lease_id !== lease.leaseId && !reconnectingLaunchedChild) return undefined;
+      }
+      if (actorId !== undefined && current.recipient !== actorId) return undefined;
+      if (delivery !== undefined && current.message_id !== null) {
+        requireSentinelDelivery(this.#database, delivery, current.message_id, now);
+      }
+      const allowed = (transition === "launching" && current.state === "claimed")
+        || (transition === "launched" && current.state === "launching")
+        || (transition === "exited" && current.state === "launched")
+        || (transition === "spawn_failed" && current.state === "launching" && current.child_identity === null);
+      if (!allowed) return toSentinelOccurrence(current);
+      if (transition === "exited") assertExitCode(exitCode);
+      if (transition === "spawn_failed") {
+        // ponytail: release only the unstarted attempt; the original body remains in the normal queue.
+        releaseSentinelMessage(this.#database, current.message_id, now);
+        this.#database.prepare("DELETE FROM sentinel_occurrences WHERE occurrence_id = ?").run(occurrenceId);
+        return { ...toSentinelOccurrence(current), state: "retryable", transition_sequence: current.transition_sequence + 1 };
+      }
+      if (transition === "launched" && current.message_id !== null) {
+        // The launch record and this delivery acknowledgement commit together; normal timeout recovery must not replay a child.
+        this.#database.prepare("UPDATE delivery_attempts SET state = 'acknowledged', updated_at = ? WHERE message_id = ? AND state IN ('leased', 'injection_requested')").run(now, current.message_id);
+        this.#database.prepare("UPDATE messages SET state = 'acknowledged' WHERE id = ? AND state IN ('leased', 'injection_requested')").run(current.message_id);
+      }
+      if (transition === "exited" && current.message_id !== null) {
+        this.#database.prepare("UPDATE messages SET body = '', state = 'dead_letter' WHERE id = ?").run(current.message_id);
+        this.#database.prepare("UPDATE delivery_attempts SET state = 'timed_out', updated_at = ? WHERE message_id = ? AND state IN ('leased', 'injection_requested')").run(now, current.message_id);
+        this.#database.prepare("UPDATE reminders SET state = 'failed', linked_message_id = NULL WHERE linked_message_id = ? AND interval_ms IS NULL").run(current.message_id);
+        this.#database.prepare("UPDATE reminders SET state = 'scheduled', linked_message_id = NULL WHERE linked_message_id = ? AND interval_ms IS NOT NULL").run(current.message_id);
+      }
+      this.#database.prepare(`
+        UPDATE sentinel_occurrences
+        SET state = ?, child_identity = COALESCE(?, child_identity), exit_code = CASE WHEN ? = 'exited' THEN ? ELSE exit_code END, terminal_at = CASE WHEN ? = 'exited' THEN ? ELSE terminal_at END, transition_sequence = transition_sequence + 1, updated_at = ?
+        WHERE occurrence_id = ?
+      `).run(next, childIdentity ?? null, transition, exitCode ?? null, transition, now, now, occurrenceId);
+      return toSentinelOccurrence(this.#database.prepare("SELECT * FROM sentinel_occurrences WHERE occurrence_id = ?").get(occurrenceId));
+    });
+  }
+
   createReminder(reminder) {
     const candidate = validateReminder(reminder, { maxBodyBytes: this.#maxBodyBytes });
     const now = clockTimestamp(this.#clock);
@@ -216,9 +386,9 @@ class MessageRepository {
       this.#database.prepare(`
         INSERT INTO reminders (
           id, target, creator, subject, body, created_at, next_due_at,
-          interval_ms, state, linked_message_id, occurrence_number,
+          interval_ms, sentinel_json, state, linked_message_id, occurrence_number,
           attempt_count, last_attempt_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, 0, 0, NULL)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, 0, 0, NULL)
       `).run(
         candidate.id,
         candidate.target,
@@ -228,6 +398,7 @@ class MessageRepository {
         candidate.created_at,
         candidate.next_due_at,
         candidate.interval_ms,
+        candidate.sentinel === undefined ? null : JSON.stringify(candidate.sentinel),
       );
       return { created: true, reminder: selectReminder(this.#database, candidate.id) };
     });
@@ -248,6 +419,7 @@ class MessageRepository {
         reminders.created_at,
         reminders.next_due_at,
         reminders.interval_ms,
+        reminders.sentinel_json,
         reminders.state,
         reminders.linked_message_id,
         messages.state AS linked_message_state,
@@ -792,6 +964,11 @@ class MessageRepository {
         || delivery.message_state !== "injection_requested") {
         throw new DeliveryNotActiveError(messageId, attemptNumber);
       }
+      const activeSentinel = this.#database.prepare(`
+        SELECT 1 FROM sentinel_occurrences
+        WHERE message_id = ? AND state IN ('claimed', 'launching')
+      `).get(messageId);
+      if (activeSentinel !== undefined) throw new DeliveryNotActiveError(messageId, attemptNumber);
 
       this.#database.prepare(`
         UPDATE messages
@@ -864,6 +1041,12 @@ class MessageRepository {
         WHERE delivery_attempts.state IN ('leased', 'injection_requested')
           AND messages.state IN ('leased', 'injection_requested')
           AND delivery_attempts.delivery_expires_at <= ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM sentinel_occurrences
+            WHERE sentinel_occurrences.message_id = messages.id
+              AND sentinel_occurrences.state IN ('claimed', 'launching', 'launched')
+          )
         ORDER BY messages.enqueue_sequence ASC
       `).all(now);
       return timedOut.map((delivery) => ({
@@ -915,7 +1098,7 @@ class MessageRepository {
     }
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const message = selectMessage(this.#database, messageId);
-      if (message === undefined || message.state !== "dead_letter") return undefined;
+      if (message === undefined || message.state !== "dead_letter" || message.sentinel !== undefined) return undefined;
       const usage = selectLiveQueueUsage(this.#database, message.to);
       if (usage.message_count >= this.#maxQueuedMessages
         || usage.queued_bytes + envelopeByteLength(message) > this.#maxQueuedBytes) {
@@ -1013,7 +1196,8 @@ class MessageRepository {
         created_at,
         expires_at,
         message_incarnation_id,
-        state
+        state,
+        sentinel_json
       FROM messages
       WHERE recipient = ? AND state = 'queued'
       ORDER BY enqueue_sequence ASC
@@ -1161,7 +1345,8 @@ function selectMessage(database, id) {
       created_at,
       expires_at,
       message_incarnation_id,
-      state
+      state,
+      sentinel_json
     FROM messages
     WHERE id = ?
   `).get(id);
@@ -1208,6 +1393,8 @@ function prepareEnvelope(envelope) {
     subject,
     body: envelope.body,
     created_at: envelope.created_at,
+    sentinel: envelope.sentinel,
+    sentinel_json: envelope.sentinel === undefined ? null : JSON.stringify(envelope.sentinel),
   };
 }
 
@@ -1238,8 +1425,8 @@ function enqueueCandidate(
   `).run(candidate.to, firstSeenAt);
   database.prepare(`
     INSERT INTO messages (
-      id, sender, recipient, subject, body, created_at, expires_at, message_incarnation_id, state
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued')
+      id, sender, recipient, subject, body, created_at, expires_at, message_incarnation_id, sentinel_json, state
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')
   `).run(
     candidate.id,
     candidate.from,
@@ -1249,6 +1436,7 @@ function enqueueCandidate(
     candidate.created_at,
     oneHourAfter(firstSeenAt),
     randomUUID(),
+    candidate.sentinel_json,
   );
   return {
     created: true,
@@ -1270,6 +1458,7 @@ export function validateReminder(reminder, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
     "created_at",
     "next_due_at",
     "interval_ms",
+    "sentinel",
   ]);
   if (Object.keys(reminder).some((key) => !expectedKeys.has(key))) {
     throw new ReminderValidationError();
@@ -1283,8 +1472,10 @@ export function validateReminder(reminder, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
     created_at: createdAt,
     next_due_at: nextDueAt,
     interval_ms: intervalMs,
+    sentinel,
   } = reminder;
   assertReminderId(id);
+  if (sentinel?.origin_sender !== undefined || sentinel?.sentinel_child !== undefined) throw new ReminderValidationError();
   if (!(intervalMs === null || (Number.isSafeInteger(intervalMs) && intervalMs > 0))) {
     throw new ReminderValidationError("interval_ms must be null or a positive safe integer");
   }
@@ -1294,6 +1485,7 @@ export function validateReminder(reminder, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
       from: creator,
       to: target,
       ...(subject === undefined ? {} : { subject }),
+      ...(sentinel === undefined ? {} : { sentinel }),
       body,
       created_at: createdAt,
     }, { maxBodyBytes });
@@ -1320,6 +1512,7 @@ export function validateReminder(reminder, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
     created_at: createdAt,
     next_due_at: nextDueAt,
     interval_ms: intervalMs,
+    ...(sentinel === undefined ? {} : { sentinel }),
   };
 }
 
@@ -1345,6 +1538,9 @@ function fireDueOneShotReminder(database, reminder, now, limits) {
       from: "reminders",
       to: reminder.target,
       ...(reminder.subject === undefined ? {} : { subject: reminder.subject }),
+      ...(reminder.sentinel === undefined ? {} : {
+        sentinel: { ...reminder.sentinel, origin_sender: reminder.creator },
+      }),
       body: reminder.body,
       created_at: now,
     }, { maxBodyBytes: limits.maxBodyBytes })),
@@ -1419,6 +1615,9 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
       from: "reminders",
       to: reminder.target,
       ...(reminder.subject === undefined ? {} : { subject: reminder.subject }),
+      ...(reminder.sentinel === undefined ? {} : {
+        sentinel: { ...reminder.sentinel, origin_sender: reminder.creator },
+      }),
       body: reminder.body,
       created_at: now,
     }, { maxBodyBytes: limits.maxBodyBytes })),
@@ -1449,6 +1648,18 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
   };
 }
 
+function requireSentinelDelivery(database, delivery, messageId, now) {
+  validateDeliveryReceipt(delivery);
+  requireActiveAgentLease(database, delivery, now);
+  requireActiveDelivery(database, delivery);
+  if (delivery.messageId !== messageId) throw new DeliveryNotActiveError(messageId, delivery.attemptNumber);
+}
+
+function releaseSentinelMessage(database, messageId, now) {
+  database.prepare("UPDATE delivery_attempts SET state = 'nacked', updated_at = ? WHERE message_id = ? AND state IN ('leased', 'injection_requested')").run(now, messageId);
+  database.prepare("UPDATE messages SET state = 'queued' WHERE id = ? AND state IN ('leased', 'injection_requested')").run(messageId);
+}
+
 function completeLinkedReminder(database, messageId) {
   database.prepare(`
     DELETE FROM reminders
@@ -1476,6 +1687,7 @@ function selectReminder(database, reminderId) {
       reminders.created_at,
       reminders.next_due_at,
       reminders.interval_ms,
+      reminders.sentinel_json,
       reminders.state,
       reminders.linked_message_id,
       messages.state AS linked_message_state,
@@ -1644,19 +1856,27 @@ function cleanupStaleAgentResources(database, now) {
     SELECT agent_id
     FROM agents
     WHERE (
-      last_connected_at IS NULL
-      AND first_seen_at <= ?
-      AND NOT EXISTS (
-        SELECT 1
-        FROM reminders
-        WHERE reminders.target = agents.agent_id
-          AND (
-            reminders.state = 'scheduled'
-            OR (reminders.interval_ms IS NULL AND reminders.linked_message_id IS NOT NULL)
-          )
+      (
+        last_connected_at IS NULL
+        AND first_seen_at <= ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM reminders
+          WHERE reminders.target = agents.agent_id
+            AND (
+              reminders.state = 'scheduled'
+              OR (reminders.interval_ms IS NULL AND reminders.linked_message_id IS NOT NULL)
+            )
+        )
       )
+      OR (disconnected_at IS NOT NULL AND disconnected_at <= ?)
     )
-       OR (disconnected_at IS NOT NULL AND disconnected_at <= ?)
+    AND NOT EXISTS (
+      SELECT 1
+      FROM sentinel_occurrences
+      WHERE sentinel_occurrences.recipient = agents.agent_id
+        AND sentinel_occurrences.state = 'launched'
+    )
     ORDER BY agent_id ASC
   `).all(threshold, threshold).map(({ agent_id: agentId }) => agentId);
   for (const agentId of stale) removeAgentResources(database, agentId);
@@ -1664,7 +1884,15 @@ function cleanupStaleAgentResources(database, now) {
 }
 
 function removeAgentResources(database, agentId) {
+  const launchedChild = database.prepare(`
+    SELECT 1
+    FROM sentinel_occurrences
+    WHERE recipient = ? AND state = 'launched'
+    LIMIT 1
+  `).get(agentId);
+  if (launchedChild !== undefined) return false;
   database.prepare("DELETE FROM agents WHERE agent_id = ?").run(agentId);
+  return true;
 }
 
 function sameReminder(reminder, candidate) {
@@ -1675,7 +1903,8 @@ function sameReminder(reminder, candidate) {
     && reminder.body === candidate.body
     && reminder.created_at === candidate.created_at
     && reminder.next_due_at === candidate.next_due_at
-    && reminder.interval_ms === candidate.interval_ms;
+    && reminder.interval_ms === candidate.interval_ms
+    && sameSentinelDescriptor(reminder.sentinel, candidate.sentinel);
 }
 
 function reminderMessageId(reminderId, occurrenceNumber) {
@@ -1713,6 +1942,12 @@ function assertServerJobKey(jobKey) {
 function assertTimestamp(timestamp, name) {
   if (typeof timestamp !== "string" || !Number.isFinite(Date.parse(timestamp))) {
     throw new TypeError(`${name} must be a valid timestamp`);
+  }
+}
+
+function assertExitCode(exitCode) {
+  if (!Number.isSafeInteger(exitCode) || exitCode < 0 || exitCode > 255) {
+    throw new TypeError("exitCode must be an integer from 0 through 255");
   }
 }
 
@@ -1932,7 +2167,17 @@ function sameEnvelope(message, envelope) {
     && message.to === envelope.to
     && (message.subject ?? null) === envelope.subject
     && message.body === envelope.body
-    && message.created_at === envelope.created_at;
+    && message.created_at === envelope.created_at
+    && sameSentinelDescriptor(message.sentinel, envelope.sentinel);
+}
+
+function sameSentinelDescriptor(left, right) {
+  return left === undefined
+    ? right === undefined
+    : right !== undefined
+      && left.receiver_policy === right.receiver_policy
+      && left.model === right.model
+      && left.origin_sender === right.origin_sender;
 }
 
 function oneHourAfter(createdAt) {
@@ -1955,6 +2200,23 @@ function toMessage(row) {
     expires_at: row.expires_at,
     message_incarnation_id: row.message_incarnation_id,
     state: row.state,
+    ...(row.sentinel_json === null ? {} : { sentinel: JSON.parse(row.sentinel_json) }),
+  };
+}
+
+function toSentinelOccurrence(row) {
+  return {
+    occurrence_id: row.occurrence_id,
+    message_id: row.message_id,
+    state: row.state,
+    attempt_id: row.attempt_id,
+    transition_sequence: row.transition_sequence,
+    ...(row.child_identity === null ? {} : { child_identity: row.child_identity }),
+    ...(row.exit_code === null ? {} : {
+      exit_code: row.exit_code,
+      outcome: row.exit_code === 0 ? "succeeded" : "failed",
+    }),
+    ...(row.terminal_at === null ? {} : { terminal_at: row.terminal_at }),
   };
 }
 
@@ -1968,6 +2230,7 @@ function toReminder(row) {
     created_at: row.created_at,
     next_due_at: row.next_due_at,
     interval_ms: row.interval_ms,
+    ...(row.sentinel_json === null ? {} : { sentinel: JSON.parse(row.sentinel_json) }),
     state: row.state,
     linked_message_id: row.linked_message_id,
     linked_message_state: row.linked_message_state,
