@@ -441,7 +441,7 @@ export function createAgentRouter({
         });
         sendFrame(currentSocket, generateFrameId, {
           type: "message",
-          message: toEnvelope(delivery.message),
+          message: deliveryEnvelope(currentSession, delivery.message),
           message_incarnation_id: delivery.message.message_incarnation_id,
           attempt_number: delivery.attempt_number,
           delivery_expires_at: delivery.delivery_expires_at,
@@ -722,6 +722,28 @@ export function createAgentRouter({
     }
     agents.sort((left, right) => left.agent_id < right.agent_id ? -1 : left.agent_id > right.agent_id ? 1 : 0);
     return { generated_at: generatedAt, agents };
+  }
+
+  function deliveryEnvelope(recipientSession, message) {
+    const envelope = toEnvelope(message);
+    if (message.from === recipientSession.agentId) return envelope;
+
+    const senderSession = sessions.get(message.from);
+    const now = new Date(currentTimeMs(clock)).toISOString();
+    const senderLease = senderSession === undefined ? undefined : repository.leaseFor(message.from);
+    if (senderSession === undefined
+      || senderSession.socket.readyState !== WebSocket.OPEN
+      || senderLease === undefined
+      || senderLease.lease_id !== senderSession.leaseId
+      || senderLease.instance_id !== senderSession.instanceId
+      || senderLease.expires_at <= now) return envelope;
+
+    const footer = `\n\n[Reply via mailbox to ${message.from}.]`;
+    const maxBodyBytes = repository.admissionLimits?.().maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+    if (Buffer.byteLength(envelope.body, "utf8") + Buffer.byteLength(footer, "utf8") > maxBodyBytes) {
+      return envelope;
+    }
+    return { ...envelope, body: `${envelope.body}${footer}` };
   }
 
   function enqueueMessage(envelope) {
