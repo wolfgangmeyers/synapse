@@ -1,0 +1,580 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import { DatabaseSync } from "node:sqlite";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import WebSocket from "ws";
+
+import { openMessageRepository } from "../harness/db.js";
+import {
+  ProtocolValidationError,
+  validateClientFrame,
+  validateEnvelope,
+  validateServerFrame,
+} from "../harness/protocol.js";
+import { createAgentRouter } from "../harness/router.js";
+
+const register = {
+  version: "v1",
+  frame_id: "register-1",
+  type: "register",
+  agent_id: "android-550e8400-e29b-41d4-a716-446655440000",
+  instance_id: "instance-1",
+  agent_role: "user_interaction",
+  client_type: "android",
+  ack_confirmation: "correlated_v1",
+};
+
+test("Android registration metadata is accepted while legacy registration remains valid", () => {
+  assert.equal(validateClientFrame(register), register);
+
+  const legacy = {
+    version: "v1",
+    frame_id: "register-legacy",
+    type: "register",
+    agent_id: "worker",
+    instance_id: "instance-legacy",
+  };
+  assert.equal(validateClientFrame(legacy), legacy);
+});
+
+test("registered frames require the effective role and only allow negotiated ACK confirmation", () => {
+  const registered = {
+    version: "v1",
+    frame_id: "registered-1",
+    type: "registered",
+    request_id: register.frame_id,
+    agent_id: register.agent_id,
+    instance_id: register.instance_id,
+    lease_id: "lease-1",
+    expires_at: "2026-07-15T06:00:30.000Z",
+    recovered: false,
+    agent_role: "user_interaction",
+    ack_confirmation: "correlated_v1",
+  };
+  assert.equal(validateServerFrame(registered), registered);
+
+  const missingRole = { ...registered };
+  delete missingRole.agent_role;
+  assert.throws(() => validateServerFrame(missingRole), ProtocolValidationError);
+
+  const legacy = { ...registered, agent_role: "agent" };
+  delete legacy.ack_confirmation;
+  assert.equal(validateServerFrame(legacy), legacy);
+});
+
+test("router echoes Android ACK capability but preserves legacy response shape", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-contract-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const events = [];
+  const router = createAgentRouter({
+    repository,
+    timeoutSweepIntervalMs: 60_000,
+    eventLogger: (event, fields) => events.push({ event, fields }),
+  });
+  const websocketUrl = await router.listen();
+  const sockets = [];
+  const connect = async () => {
+    const socket = new WebSocket(websocketUrl);
+    sockets.push(socket);
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    return socket;
+  };
+  const nextFrame = (socket) => new Promise((resolve, reject) => {
+    socket.once("message", (payload) => resolve(JSON.parse(payload.toString("utf8"))));
+    socket.once("error", reject);
+  });
+  try {
+    const android = await connect();
+    const androidRegistered = nextFrame(android);
+    android.send(JSON.stringify(register));
+    const frame = await androidRegistered;
+    assert.equal(frame.version, "v1");
+    assert.match(frame.frame_id, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+    assert.equal(frame.type, "registered");
+    assert.equal(frame.request_id, register.frame_id);
+    assert.equal(frame.agent_id, register.agent_id);
+    assert.equal(frame.instance_id, register.instance_id);
+    assert.match(frame.lease_id, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+    assert.match(frame.expires_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.equal(frame.recovered, false);
+    assert.equal(frame.agent_role, "user_interaction");
+    assert.equal(frame.ack_confirmation, "correlated_v1");
+    const renewed = nextFrame(android);
+    android.send(JSON.stringify({
+      version: "v1",
+      frame_id: "renew-1",
+      type: "lease_renew",
+      agent_id: register.agent_id,
+      instance_id: register.instance_id,
+      lease_id: frame.lease_id,
+    }));
+    assert.equal((await renewed).ack_confirmation, "correlated_v1");
+    assert.deepEqual(events.find(({ event }) => event === "agent_registered").fields.client_type, "android");
+  } finally {
+    for (const socket of sockets) socket.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("negotiated ACK sends one correlated settlement confirmation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-confirmation-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  let socket;
+  let frameId = 0;
+  const nextFrame = (timeoutMs = 500) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out waiting for router frame")), timeoutMs);
+    socket.once("message", (payload) => {
+      clearTimeout(timer);
+      resolve(JSON.parse(payload.toString("utf8")));
+    });
+    socket.once("error", reject);
+  });
+  const send = (frame) => socket.send(JSON.stringify({ version: "v1", frame_id: `frame-${++frameId}`, ...frame }));
+  try {
+    socket = new WebSocket(await router.listen());
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const registered = nextFrame();
+    socket.send(JSON.stringify(register));
+    const lease = await registered;
+
+    const delivery = nextFrame();
+    router.enqueueMessage({
+      id: "confirmation-message",
+      from: "sender",
+      to: register.agent_id,
+      body: "body",
+      created_at: "2026-07-15T06:00:00.000Z",
+    });
+    const offered = await delivery;
+    send({
+      type: "injection_requested",
+      agent_id: register.agent_id,
+      instance_id: register.instance_id,
+      lease_id: lease.lease_id,
+      message_id: offered.message.id,
+      attempt_number: offered.attempt_number,
+    });
+    const confirmation = nextFrame();
+    send({
+      type: "ack",
+      agent_id: register.agent_id,
+      instance_id: register.instance_id,
+      lease_id: lease.lease_id,
+      message_id: offered.message.id,
+      attempt_number: offered.attempt_number,
+    });
+    const settled = await confirmation;
+    assert.match(settled.frame_id, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+    assert.deepEqual({ ...settled, frame_id: undefined }, {
+      version: "v1",
+      frame_id: undefined,
+      type: "delivery_acknowledged",
+      request_id: "frame-2",
+      agent_id: register.agent_id,
+      instance_id: register.instance_id,
+      lease_id: lease.lease_id,
+      message_id: offered.message.id,
+      message_incarnation_id: offered.message_incarnation_id,
+      attempt_number: offered.attempt_number,
+    });
+  } finally {
+    socket?.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("legacy ACK does not receive correlated settlement confirmation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-legacy-ack-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  let socket;
+  let frameId = 0;
+  const nextFrame = () => new Promise((resolve, reject) => {
+    socket.once("message", (payload) => resolve(JSON.parse(payload.toString("utf8"))));
+    socket.once("error", reject);
+  });
+  const send = (frame) => socket.send(JSON.stringify({ version: "v1", frame_id: `legacy-${++frameId}`, ...frame }));
+  try {
+    socket = new WebSocket(await router.listen());
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const registered = nextFrame();
+    send({ type: "register", agent_id: "legacy-worker", instance_id: "legacy-instance" });
+    const lease = await registered;
+    assert.equal(lease.agent_role, "agent");
+    assert.equal(lease.ack_confirmation, undefined);
+
+    const delivery = nextFrame();
+    router.enqueueMessage({
+      id: "legacy-ack-message",
+      from: "sender",
+      to: "legacy-worker",
+      body: "body",
+      created_at: "2026-07-15T06:00:00.000Z",
+    });
+    const offered = await delivery;
+    send({ type: "injection_requested", agent_id: "legacy-worker", instance_id: "legacy-instance", lease_id: lease.lease_id, message_id: offered.message.id, attempt_number: offered.attempt_number });
+    send({ type: "ack", agent_id: "legacy-worker", instance_id: "legacy-instance", lease_id: lease.lease_id, message_id: offered.message.id, attempt_number: offered.attempt_number });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(repository.messageFor(offered.message.id), undefined);
+  } finally {
+    socket?.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("correlated delivery confirmation validates the settled lease and incarnation", () => {
+  const confirmation = {
+    version: "v1",
+    frame_id: "confirmation-1",
+    type: "delivery_acknowledged",
+    request_id: "ack-1",
+    agent_id: register.agent_id,
+    instance_id: register.instance_id,
+    lease_id: "lease-1",
+    message_id: "message-1",
+    message_incarnation_id: "550e8400-e29b-41d4-a716-446655440000",
+    attempt_number: 1,
+  };
+  assert.equal(validateServerFrame(confirmation), confirmation);
+});
+
+test("delivery frames require the router-generated message incarnation", () => {
+  const message = {
+    version: "v1",
+    frame_id: "message-1",
+    type: "message",
+    message: {
+      id: "message-1",
+      from: "sender",
+      to: "worker",
+      body: "body",
+      created_at: "2026-07-15T06:00:00.000Z",
+    },
+    attempt_number: 1,
+    delivery_expires_at: "2026-07-15T06:00:30.000Z",
+    message_incarnation_id: "550e8400-e29b-41d4-a716-446655440000",
+  };
+  assert.equal(validateServerFrame(message), message);
+
+  const missingIncarnation = { ...message };
+  delete missingIncarnation.message_incarnation_id;
+  assert.throws(() => validateServerFrame(missingIncarnation), ProtocolValidationError);
+});
+
+test("router rejects malformed WebSocket UTF-8 before frame admission", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-ws-utf8-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  let socket;
+  try {
+    socket = new WebSocket(await router.listen());
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const response = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("malformed frame was not rejected")), 500);
+      socket.once("message", (payload) => {
+        clearTimeout(timeout);
+        resolve(JSON.parse(payload.toString("utf8")));
+      });
+      socket.once("close", () => {
+        clearTimeout(timeout);
+        resolve({ type: "closed" });
+      });
+      socket.once("error", reject);
+    });
+    socket.send(Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xed, 0xa0, 0x80, 0x22, 0x7d]), { binary: false });
+    assert.ok(["error", "closed"].includes((await response).type));
+    assert.equal(repository.leaseFor(register.agent_id), undefined);
+  } finally {
+    socket?.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router rejects malformed HTTP UTF-8 before queue admission", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-utf8-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  try {
+    const websocketUrl = await router.listen();
+    const body = Buffer.concat([
+      Buffer.from('{"id":"invalid-utf8-1","from":"sender'),
+      Buffer.from([0xed, 0xa0, 0x80]),
+      Buffer.from('","to":"worker","body":"body","created_at":"2026-07-15T06:00:00.000Z"}'),
+    ]);
+    const response = await new Promise((resolve, reject) => {
+      const request = httpRequest(websocketUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/messages"), {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": body.length },
+      }, (result) => {
+        const chunks = [];
+        result.on("data", (chunk) => chunks.push(chunk));
+        result.on("end", () => resolve({ status: result.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      request.once("error", reject);
+      request.end(body);
+    });
+    assert.equal(response.status, 400);
+    assert.equal(repository.messageFor("invalid-utf8-1"), undefined);
+  } finally {
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("protocol rejects escaped unpaired surrogates before envelope admission", () => {
+  assert.throws(() => validateEnvelope({
+    id: "invalid-scalar-1",
+    from: "sender\ud800",
+    to: "worker",
+    body: "body",
+    created_at: "2026-07-15T06:00:00.000Z",
+  }), ProtocolValidationError);
+});
+
+test("health reports migration 005 for Android preflight", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-health-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  try {
+    const websocketUrl = await router.listen();
+    const response = await fetch(websocketUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/health"));
+    assert.equal(response.status, 200);
+    assert.ok((await response.json()).schema_migrations.includes("005_message_incarnation"));
+  } finally {
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("message lookup includes its router-generated incarnation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-message-lookup-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  try {
+    const websocketUrl = await router.listen();
+    const queued = router.enqueueMessage({
+      id: "lookup-incarnation-1",
+      from: "sender",
+      to: "worker",
+      body: "body",
+      created_at: "2026-07-15T06:00:00.000Z",
+    });
+    const response = await fetch(websocketUrl
+      .replace("ws://", "http://")
+      .replace("/v1/agents", "/v1/messages/lookup-incarnation-1"));
+    assert.equal(response.status, 200);
+    const { message } = await response.json();
+    assert.equal(message.message_incarnation_id, queued.message.message_incarnation_id);
+  } finally {
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router enqueue events never log the claimed sender", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-logging-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const events = [];
+  const router = createAgentRouter({ repository, eventLogger: (event, fields) => events.push({ event, fields }) });
+  try {
+    router.enqueueMessage({
+      id: "hostile-sender-1",
+      from: "sender\nsecret-marker",
+      to: "worker",
+      body: "body",
+      created_at: "2026-07-15T06:00:00.000Z",
+    });
+    const enqueue = events.find(({ event }) => event === "message_enqueued");
+    assert.equal(enqueue.fields.from, undefined);
+    assert.equal(JSON.stringify(enqueue), JSON.stringify({
+      event: "message_enqueued",
+      fields: {
+        message_id: "hostile-sender-1",
+        to: "worker",
+        agent_id: "worker",
+        state: "queued",
+        created: true,
+      },
+    }));
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("migration 005 backfills an existing queued row with a UUIDv4 incarnation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-migration-"));
+  const databasePath = join(directory, "router.sqlite");
+  const database = new DatabaseSync(databasePath);
+  try {
+    for (const id of ["001_initial", "002_delivery_attempt_deadline", "003_reminders", "004_server_jobs"]) {
+      database.exec(readFileSync(new URL(`../harness/migrations/${id}.sql`, import.meta.url), "utf8"));
+    }
+    database.exec("CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
+    for (const id of ["001_initial", "002_delivery_attempt_deadline", "003_reminders", "004_server_jobs"]) {
+      database.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(id, "2026-07-15T06:00:00.000Z");
+    }
+    database.prepare("INSERT INTO agents (agent_id, first_seen_at) VALUES (?, ?)").run("worker", "2026-07-15T06:00:00.000Z");
+    database.prepare(`
+      INSERT INTO messages (id, sender, recipient, subject, body, created_at, expires_at, state)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, 'queued')
+    `).run("pre-migration-message", "sender", "worker", "body", "2026-07-15T06:00:00.000Z", "2026-07-15T07:00:00.000Z");
+  } finally {
+    database.close();
+  }
+
+  const repository = openMessageRepository({ databasePath });
+  try {
+    assert.match(repository.messageFor("pre-migration-message").message_incarnation_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("queue expiry is anchored to router first-seen time, not sender time", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-expiry-"));
+  const firstSeenAt = new Date("2026-07-15T06:00:00.000Z");
+  const repository = openMessageRepository({
+    databasePath: join(directory, "router.sqlite"),
+    clock: () => firstSeenAt,
+  });
+  try {
+    const { message } = repository.enqueue({
+      id: "router-expiry-1",
+      from: "sender",
+      to: "worker",
+      body: "body",
+      created_at: "2099-01-01T00:00:00.000Z",
+    });
+    assert.equal(message.expires_at, "2026-07-15T07:00:00.000Z");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("queued messages retain one router-generated incarnation across identical enqueue", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-incarnation-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const message = {
+    id: "incarnation-1",
+    from: "sender",
+    to: "worker",
+    body: "body",
+    created_at: "2026-07-15T06:00:00.000Z",
+  };
+  try {
+    const first = repository.enqueue(message);
+    assert.equal(first.created, true);
+    assert.match(first.message.message_incarnation_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+
+    const duplicate = repository.enqueue(message);
+    assert.equal(duplicate.created, false);
+    assert.equal(duplicate.message.message_incarnation_id, first.message.message_incarnation_id);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("discovery excludes a session after its repository lease expires", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-discovery-expiry-"));
+  let now = Date.parse("2026-07-15T06:00:00.000Z");
+  const clock = () => new Date(now);
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), clock });
+  const router = createAgentRouter({ repository, clock, leaseDurationMs: 30_000, timeoutSweepIntervalMs: 60_000 });
+  let socket;
+  try {
+    const websocketUrl = await router.listen();
+    socket = new WebSocket(websocketUrl);
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const registered = new Promise((resolve, reject) => {
+      socket.once("message", (payload) => resolve(JSON.parse(payload.toString("utf8"))));
+      socket.once("error", reject);
+    });
+    socket.send(JSON.stringify(register));
+    await registered;
+    now += 30_000;
+    const response = await fetch(websocketUrl.replace("ws://", "http://"));
+    assert.deepEqual((await response.json()).agents, []);
+  } finally {
+    socket?.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("discovery exposes only active sessions with role and no lease metadata", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-discovery-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  let socket;
+  try {
+    const websocketUrl = await router.listen();
+    socket = new WebSocket(websocketUrl);
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const registered = new Promise((resolve, reject) => {
+      socket.once("message", (payload) => resolve(JSON.parse(payload.toString("utf8"))));
+      socket.once("error", reject);
+    });
+    socket.send(JSON.stringify(register));
+    await registered;
+
+    const response = await fetch(websocketUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/agents"));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const snapshot = await response.json();
+    assert.match(snapshot.generated_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.deepEqual(snapshot.agents.map(({ agent_id, agent_role }) => ({ agent_id, agent_role })), [{
+      agent_id: register.agent_id,
+      agent_role: "user_interaction",
+    }]);
+    assert.match(snapshot.agents[0].connected_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.match(snapshot.agents[0].lease_expires_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.deepEqual(Object.keys(snapshot.agents[0]).sort(), [
+      "agent_id", "agent_role", "connected_at", "lease_expires_at",
+    ]);
+  } finally {
+    socket?.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -17,7 +17,11 @@
     "agentId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "instanceId": { "$ref": "#/$defs/frameId" },
     "leaseId": { "$ref": "#/$defs/frameId" },
+    "agentRole": { "type": "string", "enum": ["agent", "user_interaction"] },
+    "clientType": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+    "ackConfirmationMode": { "type": "string", "const": "correlated_v1" },
     "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "attemptNumber": { "type": "integer", "minimum": 1 },
     "failureReason": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$" },
     "utcMillis": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
@@ -52,7 +56,10 @@
         "frame_id": { "$ref": "#/$defs/frameId" },
         "type": { "const": "register" },
         "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" }
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "agent_role": { "$ref": "#/$defs/agentRole" },
+        "client_type": { "$ref": "#/$defs/clientType" },
+        "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" }
       }
     },
     "leaseRenewFrame": {
@@ -137,7 +144,7 @@
     "registeredFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "request_id", "agent_id", "instance_id", "lease_id", "expires_at", "recovered"],
+      "required": ["version", "frame_id", "type", "request_id", "agent_id", "instance_id", "lease_id", "expires_at", "recovered", "agent_role"],
       "properties": {
         "version": { "const": "v1" },
         "frame_id": { "$ref": "#/$defs/frameId" },
@@ -147,7 +154,9 @@
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "lease_id": { "$ref": "#/$defs/leaseId" },
         "expires_at": { "$ref": "#/$defs/utcMillis" },
-        "recovered": { "type": "boolean" }
+        "recovered": { "type": "boolean" },
+        "agent_role": { "$ref": "#/$defs/agentRole" },
+        "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" }
       }
     },
     "leaseRejectedFrame": {
@@ -191,14 +200,32 @@
     "messageFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "message", "attempt_number", "delivery_expires_at"],
+      "required": ["version", "frame_id", "type", "message", "message_incarnation_id", "attempt_number", "delivery_expires_at"],
       "properties": {
         "version": { "const": "v1" },
         "frame_id": { "$ref": "#/$defs/frameId" },
         "type": { "const": "message" },
         "message": { "$ref": "#/$defs/envelope" },
+        "message_incarnation_id": { "$ref": "#/$defs/messageIncarnationId" },
         "attempt_number": { "$ref": "#/$defs/attemptNumber" },
         "delivery_expires_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
+    "deliveryAcknowledgedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "request_id", "agent_id", "instance_id", "lease_id", "message_id", "message_incarnation_id", "attempt_number"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "delivery_acknowledged" },
+        "request_id": { "$ref": "#/$defs/frameId" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "message_incarnation_id": { "$ref": "#/$defs/messageIncarnationId" },
+        "attempt_number": { "$ref": "#/$defs/attemptNumber" }
       }
     },
     "serverFrame": {
@@ -207,7 +234,8 @@
         { "$ref": "#/$defs/leaseRejectedFrame" },
         { "$ref": "#/$defs/errorFrame" },
         { "$ref": "#/$defs/pongFrame" },
-        { "$ref": "#/$defs/messageFrame" }
+        { "$ref": "#/$defs/messageFrame" },
+        { "$ref": "#/$defs/deliveryAcknowledgedFrame" }
       ]
     },
     "envelope": {
