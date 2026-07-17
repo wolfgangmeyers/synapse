@@ -717,6 +717,9 @@ private fun UsernameDialog(current: String, onSave: (String) -> Unit, onDismiss:
     var value by remember(current) { mutableStateOf(current) }
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
         title = { Text("Router username") },
         text = {
             Column {
@@ -742,6 +745,9 @@ private fun RouterDialog(
     var endpoint by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
         title = { Text("Routers") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
