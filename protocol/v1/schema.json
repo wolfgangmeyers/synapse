@@ -6,11 +6,21 @@
   "$defs": {
     "frame": {
       "type": "object",
-      "required": ["version", "frame_id", "type"],
+      "required": [
+        "version",
+        "frame_id",
+        "type"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "type": "string" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "type": "string"
+        }
       }
     },
     "frameId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
@@ -22,35 +32,68 @@
     "ackConfirmationMode": { "type": "string", "const": "correlated_v1" },
     "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 },
     "attemptNumber": { "type": "integer", "minimum": 1 },
     "failureReason": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$" },
     "utcMillis": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
     "leaseIdentity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent_id", "instance_id", "lease_id"],
+      "required": [
+        "agent_id",
+        "instance_id",
+        "lease_id"
+      ],
       "properties": {
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" },
-        "lease_id": { "$ref": "#/$defs/leaseId" }
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        }
       }
     },
     "deliveryIdentity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent_id", "instance_id", "lease_id", "message_id", "attempt_number"],
+      "required": [
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "message_id",
+        "attempt_number"
+      ],
       "properties": {
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" },
-        "lease_id": { "$ref": "#/$defs/leaseId" },
-        "message_id": { "$ref": "#/$defs/messageId" },
-        "attempt_number": { "$ref": "#/$defs/attemptNumber" }
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "message_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "attempt_number": {
+          "$ref": "#/$defs/attemptNumber"
+        }
       }
     },
     "registerFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "instance_id"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id"
+      ],
       "properties": {
         "version": { "const": "v1" },
         "frame_id": { "$ref": "#/$defs/frameId" },
@@ -65,80 +108,406 @@
     "leaseRenewFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "lease_renew" },
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" },
-        "lease_id": { "$ref": "#/$defs/leaseId" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "lease_renew"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        }
       }
     },
     "pingFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type"],
+      "required": [
+        "version",
+        "frame_id",
+        "type"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "ping" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "ping"
+        }
       }
     },
     "injectionRequestedFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "message_id", "attempt_number"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "message_id",
+        "attempt_number"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "injection_requested" },
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" },
-        "lease_id": { "$ref": "#/$defs/leaseId" },
-        "message_id": { "$ref": "#/$defs/messageId" },
-        "attempt_number": { "$ref": "#/$defs/attemptNumber" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "injection_requested"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "message_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "attempt_number": {
+          "$ref": "#/$defs/attemptNumber"
+        }
       }
     },
     "ackFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "message_id", "attempt_number"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "message_id",
+        "attempt_number"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "ack" },
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" },
-        "lease_id": { "$ref": "#/$defs/leaseId" },
-        "message_id": { "$ref": "#/$defs/messageId" },
-        "attempt_number": { "$ref": "#/$defs/attemptNumber" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "ack"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "message_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "attempt_number": {
+          "$ref": "#/$defs/attemptNumber"
+        }
+      }
+    },
+    "sentinelClaimFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "message_id",
+        "attempt_number",
+        "occurrence_id",
+        "attempt_id"
+      ],
+      "properties": {
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "sentinel_claim"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "message_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "attempt_number": {
+          "$ref": "#/$defs/attemptNumber"
+        },
+        "occurrence_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/frameId"
+        }
+      }
+    },
+    "sentinelTransitionFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "message_id",
+        "attempt_number",
+        "occurrence_id",
+        "attempt_id"
+      ],
+      "properties": {
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "enum": [
+            "sentinel_launching",
+            "sentinel_spawn_failed"
+          ]
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "message_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "attempt_number": {
+          "$ref": "#/$defs/attemptNumber"
+        },
+        "occurrence_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/frameId"
+        }
+      }
+    },
+    "sentinelLaunchedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "message_id",
+        "attempt_number",
+        "occurrence_id",
+        "attempt_id",
+        "child_identity"
+      ],
+      "properties": {
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "sentinel_launched"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "message_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "attempt_number": {
+          "$ref": "#/$defs/attemptNumber"
+        },
+        "occurrence_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "child_identity": {
+          "$ref": "#/$defs/frameId"
+        }
+      }
+    },
+    "sentinelExitedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "occurrence_id",
+        "attempt_id",
+        "exit_code"
+      ],
+      "properties": {
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "sentinel_exited"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "occurrence_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "exit_code": {
+          "$ref": "#/$defs/exitCode"
+        }
       }
     },
     "nackFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "message_id", "attempt_number", "reason"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "agent_id",
+        "instance_id",
+        "lease_id",
+        "message_id",
+        "attempt_number",
+        "reason"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "nack" },
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" },
-        "lease_id": { "$ref": "#/$defs/leaseId" },
-        "message_id": { "$ref": "#/$defs/messageId" },
-        "attempt_number": { "$ref": "#/$defs/attemptNumber" },
-        "reason": { "$ref": "#/$defs/failureReason" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "nack"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/leaseId"
+        },
+        "message_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "attempt_number": {
+          "$ref": "#/$defs/attemptNumber"
+        },
+        "reason": {
+          "$ref": "#/$defs/failureReason"
+        }
       }
     },
     "clientFrame": {
       "oneOf": [
-        { "$ref": "#/$defs/registerFrame" },
-        { "$ref": "#/$defs/leaseRenewFrame" },
-        { "$ref": "#/$defs/injectionRequestedFrame" },
-        { "$ref": "#/$defs/ackFrame" },
-        { "$ref": "#/$defs/nackFrame" },
-        { "$ref": "#/$defs/pingFrame" }
+        {
+          "$ref": "#/$defs/registerFrame"
+        },
+        {
+          "$ref": "#/$defs/leaseRenewFrame"
+        },
+        {
+          "$ref": "#/$defs/injectionRequestedFrame"
+        },
+        {
+          "$ref": "#/$defs/ackFrame"
+        },
+        {
+          "$ref": "#/$defs/nackFrame"
+        },
+        {
+          "$ref": "#/$defs/sentinelClaimFrame"
+        },
+        {
+          "$ref": "#/$defs/sentinelTransitionFrame"
+        },
+        {
+          "$ref": "#/$defs/sentinelLaunchedFrame"
+        },
+        {
+          "$ref": "#/$defs/sentinelExitedFrame"
+        },
+        {
+          "$ref": "#/$defs/pingFrame"
+        }
       ]
     },
     "registeredFrame": {
@@ -162,39 +531,153 @@
     "leaseRejectedFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "request_id", "code", "agent_id", "instance_id", "active_instance_id"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "request_id",
+        "code",
+        "agent_id",
+        "instance_id",
+        "active_instance_id"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "lease_rejected" },
-        "request_id": { "$ref": "#/$defs/frameId" },
-        "code": { "const": "duplicate_identity" },
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "instance_id": { "$ref": "#/$defs/instanceId" },
-        "active_instance_id": { "$ref": "#/$defs/instanceId" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "lease_rejected"
+        },
+        "request_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "code": {
+          "const": "duplicate_identity"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/agentId"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/instanceId"
+        },
+        "active_instance_id": {
+          "$ref": "#/$defs/instanceId"
+        }
       }
     },
     "errorFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "code"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "code"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "error" },
-        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "request_id": { "$ref": "#/$defs/frameId" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "error"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "request_id": {
+          "$ref": "#/$defs/frameId"
+        }
       }
     },
     "pongFrame": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "request_id"],
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "request_id"
+      ],
       "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "pong" },
-        "request_id": { "$ref": "#/$defs/frameId" }
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "pong"
+        },
+        "request_id": {
+          "$ref": "#/$defs/frameId"
+        }
+      }
+    },
+    "sentinelStateFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "frame_id",
+        "type",
+        "request_id",
+        "occurrence_id",
+        "state",
+        "transition_sequence"
+      ],
+      "properties": {
+        "version": {
+          "const": "v1"
+        },
+        "frame_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "type": {
+          "const": "sentinel_state"
+        },
+        "request_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "occurrence_id": {
+          "$ref": "#/$defs/frameId"
+        },
+        "state": {
+          "enum": [
+            "claimed",
+            "launching",
+            "launched",
+            "exited",
+            "failed",
+            "retryable"
+          ]
+        },
+        "transition_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "child_identity": {
+          "$ref": "#/$defs/frameId"
+        },
+        "exit_code": {
+          "$ref": "#/$defs/exitCode"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "failed"
+          ]
+        },
+        "relay_token": {
+          "$ref": "#/$defs/frameId"
+        }
       }
     },
     "messageFrame": {
@@ -234,21 +717,86 @@
         { "$ref": "#/$defs/leaseRejectedFrame" },
         { "$ref": "#/$defs/errorFrame" },
         { "$ref": "#/$defs/pongFrame" },
+        { "$ref": "#/$defs/sentinelStateFrame" },
         { "$ref": "#/$defs/messageFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" }
       ]
     },
+    "sentinelDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receiver_policy",
+        "model"
+      ],
+      "properties": {
+        "receiver_policy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "origin_sender": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sentinel_child": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "occurrence_id"
+          ],
+          "properties": {
+            "occurrence_id": {
+              "$ref": "#/$defs/frameId"
+            }
+          }
+        }
+      }
+    },
     "envelope": {
       "type": "object",
-      "required": ["id", "from", "to", "body", "created_at"],
+      "required": [
+        "id",
+        "from",
+        "to",
+        "body",
+        "created_at"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "$ref": "#/$defs/messageId" },
-        "from": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "to": { "$ref": "#/$defs/agentId" },
-        "subject": { "type": "string", "maxLength": 256 },
-        "body": { "type": "string", "maxLength": 65536 },
-        "created_at": { "$ref": "#/$defs/utcMillis" }
+        "id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "to": {
+          "$ref": "#/$defs/agentId"
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "created_at": {
+          "$ref": "#/$defs/utcMillis"
+        },
+        "sentinel": {
+          "$ref": "#/$defs/sentinelDescriptor"
+        }
       }
     }
   }

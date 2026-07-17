@@ -6,9 +6,14 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import sys
 
 SOURCE = Path(__file__).resolve().parents[4] / "pi-extensions" / "mecha-messaging.js"
+CHILD_SOURCE = SOURCE.with_name("sentinel-child.js")
+POLICY_SOURCE = SOURCE.with_name("sentinel-receiver-policies.json")
 TARGET = Path.home() / ".mecha-developer" / "extensions" / "mecha-messaging.js"
+CHILD_TARGET = TARGET.with_name("sentinel-child.js")
+POLICY_TARGET = TARGET.with_name("sentinel-receiver-policies.json")
 SETTINGS = Path.home() / ".pi" / "agent" / "settings.json"
 
 
@@ -63,34 +68,48 @@ def load_settings() -> tuple[dict, bool]:
 
 
 def main() -> int:
-    if not is_regular_file(SOURCE):
-        raise SystemExit(f"Invalid canonical extension source: {SOURCE}")
+    if not is_regular_file(SOURCE) or not is_regular_file(CHILD_SOURCE) or not is_regular_file(POLICY_SOURCE):
+        raise SystemExit(f"Invalid canonical extension source: {SOURCE}, {CHILD_SOURCE}, or {POLICY_SOURCE}")
 
     try:
         settings, had_settings = load_settings()
     except ValueError as error:
         raise SystemExit(f"Error: {error}") from error
 
-    if (TARGET.exists() or TARGET.is_symlink()) and not is_regular_file(TARGET):
-        raise SystemExit(f"Installed extension must be a regular, non-symlink file: {TARGET}")
+    if ((TARGET.exists() or TARGET.is_symlink()) and not is_regular_file(TARGET)) \
+            or ((CHILD_TARGET.exists() or CHILD_TARGET.is_symlink()) and not is_regular_file(CHILD_TARGET)) \
+            or ((POLICY_TARGET.exists() or POLICY_TARGET.is_symlink()) and not is_regular_file(POLICY_TARGET)):
+        raise SystemExit(f"Installed Sentinel artifacts must be regular, non-symlink files: {TARGET}, {CHILD_TARGET}, {POLICY_TARGET}")
 
     TARGET.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     artifact_backup = TARGET.with_name(TARGET.name + ".rollback")
+    child_backup = CHILD_TARGET.with_name(CHILD_TARGET.name + ".rollback")
+    policy_backup = POLICY_TARGET.with_name(POLICY_TARGET.name + ".rollback")
     settings_backup = SETTINGS.with_name(SETTINGS.name + ".mecha-messaging.rollback")
-    if artifact_backup.exists() or artifact_backup.is_symlink() or settings_backup.exists() or settings_backup.is_symlink():
+    if (artifact_backup.exists() or artifact_backup.is_symlink() or child_backup.exists()
+            or child_backup.is_symlink() or policy_backup.exists() or policy_backup.is_symlink()
+            or settings_backup.exists() or settings_backup.is_symlink()):
         raise SystemExit(
             "Existing Pi extension rollback copies need verification or recovery before updating: "
-            f"{artifact_backup}, {settings_backup}"
+            f"{artifact_backup}, {child_backup}, {policy_backup}, {settings_backup}"
         )
 
     had_target = TARGET.exists()
+    had_child_target = CHILD_TARGET.exists()
+    had_policy_target = POLICY_TARGET.exists()
     try:
         if had_settings:
             atomic_copy(SETTINGS, settings_backup, ".settings-backup.")
         if had_target:
             atomic_copy(TARGET, artifact_backup, ".mecha-messaging-backup.")
+        if had_child_target:
+            atomic_copy(CHILD_TARGET, child_backup, ".sentinel-child-backup.")
+        if had_policy_target:
+            atomic_copy(POLICY_TARGET, policy_backup, ".sentinel-policy-backup.")
 
+        atomic_copy(POLICY_SOURCE, POLICY_TARGET, ".sentinel-policy.")
+        atomic_copy(CHILD_SOURCE, CHILD_TARGET, ".sentinel-child.")
         atomic_copy(SOURCE, TARGET, ".mecha-messaging.")
 
         packages = [entry for entry in settings.get("packages", []) if entry != str(TARGET)]
@@ -100,7 +119,11 @@ def main() -> int:
 
         verified_settings, _ = load_settings()
         if (not is_regular_file(TARGET)
+                or not is_regular_file(CHILD_TARGET)
+                or not is_regular_file(POLICY_TARGET)
                 or TARGET.read_bytes() != SOURCE.read_bytes()
+                or CHILD_TARGET.read_bytes() != CHILD_SOURCE.read_bytes()
+                or POLICY_TARGET.read_bytes() != POLICY_SOURCE.read_bytes()
                 or verified_settings["packages"].count(str(TARGET)) != 1):
             raise RuntimeError("post-install verification failed")
     except Exception as error:
@@ -112,6 +135,14 @@ def main() -> int:
             os.replace(artifact_backup, TARGET)
         elif not had_target:
             TARGET.unlink(missing_ok=True)
+        if had_child_target and child_backup.exists():
+            os.replace(child_backup, CHILD_TARGET)
+        elif not had_child_target:
+            CHILD_TARGET.unlink(missing_ok=True)
+        if had_policy_target and policy_backup.exists():
+            os.replace(policy_backup, POLICY_TARGET)
+        elif not had_policy_target:
+            POLICY_TARGET.unlink(missing_ok=True)
         raise SystemExit(f"Pi extension install failed and was rolled back: {error}") from error
 
     print(f"Pi extension installed: {TARGET} (source: {SOURCE})")
@@ -121,4 +152,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--sentinel-receiver-policies":
+        POLICY_SOURCE = Path(sys.argv[2]).expanduser()
+    elif len(sys.argv) != 1:
+        raise SystemExit("Usage: install_pi_extension.py [--sentinel-receiver-policies <json-file>]")
     raise SystemExit(main())

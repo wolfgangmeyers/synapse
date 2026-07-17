@@ -40,7 +40,7 @@ export function validateEnvelope(envelope, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
     || maxBodyBytes > ABSOLUTE_MAX_BODY_BYTES) {
     throw new TypeError("maxBodyBytes must be a positive safe integer no greater than 65536");
   }
-  if (!hasOnlyUnicodeScalars(envelope) || !validateSchema(envelope)) throw new ProtocolValidationError();
+  if (!hasOnlyUnicodeScalars(envelope) || !validateSchema(envelope) || envelope.sentinel?.sentinel_child !== undefined) throw new ProtocolValidationError();
   if (Number.isNaN(Date.parse(envelope.created_at))) {
     throw new ProtocolValidationError();
   }
@@ -48,6 +48,25 @@ export function validateEnvelope(envelope, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
     throw new ProtocolValidationError("payload_too_large");
   }
 
+  return envelope;
+}
+
+export function validateSentinelAdmission(envelope, receiverPolicies = {}) {
+  if (envelope.sentinel === undefined) return envelope;
+  if (envelope.sentinel.origin_sender !== undefined) {
+    throw new ProtocolValidationError("invalid_sentinel_policy");
+  }
+  const policy = receiverPolicies[envelope.sentinel.receiver_policy];
+  if (!policy
+    || policy.receiver !== envelope.to
+    || !Array.isArray(policy.senders)
+    || !policy.senders.includes(envelope.from)
+    || !policy.models.includes(envelope.sentinel.model)
+    || policy.execution?.supervisor !== envelope.from
+    || !Array.isArray(policy.execution.tools)
+    || policy.execution.tools.length !== 0) {
+    throw new ProtocolValidationError("invalid_sentinel_policy");
+  }
   return envelope;
 }
 
@@ -99,7 +118,7 @@ function hasOnlyPairedSurrogates(value) {
   return true;
 }
 
-export function createEnvelope({ from, to, subject, body }, {
+export function createEnvelope({ from, to, subject, body, sentinel }, {
   now = () => new Date(),
   generateId = createNanoId,
 } = {}) {
@@ -108,6 +127,7 @@ export function createEnvelope({ from, to, subject, body }, {
     from,
     to,
     ...(subject === undefined ? {} : { subject }),
+    ...(sentinel === undefined ? {} : { sentinel }),
     body,
     created_at: now().toISOString(),
   };
