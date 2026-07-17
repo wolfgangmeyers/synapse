@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { chmodSync, existsSync, readFileSync } from "node:fs";
 
@@ -16,6 +17,7 @@ export const DEFAULT_SERVER_JOB_MAX_ATTEMPTS = 3;
 export const SERVER_JOB_FAILURE_RETRY_MS = 60 * 1000;
 const MAX_UTC_TIMESTAMP_MS = Date.parse("9999-12-31T23:59:59.999Z");
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+const MESSAGE_INCARNATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const DEFAULT_LEASE_DURATION_MS = 30_000;
 export const DEFAULT_DELIVERY_LEASE_DURATION_MS = 30_000;
 export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
@@ -40,6 +42,10 @@ const migrations = Object.freeze([
   {
     id: "004_server_jobs",
     sql: readFileSync(new URL("./migrations/004_server_jobs.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "005_message_incarnation",
+    sql: readFileSync(new URL("./migrations/005_message_incarnation.sql", import.meta.url), "utf8"),
   },
 ]);
 
@@ -675,6 +681,13 @@ class MessageRepository {
 
       const message = selectOldestQueuedMessage(this.#database, agentId, now);
       if (message === undefined) return undefined;
+      if (!MESSAGE_INCARNATION_ID.test(message.message_incarnation_id ?? "")) {
+        this.#database.prepare(`
+          UPDATE messages
+          SET message_incarnation_id = ?
+          WHERE id = ? AND state = 'queued'
+        `).run(randomUUID(), message.id);
+      }
       const attemptNumber = nextAttemptNumber(this.#database, message.id);
       this.#database.prepare(`
         UPDATE messages
@@ -787,7 +800,10 @@ class MessageRepository {
       `).run(messageId);
       completeLinkedReminder(this.#database, messageId);
       this.#database.prepare("DELETE FROM messages WHERE id = ?").run(messageId);
-      return { message_id: messageId };
+      return {
+        message_id: messageId,
+        message_incarnation_id: delivery.message_incarnation_id,
+      };
     });
     if (result.timed_out) throw new DeliveryNotActiveError(messageId, attemptNumber);
     return result;
@@ -996,6 +1012,7 @@ class MessageRepository {
         body,
         created_at,
         expires_at,
+        message_incarnation_id,
         state
       FROM messages
       WHERE recipient = ? AND state = 'queued'
@@ -1082,11 +1099,27 @@ function applyMigrations(database, migrationPlan, clock, databasePath) {
       if (applied !== undefined) return;
 
       database.exec(migration.sql);
+      if (migration.id === "005_message_incarnation") backfillMessageIncarnations(database);
       database.prepare(
         "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
       ).run(migration.id, clock().toISOString());
     });
   }
+}
+
+function backfillMessageIncarnations(database) {
+  const rows = database.prepare(`
+    SELECT id
+    FROM messages
+    WHERE message_incarnation_id IS NULL
+    ORDER BY enqueue_sequence ASC
+  `).all();
+  const update = database.prepare(`
+    UPDATE messages
+    SET message_incarnation_id = ?
+    WHERE id = ? AND message_incarnation_id IS NULL
+  `);
+  for (const { id } of rows) update.run(randomUUID(), id);
 }
 
 function immediateTransaction(database, databasePath, operation) {
@@ -1127,6 +1160,7 @@ function selectMessage(database, id) {
       body,
       created_at,
       expires_at,
+      message_incarnation_id,
       state
     FROM messages
     WHERE id = ?
@@ -1204,8 +1238,8 @@ function enqueueCandidate(
   `).run(candidate.to, firstSeenAt);
   database.prepare(`
     INSERT INTO messages (
-      id, sender, recipient, subject, body, created_at, expires_at, state
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')
+      id, sender, recipient, subject, body, created_at, expires_at, message_incarnation_id, state
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued')
   `).run(
     candidate.id,
     candidate.from,
@@ -1213,7 +1247,8 @@ function enqueueCandidate(
     candidate.subject,
     candidate.body,
     candidate.created_at,
-    oneHourAfter(candidate.created_at),
+    oneHourAfter(firstSeenAt),
+    randomUUID(),
   );
   return {
     created: true,
@@ -1737,7 +1772,7 @@ function selectInFlightDelivery(database, agentId) {
 
 function selectOldestQueuedMessage(database, agentId, now) {
   return database.prepare(`
-    SELECT id
+    SELECT id, message_incarnation_id
     FROM messages
     WHERE recipient = ?
       AND state = 'queued'
@@ -1761,6 +1796,7 @@ function requireActiveDelivery(database, { agentId, leaseId, messageId, attemptN
       messages.id AS message_id,
       messages.recipient AS agent_id,
       messages.state AS message_state,
+      messages.message_incarnation_id,
       delivery_attempts.attempt_number,
       delivery_attempts.owner_lease_id,
       delivery_attempts.delivery_expires_at,
@@ -1917,6 +1953,7 @@ function toMessage(row) {
     body: row.body,
     created_at: row.created_at,
     expires_at: row.expires_at,
+    message_incarnation_id: row.message_incarnation_id,
     state: row.state,
   };
 }
