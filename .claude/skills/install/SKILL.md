@@ -456,14 +456,6 @@ else
   echo "skipped: mailbox cron job already exists"
 fi
 
-# Purelymail IMAP poller — materializes inbound mail into the supervisor mailbox.
-if ! crontab -l 2>/dev/null | grep -q "purelymail_poll.py"; then
-  (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/python3 $TOOLS/purelymail_poll.py >> ~/.mecha-developer/purelymail-poll.log 2>&1") | crontab -
-  echo "added: Purelymail IMAP poll cron job (runs every minute)"
-else
-  echo "skipped: Purelymail IMAP poll cron job already exists"
-fi
-
 # Standing-orders refresh — posts current supervisor standing orders via mailbox every 2 hours.
 if ! crontab -l 2>/dev/null | grep -q "standing_orders_cron.py"; then
   (crontab -l 2>/dev/null; echo "0 */2 * * * /usr/bin/python3 $TOOLS/standing_orders_cron.py >> ~/.mecha-developer/standing-orders-cron.log 2>&1") | crontab -
@@ -569,12 +561,11 @@ fi
 
 The cron jobs:
 - **mailbox_cron.py**: Runs every 10 seconds (6 staggered entries). Checks all agent mailboxes for unread messages older than 30 seconds and delivers to tmux windows.
-- **purelymail_poll.py**: Runs every minute. Polls the machine's Purelymail IMAP inbox, writes unseen messages into the supervisor mailbox, then marks them seen.
 - **standing_orders_cron.py**: Runs every 2 hours. Reads current supervisor standing orders and posts them to the supervisor mailbox from the `standing-orders-cron` system sender.
 - **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
-- **watchdog.py**: Runs every 30 minutes. Captures all tmux window output, asks an LLM to evaluate whether any workers are stuck (idle without being told to wait), and mails the supervisor if so.
+- **watchdog.py**: Runs every 30 minutes. Captures all tmux window output, asks an LLM to evaluate whether any workers are stuck (idle without being told to wait), and sends supervisor alerts through Mailbox.
 
-  **LLM config (optional)**: `~/.mecha-developer/watchdog-llm.json` selects which CLI the watchdog uses. Schema: `{"cli": "claude" | "codex", "model": "<model>", "extra_args": []}`. If the file is missing, defaults are `claude` + `claude-sonnet-4-6` + `[]`. An invalid `cli` value is rejected with a loud ntfy notification rather than silent fallback. If the configured CLI returns "Not logged in" (or the codex equivalent), the watchdog sends an ntfy push to topic `mecha-wolfgang-notify` and exits 0 so cron does not flood email.
+  **LLM config (optional)**: `~/.mecha-developer/watchdog-llm.json` selects which CLI the watchdog uses. Schema: `{"cli": "claude" | "codex", "model": "<model>", "extra_args": []}`. If the file is missing, defaults are `claude` + `claude-sonnet-4-6` + `[]`. An invalid `cli` value is rejected with a loud ntfy notification rather than silent fallback.
 - **Mailbox V2 router**: Persists and schedules durable reminders; no reminder cron job or reminder JSON file is used.
 - **logrotate**: Runs daily. Rotates logs in `~/.mecha-developer/` when they exceed size limits; keeps 1 backup, discards anything older than 24 hours.
 
@@ -651,7 +642,6 @@ fi
 echo ""
 echo "=== Crontab ==="
 crontab -l 2>/dev/null | grep "mailbox_cron.py" || echo "no mailbox cron job"
-crontab -l 2>/dev/null | grep "purelymail_poll.py" || echo "no Purelymail IMAP poll cron job"
 crontab -l 2>/dev/null | grep "standing_orders_cron.py" || echo "no standing-orders refresh cron job"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
 crontab -l 2>/dev/null | grep "watchdog.py" || echo "no watchdog cron job"
