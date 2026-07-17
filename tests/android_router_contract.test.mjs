@@ -92,6 +92,17 @@ test("router echoes Android ACK capability but preserves legacy response shape",
     socket.once("error", reject);
   });
   try {
+    const sender = await connect();
+    const senderRegistered = nextFrame(sender);
+    sender.send(JSON.stringify({
+      version: "v1",
+      frame_id: "sender-register-1",
+      type: "register",
+      agent_id: "sender",
+      instance_id: "sender-instance",
+    }));
+    await senderRegistered;
+
     const android = await connect();
     const androidRegistered = nextFrame(android);
     android.send(JSON.stringify(register));
@@ -117,7 +128,18 @@ test("router echoes Android ACK capability but preserves legacy response shape",
       lease_id: frame.lease_id,
     }));
     assert.equal((await renewed).ack_confirmation, "correlated_v1");
-    assert.deepEqual(events.find(({ event }) => event === "agent_registered").fields.client_type, "android");
+    assert.deepEqual(events.find(({ event, fields }) => event === "agent_registered" && fields.agent_id === register.agent_id).fields.client_type, "android");
+
+    const offered = nextFrame(android);
+    router.enqueueMessage({
+      id: "reply-hint-message",
+      from: "sender",
+      to: register.agent_id,
+      body: "raw body",
+      created_at: "2026-07-15T06:00:00.000Z",
+    });
+    assert.equal((await offered).message.body, "raw body\n\n[Reply via mailbox to sender.]");
+    assert.equal(repository.messageFor("reply-hint-message").body, "raw body");
   } finally {
     for (const socket of sockets) socket.terminate();
     await router.close();
