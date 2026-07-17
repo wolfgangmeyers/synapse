@@ -459,9 +459,7 @@ function mailboxCustomMessage(message) {
   };
 }
 
-export async function spawnNativeSentinel(message) {
-  // The native package documents this global symbol as its cross-extension service channel.
-  const service = globalThis[PI_SUBAGENTS_SERVICE];
+export async function spawnNativeSentinel(message, service = globalThis[PI_SUBAGENTS_SERVICE]) {
   if (service === undefined || typeof service.spawn !== "function") {
     throw new Error("Pi native subagent service is unavailable");
   }
@@ -470,6 +468,10 @@ export async function spawnNativeSentinel(message) {
     model: message.sentinel.model,
     inheritContext: true,
   });
+}
+
+export function captureNativeSentinelSpawner(service = globalThis[PI_SUBAGENTS_SERVICE]) {
+  return (message) => spawnNativeSentinel(message, service);
 }
 
 export function createPiMailboxDeliveryCoordinator({
@@ -815,10 +817,13 @@ export function createMechaMessagingExtension(pi, {
         log: () => {},
       });
       client = mailboxClient;
+      // Child sessions inherit extensions and can replace the package's global
+      // service symbol. Bind scheduled work to this resident parent service.
       coordinator = createPiMailboxDeliveryCoordinator({
         pi,
         sessionContext: context,
         client: mailboxClient,
+        spawnSubagent: captureNativeSentinelSpawner(),
       });
       void mailboxClient.connect().catch((error) => {
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${error.message}`, "error");
