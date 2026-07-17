@@ -10,6 +10,12 @@ __pycache__/
 # Node.js
 node_modules/
 
+# Android
+local.properties
+.gradle/
+build/
+app/build/
+
 # Editor
 *.swp
 *.swo
