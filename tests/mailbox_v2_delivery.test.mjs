@@ -117,7 +117,7 @@ test("Pi delivery ACK follows a persisted session entry, not pi.sendMessage", as
   coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
 
   assert.equal(sent.length, 1);
-  assert.match(sent[0].customMessage.content, /Message-ID: message-1/);
+  assert.equal(sent[0].customMessage.content, "Mailbox message from sender\nSubject: Durability\n\ndurable body");
   assert.deepEqual(sent[0].options, { deliverAs: "steer", triggerTurn: true });
   assert.deepEqual(client.receipts, [
     { type: "injection_requested", messageId: message.id, attemptNumber: 1, reason: undefined },
