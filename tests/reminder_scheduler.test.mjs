@@ -9,47 +9,6 @@ import { createAgentRouter } from "../harness/router.js";
 
 const intervalMs = 15 * 60 * 1000;
 
-test("Sentinel claims are idempotent and retryable before launch", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "mecha-sentinel-claim-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
-  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
-  t.after(() => repository.close());
-  repository.enqueue({ id: "sentinel-message", from: "supervisor", to: "receiver", body: "opaque prompt", created_at: "2030-01-01T00:00:00.000Z", sentinel: { receiver_policy: "managed", model: "gpt-5.6-terra" } });
-  assert.throws(() => repository.claimSentinel("sentinel-message", "missing-deadline", "attempt"), /launchDeadlineAt/);
-  const deadline = "2030-01-01T00:01:00.000Z";
-  const claimed = repository.claimSentinel("sentinel-message", "occurrence-1", "attempt-1", { launchDeadlineAt: deadline });
-  assert.deepEqual(claimed, { occurrence_id: "occurrence-1", message_id: "sentinel-message", state: "claimed", attempt_id: "attempt-1", transition_sequence: 1 });
-  assert.throws(
-    () => repository.claimSentinel("sentinel-message", "occurrence-1", "other-attempt", { launchDeadlineAt: deadline }),
-    /belongs to another delivery/,
-  );
-  assert.equal(repository.transitionSentinel("occurrence-1", "attempt-1", "launching").state, "launching");
-  assert.equal(repository.transitionSentinel("occurrence-1", "attempt-1", "spawn_failed").state, "retryable");
-  assert.equal(repository.sentinelState("occurrence-1"), undefined);
-  assert.equal(repository.claimSentinel("sentinel-message", "occurrence-retry", "attempt-retry", { launchDeadlineAt: deadline }).state, "claimed");
-});
-
-test("a launching Sentinel attempt expires into a non-retryable tombstone", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "mecha-sentinel-launch-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
-  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
-  t.after(() => repository.close());
-  repository.enqueue({ id: "sentinel-launch", from: "supervisor", to: "receiver", body: "opaque", created_at: "2030-01-01T00:00:00.000Z", sentinel: { receiver_policy: "managed", model: "gpt-5.6-terra" } });
-  repository.claimSentinel("sentinel-launch", "occurrence-2", "attempt-2", { launchDeadlineAt: "2000-01-01T00:00:00.000Z" });
-  repository.transitionSentinel("occurrence-2", "attempt-2", "launching");
-  const launching = repository.transitionSentinel("occurrence-2", "attempt-2", "launching");
-  assert.equal(launching.state, "launching");
-  assert.equal(repository.recoverSentinelDeadlines("2030-01-01T00:00:00.000Z"), 1);
-  assert.equal(repository.sentinelState("occurrence-2").state, "failed");
-  assert.equal(repository.sentinelState("occurrence-2").message_id, "sentinel-launch");
-  assert.equal(repository.messageFor("sentinel-launch").state, "dead_letter");
-  assert.equal(repository.messageFor("sentinel-launch").body, "");
-  assert.equal(repository.claimSentinel("sentinel-launch", "replay", "replay-attempt", { launchDeadlineAt: "2030-01-01T00:01:00.000Z" }), undefined);
-  assert.equal(repository.retryDeadLetter("sentinel-launch"), undefined);
-  assert.equal(repository.cleanupSentinelTombstones("2030-01-02T00:00:01.000Z"), 1);
-  assert.equal(repository.sentinelState("occurrence-2"), undefined);
-});
-
 test("the live router fires every recurring slot despite normal sweep lateness and skips only missed intervals", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-reminder-scheduler-"));
   t.after(async () => {

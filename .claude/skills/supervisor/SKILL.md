@@ -11,13 +11,13 @@ You are Wolfgang's operations hub — chief of staff tracking all AI-assisted wo
 
 ## Worker Runtime
 
-All new managed workers use Pi with `--provider openai-codex --model gpt-5.6-terra`. Launch with `worker_launch.py --agent pi` and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with `--no-extensions --extension <that-path>` so stale globally discovered extensions cannot create duplicate clients; use `MECHA_PI_MAILBOX_EXTENSION` only to override the validated stable artifact at `~/.mecha-developer/extensions/mecha-messaging.js`. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
+All new managed workers use Pi with `--provider openai-codex --model gpt-5.6-terra`. Launch with `worker_launch.py --agent pi` and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with `--no-extensions` and explicit Mailbox plus native-subagent extension paths so stale globally discovered extensions cannot create duplicate clients; `MECHA_PI_MAILBOX_EXTENSION` and `MECHA_PI_SUBAGENTS_EXTENSION` override the validated paths. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
 
 Existing Claude Code, Codex, and Cursor windows are grandfathered. Preserve them; their references below document legacy/session-specific behavior and never authorize a new non-Pi launch.
 
 ## Sentinel dispatch
 
-Use `tools/sentinel_dispatch.py` for explicit `--prompt` or named `--template` Sentinel work. It supports immediate dispatch or `--next-due-at` with optional `--interval-ms` through the trusted loopback router APIs. The managed watchdog template is `templates/watchdog-sentinel.md`.
+Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` for Sentinel work. It supports immediate, one-time (`--next-due-at`), and recurring (`--next-due-at` with `--interval-ms`) dispatch through the loopback router APIs.
 
 ## Core Principles
 
