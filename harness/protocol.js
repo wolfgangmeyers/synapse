@@ -40,7 +40,7 @@ export function validateEnvelope(envelope, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
     || maxBodyBytes > ABSOLUTE_MAX_BODY_BYTES) {
     throw new TypeError("maxBodyBytes must be a positive safe integer no greater than 65536");
   }
-  if (!validateSchema(envelope)) throw new ProtocolValidationError();
+  if (!hasOnlyUnicodeScalars(envelope) || !validateSchema(envelope)) throw new ProtocolValidationError();
   if (Number.isNaN(Date.parse(envelope.created_at))) {
     throw new ProtocolValidationError();
   }
@@ -52,12 +52,12 @@ export function validateEnvelope(envelope, { maxBodyBytes = DEFAULT_MAX_BODY_BYT
 }
 
 export function validateClientFrame(frame) {
-  if (!validateClientSchema(frame)) throw new ProtocolValidationError();
+  if (!hasOnlyUnicodeScalars(frame) || !validateClientSchema(frame)) throw new ProtocolValidationError();
   return frame;
 }
 
 export function validateServerFrame(frame) {
-  if (!validateServerSchema(frame)) throw new ProtocolValidationError();
+  if (!hasOnlyUnicodeScalars(frame) || !validateServerSchema(frame)) throw new ProtocolValidationError();
   for (const timestamp of ["expires_at", "delivery_expires_at"]) {
     if (timestamp in frame && Number.isNaN(Date.parse(frame[timestamp]))) {
       throw new ProtocolValidationError();
@@ -74,6 +74,29 @@ export function validateLeaseIdentity(identity) {
 export function validateDeliveryIdentity(identity) {
   if (!validateDeliveryIdentitySchema(identity)) throw new ProtocolValidationError();
   return identity;
+}
+
+function hasOnlyUnicodeScalars(value) {
+  if (typeof value === "string") return hasOnlyPairedSurrogates(value);
+  if (value === null || typeof value !== "object") return true;
+  if (Array.isArray(value)) return value.every(hasOnlyUnicodeScalars);
+  return Object.entries(value).every(([key, member]) => (
+    hasOnlyPairedSurrogates(key) && hasOnlyUnicodeScalars(member)
+  ));
+}
+
+function hasOnlyPairedSurrogates(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function createEnvelope({ from, to, subject, body }, {
