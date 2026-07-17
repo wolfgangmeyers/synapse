@@ -314,7 +314,7 @@ class MainActivity : ComponentActivity() {
     private fun historyFor(peer: String): List<ChatMessage> {
         if (peer.isBlank()) return emptyList()
         val raw = prefs().getString(routerHistoryKey(peer), null)
-            ?: if (activeRouter == DEFAULT_ROUTER_ENDPOINT) prefs().getString("history:$peer", null) else null
+            ?: (if (activeRouter == DEFAULT_ROUTER_ENDPOINT) prefs().getString("history:$peer", null) else null)
             ?: return emptyList()
         return try {
             val array = JSONArray(raw)
