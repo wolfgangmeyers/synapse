@@ -150,15 +150,7 @@ def format_timestamp(ts):
 
 
 def message_sender_hint(msg):
-    return msg.get("from_alias") or msg.get("from", "")
-
-
-def is_email_message(msg):
-    return "@" in msg.get("from", "")
-
-
-def has_email_sender(messages):
-    return any(is_email_message(msg) for _, msg in messages)
+    return msg.get("from", "")
 
 
 def system_senders():
@@ -186,29 +178,15 @@ def system_senders():
     return senders
 
 
-def smtp_reply_block():
-    return [
-        "*** MANDATORY — IF YOU REPLY, USE SMTP ***",
-        "The sender is reachable only via the mail system. To respond, run:",
-        '   python3 .claude/skills/supervisor/tools/mailbox_send.py --to <sender-email-above> --from <self> --subject "..." --body "..."',
-        "Replies typed at the terminal DO NOT reach the sender. Decide if a reply is warranted; if yes, this is the only valid path.",
-        "*** END MANDATORY BLOCK ***",
-    ]
-
-
 def format_delivery_text(messages, agent_name=""):
     """Format messages for direct tmux delivery."""
     count = len(messages)
     noun = "message" if count == 1 else "messages"
 
-    # Collect unique non-email senders to pre-fill the state update command.
-    # Email-originated messages use from_alias for display/reply routing, but that
-    # alias is not a supervisor task alias and must not drive state updates.
+    # Collect unique senders to pre-fill the state update command.
     senders = []
     seen = set()
     for _, msg in messages:
-        if is_email_message(msg):
-            continue
         s = message_sender_hint(msg)
         if s and s not in seen:
             senders.append(s)
@@ -244,9 +222,6 @@ def format_delivery_text(messages, agent_name=""):
             lines.append(f"Subject: {msg['subject']}")
         lines.append(msg.get("body", ""))
         lines.append("")
-
-    if has_email_sender(messages):
-        lines += smtp_reply_block()
 
     return "\n".join(lines).rstrip()
 
