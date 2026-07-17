@@ -1,9 +1,6 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 const WebSocket = globalThis.WebSocket;
 const NANOID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -24,10 +21,9 @@ const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_SESSION_CHECKPOINT_RETRY_MS = 250;
 const DEFAULT_REPLY_TIMEOUT_MS = 5_000;
-const DEFAULT_SENTINEL_RPC_TIMEOUT_MS = 180_000;
 const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
-const SENTINEL_RECEIVER_POLICIES = new URL("./sentinel-receiver-policies.json", import.meta.url);
+const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
 
 function childSessionIds() {
   if (!(globalThis[CHILD_SESSION_IDS] instanceof Set)) {
@@ -42,41 +38,11 @@ function childSessionId(event) {
     : undefined;
 }
 
-export function recoverSentinelExits(sessionManager, client, onConfirmed = undefined) {
-  const pending = new Map();
-  const confirmed = new Map();
-  for (const entry of sessionManager.getBranch()) {
-    const details = entry?.details;
-    if (entry?.type !== "custom_message"
-      || entry.customType !== "mecha-sentinel-status"
-      || typeof details?.occurrence_id !== "string"
-      || typeof details.attempt_id !== "string") continue;
-    const key = `${details.occurrence_id}\u0000${details.attempt_id}`;
-    const sequence = Number.isSafeInteger(details.transition_sequence) ? details.transition_sequence : -1;
-    if (details.state === "exited_pending" && Number.isSafeInteger(details.exit_code)) {
-      const previous = pending.get(key);
-      if (previous === undefined || sequence >= previous.sequence) pending.set(key, { details, sequence });
-    }
-    if (details.state === "exited" || details.state === "failed") {
-      const previous = confirmed.get(key);
-      if (previous === undefined || sequence >= previous) confirmed.set(key, sequence);
-    }
+export function transientChildAgentId(sessionId, generateId = createNanoId) {
+  if (typeof sessionId !== "string" || sessionId.length === 0 || typeof generateId !== "function") {
+    throw new TypeError("a child session ID and ID generator are required");
   }
-  for (const [key, { details, sequence }] of pending) {
-    if (confirmed.has(key) && confirmed.get(key) >= sequence) continue;
-    client.queueSentinelExit({
-      messageId: details.message_id,
-      occurrenceId: details.occurrence_id,
-      attemptId: details.attempt_id,
-      exitCode: details.exit_code,
-      ...(onConfirmed === undefined ? {} : { onConfirmed: (confirmed) => onConfirmed({
-        messageId: details.message_id,
-        occurrenceId: details.occurrence_id,
-        attemptId: details.attempt_id,
-        exitCode: details.exit_code,
-      }, confirmed) }),
-    });
-  }
+  return `subagent-${generateId()}`;
 }
 
 export function resolveAgentId(
@@ -112,206 +78,6 @@ export function queryTmuxWindowName(
 
 export function routeMailboxEnvelope(envelope, inject) {
   inject(envelope);
-}
-
-export function loadSentinelReceiverPolicies(path = SENTINEL_RECEIVER_POLICIES, readFile = readFileSync) {
-  let policies;
-  try {
-    policies = JSON.parse(readFile(path, "utf8"));
-  } catch {
-    throw new Error("Sentinel receiver policies are unavailable or malformed");
-  }
-  if (policies === null || typeof policies !== "object" || Array.isArray(policies)) {
-    throw new Error("Sentinel receiver policies are unavailable or malformed");
-  }
-  for (const policy of Object.values(policies)) {
-    if (policy === null || typeof policy !== "object" || Array.isArray(policy)
-      || typeof policy.receiver !== "string" || policy.receiver.length === 0
-      || !Array.isArray(policy.senders) || policy.senders.length === 0 || !policy.senders.every((sender) => typeof sender === "string" && sender.length > 0)
-      || !Array.isArray(policy.models) || policy.models.length === 0 || !policy.models.every((model) => typeof model === "string" && model.length > 0)
-      || policy.execution === null || typeof policy.execution !== "object" || Array.isArray(policy.execution)
-      || Object.keys(policy.execution).some((key) => !["supervisor", "auth_path", "tools"].includes(key))
-      || typeof policy.execution.supervisor !== "string" || !policy.senders.includes(policy.execution.supervisor)
-      || typeof policy.execution.auth_path !== "string" || policy.execution.auth_path.length === 0
-      || !Array.isArray(policy.execution.tools) || policy.execution.tools.length !== 0) {
-      throw new Error("Sentinel receiver policies are unavailable or malformed");
-    }
-  }
-  return policies;
-}
-
-export function sentinelExecutionProfile(message, receiverPolicies = {}) {
-  const policy = receiverPolicies[message?.sentinel?.receiver_policy];
-  const supervisor = message?.sentinel?.origin_sender;
-  if (!policy
-    || policy.receiver !== message.to
-    || typeof supervisor !== "string"
-    || !Array.isArray(policy.senders)
-    || !policy.senders.includes(supervisor)
-    || !Array.isArray(policy.models)
-    || !policy.models.includes(message.sentinel.model)
-    || policy.execution?.supervisor !== supervisor
-    || typeof policy.execution.auth_path !== "string" || policy.execution.auth_path.length === 0
-    || !Array.isArray(policy.execution.tools)
-    || policy.execution.tools.length !== 0) return undefined;
-  return policy.execution;
-}
-
-export async function prepareSentinelChildAuth({
-  authPath,
-  createDirectory = mkdtemp,
-  copy = copyFile,
-  createDirectoryPath = mkdir,
-  changeMode = chmod,
-  inspect = lstat,
-  removeDirectory = rm,
-  getuid = process.getuid,
-} = {}) {
-  if (typeof authPath !== "string" || authPath.length === 0 || typeof getuid !== "function") {
-    throw new TypeError("an explicit operator-provisioned child auth path is required");
-  }
-  let source;
-  try {
-    source = await inspect(authPath);
-  } catch {
-    throw new Error("child auth must be an owner-controlled regular 0600 file");
-  }
-  if (!source.isFile() || source.isSymbolicLink?.() || source.uid !== getuid() || (source.mode & 0o777) !== 0o600) {
-    throw new Error(source.uid !== getuid() ? "child auth must be owned by the current user" : "child auth must be an owner-controlled regular 0600 file");
-  }
-  const home = await createDirectory(join(tmpdir(), "mecha-sentinel-auth-home-"));
-  const authDirectory = join(home, ".pi", "agent");
-  const destination = join(authDirectory, "auth.json");
-  try {
-    await createDirectoryPath(authDirectory, { recursive: true, mode: 0o700 });
-    await copy(authPath, destination, 0);
-    await changeMode(destination, 0o600);
-  } catch (error) {
-    await removeDirectory(home, { recursive: true, force: true });
-    throw error;
-  }
-  return {
-    home,
-    authPath: destination,
-    // ponytail: credentials stay filesystem-only; do not return an auth environment entry.
-    environment: {},
-    cleanup: () => removeDirectory(home, { recursive: true, force: true }),
-  };
-}
-
-function isBodyFreeRunnerStatus(frame) {
-  if (frame === null || typeof frame !== "object" || Array.isArray(frame) || typeof frame.type !== "string") return false;
-  if (frame.type === "result_send_attempt") return Object.keys(frame).length === 1;
-  return frame.type === "completed"
-    && Object.keys(frame).every((key) => ["type", "state", "code", "event_counts", "stderr_bytes", "malformed_frames"].includes(key))
-    && (frame.state === "succeeded" || frame.state === "failed")
-    && typeof frame.code === "string"
-    && (frame.event_counts === undefined || (frame.event_counts !== null && typeof frame.event_counts === "object" && Object.values(frame.event_counts).every((value) => Number.isSafeInteger(value) && value >= 0)))
-    && (frame.stderr_bytes === undefined || (Number.isSafeInteger(frame.stderr_bytes) && frame.stderr_bytes >= 0))
-    && (frame.malformed_frames === undefined || (Number.isSafeInteger(frame.malformed_frames) && frame.malformed_frames >= 0));
-}
-
-export async function launchSentinelChild({
-  message,
-  supervisor = message?.sentinel?.origin_sender ?? message?.from,
-  routerUrl = process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL,
-  authPath,
-  spawnImpl = spawn,
-  markResultSendAttempt = async () => {},
-  timeoutMs = DEFAULT_SENTINEL_RPC_TIMEOUT_MS,
-  onDiagnostic = () => {},
-  onCleanupError = () => {},
-} = {}) {
-  if (typeof message?.body !== "string" || typeof message.sentinel?.model !== "string" || typeof supervisor !== "string"
-    || typeof authPath !== "string" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
-    throw new TypeError("a Sentinel message with a private body, model, approved supervisor, auth path, and timeout is required");
-  }
-  const runner = spawnImpl(process.execPath, [new URL("./sentinel-child.js", import.meta.url).pathname], {
-    env: { PATH: process.env.PATH ?? "" }, stdio: ["pipe", "pipe", "pipe"], shell: false,
-  });
-  let observedExit;
-  let finalized = false;
-  let resultSendStarted = false;
-  let authorizationPending = false;
-  let pendingRunnerCompletion;
-  let stdoutBuffer = "";
-  let stderrBytes = 0;
-  let resolveCompletion;
-  const completion = new Promise((resolve) => { resolveCompletion = resolve; });
-  const finish = (state, code) => {
-    if (finalized) return;
-    finalized = true;
-    try { onDiagnostic({ state, code, stderr_bytes: stderrBytes }); } catch { /* diagnostics cannot change terminal handling */ }
-    resolveCompletion({ state, code });
-  };
-  const fail = (code) => {
-    if (finalized) return;
-    finish("failed", code);
-    try { runner.kill?.("SIGTERM"); } catch { /* process state is terminally uncertain */ }
-  };
-  const finishRunnerCompletion = (status) => {
-    if (status.state === "succeeded" && status.code === "result_sent" && authorizationPending) {
-      pendingRunnerCompletion = status;
-      return;
-    }
-    finish(status.state, status.code);
-  };
-  const handleStatus = (status) => {
-    if (!isBodyFreeRunnerStatus(status)) return fail("runner_malformed_status");
-    if (status.type !== "result_send_attempt") return finishRunnerCompletion(status);
-    if (resultSendStarted) return fail("runner_duplicate_result_attempt");
-    resultSendStarted = true;
-    authorizationPending = true;
-    void (async () => {
-      let relayToken;
-      try { relayToken = await markResultSendAttempt(); } catch { fail("result_send_marker_failed"); return; }
-      if (finalized) return;
-      try {
-        runner.stdin.write(`${JSON.stringify({ type: "result_send_authorized", relay_token: relayToken })}\n`, (error) => {
-          if (error) return fail("runner_stdin_error");
-          try {
-            runner.stdin.end((endError) => {
-              if (endError) return fail("runner_stdin_error");
-              authorizationPending = false;
-              if (pendingRunnerCompletion !== undefined) finishRunnerCompletion(pendingRunnerCompletion);
-            });
-          } catch { fail("runner_stdin_error"); }
-        });
-      } catch { fail("runner_stdin_error"); }
-    })();
-  };
-  runner.stdin.once?.("error", () => fail("runner_stdin_error"));
-  runner.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk.toString("utf8");
-    while (!finalized) {
-      const newline = stdoutBuffer.indexOf("\n");
-      if (newline === -1) return;
-      const line = stdoutBuffer.slice(0, newline); stdoutBuffer = stdoutBuffer.slice(newline + 1);
-      try { handleStatus(JSON.parse(line)); } catch { fail("runner_malformed_status"); }
-    }
-  });
-  runner.stdout.once("error", () => fail("runner_stdout_error"));
-  runner.stdout.once("end", () => { if (!finalized) fail(stdoutBuffer.length === 0 ? "runner_stdout_eof" : "runner_malformed_status"); });
-  runner.stderr.on("data", (chunk) => { stderrBytes = Math.min(65_536, stderrBytes + Buffer.byteLength(chunk)); });
-  runner.once("error", () => fail("runner_error"));
-  runner.once("exit", (code) => { observedExit ??= Number.isSafeInteger(code) ? code : 1; if (!finalized) fail("runner_exit"); });
-  try {
-    runner.stdin.write(`${JSON.stringify({
-      type: "start", prompt: message.body, model: message.sentinel.model, router_url: routerUrl,
-      sender: message.to, recipient: supervisor, occurrence_id: message.id, auth_path: authPath, timeout_ms: timeoutMs,
-    })}\n`);
-  } catch {
-    fail("runner_stdin_write_failed");
-  }
-  return {
-    childIdentity: `child-${runner.pid}`,
-    completion,
-    onExit(callback) {
-      if (observedExit !== undefined) return queueMicrotask(() => callback(observedExit));
-      runner.once("exit", (code) => callback(Number.isSafeInteger(code) ? code : 1));
-      runner.once("error", () => callback(1));
-    },
-  };
 }
 
 function assertAgentId(agentId) {
@@ -406,8 +172,6 @@ export function createMailboxClient({
   let initialConnection;
   let resolveInitialConnection;
   let rejectInitialConnection;
-  const pendingSentinelStates = new Map();
-  const deferredSentinelExits = new Map();
 
   function report(state, error) {
     try {
@@ -417,71 +181,11 @@ export function createMailboxClient({
     }
   }
 
-  function send(fields, pendingSentinelState) {
+  function send(fields) {
     if (!socketOpen(socket)) throw new Error("Mailbox v2 socket is not connected");
     const frameId = generateId();
-    if (pendingSentinelState !== undefined) pendingSentinelStates.set(frameId, pendingSentinelState);
-    try {
-      socket.send(JSON.stringify({ version: "v1", frame_id: frameId, ...fields }));
-    } catch (error) {
-      pendingSentinelStates.delete(frameId);
-      throw error;
-    }
+    socket.send(JSON.stringify({ version: "v1", frame_id: frameId, ...fields }));
     return frameId;
-  }
-
-  function rejectPendingSentinelStates(error) {
-    for (const { reject } of pendingSentinelStates.values()) reject(error);
-    pendingSentinelStates.clear();
-  }
-
-  function queueSentinelExit({ occurrenceId, attemptId, exitCode, onConfirmed }) {
-    const key = `${occurrenceId}\u0000${attemptId}`;
-    const exit = { occurrenceId, attemptId, exitCode, onConfirmed };
-    deferredSentinelExits.set(key, exit);
-    if (leaseId === undefined) return;
-    void sendSentinelLifecycle("sentinel_exited", exit).then((state) => {
-      if (state.state === "exited" || state.state === "failed") {
-        deferredSentinelExits.delete(key);
-        onConfirmed?.(state);
-      }
-    }).catch(() => {
-      // Keep the outcome until the recipient reconnects with an active lease.
-    });
-  }
-
-  function flushSentinelExits() {
-    for (const exit of deferredSentinelExits.values()) queueSentinelExit(exit);
-  }
-
-  function sendSentinelLifecycle(type, {
-    delivery,
-    occurrenceId,
-    attemptId,
-    childIdentity,
-    exitCode,
-  } = {}) {
-    if (!["sentinel_claim", "sentinel_launching", "sentinel_spawn_failed", "sentinel_launched", "sentinel_exited"].includes(type)
-      || typeof occurrenceId !== "string"
-      || typeof attemptId !== "string") {
-      throw new TypeError("a valid Sentinel lifecycle frame is required");
-    }
-    if (type !== "sentinel_exited" && (!delivery || typeof delivery.messageId !== "string" || !Number.isSafeInteger(delivery.attemptNumber))) {
-      throw new TypeError("an active Sentinel delivery is required");
-    }
-    return new Promise((resolve, reject) => {
-      send({
-        type,
-        agent_id: agentId,
-        instance_id: instanceId,
-        lease_id: leaseId,
-        occurrence_id: occurrenceId,
-        attempt_id: attemptId,
-        ...(delivery === undefined ? {} : { message_id: delivery.messageId, attempt_number: delivery.attemptNumber }),
-        ...(childIdentity === undefined ? {} : { child_identity: childIdentity }),
-        ...(exitCode === undefined ? {} : { exit_code: exitCode }),
-      }, { resolve, reject });
-    });
   }
 
   function receipt(type, delivery, reason) {
@@ -549,7 +253,6 @@ export function createMailboxClient({
     renewTimer = undefined;
     socket = undefined;
     leaseId = undefined;
-    rejectPendingSentinelStates(error ?? new Error("Mailbox v2 socket disconnected"));
     if (stopped) return;
     report("disconnected", error);
     scheduleReconnect({ kickstartRouter });
@@ -585,25 +288,11 @@ export function createMailboxClient({
         resolveInitialConnection = undefined;
         rejectInitialConnection = undefined;
       }
-      flushSentinelExits();
       report("connected");
-      return;
-    }
-    if (frame.type === "sentinel_state") {
-      const pending = pendingSentinelStates.get(frame.request_id);
-      if (pending !== undefined) {
-        pendingSentinelStates.delete(frame.request_id);
-        pending.resolve(frame);
-      }
       return;
     }
     if (frame.type !== "message") {
       if (frame.type === "error" || frame.type === "lease_rejected") {
-        const pending = pendingSentinelStates.get(frame.request_id);
-        if (pending !== undefined) {
-          pendingSentinelStates.delete(frame.request_id);
-          pending.reject(new Error(`Mailbox v2 Sentinel lifecycle rejected (${frame.code ?? "unknown"})`));
-        }
         log(`MECHA_V2_FRAME ${frame.type} agent=${agentId} code=${frame.code ?? "unknown"}`);
       }
       return;
@@ -687,8 +376,6 @@ export function createMailboxClient({
       return initialConnection;
     },
     sendReceipt: receipt,
-    sendSentinelLifecycle,
-    queueSentinelExit,
     async sendReply({ to, body, subject = "Pi mailbox reply" }) {
       if (typeof to !== "string" || to.length === 0 || to.includes("@")) throw new Error("a mailbox recipient is required");
       if (typeof body !== "string" || body.length === 0) throw new Error("a reply body is required");
@@ -719,8 +406,6 @@ export function createMailboxClient({
       const currentSocket = socket;
       socket = undefined;
       leaseId = undefined;
-      rejectPendingSentinelStates(new Error("Mailbox v2 client closed"));
-      deferredSentinelExits.clear();
       if (rejectInitialConnection !== undefined) {
         rejectInitialConnection(new Error("Mailbox v2 client closed before connecting"));
         resolveInitialConnection = undefined;
@@ -737,14 +422,6 @@ function isMailboxSessionEntry(entry, messageId) {
     && entry.details?.message_id === messageId;
 }
 
-function isSentinelStatusEntry(entry, { messageId, occurrenceId, attemptId, state }) {
-  return entry?.type === "custom_message"
-    && entry.customType === "mecha-sentinel-status"
-    && entry.details?.message_id === messageId
-    && entry.details?.occurrence_id === occurrenceId
-    && entry.details?.attempt_id === attemptId
-    && entry.details?.state === state;
-}
 
 function readPersistedSessionEntries(sessionFile, readSessionFile) {
   const source = readSessionFile(sessionFile, "utf8");
@@ -782,6 +459,21 @@ function mailboxCustomMessage(message) {
   };
 }
 
+export async function spawnNativeSentinel(message, service = globalThis[PI_SUBAGENTS_SERVICE]) {
+  if (service === undefined || typeof service.spawn !== "function") {
+    throw new Error("Pi native subagent service is unavailable");
+  }
+  return service.spawn("general-purpose", message.body, {
+    description: "Scheduled Sentinel work",
+    model: message.sentinel.model,
+    inheritContext: true,
+  });
+}
+
+export function captureNativeSentinelSpawner(service = globalThis[PI_SUBAGENTS_SERVICE]) {
+  return (message) => spawnNativeSentinel(message, service);
+}
+
 export function createPiMailboxDeliveryCoordinator({
   pi,
   sessionContext,
@@ -791,8 +483,7 @@ export function createPiMailboxDeliveryCoordinator({
   clearTimeoutImpl = clearTimeout,
   checkpointRetryDelayMs = DEFAULT_SESSION_CHECKPOINT_RETRY_MS,
   readSessionFile = readFileSync,
-  launchChild = launchSentinelChild,
-  sentinelReceiverPolicies = {},
+  spawnSubagent = spawnNativeSentinel,
 } = {}) {
   if (pi === undefined || typeof pi.sendMessage !== "function") {
     throw new TypeError("pi.sendMessage is required");
@@ -811,10 +502,7 @@ export function createPiMailboxDeliveryCoordinator({
     throw new TypeError("checkpointRetryDelayMs must be a positive safe integer");
   }
   if (typeof readSessionFile !== "function") throw new TypeError("readSessionFile must be a function");
-  if (typeof launchChild !== "function") throw new TypeError("launchChild must be a function");
-  if (sentinelReceiverPolicies === null || typeof sentinelReceiverPolicies !== "object" || Array.isArray(sentinelReceiverPolicies)) {
-    throw new TypeError("Sentinel receiver policies must be an object");
-  }
+  if (typeof spawnSubagent !== "function") throw new TypeError("spawnSubagent must be a function");
 
   const sessionId = sessionContext.sessionManager.getSessionId();
   const pending = new Map();
@@ -890,136 +578,46 @@ export function createPiMailboxDeliveryCoordinator({
     }, checkpointRetryDelayMs);
   }
 
-  function recordSentinelStatus(message, state, lifecycle = {}) {
-    const status = {
-      messageId: message.id,
-      occurrenceId: lifecycle.occurrenceId,
-      attemptId: lifecycle.attemptId,
-      transitionSequence: lifecycle.transitionSequence ?? state.transition_sequence,
-      state: state.state,
-    };
+  function recordSentinelStatus(message, subagentId) {
+    // ponytail: this status deliberately contains no scheduled prompt or derived text.
     pi.sendMessage({
       customType: "mecha-sentinel-status",
-      content: `[Sentinel ${message.id}] ${state.state}${state.outcome === undefined ? "" : ` (${state.outcome})`}`,
-      display: true,
-      details: {
-        message_id: message.id,
-        state: state.state,
-        ...(state.outcome === undefined ? {} : { outcome: state.outcome }),
-        ...(lifecycle.occurrenceId === undefined ? {} : { occurrence_id: lifecycle.occurrenceId }),
-        ...(lifecycle.attemptId === undefined ? {} : { attempt_id: lifecycle.attemptId }),
-        ...(status.transitionSequence === undefined ? {} : { transition_sequence: status.transitionSequence }),
-        ...(lifecycle.childIdentity === undefined ? {} : { child_identity: lifecycle.childIdentity }),
-        ...(lifecycle.exitCode === undefined ? {} : { exit_code: lifecycle.exitCode }),
-      },
+      content: "Sentinel work handed off to a native subagent.",
+      display: false,
+      details: { message_id: message.id, subagent_id: subagentId, state: "handed_off" },
     }, { deliverAs: "followUp", triggerTurn: false });
-    if (typeof sessionContext.sessionManager.isPersisted !== "function") return;
-    if (!sessionContext.sessionManager.isPersisted()) throw new Error("Sentinel parent lifecycle status is not durable");
-    const sessionFile = sessionContext.sessionManager.getSessionFile?.();
-    if (typeof sessionFile !== "string" || !sessionContext.sessionManager.getBranch().some((entry) => isSentinelStatusEntry(entry, status))) {
-      throw new Error("Sentinel parent lifecycle status is not durable");
-    }
-    try {
-      if (!readPersistedSessionEntries(sessionFile, readSessionFile).some((entry) => isSentinelStatusEntry(entry, status))) {
-        throw new Error("Sentinel parent lifecycle status is not durable");
-      }
-    } catch (error) {
-      if (error?.message === "Sentinel parent lifecycle status is not durable") throw error;
-      throw new Error("Sentinel parent lifecycle status is not durable");
-    }
   }
 
   async function onSentinelEnvelope(message, delivery) {
-    const profile = sentinelExecutionProfile(message, sentinelReceiverPolicies);
-    if (profile === undefined) {
-      recordSentinelStatus(message, { state: "rejected_profile" });
-      return;
-    }
-    if (typeof client.sendSentinelLifecycle !== "function") throw new Error("Mailbox v2 client cannot report Sentinel lifecycle");
-    const occurrenceId = message.id;
-    const attemptId = String(delivery.attemptNumber);
-    const lifecycleIdentity = { occurrenceId, attemptId };
-    let state = await client.sendSentinelLifecycle("sentinel_claim", { delivery, occurrenceId, attemptId });
-    let transitionSequence = state.transition_sequence;
-    recordSentinelStatus(message, state, lifecycleIdentity);
-    if (state.state !== "claimed") return;
-    state = await client.sendSentinelLifecycle("sentinel_launching", { delivery, occurrenceId, attemptId });
-    transitionSequence = state.transition_sequence;
-    recordSentinelStatus(message, state, lifecycleIdentity);
-    if (state.state !== "launching") return;
-    let releaseResultSend;
-    let resultSendEnabled = false;
-    let relayToken;
-    const resultSendReady = new Promise((resolve) => { releaseResultSend = resolve; });
-    let child;
-    try {
-      child = await launchChild({
-        message,
-        supervisor: profile.supervisor,
-        authPath: profile.auth_path,
-        markResultSendAttempt: async () => {
-          await resultSendReady;
-          if (!resultSendEnabled || typeof relayToken !== "string") throw new Error("Sentinel launch was not durably confirmed");
-          recordSentinelStatus(message, { state: "result_send_attempted" }, { ...lifecycleIdentity, transitionSequence, childIdentity: child?.childIdentity });
-          return relayToken;
-        },
-        onCleanupError: () => recordSentinelStatus(message, { state: "cleanup_failed" }, lifecycleIdentity),
-      });
-    } catch {
-      await client.sendSentinelLifecycle("sentinel_spawn_failed", { delivery, occurrenceId, attemptId });
-      return;
-    }
-    recordSentinelStatus(message, { state: "spawned_pending" }, { ...lifecycleIdentity, childIdentity: child.childIdentity });
-    let exitCode;
-    let exitReported = false;
-    const reportExit = () => {
-      if (exitCode === undefined || exitReported) return;
-      exitReported = true;
-      recordSentinelStatus(message, { state: "exited_pending" }, { ...lifecycleIdentity, transitionSequence, exitCode });
-      if (typeof client.queueSentinelExit === "function") {
-        client.queueSentinelExit({
-          occurrenceId, attemptId, exitCode,
-          onConfirmed: (confirmed) => recordSentinelStatus(message, confirmed, { ...lifecycleIdentity, exitCode }),
-        });
-      } else {
-        void client.sendSentinelLifecycle("sentinel_exited", { occurrenceId, attemptId, exitCode });
+    const existing = sentinelInFlight.get(message.id);
+    if (existing !== undefined) return existing;
+    const handoff = (async () => {
+      let subagentId;
+      try {
+        subagentId = await spawnSubagent(message);
+      } catch {
+        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
+        return;
       }
-    };
-    let launchSettled = false;
-    child.onExit((code) => {
-      exitCode = code;
-      if (launchSettled) reportExit();
-    });
-    try {
-      state = await client.sendSentinelLifecycle("sentinel_launched", {
-        delivery,
-        occurrenceId,
-        attemptId,
-        childIdentity: child.childIdentity,
-      });
-      transitionSequence = state.transition_sequence;
-      relayToken = state.relay_token;
-      recordSentinelStatus(message, state, { ...lifecycleIdentity, childIdentity: child.childIdentity });
-      resultSendEnabled = typeof relayToken === "string";
-    } catch {
-      // The child exists but its launch acknowledgement is uncertain; preserve reconciliation data locally.
-      recordSentinelStatus(message, { state: "post_spawn_uncertain" }, { ...lifecycleIdentity, childIdentity: child.childIdentity });
-    } finally {
-      releaseResultSend();
-      launchSettled = true;
-      reportExit();
-    }
+      if (typeof subagentId !== "string" || subagentId.length === 0) {
+        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
+        return;
+      }
+      try { recordSentinelStatus(message, subagentId); } catch { /* a local status must not duplicate a handed-off child */ }
+      try {
+        receipt("injection_requested", delivery);
+        receipt("ack", delivery);
+      } catch {
+        // The native child already exists. The normal router delivery lifecycle decides any replay.
+      }
+    })();
+    sentinelInFlight.set(message.id, handoff);
+    return handoff;
   }
 
   function onEnvelope(message, delivery) {
     if (!active) return undefined;
-    if (message.sentinel !== undefined && message.sentinel.sentinel_child === undefined) {
-      const existing = sentinelInFlight.get(message.id);
-      if (existing !== undefined) return existing;
-      const lifecycle = onSentinelEnvelope(message, delivery).finally(() => sentinelInFlight.delete(message.id));
-      sentinelInFlight.set(message.id, lifecycle);
-      return lifecycle;
-    }
+    if (message.sentinel !== undefined) return onSentinelEnvelope(message, delivery);
     const currentContext = sessionContext;
     const state = sessionDeliveryState(currentContext, message.id);
     if (state === "durable") {
@@ -1080,13 +678,12 @@ export function createPiMailboxDeliveryCoordinator({
   return {
     onEnvelope,
     onMessageEnd,
-    recordSentinelExitConfirmed({ messageId, occurrenceId, attemptId, exitCode }, confirmed) {
-      recordSentinelStatus({ id: messageId }, confirmed, { occurrenceId, attemptId, exitCode });
-    },
+
     close() {
       active = false;
       for (const pendingDelivery of pending.values()) clearCheckpointTimer(pendingDelivery);
       pending.clear();
+      sentinelInFlight.clear();
       reportedPersistenceErrors.clear();
     },
   };
@@ -1095,13 +692,37 @@ export function createPiMailboxDeliveryCoordinator({
 export function createMechaMessagingExtension(pi, {
   resolveCurrentAgentId = resolveAgentId,
   createClient = createMailboxClient,
-  sentinelReceiverPolicies,
-  loadReceiverPolicies = loadSentinelReceiverPolicies,
 } = {}) {
   let client;
   let coordinator;
   let startupError;
   const children = childSessionIds();
+  const childReplyClients = new Map();
+
+  pi.registerTool({
+    name: "mecha_parent_message",
+    label: "Message parent",
+    description: "Child-only: send an ordinary Mailbox message to this native subagent's target parent.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["message"],
+      properties: { message: { type: "string", minLength: 1 } },
+    },
+    async execute(_toolCallId, { message }, _signal, _onUpdate, toolContext) {
+      const childClient = childReplyClients.get(toolContext.sessionManager.getSessionId());
+      const parentAgentId = resolveCurrentAgentId();
+      if (childClient === undefined || parentAgentId === undefined || typeof message !== "string" || message.length === 0) {
+        return { content: [{ type: "text", text: "Parent message is unavailable in this session." }], isError: true };
+      }
+      try {
+        const sent = await childClient.sendReply({ to: parentAgentId, body: message, subject: "Pi subagent message" });
+        return { content: [{ type: "text", text: "Parent message accepted." }], details: { message_id: sent.id } };
+      } catch {
+        return { content: [{ type: "text", text: "Parent message was not accepted." }], isError: true };
+      }
+    },
+  });
 
   pi.events.on("subagents:child:session-created", (event) => {
     const sessionId = childSessionId(event);
@@ -1115,10 +736,40 @@ export function createMechaMessagingExtension(pi, {
   pi.on("message_end", (event, context) => coordinator?.onMessageEnd(event, context));
 
   pi.on("session_start", (_event, context) => {
-    if (children.has(context.sessionManager.getSessionId())) return;
+    const sessionId = context.sessionManager.getSessionId();
+    if (children.has(sessionId)) {
+      try {
+        const parentAgentId = resolveCurrentAgentId();
+        if (parentAgentId === undefined) return;
+        childReplyClients.set(sessionId, createClient({
+          agentId: transientChildAgentId(sessionId),
+          onEnvelope: () => {},
+        }));
+      } catch {
+        // A child without ordinary Mailbox send capability can still finish natively.
+      }
+      return;
+    }
     try {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
+      pi.registerCommand("mecha-parent-message", {
+        description: "Child-only ordinary Mailbox message to its target parent: /mecha-parent-message <message>",
+        handler: async (argumentsText, commandContext) => {
+          try {
+            const childClient = childReplyClients.get(commandContext.sessionManager.getSessionId());
+            const parentAgentId = resolveCurrentAgentId();
+            const body = argumentsText.trim();
+            if (childClient === undefined || parentAgentId === undefined || body.length === 0) {
+              throw new Error("This command is available only to a child with a parent message");
+            }
+            const message = await childClient.sendReply({ to: parentAgentId, body, subject: "Pi subagent message" });
+            commandContext.ui.notify(`Mailbox v2 child message accepted (${message.id})`, "info");
+          } catch (error) {
+            commandContext.ui.notify(error.message, "error");
+          }
+        },
+      });
       pi.registerCommand("mecha-reply", {
         description: "Send a Mailbox v2 reply: /mecha-reply <recipient> <message>",
         handler: async (argumentsText, commandContext) => {
@@ -1166,23 +817,13 @@ export function createMechaMessagingExtension(pi, {
         log: () => {},
       });
       client = mailboxClient;
-      let localReceiverPolicies = sentinelReceiverPolicies;
-      if (localReceiverPolicies === undefined) {
-        try {
-          localReceiverPolicies = loadReceiverPolicies();
-        } catch (error) {
-          localReceiverPolicies = {};
-          context.ui.notify(`Mailbox v2 Sentinel policy unavailable: ${error.message}`, "error");
-        }
-      }
+      // Child sessions inherit extensions and can replace the package's global
+      // service symbol. Bind scheduled work to this resident parent service.
       coordinator = createPiMailboxDeliveryCoordinator({
         pi,
         sessionContext: context,
         client: mailboxClient,
-        sentinelReceiverPolicies: localReceiverPolicies,
-      });
-      recoverSentinelExits(context.sessionManager, mailboxClient, (exit, confirmed) => {
-        coordinator?.recordSentinelExitConfirmed(exit, confirmed);
+        spawnSubagent: captureNativeSentinelSpawner(),
       });
       void mailboxClient.connect().catch((error) => {
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${error.message}`, "error");
@@ -1194,7 +835,11 @@ export function createMechaMessagingExtension(pi, {
   });
 
   pi.on("session_shutdown", (_event, context) => {
-    if (children.has(context.sessionManager.getSessionId())) return;
+    const sessionId = context.sessionManager.getSessionId();
+    if (children.has(sessionId)) {
+      childReplyClients.delete(sessionId);
+      return;
+    }
     coordinator?.close();
     coordinator = undefined;
     client?.close();

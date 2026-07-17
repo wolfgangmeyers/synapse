@@ -1,69 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createEnvelope, validateClientFrame, validateEnvelope, validateSentinelAdmission, validateServerFrame } from "../harness/protocol.js";
+import { createEnvelope, validateClientFrame, validateEnvelope, validateServerFrame } from "../harness/protocol.js";
 
 const nanoid = /^[A-Za-z0-9]{21}$/;
 
-test("Sentinel descriptor is optional, closed, and requires policy and model", () => {
-  const base = createEnvelope({ from: "sender", to: "recipient", body: "opaque" });
-  assert.doesNotThrow(() => validateEnvelope({
-    ...base,
-    sentinel: { receiver_policy: "managed-receiver", model: "gpt-5.6-terra" },
-  }));
-  assert.throws(() => validateEnvelope({
-    ...base,
-    sentinel: { receiver_policy: "managed-receiver" },
-  }));
-  assert.throws(() => validateEnvelope({
-    ...base,
-    sentinel: { receiver_policy: "managed-receiver", model: "gpt-5.6-terra", prompt: "no" },
-  }));
-  assert.throws(() => validateEnvelope({
-    ...base,
-    sentinel: { receiver_policy: "managed-receiver", model: "gpt-5.6-terra", sentinel_child: { occurrence_id: "occurrence" } },
-  }));
+test("Sentinel descriptor accepts only caller-selected model metadata", () => {
+  const base = createEnvelope({ from: "unknown-sender", to: "different-target", body: "opaque" });
+  assert.doesNotThrow(() => validateEnvelope({ ...base, sentinel: { model: "gpt-5.6-terra" } }));
+  assert.throws(() => validateEnvelope({ ...base, sentinel: {} }));
+  assert.throws(() => validateEnvelope({ ...base, sentinel: { model: "gpt-5.6-terra", receiver_policy: "no" } }));
 });
 
-test("Sentinel admission binds policy to receiver, sender, and model", () => {
-  const envelope = createEnvelope({ from: "supervisor", to: "receiver", body: "opaque", sentinel: { receiver_policy: "managed", model: "gpt-5.6-terra" } });
-  const policies = { managed: { receiver: "receiver", senders: ["supervisor"], models: ["gpt-5.6-terra"], execution: { supervisor: "supervisor", auth_path: "operator-auth", tools: [] } } };
-  assert.doesNotThrow(() => validateSentinelAdmission(envelope, policies));
-  assert.throws(() => validateSentinelAdmission(envelope, {
-    managed: { ...policies.managed, execution: { supervisor: "supervisor", auth_path: "operator-auth", tools: ["sentinel_reply"] } },
-  }));
-  assert.throws(() => validateSentinelAdmission(envelope, {
-    managed: { ...policies.managed, execution: { supervisor: "supervisor", auth_path: "operator-auth", tools: ["other_tool"] } },
-  }));
-  assert.throws(() => validateSentinelAdmission({ ...envelope, to: "other-receiver" }, policies));
-  assert.throws(() => validateSentinelAdmission({ ...envelope, from: "other-sender" }, policies));
-  assert.throws(() => validateSentinelAdmission(envelope, { managed: { ...policies.managed, models: [] } }));
-  assert.throws(() => validateSentinelAdmission({
-    ...envelope,
-    sentinel: { ...envelope.sentinel, origin_sender: "forged" },
-  }, policies));
-});
-
-test("Sentinel claim frames are lease-bound and body-free", () => {
-  assert.doesNotThrow(() => validateClientFrame({
-    version: "v1", frame_id: "frame", type: "sentinel_claim", agent_id: "receiver",
-    instance_id: "instance", lease_id: "lease", message_id: "message", attempt_number: 1, occurrence_id: "occurrence", attempt_id: "attempt",
-  }));
+test("the shared protocol rejects retired Sentinel lifecycle frames", () => {
   assert.throws(() => validateClientFrame({
     version: "v1", frame_id: "frame", type: "sentinel_claim", agent_id: "receiver",
-    instance_id: "instance", lease_id: "lease", message_id: "message", attempt_number: 1, occurrence_id: "occurrence", attempt_id: "attempt", body: "opaque",
+    instance_id: "instance", lease_id: "lease", message_id: "message", attempt_number: 1,
   }));
-});
-
-test("Sentinel exit frames require a bounded observable exit code", () => {
-  const frame = {
-    version: "v1", frame_id: "frame", type: "sentinel_exited", agent_id: "receiver",
-    instance_id: "instance", lease_id: "lease", occurrence_id: "occurrence", attempt_id: "attempt", exit_code: 0,
-  };
-  assert.doesNotThrow(() => validateClientFrame(frame));
-  assert.throws(() => validateClientFrame({ ...frame, exit_code: 256 }));
-  const { exit_code, ...withoutExitCode } = frame;
-  assert.throws(() => validateClientFrame(withoutExitCode));
 });
 
 test("correlated delivery frames require a valid router-generated incarnation", () => {

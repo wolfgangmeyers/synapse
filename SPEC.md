@@ -103,13 +103,13 @@ parent notification path. The implementation must prove that a background child
 created through `getSubagentsService().spawn()` produces that notification in
 the target parent session.
 
-The public service currently documents spawning, observation, aborting, and
-steering, but not arbitrary child-to-parent progress messages. Before adding
-any progress-message behavior, implementation must establish a supported
-Pi-native parent-message seam. It must not invent a Mailbox child-result route,
-relay token, fixed recipient, child capability, or supervisor-specific path. If
-there is no supported native seam, implementation stops after delivering the
-normal native completion and reports that fact for a product decision.
+The package has no arbitrary child-to-parent progress-message API. A child may
+instead use its inherited ordinary Mailbox send capability to post an interim
+message to its own target parent, using a distinct transient child sender
+identity. That is an existing unauthenticated Mailbox delivery, not a Sentinel
+result channel: it has no Sentinel lifecycle frame, relay token, result
+endpoint, fixed supervisor, or custom child-result protocol. It does not
+replace or transform the native final completion notification.
 
 ## Transport shape
 
@@ -166,6 +166,10 @@ cwd, extensions, relay recipients, or Pi process flags.
 - [ ] The child final completion appears in the target parent through the
   native `subagent-notification` behavior. Sentinel neither sends nor
   transforms a router child-result message.
+- [ ] A child can separately send an interim message through its inherited
+  ordinary Mailbox capability to its target parent using a distinct transient
+  child sender identity; this remains an ordinary delivery, not a Sentinel
+  relay or result protocol.
 
 ### Removal proof
 
@@ -204,8 +208,7 @@ This specification is grounded in the locally installed Pi `0.80.10` docs and
   method. The current managed launcher does not load that package, so explicit
   dual-extension loading is a required implementation change.
 
-The unresolved fact is therefore narrow: whether the installed Pi runtime has a
-supported native API for arbitrary progress messages from a background child to
-its parent, beyond the documented final completion notification. This must be
-resolved with an isolated compatibility probe before implementation adds that
-behavior. There is no approved fallback relay protocol.
+The package does not expose a native arbitrary-progress API beyond final
+completion. Interim child messages use the already installed ordinary Mailbox
+capability with a transient child sender identity and target-parent destination;
+they do not introduce a Sentinel fallback relay protocol.
