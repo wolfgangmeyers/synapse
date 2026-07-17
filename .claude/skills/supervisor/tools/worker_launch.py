@@ -27,10 +27,9 @@ from _tmux import ensure_session, new_window, send_text, send_enter, window_exis
 
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.6-terra"
+PI_SUBAGENTS_EXTENSION = "npm:@gotgenes/pi-subagents"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
-PI_SUBAGENTS_EXTENSION_ENV = "MECHA_PI_SUBAGENTS_EXTENSION"
-PI_SUBAGENTS_EXTENSION_PATH = os.path.expanduser("~/.pi/agent/npm/node_modules/@gotgenes/pi-subagents/src/index.ts")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -72,21 +71,6 @@ def resolve_pi_mailbox_extension():
             f"{PI_MAILBOX_EXTENSION_ENV} must name a validated extension file. "
             f"Install the canonical Pi extension first: "
             f"python3 {os.path.join(os.path.dirname(__file__), 'install_pi_extension.py')}"
-        )
-    return extension_path
-
-
-def resolve_pi_subagents_extension():
-    """Return the explicit, validated Pi-native subagent extension entry point."""
-    extension_path = (
-        os.environ[PI_SUBAGENTS_EXTENSION_ENV]
-        if PI_SUBAGENTS_EXTENSION_ENV in os.environ
-        else PI_SUBAGENTS_EXTENSION_PATH
-    )
-    if not os.path.isfile(extension_path):
-        raise ValueError(
-            f"{PI_SUBAGENTS_EXTENSION_ENV} must name the installed Pi-native subagent extension. "
-            f"Install @gotgenes/pi-subagents before launching managed workers."
         )
     return extension_path
 
@@ -223,12 +207,10 @@ def main():
 
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
     pi_mailbox_extension = None
-    pi_subagents_extension = None
     pi_router_url = None
     if args.agent == "pi":
         try:
             pi_mailbox_extension = resolve_pi_mailbox_extension()
-            pi_subagents_extension = resolve_pi_subagents_extension()
             pi_router_url = resolve_pi_router_url()
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
@@ -263,11 +245,12 @@ def main():
             "--name",
             args.window,
         ]
-        # Load only the validated Mailbox and native-subagent extensions. Global
-        # discovery may point to a stale staging checkout or duplicate control-plane behavior.
+        # Load only the required explicit extensions. Global discovery may point
+        # to stale staging checkouts and duplicate control-plane client behavior.
         parts.extend([
-            "--no-extensions", "--extension", pi_mailbox_extension,
-            "--extension", pi_subagents_extension,
+            "--no-extensions",
+            "--extension", PI_SUBAGENTS_EXTENSION,
+            "--extension", pi_mailbox_extension,
         ])
         # Pi has no permission mode. --approve makes the trusted project resources
         # available without a startup prompt, matching the existing launcher default.
@@ -343,7 +326,6 @@ def main():
     else:
         router_export = (
             f"export {PI_ROUTER_URL_ENV}={shlex.quote(pi_router_url)} && "
-            f"export {PI_SUBAGENTS_EXTENSION_ENV}={shlex.quote(pi_subagents_extension)} && "
             if args.agent == "pi" else ""
         )
         full_cmd = (
