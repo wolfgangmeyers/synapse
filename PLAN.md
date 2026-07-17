@@ -109,7 +109,11 @@ launcher tests, and the target-extension installation/validation path.
 5. Persist only message/occurrence ID and native subagent ID/status necessary
    for observation. Do not persist prompt content, prompt-derived data, model
    output, or a manual result relay.
-6. Do not observe native lifecycle events merely to create a duplicate result.
+6. Let child sessions retain the ordinary Mailbox send capability with a
+   transient child sender identity and their target parent as the ordinary
+   delivery destination. This supports interim parent-visible child messages
+   without adding a Sentinel result route, frame, token, or fixed supervisor.
+7. Do not observe native lifecycle events merely to create a duplicate result.
    The installed package already appends its native record and sends its normal
    `subagent-notification` completion to the target parent.
 
@@ -160,6 +164,8 @@ any current docs that describe removed behavior.
 - absent/malformed native service and synchronous spawn error leave delivery
   unacknowledged for normal replay; replay after a successful handoff does not
   make a second child;
+- a child interim parent message is an ordinary Mailbox delivery from a
+  transient child identity, while native final completion remains separate;
 - ordinary messages/reminders are unchanged;
 - no protocol, router, or extension code retains policy/relay/RPC/capability
   strings or accepts retired Sentinel lifecycle frames/endpoints.
@@ -179,11 +185,11 @@ with the installed package enabled. The probe must prove from runtime evidence:
 5. An immediate dispatch, delayed dispatch, and two recurring occurrences each
    obey existing router scheduling/replay behavior.
 
-The probe must also answer this exact API question: can a native background child
-send an arbitrary progress message to its parent through a supported Pi API? The
-currently inspected public service has no such method. If the answer is no,
-record the evidence and stop; do not create a mailbox relay or an equivalent
-side channel.
+The probe must record that the package has no native arbitrary-progress API and
+then prove an interim child message through the inherited ordinary Mailbox send
+capability, from a transient child identity to its target parent. This remains
+separate from the native final completion and must not add a Sentinel relay,
+result endpoint, token, lifecycle frame, or equivalent side channel.
 
 ## Review gates
 
