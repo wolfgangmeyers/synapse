@@ -541,19 +541,14 @@ class MainActivity : ComponentActivity() {
         MaterialTheme(colorScheme = colors) {
             Surface(Modifier.fillMaxSize(), color = Ink) {
                 when {
-                    showRouterManager || activeRouter.isBlank() -> {
-                        BackHandler(enabled = activeRouter.isNotBlank()) { showRouterManager = false; routerError = "" }
-                        RouterManagement(
-                            activeRouter = activeRouter,
-                            routers = routerRevision.let { routers() },
-                            error = routerError,
-                            canReturn = activeRouter.isNotBlank(),
-                            onAdd = ::saveRouter,
-                            onSelect = ::switchRouter,
-                            onRemove = ::removeRouter,
-                            onBack = { showRouterManager = false; routerError = "" },
-                        )
-                    }
+                    showRouterManager || activeRouter.isBlank() -> RouterManagement(
+                        activeRouter = activeRouter,
+                        routers = routerRevision.let { routers() },
+                        error = routerError,
+                        onAdd = ::saveRouter,
+                        onSelect = ::switchRouter,
+                        onRemove = ::removeRouter,
+                    )
                     selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, ::selectPeer, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
                         BackHandler(onBack = ::returnHome)
@@ -577,12 +572,16 @@ private fun PeerHome(
     onManageRouters: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 18.dp)) {
+        TextButton(onManageRouters, Modifier.height(36.dp)) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+            Spacer(Modifier.width(4.dp))
+            Text("Routers")
+        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Mecha", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text("Your agent network", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
             }
-            TextButton(onManageRouters) { Text("Routers") }
             IconButton(onEditProfile, Modifier.size(48.dp)) {
                 Icon(Icons.Default.Edit, "Edit username", tint = Periwinkle)
             }
@@ -750,27 +749,14 @@ private fun RouterManagement(
     activeRouter: String,
     routers: List<RouterConfig>,
     error: String,
-    canReturn: Boolean,
     onAdd: (String) -> Boolean,
     onSelect: (String) -> Unit,
     onRemove: (String) -> Unit,
-    onBack: () -> Unit,
 ) {
     var endpoint by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 18.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            if (canReturn) {
-                TextButton(onBack, Modifier.height(48.dp)) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Back")
-                }
-            }
-            Column(Modifier.weight(1f)) {
-                Text("Routers", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Text("Each router keeps its own peers and chats.", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
-            }
-        }
+        Text("Routers", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("Each router keeps its own peers and chats.", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
         OutlinedTextField(
             value = endpoint,
             onValueChange = { endpoint = it },
@@ -796,13 +782,16 @@ private fun RouterManagement(
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(routers, key = { it.endpoint }) { router ->
-                    Card(colors = CardDefaults.cardColors(containerColor = if (router.endpoint == activeRouter) SurfaceRaised else SurfaceDark), shape = RoundedCornerShape(18.dp)) {
+                    Card(
+                        Modifier.fillMaxWidth().clickable { onSelect(router.endpoint) },
+                        colors = CardDefaults.cardColors(containerColor = if (router.endpoint == activeRouter) SurfaceRaised else SurfaceDark),
+                        shape = RoundedCornerShape(18.dp),
+                    ) {
                         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(router.display, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                                 if (router.endpoint == activeRouter) Text("Active", style = MaterialTheme.typography.bodySmall, color = Teal)
                             }
-                            if (router.endpoint != activeRouter) TextButton({ onSelect(router.endpoint) }) { Text("Use") }
                             TextButton({ onRemove(router.endpoint) }) { Text("Remove", color = Color(0xFFFFA4A0)) }
                         }
                     }
