@@ -77,10 +77,11 @@ import java.util.UUID
 import java.time.temporal.ChronoUnit
 import kotlin.concurrent.scheduleAtFixedRate
 
-private const val ROUTER_HTTP = "http://donuts:8765"
-private const val ROUTER_WS = "ws://donuts:8765/v1/agents"
+private const val DEFAULT_ROUTER_ENDPOINT = "donuts:8765"
+private const val DEFAULT_ROUTER_PORT = 8765
 private const val PREFS = "mecha"
 private val AGENT_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]*")
+private val ROUTER_ENDPOINT = Regex("^([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)(?::([0-9]{1,5}))?$")
 private val Ink = Color(0xFF0B0D14)
 private val SurfaceDark = Color(0xFF151925)
 private val SurfaceRaised = Color(0xFF202638)
@@ -110,12 +111,16 @@ class MainActivity : ComponentActivity() {
     private val reconnectHandler = Handler(Looper.getMainLooper())
 
     private var agentId by mutableStateOf("")
+    private var activeRouter by mutableStateOf(DEFAULT_ROUTER_ENDPOINT)
     private var connection by mutableStateOf("Connecting to your agents…")
     private var peers by mutableStateOf(emptyList<String>())
     private var selectedPeer by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<ChatMessage>())
     private var draft by mutableStateOf("")
     private var showProfileEditor by mutableStateOf(false)
+    private var showRouterManager by mutableStateOf(false)
+    private var routerRevision by mutableStateOf(0)
+    private var routerError by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -124,6 +129,7 @@ class MainActivity : ComponentActivity() {
             ?: UUID.randomUUID().toString().also { preferences.edit().putString("instance_id", it).apply() }
         agentId = preferences.getString("agent_id", null)
             ?: "android-${instanceId.take(8)}".also { preferences.edit().putString("agent_id", it).apply() }
+        activeRouter = persistedActiveRouter()
         peers = knownPeers().sorted()
         intent.getStringExtra("peer_id")?.takeIf { it.isNotBlank() }?.let(::selectPeer)
         setContent { MechaApp() }
@@ -143,12 +149,44 @@ class MainActivity : ComponentActivity() {
 
     private fun prefs() = getSharedPreferences(PREFS, MODE_PRIVATE)
 
-    private fun knownPeers(): Set<String> = prefs().getStringSet("known_peers", emptySet()) ?: emptySet()
+    private fun routerEndpoints(): Set<String> = prefs().getStringSet("router_endpoints", null)
+        ?.toSet()
+        ?.ifEmpty { setOf(DEFAULT_ROUTER_ENDPOINT) }
+        ?: setOf(DEFAULT_ROUTER_ENDPOINT)
+
+    private fun persistedActiveRouter(): String {
+        val routers = routerEndpoints()
+        return prefs().getString("active_router", null)?.takeIf { it in routers }
+            ?: DEFAULT_ROUTER_ENDPOINT.takeIf { it in routers }
+            ?: routers.sorted().first()
+    }
+
+    private fun routerHttp() = "http://$activeRouter"
+
+    private fun routerWs() = "ws://$activeRouter/v1/agents"
+
+    private fun routerHistoryKey(peer: String) = "history:$activeRouter:$peer"
+
+    private fun knownPeersKey() = "known_peers:$activeRouter"
+
+    private fun knownPeers(): Set<String> {
+        val scoped = prefs().getStringSet(knownPeersKey(), null)
+        if (scoped != null) return scoped.toSet()
+        return if (activeRouter == DEFAULT_ROUTER_ENDPOINT) {
+            prefs().getStringSet("known_peers", emptySet())?.toSet() ?: emptySet()
+        } else {
+            emptySet()
+        }
+    }
+
+    private fun persistKnownPeers(value: Set<String>): Boolean = prefs().edit()
+        .putStringSet(knownPeersKey(), value)
+        .commit()
 
     private fun connect() {
         val generation = ++connectionGeneration
         connection = "Connecting to your agents…"
-        socket = client.newWebSocket(Request.Builder().url(ROUTER_WS).build(), object : WebSocketListener() {
+        socket = client.newWebSocket(Request.Builder().url(routerWs()).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (generation != connectionGeneration) return
                 webSocket.send(
@@ -239,7 +277,7 @@ class MainActivity : ComponentActivity() {
 
     private fun discoverPeers(generation: Int) = Thread {
         try {
-            client.newCall(Request.Builder().url("$ROUTER_HTTP/v1/agents").build()).execute().use { response ->
+            client.newCall(Request.Builder().url("${routerHttp()}/v1/agents").build()).execute().use { response ->
                 if (!response.isSuccessful || generation != connectionGeneration) return@use
                 val agents = JSONObject(response.body?.string().orEmpty()).optJSONArray("agents") ?: return@use
                 val discovered = buildSet {
@@ -275,7 +313,9 @@ class MainActivity : ComponentActivity() {
 
     private fun historyFor(peer: String): List<ChatMessage> {
         if (peer.isBlank()) return emptyList()
-        val raw = prefs().getString("history:$peer", null) ?: return emptyList()
+        val raw = prefs().getString(routerHistoryKey(peer), null)
+            ?: if (activeRouter == DEFAULT_ROUTER_ENDPOINT) prefs().getString("history:$peer", null) else null
+            ?: return emptyList()
         return try {
             val array = JSONArray(raw)
             List(array.length()) { index ->
@@ -317,15 +357,13 @@ class MainActivity : ComponentActivity() {
                 .put("direction", message.direction.name)
                 .put("created_at", message.createdAt))
         }
-        return prefs().edit().putString("history:$peer", array.toString()).commit()
+        return prefs().edit().putString(routerHistoryKey(peer), array.toString()).commit()
     }
 
     private fun appendMessage(peer: String, message: ChatMessage): Boolean = synchronized(historyLock) {
         val existing = historyFor(peer)
         val updated = (existing + message).takeLast(200)
-        val saved = prefs().edit()
-            .putStringSet("known_peers", knownPeers() + peer)
-            .commit()
+        val saved = persistKnownPeers(knownPeers() + peer)
         if (saved && persistHistory(peer, updated) && selectedPeer == peer) messages = updated
         saved
     }
@@ -335,7 +373,7 @@ class MainActivity : ComponentActivity() {
         selectedPeer = peer
         messages = historyFor(peer)
         peers = (peers + peer).distinct().sorted()
-        prefs().edit().putStringSet("known_peers", knownPeers() + peer).apply()
+        persistKnownPeers(knownPeers() + peer)
     }
 
     private fun returnHome() {
@@ -361,7 +399,7 @@ class MainActivity : ComponentActivity() {
         Thread {
             try {
                 client.newCall(
-                    Request.Builder().url("$ROUTER_HTTP/v1/messages")
+                    Request.Builder().url("${routerHttp()}/v1/messages")
                         .post(body.toRequestBody("application/json".toMediaType()))
                         .build(),
                 ).execute().use { response ->
@@ -390,8 +428,71 @@ class MainActivity : ComponentActivity() {
         connect()
     }
 
+    private fun normalizeRouterEndpoint(candidate: String): String? {
+        val match = ROUTER_ENDPOINT.matchEntire(candidate.trim()) ?: return null
+        val host = match.groupValues[1].lowercase()
+        val port = match.groupValues[2].ifBlank { DEFAULT_ROUTER_PORT.toString() }.toIntOrNull() ?: return null
+        return "$host:$port".takeIf { port in 1..65535 }
+    }
+
+    private fun saveRouter(candidate: String): Boolean {
+        val endpoint = normalizeRouterEndpoint(candidate)
+        if (endpoint == null) {
+            routerError = "Enter a hostname with an optional port, for example donuts or donuts:8765"
+            return false
+        }
+        val updated = routerEndpoints() + endpoint
+        prefs().edit().putStringSet("router_endpoints", updated).putString("active_router", endpoint).commit()
+        activeRouter = endpoint
+        routerRevision++
+        peers = knownPeers().sorted()
+        returnHome()
+        routerError = ""
+        showRouterManager = false
+        cancelConnection()
+        connect()
+        return true
+    }
+
+    private fun switchRouter(endpoint: String) {
+        if (endpoint == activeRouter) {
+            showRouterManager = false
+            return
+        }
+        prefs().edit().putString("active_router", endpoint).commit()
+        activeRouter = endpoint
+        peers = knownPeers().sorted()
+        returnHome()
+        showRouterManager = false
+        cancelConnection()
+        connect()
+    }
+
+    private fun removeRouter(endpoint: String) {
+        val remaining = routerEndpoints() - endpoint
+        if (remaining.isEmpty()) {
+            routerError = "Keep at least one router configured"
+            return
+        }
+        val next = if (endpoint == activeRouter) {
+            DEFAULT_ROUTER_ENDPOINT.takeIf { it in remaining } ?: remaining.sorted().first()
+        } else {
+            activeRouter
+        }
+        prefs().edit().putStringSet("router_endpoints", remaining).putString("active_router", next).commit()
+        routerRevision++
+        routerError = ""
+        if (next != activeRouter) {
+            activeRouter = next
+            peers = knownPeers().sorted()
+            returnHome()
+            cancelConnection()
+            connect()
+        }
+    }
+
     private fun conversationId(peer: String): String {
-        val key = "conversation_id:$peer"
+        val key = "conversation_id:$activeRouter:$peer"
         return prefs().getString(key, null)
             ?: UUID.randomUUID().toString().also { prefs().edit().putString(key, it).commit() }
     }
@@ -430,12 +531,23 @@ class MainActivity : ComponentActivity() {
         MaterialTheme(colorScheme = colors) {
             Surface(Modifier.fillMaxSize(), color = Ink) {
                 if (selectedPeer.isBlank()) {
-                    PeerHome(connection, agentId, peers, ::selectPeer, { showProfileEditor = true })
+                    PeerHome(connection, agentId, activeRouter, peers, ::selectPeer, { showProfileEditor = true }, { showRouterManager = true })
                 } else {
                     BackHandler(onBack = ::returnHome)
                     Conversation(selectedPeer, messages, draft, { draft = it }, ::send, ::returnHome)
                 }
                 if (showProfileEditor) UsernameDialog(agentId, ::saveAgentId, { showProfileEditor = false })
+                if (showRouterManager) {
+                    RouterDialog(
+                        activeRouter = activeRouter,
+                        routers = routerRevision.let { routerEndpoints().sorted() },
+                        error = routerError,
+                        onAdd = ::saveRouter,
+                        onSelect = ::switchRouter,
+                        onRemove = ::removeRouter,
+                        onDismiss = { showRouterManager = false; routerError = "" },
+                    )
+                }
             }
         }
     }
@@ -445,9 +557,11 @@ class MainActivity : ComponentActivity() {
 private fun PeerHome(
     connection: String,
     agentId: String,
+    activeRouter: String,
     peers: List<String>,
     onPeer: (String) -> Unit,
     onEditProfile: () -> Unit,
+    onManageRouters: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 18.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -455,6 +569,7 @@ private fun PeerHome(
                 Text("Mecha", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text("Your agent network", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
             }
+            TextButton(onManageRouters) { Text("Routers") }
             IconButton(onEditProfile, Modifier.size(48.dp)) {
                 Icon(Icons.Default.Edit, "Edit username", tint = Periwinkle)
             }
@@ -469,7 +584,7 @@ private fun PeerHome(
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(connection, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    Text("Signed in as $agentId", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                    Text("$agentId · $activeRouter", style = MaterialTheme.typography.bodySmall, color = TextMuted)
                 }
             }
         }
@@ -611,6 +726,51 @@ private fun UsernameDialog(current: String, onSave: (String) -> Unit, onDismiss:
         },
         confirmButton = { TextButton({ onSave(value) }) { Text("Save") } },
         dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun RouterDialog(
+    activeRouter: String,
+    routers: List<String>,
+    error: String,
+    onAdd: (String) -> Boolean,
+    onSelect: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var endpoint by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Routers") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Choose where Mecha connects. Each router keeps its own peer list and chats.", color = TextMuted)
+                routers.forEach { router ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(router, fontWeight = if (router == activeRouter) FontWeight.Bold else FontWeight.Normal)
+                            if (router == activeRouter) Text("Active", style = MaterialTheme.typography.bodySmall, color = Teal)
+                        }
+                        if (router != activeRouter) TextButton({ onSelect(router) }) { Text("Use") }
+                        if (routers.size > 1) TextButton({ onRemove(router) }) { Text("Remove") }
+                    }
+                }
+                HorizontalDivider(color = SurfaceRaised, modifier = Modifier.padding(vertical = 4.dp))
+                OutlinedTextField(
+                    value = endpoint,
+                    onValueChange = { endpoint = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Hostname or hostname:port") },
+                    placeholder = { Text("donuts or donuts:8765") },
+                    isError = error.isNotBlank(),
+                )
+                if (error.isNotBlank()) Text(error, style = MaterialTheme.typography.bodySmall, color = Color(0xFFFF8A80))
+                TextButton({ if (onAdd(endpoint)) endpoint = "" }, enabled = endpoint.isNotBlank()) { Text("Add and use router") }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("Done") } },
     )
 }
 
