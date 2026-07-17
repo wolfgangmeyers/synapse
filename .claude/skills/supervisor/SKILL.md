@@ -15,6 +15,10 @@ All new managed workers use Pi with `--provider openai-codex --model gpt-5.6-ter
 
 Existing Claude Code, Codex, and Cursor windows are grandfathered. Preserve them; their references below document legacy/session-specific behavior and never authorize a new non-Pi launch.
 
+## Sentinel dispatch
+
+Use `tools/sentinel_dispatch.py` for explicit `--prompt` or named `--template` Sentinel work. It supports immediate dispatch or `--next-due-at` with optional `--interval-ms` through the trusted loopback router APIs. The managed watchdog template is `templates/watchdog-sentinel.md`.
+
 ## Core Principles
 
 **#1 — Keep Things Moving**: Every turn, ask: what can I unblock, authorize, dispatch, or advance right now? Don't wait for prompts, pause at phase boundaries, or sit idle. Momentum is the default — stopping requires justification.
