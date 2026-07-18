@@ -6,8 +6,13 @@ import org.json.JSONObject
 import java.time.Instant
 import java.util.UUID
 
+internal const val MAX_CONVERSATION_MESSAGES = 25
+
+internal fun retainedHistory(messages: List<ChatMessage>): List<ChatMessage> =
+    messages.takeLast(MAX_CONVERSATION_MESSAGES)
+
 internal fun boundedHistory(existing: List<ChatMessage>, message: ChatMessage): List<ChatMessage> =
-    (existing + message).takeLast(200)
+    retainedHistory(existing + message)
 
 internal object ConversationStore {
     private const val preferencesName = "mecha"
@@ -32,7 +37,7 @@ internal object ConversationStore {
         val raw = preferences(context).getString("history:$router:$peer", null) ?: return emptyList()
         return try {
             val array = JSONArray(raw)
-            List(array.length()) { index ->
+            val decoded = List(array.length()) { index ->
                 val value = array.getJSONObject(index)
                 ChatMessage(
                     id = value.optString("id", UUID.randomUUID().toString()),
@@ -42,8 +47,11 @@ internal object ConversationStore {
                     createdAt = value.optString("created_at", Instant.EPOCH.toString()),
                 )
             }
+            val retained = retainedHistory(decoded)
+            if (retained.size != decoded.size) preferences(context).edit().putString("history:$router:$peer", encode(retained)).commit()
+            retained
         } catch (_: Exception) {
-            val migrated = legacyHistory(context, peer, raw)
+            val migrated = retainedHistory(legacyHistory(context, peer, raw))
             preferences(context).edit().putString("history:$router:$peer", encode(migrated)).commit()
             migrated
         }
