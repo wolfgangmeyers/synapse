@@ -74,6 +74,48 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         )
         self.assertIn("--no-extensions", command)
 
+    def test_main_uses_absolute_subagents_extension_override_before_mailbox(self):
+        mailbox_extension = self._pi_mailbox_extension()
+        subagents_extension = self.tmp_path / "pi-subagents.js"
+        subagents_extension.write_text("export default () => {};\n", encoding="utf-8")
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(mailbox_extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+            worker_launch.PI_SUBAGENTS_EXTENSION_ENV: str(subagents_extension),
+        }, clear=True):
+            commands, _ = self._run_main("pi-worker", agent="pi")
+
+        command = shlex.split(commands[0])
+        extensions = [command[index + 1] for index, value in enumerate(command) if value == "--extension"]
+        self.assertEqual(extensions, [str(subagents_extension), str(mailbox_extension)])
+
+    def test_main_rejects_invalid_subagents_extension_override_before_launch(self):
+        mailbox_extension = self._pi_mailbox_extension()
+        directory = self.tmp_path / "pi-subagents-directory"
+        directory.mkdir()
+        cases = {
+            "empty": "",
+            "relative": "pi-subagents.js",
+            "missing": str(self.tmp_path / "missing.js"),
+            "directory": str(directory),
+        }
+        for name, override in cases.items():
+            argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name]
+            with self.subTest(name=name), patch.dict(os.environ, {
+                worker_launch.PI_MAILBOX_EXTENSION_ENV: str(mailbox_extension),
+                worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+                worker_launch.PI_SUBAGENTS_EXTENSION_ENV: override,
+            }, clear=True), \
+                 patch.object(worker_launch.sys, "argv", argv), \
+                 patch.object(worker_launch, "window_exists") as window_exists, \
+                 contextlib.redirect_stderr(stderr := io.StringIO()), \
+                 self.assertRaises(SystemExit) as raised:
+                worker_launch.main()
+
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn(worker_launch.PI_SUBAGENTS_EXTENSION_ENV, stderr.getvalue())
+            window_exists.assert_not_called()
+
     def test_main_maps_resume_to_pi_session(self):
         extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
