@@ -96,9 +96,9 @@ private val Teal = Color(0xFF78E0CD)
 private val TextPrimary = Color(0xFFF2F4FF)
 private val TextMuted = Color(0xFFB5BCD0)
 
-private enum class Direction { INCOMING, OUTGOING }
+internal enum class Direction { INCOMING, OUTGOING }
 
-private data class ChatMessage(
+internal data class ChatMessage(
     val id: String,
     val sender: String,
     val body: String,
@@ -115,13 +115,15 @@ private data class RouterConfig(
 
 class MainActivity : ComponentActivity() {
     private val client = OkHttpClient()
-    private val historyLock = Any()
-    private lateinit var instanceId: String
-    private var socket: WebSocket? = null
-    private var leaseTimer: Timer? = null
-    private var leaseId = ""
-    private var connectionGeneration = 0
-    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private val stateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.getStringExtra(MailboxConnectionService.EXTRA_ROUTER) != activeRouter) return
+            intent.getStringExtra(MailboxConnectionService.EXTRA_CONNECTION)?.let { connection = it }
+            peers = knownPeers().sorted()
+            intent.getStringExtra(MailboxConnectionService.EXTRA_PEER)
+                ?.let { refreshVisibleConversation(it) }
+        }
+    }
 
     private var agentId by mutableStateOf("")
     private var activeRouter by mutableStateOf("")
@@ -138,26 +140,36 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val preferences = prefs()
-        instanceId = preferences.getString("instance_id", null)
-            ?: UUID.randomUUID().toString().also { preferences.edit().putString("instance_id", it).apply() }
         agentId = preferences.getString("agent_id", null)
-            ?: "android-${instanceId.take(8)}".also { preferences.edit().putString("agent_id", it).apply() }
+            ?: "android-${UUID.randomUUID()}".also { preferences.edit().putString("agent_id", it).apply() }
         activeRouter = persistedActiveRouter().orEmpty()
         peers = knownPeers().sorted()
-        intent.getStringExtra("peer_id")?.takeIf { it.isNotBlank() && activeRouter.isNotBlank() }?.let(::selectPeer)
+        openConversation(intent)
         setContent { MechaApp() }
+        val stateFilter = android.content.IntentFilter(MailboxConnectionService.ACTION_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(stateReceiver, stateFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(stateReceiver, stateFilter)
+        }
         ensureNotificationsEnabled()
-        if (activeRouter.isNotBlank()) connect()
+        if (activeRouter.isNotBlank()) MailboxConnectionService.connect(this, activeRouter)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.getStringExtra("peer_id")?.takeIf { it.isNotBlank() && activeRouter.isNotBlank() }?.let(::selectPeer)
+        openConversation(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        peers = knownPeers().sorted()
+        if (selectedPeer.isNotBlank()) messages = historyFor(selectedPeer)
     }
 
     override fun onDestroy() {
-        cancelConnection()
+        unregisterReceiver(stateReceiver)
         super.onDestroy()
     }
 
@@ -196,199 +208,21 @@ class MainActivity : ComponentActivity() {
         .putStringSet(knownPeersKey(), value)
         .commit()
 
-    private fun connect() {
-        if (activeRouter.isBlank()) {
-            connection = "Add a router to connect"
-            return
-        }
-        val generation = ++connectionGeneration
-        connection = "Connecting to your agents…"
-        socket = client.newWebSocket(Request.Builder().url(routerWs()).build(), object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (generation != connectionGeneration) return
-                webSocket.send(
-                    JSONObject()
-                        .put("version", "v1")
-                        .put("frame_id", UUID.randomUUID().toString())
-                        .put("type", "register")
-                        .put("agent_id", agentId)
-                        .put("instance_id", instanceId)
-                        .toString(),
-                )
-            }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                if (generation != connectionGeneration) return
-                val frame = try {
-                    JSONObject(text)
-                } catch (_: Exception) {
-                    connection = "Router sent an invalid response"
-                    return
-                }
-                when (frame.optString("type")) {
-                    "registered" -> {
-                        leaseId = frame.optString("lease_id")
-                        if (leaseId.isBlank()) {
-                            connection = "Router rejected this username"
-                            return
-                        }
-                        connection = "Connected as $agentId"
-                        startLeaseRenewal(webSocket, generation)
-                        discoverPeers(generation)
-                    }
-                    "lease_rejected" -> connection = "Username is already connected elsewhere"
-                    "error" -> connection = "Router error: ${frame.optString("code", "unknown")}"
-                    "message" -> receiveMessage(webSocket, frame)
-                }
-            }
-
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                if (generation != connectionGeneration) return
-                connection = "Router connection closed; retrying…"
-                scheduleReconnect(generation)
-            }
-
-            override fun onFailure(webSocket: WebSocket, throwable: Throwable, response: Response?) {
-                if (generation != connectionGeneration) return
-                connection = "Router unavailable; retrying…"
-                scheduleReconnect(generation)
-            }
-
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) = Unit
-        })
-    }
-
-    private fun scheduleReconnect(generation: Int) {
-        reconnectHandler.postDelayed({
-            if (generation == connectionGeneration) connect()
-        }, 1_000)
-    }
-
-    private fun cancelConnection() {
-        connectionGeneration++
-        leaseTimer?.cancel()
-        leaseTimer = null
-        socket?.close(1000, "reconnecting")
-        socket = null
-        leaseId = ""
-    }
-
-    private fun startLeaseRenewal(webSocket: WebSocket, generation: Int) {
-        leaseTimer?.cancel()
-        leaseTimer = Timer().apply {
-            scheduleAtFixedRate(20_000, 20_000) {
-                if (generation != connectionGeneration || leaseId.isBlank()) return@scheduleAtFixedRate
-                webSocket.send(
-                    JSONObject()
-                        .put("version", "v1")
-                        .put("frame_id", UUID.randomUUID().toString())
-                        .put("type", "lease_renew")
-                        .put("agent_id", agentId)
-                        .put("instance_id", instanceId)
-                        .put("lease_id", leaseId)
-                        .toString(),
-                )
-            }
-            scheduleAtFixedRate(60_000, 60_000) {
-                if (generation != connectionGeneration || leaseId.isBlank()) return@scheduleAtFixedRate
-                discoverPeers(generation)
-            }
-        }
-    }
-
     private fun refreshPeers() {
-        if (leaseId.isNotBlank()) discoverPeers(connectionGeneration)
+        if (activeRouter.isNotBlank()) MailboxConnectionService.refresh(this)
     }
 
-    private fun discoverPeers(generation: Int) = Thread {
-        try {
-            client.newCall(Request.Builder().url("${routerHttp()}/v1/agents").build()).execute().use { response ->
-                if (!response.isSuccessful || generation != connectionGeneration) return@use
-                val agents = JSONObject(response.body?.string().orEmpty()).optJSONArray("agents") ?: return@use
-                val discovered = buildSet {
-                    for (index in 0 until agents.length()) {
-                        agents.optJSONObject(index)?.optString("agent_id")?.takeIf { it.isNotBlank() && it != agentId }?.let(::add)
-                    }
-                    addAll(knownPeers().filter { it != agentId })
-                }
-                peers = discovered.sorted()
-            }
-        } catch (_: Exception) {
-            // The active connection remains usable when discovery is unavailable.
-        }
-    }.start()
+    private fun historyFor(peer: String): List<ChatMessage> = ConversationStore.history(this, activeRouter, peer)
 
-    private fun receiveMessage(webSocket: WebSocket, frame: JSONObject) {
-        val message = frame.optJSONObject("message") ?: return
-        val sender = message.optString("from")
-        val body = message.optString("body")
-        val id = message.optString("id", UUID.randomUUID().toString())
-        if (sender.isBlank() || !appendMessage(sender, ChatMessage(id, sender, body, Direction.INCOMING, Instant.now().toString()))) return
-        postInboundNotification(sender, body)
-        val delivery = JSONObject()
-            .put("version", "v1")
-            .put("agent_id", agentId)
-            .put("instance_id", instanceId)
-            .put("lease_id", leaseId)
-            .put("message_id", id)
-            .put("attempt_number", frame.optInt("attempt_number", 1))
-        webSocket.send(delivery.put("frame_id", UUID.randomUUID().toString()).put("type", "injection_requested").toString())
-        webSocket.send(delivery.put("frame_id", UUID.randomUUID().toString()).put("type", "ack").toString())
+    private fun appendMessage(peer: String, message: ChatMessage): Boolean {
+        val saved = ConversationStore.append(this, activeRouter, peer, message)
+        if (saved && selectedPeer == peer) messages = historyFor(peer)
+        return saved
     }
 
-    private fun historyFor(peer: String): List<ChatMessage> {
-        if (peer.isBlank()) return emptyList()
-        val raw = prefs().getString(routerHistoryKey(peer), null) ?: return emptyList()
-        return try {
-            val array = JSONArray(raw)
-            List(array.length()) { index ->
-                val value = array.getJSONObject(index)
-                ChatMessage(
-                    id = value.optString("id", UUID.randomUUID().toString()),
-                    sender = value.optString("sender", peer),
-                    body = value.optString("body"),
-                    direction = if (value.optString("direction") == Direction.OUTGOING.name) Direction.OUTGOING else Direction.INCOMING,
-                    createdAt = value.optString("created_at", Instant.EPOCH.toString()),
-                )
-            }
-        } catch (_: Exception) {
-            migrateLegacyHistory(peer, raw)
-        }
-    }
-
-    private fun migrateLegacyHistory(peer: String, raw: String): List<ChatMessage> {
-        if (raw.isBlank() || raw == "No messages yet") return emptyList()
-        return raw.lines().filter { it.isNotBlank() }.map { line ->
-            val outgoing = line.startsWith("You · ")
-            ChatMessage(
-                id = UUID.randomUUID().toString(),
-                sender = if (outgoing) agentId else peer,
-                body = line.substringAfter(" · ", line),
-                direction = if (outgoing) Direction.OUTGOING else Direction.INCOMING,
-                createdAt = Instant.EPOCH.toString(),
-            )
-        }.also { persistHistory(peer, it) }
-    }
-
-    private fun persistHistory(peer: String, value: List<ChatMessage>): Boolean {
-        val array = JSONArray()
-        value.takeLast(200).forEach { message ->
-            array.put(JSONObject()
-                .put("id", message.id)
-                .put("sender", message.sender)
-                .put("body", message.body)
-                .put("direction", message.direction.name)
-                .put("created_at", message.createdAt))
-        }
-        return prefs().edit().putString(routerHistoryKey(peer), array.toString()).commit()
-    }
-
-    private fun appendMessage(peer: String, message: ChatMessage): Boolean = synchronized(historyLock) {
-        val existing = historyFor(peer)
-        val updated = (existing + message).takeLast(200)
-        val saved = persistKnownPeers(knownPeers() + peer)
-        if (saved && persistHistory(peer, updated) && selectedPeer == peer) messages = updated
-        saved
+    private fun refreshVisibleConversation(peer: String) {
+        if (peer != selectedPeer) return
+        runOnUiThread { if (peer == selectedPeer) messages = historyFor(peer) }
     }
 
     private fun selectPeer(peer: String) {
@@ -397,6 +231,18 @@ class MainActivity : ComponentActivity() {
         messages = historyFor(peer)
         peers = (peers + peer).distinct().sorted()
         persistKnownPeers(knownPeers() + peer)
+    }
+
+    private fun openConversation(intent: Intent) {
+        val peer = intent.getStringExtra("peer_id")?.takeIf { it.isNotBlank() } ?: return
+        val sourceRouter = intent.getStringExtra(MailboxConnectionService.EXTRA_ROUTER)
+        if (sourceRouter != null && routers().any { it.endpoint == sourceRouter } && sourceRouter != activeRouter) {
+            prefs().edit().putString("active_router", sourceRouter).commit()
+            activeRouter = sourceRouter
+            peers = knownPeers().sorted()
+            MailboxConnectionService.connect(this, sourceRouter)
+        }
+        if (activeRouter.isNotBlank()) selectPeer(peer)
     }
 
     private fun returnHome() {
@@ -408,9 +254,11 @@ class MainActivity : ComponentActivity() {
     private fun send() {
         val recipient = selectedPeer
         val text = draft
-        if (recipient.isBlank() || text.isBlank()) return
+        val selectedRouter = activeRouter
+        if (recipient.isBlank() || text.isBlank() || selectedRouter.isBlank()) return
         val message = ChatMessage(UUID.randomUUID().toString(), agentId, text, Direction.OUTGOING, Instant.now().truncatedTo(ChronoUnit.MILLIS).toString())
-        if (!appendMessage(recipient, message)) return
+        if (!ConversationStore.append(this, selectedRouter, recipient, message)) return
+        messages = historyFor(recipient)
         draft = ""
         val body = JSONObject()
             .put("id", message.id)
@@ -422,11 +270,14 @@ class MainActivity : ComponentActivity() {
         Thread {
             try {
                 client.newCall(
-                    Request.Builder().url("${routerHttp()}/v1/messages")
+                    Request.Builder().url("http://$selectedRouter/v1/messages")
                         .post(body.toRequestBody("application/json".toMediaType()))
                         .build(),
                 ).execute().use { response ->
-                    if (!response.isSuccessful) runOnUiThread { connection = "Message not sent (${response.code})" }
+                    runOnUiThread {
+                        if (!response.isSuccessful) connection = "Message not sent (${response.code})"
+                        else if (!connection.startsWith("Connected as")) connection = "Reply queued on $selectedRouter; inbound reconnecting"
+                    }
                 }
             } catch (_: Exception) {
                 runOnUiThread { connection = "Message saved locally; router unavailable" }
@@ -447,8 +298,7 @@ class MainActivity : ComponentActivity() {
         prefs().edit().putString("agent_id", trimmed).commit()
         agentId = trimmed
         showProfileEditor = false
-        cancelConnection()
-        connect()
+        if (activeRouter.isNotBlank()) MailboxConnectionService.connect(this, activeRouter)
     }
 
     private fun normalizeRouterEndpoint(candidate: String): String? {
@@ -474,8 +324,7 @@ class MainActivity : ComponentActivity() {
         returnHome()
         routerError = ""
         showRouterManager = false
-        cancelConnection()
-        connect()
+        MailboxConnectionService.connect(this, activeRouter)
         return true
     }
 
@@ -489,8 +338,7 @@ class MainActivity : ComponentActivity() {
         peers = knownPeers().sorted()
         returnHome()
         showRouterManager = false
-        cancelConnection()
-        connect()
+        MailboxConnectionService.connect(this, activeRouter)
     }
 
     private fun removeRouter(endpoint: String) {
@@ -509,18 +357,16 @@ class MainActivity : ComponentActivity() {
             activeRouter = next
             peers = knownPeers().sorted()
             returnHome()
-            cancelConnection()
-            if (next.isNotBlank()) connect() else connection = "Add a router to connect"
+            if (next.isBlank()) {
+                MailboxConnectionService.stop(this)
+                connection = "Add a router to connect"
+                return
+            }
         }
+        if (activeRouter.isNotBlank()) MailboxConnectionService.connect(this, activeRouter)
     }
 
     private fun knownPeersKeyFor(router: String) = "known_peers:$router"
-
-    private fun conversationId(peer: String): String {
-        val key = "conversation_id:$activeRouter:$peer"
-        return prefs().getString(key, null)
-            ?: UUID.randomUUID().toString().also { prefs().edit().putString(key, it).commit() }
-    }
 
     private fun ensureNotificationsEnabled() {
         createMessageNotificationChannel()
@@ -536,28 +382,6 @@ class MainActivity : ComponentActivity() {
         manager.createNotificationChannel(
             NotificationChannel(MESSAGE_NOTIFICATION_CHANNEL, "Messages", NotificationManager.IMPORTANCE_DEFAULT),
         )
-    }
-
-    private fun postInboundNotification(from: String, body: String) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) return
-        val conversationId = conversationId(from)
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        createMessageNotificationChannel()
-        val intent = Intent(this, MainActivity::class.java)
-            .setAction("mecha.conversation.$conversationId")
-            .setData(android.net.Uri.parse("mecha://conversation/$conversationId"))
-            .putExtra("peer_id", from)
-        val pending = PendingIntent.getActivity(this, conversationId.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification = android.app.Notification.Builder(this, MESSAGE_NOTIFICATION_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentTitle(humanName(from))
-            .setContentText(body)
-            .setContentIntent(pending)
-            .setAutoCancel(true)
-            .build()
-        manager.notify(conversationId, 1, notification)
     }
 
     @Composable
@@ -853,7 +677,7 @@ private fun StatusDot(connected: Boolean) {
     Box(Modifier.size(10.dp).clip(CircleShape).background(if (connected) Teal else Color(0xFFFF8A80)))
 }
 
-private fun humanName(id: String): String = id.split(Regex("[._-]+"))
+internal fun humanName(id: String): String = id.split(Regex("[._-]+"))
     .filter { it.isNotBlank() }
     .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
     .ifBlank { id }

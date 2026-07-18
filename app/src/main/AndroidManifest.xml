@@ -1,7 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <application android:allowBackup="false" android:usesCleartextTraffic="true" android:label="Mecha" android:icon="@drawable/mecha_icon" android:roundIcon="@drawable/mecha_icon" android:theme="@style/Theme.Mecha">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <application android:name=".MechaApplication" android:allowBackup="false" android:usesCleartextTraffic="true" android:label="Mecha" android:icon="@drawable/mecha_icon" android:roundIcon="@drawable/mecha_icon" android:theme="@style/Theme.Mecha">
+        <service android:name=".MailboxConnectionService" android:exported="false" android:foregroundServiceType="remoteMessaging" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

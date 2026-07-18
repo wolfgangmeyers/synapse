@@ -18,6 +18,22 @@ The first release target is a complete emulator flow against the existing router
 
 ## 2. Product decisions
 
+### 2.1 Approved multi-router connection policy — superseding prior singular-router scope
+
+This section replaces conflicting fixed-endpoint, one-router, one-socket, one-lease, one-recovery, one-storage-namespace, and singular-status/test assumptions in Sections 2, 7 through 11, 13.3, 15, 16, 18, and 19. It is the authoritative multi-router contract.
+
+The installation persists a reviewed set of approved canonical router descriptors and one outbound-default descriptor key. A descriptor contains a stable canonical router key, its display label, and the approved base endpoint. The default controls only newly composed outbound work and the initially selected UI router. Selecting a default must never disconnect, invalidate, pause, or reroute another configured router.
+
+Debug descriptors remain restricted to the existing loopback emulator paths. Release descriptors remain restricted to an explicit reviewed Tailnet HTTPS/WSS allowlist; arbitrary endpoint entry is not accepted in release. No descriptor may use public Internet routing, LAN exposure, Tailscale Funnel, or an unreviewed Tailnet host. Existing loopback, ADB reverse, Tailscale ACL, cleartext-debug-only, and no-public/LAN/Funnel constraints remain unchanged.
+
+The foreground service owns one independent slot for every configured canonical router key. A slot owns its immutable router key and endpoint, socket, connection generation, registration state, lease, renewal timer, reconnect/backoff state, health state, and close state. The shared install `agent_id` and one foreground-service-lifetime `instance_id` register independently at every approved router. Every callback, timer, receipt, health response, close, and reconnect action must match the slot's router key and generation; a late result is ignored. Loss or retry of one router affects only that slot. Removing a descriptor intentionally closes only that slot and pauses its router-namespaced retry state and history; re-adding the same canonical endpoint can resume it. A storage durability failure is global: suspend every slot without receipts until storage recovers.
+
+Router identity is part of every local key. Conversations, incoming deduplication/incarnation evidence and recovery, messages, outbox rows, notification identity, reply routing, retry state, and history are namespaced by canonical router key. The same sender or message/incarnation identity from two routers is never merged, recovered, acknowledged, or rerouted across routers. A background notification identifies the source router without exposing raw protocol data. Foreground deliveries update their source-router local/UI state without a system notification.
+
+The UI shows aggregate connection state plus per-router status; it must not present one selected-router registration as globally connected. Outbound send captures the selected default router key before asynchronous work begins. A 2xx response means that router accepted the message or queued it; it never claims phone inbound reachability. A queued-reply status names the selected router and its actual slot state.
+
+Required deterministic verification uses two isolated fake routers and proves concurrent registrations with one shared install/service identity, independent loss/reconnect, inbound delivery and source attribution from both, router-key deduplication, removal isolation, re-add resumption, background-only notifications, and outbound routing captured to the selected router. Device validation additionally proves the foreground service keeps every configured slot after Home/background operation while preserving the existing Android force-stop and reboot limits.
+
 The following are requirements, not open design questions:
 
 - Kotlin application code and Jetpack Compose UI.
