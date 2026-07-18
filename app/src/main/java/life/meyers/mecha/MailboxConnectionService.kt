@@ -27,7 +27,12 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.scheduleAtFixedRate
 
 class MailboxConnectionService : Service() {
-    private data class Session(val attempt: RouterConnectionAttempt, var socket: WebSocket? = null, var timer: Timer? = null)
+    private data class Session(
+        val attempt: RouterConnectionAttempt,
+        var socket: WebSocket? = null,
+        var timer: Timer? = null,
+        var status: String = "Connecting to your agents…",
+    )
 
     private val client = OkHttpClient()
     private val reconnectHandler = Handler(Looper.getMainLooper())
@@ -70,6 +75,7 @@ class MailboxConnectionService : Service() {
         startAsForeground("Connecting to your agents…")
         sessions.keys.toList().filter { it !in configured }.forEach(::stopEndpoint)
         configured.filterNot(sessions::containsKey).forEach(::startEndpoint)
+        sessions[selectedRouter()]?.let { updateSelectedConnection(it.attempt, it.status) }
     }
 
     private fun startEndpoint(endpoint: String) {
@@ -193,6 +199,7 @@ class MailboxConnectionService : Service() {
 
     private fun updateSelectedConnection(attempt: RouterConnectionAttempt, status: String) {
         if (!coordinator.isCurrent(attempt)) return
+        sessions[attempt.endpoint]?.status = status
         val selected = selectedRouter()
         if (attempt.endpoint == selected) {
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(CONNECTION_NOTIFICATION_ID, connectionNotification(status))

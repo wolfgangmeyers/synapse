@@ -168,6 +168,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         peers = livePeers()
         selectedConversation?.let { messages = historyFor(it) }
+        if (activeRouter.isNotBlank()) MailboxConnectionService.refresh(this)
     }
 
     override fun onDestroy() {
@@ -405,7 +406,7 @@ class MainActivity : ComponentActivity() {
                         onSelect = ::switchRouter,
                         onRemove = ::removeRouter,
                     )
-                    selectedConversation == null -> PeerHome(connection, agentId, activeRouter, peers, ::selectConversation, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
+                    selectedConversation == null -> PeerHome(connection, agentId, activeRouter, routers(), peers, ::selectConversation, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
                         val conversation = selectedConversation!!
                         BackHandler(onBack = ::returnHome)
@@ -423,6 +424,7 @@ private fun PeerHome(
     connection: String,
     agentId: String,
     activeRouter: String,
+    routers: List<RouterConfig>,
     peers: List<RouterPeer>,
     onPeer: (RouterPeer) -> Unit,
     onRefresh: () -> Unit,
@@ -462,13 +464,25 @@ private fun PeerHome(
             }
         }
         Text("Agents", Modifier.padding(top = 28.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        if (peers.isEmpty()) {
-            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
-                Text("No connected agents yet", Modifier.padding(20.dp), color = TextMuted)
-            }
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(peers, key = { "${it.router}:${it.peer}" }) { peer -> PeerRow(peer, { onPeer(peer) }) }
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            routers.forEach { router ->
+                val routerPeers = peers.filter { it.router == router.endpoint }
+                item(key = "router:${router.endpoint}") {
+                    Text(
+                        if (router.endpoint == activeRouter) "${router.display} · Default" else router.display,
+                        Modifier.padding(top = 8.dp, bottom = 2.dp),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (router.endpoint == activeRouter) Teal else TextMuted,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                if (routerPeers.isEmpty()) {
+                    item(key = "empty:${router.endpoint}") {
+                        Text("No live agents", Modifier.padding(start = 16.dp, bottom = 8.dp), color = TextMuted)
+                    }
+                } else {
+                    items(routerPeers, key = { "${it.router}:${it.peer}" }) { peer -> PeerRow(peer, { onPeer(peer) }) }
+                }
             }
         }
     }
