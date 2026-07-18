@@ -28,6 +28,7 @@ from _tmux import ensure_session, new_window, send_text, send_enter, window_exis
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.6-terra"
 PI_SUBAGENTS_EXTENSION = "npm:@gotgenes/pi-subagents"
+PI_SUBAGENTS_EXTENSION_ENV = "MECHA_PI_SUBAGENTS_EXTENSION"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
@@ -71,6 +72,18 @@ def resolve_pi_mailbox_extension():
             f"{PI_MAILBOX_EXTENSION_ENV} must name a validated extension file. "
             f"Install the canonical Pi extension first: "
             f"python3 {os.path.join(os.path.dirname(__file__), 'install_pi_extension.py')}"
+        )
+    return extension_path
+
+
+def resolve_pi_subagents_extension():
+    """Return the default subagents package or a validated per-launch override."""
+    extension_path = os.environ.get(PI_SUBAGENTS_EXTENSION_ENV)
+    if extension_path is None:
+        return PI_SUBAGENTS_EXTENSION
+    if not os.path.isabs(extension_path) or not os.path.isfile(extension_path):
+        raise ValueError(
+            f"{PI_SUBAGENTS_EXTENSION_ENV} must name an absolute, existing regular extension file"
         )
     return extension_path
 
@@ -208,9 +221,11 @@ def main():
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
     pi_mailbox_extension = None
     pi_router_url = None
+    pi_subagents_extension = None
     if args.agent == "pi":
         try:
             pi_mailbox_extension = resolve_pi_mailbox_extension()
+            pi_subagents_extension = resolve_pi_subagents_extension()
             pi_router_url = resolve_pi_router_url()
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
@@ -249,7 +264,7 @@ def main():
         # to stale staging checkouts and duplicate control-plane client behavior.
         parts.extend([
             "--no-extensions",
-            "--extension", PI_SUBAGENTS_EXTENSION,
+            "--extension", pi_subagents_extension,
             "--extension", pi_mailbox_extension,
         ])
         # Pi has no permission mode. --approve makes the trusted project resources
