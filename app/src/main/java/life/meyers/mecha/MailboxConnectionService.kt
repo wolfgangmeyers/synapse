@@ -160,7 +160,6 @@ class MailboxConnectionService : Service() {
                 val peers = buildSet {
                     for (index in 0 until agents.length()) agents.optJSONObject(index)?.optString("agent_id")
                         ?.takeIf { it.isNotBlank() && it != agentId }?.let(::add)
-                    addAll(ConversationStore.knownPeers(this@MailboxConnectionService, attempt.endpoint).filter { it != agentId })
                 }
                 if (!coordinator.isCurrent(attempt)) return@use
                 prefs().edit().putStringSet("known_peers:${attempt.endpoint}", peers).commit()
