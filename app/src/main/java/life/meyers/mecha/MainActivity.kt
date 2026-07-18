@@ -113,25 +113,23 @@ private data class RouterConfig(
     fun persist() = "$display$ROUTER_RECORD_SEPARATOR$endpoint"
 }
 
-private data class RouterPeer(val router: String, val peer: String)
-
 class MainActivity : ComponentActivity() {
     private val client = OkHttpClient()
     private val stateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val router = intent.getStringExtra(MailboxConnectionService.EXTRA_ROUTER) ?: return
-            if (router == activeRouter) intent.getStringExtra(MailboxConnectionService.EXTRA_CONNECTION)?.let { connection = it }
-            peers = livePeers()
+            if (intent.getStringExtra(MailboxConnectionService.EXTRA_ROUTER) != activeRouter) return
+            intent.getStringExtra(MailboxConnectionService.EXTRA_CONNECTION)?.let { connection = it }
+            peers = knownPeers().sorted()
             intent.getStringExtra(MailboxConnectionService.EXTRA_PEER)
-                ?.let { refreshVisibleConversation(RouterPeer(router, it)) }
+                ?.let { refreshVisibleConversation(it) }
         }
     }
 
     private var agentId by mutableStateOf("")
     private var activeRouter by mutableStateOf("")
     private var connection by mutableStateOf("Connecting to your agents…")
-    private var peers by mutableStateOf(emptyList<RouterPeer>())
-    private var selectedConversation by mutableStateOf<RouterPeer?>(null)
+    private var peers by mutableStateOf(emptyList<String>())
+    private var selectedPeer by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<ChatMessage>())
     private var draft by mutableStateOf("")
     private var showProfileEditor by mutableStateOf(false)
@@ -145,7 +143,7 @@ class MainActivity : ComponentActivity() {
         agentId = preferences.getString("agent_id", null)
             ?: "android-${UUID.randomUUID()}".also { preferences.edit().putString("agent_id", it).apply() }
         activeRouter = persistedActiveRouter().orEmpty()
-        peers = livePeers()
+        peers = knownPeers().sorted()
         openConversation(intent)
         setContent { MechaApp() }
         val stateFilter = android.content.IntentFilter(MailboxConnectionService.ACTION_STATE_CHANGED)
@@ -166,8 +164,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        peers = livePeers()
-        selectedConversation?.let { messages = historyFor(it) }
+        peers = knownPeers().sorted()
+        if (selectedPeer.isNotBlank()) messages = historyFor(selectedPeer)
         if (activeRouter.isNotBlank()) MailboxConnectionService.refresh(this)
     }
 
@@ -215,49 +213,46 @@ class MainActivity : ComponentActivity() {
         if (activeRouter.isNotBlank()) MailboxConnectionService.refresh(this)
     }
 
-    private fun livePeers(): List<RouterPeer> = routers().flatMap { router ->
-        prefs().getStringSet("known_peers:${router.endpoint}", emptySet()).orEmpty()
-            .map { RouterPeer(router.endpoint, it) }
-    }.sortedWith(compareBy<RouterPeer> { it.peer }.thenBy { it.router })
+    private fun historyFor(peer: String): List<ChatMessage> = ConversationStore.history(this, activeRouter, peer)
 
-    private fun historyFor(conversation: RouterPeer): List<ChatMessage> =
-        ConversationStore.history(this, conversation.router, conversation.peer)
-
-    private fun refreshVisibleConversation(conversation: RouterPeer) {
-        if (conversation != selectedConversation) return
-        runOnUiThread { if (conversation == selectedConversation) messages = historyFor(conversation) }
+    private fun appendMessage(peer: String, message: ChatMessage): Boolean {
+        val saved = ConversationStore.append(this, activeRouter, peer, message)
+        if (saved && selectedPeer == peer) messages = historyFor(peer)
+        return saved
     }
 
-    private fun selectConversation(conversation: RouterPeer) {
-        if (conversation.peer.isBlank()) return
-        selectedConversation = conversation
-        messages = historyFor(conversation)
-        peers = livePeers()
+    private fun refreshVisibleConversation(peer: String) {
+        if (peer != selectedPeer) return
+        runOnUiThread { if (peer == selectedPeer) messages = historyFor(peer) }
+    }
+
+    private fun selectPeer(peer: String) {
+        if (peer.isBlank()) return
+        selectedPeer = peer
+        messages = historyFor(peer)
+        peers = (peers + peer).distinct().sorted()
+        persistKnownPeers(knownPeers() + peer)
     }
 
     private fun openConversation(intent: Intent) {
         val peer = intent.getStringExtra("peer_id")?.takeIf { it.isNotBlank() } ?: return
-        val sourceRouter = intent.getStringExtra(MailboxConnectionService.EXTRA_ROUTER)
-            ?.takeIf { router -> routers().any { it.endpoint == router } }
-            ?: activeRouter
-        if (sourceRouter.isNotBlank()) selectConversation(RouterPeer(sourceRouter, peer))
+        if (activeRouter.isNotBlank()) selectPeer(peer)
     }
 
     private fun returnHome() {
-        selectedConversation = null
+        selectedPeer = ""
         messages = emptyList()
         draft = ""
     }
 
     private fun send() {
-        val conversation = selectedConversation ?: return
-        val recipient = conversation.peer
+        val recipient = selectedPeer
         val text = draft
-        val selectedRouter = conversation.router
-        if (text.isBlank() || selectedRouter.isBlank()) return
+        val selectedRouter = activeRouter
+        if (recipient.isBlank() || text.isBlank() || selectedRouter.isBlank()) return
         val message = ChatMessage(UUID.randomUUID().toString(), agentId, text, Direction.OUTGOING, Instant.now().truncatedTo(ChronoUnit.MILLIS).toString())
         if (!ConversationStore.append(this, selectedRouter, recipient, message)) return
-        messages = historyFor(conversation)
+        messages = historyFor(recipient)
         draft = ""
         val body = JSONObject()
             .put("id", message.id)
@@ -319,7 +314,7 @@ class MainActivity : ComponentActivity() {
         prefs().edit().putStringSet("router_endpoints", updated).putString("active_router", endpoint).commit()
         activeRouter = endpoint
         routerRevision++
-        peers = livePeers()
+        peers = knownPeers().sorted()
         returnHome()
         routerError = ""
         showRouterManager = false
@@ -334,7 +329,7 @@ class MainActivity : ComponentActivity() {
         }
         prefs().edit().putString("active_router", endpoint).commit()
         activeRouter = endpoint
-        peers = livePeers()
+        peers = knownPeers().sorted()
         returnHome()
         showRouterManager = false
         MailboxConnectionService.connect(this, activeRouter)
@@ -354,7 +349,7 @@ class MainActivity : ComponentActivity() {
         routerError = ""
         if (endpoint == activeRouter) {
             activeRouter = next
-            peers = livePeers()
+            peers = knownPeers().sorted()
             returnHome()
             if (next.isBlank()) {
                 MailboxConnectionService.stop(this)
@@ -406,11 +401,10 @@ class MainActivity : ComponentActivity() {
                         onSelect = ::switchRouter,
                         onRemove = ::removeRouter,
                     )
-                    selectedConversation == null -> PeerHome(connection, agentId, activeRouter, routers(), peers, ::selectConversation, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
+                    selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
-                        val conversation = selectedConversation!!
                         BackHandler(onBack = ::returnHome)
-                        Conversation(conversation, messages, draft, { draft = it }, ::send, ::returnHome)
+                        Conversation(selectedPeer, messages, draft, { draft = it }, ::send, ::returnHome)
                     }
                 }
                 if (showProfileEditor) UsernameDialog(agentId, ::saveAgentId, { showProfileEditor = false })
@@ -424,9 +418,8 @@ private fun PeerHome(
     connection: String,
     agentId: String,
     activeRouter: String,
-    routers: List<RouterConfig>,
-    peers: List<RouterPeer>,
-    onPeer: (RouterPeer) -> Unit,
+    peers: List<String>,
+    onPeer: (String) -> Unit,
     onRefresh: () -> Unit,
     onEditProfile: () -> Unit,
     onManageRouters: () -> Unit,
@@ -464,33 +457,20 @@ private fun PeerHome(
             }
         }
         Text("Agents", Modifier.padding(top = 28.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            routers.forEach { router ->
-                val routerPeers = peers.filter { it.router == router.endpoint }
-                item(key = "router:${router.endpoint}") {
-                    Text(
-                        if (router.endpoint == activeRouter) "${router.display} · Default" else router.display,
-                        Modifier.padding(top = 8.dp, bottom = 2.dp),
-                        style = MaterialTheme.typography.titleSmall,
-                        color = if (router.endpoint == activeRouter) Teal else TextMuted,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                if (routerPeers.isEmpty()) {
-                    item(key = "empty:${router.endpoint}") {
-                        Text("No live agents", Modifier.padding(start = 16.dp, bottom = 8.dp), color = TextMuted)
-                    }
-                } else {
-                    items(routerPeers, key = { "${it.router}:${it.peer}" }) { peer -> PeerRow(peer, { onPeer(peer) }) }
-                }
+        if (peers.isEmpty()) {
+            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
+                Text("No connected agents yet", Modifier.padding(20.dp), color = TextMuted)
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(peers, key = { it }) { peer -> PeerRow(peer, { onPeer(peer) }) }
             }
         }
     }
 }
 
 @Composable
-private fun PeerRow(conversation: RouterPeer, onClick: () -> Unit) {
-    val peer = conversation.peer
+private fun PeerRow(peer: String, onClick: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable(onClick = onClick),
         colors = CardDefaults.cardColors(containerColor = SurfaceDark),
@@ -501,7 +481,7 @@ private fun PeerRow(conversation: RouterPeer, onClick: () -> Unit) {
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(humanName(peer), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text("$peer · ${conversation.router}", style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("$peer · Available", style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Icon(Icons.Default.ChevronRight, "Open conversation", tint = TextMuted)
         }
@@ -510,14 +490,13 @@ private fun PeerRow(conversation: RouterPeer, onClick: () -> Unit) {
 
 @Composable
 private fun Conversation(
-    conversation: RouterPeer,
+    peer: String,
     messages: List<ChatMessage>,
     draft: String,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
     onBack: () -> Unit,
 ) {
-    val peer = conversation.peer
     val transcriptState = rememberLazyListState()
     LaunchedEffect(messages.lastOrNull()?.id) {
         if (messages.isNotEmpty()) transcriptState.animateScrollToItem(messages.lastIndex)
@@ -536,7 +515,7 @@ private fun Conversation(
             Spacer(Modifier.width(10.dp))
             Column {
                 Text(humanName(peer), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("$peer · ${conversation.router}", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                Text(peer, style = MaterialTheme.typography.bodySmall, color = TextMuted)
             }
         }
         HorizontalDivider(color = SurfaceRaised)
