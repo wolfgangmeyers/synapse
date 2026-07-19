@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
-import { MemoryCatalogError, openMemoryCatalog } from "../harness/memory-catalog.js";
+import { MemoryCatalogError, openMemoryCatalog, RECALL_POLICY } from "../harness/memory-catalog.js";
 
 async function request(url, path, body) {
   return fetch(`${url}${path}`, { method: body === undefined ? "GET" : "POST", headers: body === undefined ? {} : { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -43,6 +43,20 @@ test("memory HTTP routes expose shared policy and forward only explicit selected
   assert.equal(disabled.status, 400);
   const missing = await request(url, "/v1/memory/lookup", { terms: ["literal"] });
   assert.equal(missing.status, 400);
+});
+
+test("memory policy returns built-in defaults without a catalog", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-memory-policy-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, port: 0 });
+  const wsUrl = await router.listen(); const url = wsUrl.replace(/^ws:/, "http:").replace(/\/v1\/agents$/, "");
+  t.after(async () => { await router.close(); repository.close(); await rm(directory, { recursive: true, force: true }); });
+
+  const response = await request(url, "/v1/memory/policy");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { recall: RECALL_POLICY });
+  const lookup = await request(url, "/v1/memory/lookup", { stores: ["default"] });
+  assert.equal(lookup.status, 404);
 });
 
 test("malformed memory apply requests leave a real catalog untouched before its queue", async (t) => {
