@@ -135,6 +135,8 @@ Then wait idle. The supervisor will kill the window when ready.
 
 ## Rules
 
+**Review findings need a protected requirement.** Before accepting a PR or review finding, map it to the approved specification, a task acceptance criterion, or a concrete security, data-loss, or existing-behavior risk. Reject findings that contradict specified behavior or demand unsupported scope; record the exact protected requirement with each retained finding.
+
 1. **Work directly in focused stages**: The managed Pi launch has no subagent runtime. Do not substitute another agent runtime; keep exploration, implementation, and review scopes small enough to verify. Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals; request them from the supervisor if absent. Before touching a new component or adding diagnostics, proof, or review beyond the task, mail the supervisor the exact acceptance criterion and failed direct-path evidence. Without both, use the existing path, verify once, and finish.
 
 2. **Maintain your todo list**: Track what you're doing. Update constantly.

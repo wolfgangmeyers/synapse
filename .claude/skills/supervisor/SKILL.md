@@ -222,6 +222,8 @@ If the worker says "scope-corrected," "all findings addressed," "tests prove it,
 
 **Pass user requirements to workers explicitly.** Include stated requirements verbatim in TASK.md, including negative constraints and solution-shape constraints. "Make a new X" is not equivalent to "wrap or sanitize the old X." Instruct workers to give the requirements to robot-review's reviewers as their requirements input. A review that doesn't know the requirements cannot flag gaps. Skipping this wastes a full round-trip.
 
+**Review findings need a protected requirement.** Before accepting a PR or review finding, map it to the approved specification, a task acceptance criterion, or a concrete security, data-loss, or existing-behavior risk. Reject findings that contradict specified behavior or demand unsupported scope; record the exact protected requirement with each retained finding.
+
 **Robot review findings are acted on autonomously.** The supervisor applies Wolfgang's severity tiers and decides:
 
 | Severity | Decision rule |
