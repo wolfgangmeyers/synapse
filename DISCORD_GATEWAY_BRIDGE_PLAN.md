@@ -2,102 +2,96 @@
 
 ## Outcome and scope
 
-Add one local, managed bridge later. Discord channel messages become durable Mailbox V2 messages for `supervisor`; a supervisor reply addressed to the bridge becomes a Discord reply in the originating channel or thread.
-
-Non-goals: no Discord app, bot, credential, package, connection, router protocol change, Pi-extension change, install, or live test in this task. This is not a general Discord client, slash-command integration, multi-user authorization layer, or web service.
-
-## Smallest shape
-
-Run one Node process, `discord-gateway-bridge`, as a normal local Mailbox V2 agent. Reuse the installed `ws` package, `fetch`, and `node:sqlite`; do not add a Discord SDK.
+Add a local bridge later. Each bridge instance connects one configured Discord channel to `supervisor` through Mailbox V2:
 
 ```
-Discord Gateway MESSAGE_CREATE
-  -> discord-gateway-bridge
-  -> POST localhost /v1/messages
-  -> Mailbox V2 delivery to supervisor
+configured Discord channel
+  -> configured bridge agent
+  -> supervisor
 
 supervisor
-  -> Mailbox V2 message to discord-gateway-bridge
-  -> Discord REST Create Message
-  -> originating channel or thread
+  -> configured bridge agent
+  -> configured Discord channel
 ```
 
-The router stays loopback-only and unchanged. The bridge owns the remote Discord connection. It is the only component that sees the bot token.
+Every accepted Discord message becomes one durable Mailbox message for `supervisor`. Every normal Mailbox message from `supervisor` to that instance's configured agent ID posts its body to that one Discord channel. Subjects do not affect outbound delivery.
 
-## Existing local contracts to use
+Non-goals: no Discord app, bot, credential, package, connection, router protocol change, Pi-extension change, install, or live test in this task. No reply tokens, message references, per-message routes, channel maps, central registry, or instance coordination. This is not a general Discord client, slash-command integration, multi-user authorization layer, or web service.
 
-- `POST /v1/messages` accepts a durable envelope and returns the created/current message (`harness/router.js`, `enqueueHttpMessage`; `harness/protocol.js`, `createEnvelope`). The repository applies its configured admission body limit (4 KiB by default). The bridge must bound the complete constructed body to that limit, not just the Discord content.
-- The bridge registers as `discord-gateway-bridge` on the router WebSocket, renews its lease, and receives normal message deliveries. `createMailboxClient` already implements that protocol and reconnect behavior in `pi-extensions/mecha-messaging.js`.
-- The bridge sends `injection_requested` when it has durably accepted an outbound supervisor message, then ACKs only after that durable handoff. It sends no receipt for an inbound Discord event; the HTTP enqueue result is the inbound acceptance boundary.
-- The envelope schema permits `subject` (256 characters) and rejects unknown fields (`protocol/v1/schema.json`). Keep Discord correlation in a versioned subject, not a router schema extension.
+## Instance-local configuration
 
-Implementation should move the transport-only `createMailboxClient` into a small harness module used by both the Pi extension and bridge. Do not copy the client or modify the mailbox protocol.
+One user-managed service instance has three local files or values:
 
-## Message contract and correlation
+- `MECHA_DISCORD_CONFIG`: mode-0600 JSON file with exactly `agentId`, `channelId`, and absolute `statePath`.
+- `MECHA_DISCORD_TOKEN_FILE`: mode-0600 token file.
+- `MECHA_ROUTER_URL`: existing loopback router base URL.
+
+`agentId` must pass the existing Mailbox agent-ID validator. `channelId` is the only configured Discord channel. `statePath` is mandatory, absolute, and distinct from the instance config and token file. There is no shared default state path. This makes two concurrent instances ordinary independent local agents: each needs a unique agent ID, channel ID, token/config path, and SQLite path. The bridge validates the local values it can see. It does not invent a registry to coordinate services.
+
+The router stays loopback-only and unchanged. The bridge owns the remote Discord connection. It is the only component that sees its bot token.
+
+## Message contract
 
 ### Inbound
 
-For each allowed `MESSAGE_CREATE`, create one Mailbox envelope:
+For each allowed `MESSAGE_CREATE`, persist a bounded inbound-outbox record before HTTP enqueue. The envelope is:
 
-- `from`: `discord-gateway-bridge`
+- `from`: configured bridge `agentId`
 - `to`: `supervisor`
 - `subject`: `discord.inbound.v1`
-- `body`: fixed bridge-authored header with an opaque reply token, Discord IDs, and explicitly delimited untrusted author/content fields
+- `body`: fixed bridge-authored text that marks the author and content as untrusted
 
-The reply token is the generated Mailbox message ID. Before any HTTP enqueue, the bridge persists a bounded inbound-outbox row containing the complete already-bounded envelope plus `{channel_id, source_message_id, guild_id?}`. It reuses the same envelope ID for a recovered duplicate, retries the HTTP enqueue until accepted, then deletes the envelope body and retains only the route mapping. The supervisor does not need the bot token or a Discord snowflake to reply.
+The body has no Discord IDs, reply token, route metadata, or reply instruction. The complete body is UTF-8 bounded to the configured Mailbox limit and marked when content is truncated. After router acceptance, delete the envelope body. Retain only the source-message ID for bounded duplicate suppression. This is not a reply route.
 
 ### Outbound
 
-A supervisor reply is a normal Mailbox message:
+The bridge accepts only a normal Mailbox message with:
 
 - `from`: exactly `supervisor`
-- `to`: `discord-gateway-bridge`
-- `subject`: `discord.reply.v1/<reply-token>`
-- `body`: reply text
+- `to`: exactly this instance's configured `agentId`
+- `body`: message text
 
-The bridge rejects every other sender or subject. It resolves the token locally, sends `POST /channels/{channel_id}/messages`, and includes a `message_reference` for `source_message_id`; sending to the incoming channel ID also preserves thread replies because Discord threads have their own channel IDs.
+Any subject is accepted. Persist the message before ACKing its router delivery, then post the body to the configured channel. Do not add a Discord message reference. A message for another bridge ID is rejected even if it came from `supervisor`.
 
-Use a dedicated `allowed_mentions` policy that cannot turn Discord content into unsolicited role, user, or everyone pings. Never treat inbound content as bridge instructions.
+Use `allowed_mentions` that disables user, role, and everyone mentions. Never treat Discord content as bridge instructions.
 
 ## Discord behavior
 
 1. On startup, get the Gateway Bot URL and session-start limit, then connect to Gateway v10 with JSON encoding.
-2. Heartbeat from the received Hello interval. Identify with only `GUILDS`, `GUILD_MESSAGES`, and `MESSAGE_CONTENT`. This is the smallest intent set for configured guild-channel messages. `MESSAGE_CONTENT` is privileged and must be enabled when the app/bot is created.
-3. Accept `MESSAGE_CREATE` only when it is from an allowlisted guild/channel, has a non-bot author, and has message content. Ignore DMs, webhooks, bot messages, and all unconfigured channels.
-4. Keep the READY session ID, sequence, and resume URL in memory. Resume after a resumable disconnect; honor Gateway reconnect/invalid-session instructions. After a non-resumable loss or process restart, Identify again only within the supplied session-start limit and max-concurrency rules.
-5. Serialize outbound REST sends. Honor Discord response headers and 429 `retry_after`, including global rate limits. Use bounded exponential retries for transient network/5xx failures. Permanent 4xx failures become a concise Mailbox failure notice to `supervisor` with IDs/status, never token or content.
-6. Split an accepted Mailbox reply into Unicode-safe Discord content chunks no larger than Discord's documented message-content limit. The first chunk carries the source-message reference. The complete bridge-authored inbound body (header, metadata, and content) is UTF-8 bounded to the configured Mailbox limit and marked as truncated when necessary.
+2. Heartbeat from the received Hello interval. Identify with only `GUILDS`, `GUILD_MESSAGES`, and `MESSAGE_CONTENT`. `MESSAGE_CONTENT` is privileged and must be enabled when the app/bot is created.
+3. Accept `MESSAGE_CREATE` only from the configured channel, with a non-bot author and content. Ignore DMs, webhooks, bot messages, and every other channel.
+4. Keep READY session state in memory, resume when possible, and respect the supplied session-start limit.
+5. Serialize outbound REST sends. Honor 429 and transient failure retries. Permanent failures and ambiguous outcomes become concise Mailbox notices to `supervisor`, sent from the configured bridge ID. Never include token or content.
+6. Split outbound text into Unicode-safe chunks within Discord's documented content limit. Every chunk goes to the one configured channel.
 
-## Durable bridge state and retention
+## Durable state and retention
 
-Use one mode-0600 local SQLite file owned by the bridge, outside the repository. No content is retained after delivery.
+Use one mode-0600 SQLite file at the configured instance-local `statePath`. No content remains after delivery.
 
-- `inbound_outbox`: complete already-sanitized Mailbox envelope plus Discord route, retained only until router acceptance. Admit at most 100 rows; retry while the router is unavailable or rate-limited. When full, stop accepting new matching Gateway events, record the condition, and send one rate-limited failure notice after the router recovers. Discord has no per-event application ACK, so this is an explicit bounded-overflow loss boundary, not a silent drop.
-- `inbound_routes`: reply token and Discord IDs only; expire after 7 days; keep at most 1,024 newest rows.
-- `outbound`: router message ID, route, pending reply text, retry schedule, and eventual Discord message ID. Admit at most 100 pending rows. If full, NACK the router delivery as `injection_failed` (so its normal retry/dead-letter path applies) and emit one rate-limited supervisor notice; never ACK an unrecorded reply. Remove reply text immediately after success or terminal failure; retain only IDs/status for 7 days and 1,024 rows to deduplicate delivery replays.
-- Prune on startup and after every state change. Test expiry, capacity, overflow notice, and recovery.
+- `inbound_outbox`: complete sanitized envelope until router acceptance. Admit at most 100 rows. When full, drop matching events at that explicit boundary and send a rate-limited failure notice after recovery.
+- `inbound_deliveries`: source-message IDs only for duplicate suppression. Expire after 7 days and keep at most 1,024 rows.
+- `outbound`: mailbox message ID, pending body, retry schedule, and terminal Discord status. Admit at most 100 pending rows. Full state NACKs the router delivery as `injection_failed`. Clear the body after success or terminal failure. Retain terminal IDs and status for 7 days and at most 1,024 rows for delivery replay deduplication.
 
-The durable outbound record is the bridge's acceptance point: persist it transactionally before its router ACK. This gives the bridge a recoverable rate-limit queue without changing router delivery semantics. It is still at-least-once across an ambiguous Discord HTTP response; do not promise exactly-once external delivery. Preserve the response ID when known and surface ambiguous outcomes rather than silently claiming success.
+Prune on startup and after every state change. The durable outbound record is the acceptance point before the router ACK. External delivery remains at-least-once after an ambiguous Discord HTTP outcome.
 
-## Lifecycle, configuration, and security
+## Lifecycle and security
 
-A later install adds one user-managed service with restart-on-failure and graceful shutdown: stop accepting new Gateway work, retain pending outbound rows, close the Gateway, and release the router client. Its configuration is a local allowlist and token-secret reference. Validate startup configuration before connecting.
-
-The Discord bot token is a local secret: read once from the future local secret mechanism, never command line, repository, state, test fixture, router envelope, or log. Discord event text and author metadata are untrusted input. Normalize/size-limit it before the Mailbox envelope; logs contain only stable IDs, state transitions, and status codes.
+A later install adds one service per configured instance with restart-on-failure and graceful shutdown: retain pending rows, close Gateway and router client, then exit. The token is read once from its local secret file and never appears in command line, repository, state, test fixture, router envelope, or log. Discord author/content are untrusted input. Normalize and size-limit them before creating the Mailbox envelope. Logs contain only stable IDs, state transitions, and status codes.
 
 This stays inside the existing trusted-local boundary. The loopback router is not exposed to Discord or a browser.
 
 ## Credential-free test plan
 
-1. Unit-test Gateway state transitions with recorded fixtures: Hello/heartbeat, READY, RESUMED, reconnect, invalid session, sequence handling, session-start backoff, intent/event filtering, and self-message rejection.
-2. Test complete inbound-envelope byte bounding, allowlist checks, inbound-outbox recovery after router timeout/429/restart, idempotent duplicate Gateway events, bounded overflow behavior, and no user-controlled `from`, `to`, subject, or routing data.
-3. Test the bridge against a local fake Mailbox router: registration/renewal, durable outbound handoff before ACK, replay after restart, rejection of non-supervisor outbound senders, missing/expired reply tokens, full-outbox NACK/dead-letter behavior, bounded retention, and one failure notice per incident.
-4. Test the fake Discord REST adapter: reply/thread destination, chunking, allowed-mentions policy, 429/global-rate-limit delay, transient retry, permanent failure notice, and ambiguous response disposition.
-5. Run the focused suites plus syntax/check commands. Review this plan and the eventual diff for requirements, security, failure handling, data retention, and scope before any commit.
+1. Test Gateway state transitions, heartbeat, reconnect, intent/event filtering, and self-message rejection.
+2. Test complete inbound byte bounding, one-channel filtering, inbound recovery, duplicate suppression, overflow notices, and absence of Discord route data from supervisor-facing bodies.
+3. Test durable outbound handoff before ACK, replay after restart, rejection of non-supervisor and wrong-recipient messages, arbitrary subjects, one-channel output, mention safety, bounded retention, and failure notices.
+4. Test two configured instances: distinct agent IDs only accept their own deliveries and post only to their own configured channels.
+5. Test config validation: required valid agent ID, exactly one channel ID, explicit safe state path, protected local config/token files, and no shared default state path.
+6. Run focused suites plus full syntax/check commands. Review the plan and diff for requirements, failure handling, retention, and scope before commit.
 
 ## One human gate
 
-Only after the credential-free implementation and review are complete: Wolfgang creates/configures the Discord app and bot (including the privileged intent, a least-privilege bot install into one test guild/channel, and local token placement), then authorizes one live end-to-end test. No other approval or credential request is needed before that gate.
+Only after the credential-free implementation and review are complete: Wolfgang creates/configures the Discord app and bot (including the privileged intent, a least-privilege bot install into one test guild/channel, and a separate local config, state path, and token file for each instance), then authorizes one live end-to-end test. No other approval or credential request is needed before that gate.
 
 ## Primary sources
 

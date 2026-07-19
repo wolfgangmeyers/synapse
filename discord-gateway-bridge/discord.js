@@ -3,9 +3,9 @@ import WebSocket from "ws";
 const DISCORD_API = "https://discord.com/api/v10";
 const GUILD_INTENTS = (1 << 0) | (1 << 9) | (1 << 15);
 
-export function shouldAcceptGatewayMessage(event, allowlist) {
+export function shouldAcceptGatewayMessage(event, channelId) {
   if (event?.author?.bot || event?.webhook_id !== undefined || !event?.guild_id || !event?.content) return false;
-  return allowlist.some(({ guildId, channelId }) => event.guild_id === guildId && event.channel_id === channelId);
+  return event.channel_id === channelId;
 }
 
 export function gatewayIdentify(token) {
@@ -15,14 +15,14 @@ export function gatewayIdentify(token) {
 export function createDiscordRest({ token, fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
   if (typeof token !== "string" || token.length === 0) throw new TypeError("Discord token is required");
   let queue = Promise.resolve();
-  const request = async ({ channelId, content, messageReference, allowedMentions }) => {
+  const request = async ({ channelId, content, allowedMentions }) => {
     let attempts = 0;
     while (true) {
       try {
         const response = await fetchImpl(`${DISCORD_API}/channels/${encodeURIComponent(channelId)}/messages`, {
           method: "POST",
           headers: { authorization: `Bot ${token}`, "content-type": "application/json" },
-          body: JSON.stringify({ content, ...(messageReference === undefined ? {} : { message_reference: { message_id: messageReference } }), allowed_mentions: allowedMentions }),
+          body: JSON.stringify({ content, allowed_mentions: allowedMentions }),
         });
         if (response.ok) return response.json();
         const payload = await response.json().catch(() => ({}));
@@ -44,8 +44,8 @@ export function createDiscordRest({ token, fetchImpl = fetch, sleep = (ms) => ne
 }
 
 /** Gateway v10 transport. It is inert until the later local-secret/live-test gate starts it. */
-export function createDiscordGateway({ token, allowlist, onMessage, fetchImpl = fetch, webSocketFactory = (url) => new WebSocket(url), schedule = setTimeout, clearSchedule = clearTimeout, random = Math.random, log = () => {} } = {}) {
-  if (typeof token !== "string" || token.length === 0 || !Array.isArray(allowlist) || typeof onMessage !== "function") throw new TypeError("token, allowlist, and onMessage are required");
+export function createDiscordGateway({ token, channelId, onMessage, fetchImpl = fetch, webSocketFactory = (url) => new WebSocket(url), schedule = setTimeout, clearSchedule = clearTimeout, random = Math.random, log = () => {} } = {}) {
+  if (typeof token !== "string" || token.length === 0 || typeof channelId !== "string" || channelId.length === 0 || typeof onMessage !== "function") throw new TypeError("token, channelId, and onMessage are required");
   let socket; let heartbeat; let awaitingHeartbeatAck = false; let stopped = false; let sequence = null; let sessionId; let resumeUrl; let gatewayUrl; let canResume = false; let sessionStart;
   const send = (frame) => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify(frame));
   const clearHeartbeat = () => {
@@ -89,7 +89,7 @@ export function createDiscordGateway({ token, allowlist, onMessage, fetchImpl = 
       }
       else if (frame.op === 0 && frame.t === "READY") { sessionId = frame.d.session_id; resumeUrl = frame.d.resume_gateway_url; canResume = true; }
       else if (frame.op === 0 && frame.t === "RESUMED") { canResume = true; }
-      else if (frame.op === 0 && frame.t === "MESSAGE_CREATE" && shouldAcceptGatewayMessage(frame.d, allowlist)) await onMessage(frame.d);
+      else if (frame.op === 0 && frame.t === "MESSAGE_CREATE" && shouldAcceptGatewayMessage(frame.d, channelId)) await onMessage(frame.d);
     });
     socket.on("close", () => { clearHeartbeat(); reconnect(); });
     socket.on("error", (error) => log("gateway_error", { message: error.message }));
