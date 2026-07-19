@@ -14,6 +14,15 @@ All new managed workers use Pi with provider `openai-codex` and model `gpt-5.6-t
 
 When adding or updating a skill, keep this CLAUDE.md's skill table (below) current.
 
+## Data retention
+
+Any feature that accumulates data over time—ledgers, logs, histories, queues,
+caches, reports, or state records—must define and implement bounded retention
+before it ships. Prefer built-in expiry, rotation, or pruning. If history must
+outlive the active store, define a bounded archive plus its owner and trigger.
+Do not leave cleanup as a manual future task. Test the retention path and
+document the size or age limit.
+
 ## User input
 
 Wolfgang often uses voice transcription, so requests may include phonetic spellings

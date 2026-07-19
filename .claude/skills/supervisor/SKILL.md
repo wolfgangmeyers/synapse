@@ -41,6 +41,24 @@ Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` f
 
 **When a task blocks, scan for newly unblocked work.** When a worker parks/blocks/finishes, check all queued tasks for ones that can now advance. Task A releases a resource → anything waiting on that resource starts immediately. This is the core of keeping things moving.
 
+## Watchdog Authority Boundary
+
+The watchdog is an independent, higher-authority control loop that keeps the supervisor on track. It is not a worker, subordinate service, or execution target.
+
+- Do not give watchdog routine directions, status updates, task assignments, implementation requests, or monitoring requests.
+- Do not edit watchdog rules, create/cancel its reminders, or alter its operating contract unless Wolfgang explicitly asks for that watchdog-specific change.
+- The watchdog owns its reminder cadence and notices the supervisor; the supervisor does not need to monitor, remind, or manage watchdog proactively.
+- When watchdog contacts the supervisor directly, first perform the normal mailbox state update, then treat its finding as supervisory feedback: validate the evidence, take the smallest authorized corrective action, and reply only when an acknowledgement or requested disposition is useful.
+- Do not debate, override, or reframe watchdog findings into instructions for watchdog. If evidence contradicts a finding, report the concrete evidence concisely; otherwise correct the supervisor's course.
+- A watchdog finding is not a user-approval gate. Use the standing autonomy rules to execute the next safe local action it identifies.
+
+
+## Execution-Prerequisite Autonomy
+
+**Trusted-local shared runtime is delivery scope, not a second approval gate.** When a stated outcome requires a local router, extension, database migration, managed worker restart, local service reload, or local runtime upgrade, proceed autonomously with the smallest reversible operation: snapshot current state, perform the scoped change, verify the stated acceptance evidence, and roll back on a failed gate. Wolfgang's standing instruction is to keep moving; do not ask again merely because the local service has multiple trusted-local clients. A direct user authorization for an outcome includes these ordinary trusted-local integration steps. Report what changed, but do not wait for approval between preflight, install, restart, proof, or rollback.
+
+Escalate only an actual external or irreversible boundary: missing credentials or account authority, spending, production/shared runtime outside Wolfgang's trusted local control, security/legal tradeoffs, irreversible data loss, or materially ambiguous product intent. Do not manufacture an escalation from a reversible local router/database/service action that has a snapshot and rollback path.
+
 **Check issue assignees before picking up work.** Before starting work on a GitHub issue, check if it's already assigned or has an open PR from another team member. Other people are working on these projects — don't duplicate their effort. Use `gh issue view <number> --json assignees,labels` and check for linked PRs. If an issue is in progress by someone else, skip it and pick the next one.
 
 **Process Reminders**: At session start and after compaction, set three self-renewing hourly reminders: (1) dev-loop checklist — explain --overview, test-coverage, robot-review before authorizing production code, (2) don't block on terminal — send the user a mailbox message instead, (3) simplicity — check for over-engineering against Wolfgang persona. Each message includes "Set this reminder again in 60m" for self-renewal.
@@ -70,9 +88,9 @@ Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` f
 
 7. **The supervisor never commits directly.** If you need git auth in your own session, you're doing inline work — delegate to a worker instead.
 
-**Autonomous Execution**: Once a plan is approved or task launched, execute through completion without stopping to offer optionality. Phase transitions are handoffs within approved scope, not pause points. Use Wolfgang's judgment for all decisions within scope. Only stop for: novel architectural decisions outside scope, genuine unresolvable ambiguity, or Wolfgang's "What Warrants Escalation" conditions.
+**Autonomous Execution**: Once a plan is approved or task launched, execute through completion without stopping to offer optionality. Phase transitions are handoffs within approved scope, not pause points. Use Wolfgang's judgment for all decisions within scope. When evidence identifies the next safe reversible action, execute or dispatch it in the same turn; do not convert a preflight, review, local integration dependency, or rollback-capable runtime change into a waiting state. Only stop for: novel architectural decisions outside scope, genuine unresolvable ambiguity, or an actual external/irreversible boundary.
 
-"Ready to proceed when you want" and "let me know when to continue" are failure modes, not courtesy.
+"Ready to proceed when you want," "awaiting authorization," and "let me know when to continue" are failure modes when the next action is already covered by the stated outcome and standing trusted-local autonomy.
 
 **Supervisor owns ALL state updates — workers NEVER touch state**: Workers communicate via mailbox only. They never run `state_update_*` scripts or record their own status. If you're about to tell a worker to run a state tool, stop — always wrong.
 
@@ -1090,33 +1108,7 @@ python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window <window> --
 
 ## Responding to Watchdog Alerts
 
-The watchdog (`watchdog.py`) runs every 30 minutes, captures all tmux windows in the mecha session, and mails the supervisor if any windows look stuck. This section describes known failure modes and how to respond when it fires.
-
-### Stuck Criteria
-
-A window is classified as stuck when it matches one or more of these patterns:
-
-1. **Idle with no work** — window shows an empty prompt with no recent tool activity or output, and the worker was not told to wait.
-
-2. **No progress over time** — same tool call or output repeating with no advancement; worker appears to be looping without making progress.
-
-3. **Waiting for input it will never receive** — worker halted at a prompt that requires user input (e.g., a shell waiting for a passphrase), but no one is watching.
-
-4. **Auto-suggestion false negative** — Claude Code's idle input box shows placeholder hints like `❯ Try "fix lint errors"` or `❯ Try "write a test for..."`. These are UI suggestions, NOT things anyone typed. An idle prompt with a suggestion is just an idle prompt. If only an auto-suggestion line is visible, the worker is idle — classify by whether it was told to wait.
-
-5. **Asking decidable questions** — the supervisor output contains a question the sender (Wolfgang's persona) already has enough information to answer, and no tool was called to act on it. This indicates the supervisor has stalled on a decision it is authorized to make. Phase-boundary hesitation is a specific form of this failure. Flag it explicitly when the supervisor output contains phrases like:
-   - "Ready to proceed when you want"
-   - "Let me know when to continue"
-   - "I can start the next phase whenever you'd like"
-   - "Waiting for your go-ahead before [next clearly-approved step]"
-
-   These phrases indicate the supervisor has paused at a transition it was already authorized to execute. Flag as stuck with reason: "supervisor offered optionality at a phase transition — approved plan means proceed, not check in."
-
-### Supervisor Window Monitoring
-
-**The supervisor window itself is a monitored window.** The watchdog should capture the supervisor's Claude Code session (the `mecha` tmux window or equivalent) and evaluate it for the stuck criteria above — particularly criterion #5 (decidable questions) and phase-boundary hesitation. A supervisor window showing "ready to proceed when you want" is as stuck as a worker window showing no tool activity.
-
-Also check for: the supervisor asking the user to make a decision that Wolfgang's persona already answers, or the supervisor listing options and deferring the choice entirely to the user when a clear recommendation is warranted.
+The watchdog independently evaluates the supervisor and managed work, then contacts the supervisor when corrective attention is needed. This section describes how to receive and act on that higher-authority feedback; it does not authorize the supervisor to manage watchdog.
 
 ### When the Watchdog Fires
 
@@ -1882,30 +1874,7 @@ python3 ~/.claude/skills/supervisor/tools/standing_orders_cron.py --dry-run
 
 ## Watchdog Guidance
 
-The watchdog's evaluation instructions now live in their own dedicated skill:
-`.claude/skills/watchdog/SKILL.md`
-
-The watchdog loads that file directly. To change watchdog behavior, edit the watchdog skill, not this section.
-
-### Supervisor Stuck on External Blockers — Unstuck Rules
-
-When the supervisor itself is blocked on something external (git authorization, user input, a failing service), the watchdog should tell the supervisor to **reassess whether the blocker actually matters and keep the pipeline moving**.
-
-**The #1 failure mode is treating an optional fix as a required step.** Before attempting to work around a blocker, first ask: does this blocker actually need to be resolved to advance the pipeline? If the answer is no, the supervisor should not have been blocked in the first place.
-
-**Unstuck heuristics the watchdog should include in its alert when the supervisor is stuck:**
-
-1. **Is the blocked work actually required to proceed?** If a quality gate has already passed and the remaining work is cosmetic or deferred, the supervisor should declare the gate passed and advance to the next phase. Don't let an optional fix become a mandatory step just because you started working on it.
-
-2. **Blocked on the same thing for 2+ watchdog cycles?** The blocker is not resolving itself. The supervisor must escalate to the user with a concrete message: "I'm stuck on X. Here are my options: [A, B, C]. I recommend [X]." Silent waiting is never acceptable past 2 cycles.
-
-3. **Blocked on user input that isn't truly needed?** Make the decision autonomously using Wolfgang's judgment. Only escalate to the user when the decision is genuinely outside the supervisor's authority (spending money, deleting production data, choosing between fundamentally different product directions).
-
-4. **All remaining Greptile/review comments are deferred repeats?** The quality gate has passed. Stop waiting for silence — declare it done and move on. Greptile will keep commenting on deferred items every round; that's not new signal.
-
-5. **Check standing orders.** If standing orders exist in the state file, evaluate whether the supervisor's current behavior violates any of them. Standing orders capture lessons from past stalls and should be treated as high-priority directives.
-
-**The watchdog alert should say**: "Supervisor has been stuck on [X] for [N] cycles. Suggested action: [specific unstuck step from above]." Don't just report the problem — prescribe the fix.
+The watchdog's evaluation contract lives in `.claude/skills/watchdog/SKILL.md`. The watchdog applies that contract independently; this supervisor skill only defines how to receive and act on its alerts. Do not direct or modify the watchdog through this section.
 
 ---
 
