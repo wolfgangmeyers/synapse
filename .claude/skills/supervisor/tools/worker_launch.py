@@ -2,7 +2,7 @@
 """Launch a new worker in a tmux window.
 
 Usage:
-  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--reasoning-effort low|medium|high|xhigh]
+  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--reasoning-effort low|medium|high|xhigh] [--notify-on-settled MAILBOX_RECIPIENT]
 
 Creates a tmux window, starts the agent in the specified directory,
 and waits for it to initialize. Deliver all instructions with mailbox_send.py
@@ -22,7 +22,7 @@ import uuid
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _tmux import ensure_session, new_window, send_text, send_enter, window_exists
+from _tmux import _AGENT_ID, ensure_session, new_window, send_text, send_enter, window_exists
 
 
 PI_PROVIDER = "openai-codex"
@@ -32,6 +32,7 @@ PI_SUBAGENTS_EXTENSION_ENV = "MECHA_PI_SUBAGENTS_EXTENSION"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
+PI_NOTIFY_ON_SETTLED_ENV = "MECHA_PI_NOTIFY_ON_SETTLED"
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -215,8 +216,22 @@ def main():
         default=None,
         help="Codex-only reasoning effort override for this worker launch.",
     )
+    parser.add_argument(
+        "--notify-on-settled",
+        default=None,
+        metavar="MAILBOX_RECIPIENT",
+        help="Pi-only: notify this Mailbox agent ID after the worker settles idle.",
+    )
 
     args = parser.parse_args()
+
+    if args.notify_on_settled is not None:
+        if args.agent != "pi":
+            print("Error: --notify-on-settled is only supported for Pi workers", file=sys.stderr)
+            sys.exit(1)
+        if _AGENT_ID.fullmatch(args.notify_on_settled) is None:
+            print("Error: --notify-on-settled must be a valid Mailbox agent ID", file=sys.stderr)
+            sys.exit(1)
 
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
     pi_mailbox_extension = None
@@ -339,13 +354,17 @@ def main():
     if args.agent == "cursor":
         full_cmd = f"cd {work_dir} && {agent_cmd}"
     else:
-        router_export = (
-            f"export {PI_ROUTER_URL_ENV}={shlex.quote(pi_router_url)} && "
-            if args.agent == "pi" else ""
-        )
+        pi_exports = ""
+        if args.agent == "pi":
+            pi_exports = f"export {PI_ROUTER_URL_ENV}={shlex.quote(pi_router_url)} && "
+            if args.notify_on_settled is not None:
+                pi_exports += (
+                    f"export {PI_NOTIFY_ON_SETTLED_ENV}="
+                    f"{shlex.quote(args.notify_on_settled)} && "
+                )
         full_cmd = (
             f"cd {work_dir} && unset CLAUDECODE && "
-            f"{router_export}{agent_cmd}"
+            f"{pi_exports}{agent_cmd}"
         )
     send_text(args.window, full_cmd)
     time.sleep(0.5)

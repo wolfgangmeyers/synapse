@@ -696,6 +696,14 @@ export function createMechaMessagingExtension(pi, {
   let client;
   let coordinator;
   let startupError;
+  let settledNotificationAgentId;
+  let settledNotificationPending = false;
+  let settledNotificationRecipient;
+  try {
+    settledNotificationRecipient = assertAgentId(process.env.MECHA_PI_NOTIFY_ON_SETTLED);
+  } catch {
+    // The launcher rejects invalid values; a manually configured Pi stays disabled.
+  }
   const children = childSessionIds();
   const childReplyClients = new Map();
 
@@ -736,7 +744,32 @@ export function createMechaMessagingExtension(pi, {
   pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
   pi.on("message_end", (event, context) => { if (!children.has(context.sessionManager.getSessionId())) activeWork = boundedConversationText(event.message?.content, 4096); coordinator?.onMessageEnd(event, context); });
   pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; try { await ensureRecallPolicy(); recallController.activity(); } catch { /* Fail closed: no default-timing recall window. */ } });
+  pi.on("agent_start", (_event, context) => {
+    if (settledNotificationRecipient !== undefined && !children.has(context.sessionManager.getSessionId())) {
+      settledNotificationPending = true;
+    }
+  });
   pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; try { await ensureRecallPolicy(); recallController.activity(); } catch { /* Fail closed: no default-timing recall window. */ } });
+  pi.on("agent_settled", (_event, context) => {
+    if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending || !context.isIdle()) return;
+
+    // Claim before sendReply starts so a later run is an independent generation.
+    settledNotificationPending = false;
+    const notificationClient = client;
+    const worker = settledNotificationAgentId;
+    if (notificationClient === undefined || worker === undefined) return;
+    try {
+      Promise.resolve(notificationClient.sendReply({
+        to: settledNotificationRecipient,
+        subject: "Pi worker settled",
+        body: `Worker ${worker} has settled and is idle.`,
+      })).catch((error) => {
+        context.ui.notify(`Pi settled notification failed: ${error.message}`, "error");
+      });
+    } catch (error) {
+      context.ui.notify(`Pi settled notification failed: ${error.message}`, "error");
+    }
+  });
   pi.on("session_shutdown", async (_event, context) => { if (children.has(context.sessionManager.getSessionId())) return; recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch {} finally { controller.abort(); clearTimeout(timer); } });
 
   pi.on("session_start", (_event, context) => {
@@ -757,6 +790,8 @@ export function createMechaMessagingExtension(pi, {
     try {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
+      settledNotificationPending = false;
+      settledNotificationAgentId = agentId;
       pi.registerCommand("mecha-parent-message", {
         description: "Child-only ordinary Mailbox message to its target parent: /mecha-parent-message <message>",
         handler: async (argumentsText, commandContext) => {
@@ -844,6 +879,8 @@ export function createMechaMessagingExtension(pi, {
       childReplyClients.delete(sessionId);
       return;
     }
+    settledNotificationPending = false;
+    settledNotificationAgentId = undefined;
     coordinator?.close();
     coordinator = undefined;
     client?.close();
