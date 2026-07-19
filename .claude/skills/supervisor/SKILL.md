@@ -1110,6 +1110,32 @@ python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window <window> --
 
 The watchdog independently evaluates the supervisor and managed work, then contacts the supervisor when corrective attention is needed. This section describes how to receive and act on that higher-authority feedback; it does not authorize the supervisor to manage watchdog.
 
+### Stuck Criteria
+
+A window is classified as stuck when it matches one or more of these patterns:
+
+1. **Idle with no work** — window shows an empty prompt with no recent tool activity or output, and the worker was not told to wait.
+
+2. **No progress over time** — same tool call or output repeating with no advancement; worker appears to be looping without making progress.
+
+3. **Waiting for input it will never receive** — worker halted at a prompt that requires user input (e.g., a shell waiting for a passphrase), but no one is watching.
+
+4. **Auto-suggestion false negative** — Claude Code's idle input box shows placeholder hints like `❯ Try "fix lint errors"` or `❯ Try "write a test for..."`. These are UI suggestions, NOT things anyone typed. An idle prompt with a suggestion is just an idle prompt. If only an auto-suggestion line is visible, the worker is idle — classify by whether it was told to wait.
+
+5. **Asking decidable questions** — the supervisor output contains a question the sender (Wolfgang's persona) already has enough information to answer, and no tool was called to act on it. This indicates the supervisor has stalled on a decision it is authorized to make. Phase-boundary hesitation is a specific form of this failure. Flag it explicitly when the supervisor output contains phrases like:
+   - "Ready to proceed when you want"
+   - "Let me know when to continue"
+   - "I can start the next phase whenever you'd like"
+   - "Waiting for your go-ahead before [next clearly-approved step]"
+
+   These phrases indicate the supervisor has paused at a transition it was already authorized to execute. Flag as stuck with reason: "supervisor offered optionality at a phase transition — approved plan means proceed, not check in."
+
+### Supervisor Window Monitoring
+
+**The supervisor window itself is a monitored window.** The watchdog should capture the supervisor's Claude Code session (the `mecha` tmux window or equivalent) and evaluate it for the stuck criteria above — particularly criterion #5 (decidable questions) and phase-boundary hesitation. A supervisor window showing "ready to proceed when you want" is as stuck as a worker window showing no tool activity.
+
+Also check for: the supervisor asking the user to make a decision that Wolfgang's persona already answers, or the supervisor listing options and deferring the choice entirely to the user when a clear recommendation is warranted.
+
 ### When the Watchdog Fires
 
 When a watchdog alert arrives in the mailbox:
