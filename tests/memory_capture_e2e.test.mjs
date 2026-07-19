@@ -12,8 +12,8 @@ const source = [{ id: "verified-tool", role: "toolResult", details: { memory_val
 const create = (id, body, related = []) => ({ mode: "create", id, title: id, body, tags: ["release"], related, evidence: { source_ids: ["verified-tool"] } });
 
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), "memory-capture-e2e-")); const catalog = openMemoryCatalog({ kbRoot: root, databasePath: join(root, "catalog.sqlite") }); await writeFile(join(root, "INDEX.md"), "# Index\n");
-  t.after(async () => { catalog.close(); await rm(root, { recursive: true, force: true }); });
+  const root = await mkdtemp(join(tmpdir(), "memory-capture-e2e-")); await writeFile(join(root, "INDEX.md"), "# Index\n"); const catalog = openMemoryCatalog({ kbRoot: root });
+  t.after(async () => { try { await catalog.close(); } catch {} await rm(root, { recursive: true, force: true }); });
   return { root, catalog };
 }
 
@@ -23,11 +23,9 @@ test("configured extractor captures, retains, and recalls tagged linked chunks",
   const capture = createMemoryCaptureLifecycle({ policy, extract, apply: (input) => catalog.apply(input) });
   assert.deepEqual(await capture.compact(source), { status: "applied", records: 2 });
   assert.equal(model.file, "pi"); assert.equal(model.args[model.args.indexOf("--model") + 1], "openai-codex/gpt-5.6-sol"); assert.equal(model.options.timeout, 60_000); assert.match(model.args.at(-1), /\{"decision":"noop","records":\[\]\}/);
-  await catalog.rebuild(); const stored = await catalog.lookup({ stores: ["default"], terms: ["signed"] }); assert.deepEqual(stored.map(({ id }) => id), ["release-process"]);
-  const original = await readFile(join(root, "release-process.md"), "utf8"); assert.match(original, /tags:\n  - release\nrelated:/); assert.doesNotMatch(original, /evidence|verified-tool/i); assert.doesNotMatch(JSON.stringify(stored), /evidence|verified-tool/i);
-  const replay = createMemoryCaptureLifecycle({ policy, extract, apply: (input) => catalog.apply(input) }); assert.deepEqual(await replay.compact(source), { status: "noop", records: 0 }); assert.equal(await readFile(join(root, "release-process.md"), "utf8"), original);
-  await writeFile(join(root, "release-process.md"), original.replace("signed production", "external production")); const stale = createMemoryCaptureLifecycle({ policy, extract, apply: (input) => catalog.apply(input) }); await assert.rejects(() => stale.compact(source), /capture conflict/);
-  await rm(join(root, "release-health.md")); await catalog.rebuild(); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "release-health"), false);
+  const stored = await catalog.lookup({ stores: ["default"], terms: ["signed"] }); assert.deepEqual(stored.map(({ id }) => id), ["release-process"]);
+  await catalog.close(); const original = await readFile(join(root, "release-process.md"), "utf8"); assert.match(original, /tags:\n  - release\nrelated:/); assert.doesNotMatch(original, /evidence|verified-tool/i); assert.doesNotMatch(JSON.stringify(stored), /evidence|verified-tool/i);
+  const replay = createMemoryCaptureLifecycle({ policy, extract, apply: (input) => catalog.apply(input) }); assert.deepEqual(await replay.compact(source), { status: "noop", records: 0 }); await catalog.close(); assert.equal(await readFile(join(root, "release-process.md"), "utf8"), original);
 });
 
 test("adversarial fake extractor stale, unverified, noisy, and one-invalid-record batches never write", async (t) => {

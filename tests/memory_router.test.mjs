@@ -51,11 +51,11 @@ test("malformed memory apply requests leave a real catalog untouched before its 
   await writeFile(recordPath, "---\nid: default\ntitle: Default\nrelevant_at: 2026-07-13T00:00:00.000Z\nrelated:\n---\n\ndefault body\n");
   await writeFile(indexPath, "# index\n");
   let queueRuns = 0; let writes = 0;
-  const catalog = openMemoryCatalog({ kbRoot: directory, databasePath: join(directory, "catalog.sqlite"), mutationHook: () => { queueRuns += 1; }, writeHook: () => { writes += 1; } });
+  const catalog = openMemoryCatalog({ kbRoot: directory, mutationHook: () => { queueRuns += 1; }, writeHook: () => { writes += 1; } });
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
   const router = createAgentRouter({ repository, memoryCatalog: catalog, port: 0 });
   const wsUrl = await router.listen(); const url = wsUrl.replace(/^ws:/, "http:").replace(/\/v1\/agents$/, "");
-  t.after(async () => { await router.close(); repository.close(); catalog.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { await router.close(); repository.close(); await catalog.close(); await rm(directory, { recursive: true, force: true }); });
 
   const snapshot = { queueRuns, writes, record: await readFile(recordPath, "utf8"), index: await readFile(indexPath, "utf8") };
   for (const payload of [null, { store: "default", request_id: "shape", operations: [] }, { store: "default", request_id: "canonical", operations: [{ mode: "create", id: "new", title: "New\nTitle", body: "body", related: [] }] }, { store: "default", request_id: "date-only", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13", expected_title: "Default", expected_body: "default body", expected_related: [], title: "Changed", body: "changed", related: [] }] }, { store: "default", request_id: "batch", operations: [{ mode: "create", id: "new", title: "New", body: "body", related: [] }, { mode: "create", id: "new", title: "Again", body: "body", related: [] }] }]) {
@@ -67,4 +67,20 @@ test("malformed memory apply requests leave a real catalog untouched before its 
   assert.equal(writes, snapshot.writes);
   assert.equal(await readFile(recordPath, "utf8"), snapshot.record);
   assert.equal(await readFile(indexPath, "utf8"), snapshot.index);
+});
+
+test("router close flushes deferred memory mutations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-memory-router-close-"));
+  const recordPath = join(directory, "default.md");
+  await writeFile(recordPath, "---\nid: default\ntitle: Default\nrelevant_at: 2026-07-13T00:00:00.000Z\nrelated:\n---\n\ndefault body\n");
+  await writeFile(join(directory, "INDEX.md"), "# Index\n");
+  const catalog = openMemoryCatalog({ kbRoot: directory }); const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") }); const router = createAgentRouter({ repository, memoryCatalog: catalog, port: 0 });
+  try {
+    const wsUrl = await router.listen(); const url = wsUrl.replace(/^ws:/, "http:").replace(/\/v1\/agents$/, "");
+    const response = await request(url, "/v1/memory/apply", { store: "default", request_id: "close", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: [], title: "Changed", body: "changed", related: [] }] });
+    assert.equal(response.status, 200); assert.match(await response.text(), /"applied"/);
+    assert.match(await readFile(recordPath, "utf8"), /title: Default/);
+    await router.close();
+    assert.match(await readFile(recordPath, "utf8"), /title: Changed/);
+  } finally { repository.close(); await catalog.close(); await rm(directory, { recursive: true, force: true }); }
 });

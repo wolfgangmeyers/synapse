@@ -69,8 +69,7 @@ export async function startRouter({
   try {
     repository = openMessageRepository({ databasePath: database });
     const kbRoot = process.env.MECHA_KB_ROOT ?? join(homedir(), ".mecha-developer", "kb");
-    memoryCatalog = openMemoryCatalog({ kbRoot, databasePath: `${database}.memory.sqlite` });
-    await memoryCatalog.rebuild();
+    memoryCatalog = openMemoryCatalog({ kbRoot });
     jsonlLogger = createJsonlLogger({ logPath: resolvedLogPath });
     const eventLogger = (event, fields) => jsonlLogger.log(event, fields);
     for (const migrationId of repository.migrationIds()) {
@@ -90,7 +89,7 @@ export async function startRouter({
         } finally {
           try {
             repository?.close();
-            memoryCatalog?.close();
+            await memoryCatalog?.close();
           } finally {
             jsonlLogger.close();
           }
@@ -108,7 +107,7 @@ export async function startRouter({
     }
     try {
       repository?.close();
-      memoryCatalog?.close();
+      await memoryCatalog?.close();
     } finally {
       jsonlLogger?.close();
     }
