@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check harness/id.js && node --check harness/protocol.js && node --check harness/db.js && node --check harness/jsonl_logger.js && node --check harness/router.js && node --check harness/server_jobs.js && node --check harness/server_jobs/kb_maintenance_reminder.js && node --check tools/run_router.mjs && node --check tools/sentinel_native_probe.mjs && node --check pi-extensions/mecha-messaging.js && node --check tests/pi_extension_silent.test.mjs && node --check tests/pr_watch_wakeup.test.mjs && node --check tests/mailbox_v2_delivery.test.mjs && node --check tests/protocol.test.mjs && node --check tests/pi_extension_standalone.test.mjs"
+    "check": "node --check harness/id.js && node --check harness/protocol.js && node --check harness/db.js && node --check harness/jsonl_logger.js && node --check harness/router.js && node --check harness/server_jobs.js && node --check harness/server_jobs/kb_maintenance_reminder.js && node --check harness/mailbox-client.js && node --check pi-extensions/mailbox-client.js && node --check discord-gateway-bridge/bridge.js && node --check discord-gateway-bridge/discord.js && node --check discord-gateway-bridge/state.js && node --check discord-gateway-bridge/main.mjs && node --check tools/run_router.mjs && node --check tools/sentinel_native_probe.mjs && node --check pi-extensions/mecha-messaging.js && node --check tests/discord_gateway_bridge.test.mjs && node --check tests/pi_extension_silent.test.mjs && node --check tests/pr_watch_wakeup.test.mjs && node --check tests/mailbox_v2_delivery.test.mjs && node --check tests/protocol.test.mjs && node --check tests/pi_extension_standalone.test.mjs",
+    "discord-gateway-bridge": "node discord-gateway-bridge/main.mjs"
   },
   "dependencies": {
     "ajv": "8.20.0",
