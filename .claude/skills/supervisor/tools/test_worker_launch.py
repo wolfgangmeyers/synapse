@@ -128,7 +128,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(command[command.index("--session") + 1], "session-123")
         self.assertNotIn("resume", command)
 
-    def test_pi_launch_exports_router_configuration_but_not_identity(self):
+    def test_pi_launch_exports_router_configuration_but_not_identity_or_settled_recipient_by_default(self):
         extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
@@ -137,8 +137,58 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
+        self.assertNotIn(worker_launch.PI_NOTIFY_ON_SETTLED_ENV, commands[0])
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])
+
+    def test_pi_launch_exports_validated_settled_recipient(self):
+        extension = self._pi_mailbox_extension()
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main(
+                "pi-worker", "--notify-on-settled", "supervisor", agent="pi"
+            )
+
+        self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
+        self.assertIn("export MECHA_PI_NOTIFY_ON_SETTLED=supervisor", commands[0])
+
+    def test_settled_recipient_rejects_non_mailbox_ids_before_launch(self):
+        extension = self._pi_mailbox_extension()
+        for recipient in ("", "bad recipient", "bad@recipient"):
+            argv = [
+                "worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name,
+                "--agent", "pi", "--notify-on-settled", recipient,
+            ]
+            with self.subTest(recipient=recipient), patch.dict(os.environ, {
+                worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+                worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+            }, clear=True), \
+                 patch.object(worker_launch.sys, "argv", argv), \
+                 patch.object(worker_launch, "window_exists") as window_exists, \
+                 contextlib.redirect_stderr(stderr := io.StringIO()), \
+                 self.assertRaises(SystemExit) as raised:
+                worker_launch.main()
+
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn("valid Mailbox agent ID", stderr.getvalue())
+            window_exists.assert_not_called()
+
+    def test_settled_recipient_rejects_non_pi_agents_before_launch(self):
+        argv = [
+            "worker_launch.py", "--window", "worker", "--dir", self.tmpdir.name,
+            "--agent", "claude", "--notify-on-settled", "supervisor",
+        ]
+        with patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("only supported for Pi", stderr.getvalue())
+        window_exists.assert_not_called()
 
     def test_main_refuses_pi_global_extension_discovery(self):
         argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name]

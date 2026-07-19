@@ -158,6 +158,170 @@ test("Pi delivery ACK follows a persisted session entry, not pi.sendMessage", as
   await session.close();
 });
 
+function settledNotificationFixture(t, { recipient, sendReply = async () => ({ id: "reply" }) } = {}) {
+  const previousRecipient = process.env.MECHA_PI_NOTIFY_ON_SETTLED;
+  if (recipient === undefined) delete process.env.MECHA_PI_NOTIFY_ON_SETTLED;
+  else process.env.MECHA_PI_NOTIFY_ON_SETTLED = recipient;
+  t.after(() => {
+    if (previousRecipient === undefined) delete process.env.MECHA_PI_NOTIFY_ON_SETTLED;
+    else process.env.MECHA_PI_NOTIFY_ON_SETTLED = previousRecipient;
+  });
+
+  const handlers = new Map();
+  const childEvents = new Map();
+  const notifications = [];
+  let idle = true;
+  const context = {
+    sessionManager: { getSessionId: () => "parent-session" },
+    isIdle: () => idle,
+    ui: { notify: (...args) => notifications.push(args), setStatus() {} },
+  };
+  const client = {
+    connect: () => Promise.resolve(),
+    close() {},
+    sendReply,
+    sendReceipt() {},
+  };
+  const pi = {
+    events: { on(type, handler) { childEvents.set(type, handler); } },
+    on(type, handler) { handlers.set(type, handler); },
+    registerCommand() {},
+    registerTool() {},
+    sendMessage() {},
+    exec: async () => ({ code: 0, stderr: "" }),
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "worker",
+    createClient: () => client,
+  });
+  handlers.get("session_start")({}, context);
+  return {
+    childEvents,
+    client,
+    context,
+    handlers,
+    notifications,
+    setIdle(value) { idle = value; },
+  };
+}
+
+test("settled notification sends one exact reply only after top-level work settles idle", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+
+  assert.deepEqual(attempts, []);
+  assert.equal(fixture.handlers.has("agent_end"), false);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.setIdle(false);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.deepEqual(attempts, []);
+
+  fixture.setIdle(true);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.deepEqual(attempts, [{
+    to: "supervisor",
+    subject: "Pi worker settled",
+    body: "Worker worker has settled and is idle.",
+  }]);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.equal(attempts.length, 1);
+});
+
+test("settled notification stays disabled without a valid opt-in", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.equal(attempts.length, 0);
+});
+
+test("settled notification excludes child sessions", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+
+  fixture.childEvents.get("subagents:child:session-created")({ sessionId: "child-session" });
+  const childContext = {
+    ...fixture.context,
+    sessionManager: { getSessionId: () => "child-session" },
+  };
+  fixture.handlers.get("session_start")({}, childContext);
+  fixture.handlers.get("agent_start")({}, childContext);
+  fixture.handlers.get("agent_settled")({}, childContext);
+  assert.equal(attempts.length, 0);
+  fixture.childEvents.get("subagents:child:disposed")({ sessionId: "child-session" });
+});
+
+test("an invalid settled recipient leaves notifications disabled", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "not a mailbox agent",
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.equal(attempts.length, 0);
+});
+
+test("a rejected settled notification reports once and does not block a later run", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    sendReply(message) {
+      attempts.push(message);
+      return attempts.length === 1 ? Promise.reject(new Error("router rejected")) : Promise.resolve({ id: "reply" });
+    },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  await nextTurn();
+  assert.deepEqual(fixture.notifications, [["Pi settled notification failed: router rejected", "error"]]);
+  assert.equal(attempts.length, 1);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  await nextTurn();
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(fixture.notifications, [["Pi settled notification failed: router rejected", "error"]]);
+});
+
+test("overlapping settled notification sends retain independent claimed generations", async (t) => {
+  const attempts = [];
+  const deferred = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    sendReply(message) {
+      attempts.push(message);
+      return new Promise((resolve) => deferred.push(resolve));
+    },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.equal(attempts.length, 2);
+
+  deferred[0]({ id: "first" });
+  await nextTurn();
+  assert.equal(attempts.length, 2);
+  deferred[1]({ id: "second" });
+  await nextTurn();
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(fixture.notifications, []);
+});
+
 test("extension forwards Pi message_end into the durable mailbox checkpoint", async () => {
   const message = envelope("message-extension-wiring");
   const session = await durableSession(message.id);
