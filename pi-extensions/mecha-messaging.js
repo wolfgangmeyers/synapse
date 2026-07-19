@@ -733,7 +733,11 @@ export function createMechaMessagingExtension(pi, {
     if (sessionId !== undefined) children.delete(sessionId);
   });
 
-  pi.on("message_end", (event, context) => coordinator?.onMessageEnd(event, context));
+  pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
+  pi.on("message_end", (event, context) => { if (!children.has(context.sessionManager.getSessionId())) activeWork = boundedConversationText(event.message?.content, 4096); coordinator?.onMessageEnd(event, context); });
+  pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; try { await ensureRecallPolicy(); recallController.activity(); } catch { /* Fail closed: no default-timing recall window. */ } });
+  pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; try { await ensureRecallPolicy(); recallController.activity(); } catch { /* Fail closed: no default-timing recall window. */ } });
+  pi.on("session_shutdown", async (_event, context) => { if (children.has(context.sessionManager.getSessionId())) return; recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch {} finally { controller.abort(); clearTimeout(timer); } });
 
   pi.on("session_start", (_event, context) => {
     const sessionId = context.sessionManager.getSessionId();
