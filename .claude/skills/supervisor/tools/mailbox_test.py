@@ -135,13 +135,11 @@ class MailboxSendV2Test(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("Router rejected message: queue_full", result.stderr)
 
-    def test_rejects_non_loopback_router_before_posting(self):
-        result = run_send(
-            ["--to", "worker-1", "--from", "supervisor", "--body", "Status", "--router-url", "https://example.com"]
+    def test_allows_exact_non_loopback_router_urls(self):
+        self.assertEqual(
+            mailbox_send.router_endpoint("https://example.com", "/v1/messages"),
+            "https://example.com/v1/messages",
         )
-
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("must use a loopback", result.stderr)
 
     def test_rejects_non_agent_recipients_and_v1_large_body_override(self):
         non_agent = run_send(["--to", "person@example.com", "--from", "supervisor", "--body", "Status"])

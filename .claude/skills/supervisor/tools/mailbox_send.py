@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post one durable local Mailbox v2 agent message."""
+"""Post one durable Mailbox v2 agent message to an explicit router."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--router-url",
         default=os.environ.get("MECHA_ROUTER_URL", DEFAULT_ROUTER_URL),
-        help="Loopback router URL (default: %(default)s)",
+        help="Router URL (default: %(default)s)",
     )
     return result
 
@@ -75,10 +75,16 @@ def resolve_sender(explicit: str | None) -> str:
     return sender
 
 
+def is_loopback_router(router_url: str) -> bool:
+    return urlparse(router_url).hostname in LOOPBACK_HOSTS
+
+
 def router_endpoint(router_url: str, path: str) -> str:
     parsed = urlparse(router_url)
-    if parsed.scheme not in {"http", "https"} or parsed.hostname not in LOOPBACK_HOSTS:
-        raise ValueError("--router-url must use a loopback http(s) address.")
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment):
+        raise ValueError("--router-url must be an exact http(s) base URL.")
     return f"{router_url.rstrip('/')}{path}"
 
 
@@ -148,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         return fail(f"Router response invalid: {error}", 1)
     except URLError as error:
-        if not connection_refused(error):
+        if not connection_refused(error) or not is_loopback_router(args.router_url):
             return fail(f"Router unavailable: {error.reason}", 1)
         kickstart_error = kickstart_once()
         if kickstart_error is not None:
