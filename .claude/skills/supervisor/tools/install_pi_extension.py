@@ -10,7 +10,7 @@ import tempfile
 SOURCE = Path(__file__).resolve().parents[4] / "pi-extensions" / "mecha-messaging.js"
 TARGET = Path.home() / ".mecha-developer" / "extensions" / "mecha-messaging.js"
 SETTINGS = Path.home() / ".pi" / "agent" / "settings.json"
-EXTENSION_MODULES = ("memory-capture.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
+EXTENSION_MODULES = ("mailbox-client.js", "memory-capture.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
 
 
 def extension_artifacts() -> tuple[tuple[Path, Path], ...]:
