@@ -10,7 +10,7 @@ export const RECALL_POLICY = Object.freeze({
   candidate_bytes: 16384,
   evaluator: "openai-codex/gpt-5.6-luna",
   maximum_messages: 3,
-  expansion: Object.freeze({ maximum_ids: 6, maximum_terms: 3, maximum_matched_records: 12, maximum_bytes: 16384, maximum_related_edges: 24, maximum_graph_depth: 2 }),
+  expansion: Object.freeze({ maximum_ids: 6, maximum_terms: 3, maximum_tags: 8, maximum_matched_records: 12, maximum_bytes: 16384, maximum_related_edges: 24, maximum_graph_depth: 2 }),
   capture: Object.freeze({ evaluator: "openai-codex/gpt-5.6-sol", compaction_deadline_ms: 30000, shutdown_deadline_ms: 10000, evaluator_timeout_ms: 60000, router_timeout_ms: 5000, source_max_bytes: 98304, source_message_max_bytes: 8192, tool_result_max_bytes: 2048, previous_summary_max_bytes: 8192, candidate_limit: 100, candidate_max_bytes: 65536, output_max_bytes: 32768, maximum_records: 6, maximum_title_bytes: 256, maximum_body_bytes_per_record: 16384, maximum_total_body_bytes: 32768, maximum_related_ids_per_record: 24 }),
 });
 const STORE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -63,20 +63,23 @@ class MemoryCatalog {
   lookupSync({ stores, terms = [] }) {
     this.rebuildSync();
     const selected = validateStores(stores, this.stores()); const literalTerms = validateTerms(terms, RECALL_POLICY.expansion.maximum_terms);
-    const rows = this.db.prepare(`SELECT id, title, substr(memory, 1, ?) AS memory, relevant_at, related, store, path FROM records WHERE store IN (${selected.map(() => "?").join(",")}) ORDER BY relevant_at DESC, id ASC LIMIT ?`).all(8192, ...selected, RECALL_POLICY.candidate_limit);
-    let bytes = 0; return rows.filter((row) => literalTerms.length === 0 || literalTerms.every((term) => `${row.title}\n${row.memory}`.toLowerCase().includes(term.toLowerCase()))).map(toRecord).filter((record) => { bytes += Buffer.byteLength(JSON.stringify(record)); return bytes <= RECALL_POLICY.candidate_bytes; });
+    const rows = this.db.prepare(`SELECT id, title, memory, relevant_at, related, store, path FROM records WHERE store IN (${selected.map(() => "?").join(",")}) ORDER BY relevant_at DESC, id ASC`).all(...selected);
+    const matched = rows.filter((row) => literalTerms.length === 0 || literalTerms.every((term) => `${row.title}\n${row.memory}`.toLowerCase().includes(term.toLowerCase()))).slice(0, RECALL_POLICY.candidate_limit);
+    let bytes = 0; return matched.map(toRecord).filter((record) => { bytes += Buffer.byteLength(JSON.stringify(record)); return bytes <= RECALL_POLICY.candidate_bytes; });
   }
   async expand(input) { return this.mutate(() => this.expandSync(input)); }
-  expandSync({ stores, ids = [], terms = [], depth = 0 }) {
+  expandSync({ stores, ids = [], terms = [], tags = [], depth = 0 }) {
     this.rebuildSync();
     const selected = validateStores(stores, this.stores());
     if (!Number.isSafeInteger(depth) || depth < 0 || depth > RECALL_POLICY.expansion.maximum_graph_depth) throw new MemoryCatalogError("invalid graph depth");
-    const wanted = validateIds(ids, RECALL_POLICY.expansion.maximum_ids); const literalTerms = validateTerms(terms, RECALL_POLICY.expansion.maximum_terms);
-    const all = this.db.prepare(`SELECT id, title, substr(memory, 1, ?) AS memory, relevant_at, related, store FROM records WHERE store IN (${selected.map(() => "?").join(",")}) ORDER BY CASE WHEN id IN (${wanted.map(() => "?").join(",")}) THEN 0 ELSE 1 END, relevant_at DESC, id ASC LIMIT ?`).all(8192, ...selected, ...wanted, RECALL_POLICY.candidate_limit).map(toRecord);
+    const wanted = validateOptionalIds(ids, RECALL_POLICY.expansion.maximum_ids); const literalTerms = validateTerms(terms, RECALL_POLICY.expansion.maximum_terms); const requestedTags = validateTags(tags, RECALL_POLICY.expansion.maximum_tags);
+    if (wanted.length === 0 && literalTerms.length === 0 && requestedTags.length === 0) throw new MemoryCatalogError("empty memory expansion");
+    const all = this.db.prepare(`SELECT id, title, substr(memory, 1, ?) AS memory, relevant_at, related, store, path FROM records WHERE store IN (${selected.map(() => "?").join(",")}) ORDER BY relevant_at DESC, id ASC`).all(8192, ...selected).map(toRecord);
     const byId = new Map(all.map((record) => [record.id, record])); const result = []; const add = (record) => { if (record && !result.some((item) => item.id === record.id) && result.length < RECALL_POLICY.expansion.maximum_matched_records) result.push(record); };
-    wanted.forEach((id) => add(byId.get(id))); for (const term of literalTerms) for (const row of this.db.prepare(`SELECT id, title, substr(memory, 1, ?) AS memory, relevant_at, related, store FROM records WHERE store IN (${selected.map(() => "?").join(",")}) AND (title LIKE ? OR memory LIKE ?) ORDER BY relevant_at DESC, id ASC LIMIT ?`).all(8192, ...selected, `%${term}%`, `%${term}%`, RECALL_POLICY.expansion.maximum_matched_records)) add(toRecord(row));
+    for (const record of all) if (literalTerms.every((term) => `${record.title}\n${record.memory}`.toLowerCase().includes(term.toLowerCase())) && requestedTags.every((tag) => record.tags.includes(tag)) && (literalTerms.length > 0 || requestedTags.length > 0)) add(record);
+    wanted.forEach((id) => add(byId.get(id)));
     let frontier = result.slice(); let edges = 0;
-    graph: for (let level = 0; level < depth; level += 1) { const next = []; for (const record of frontier) for (const id of record.related) { if (++edges > this.edgeBudget) break graph; let related = byId.get(id); if (!related) { const row = this.db.prepare(`SELECT id, title, substr(memory, 1, ?) AS memory, relevant_at, related, store FROM records WHERE id = ? AND store IN (${selected.map(() => "?").join(",")})`).get(8192, id, ...selected); if (row) { related = toRecord(row); byId.set(id, related); } } if (related && !result.some((item) => item.id === id)) { add(related); next.push(related); } } frontier = next; }
+    graph: for (let level = 0; level < depth; level += 1) { const next = []; for (const record of frontier) for (const id of record.related) { if (++edges > this.edgeBudget) break graph; let related = byId.get(id); if (!related) { const row = this.db.prepare(`SELECT id, title, substr(memory, 1, ?) AS memory, relevant_at, related, store, path FROM records WHERE id = ? AND store IN (${selected.map(() => "?").join(",")})`).get(8192, id, ...selected); if (row) { related = toRecord(row); byId.set(id, related); } } if (related && !result.some((item) => item.id === id)) { add(related); next.push(related); } } frontier = next; }
     result.sort((left, right) => right.relevant_at.localeCompare(left.relevant_at) || left.id.localeCompare(right.id)); let bytes = 0; return result.filter((record) => { bytes += Buffer.byteLength(JSON.stringify(record)); return bytes <= RECALL_POLICY.expansion.maximum_bytes; });
   }
   async apply(input) { validateApplyInput(input); return this.mutate(() => this.applySync(input)); }
@@ -112,5 +115,7 @@ function toRecord(row) { const { path, ...record } = row; const tags = typeof pa
 function boundUtf8(value, maximum) { let bytes = 0; let output = ""; for (const character of value) { const size = Buffer.byteLength(character); if (bytes + size > maximum) break; output += character; bytes += size; } return output; }
 function validateStores(stores, available) { if (!Array.isArray(stores) || stores.length === 0 || new Set(stores).size !== stores.length || stores.some((store) => store !== "default" && !STORE_ID.test(store)) || stores.some((store) => !available.includes(store))) throw new MemoryCatalogError("invalid selected stores"); return stores; }
 function validateIds(ids, maximum) { if (!Array.isArray(ids) || ids.length === 0 || ids.length > maximum || new Set(ids).size !== ids.length || ids.some((id) => !ID.test(id))) throw new MemoryCatalogError("invalid memory ids"); return ids; }
+function validateOptionalIds(ids, maximum) { if (!Array.isArray(ids) || ids.length > maximum || new Set(ids).size !== ids.length || ids.some((id) => !ID.test(id))) throw new MemoryCatalogError("invalid memory ids"); return ids; }
 function validateTerms(terms, maximum) { if (!Array.isArray(terms) || terms.length > maximum || terms.some((term) => typeof term !== "string" || term.length === 0 || term.length > 128)) throw new MemoryCatalogError("invalid literal terms"); return terms; }
+function validateTags(tags, maximum) { if (!Array.isArray(tags) || tags.length > maximum || new Set(tags).size !== tags.length || tags.some((tag) => typeof tag !== "string" || !TAG.test(tag) || Buffer.byteLength(tag) > 64)) throw new MemoryCatalogError("invalid memory tags"); return tags; }
 function touchRecord(path, timestamp) { const text = readFileSync(path, "utf8"); const updated = text.replace(/^(relevant_at:)\s*.*$/m, `$1 ${timestamp}`); if (updated === text) throw new MemoryCatalogError("canonical record disappeared"); const temporary = safeTemporary(path, updated); renameSync(temporary, path); }

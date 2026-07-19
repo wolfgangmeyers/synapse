@@ -169,6 +169,7 @@ function settledNotificationFixture(t, { recipient, sendReply = async () => ({ i
 
   const handlers = new Map();
   const childEvents = new Map();
+  const tools = new Map();
   const notifications = [];
   const context = {
     sessionManager: { getSessionId: () => "parent-session" },
@@ -184,7 +185,7 @@ function settledNotificationFixture(t, { recipient, sendReply = async () => ({ i
     events: { on(type, handler) { childEvents.set(type, handler); } },
     on(type, handler) { handlers.set(type, handler); },
     registerCommand() {},
-    registerTool() {},
+    registerTool(tool) { tools.set(tool.name, tool); },
     sendMessage() {},
     exec: async () => ({ code: 0, stderr: "" }),
   };
@@ -199,6 +200,7 @@ function settledNotificationFixture(t, { recipient, sendReply = async () => ({ i
     context,
     handlers,
     notifications,
+    tools,
   };
 }
 
@@ -250,6 +252,24 @@ test("settled notification excludes child sessions", async (t) => {
   fixture.handlers.get("agent_start")({}, childContext);
   fixture.handlers.get("agent_settled")({}, childContext);
   assert.equal(attempts.length, 0);
+  fixture.childEvents.get("subagents:child:disposed")({ sessionId: "child-session" });
+});
+
+test("child sessions do not schedule recall work", async (t) => {
+  const fixture = settledNotificationFixture(t, { recipient: "supervisor" });
+  const previousFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => { fetches += 1; throw new Error("child recall must not fetch policy"); };
+  t.after(() => { globalThis.fetch = previousFetch; });
+
+  await fixture.tools.get("mecha_recall").execute("enable-recall", { action: "enable", stores: ["default"] });
+  fixture.childEvents.get("subagents:child:session-created")({ sessionId: "child-session" });
+  const childContext = { ...fixture.context, sessionManager: { getSessionId: () => "child-session" } };
+  fixture.handlers.get("message_start")({}, childContext);
+  fixture.handlers.get("agent_settled")({}, childContext);
+  await nextTurn();
+
+  assert.equal(fetches, 0);
   fixture.childEvents.get("subagents:child:disposed")({ sessionId: "child-session" });
 });
 

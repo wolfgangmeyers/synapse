@@ -11,6 +11,9 @@ test("copied Pi extension loads without repository dependencies", async () => {
   try {
     const extension = join(directory, "mecha-messaging.js");
     await copyFile(new URL("../pi-extensions/mecha-messaging.js", import.meta.url), extension);
+    for (const name of ["recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js", "memory-capture.js"]) {
+      await copyFile(new URL(`../pi-extensions/${name}`, import.meta.url), join(directory, name));
+    }
     const module = await import(pathToFileURL(extension).href);
     const client = module.createMailboxClient({ agentId: "worker", onEnvelope: () => {} });
     assert.match(client.instanceId, /^[A-Za-z0-9]{21}$/);
