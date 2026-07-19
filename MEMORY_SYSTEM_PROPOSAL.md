@@ -26,9 +26,9 @@ unrestricted local-file access.
   not implicitly migrated or cataloged; making one canonical is an explicit
   normal KB edit. Material from an old store may likewise be deliberately
   incorporated through a normal KB update.
-- A rebuildable SQLite catalog supports recall but is not memory: it contains
-  canonical frontmatter, derived store data, and a derived copy of each record's
-  Markdown body and is always rebuildable from Markdown.
+- The single router hydrates an in-memory catalog from canonical Markdown at
+  startup. It serves recall and capture validation from that ordered state;
+  capture writes are coalesced back to canonical Markdown and `INDEX.md`.
 - Recall activation, selected stores, and runtime state—including timers,
   cooldown, coalescing, and pending evaluation—exist only in the local Pi
   extension for that agent process. They are never router, KB-record, or
@@ -71,8 +71,8 @@ Markdown `See Also` section may exist for people, but is not part of recall.
 
 ## Catalog, Lookup, And Policy
 
-The router owns the rebuildable catalog, narrow memory lookup and touch APIs,
-and central shared recall policy. It does not own activation, selected-store
+The router owns the startup-hydrated in-memory catalog, narrow memory lookup
+and touch APIs, and central shared recall policy. It does not own activation, selected-store
 configuration, runtime state, run the evaluator, or inject recall messages. Its
 catalog contains the canonical fields plus derived store data:
 
@@ -236,11 +236,10 @@ the same retrieval facet.
 
 ## Maintainability Constraints
 
-Keep router and extension work in small, cohesive modules: catalog rebuild and
+Keep router and extension work in small, cohesive modules: catalog hydration,
 lookup/touch APIs, policy and session state, activity timing, evaluator launch,
 and message delivery. Do not turn an existing router or extension file into a
-memory monolith. Keep catalog rebuilding and bounded literal search simple,
-local operations over the KB.
+memory monolith. Keep bounded literal search simple and local to the router.
 
 ## Phased Implementation
 
@@ -253,8 +252,8 @@ durable memory.
    contract; discover default-layout and named-store records while excluding
    `INDEX.md` and noncanonical files; derive store from path; reject global ID
    collisions; treat the Markdown body as the memory; make normal KB writes set
-   `relevant_at`; and build/rebuild the derived catalog with deterministic
-   ordering.
+   `relevant_at`; hydrate the derived catalog at router startup with deterministic
+   ordering; and coalesce capture writes back to canonical Markdown and `INDEX.md`.
 3. **Add router control-plane APIs.** Implement the central shared-policy block
    and bounded lookup/expansion and touch APIs with explicit validated selected
    stores. The router has no recall activation, selected-store configuration,
@@ -280,9 +279,10 @@ durable memory.
   `stores/<store-id>/` subtree. Store is derived from path, never added to
   canonical frontmatter. Discovery excludes `INDEX.md` and noncanonical files;
   noncanonical existing files require an explicit normal KB edit to migrate.
-- Deleting and rebuilding the SQLite catalog loses no memory and recreates the
-  five canonical-derived fields plus derived `store`; duplicate IDs across all
-  stores are rejected.
+- Router startup hydrates the in-memory catalog from canonical Markdown and
+  orders its canonical-derived fields plus derived `store`; duplicate IDs across
+  all stores are rejected. Capture mutations update memory immediately and
+  coalesce a safe canonical Markdown and `INDEX.md` flush before router shutdown.
 - The old recall implementation is removed before new recall implementation;
   no legacy/coexisting delivery path remains.
 - The router owns the catalog, narrow lookup/touch APIs, and the sole shared

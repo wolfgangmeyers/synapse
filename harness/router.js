@@ -505,6 +505,7 @@ export function createAgentRouter({
       await new Promise((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
+      await memoryCatalog?.close?.();
       emit("router_stopped");
     },
 
