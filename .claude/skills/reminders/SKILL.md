@@ -60,3 +60,6 @@ The Mailbox V2 router persists reminders and delivers due envelopes. It owns
 scheduling; do not run the retired V1 `reminder_cron.py` or edit a local
 reminder JSON file. `set_reminder.py` remains only as a compatibility entry
 point and delegates to `reminders.py set`.
+
+Reminder delivery means execute the named action and report evidence or the exact
+block; acknowledgement or generic status without action is not compliant.
