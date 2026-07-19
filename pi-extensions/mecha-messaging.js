@@ -751,9 +751,9 @@ export function createMechaMessagingExtension(pi, {
   });
   pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; try { await ensureRecallPolicy(); recallController.activity(); } catch { /* Fail closed: no default-timing recall window. */ } });
   pi.on("agent_settled", (_event, context) => {
-    if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending || !context.isIdle()) return;
+    if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending) return;
 
-    // Claim before sendReply starts so a later run is an independent generation.
+    // Consume before sendReply starts so a later run can arm independently.
     settledNotificationPending = false;
     const notificationClient = client;
     const worker = settledNotificationAgentId;

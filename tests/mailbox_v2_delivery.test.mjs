@@ -170,10 +170,8 @@ function settledNotificationFixture(t, { recipient, sendReply = async () => ({ i
   const handlers = new Map();
   const childEvents = new Map();
   const notifications = [];
-  let idle = true;
   const context = {
     sessionManager: { getSessionId: () => "parent-session" },
-    isIdle: () => idle,
     ui: { notify: (...args) => notifications.push(args), setStatus() {} },
   };
   const client = {
@@ -201,11 +199,10 @@ function settledNotificationFixture(t, { recipient, sendReply = async () => ({ i
     context,
     handlers,
     notifications,
-    setIdle(value) { idle = value; },
   };
 }
 
-test("settled notification sends one exact reply only after top-level work settles idle", async (t) => {
+test("settled notification sends one exact reply when top-level work settles", async (t) => {
   const attempts = [];
   const fixture = settledNotificationFixture(t, {
     recipient: "supervisor",
@@ -216,11 +213,6 @@ test("settled notification sends one exact reply only after top-level work settl
   assert.equal(fixture.handlers.has("agent_end"), false);
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.handlers.get("agent_start")({}, fixture.context);
-  fixture.setIdle(false);
-  fixture.handlers.get("agent_settled")({}, fixture.context);
-  assert.deepEqual(attempts, []);
-
-  fixture.setIdle(true);
   fixture.handlers.get("agent_settled")({}, fixture.context);
   assert.deepEqual(attempts, [{
     to: "supervisor",
@@ -296,7 +288,7 @@ test("a rejected settled notification reports once and does not block a later ru
   assert.deepEqual(fixture.notifications, [["Pi settled notification failed: router rejected", "error"]]);
 });
 
-test("overlapping settled notification sends retain independent claimed generations", async (t) => {
+test("overlapping settled notification sends make independent attempts", async (t) => {
   const attempts = [];
   const deferred = [];
   const fixture = settledNotificationFixture(t, {
