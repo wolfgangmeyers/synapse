@@ -19,6 +19,8 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.target = root / "managed" / "mecha-messaging.js"
         self.settings = root / "pi" / "agent" / "settings.json"
         self.source.write_text("export default {};\n", encoding="utf-8")
+        for name in install_pi_extension.EXTENSION_MODULES:
+            self.source.with_name(name).write_text(f"export const name = {name!r};\n", encoding="utf-8")
         self.paths = patch.multiple(
             install_pi_extension, SOURCE=self.source, TARGET=self.target, SETTINGS=self.settings,
         )
@@ -39,9 +41,35 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.assertEqual(install_pi_extension.main(), 0)
 
         self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
+        for name in install_pi_extension.EXTENSION_MODULES:
+            self.assertEqual(self.target.with_name(name).read_bytes(), self.source.with_name(name).read_bytes())
         settings = json.loads(self.settings.read_text(encoding="utf-8"))
         self.assertEqual(settings["packages"], ["npm:other", str(stale), str(self.target)])
         self.assertTrue((self.target.with_name(self.target.name + ".rollback")).is_file())
+
+    def test_rolls_back_every_bundle_file_after_a_partial_install_failure(self):
+        self.target.parent.mkdir()
+        original_files = {}
+        for _, target in install_pi_extension.extension_artifacts():
+            original = f"old {target.name}\n"
+            target.write_text(original, encoding="utf-8")
+            original_files[target] = original
+        self.settings.parent.mkdir(parents=True)
+        original_settings = '{"packages": ["npm:other"]}\n'
+        self.settings.write_text(original_settings, encoding="utf-8")
+        copy = install_pi_extension.atomic_copy
+
+        def fail_on_second_bundle_copy(source, target, prefix):
+            if source.parent == self.source.parent and source.name == "recall-state.js":
+                raise OSError("injected bundle copy failure")
+            return copy(source, target, prefix)
+
+        with patch.object(install_pi_extension, "atomic_copy", side_effect=fail_on_second_bundle_copy), self.assertRaises(SystemExit):
+            install_pi_extension.main()
+
+        for target, original in original_files.items():
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+        self.assertEqual(self.settings.read_text(encoding="utf-8"), original_settings)
 
     def test_rejects_symlinked_source_without_mutation(self):
         actual = self.temp_path / "actual.js"

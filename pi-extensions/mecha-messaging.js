@@ -1,6 +1,15 @@
-import { randomBytes } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createRecallState } from "./recall-state.js";
+import { createRecallController } from "./recall-controller.js";
+import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
+import { runRecallEvaluator as evaluateRecall, validateRecallChoice as validateChoice } from "./recall-evaluator.js";
+import { createMemoryCaptureLifecycle } from "./memory-capture.js";
+export { createRecallState } from "./recall-state.js";
+export { createRecallController } from "./recall-controller.js";
+export { createRecallPipeline } from "./recall-pipeline.js";
+export { runRecallEvaluator, validateRecallChoice } from "./recall-evaluator.js";
 
 const WebSocket = globalThis.WebSocket;
 const NANOID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -88,6 +97,12 @@ function assertAgentId(agentId) {
     throw new Error("Mailbox v2 agent identity is invalid");
   }
   return agentId;
+}
+
+export function boundedConversationText(content, maximum = 4096) {
+  const blocks = Array.isArray(content) ? content : [content];
+  const text = blocks.map((block) => typeof block === "string" ? block : block?.type === "text" && typeof block.text === "string" ? block.text : "").filter(Boolean).join("\n");
+  return text.slice(-maximum);
 }
 
 export function routerHttpUrl(routerUrl) {
@@ -696,6 +711,22 @@ export function createMechaMessagingExtension(pi, {
   let client;
   let coordinator;
   let startupError;
+  let activeWork = ""; let recallAbort; let recallProcess; let policyAbort; let policyReady; let capture;
+  const ensureCapture = async (signal) => { if (capture !== undefined) return capture; const response = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000) }); if (!response.ok) throw new Error("capture policy unavailable"); const { recall: policy } = await response.json(); capture = createMemoryCaptureLifecycle({ policy, context: async ({ signal } = {}) => { const lookup = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/lookup`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify({ stores: ["default"] }) }); if (!lookup.ok) throw new Error("capture destination unavailable"); const { records } = await lookup.json(); return records; }, apply: async (body, signal) => { const applied = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/apply`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify(body) }); if (!applied.ok) throw new Error("capture apply failed"); return applied.json(); } }); return capture; };
+  const ensureRecallPolicy = async () => { if (policyReady !== undefined) return policyReady; policyAbort = new AbortController(); const timeout = setTimeout(() => policyAbort?.abort(), 5_000); policyReady = fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: policyAbort.signal }).then((response) => { if (!response.ok) throw new Error("recall policy unavailable"); return response.json(); }).then(({ recall: policy }) => { recallController.configure(policy); return policy; }).finally(() => clearTimeout(timeout)).catch((error) => { policyReady = undefined; throw error; }); return policyReady; };
+  let recall; let recallConfigurationError;
+  try { recall = createRecallState(); } catch (error) { recallConfigurationError = error; recall = createRecallState({}); }
+  let recallPipeline;
+  const recallController = createRecallController({
+    cancel: () => { policyAbort?.abort(); recallAbort?.abort(); recallProcess?.kill(); },
+    evaluate: async (active) => {
+      const status = recall.status();
+      if (!status.enabled || !active()) return undefined;
+      recallPipeline = createPipeline({ routerUrl: process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL, stores: status.stores, workSnapshot: activeWork, evaluate: evaluateRecall, validateChoice, onPolicy: (policy) => recallController.configure(policy), registerAbort: (controller) => { recallAbort = controller; }, registerProcess: (child) => { recallProcess = child; }, send: pi.sendMessage.bind(pi) });
+      return recallPipeline.evaluate(active);
+    },
+    recall: (choice, active) => recallPipeline?.recall(choice, active),
+  });
   let settledNotificationAgentId;
   let settledNotificationPending = false;
   let settledNotificationRecipient;
@@ -732,6 +763,28 @@ export function createMechaMessagingExtension(pi, {
     },
   });
 
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name: "mecha_recall",
+    label: "Mecha Recall",
+    description: "Enable, disable, or inspect process-local Markdown recall.",
+    parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
+      action: { type: "string", enum: ["enable", "disable", "status"] },
+      stores: { type: "array", items: { type: "string" } },
+    } },
+    async execute(_toolCallId, input) {
+      try {
+        if (recallConfigurationError !== undefined) throw recallConfigurationError;
+        if (input.action === "enable") { recallController.stop(); recall.enable(input.stores); }
+        else if (input.action === "disable") { recall.disable(); recallController.stop(); }
+        else if (input.action !== "status") throw new Error("unsupported mecha_recall action");
+        const status = recall.status();
+        return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
+      } catch (error) {
+        return { content: [{ type: "text", text: error.message }], details: {}, isError: true };
+      }
+    },
+  });
+
   pi.events.on("subagents:child:session-created", (event) => {
     const sessionId = childSessionId(event);
     if (sessionId !== undefined) children.add(sessionId);
@@ -743,13 +796,13 @@ export function createMechaMessagingExtension(pi, {
 
   pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
   pi.on("message_end", (event, context) => { if (!children.has(context.sessionManager.getSessionId())) activeWork = boundedConversationText(event.message?.content, 4096); coordinator?.onMessageEnd(event, context); });
-  pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; try { await ensureRecallPolicy(); recallController.activity(); } catch { /* Fail closed: no default-timing recall window. */ } });
+  pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_start", (_event, context) => {
     if (settledNotificationRecipient !== undefined && !children.has(context.sessionManager.getSessionId())) {
       settledNotificationPending = true;
     }
   });
-  pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; try { await ensureRecallPolicy(); recallController.activity(); } catch { /* Fail closed: no default-timing recall window. */ } });
+  pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_settled", (_event, context) => {
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending) return;
 

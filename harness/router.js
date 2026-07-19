@@ -19,6 +19,7 @@ import {
 } from "./db.js";
 import { registeredServerJobs, serverJobEnvelope } from "./server_jobs.js";
 import { createNanoId } from "./id.js";
+import { RECALL_POLICY, MemoryCatalogError } from "./memory-catalog.js";
 import {
   ABSOLUTE_MAX_BODY_BYTES,
   DEFAULT_MAX_BODY_BYTES,
@@ -71,6 +72,7 @@ export function createAgentRouter({
   onOfferError = defaultOfferError,
   onReminderError = defaultReminderError,
   onServerJobError = defaultServerJobError,
+  memoryCatalog,
 } = {}) {
   if (repository === undefined
     || typeof repository.enqueue !== "function"
@@ -119,6 +121,11 @@ export function createAgentRouter({
   if (typeof onServerJobError !== "function") throw new TypeError("onServerJobError must be a function");
   if (!LOOPBACK_HOSTS.has(host)) {
     throw new TypeError("host must be 127.0.0.1 or ::1");
+  }
+
+  if (memoryCatalog !== undefined
+    && (!["rebuild", "lookup", "expand", "touch", "apply"].every((method) => typeof memoryCatalog[method] === "function"))) {
+    throw new TypeError("memoryCatalog must provide rebuild, lookup, expand, and touch");
   }
 
   const sessions = new Map();
@@ -777,6 +784,31 @@ export function createAgentRouter({
       });
       return;
     }
+    if (request.method === "GET" && requestUrl.pathname === "/v1/memory/policy") {
+      if (memoryCatalog === undefined) { sendHttpError(response, 404, "not_found"); return; }
+      sendHttpJson(response, 200, { recall: RECALL_POLICY });
+      return;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/v1/memory/rebuild") {
+      await handleMemoryRequest(request, response, async () => ({ records: await memoryCatalog.rebuild() }));
+      return;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/v1/memory/lookup") {
+      await handleMemoryRequest(request, response, async (payload) => ({ records: await memoryCatalog.lookup(payload) }));
+      return;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/v1/memory/expand") {
+      await handleMemoryRequest(request, response, async (payload) => ({ records: await memoryCatalog.expand(payload) }));
+      return;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/v1/memory/apply") {
+      await handleMemoryRequest(request, response, async (payload) => await memoryCatalog.apply(payload));
+      return;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/v1/memory/touch") {
+      await handleMemoryRequest(request, response, async (payload) => ({ relevant_at: await memoryCatalog.touch(payload) }));
+      return;
+    }
     if (request.method === "GET" && requestUrl.pathname === "/v1/agents") {
       sendHttpJson(response, 200, connectedAgentsSnapshot());
       return;
@@ -843,6 +875,16 @@ export function createAgentRouter({
       }
     }
     sendHttpError(response, 404, "not_found");
+  }
+
+  async function handleMemoryRequest(request, response, operation) {
+    if (memoryCatalog === undefined) { sendHttpError(response, 404, "not_found"); return; }
+    if (!isJsonContentType(request.headers["content-type"])) { sendHttpError(response, 400, "invalid_request"); return; }
+    try { sendHttpJson(response, 200, await operation(await readJsonRequest(request, maxRequestBytes))); }
+    catch (error) {
+      if (error instanceof HttpRequestError || error instanceof MemoryCatalogError) sendHttpError(response, error.statusCode ?? 400, "invalid_request");
+      else throw error;
+    }
   }
 
   async function handleReminderCollection(request, response) {
