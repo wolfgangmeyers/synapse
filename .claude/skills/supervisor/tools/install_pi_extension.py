@@ -10,6 +10,11 @@ import tempfile
 SOURCE = Path(__file__).resolve().parents[4] / "pi-extensions" / "mecha-messaging.js"
 TARGET = Path.home() / ".mecha-developer" / "extensions" / "mecha-messaging.js"
 SETTINGS = Path.home() / ".pi" / "agent" / "settings.json"
+EXTENSION_MODULES = ("memory-capture.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
+
+
+def extension_artifacts() -> tuple[tuple[Path, Path], ...]:
+    return ((SOURCE, TARGET), *((SOURCE.with_name(name), TARGET.with_name(name)) for name in EXTENSION_MODULES))
 
 
 def is_regular_file(path: Path) -> bool:
@@ -59,35 +64,38 @@ def load_settings() -> tuple[dict, bool]:
 
 
 def main() -> int:
-    if not is_regular_file(SOURCE):
-        raise SystemExit(f"Invalid canonical extension source: {SOURCE}")
+    artifacts = extension_artifacts()
+    if any(not is_regular_file(source) for source, _ in artifacts):
+        raise SystemExit("Invalid canonical extension bundle source")
     try:
         settings, had_settings = load_settings()
     except ValueError as error:
         raise SystemExit(f"Error: {error}") from error
-    if (TARGET.exists() or TARGET.is_symlink()) and not is_regular_file(TARGET):
-        raise SystemExit(f"Installed extension must be a regular, non-symlink file: {TARGET}")
+    if any((target.exists() or target.is_symlink()) and not is_regular_file(target) for _, target in artifacts):
+        raise SystemExit("Installed extension bundle must contain only regular, non-symlink files")
 
     TARGET.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    artifact_backup = TARGET.with_name(TARGET.name + ".rollback")
+    artifact_backups = {target: target.with_name(target.name + ".rollback") for _, target in artifacts}
     settings_backup = SETTINGS.with_name(SETTINGS.name + ".mecha-messaging.rollback")
-    if any(path.exists() or path.is_symlink() for path in (artifact_backup, settings_backup)):
+    if any(path.exists() or path.is_symlink() for path in (*artifact_backups.values(), settings_backup)):
         raise SystemExit("Existing Pi extension rollback copies need verification or recovery before updating")
 
-    had_target = TARGET.exists()
+    had_targets = {target: target.exists() for _, target in artifacts}
     try:
         if had_settings:
             atomic_copy(SETTINGS, settings_backup, ".settings-backup.")
-        if had_target:
-            atomic_copy(TARGET, artifact_backup, ".mecha-messaging-backup.")
-        atomic_copy(SOURCE, TARGET, ".mecha-messaging.")
+        for _, target in artifacts:
+            if had_targets[target]:
+                atomic_copy(target, artifact_backups[target], ".mecha-messaging-backup.")
+        for source, target in artifacts:
+            atomic_copy(source, target, ".mecha-messaging.")
         packages = [entry for entry in settings.get("packages", []) if entry != str(TARGET)]
         packages.append(str(TARGET))
         settings["packages"] = packages
         atomic_write_json(SETTINGS, settings)
         verified_settings, _ = load_settings()
-        if (not is_regular_file(TARGET) or TARGET.read_bytes() != SOURCE.read_bytes()
+        if (any(not is_regular_file(target) or target.read_bytes() != source.read_bytes() for source, target in artifacts)
                 or verified_settings["packages"].count(str(TARGET)) != 1):
             raise RuntimeError("post-install verification failed")
     except Exception as error:
@@ -95,10 +103,11 @@ def main() -> int:
             os.replace(settings_backup, SETTINGS)
         elif not had_settings:
             SETTINGS.unlink(missing_ok=True)
-        if had_target and artifact_backup.exists():
-            os.replace(artifact_backup, TARGET)
-        elif not had_target:
-            TARGET.unlink(missing_ok=True)
+        for _, target in artifacts:
+            if had_targets[target] and artifact_backups[target].exists():
+                os.replace(artifact_backups[target], target)
+            elif not had_targets[target]:
+                target.unlink(missing_ok=True)
         raise SystemExit(f"Pi extension install failed and was rolled back: {error}") from error
 
     print(f"Pi extension installed: {TARGET} (source: {SOURCE})")

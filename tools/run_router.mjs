@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 
 import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { openMessageRepository } from "../harness/db.js";
+import { openMemoryCatalog } from "../harness/memory-catalog.js";
 import { createJsonlLogger } from "../harness/jsonl_logger.js";
 import { createAgentRouter } from "../harness/router.js";
 
@@ -59,16 +62,21 @@ export async function startRouter({
   const readyOutput = typeof log === "function" ? log : output;
   const resolvedLogPath = typeof log === "string" ? log : (logPath ?? `${database}.jsonl`);
   await mkdir(dirname(resolve(database)), { recursive: true, mode: 0o700 });
-  const repository = openMessageRepository({ databasePath: database });
+  let repository;
+  let memoryCatalog;
   let jsonlLogger;
   let router;
   try {
+    repository = openMessageRepository({ databasePath: database });
+    const kbRoot = process.env.MECHA_KB_ROOT ?? join(homedir(), ".mecha-developer", "kb");
+    memoryCatalog = openMemoryCatalog({ kbRoot, databasePath: `${database}.memory.sqlite` });
+    await memoryCatalog.rebuild();
     jsonlLogger = createJsonlLogger({ logPath: resolvedLogPath });
     const eventLogger = (event, fields) => jsonlLogger.log(event, fields);
     for (const migrationId of repository.migrationIds()) {
       eventLogger("schema_migration", { migration_id: migrationId });
     }
-    router = createAgentRouter({ repository, host, port, eventLogger });
+    router = createAgentRouter({ repository, memoryCatalog, host, port, eventLogger });
     const websocketUrl = await router.listen();
     const httpUrl = websocketUrl.replace(/^ws:/, "http:").replace(/\/v1\/agents$/, "");
     readyOutput(`MECHA_V2_ROUTER_READY http=${httpUrl} ws=${websocketUrl} database=${database} log=${resolvedLogPath}`);
@@ -81,7 +89,8 @@ export async function startRouter({
           await router.close();
         } finally {
           try {
-            repository.close();
+            repository?.close();
+            memoryCatalog?.close();
           } finally {
             jsonlLogger.close();
           }
@@ -98,7 +107,8 @@ export async function startRouter({
       }
     }
     try {
-      repository.close();
+      repository?.close();
+      memoryCatalog?.close();
     } finally {
       jsonlLogger?.close();
     }
