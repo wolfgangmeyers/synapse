@@ -162,11 +162,77 @@ access. Its fixed instructions require it to:
 - make no KB writes, link creation, or command requests; and
 - emit JSON only.
 
-After a valid selection, the extension calls the router touch API for the
-selected records, then directly calls its local `pi.sendMessage()` with at most
-three concise recall messages. Recall never uses Mailbox V2. Neither evaluator
-nor router logs raw context snapshots or Markdown bodies. The extension drops
-all activation and runtime state when its Pi process exits.
+After a valid selection, the extension directly queues at most three concise
+local `pi.sendMessage()` recalls containing that attribution. Only after the
+queue operation succeeds does it call router touch for the delivered selected
+records. Recall never uses Mailbox V2. Neither evaluator nor router logs raw
+context snapshots or Markdown bodies. The extension drops all activation and
+runtime state when its Pi process exits.
+
+## Capture And Synthesis Lifecycle
+
+Capture is independent of recall activation. The top-level trusted extension
+owns one serial extraction coordinator and one process-local destination store;
+the router owns the narrow canonical apply operation and catalog consistency.
+Capture runs at `session_before_compact` over only Pi's prepared disappearing
+span, and once at `session_shutdown` over the uncovered active branch before
+that context is invalidated. It applies to manual, threshold, and overflow
+compaction, and to `quit`, `reload`, `new`, `resume`, and `fork` shutdown.
+It never uses `session_compact`, `agent_end`, `agent_settled`, branch navigation,
+or a child session as a capture trigger.
+
+An optional periodic checkpoint may be enabled only as a policy-controlled
+process-local timer. It uses the same coordinator, source sanitation, extractor,
+dedupe, deadlines, validation, and apply path as compaction and shutdown; it is
+not a second ingestion path and does not run per turn. A checkpoint that finds
+no newly uncovered source is a no-op.
+
+Before one isolated no-tools extractor invocation, the extension sanitizes and
+bounds the source, redacts credentials and private transport content, and looks
+up only bounded candidates from its destination store. It excludes assistant
+thinking, images/base64, raw mailbox payloads, custom recall messages,
+compaction entries and summaries, environment/configuration dumps, credential
+files, authorization material, and personal correspondence from source. Evidence
+is a transient, in-memory validation gate only: sanitized source may support
+accepting or rejecting a proposed record before CAS apply, then is discarded.
+No evidence IDs, payloads, provenance, evidence index, evidence lookup, or later
+evidence access path may be written to canonical Markdown, the catalog, router
+responses, recall payloads, or any other durable memory state. The extractor
+defaults to no-op. It may synthesize only verified durable preferences, accepted decisions,
+stable facts, validated procedures, and explicit corrections. It must reject
+transient task status, TODOs, guesses, assistant-only assertions, raw logs,
+conversational summaries, duplicate facts, and unverified claims.
+
+A valid extractor result creates or completely updates one through six canonical
+one-to-three-paragraph records. It splits material spanning distinct reusable
+subjects into independently useful records and adds explicit `related` links
+where appropriate. It supplies accurate arbitrary tags for new or semantically
+updated records. The extension validates exact JSON shape, tags, paragraph
+count, links, candidate compare-and-swap bases, transient support from allowable
+sanitized source, and every policy limit before calling apply. It discards that
+source and validation material before apply; apply receives canonical fields
+only. One invalid proposed record rejects the complete result before
+writing. The router assigns `relevant_at`, atomically writes Markdown, and treats exact
+normalized replays as no-op.
+
+Compaction waits at most 30 seconds and shutdown shares one 10-second deadline
+with any in-flight capture. The configured extractor model timeout is 60 seconds,
+always clamped by the remaining lifecycle deadline. Abort, timeout, invalid output, source sanitization,
+provider, policy, lookup, or apply failure fails closed without cancelling
+compaction or shutdown, injecting a message, falling back to another model, or
+writing directly to the filesystem. Capture does not run after SIGKILL, a crash,
+or power loss.
+
+## Skill Guidance
+
+The KB skill must teach writers to use tags as small, concrete retrieval facets
+rather than a taxonomy. Good examples are `dnsid`, `release`, `health-check`,
+`sqlite`, and `incident-recovery`; a DNSid production-release procedure might
+use `dnsid`, `release`, and `health-check`. Do not use generic labels such as
+`general`, transient labels such as `today` or `current-task`, access labels,
+or a different spelling of the record ID. Writers may introduce a useful new tag
+without registration; they should reuse an existing spelling when it describes
+the same retrieval facet.
 
 ## Maintainability Constraints
 
