@@ -17,15 +17,15 @@ The output is not a biography or decision-making persona. It is a prompt-oriente
 ```
 
 - `--name`: Required. Used for the output file path `personas/<name>-voice.md`
-- `--source`: Required. One of `facebook-json`, `chat-export`, `email-archive`, or `text-files`
+- `--source`: Required. One of `facebook-json`, `chat-export`, `email-archive`, or `text-files`. Selects only the input-format extraction/parser rules; it does not influence the requested voice or profile style.
 - `<paths...>`: One or more files or directories containing the source material
 
 Examples:
 ```
-/voice --name wolfgang --source facebook-json ~/exports/facebook/
-/voice --name wolfgang --source chat-export ~/exports/slack/
-/voice --name wolfgang --source email-archive ~/mail/archive.mbox
-/voice --name wolfgang --source text-files notes/ drafts/
+/voice --name <name> --source facebook-json ~/exports/facebook/
+/voice --name <name> --source chat-export ~/exports/chat/
+/voice --name <name> --source email-archive ~/mail/archive.mbox
+/voice --name <name> --source text-files notes/ drafts/
 ```
 
 ## Output
