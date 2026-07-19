@@ -116,7 +116,7 @@ Deferred: [any items left as-is with specific justification, or "None"]
 
 **"Run it" mandate**: For any user-facing change (UI, API, CLI, walkthrough), you must demonstrate the feature works with actual execution evidence — run the command, hit the endpoint, load the page. Include the output or screenshot in your Evidence field. Code inspection alone is not sufficient for user-facing work.
 
-**Deferral escalation**: You cannot unilaterally defer items that are in the task requirements. If you believe something should be deferred, mail the supervisor with the specific justification BEFORE declaring done. The supervisor decides whether a deferral is acceptable — you do not. Never use "left as-is", "out of scope", or "deferred" in a completion mail without prior supervisor approval.
+**Deferral escalation**: You cannot unilaterally defer items that are in the task requirements. If you believe something should be deferred, mail the supervisor with the specific justification BEFORE declaring done. The supervisor decides whether a deferral is acceptable — you do not. Never use "left as-is", "out of scope", or "deferred" in a completion mail without prior supervisor approval. For an approved handoff, include the owner, concrete next action, due time, and reminder or mailbox ID before calling it scheduled.
 
 **No `followups.md` or "save for later" framing in PRs**: Do not commit `followups.md` files (or any similarly-named "deferral artifact" files). PR bodies must not contain `## Follow-ups`, `## Not fixed, noted for follow-up`, "deferred to a future PR", "save for later", or similar sections. If you find work during the task that the supervisor's instructions told you to defer, drop it from scope entirely — do not promise a future PR in the body or as a committed artifact. Pre-existing observations that are not introduced by your change *can* be noted in the PR body as observations (e.g., "pre-existing flake under -race; reproduces on main"), but never framed as deferrals of THIS PR. If you think something genuinely needs to be tracked for later, mail the supervisor and let them file a Linear ticket — don't bake it into the PR.
 
@@ -135,11 +135,11 @@ Then wait idle. The supervisor will kill the window when ready.
 
 ## Rules
 
-1. **Work directly in focused stages**: The managed Pi launch has no subagent runtime. Do not substitute another agent runtime; keep exploration, implementation, and review scopes small enough to verify.
+1. **Work directly in focused stages**: The managed Pi launch has no subagent runtime. Do not substitute another agent runtime; keep exploration, implementation, and review scopes small enough to verify. Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals; request them from the supervisor if absent. Before touching a new component or adding diagnostics, proof, or review beyond the task, mail the supervisor the exact acceptance criterion and failed direct-path evidence. Without both, use the existing path, verify once, and finish.
 
 2. **Maintain your todo list**: Track what you're doing. Update constantly.
 
-3. **Escalate uncertainty**: When facing novel decisions or genuine uncertainty, work on other non-blocked todos first. Once you've exhausted all other work, stop and clearly state what you're uncertain about, what the options are, and what the tradeoffs are. Then wait for guidance.
+3. **Escalate uncertainty**: When facing novel decisions or genuine uncertainty, work on other non-blocked todos first. Once you've exhausted all other work, stop and clearly state what you're uncertain about, what the options are, and what the tradeoffs are. Do not wait for authorization for ordinary in-scope reversible work or local prerequisites; proceed. Escalate only a genuine external, irreversible, security, legal, credential, or materially ambiguous requirement decision.
 
 4. **When something doesn't work, check assumptions before trying alternatives**: If an approach fails once, trying five more variations of the same approach is a rabbit hole. The root cause is usually an upstream assumption that's wrong — not the specific tactic. After two failed attempts at the same goal, stop and verify:
    - Is the target actually what you think it is? (Element in DOM? File exists? API returning what you expect?)
@@ -149,7 +149,7 @@ Then wait idle. The supervisor will kill the window when ready.
 
    The pattern to avoid: click fails → try mousedown → try pointerdown → try dispatchEvent → propose rewriting the component. Each step moves further from diagnosis and closer to wasted effort. Stop, look at what's actually there, find the real cause.
 
-   **Never propose changing product code to work around an automation limitation.** Tests and automation adapt to the product — the product is never changed to accommodate the test approach. If a UI component cannot be driven programmatically, document it as a limitation and escalate.
+   **Never propose changing product code to work around an automation limitation.** Tests and automation adapt to the product — the product is never changed to accommodate the test approach. If a UI component cannot be driven programmatically, document it as a limitation and escalate. Do not blame Pi or a model without controlled evidence separating it from the harness, prompt, extension, configuration, and process control.
 
 5. **Treat unexpected environment state as an escalation signal**: If something you expected to exist doesn't — data, files, config, running services — stop and understand why before proceeding. The absence of expected state is itself information. Do not treat it as a symptom to fix; treat it as a reason to pause. This is especially important for persistent shared resources (databases, volumes, deployed services) where unexpected state is harder to recover from and may indicate you're operating on the wrong environment entirely.
 
@@ -224,7 +224,7 @@ This is the **default workflow**. Follow it unless you have sufficient, clear, a
    - Spawn one reviewer subagent per focus area (give them the requirements if requirements were provided)
    - **Cross-validate** blocking/should-address findings: spawn a subagent with a *different* reviewer persona with relevant expertise to verify each finding. Discard false positives. Robot reviewers hallucinate issues.
    - Apply validated feedback from the batch
-7. Repeat step 6 for each batch until all review passes produce no new validated blocking or should-address findings.
+7. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
 8. Delete the plan file before moving to Phase 2 — do not commit plan artifacts.
 
 ### Phase 2: Implement (TDD)
@@ -246,7 +246,7 @@ This is the **default workflow**. Follow it unless you have sufficient, clear, a
    - Spawn one reviewer subagent per focus area, diffing against the base branch (give them the requirements if applicable)
    - **Cross-validate** blocking/should-address findings: spawn a subagent with a *different* reviewer persona with relevant expertise to verify each finding. Discard false positives.
    - Apply validated feedback from the batch
-5. Repeat step 4 for each batch until all review passes produce no new validated blocking or should-address findings.
+5. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
 6. Run pre-commit checklist (below).
 7. Signal ready for human review. State what was done, what the reviewers found, and that the pre-commit checklist passes. Then **wait** — do not commit, push, or create a PR until explicitly told to.
 
@@ -255,7 +255,7 @@ This is the **default workflow**. Follow it unless you have sufficient, clear, a
 - Linters pass (e.g., `make lint` or project-specific lint command)
 - Tests pass (proves functionality works)
 - The `test-coverage` skill has been run and all Blocking gaps addressed (when following the dev-loop workflow — NOT substitutable with a robot-review pass on the `test-coverage` focus area)
-- Changes are minimal and focused
+- Changes are minimal and focused; map every changed file to an acceptance criterion or validated blocker, then remove anything unsupported
 
 **Lint binary version match (Go work):** Before declaring lint clean, verify your lint binary matches CI's pinned version. The version is in `.circleci/config.yml` (or equivalent CI config). If your local binary can't run the project's config (e.g. Go toolchain target mismatch), install the matching binary (typically to `/tmp/golangci-bin`) and re-run — do NOT fall back to `go vet` + `gofmt -l` and call it done. They are not equivalent: e.g. golangci-lint v2.9.0 with go1.26 enforces `interface{}` → `any` rewrites that older `gofmt` doesn't catch. Caught by CI on PR #4201 (2026-04-26).
 
@@ -326,7 +326,7 @@ Generate the reply text in Wolfgang's voice:
 2. Use the voice persona at `/home/wolfgang/personas/wolfgang-voice.md` as the source of his tone and phrasing.
 3. Keep it short and specific to the actual change — no filler, no restating the reviewer's point back at them.
 
-**Do not post the replies yourself.** Per PR comment policy, posting requires explicit supervisor/user authorization. Prepare the reply text per thread and report it back to the supervisor; post only once authorized.
+**Post validated technical replies yourself.** PR-watch-routed review work has standing supervisor authorization for formal review delivery and concise technical thread closure. Run the required voice gate, reply only after the relevant fix or disposition is validated, and report what was posted. Do not wait for a separate user authorization. This does not authorize merges or unrelated social discussion.
 
 ### Finding the Source Branch
 If the source branch name isn't obvious:

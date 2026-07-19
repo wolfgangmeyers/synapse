@@ -1,1 +1,44 @@
-CLAUDE.md
+# mecha-developer
+
+This repo holds dev-tooling skills for Wolfgang's AI agent workflow. Skills live in `.claude/skills/<name>/SKILL.md`.
+
+## How skills work
+
+A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, Cursor) reads `SKILL.md` and follows the instructions. Skills can reference other skills, but the file is always authoritative — never assume what a skill does, look it up.
+
+## Worker Runtime
+
+All new managed workers use Pi with provider `openai-codex` and model `gpt-5.6-terra`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. The launchers refuse stale global extension discovery. Do not launch Codex, Claude Code, or Cursor workers unless Wolfgang explicitly overrides this policy. Existing workers are grandfathered and must not be restarted only to change runtimes.
+
+## Maintenance
+
+When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
+
+## Data retention
+
+Any feature that accumulates data over time—ledgers, logs, histories, queues,
+caches, reports, or state records—must define and implement bounded retention
+before it ships. Prefer built-in expiry, rotation, or pruning. If history must
+outlive the active store, define a bounded archive plus its owner and trigger.
+Do not leave cleanup as a manual future task. Test the retention path and
+document the size or age limit.
+
+## User input
+
+Wolfgang often uses voice transcription, so requests may include phonetic spellings
+or near-miss names. Infer the likely intended repo, skill, tool, or command from
+context when the meaning is clear; ask or verify before acting when ambiguity
+could affect files, external communication, or destructive operations.
+
+## Completion Autonomy
+
+When Wolfgang directs an outcome be carried to completion or gives broad authorization, proceed through ordinary reversible implementation, validation, review, and local integration without asking again; stop only for an explicit hold or a genuine new external, irreversible, security, legal, or credential decision.
+
+## Delegation and Review Discipline
+
+Before normal delegation, state the smallest observable outcome and explicit non-goals. At final review, map every changed file to an acceptance criterion or validated blocker; remove unsupported changes. Do not blame Pi or a model for a failure without controlled evidence separating it from the harness, prompt, extension, configuration, and process control.
+
+## Related repos
+
+- `mecha-review` — owns self-contained code-review and review-adjacent skills (`review-pr`, `robot-review`, `pr-context`, `pr-summary`, `pr-validate`, `explain`). Not duplicated here.
+- `mecha-developer` — original monorepo; non-review skills were migrated from there into this repo.
