@@ -786,7 +786,6 @@ export function createAgentRouter({
       return;
     }
     if (request.method === "GET" && requestUrl.pathname === "/v1/memory/policy") {
-      if (memoryCatalog === undefined) { sendHttpError(response, 404, "not_found"); return; }
       sendHttpJson(response, 200, { recall: RECALL_POLICY });
       return;
     }
