@@ -1,72 +1,207 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { MemoryCatalogError, openMemoryCatalog } from "../harness/memory-catalog.js";
 
-async function fixture(edgeBudget, mutationHook, writeHook, restoreHook) {
+async function fixture({ edgeBudget, mutationHook, writeHook } = {}) {
   const root = await mkdtemp(join(tmpdir(), "mecha-memory-"));
   await mkdir(join(root, "stores", "work"), { recursive: true });
+  await mkdir(join(root, "stores", "empty"));
   await writeFile(join(root, "default.md"), record("default", "Default", "default body", ["work"]));
   await writeFile(join(root, "stores", "work", "work.md"), record("work", "Work", "work body", ["default"]));
-  await mkdir(join(root, "stores", "empty"));
-  await writeFile(join(root, "INDEX.md"), "# index\n");
+  await writeFile(join(root, "INDEX.md"), "# Index\n");
   await writeFile(join(root, "legacy.md"), "# legacy\n");
-  return { root, catalog: openMemoryCatalog({ kbRoot: root, databasePath: join(root, "catalog.sqlite"), edgeBudget, mutationHook, writeHook, restoreHook }) };
+  return { root, catalog: openMemoryCatalog({ kbRoot: root, edgeBudget, mutationHook, writeHook }) };
 }
-function record(id, title, body, related = []) { return `---\nid: ${id}\ntitle: ${title}\nrelevant_at: 2026-07-13T00:00:00.000Z\nrelated:\n${related.map((item) => `  - ${item}\n`).join("")}---\n\n${body}\n`; }
+function record(id, title, body, related = [], relevantAt = "2026-07-13T00:00:00.000Z") { return `---\nid: ${id}\ntitle: ${title}\nrelevant_at: ${relevantAt}\nrelated:\n${related.map((item) => `  - ${item}\n`).join("")}---\n\n${body}\n`; }
 function taggedRecord(id, title, body, tags, related = []) { return `---\nid: ${id}\ntitle: ${title}\nrelevant_at: 2026-07-13T00:00:00.000Z\ntags:\n${tags.map((item) => `  - ${item}\n`).join("")}related:\n${related.map((item) => `  - ${item}\n`).join("")}---\n\n${body}\n`; }
+async function dispose(catalog, root) { await catalog.close(); await rm(root, { recursive: true, force: true }); }
+const updateDefault = (body = "changed") => ({ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Changed", body, related: ["work"] });
+const create = (id, title = id, body = "body", related = []) => ({ mode: "create", id, title, body, related });
 
-test("missing KB root is an empty catalog and API records never disclose paths", async () => { const root = join(tmpdir(), `mecha-no-root-${Date.now()}`); const catalog = openMemoryCatalog({ kbRoot: root, databasePath: `${root}.sqlite` }); try { assert.equal(await catalog.rebuild(), 0); assert.deepEqual(await catalog.lookup({ stores: ["default"] }), []); } finally { catalog.close(); await rm(`${root}.sqlite`, { force: true }); } });
-test("graph expansion stops globally at its edge budget", async () => { const { root, catalog } = await fixture(1); try { await catalog.rebuild(); assert.deepEqual((await catalog.expand({ stores: ["default", "work"], ids: ["default"], depth: 2 })).map(({ id }) => id), ["default", "work"]); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("selected IDs survive the recency slice during expansion", async () => { const { root, catalog } = await fixture(); try { await writeFile(join(root, "old.md"), record("old", "Old", "old")); await writeFile(join(root, "root.md"), record("root", "Root", "root", ["old"])); await catalog.rebuild(); assert.deepEqual((await catalog.expand({ stores: ["default"], ids: ["root"], depth: 1 })).map(({ id }) => id), ["old", "root"]); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("normal canonical KB edits refresh before lookup without router restart", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await writeFile(join(root, "default.md"), record("default", "Changed", "changed")); assert.equal((await catalog.lookup({ stores: ["default"] }))[0].title, "Changed"); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("lookup applies literal predicates before its bounded recent window", async () => { const { root, catalog } = await fixture(); try { for (let index = 0; index < 100; index += 1) await writeFile(join(root, `recent-${index}.md`), record(`recent-${index}`, "Recent", "other").replace("2026-07-13", "2027-07-13")); await writeFile(join(root, "older-match.md"), record("older-match", "Older", "needle")); assert.deepEqual((await catalog.lookup({ stores: ["default"], terms: ["needle"] })).map(({ id }) => id), ["older-match"]); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("catalog projection bounds oversized Markdown bodies before lookup", async () => { const { root, catalog } = await fixture(); try { await writeFile(join(root, "large.md"), record("large", "Large", "x".repeat(20_000))); assert.ok((await catalog.lookup({ stores: ["default"] })).every((item) => item.memory.length <= 8192)); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("catalog projection caps UTF-8 emoji bodies by bytes", async () => { const { root, catalog } = await fixture(); try { await writeFile(join(root, "emoji.md"), record("emoji", "Emoji", "😀".repeat(5000))); const found = (await catalog.lookup({ stores: ["default"] })).find(({ id }) => id === "emoji"); assert.ok(Buffer.byteLength(found.memory) <= 8192); assert.equal(found.memory.includes("�"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("catalog rebuild excludes legacy files and scopes lookup/graph traversal to selected stores", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); assert.deepEqual((await catalog.lookup({ stores: ["default"] })).map(({ id }) => id), ["default"]); assert.deepEqual((await catalog.expand({ stores: ["default"], ids: ["default"], depth: 1 })).map(({ id }) => id), ["default"]); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("catalog rejects duplicate IDs and touches only selected canonical records", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await assert.rejects(() => catalog.touch({ stores: ["default"], ids: ["work"] }), MemoryCatalogError); await writeFile(join(root, "duplicate.md"), record("default", "Duplicate", "body")); await assert.rejects(() => catalog.rebuild(), /duplicate memory id/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture apply rejects stale candidate content and conflicting creates", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); const base = { mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Changed", body: "changed", related: ["work"] }; await writeFile(join(root, "default.md"), record("default", "External", "external", ["work"])); await assert.rejects(() => catalog.apply({ store: "default", request_id: "one", operations: [base] }), /(capture conflict|invalid capture apply)/); await assert.rejects(() => catalog.apply({ store: "default", request_id: "two", operations: [{ mode: "create", id: "default", title: "Else", body: "else", related: [] }] }), /(capture conflict|invalid capture apply)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture apply permits timestamp-only recall touch", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await catalog.touch({ stores: ["default"], ids: ["default"] }); const result = await catalog.apply({ store: "default", request_id: "touch", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Changed", body: "changed", related: ["work"] }] }); assert.equal(result.status, "applied"); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("identical creates in another store conflict", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "work", request_id: "cross-store", operations: [{ mode: "create", id: "default", title: "Default", body: "default body", related: ["work"] }] }), /capture conflict/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("apply compares candidates against the state rebuilt inside its queue", async () => { let mutations = 0; let root; const context = await fixture(undefined, () => { if (++mutations === 2) writeFileSync(join(root, "default.md"), record("default", "External", "external", ["work"])); }); root = context.root; const { catalog } = context; try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "rebuilt-cas", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Changed", body: "changed", related: ["work"] }] }), /capture conflict/); assert.match(await (await import("node:fs/promises")).readFile(join(root, "default.md"), "utf8"), /External/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("input-only apply validation rejects before the mutation queue or rebuild", async () => { let mutations = 0; const { root, catalog } = await fixture(undefined, () => { mutations += 1; }); const apply = (operations) => catalog.apply({ store: "default", request_id: "preflight", operations }); const create = { mode: "create", id: "new", title: "New", body: "body", related: [] }; try { await catalog.rebuild(); const before = mutations; for (const operations of [[{ ...create, title: "New\nTitle" }], [{ ...create, body: "\r\n" }], [{ ...create, body: "x".repeat(16_384) }], [{ ...create, id: "one" }, { ...create, id: "one" }], [{ ...create, id: "one", body: "x".repeat(10_923) }, { ...create, id: "two", body: "y".repeat(10_923) }, { ...create, id: "three", body: "z".repeat(10_923) }], [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default\nTitle", expected_body: "default body", expected_related: ["work"], title: "Changed", body: "changed", related: ["work"] }]]) await assert.rejects(() => apply(operations), /invalid capture apply/); assert.equal(mutations, before); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture batch rejection leaves earlier operations untouched", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "batch", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }, { mode: "bad", id: "bad", title: "Bad", body: "bad", related: [] }] }), /invalid capture (apply|operation)/); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "new"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("apply serializes touch and rebuild behind its mutation gate", async () => { let count = 0; let release; const blocked = new Promise((resolve) => { release = resolve; }); const { root, catalog } = await fixture(undefined, async () => { if (++count === 2) await blocked; }); try { await catalog.rebuild(); const apply = catalog.apply({ store: "default", request_id: "gate", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Changed", body: "changed", related: ["work"] }] }); const touch = catalog.touch({ stores: ["default"], ids: ["default"] }); const rebuild = catalog.rebuild(); await Promise.resolve(); assert.equal(count, 2); release(); await Promise.all([apply, touch, rebuild]); assert.equal((await catalog.lookup({ stores: ["default"] })).find(({ id }) => id === "default").title, "Changed"); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("apply rejects a destination symlink appearing inside its gate", async () => { let count = 0; let release; const blocked = new Promise((resolve) => { release = resolve; }); const { root, catalog } = await fixture(undefined, async () => { if (++count === 2) await blocked; }); try { await catalog.rebuild(); const apply = catalog.apply({ store: "default", request_id: "link", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }); await Promise.resolve(); await symlink(join(root, "default.md"), join(root, "new.md")); release(); await assert.rejects(() => apply, /unsafe capture path/); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "new"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("a failed gated mutation releases later work without partial catalog state", async () => { let count = 0; const { root, catalog } = await fixture(undefined, async () => { if (++count === 2) throw new Error("injected failure"); }); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "fail", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }), /injected failure/); await catalog.touch({ stores: ["default"], ids: ["default"] }); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "new"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("apply rejects symlinked store parents", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await rm(join(root, "stores", "work"), { recursive: true }); await symlink(join(root, "stores", "empty"), join(root, "stores", "work")); await assert.rejects(() => catalog.apply({ store: "work", request_id: "parent-link", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }), /(unsafe capture path|invalid selected stores)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture batch rolls back if a later record commit fails", async () => { let writes = 0; const { root, catalog } = await fixture(undefined, undefined, () => { if (++writes === 2) throw new Error("later rename failure"); }); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "rollback", operations: [{ mode: "create", id: "one", title: "One", body: "one", related: [] }, { mode: "create", id: "two", title: "Two", body: "two", related: [] }] }), /later rename failure/); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "one" || id === "two"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture apply restores record and index after index-write failure", async () => { const { root, catalog } = await fixture(undefined, undefined, ({ index }) => { if (index) throw new Error("index failure"); }); try { await catalog.rebuild(); const before = await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"); await assert.rejects(() => catalog.apply({ store: "default", request_id: "index", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }), /index failure/); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "new"), false); assert.equal(await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"), before); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture validates expected timestamp and related targets", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); const base = { mode: "update", id: "default", expected_relevant_at: "bad", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Changed", body: "changed", related: ["missing"] }; await assert.rejects(() => catalog.apply({ store: "default", request_id: "bad", operations: [base] }), /capture conflict|invalid capture (apply|operation)/); const applied = await catalog.apply({ store: "default", request_id: "batch-ref", operations: [{ mode: "create", id: "first", title: "First", body: "first", related: [] }, { mode: "create", id: "second", title: "Second", body: "second", related: ["first"] }] }); assert.equal(applied.status, "applied"); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("captured index link stays before the next section", async () => { const { root, catalog } = await fixture(); try { await writeFile(join(root, "INDEX.md"), "# Index\n## Automatically Captured\n## Other\n"); await catalog.rebuild(); await catalog.apply({ store: "default", request_id: "index-order", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }); const index = await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"); assert.ok(index.indexOf("[New](new.md)") < index.indexOf("## Other")); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("exact replay preserves record bytes while restoring its captured index link", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); const before = await (await import("node:fs/promises")).readFile(join(root, "default.md"), "utf8"); const result = await catalog.apply({ store: "default", request_id: "replay", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Default", body: "default body", related: ["work"] }] }); assert.equal(result.status, "noop"); assert.equal(await (await import("node:fs/promises")).readFile(join(root, "default.md"), "utf8"), before); assert.match(await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"), /\[Default\]\(default\.md\)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture CAS compares full bodies beyond recall projection", async () => { const { root, catalog } = await fixture(); try { const body = "x".repeat(9000); await writeFile(join(root, "default.md"), record("default", "Default", body, ["work"])); await catalog.rebuild(); await catalog.apply({ store: "default", request_id: "long", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: body, expected_related: ["work"], title: "Default", body: `${body}y`, related: ["work"] }] }); assert.match(await (await import("node:fs/promises")).readFile(join(root, "default.md"), "utf8"), /x{9000}y/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture timestamp CAS allows only unchanged candidate content", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); const base = { mode: "update", id: "default", expected_relevant_at: "2020-01-01T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"] }; await catalog.apply({ store: "default", request_id: "timestamp-only", operations: [{ ...base, title: "Changed", body: "changed", related: ["work"] }] }); await writeFile(join(root, "default.md"), record("default", "External", "external", ["work"])); await assert.rejects(() => catalog.apply({ store: "default", request_id: "stale", operations: [{ ...base, title: "Again", body: "again", related: ["work"] }] }), /(capture conflict|invalid capture apply)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture batch preflight rejects unknown keys and permits forward related IDs", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "unknown", operations: [{ mode: "create", id: "bad", title: "Bad", body: "bad", related: [], extra: true }] }), /invalid capture (apply|operation)/); const result = await catalog.apply({ store: "default", request_id: "forward", operations: [{ mode: "create", id: "first", title: "First", body: "first", related: ["second"] }, { mode: "create", id: "second", title: "Second", body: "second", related: [] }] }); assert.equal(result.status, "applied"); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("invalid later operation does not repair a missing captured index link", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "no-repair", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Default", body: "default body", related: ["work"] }, { mode: "bad", id: "bad", title: "Bad", body: "bad", related: [] }] }), /invalid capture (apply|operation)/); assert.doesNotMatch(await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"), /\[Default\]\(default\.md\)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("rollback preserves external edit and reports recovery conflict", async () => { let writes = 0; let root; const context = await fixture(undefined, undefined, ({ path }) => { if (++writes === 1) writeFileSync(path, record("one", "External", "external")); if (writes === 2) throw new Error("later failure"); }); root = context.root; const { catalog } = context; try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "external", operations: [{ mode: "create", id: "one", title: "One", body: "one", related: [] }, { mode: "create", id: "two", title: "Two", body: "two", related: [] }] }), /capture recovery conflict/); assert.match(await (await import("node:fs/promises")).readFile(join(root, "one.md"), "utf8"), /External/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("apply rejects a symlinked index without writing records", async () => { const { root, catalog } = await fixture(); try { await rm(join(root, "INDEX.md")); await symlink(join(root, "default.md"), join(root, "INDEX.md")); await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "index-link", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }), /unsafe capture path/); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "new"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("touch rejects a symlinked target before mutation", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await rm(join(root, "default.md")); await symlink(join(root, "stores", "work", "work.md"), join(root, "default.md")); await assert.rejects(() => catalog.touch({ stores: ["default"], ids: ["default"] }), /unsafe capture path|memory selection changed|memory selection is outside selected stores/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("apply rejects a configured kbRoot reached through a symlinked ancestor", async () => { const { root, catalog } = await fixture(); const linked = `${root}-link`; try { catalog.close(); await symlink(root, linked); const linkedCatalog = openMemoryCatalog({ kbRoot: linked, databasePath: join(root, "linked.sqlite") }); await assert.rejects(() => linkedCatalog.apply({ store: "default", request_id: "ancestor", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }), /unsafe capture path/); linkedCatalog.close(); } finally { await rm(linked, { force: true }); await rm(root, { recursive: true, force: true }); } });
-test("unsafe later index preflight leaves earlier record untouched", async () => { const { root, catalog } = await fixture(); try { await rm(join(root, "INDEX.md")); await symlink(join(root, "default.md"), join(root, "INDEX.md")); await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "unsafe-second", operations: [{ mode: "create", id: "one", title: "One", body: "one", related: [] }, { mode: "create", id: "two", title: "Two", body: "two", related: [] }] }), /unsafe capture path/); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "one" || id === "two"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("rollback preserves external record and index edits while restoring owned paths", async () => { let writes = 0; const { root, catalog } = await fixture(undefined, undefined, ({ path, index }) => { writes += 1; if (writes === 1) writeFileSync(path, record("one", "External", "external")); if (index) writeFileSync(path, "# External Index\n"); if (writes >= 3) throw new Error("later failure"); }); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "combined", operations: [{ mode: "create", id: "one", title: "One", body: "one", related: [] }, { mode: "create", id: "two", title: "Two", body: "two", related: [] }] }), /capture recovery conflict/); assert.match(await (await import("node:fs/promises")).readFile(join(root, "one.md"), "utf8"), /External/); assert.match(await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"), /External Index/); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "two"), false); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("identical create repairs a missing captured index link", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); const result = await catalog.apply({ store: "default", request_id: "create-replay", operations: [{ mode: "create", id: "default", title: "Default", body: "default body", related: ["work"] }] }); assert.equal(result.status, "noop"); assert.match(await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"), /\[Default\]\(default\.md\)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("raw whitespace direct edit conflicts with capture CAS", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); await writeFile(join(root, "default.md"), `${record("default", "Default", "default body", ["work"])}\n`); await assert.rejects(() => catalog.apply({ store: "default", request_id: "raw", operations: [{ mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_body: "default body", expected_related: ["work"], title: "Changed", body: "changed", related: ["work"] }] }), /(capture conflict|invalid capture apply)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("noncanonical frontmatter is excluded before capture mutation", async () => { const { root, catalog } = await fixture(); try { await writeFile(join(root, "default.md"), "---\nid: default\ntitle: Default\nrelevant_at: 2026-07-12T19:00:00-05:00\nextra: value\nrelated:\n  - work\n---\n\ndefault body\n"); await catalog.rebuild(); assert.deepEqual(await catalog.lookup({ stores: ["default"] }), []); await assert.rejects(() => catalog.apply({ store: "default", request_id: "schema", operations: [{ mode: "create", id: "default", title: "Default", body: "default body", related: ["work"] }] }), /(capture conflict|invalid capture apply)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("multi-create batch writes the captured index once after records", async () => { let indexWrites = 0; const { root, catalog } = await fixture(undefined, undefined, ({ index }) => { if (index) indexWrites += 1; }); try { await catalog.rebuild(); await catalog.apply({ store: "default", request_id: "multi-index", operations: [{ mode: "create", id: "one", title: "One", body: "one", related: [] }, { mode: "create", id: "two", title: "Two", body: "two", related: [] }] }); assert.equal(indexWrites, 1); const index = await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"); assert.match(index, /\[One\]\(one\.md\)/); assert.match(index, /\[Two\]\(two\.md\)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("capture apply rejects missing or non-string expected body", async () => { const { root, catalog } = await fixture(); try { await catalog.rebuild(); const base = { mode: "update", id: "default", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Default", expected_related: ["work"], title: "Changed", body: "changed", related: ["work"] }; await assert.rejects(() => catalog.apply({ store: "default", request_id: "missing-body", operations: [base] }), /(capture conflict|invalid capture apply)/); await assert.rejects(() => catalog.apply({ store: "default", request_id: "typed-body", operations: [{ ...base, expected_body: 7 }] }), /(capture conflict|invalid capture apply)/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("rollback attempts every restore while preserving drifted index", async () => { let commits = 0; let restores = 0; const { root, catalog } = await fixture(undefined, undefined, ({ path }) => { if (++commits === 2) { writeFileSync(join(root, "INDEX.md"), "# Drift\n"); throw new Error("commit failure"); } }, () => { restores += 1; throw new Error("restore failure"); }); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "restore-failures", operations: [{ mode: "create", id: "one", title: "One", body: "one", related: [] }, { mode: "create", id: "two", title: "Two", body: "two", related: [] }] }), /capture recovery conflict/); assert.equal(restores, 2); assert.equal(await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"), "# Drift\n"); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("mixed replay and create performs one index write after record commit", async () => { let recordCommits = 0; let indexWrites = 0; const { root, catalog } = await fixture(undefined, undefined, ({ index }) => { if (index) { indexWrites += 1; assert.equal(recordCommits, 1); } else recordCommits += 1; }); try { await catalog.rebuild(); await catalog.apply({ store: "default", request_id: "mixed-index", operations: [{ mode: "create", id: "default", title: "Default", body: "default body", related: ["work"] }, { mode: "create", id: "new", title: "New", body: "new", related: [] }] }); assert.equal(recordCommits, 1); assert.equal(indexWrites, 1); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
-test("post-index-hook drift is preserved and rejects apply", async () => { const { root, catalog } = await fixture(undefined, undefined, ({ path, index }) => { if (index) writeFileSync(path, "# Drift\n"); }); try { await catalog.rebuild(); await assert.rejects(() => catalog.apply({ store: "default", request_id: "post-hook", operations: [{ mode: "create", id: "new", title: "New", body: "new", related: [] }] }), /capture recovery conflict/); assert.equal(await (await import("node:fs/promises")).readFile(join(root, "INDEX.md"), "utf8"), "# Drift\n"); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
+test("startup hydration is ordered, excludes noncanonical files, and does not disclose paths", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    await writeFile(join(root, "newer.md"), record("newer", "Newer", "new", [], "2027-07-13T00:00:00.000Z"));
+    assert.deepEqual((await catalog.lookup({ stores: ["default", "work"] })).map(({ id }) => id), ["default", "work"]);
+    assert.deepEqual((await catalog.rebuild()).valueOf(), 3);
+    const records = await catalog.lookup({ stores: ["default", "work"] });
+    assert.deepEqual(records.map(({ id }) => id), ["newer", "default", "work"]);
+    assert.equal(records.some((item) => Object.hasOwn(item, "path")), false);
+  } finally { await dispose(catalog, root); }
+});
 
-test("tagged records are discovered and tagged creates use canonical five-field frontmatter", async () => { const { root, catalog } = await fixture(); try { await writeFile(join(root, "tagged.md"), taggedRecord("tagged", "Tagged", "A durable fact.", ["alpha", "release"])); await writeFile(join(root, "noncanonical-tagged.md"), taggedRecord("noncanonical-tagged", "Noncanonical", "A durable fact.", ["release", "alpha"])); await catalog.rebuild(); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "tagged"), true); assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "noncanonical-tagged"), false); await catalog.apply({ store: "default", request_id: "tagged-create", operations: [{ mode: "create", id: "created", title: "Created", body: "First durable paragraph.\n\nSecond durable paragraph.", tags: ["release", "alpha"], related: [] }] }); assert.match(await (await import("node:fs/promises")).readFile(join(root, "created.md"), "utf8"), /^---\nid: created\ntitle: Created\nrelevant_at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\ntags:\n  - alpha\n  - release\nrelated:\n---\n\nFirst durable paragraph\.\n\nSecond durable paragraph\.\n$/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
+test("lookup and expansion use hydrated records with bounded predicates and graph traversal", async () => {
+  const { root, catalog } = await fixture({ edgeBudget: 1 });
+  try {
+    await writeFile(join(root, "match.md"), taggedRecord("match", "Release", "needle", ["release"], ["default"]));
+    await catalog.rebuild();
+    assert.deepEqual((await catalog.lookup({ stores: ["default"], terms: ["needle"] })).map(({ id }) => id), ["match"]);
+    assert.deepEqual((await catalog.expand({ stores: ["default", "work"], ids: ["default"], depth: 2 })).map(({ id }) => id), ["default", "work"]);
+    assert.deepEqual((await catalog.expand({ stores: ["default"], ids: [], tags: ["release"], terms: ["needle"], depth: 1 })).map(({ id }) => id), ["default", "match"]);
+  } finally { await dispose(catalog, root); }
+});
 
-test("tagged apply validates canonical tags and one-to-three prose paragraphs before mutation", async () => { let mutations = 0; const { root, catalog } = await fixture(undefined, () => { mutations += 1; }); const create = { mode: "create", id: "tagged", title: "Tagged", body: "A durable fact.", tags: ["alpha"], related: [] }; try { await catalog.rebuild(); const before = mutations; for (const operation of [{ ...create, tags: [] }, { ...create, tags: ["Alpha"] }, { ...create, tags: ["alpha-", "release"] }, { ...create, tags: ["alpha", "alpha"] }, { ...create, body: "One.\n\nTwo.\n\nThree.\n\nFour." }, { ...create, body: "# A heading" }]) await assert.rejects(() => catalog.apply({ store: "default", request_id: operation.tags?.join("-") ?? "body", operations: [operation] }), /invalid capture apply/); assert.equal(mutations, before); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
+test("apply changes memory immediately and defers canonical record and index writes until close", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    const before = await readFile(join(root, "default.md"), "utf8");
+    assert.deepEqual(await catalog.apply({ store: "default", request_id: "immediate", operations: [updateDefault()] }), { status: "applied", records: 1 });
+    assert.equal((await catalog.lookup({ stores: ["default"] }))[0].title, "Changed");
+    assert.equal(await readFile(join(root, "default.md"), "utf8"), before);
+    await catalog.close();
+    assert.match(await readFile(join(root, "default.md"), "utf8"), /title: Changed/);
+    assert.match(await readFile(join(root, "INDEX.md"), "utf8"), /\[Changed\]\(default\.md\)/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
-test("tagged update CAS includes tags while legacy records remain exact four-field records when touched", async () => { const { root, catalog } = await fixture(); const tagged = { mode: "update", id: "tagged", expected_relevant_at: "2026-07-13T00:00:00.000Z", expected_title: "Tagged", expected_body: "A durable fact.", expected_tags: ["alpha"], expected_related: [], title: "Changed", body: "A changed durable fact.", tags: ["alpha", "release"], related: [] }; try { await writeFile(join(root, "tagged.md"), taggedRecord("tagged", "Tagged", "A durable fact.", ["alpha"])); await catalog.rebuild(); await catalog.apply({ store: "default", request_id: "tagged-update", operations: [tagged] }); const changed = await (await import("node:fs/promises")).readFile(join(root, "tagged.md"), "utf8"); assert.match(changed, /tags:\n  - alpha\n  - release\nrelated:/); await writeFile(join(root, "tagged.md"), taggedRecord("tagged", "Changed", "A changed durable fact.", ["beta", "release"])); await assert.rejects(() => catalog.apply({ store: "default", request_id: "stale-tags", operations: [{ ...tagged, title: "Again", body: "Again durable fact." }] }), /capture conflict/); await catalog.touch({ stores: ["default"], ids: ["default"] }); const legacy = await (await import("node:fs/promises")).readFile(join(root, "default.md"), "utf8"); assert.doesNotMatch(legacy, /\ntags:/); assert.match(legacy, /^---\nid: default\ntitle: Default\nrelevant_at: .*\nrelated:/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
+test("captured index labels follow a record title update after each flush", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    await catalog.apply({ store: "default", request_id: "before", operations: [create("renamed", "Before")] });
+    await catalog.close();
+    assert.match(await readFile(join(root, "INDEX.md"), "utf8"), /\[Before\]\(renamed\.md\)/);
+    const current = (await catalog.lookup({ stores: ["default"] })).find(({ id }) => id === "renamed");
+    await catalog.apply({ store: "default", request_id: "after", operations: [{ mode: "update", id: "renamed", expected_relevant_at: current.relevant_at, expected_title: "Before", expected_body: "body", expected_related: [], title: "After", body: "body", related: [] }] });
+    await catalog.close();
+    const index = await readFile(join(root, "INDEX.md"), "utf8"); assert.match(index, /\[After\]\(renamed\.md\)/); assert.doesNotMatch(index, /\[Before\]\(renamed\.md\)/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
-test("bounded expansion applies every tag and literal predicate before traversing selected related links", async () => { const { root, catalog } = await fixture(); try { await writeFile(join(root, "match.md"), taggedRecord("match", "Release", "needle", ["release"], ["linked"])); await writeFile(join(root, "linked.md"), taggedRecord("linked", "Linked", "condition", ["release"])); await writeFile(join(root, "wrong.md"), taggedRecord("wrong", "Release", "needle", ["other"])); const records = await catalog.expand({ stores: ["default"], ids: [], tags: ["release"], terms: ["needle"], depth: 1 }); assert.deepEqual(records.map(({ id }) => id), ["linked", "match"]); await assert.rejects(() => catalog.expand({ stores: ["default"], ids: [], tags: [], terms: [], depth: 0 }), /empty memory expansion/); } finally { catalog.close(); await rm(root, { recursive: true, force: true }); } });
+test("separate mutations coalesce into one deferred index flush", async () => {
+  let indexWrites = 0; const { root, catalog } = await fixture({ writeHook: ({ index }) => { if (index) indexWrites += 1; } });
+  try {
+    await catalog.apply({ store: "default", request_id: "one", operations: [create("one", "One")] });
+    await catalog.apply({ store: "default", request_id: "two", operations: [create("two", "Two")] });
+    assert.equal(indexWrites, 0);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(indexWrites, 1);
+    assert.match(await readFile(join(root, "one.md"), "utf8"), /title: One/);
+    assert.match(await readFile(join(root, "INDEX.md"), "utf8"), /\[Two\]\(two\.md\)/);
+  } finally { await dispose(catalog, root); }
+});
+
+test("a failed deferred flush gets one safe retry and preserves pending state for shutdown", async () => {
+  let fail = true; const { root, catalog } = await fixture({ writeHook: () => { if (fail) { fail = false; throw new Error("temporary flush failure"); } } });
+  try {
+    await catalog.apply({ store: "default", request_id: "retry", operations: [create("retry", "Retry")] });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.match(await readFile(join(root, "retry.md"), "utf8"), /title: Retry/);
+    await catalog.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("touch updates recency in memory immediately and preserves legacy frontmatter on shutdown flush", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    const timestamp = await catalog.touch({ stores: ["default"], ids: ["default"] });
+    assert.equal((await catalog.lookup({ stores: ["default"] }))[0].relevant_at, timestamp);
+    await catalog.close();
+    const saved = await readFile(join(root, "default.md"), "utf8");
+    assert.match(saved, new RegExp(`relevant_at: ${timestamp}`));
+    assert.doesNotMatch(saved, /\ntags:/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("CAS and selected-store validation use current in-memory state", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    await assert.rejects(() => catalog.touch({ stores: ["default"], ids: ["work"] }), MemoryCatalogError);
+    await catalog.apply({ store: "default", request_id: "first", operations: [updateDefault()] });
+    await assert.rejects(() => catalog.apply({ store: "default", request_id: "stale", operations: [updateDefault("again")] }), /capture conflict/);
+  } finally { await dispose(catalog, root); }
+});
+
+test("conflicting applies serialize through the mutation gate against current in-memory state", async () => {
+  let release; const blocked = new Promise((resolve) => { release = resolve; }); let runs = 0;
+  const { root, catalog } = await fixture({ mutationHook: async () => { if (++runs === 1) await blocked; } });
+  try {
+    const first = catalog.apply({ store: "default", request_id: "first", operations: [updateDefault()] });
+    const second = catalog.apply({ store: "default", request_id: "second", operations: [updateDefault("again")] });
+    await Promise.resolve(); assert.equal(runs, 1); release();
+    await first; await assert.rejects(() => second, /capture conflict/);
+    assert.equal((await catalog.lookup({ stores: ["default"] }))[0].title, "Changed");
+  } finally { await dispose(catalog, root); }
+});
+
+test("invalid apply input never enters the mutation queue", async () => {
+  let runs = 0; const { root, catalog } = await fixture({ mutationHook: () => { runs += 1; } });
+  try {
+    const before = runs;
+    await assert.rejects(() => catalog.apply({ store: "default", request_id: "bad", operations: [{ ...create("new"), title: "New\nTitle" }] }), /invalid capture apply/);
+    assert.equal(runs, before);
+  } finally { await dispose(catalog, root); }
+});
+
+test("explicit rebuild is the only path that observes an out-of-band canonical edit", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    await writeFile(join(root, "default.md"), record("default", "External", "external", ["work"]));
+    assert.equal((await catalog.lookup({ stores: ["default"] }))[0].title, "Default");
+    await catalog.rebuild();
+    assert.equal((await catalog.lookup({ stores: ["default"] }))[0].title, "External");
+  } finally { await dispose(catalog, root); }
+});
+
+test("flush rejects out-of-band drift without overwriting it", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    await catalog.apply({ store: "default", request_id: "drift", operations: [updateDefault()] });
+    await writeFile(join(root, "default.md"), record("default", "External", "external", ["work"]));
+    await assert.rejects(() => catalog.close(), /capture conflict/);
+    assert.match(await readFile(join(root, "default.md"), "utf8"), /title: External/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("record write failures roll back the complete batch before reporting failure", async () => {
+  let writes = 0; const { root, catalog } = await fixture({ writeHook: () => { if (++writes === 2) throw new Error("later failure"); } });
+  try {
+    await catalog.apply({ store: "default", request_id: "batch", operations: [create("one", "One"), create("two", "Two")] });
+    await assert.rejects(() => catalog.close(), /later failure/);
+    assert.equal((await readFile(join(root, "INDEX.md"), "utf8")), "# Index\n");
+    await assert.rejects(() => readFile(join(root, "one.md"), "utf8"));
+    await assert.rejects(() => readFile(join(root, "two.md"), "utf8"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("index write failures restore records and preserve the pending batch for a later flush", async () => {
+  let fail = true; const { root, catalog } = await fixture({ writeHook: ({ index }) => { if (index && fail) throw new Error("index failure"); } });
+  try {
+    await catalog.apply({ store: "default", request_id: "index", operations: [create("new", "New")] });
+    await assert.rejects(() => catalog.close(), /index failure/);
+    await assert.rejects(() => readFile(join(root, "new.md"), "utf8"));
+    fail = false; await catalog.close();
+    assert.match(await readFile(join(root, "new.md"), "utf8"), /title: New/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("flush rejects symlinked destinations before mutating memory or disk", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    await symlink(join(root, "default.md"), join(root, "new.md"));
+    await assert.rejects(() => catalog.apply({ store: "default", request_id: "link", operations: [create("new", "New")] }), /unsafe capture path/);
+    assert.equal((await catalog.lookup({ stores: ["default"] })).some(({ id }) => id === "new"), false);
+  } finally { await dispose(catalog, root); }
+});
+
+test("tagged records retain canonical tags through deferred capture", async () => {
+  const { root, catalog } = await fixture();
+  try {
+    await catalog.apply({ store: "default", request_id: "tagged", operations: [{ ...create("tagged", "Tagged", "A durable fact."), tags: ["release", "alpha"] }] });
+    await catalog.close();
+    assert.match(await readFile(join(root, "tagged.md"), "utf8"), /tags:\n  - alpha\n  - release\nrelated:/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("configured KB roots reached through symlinked ancestors reject flushes", async () => {
+  const { root, catalog } = await fixture(); const linked = `${root}-link`;
+  try {
+    await catalog.close(); await symlink(root, linked);
+    const linkedCatalog = openMemoryCatalog({ kbRoot: linked });
+    await assert.rejects(() => linkedCatalog.apply({ store: "default", request_id: "ancestor", operations: [create("new", "New")] }), /unsafe capture path/);
+  } finally { await rm(linked, { force: true }); await rm(root, { recursive: true, force: true }); }
+});
