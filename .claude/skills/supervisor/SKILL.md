@@ -11,7 +11,7 @@ You are Wolfgang's operations hub — chief of staff tracking all AI-assisted wo
 
 ## User-Facing Voice
 
-Before every non-trivial reply to Wolfgang, load the `voice` skill and read `/Users/wolfgang.meyers/personas/wolfgang.md`. Do this immediately before drafting, even if both were loaded earlier in the session. Write only in that persona's voice.
+Before every non-trivial reply to Wolfgang, load the `voice` skill and read the canonical voice persona `/Users/wolfgang.meyers/code/mecha-developer/personas/wolfgang-voice.md`. Do this immediately before drafting, even if both were loaded earlier in the session. Write only in that persona's voice.
 
 Start with the actual observation or action. Use short, direct conversational sentences. State facts plainly. Include technical detail only when it changes Wolfgang's decision. End when the point is made.
 
@@ -21,7 +21,7 @@ A non-trivial reply is any user-facing response that communicates a result, deci
 
 ## Worker Runtime
 
-All new managed workers use Pi with `--provider openai-codex --model gpt-5.6-terra`. Launch with `worker_launch.py --agent pi` and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with `--no-extensions` and explicit Mailbox plus native-subagent extension paths so stale globally discovered extensions cannot create duplicate clients; `MECHA_PI_MAILBOX_EXTENSION` and `MECHA_PI_SUBAGENTS_EXTENSION` override the validated paths. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
+All new managed workers use Pi with `--provider openai-codex --model gpt-5.6-terra`. Every newly launched or resumed top-level managed Pi task worker MUST include `--notify-on-settled supervisor` in its `worker_launch.py` command. This applies to worker and pipeline task windows, including resumed sessions. It does not apply to native Pi child sessions/subagents or long-lived service windows: supervisor, watchdog, pr-watch, dashboard, or an equivalent service. A settled notification means the worker is idle, not that its task is complete: inspect the evidence, then drive its next work, reconcile/close it, or record the exact external block. Launch with `worker_launch.py --agent pi` and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with `--no-extensions` and explicit Mailbox plus native-subagent extension paths so stale globally discovered extensions cannot create duplicate clients; `MECHA_PI_MAILBOX_EXTENSION` and `MECHA_PI_SUBAGENTS_EXTENSION` override the validated paths. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
 
 Existing Claude Code, Codex, and Cursor windows are grandfathered. Preserve them; their references below document legacy/session-specific behavior and never authorize a new non-Pi launch.
 
@@ -418,7 +418,7 @@ git worktree add -b "wolfgang/$ALIAS" "$WORKTREE_PATH" origin/main
 # constant cross-reference to figure out which task each worker holds.
 WORKER_NAME="$ALIAS"  # GOOD: "tab-saver", "login-timeout-fix", "pr-3645-lint"
                      # BAD:  "worker-1", "worker-2", "test-window"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "$WORKTREE_PATH" --agent pi --skip-permissions
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "$WORKTREE_PATH" --agent pi --notify-on-settled supervisor --skip-permissions
 
 # 4. Create the task with requirements (if you have them)
 python3 ~/.claude/skills/supervisor/tools/state_add.py \
@@ -643,12 +643,12 @@ mail the supervisor immediately — do not guess, do not restart from step 1.
 
 ### Import (Resume Existing Session)
 
-Adopt an existing Claude Code session as a worker — for migrating ongoing work into supervisor management. User provides: session ID (or search term), project path, description.
+Adopt an existing Pi session as a worker — for migrating ongoing work into supervisor management. User provides: session ID (or search term), project path, description.
 
 ```bash
-# Launch Claude with --resume in the project/worktree directory
+# Resume Pi in the project/worktree directory
 WORKER_NAME="<descriptive-alias>"  # e.g., "login-timeout-fix", not "worker-3"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "<project-or-worktree-path>" --resume "<session-id>" --skip-permissions
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "<project-or-worktree-path>" --agent pi --resume "<session-id>" --notify-on-settled supervisor --skip-permissions
 ```
 
 After the session registers with Mailbox V2, orient it as a worker:
@@ -824,7 +824,7 @@ python3 ~/.claude/skills/supervisor/tools/state_query.py --alias <alias>
 
 # 2. Launch a new worker window in the existing worktree
 WORKER_NAME="<same-or-new-window-name>"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "<worktree-path>" --skip-permissions
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "<worktree-path>" --agent pi --notify-on-settled supervisor --skip-permissions
 # 3. Update state to reflect the new window
 python3 ~/.claude/skills/supervisor/tools/state_update_field.py <alias> window "$WORKER_NAME"
 
@@ -884,7 +884,7 @@ SOURCE_BRANCH=$(gh pr view $PR_NUMBER --json headRefName -q .headRefName)
 
 # 3. Launch worker
 WORKER_NAME="<descriptive-name>"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "$WORKTREE_PATH" --skip-permissions
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WORKER_NAME" --dir "$WORKTREE_PATH" --agent pi --notify-on-settled supervisor --skip-permissions
 # 4. After the worker registers with Mailbox V2, send instructions including source branch tracking
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WORKER_NAME" --body "You are a worker agent. Rules:
 1. Use subagents (Task tool) for all actual work - keep your context clean
@@ -931,7 +931,7 @@ Then launch the worker in the worktree:
 
 ```bash
 WINDOW_NAME="<descriptive-name>"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "$WORKTREE_PATH" --skip-permissions --agent pi
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "$WORKTREE_PATH" --skip-permissions --agent pi --notify-on-settled supervisor
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
@@ -964,7 +964,7 @@ If the reviews run in parallel, create one detached worktree per PR and launch e
 
 ```bash
 WINDOW_NAME="pr-reviews"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions --agent pi
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions --agent pi --notify-on-settled supervisor
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
@@ -1331,7 +1331,7 @@ Managed Pi lifecycle tools live in `~/.claude/skills/supervisor/tools/`. Tmux ho
 ### worker_launch.py — Start or restore a Pi worker
 
 ```bash
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window WINDOW --dir DIR --agent pi [--resume SESSION_ID] [--skip-permissions]
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window WINDOW --dir DIR --agent pi --notify-on-settled supervisor [--resume SESSION_ID] [--skip-permissions]
 ```
 
 Creates the managed Pi window. After the Pi agent registers with Mailbox V2, deliver instructions with `mailbox_send.py`. If the agent is unregistered or stopped, restore it with this launcher and its recorded Pi session; never type into a terminal or tmux pane.
