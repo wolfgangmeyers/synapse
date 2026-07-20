@@ -424,9 +424,55 @@ else
 fi
 ```
 
-### 9. Set Up Crontab
+### 9. Install the Priority Handoff Monitor
 
-Add cron jobs for mailbox idle delivery, inbound mail polling, standing-order refresh, memory monitoring, and stuck-worker detection:
+The deterministic five-minute **Priority Handoff Monitor** is separate from the LLM-based Watchdog. It has no Git-hook requirement, no workflow dependency, and creates no Mailbox reminder. It requires only:
+
+- Python 3 and a user crontab;
+- a running Mailbox V2 router reachable at `${MECHA_ROUTER_URL:-http://127.0.0.1:8765}`; and
+- an initialized supervisor state file at `${MECHA_STATE_FILE:-$HOME/.mecha-developer/supervisor-state.json}` before its live state/reminder check.
+
+From the portable repository root, install exactly one schedule:
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+MECHA_ROUTER_URL="${MECHA_ROUTER_URL:-http://127.0.0.1:8765}"
+export MECHA_ROUTER_URL
+
+curl --fail --silent --show-error "$MECHA_ROUTER_URL/v1/health"
+/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --install-schedule
+```
+
+Expected install output starts with `Installed one five-minute Priority Handoff Monitor schedule:`. Re-running the command replaces an earlier marked monitor entry and the retired legacy priority entry, leaving one `# mecha-priority-handoff-monitor` line. It does not alter an independent LLM Watchdog schedule.
+
+For a machine being cut over from legacy Watchdog reminders, after the router and supervisor state are available, review then apply the one-time reconciliation:
+
+```bash
+/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --reconcile-retired-controls --dry-run
+/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --reconcile-retired-controls
+```
+
+The second command records only the exact historical terminal reminder IDs in supervisor state, clears the stale `priority_control.watchdog_reminder_id` reference, and cancels only an unlinked scheduled legacy control. Terminal failed/dead-letter records that the router cannot cancel are retired legacy controls: their liveness reference is cleared/ignored, not replaced. New terminal delivery failures are not ignored. Expected output starts with `PRIORITY HANDOFF MONITOR RETIRED:` and includes the owner, action, and resolved-when proof.
+
+Validate a new-machine installation after supervisor state exists:
+
+```bash
+crontab -l | grep -F "# mecha-priority-handoff-monitor"
+MECHA_ROUTER_URL="$MECHA_ROUTER_URL" /usr/bin/python3 \
+  "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --dry-run
+```
+
+The first command must print exactly one matching cron line. The second must print `PRIORITY HANDOFF MONITOR OK: state and router reminder evidence are current; no priority handoff breach.` when the state/router are healthy, or an actionable `WARN`/`FAIL` with `owner=`, `action=`, and `resolved-when=`.
+
+The monitor appends to `$HOME/.mecha-developer/priority-handoff-monitor.log` and trims it to 1 MiB (retaining its newest 512 KiB) on every invocation. Roll it back without touching other cron entries:
+
+```bash
+/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --remove-schedule
+```
+
+### 10. Set Up Other Crontab Jobs
+
+Add cron jobs for mailbox idle delivery, inbound mail polling, standing-order refresh, and memory monitoring:
 
 ```bash
 TOOLS="$(pwd)/.claude/skills/supervisor/tools"
@@ -472,38 +518,7 @@ else
   echo "skipped: memory monitor cron job already exists"
 fi
 
-# Watchdog — checks for stuck workers every 30 minutes, mails supervisor if found.
-# Wrapped in `launchctl asuser $UID` so the watchdog inherits Wolfgang's GUI login
-# session. Required because the claude CLI stores credentials in the macOS keychain
-# ("Claude Code-credentials"), which is unreachable from cron's stripped environment.
-# `bash -lc` additionally sources login profiles so PATH and env vars match an
-# interactive shell. DO NOT strip this wrapper — doing so silently breaks the
-# watchdog whenever credentials are keychain-backed (e.g. claude after a relogin).
-EXISTING_WATCHDOG="$(crontab -l 2>/dev/null | grep "watchdog.py" || true)"
-if [ -z "$EXISTING_WATCHDOG" ]; then
-  USER_UID="$(id -u)"
-  WATCHDOG_CMD="launchctl asuser $USER_UID /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-developer/watchdog.log 2>&1'"
-  (crontab -l 2>/dev/null; echo "*/30 * * * * $WATCHDOG_CMD") | crontab -
-  echo "added: watchdog cron job (runs every 30 minutes, via launchctl asuser for keychain access)"
-elif ! echo "$EXISTING_WATCHDOG" | grep -q "launchctl asuser"; then
-  echo ""
-  echo "================================================================"
-  echo "WARNING: existing watchdog cron entry is missing the"
-  echo "  'launchctl asuser \$UID /bin/bash -lc ...' wrapper."
-  echo ""
-  echo "On macOS the watchdog cannot reach the keychain without it, so"
-  echo "claude auth lookups silently fail every 30 minutes."
-  echo ""
-  echo "Current entry:"
-  echo "  $EXISTING_WATCHDOG"
-  echo ""
-  echo "Fix: run \`crontab -e\` and replace the watchdog line with:"
-  echo "  */30 * * * * launchctl asuser \$(id -u) /bin/bash -lc '/usr/bin/python3 $TOOLS/watchdog.py >> \$HOME/.mecha-developer/watchdog.log 2>&1'"
-  echo "================================================================"
-  echo ""
-else
-  echo "skipped: watchdog cron job already exists (wrapped correctly)"
-fi
+# The Priority Handoff Monitor is installed in step 9. Do not add a second schedule here.
 
 # Mailbox V2 router owns reminder scheduling. Remove retired cron producers
 # so they cannot create duplicate or filesystem-backed deliveries.
@@ -563,45 +578,11 @@ The cron jobs:
 - **mailbox_cron.py**: Runs every 10 seconds (6 staggered entries). Checks all agent mailboxes for unread messages older than 30 seconds and delivers to tmux windows.
 - **standing_orders_cron.py**: Runs every 2 hours. Reads current supervisor standing orders and posts them to the supervisor mailbox from the `standing-orders-cron` system sender.
 - **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
-- **watchdog.py**: Runs every 30 minutes. Captures all tmux window output, asks an LLM to evaluate whether any workers are stuck (idle without being told to wait), and sends supervisor alerts through Mailbox.
-
-  **LLM config (optional)**: `~/.mecha-developer/watchdog-llm.json` selects which CLI the watchdog uses. Schema: `{"cli": "claude" | "codex", "model": "<model>", "extra_args": []}`. If the file is missing, defaults are `claude` + `claude-sonnet-4-6` + `[]`. An invalid `cli` value is rejected with a loud ntfy notification rather than silent fallback.
+- **Priority Handoff Monitor**: Runs every five minutes. It reads supervisor state and durable Mailbox router reminders, reports actionable terminal-priority and handoff faults, and bounds `~/.mecha-developer/priority-handoff-monitor.log` to 1 MiB. It does not create a reminder. `--remove-schedule` removes only its marked cron entry.
 - **Mailbox V2 router**: Persists and schedules durable reminders; no reminder cron job or reminder JSON file is used.
 - **logrotate**: Runs daily. Rotates logs in `~/.mecha-developer/` when they exceed size limits; keeps 1 backup, discards anything older than 24 hours.
 
-### 9b. Preflight: Watchdog LLM Login Check
-
-Run a tiny ping against the configured watchdog CLI to surface auth issues at install time rather than 30 minutes later when the first cron tick happens.
-
-```bash
-WATCHDOG_CFG="$HOME/.mecha-developer/watchdog-llm.json"
-WATCHDOG_CLI="claude"
-if [ -f "$WATCHDOG_CFG" ]; then
-  WATCHDOG_CLI="$(/usr/bin/python3 -c "import json; print(json.load(open('$WATCHDOG_CFG')).get('cli', 'claude'))" 2>/dev/null || echo claude)"
-fi
-
-if [ "$WATCHDOG_CLI" = "codex" ]; then
-  PING_OUT="$(codex exec ping 2>&1 || true)"
-else
-  PING_OUT="$(claude -p ping 2>&1 || true)"
-fi
-
-if echo "$PING_OUT" | grep -qiE "not logged in|please run /login|codex login"; then
-  echo ""
-  echo "================================================================"
-  echo "WARNING: $WATCHDOG_CLI is not logged in."
-  echo "Run \`$WATCHDOG_CLI /login\` (claude) or \`$WATCHDOG_CLI login\` (codex)"
-  echo "before the watchdog cron tick or it will silently fail every 30 min."
-  echo "================================================================"
-  echo ""
-else
-  echo "preflight: $WATCHDOG_CLI ping succeeded (or returned a non-auth error — continuing)"
-fi
-```
-
-This is a non-fatal check — any non-auth error (model unavailable, network blip) is ignored. The watchdog itself will surface auth failures via ntfy at runtime.
-
-### 10. Verify
+### 11. Verify
 
 List what was installed:
 
@@ -644,11 +625,11 @@ echo "=== Crontab ==="
 crontab -l 2>/dev/null | grep "mailbox_cron.py" || echo "no mailbox cron job"
 crontab -l 2>/dev/null | grep "standing_orders_cron.py" || echo "no standing-orders refresh cron job"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
-crontab -l 2>/dev/null | grep "watchdog.py" || echo "no watchdog cron job"
+crontab -l 2>/dev/null | grep "mecha-priority-handoff-monitor" || echo "no Priority Handoff Monitor cron job"
 crontab -l 2>/dev/null | grep "reminders/tools/reminder_cron.py" && echo "WARN: retired reminder cron job remains" || echo "Mailbox V2 router owns reminder scheduling"
 crontab -l 2>/dev/null | grep "kb_reminder_cron.py" && echo "WARN: retired KB maintenance reminder cron job remains" || echo "Router owns KB maintenance reminder scheduling"
 ```
 
-### 11. Report
+### 12. Report
 
 Print a summary of what was cleaned up, linked, updated, and skipped. If anything was skipped because a non-symlink file already existed, warn the user.

@@ -53,7 +53,7 @@ could affect files, external communication, or destructive operations.
 | `test-coverage` | Run language-agnostic code coverage analysis and identify gaps with concrete test suggestions across supported project toolchains. |
 | `voice` | Generate a voice profile from writing samples so an LLM can reproduce how someone speaks and writes. Source-agnostic: works with Facebook exports, chat logs, email archives, plain text, or any writing samples. |
 | `voice-review-builder` | Collect and distill Wolfgang's feedback on PR review comments to improve review voice and review quality. |
-| `watchdog` | Watchdog momentum-nudge guidance for the Codex agent wrapper and legacy `watchdog.py` fallback. Not for direct invocation. |
+| `watchdog` | LLM-based Watchdog momentum-nudge guidance. The separate Priority Handoff Monitor owns deterministic five-minute checks. Not for direct invocation. |
 | `worker` | Worker agent instructions — injected by the supervisor at launch. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Loaded automatically; do not invoke manually. |
 | `wolfgang-voice-review` | Private final gate for rewriting validated PR review findings into Wolfgang's review voice before posting. |
 | `workflows` | Manage and execute plain-English workflow templates. Load whenever a workflow is mentioned by name — even casually — before acting on it. |

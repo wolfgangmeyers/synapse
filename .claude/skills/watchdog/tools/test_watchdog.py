@@ -98,7 +98,7 @@ class WatchdogTests(unittest.TestCase):
         self.assertIn('"nudge": true', output)
         send_mail.assert_called_once_with(
             "Keep moving.",
-            os.path.dirname(os.path.abspath(WATCHDOG_PATH)),
+            str(watchdog.SUPERVISOR_TOOLS),
             dry_run=True,
         )
 

@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Cron-compatible wrapper for running the watchdog as a standard Codex agent.
-#
-# Example crontab:
-#   */30 * * * * /Users/wolfgang.meyers/code/mecha-developer/.claude/skills/supervisor/tools/watchdog-agent.sh
-#
-# The legacy watchdog.py path is intentionally left available as a fallback.
+# Optional Codex-agent watchdog wrapper.
+# This LLM Watchdog wrapper is separate from the Priority Handoff Monitor.
+# It is not installed by the scheduler.
 
 set -u
 
@@ -443,7 +440,7 @@ if [ ! -r "$PROMPT_FILE" ]; then
         "$PROMPT_FILE"
     exit 0
 fi
-ALERT_HELPER="$REPO_ROOT/.claude/skills/supervisor/tools/watchdog_mailbox_alert.py"
+ALERT_HELPER="$REPO_ROOT/.claude/skills/watchdog/tools/watchdog_mailbox_alert.py"
 if [ ! -r "$ALERT_HELPER" ]; then
     log "alert helper not readable: $ALERT_HELPER"
     send_failure_alert \

@@ -197,16 +197,21 @@ def list_router_reminders(router: str) -> list[dict[str, Any]]:
 
 
 def pr_watch_owned(reminder: dict[str, Any]) -> bool:
+    """Every recurrence created for the dedicated service is ours to reconcile.
+
+    The subject is deliberately not ownership: an earlier recurrence used a
+    different subject and therefore kept delivering wakeups the watcher ignored.
+    """
     return (
         reminder.get("target") == PR_WATCH_TARGET
         and reminder.get("creator") == PR_WATCH_CREATOR
-        and reminder.get("subject") == PR_WATCH_SUBJECT
     )
 
 
 def pr_watch_conforming(reminder: dict[str, Any]) -> bool:
     return (
         pr_watch_owned(reminder)
+        and reminder.get("subject") == PR_WATCH_SUBJECT
         and reminder.get("interval_ms") == PR_WATCH_INTERVAL_MS
         and reminder.get("state") == "scheduled"
     )
@@ -218,16 +223,53 @@ def delete_router_reminder(router: str, reminder_id: str) -> None:
         raise ValueError(f"Router rejected reminder cancellation: {response_error(response or {})}")
 
 
+def pr_watch_non_cancelable(reminder: dict[str, Any]) -> bool:
+    return reminder.get("state") != "scheduled" or reminder.get("linked_message_id") is not None
+
+
+def notify_pr_watch_recovery_blocked(router: str, blockers: list[dict[str, Any]]) -> str | None:
+    """Tell the supervisor when a dead delivery requires manual recovery."""
+    ids = ", ".join(str(reminder.get("id", "unknown")) for reminder in blockers)
+    payload = {
+        "id": nanoid(),
+        "from": PR_WATCH_CREATOR,
+        "to": "supervisor",
+        "subject": "PR watch error",
+        "body": f"PR watch recurrence recovery is blocked by failed/dead-letter reminder(s): {ids}. Resolve or dismiss the linked delivery, then restart pr-watch.",
+        "created_at": utc_timestamp(datetime.now(timezone.utc)),
+    }
+    try:
+        status, response = post_json(router_endpoint(router, "/v1/messages"), payload)
+    except (ValueError, URLError) as error:
+        return str(error)
+    message = response.get("message") if isinstance(response, dict) else None
+    if status in {200, 201} and isinstance(message, dict) and isinstance(message.get("state"), str):
+        return None
+    return f"Router rejected supervisor notification: {response_error(response or {})}"
+
+
+def fail_for_non_cancelable_pr_watch_reminders(router: str, owned: list[dict[str, Any]]) -> None:
+    blockers = [reminder for reminder in owned if pr_watch_non_cancelable(reminder)]
+    if not blockers:
+        return
+    dead_letter = [
+        reminder for reminder in blockers
+        if reminder.get("state") == "failed" or reminder.get("linked_message_state") == "dead_letter"
+    ]
+    detail = ", ".join(str(reminder.get("id", "unknown")) for reminder in blockers)
+    if dead_letter:
+        notification_error = notify_pr_watch_recovery_blocked(router, dead_letter)
+        suffix = "supervisor notified" if notification_error is None else f"supervisor notification failed: {notification_error}"
+        raise ValueError(f"PR watch recurrence has failed/dead-letter delivery ({detail}); refusing recovery; {suffix}")
+    raise ValueError(f"PR watch recurrence is active or linked ({detail}); refusing to create another")
+
+
 def reconcile_pr_watch(args: argparse.Namespace) -> int:
     """Ensure one owned scheduled recurrence without racing a second service."""
     try:
         reminders = list_router_reminders(args.router_url)
         owned = [reminder for reminder in reminders if pr_watch_owned(reminder)]
-
-        # A linked/due reminder cannot safely be canceled. Do not create another
-        # recurrence while it exists; a later startup will reconcile it.
-        if any(reminder.get("state") != "scheduled" for reminder in owned):
-            raise ValueError("PR watch recurrence is active or linked; refusing to create another")
+        fail_for_non_cancelable_pr_watch_reminders(args.router_url, owned)
 
         conforming = [reminder for reminder in owned if pr_watch_conforming(reminder)]
         if len(conforming) == 1 and len(owned) == 1:
@@ -243,8 +285,7 @@ def reconcile_pr_watch(args: argparse.Namespace) -> int:
 
         reminders = list_router_reminders(args.router_url)
         owned = [reminder for reminder in reminders if pr_watch_owned(reminder)]
-        if any(reminder.get("state") != "scheduled" for reminder in owned):
-            raise ValueError("PR watch recurrence changed while reconciling; refusing to create another")
+        fail_for_non_cancelable_pr_watch_reminders(args.router_url, owned)
         conforming = [reminder for reminder in owned if pr_watch_conforming(reminder)]
         if len(conforming) == 1 and len(owned) == 1:
             print(f"PR watch recurrence is scheduled: {conforming[0]['id']}")

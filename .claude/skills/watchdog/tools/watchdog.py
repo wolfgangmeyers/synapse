@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Watchdog cron job for the mecha-developer supervisor system.
+"""LLM-based Watchdog for the mecha-developer supervisor system.
 
-Runs every 30 minutes. Captures tmux windows in the mecha session, asks an
-LLM whether the supervisor needs a momentum nudge, and mails that note to the
+This separate Watchdog captures tmux windows in the mecha session, asks an LLM
+whether the supervisor needs a momentum nudge, and mails that note to the
 supervisor only when the LLM says to nudge.
 
 The LLM CLI is configurable via ~/.mecha-developer/watchdog-llm.json:
@@ -14,8 +14,6 @@ Usage:
   python3 watchdog.py --dry-run
   python3 watchdog.py --self-test
 
-Crontab entry:
-  */30 * * * * /usr/bin/python3 /home/wolfgang/code/mecha-developer/.claude/skills/supervisor/tools/watchdog.py >> ~/.mecha-developer/watchdog.log 2>&1
 """
 
 import argparse
@@ -26,8 +24,11 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+WATCHDOG_TOOLS = Path(__file__).resolve().parent
+SUPERVISOR_TOOLS = WATCHDOG_TOOLS.parents[1] / "supervisor" / "tools"
+sys.path.insert(0, str(SUPERVISOR_TOOLS))
 from _tmux import capture_pane, list_windows, session_exists
 
 DEFAULT_CLI = "claude"
@@ -59,15 +60,7 @@ def log(msg):
 
 def load_watchdog_guidance():
     """Load watchdog evaluation guidance from the dedicated watchdog skill."""
-    skill_path = os.path.normpath(
-        os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..",
-            "..",
-            "watchdog",
-            "SKILL.md",
-        )
-    )
+    skill_path = WATCHDOG_TOOLS.parent / "SKILL.md"
     try:
         with open(skill_path) as f:
             content = f.read()
@@ -411,7 +404,6 @@ def main():
 
     if args.self_test:
         sys.exit(_run_self_tests())
-
     try:
         config = load_llm_config()
     except (ValueError, json.JSONDecodeError, OSError) as e:
@@ -462,11 +454,7 @@ def main():
         sys.exit(0)
 
     log(f"LLM decision: nudge={decision['nudge']} note={decision['note']!r}")
-    maybe_send_nudge(
-        decision,
-        os.path.dirname(os.path.abspath(__file__)),
-        dry_run=args.dry_run,
-    )
+    maybe_send_nudge(decision, str(SUPERVISOR_TOOLS), dry_run=args.dry_run)
 
 
 def _run_self_tests():
@@ -569,6 +557,6 @@ def _run_self_tests():
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
-        print(f"{LOG_PREFIX} Unexpected error: {e}", flush=True)
-        sys.exit(0)
+    except Exception as error:
+        print(f"WATCHDOG FAIL: unexpected runtime error: {error}", file=sys.stderr, flush=True)
+        sys.exit(1)
