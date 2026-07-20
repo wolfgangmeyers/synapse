@@ -5,7 +5,7 @@ import { RECALL_POLICY } from "../harness/memory-catalog.js";
 import { createMemoryCaptureLifecycle, runMemoryExtractor, sanitizeCaptureSource, validateCaptureResult } from "../pi-extensions/memory-capture.js";
 
 const policy = { capture: { compaction_deadline_ms: 30_000, shutdown_deadline_ms: 10_000, source_max_bytes: 4096, source_message_max_bytes: 1024, maximum_records: 6, maximum_title_bytes: 256, maximum_body_bytes_per_record: 16384, maximum_total_body_bytes: 32768, maximum_related_ids_per_record: 24 } };
-const source = [{ id: "tool-1", role: "toolResult", details: { memory_validation: "verified" }, content: "Use the signed production workflow. Verify /health before announcing completion." }];
+const source = [{ id: "tool-1", role: "toolResult", content: "Use the signed production workflow. Verify /health before announcing completion." }];
 const record = (id, body, related = []) => ({ mode: "create", id, title: id, body, tags: ["release"], related, evidence: { source_ids: ["tool-1"] } });
 
 test("capture lifecycle serializes a valid tagged linked chunk batch before apply", async () => {
@@ -14,10 +14,10 @@ test("capture lifecycle serializes a valid tagged linked chunk batch before appl
   assert.equal(calls.length, 1); assert.deepEqual(calls[0].operations.map(({ id }) => id), ["release-process", "release-health"]);
 });
 
-test("Pi session-entry tool results require explicit transient validation metadata", () => {
-  const wrapped = [{ id: "entry-1", type: "message", message: { role: "toolResult", details: { memory_validation: "verified" }, content: [{ type: "text", text: "Use the signed production workflow." }] } }];
-  const snapshot = sanitizeCaptureSource(wrapped, policy.capture); assert.equal(snapshot.messages[0].validation, "verified"); assert.deepEqual(validateCaptureResult({ decision: "apply", records: [{ ...record("release-process", "Use the signed production workflow."), evidence: { source_ids: ["entry-1"] } }] }, snapshot, policy.capture).operations.map(({ id }) => id), ["release-process"]);
-  const proseOnly = sanitizeCaptureSource([{ id: "entry-2", type: "message", message: { role: "toolResult", content: [{ type: "text", text: "Verified: Use the signed production workflow." }] } }], policy.capture); assert.throws(() => validateCaptureResult({ decision: "apply", records: [{ ...record("release-process", "Use the signed production workflow."), evidence: { source_ids: ["entry-2"] } }] }, proseOnly, policy.capture));
+test("ordinary successful Pi tool results support capture evidence without custom details", () => {
+  const wrapped = [{ id: "entry-1", type: "message", message: { role: "toolResult", content: [{ type: "text", text: "Use the signed production workflow." }], isError: false } }];
+  const snapshot = sanitizeCaptureSource(wrapped, policy.capture); assert.deepEqual(snapshot.messages, [{ id: "entry-1", role: "toolResult", text: "Use the signed production workflow." }]); assert.deepEqual(validateCaptureResult({ decision: "apply", records: [{ ...record("release-process", "Use the signed production workflow."), evidence: { source_ids: ["entry-1"] } }] }, snapshot, policy.capture).operations.map(({ id }) => id), ["release-process"]);
+  const failed = sanitizeCaptureSource([{ id: "entry-2", type: "message", message: { role: "toolResult", content: [{ type: "text", text: "Use the signed production workflow." }], isError: true } }], policy.capture); assert.deepEqual(failed.messages, []);
 });
 
 test("sanitizer excludes custom, compaction, thinking, images, and credential payloads", () => {
