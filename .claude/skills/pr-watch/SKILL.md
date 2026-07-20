@@ -41,12 +41,15 @@ extension, performs the watcher scan after receiving one.
 Reconciliation is fail-closed. It first lists the canonical router state. One
 matching scheduled recurrence is retained; duplicate or stale *scheduled*
 records owned by this service are canceled before a replacement is created.
+Ownership is target `pr-watch` plus creator `pr-watch`, so a legacy recurrence
+with a different subject is retired rather than repeatedly waking the watcher.
 A due, linked, failed, or otherwise non-scheduled owned record is never
 canceled and no replacement is created, because that could overlap a delivery.
-A deterministic reminder ID makes concurrent startup attempts idempotent; on
-an ID conflict the client lists and verifies the other attempt instead of
-creating a second recurrence. If the router cannot be listed or verified, the
-service reports failure and does not create a reminder.
+A failed or dead-letter record also sends `PR watch error` to `supervisor` for
+manual recovery. A deterministic reminder ID makes concurrent startup attempts
+idempotent; on an ID conflict the client lists and verifies the other attempt
+instead of creating a second recurrence. If the router cannot be listed or
+verified, the service reports failure and does not create a reminder.
 
 
 ### Visible wakeup contract

@@ -84,8 +84,8 @@ def main():
     if timeout < 1:
         timeout = DEFAULT_SEND_TIMEOUT_SECONDS
 
-    tools_dir = os.path.dirname(os.path.abspath(__file__))
-    mailbox_send = os.path.join(tools_dir, "mailbox_send.py")
+    supervisor_tools = Path(__file__).resolve().parents[2] / "supervisor" / "tools"
+    mailbox_send = str(supervisor_tools / "mailbox_send.py")
     argv = [
         sys.executable,
         mailbox_send,
