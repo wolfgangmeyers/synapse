@@ -22,6 +22,9 @@ app/build/
 .idea/
 .vscode/
 
+# Discord bridge secret (normally stored outside the repository)
+supervisor-bridge.token
+
 # Supervisor workflow artifacts (never commit)
 TASK.md
 TASK-*.md
