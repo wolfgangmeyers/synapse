@@ -113,11 +113,17 @@ export function mailboxSessionDeliveryState(sessionManager, messageId, {
 }
 
 function mailboxCustomMessage(message) {
+  const subject = message.subject === undefined ? "" : `\nSubject: ${message.subject}`;
   return {
     customType: MAILBOX_MESSAGE_TYPE,
-    content: `Mailbox message from ${message.from}\n\n${message.body}`,
+    content: `Mailbox message from ${message.from}${subject}\n\n${message.body}`,
     display: true,
-    details: { message_id: message.id, from: message.from, to: message.to },
+    details: {
+      message_id: message.id,
+      from: message.from,
+      to: message.to,
+      ...(message.subject === undefined ? {} : { subject: message.subject }),
+    },
   };
 }
 

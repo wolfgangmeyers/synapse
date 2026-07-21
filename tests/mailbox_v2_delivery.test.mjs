@@ -90,8 +90,8 @@ function receiptClient() {
   };
 }
 
-test("Pi delivery ACK follows a persisted session entry, not pi.sendMessage", async () => {
-  const message = envelope("message-1", { subject: "Durability" });
+test("subject-bearing PR watch wakeups preserve their exact subject through durable Pi delivery", async () => {
+  const message = envelope("message-1", { to: "pr-watch", subject: "PR watch wakeup" });
   const session = await durableSession(message.id);
   const sent = [];
   const client = receiptClient();
@@ -118,7 +118,16 @@ test("Pi delivery ACK follows a persisted session entry, not pi.sendMessage", as
   coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
 
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].customMessage.content, "Mailbox message from sender\n\ndurable body");
+  assert.equal(
+    sent[0].customMessage.content,
+    "Mailbox message from sender\nSubject: PR watch wakeup\n\ndurable body",
+  );
+  assert.deepEqual(sent[0].customMessage.details, {
+    message_id: "message-1",
+    from: "sender",
+    to: "pr-watch",
+    subject: "PR watch wakeup",
+  });
   assert.deepEqual(sent[0].options, { deliverAs: "steer", triggerTurn: true });
   assert.deepEqual(client.receipts, [
     { type: "injection_requested", messageId: message.id, attemptNumber: 1, reason: undefined },
@@ -374,6 +383,13 @@ test("extension forwards Pi message_end into the durable mailbox checkpoint", as
   handlers.get("session_start")({}, context);
   clientOptions.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
   assert.equal(sent.length, 1);
+  assert.equal(sent[0][0].content, "Mailbox message from sender\n\ndurable body");
+  assert.deepEqual(sent[0][0].details, {
+    message_id: message.id,
+    from: "sender",
+    to: "worker",
+  });
+  assert.deepEqual(sent[0][1], { deliverAs: "steer", triggerTurn: true });
   assert.deepEqual(receipts, [{ type: "injection_requested", attemptNumber: 1 }]);
 
   session.entries.push(sessionEntry(message.id));
