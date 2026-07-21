@@ -36,6 +36,78 @@ function childSessionId(event) {
     : undefined;
 }
 
+const SETTLED_NOTIFICATION_FOLLOW_UP_MS = [60_000, 300_000, 600_000];
+
+// Managed workers use background subagents, whose native started and terminal
+// events share a run ID. Foreground runs lack a matching terminal ID, so they
+// remain an upstream lifecycle limitation rather than a heuristic target.
+export function createSettledNotificationScheduler({
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+} = {}) {
+  if (typeof setTimeoutImpl !== "function" || typeof clearTimeoutImpl !== "function") {
+    throw new TypeError("settled notification timers are required");
+  }
+
+  const children = new Set();
+  const timers = new Set();
+  let generation = 0;
+  let parentSettled = false;
+
+  function invalidate() {
+    generation += 1;
+    for (const timer of timers) clearTimeoutImpl(timer);
+    timers.clear();
+  }
+
+  function schedule(delay, expectedGeneration, send) {
+    let timer;
+    timer = setTimeoutImpl(() => {
+      timers.delete(timer);
+      if (generation !== expectedGeneration || children.size > 0) return;
+      send();
+    }, delay);
+    timers.add(timer);
+    timer?.unref?.();
+  }
+
+  return {
+    onParentActivity() {
+      parentSettled = false;
+      invalidate();
+    },
+    onParentSettled(send) {
+      if (parentSettled || typeof send !== "function") return;
+      parentSettled = true;
+      if (children.size > 0) return;
+
+      invalidate();
+      const settledGeneration = generation;
+      send();
+      for (const delay of SETTLED_NOTIFICATION_FOLLOW_UP_MS) {
+        schedule(delay, settledGeneration, send);
+      }
+    },
+    onChildStarted(sessionId) {
+      if (typeof sessionId !== "string" || sessionId.length === 0 || children.has(sessionId)) return;
+      children.add(sessionId);
+      invalidate();
+    },
+    onChildDisposed(sessionId) {
+      if (typeof sessionId !== "string" || sessionId.length === 0) return;
+      children.delete(sessionId);
+    },
+    dispose() {
+      invalidate();
+      children.clear();
+      parentSettled = false;
+    },
+    activeChildCount() {
+      return children.size;
+    },
+  };
+}
+
 export function transientChildAgentId(sessionId, generateId = createNanoId) {
   if (typeof sessionId !== "string" || sessionId.length === 0 || typeof generateId !== "function") {
     throw new TypeError("a child session ID and ID generator are required");
@@ -360,6 +432,7 @@ export function createPiMailboxDeliveryCoordinator({
 export function createMechaMessagingExtension(pi, {
   resolveCurrentAgentId = resolveAgentId,
   createClient = createMailboxClient,
+  createSettledScheduler = createSettledNotificationScheduler,
 } = {}) {
   let client;
   let coordinator;
@@ -389,6 +462,7 @@ export function createMechaMessagingExtension(pi, {
     // The launcher rejects invalid values; a manually configured Pi stays disabled.
   }
   const children = childSessionIds();
+  const settledNotifications = createSettledScheduler();
   const childReplyClients = new Map();
 
   pi.registerTool({
@@ -438,6 +512,15 @@ export function createMechaMessagingExtension(pi, {
     },
   });
 
+  pi.events.on("subagents:started", (event) => {
+    settledNotifications.onChildStarted(event?.id);
+  });
+  pi.events.on("subagents:completed", (event) => {
+    settledNotifications.onChildDisposed(event?.id);
+  });
+  pi.events.on("subagents:failed", (event) => {
+    settledNotifications.onChildDisposed(event?.id);
+  });
   pi.events.on("subagents:child:session-created", (event) => {
     const sessionId = childSessionId(event);
     if (sessionId !== undefined) children.add(sessionId);
@@ -453,6 +536,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("agent_start", (_event, context) => {
     if (settledNotificationRecipient !== undefined && !children.has(context.sessionManager.getSessionId())) {
       settledNotificationPending = true;
+      settledNotifications.onParentActivity();
     }
   });
   pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
@@ -461,20 +545,22 @@ export function createMechaMessagingExtension(pi, {
 
     // Consume before sendReply starts so a later run can arm independently.
     settledNotificationPending = false;
-    const notificationClient = client;
-    const worker = settledNotificationAgentId;
-    if (notificationClient === undefined || worker === undefined) return;
-    try {
-      Promise.resolve(notificationClient.sendReply({
-        to: settledNotificationRecipient,
-        subject: "Pi worker settled",
-        body: `Worker ${worker} has settled and is idle.`,
-      })).catch((error) => {
+    settledNotifications.onParentSettled(() => {
+      const notificationClient = client;
+      const worker = settledNotificationAgentId;
+      if (notificationClient === undefined || worker === undefined) return;
+      try {
+        Promise.resolve(notificationClient.sendReply({
+          to: settledNotificationRecipient,
+          subject: "Pi worker settled",
+          body: `Worker ${worker} has settled and is idle.`,
+        })).catch((error) => {
+          context.ui.notify(`Pi settled notification failed: ${error.message}`, "error");
+        });
+      } catch (error) {
         context.ui.notify(`Pi settled notification failed: ${error.message}`, "error");
-      });
-    } catch (error) {
-      context.ui.notify(`Pi settled notification failed: ${error.message}`, "error");
-    }
+      }
+    });
   });
   pi.on("session_shutdown", async (_event, context) => { if (children.has(context.sessionManager.getSessionId())) return; recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch {} finally { controller.abort(); clearTimeout(timer); } });
 
@@ -587,6 +673,7 @@ export function createMechaMessagingExtension(pi, {
     }
     settledNotificationPending = false;
     settledNotificationAgentId = undefined;
+    settledNotifications.dispose();
     coordinator?.close();
     coordinator = undefined;
     client?.close();
