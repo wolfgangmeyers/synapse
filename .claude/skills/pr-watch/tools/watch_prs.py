@@ -617,7 +617,7 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
         state["last_report"] = str(report_path)
         save_state(state)
 
-    if send and not dry_run and report_path and (findings or quiet):
+    if send and not dry_run and report_path and (findings or (errors and quiet)):
         subject = "PR watch findings" if findings else "PR watch quiet"
         try_send_mail(subject, mail_body(findings, errors, report_path, now, quiet))
 

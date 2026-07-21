@@ -136,6 +136,29 @@ class PassOnceDeliveryTest(unittest.TestCase):
         self.assertEqual("PR watch findings", sent[0][0])
         self.assertIn("1 actionable PR(s)", sent[0][1])
 
+    def test_clean_scan_writes_its_report_without_sending_mail(self):
+        old_repos = watch_prs.REPOS
+        old_fetch_repo = watch_prs.fetch_repo
+        old_try_send_mail = watch_prs.try_send_mail
+        old_state_dir = watch_prs.STATE_DIR
+        sent = []
+        try:
+            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.fetch_repo = lambda _repo: []
+            watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
+            with tempfile.TemporaryDirectory() as directory:
+                watch_prs.configure_paths(Path(directory))
+                findings, report_path = watch_prs.pass_once()
+                self.assertTrue(report_path.exists())
+        finally:
+            watch_prs.REPOS = old_repos
+            watch_prs.fetch_repo = old_fetch_repo
+            watch_prs.try_send_mail = old_try_send_mail
+            watch_prs.configure_paths(old_state_dir)
+
+        self.assertEqual([], findings)
+        self.assertEqual([], sent)
+
 
 class ClassifyHeadChangeTest(unittest.TestCase):
     def test_head_change_after_wolfgang_review_is_actionable(self):
