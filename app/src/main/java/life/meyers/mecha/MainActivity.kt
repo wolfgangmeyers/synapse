@@ -14,6 +14,7 @@ import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -147,11 +148,7 @@ class MainActivity : ComponentActivity() {
         openConversation(intent)
         setContent { MechaApp() }
         val stateFilter = android.content.IntentFilter(MailboxConnectionService.ACTION_STATE_CHANGED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(stateReceiver, stateFilter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(stateReceiver, stateFilter)
-        }
+        ContextCompat.registerReceiver(this, stateReceiver, stateFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
         ensureNotificationsEnabled()
         if (activeRouter.isNotBlank()) MailboxConnectionService.connect(this, activeRouter)
     }

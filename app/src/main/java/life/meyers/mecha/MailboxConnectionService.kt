@@ -217,8 +217,16 @@ class MailboxConnectionService : Service() {
     private fun startAsForeground(status: String) {
         createNotificationChannels()
         val notification = connectionNotification(status)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(CONNECTION_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
-        else startForeground(CONNECTION_NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startRemoteMessagingForeground(notification)
+        } else {
+            startForeground(CONNECTION_NOTIFICATION_ID, notification)
+        }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun startRemoteMessagingForeground(notification: Notification) {
+        startForeground(CONNECTION_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
     }
 
     private fun createNotificationChannels() {
