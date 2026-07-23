@@ -107,22 +107,74 @@ def priority_liveness_findings(state: dict, reminders: list[dict]) -> list[str]:
     tasks = {task.get("id"): task for task in state["tasks"] if isinstance(task, dict)}
     reminders_by_id = {item.get("id"): item for item in reminders if isinstance(item, dict)}
     findings = []
+    delivery_tasks = [
+        task for task in state["tasks"]
+        if task.get("state") in {"active", "blocked"}
+        and task.get("type") in {"worker", "pipeline", "remote-worker"}
+    ]
+    active_priorities = [
+        priority for priority in state["priorities"]
+        if isinstance(priority, dict) and priority.get("status") in {"active", "blocked"}
+    ]
+    if delivery_tasks and not active_priorities:
+        findings.append(actionable(
+            "FAIL",
+            "supervisor",
+            "non-terminal delivery tasks exist but no active priority is recorded",
+            "create or restore the ordered priority and link its task IDs using state_priority.py",
+            "each current delivery workstream is represented by an active priority with linked tasks",
+        ))
+
+    general_sweeps = [
+        reminder for reminder in reminders
+        if reminder.get("target") == "supervisor"
+        and reminder.get("state") == "scheduled"
+        and isinstance(reminder.get("interval_ms"), int)
+        and 300_000 <= reminder["interval_ms"] <= 600_000
+        and "sweep" in str(reminder.get("body", "")).lower()
+    ]
+    if (delivery_tasks or active_priorities) and len(general_sweeps) != 1:
+        findings.append(actionable(
+            "FAIL",
+            "supervisor",
+            f"expected exactly one recurring 5-10 minute general sweep reminder, found {len(general_sweeps)}",
+            "repair the recurring supervisor general-sweep reminder through Mailbox",
+            "exactly one scheduled recurring supervisor reminder at a 5-10 minute cadence names the general sweep",
+        ))
+
     for priority in state["priorities"]:
-        if not isinstance(priority, dict) or priority.get("status") != "active":
+        if not isinstance(priority, dict) or priority.get("status") not in {"active", "blocked"}:
             continue
         priority_id = priority.get("id")
+        if not priority.get("task_ids"):
+            findings.append(actionable(
+                "FAIL",
+                "supervisor",
+                f"priority {priority_id} ({priority.get('name')}) has no linked tasks",
+                "link its current delivery or CI/review successor task using state_priority.py",
+                f"priority {priority_id} has at least one non-terminal linked task",
+            ))
         linked = [tasks[task_id] for task_id in priority.get("task_ids", []) if task_id in tasks]
         if priority.get("task_ids") and len(linked) != len(priority["task_ids"]):
             findings.append(actionable("FAIL", "supervisor", f"priority {priority_id} references task IDs absent from state", "repair priority.task_ids to reference existing tasks", f"every task ID in priority {priority_id} resolves in supervisor state"))
         if linked and all(task.get("state") in {"completed", "abandoned"} for task in linked):
             findings.append(actionable("WARN", "supervisor", f"priority {priority_id} ({priority.get('name')}) has an exhausted queue", "record the priority completion or add its next authorized successor task", f"priority {priority_id} is completed/deprioritized or has a non-terminal successor"))
         for task in linked:
+            if task.get("state") in {"completed", "abandoned"}:
+                continue
             handoff = task.get("verification_handoff")
             if not isinstance(handoff, dict):
+                findings.append(actionable(
+                    "FAIL",
+                    "supervisor",
+                    f"priority {priority_id} task-{task.get('id')} has no verification handoff",
+                    "create a recurring Mailbox reminder for its next asynchronous verification and record the reminder ID",
+                    f"task-{task.get('id')} has a verification_handoff object linked to a live reminder",
+                ))
                 continue
             reminder = reminders_by_id.get(handoff.get("reminder_id"))
             if reminder is None or is_terminal(reminder):
-                findings.append(actionable("FAIL", "supervisor", f"priority {priority_id} task-{task.get('id')} verification reminder is unavailable", "create or repair the task verification reminder through Mailbox", f"the recorded verification reminder is scheduled or has a non-terminal linked delivery"))
+                findings.append(actionable("FAIL", "supervisor", f"priority {priority_id} task-{task.get('id')} verification reminder is unavailable", "create or repair the task verification reminder through Mailbox", "the recorded verification reminder is scheduled or has a non-terminal linked delivery"))
             if not handoff.get("verification_started_at"):
                 findings.append(actionable("WARN", "supervisor", f"priority {priority_id} task-{task.get('id')} has no verification start", "start verification and record verification_started_at", "verification_started_at contains the current verification start time"))
             elif handoff.get("remote_verified") is None:

@@ -72,6 +72,37 @@ class PriorityHandoffMonitorTests(unittest.TestCase):
             self.assertIn("; action=", finding)
             self.assertIn("; resolved-when=", finding)
 
+    def test_delivery_tasks_without_priority_or_general_sweep_fail_loudly(self):
+        state = {
+            "priorities": [],
+            "tasks": [{"id": 12, "state": "active", "type": "worker"}],
+            "priority_control": {},
+        }
+        findings = monitor.priority_liveness_findings(state, [])
+        self.assertTrue(any("no active priority is recorded" in item for item in findings))
+        self.assertTrue(any("general sweep reminder" in item for item in findings))
+
+    def test_active_priority_requires_linked_task_handoff_and_live_reminder(self):
+        state = {
+            "priorities": [{"id": "p-1502", "name": "PR #1502", "status": "active", "task_ids": [12]}],
+            "tasks": [{"id": 12, "state": "active", "type": "worker"}],
+            "priority_control": {},
+        }
+        sweep = {
+            "id": "sweep", "target": "supervisor", "state": "scheduled",
+            "interval_ms": 300_000, "body": "General priority sweep",
+        }
+        findings = monitor.priority_liveness_findings(state, [sweep])
+        self.assertEqual(len(findings), 1)
+        self.assertIn("has no verification handoff", findings[0])
+
+        state["tasks"][0]["verification_handoff"] = {
+            "reminder_id": "ci", "verification_started_at": "2026-07-23T00:00:00Z",
+            "remote_verified": False, "successor": "CI watcher",
+        }
+        ci = {"id": "ci", "target": "supervisor", "state": "scheduled"}
+        self.assertEqual(monitor.priority_liveness_findings(state, [sweep, ci]), [])
+
     def test_terminal_legacy_ids_are_ignored_only_after_exact_retirement(self):
         failed = {"id": "legacy-dead", "target": "watchdog", "state": "failed", "linked_message_state": "dead_letter"}
         state = {
