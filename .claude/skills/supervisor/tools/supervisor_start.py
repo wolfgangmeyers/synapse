@@ -2,7 +2,7 @@
 """Start the mecha supervisor session.
 
 Creates the 'mecha' tmux session, opens the supervisor window, and launches
-Pi with the pinned OpenAI Codex GPT-5.6 Terra runtime by default. The tmux
+Pi with the pinned OpenAI Codex GPT-5.5 runtime by default. The tmux
 window name supplies the mailbox identity.
 sends the bootstrap prompt to activate supervisor mode.
 
@@ -31,10 +31,12 @@ from _tmux import SESSION, ensure_session, send_text, send_enter, session_exists
 SUPERVISOR_WINDOW = "supervisor"
 DEFAULT_DIR = os.path.expanduser("~/code/mecha-developer")
 PI_PROVIDER = "openai-codex"
-PI_MODEL = "gpt-5.6-terra"
+PI_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
+PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
+PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 CODEX_BOOTSTRAP_PROMPT = """Load the supervisor skill and mailbox skill from ~/.agents/skills, then operate as the supervisor.
@@ -47,7 +49,55 @@ Check the current supervisor state and resume all active work. Review any in-pro
 
 PI_BOOTSTRAP_PROMPT = """Load the supervisor skill and mailbox skill from ~/.agents/skills, then operate as the supervisor.
 
-Bootstrap now: read ~/personas/wolfgang.md, read the supervisor memory indexes required by the supervisor skill, read supervisor state, discover running workers, reconcile state, and report current status. Launch future workers only with Pi using provider openai-codex and model gpt-5.6-terra."""
+Bootstrap now: read ~/personas/wolfgang.md, read the supervisor memory indexes required by the supervisor skill, read supervisor state, discover running workers, reconcile state, and report current status. Launch future workers only with Pi using provider openai-codex and model gpt-5.5."""
+
+
+def _validate_compaction_levels(levels):
+    if not isinstance(levels, list) or not levels:
+        raise ValueError("compaction policy must define at least one percentage level")
+    for level in levels:
+        percent = level if isinstance(level, (int, float)) else level.get("percent") if isinstance(level, dict) else None
+        if not isinstance(percent, (int, float)) or percent <= 0 or percent >= 100:
+            raise ValueError("compaction policy percentages must be greater than 0 and less than 100")
+
+
+def validate_compaction_policy(policy):
+    """Validate a JSON tiered policy, JSON levels policy, or comma-list percentages for Pi."""
+    if policy is None:
+        return None
+    import json
+    policy = policy.strip()
+    if not policy:
+        raise ValueError("compaction policy must not be empty")
+    try:
+        parsed = json.loads(policy)
+    except json.JSONDecodeError:
+        parsed = [float(part.strip()) for part in policy.split(",")]
+    if isinstance(parsed, list):
+        _validate_compaction_levels(parsed)
+        return policy
+    if not isinstance(parsed, dict):
+        raise ValueError("compaction policy must be a levels list or tiered object")
+    handoff = parsed.get("postCompactionNotification")
+    if handoff is not None and not isinstance(handoff, str):
+        raise ValueError("compaction policy postCompactionNotification must be a string")
+    models = parsed.get("models")
+    if models is not None and not isinstance(models, (dict, list)):
+        raise ValueError("compaction policy models must be an object or list")
+    if "levels" in parsed:
+        _validate_compaction_levels(parsed.get("levels"))
+        return policy
+    tiers = parsed.get("tiers")
+    if not isinstance(tiers, list) or not tiers:
+        raise ValueError("compaction policy must define default levels or at least one context-size tier")
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            raise ValueError("compaction policy tiers must be objects")
+        max_context = tier.get("maxContextTokens")
+        if max_context is not None and (not isinstance(max_context, int) or max_context <= 0):
+            raise ValueError("compaction policy tier maxContextTokens must be a positive integer or null")
+        _validate_compaction_levels(tier.get("levels"))
+    return policy
 
 
 def resolve_pi_router_url():
@@ -93,7 +143,6 @@ def agent_command(agent, prompt, pi_mailbox_extension=None):
                 PI_MODEL,
                 "--name",
                 SUPERVISOR_WINDOW,
-                "--no-extensions",
                 "--extension",
                 shlex.quote(pi_mailbox_extension),
                 "--approve",
@@ -130,7 +179,22 @@ def main():
         default="pi",
         help="Agent to launch: pi (default), codex, or claude",
     )
+    parser.add_argument(
+        "--compaction-policy",
+        default=None,
+        metavar="POLICY",
+        help="Pi-only: context notification policy as tiered JSON, levels JSON, or comma-separated percentages.",
+    )
     args = parser.parse_args()
+
+    if args.compaction_policy is not None and args.agent != "pi":
+        print("Error: --compaction-policy is only supported for Pi", file=sys.stderr)
+        sys.exit(1)
+    try:
+        compaction_policy = validate_compaction_policy(args.compaction_policy)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
 
     work_dir = os.path.expanduser(args.dir)
     if not os.path.isdir(work_dir):
@@ -169,10 +233,20 @@ def main():
         f" && export {PI_ROUTER_URL_ENV}={shlex.quote(pi_router_url)}"
         if args.agent == "pi" else ""
     )
+    model_key_export = (
+        f" && export {PI_MODEL_KEY_ENV}={shlex.quote(f'{PI_PROVIDER}/{PI_MODEL}')}"
+        if args.agent == "pi" else ""
+    )
+    compaction_export = (
+        f" && export {PI_COMPACTION_POLICY_ENV}={shlex.quote(compaction_policy)}"
+        if args.agent == "pi" and compaction_policy is not None else ""
+    )
     cmd = (
         f"cd {shlex.quote(work_dir)}"
         f" && unset CLAUDECODE"
         f"{router_export}"
+        f"{model_key_export}"
+        f"{compaction_export}"
         f" && {command}"
     )
     send_text(SUPERVISOR_WINDOW, cmd)

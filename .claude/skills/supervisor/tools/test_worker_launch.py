@@ -36,7 +36,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertNotIn("set_reminder.py", output)
         self.assertNotIn("--- Reminders ---", output)
 
-    def test_main_defaults_to_pinned_pi_terra(self):
+    def test_main_defaults_to_pinned_pi_gpt_55(self):
         extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
@@ -46,15 +46,15 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertIn(str(extension), command)
-        self.assertIn("--no-extensions", command)
+        self.assertNotIn("--no-extensions", command)
         session_id = command[command.index("--session-id") + 1]
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
         self.assertIn(f"--session {session_id}", output)
 
-    def test_managed_pi_command_uses_only_explicit_subagents_and_mailbox_extensions(self):
+    def test_managed_pi_command_uses_default_extensions_with_explicit_mailbox(self):
         extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
@@ -68,53 +68,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             for index, part in enumerate(command)
             if part == "--extension"
         ]
-        self.assertEqual(
-            extensions,
-            [worker_launch.PI_SUBAGENTS_EXTENSION, str(extension)],
-        )
-        self.assertIn("--no-extensions", command)
-
-    def test_main_uses_absolute_subagents_extension_override_before_mailbox(self):
-        mailbox_extension = self._pi_mailbox_extension()
-        subagents_extension = self.tmp_path / "pi-subagents.js"
-        subagents_extension.write_text("export default () => {};\n", encoding="utf-8")
-        with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(mailbox_extension),
-            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
-            worker_launch.PI_SUBAGENTS_EXTENSION_ENV: str(subagents_extension),
-        }, clear=True):
-            commands, _ = self._run_main("pi-worker", agent="pi")
-
-        command = shlex.split(commands[0])
-        extensions = [command[index + 1] for index, value in enumerate(command) if value == "--extension"]
-        self.assertEqual(extensions, [str(subagents_extension), str(mailbox_extension)])
-
-    def test_main_rejects_invalid_subagents_extension_override_before_launch(self):
-        mailbox_extension = self._pi_mailbox_extension()
-        directory = self.tmp_path / "pi-subagents-directory"
-        directory.mkdir()
-        cases = {
-            "empty": "",
-            "relative": "pi-subagents.js",
-            "missing": str(self.tmp_path / "missing.js"),
-            "directory": str(directory),
-        }
-        for name, override in cases.items():
-            argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name]
-            with self.subTest(name=name), patch.dict(os.environ, {
-                worker_launch.PI_MAILBOX_EXTENSION_ENV: str(mailbox_extension),
-                worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
-                worker_launch.PI_SUBAGENTS_EXTENSION_ENV: override,
-            }, clear=True), \
-                 patch.object(worker_launch.sys, "argv", argv), \
-                 patch.object(worker_launch, "window_exists") as window_exists, \
-                 contextlib.redirect_stderr(stderr := io.StringIO()), \
-                 self.assertRaises(SystemExit) as raised:
-                worker_launch.main()
-
-            self.assertEqual(raised.exception.code, 1)
-            self.assertIn(worker_launch.PI_SUBAGENTS_EXTENSION_ENV, stderr.getvalue())
-            window_exists.assert_not_called()
+        self.assertEqual(extensions, [str(extension)])
+        self.assertNotIn("--no-extensions", command)
 
     def test_main_maps_resume_to_pi_session(self):
         extension = self._pi_mailbox_extension()
@@ -137,6 +92,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
+        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.5", commands[0])
         self.assertNotIn(worker_launch.PI_NOTIFY_ON_SETTLED_ENV, commands[0])
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])
@@ -153,6 +109,55 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
         self.assertIn("export MECHA_PI_NOTIFY_ON_SETTLED=supervisor", commands[0])
+
+    def test_pi_launch_exports_validated_compaction_policy(self):
+        extension = self._pi_mailbox_extension()
+        policy = '{"postCompactionNotification":"resume after compact","levels":[40,50,90],"models":{"openai-codex/gpt-5.6-sol":{"levels":[20,30,{"percent":45,"mandatory":true}]}}}'
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main(
+                "pi-worker", "--compaction-policy", policy, agent="pi"
+            )
+
+        self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
+        self.assertIn(f"export {worker_launch.PI_COMPACTION_POLICY_ENV}=", commands[0])
+        self.assertIn(shlex.quote(policy), commands[0])
+
+    def test_compaction_policy_rejects_invalid_values_before_launch(self):
+        extension = self._pi_mailbox_extension()
+        argv = [
+            "worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name,
+            "--agent", "pi", "--compaction-policy", '{"tiers":[{"maxContextTokens":1000000,"levels":[40,100]}]}',
+        ]
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=True), patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("percentages", stderr.getvalue())
+        window_exists.assert_not_called()
+
+    def test_compaction_policy_rejects_non_pi_agents_before_launch(self):
+        argv = [
+            "worker_launch.py", "--window", "worker", "--dir", self.tmpdir.name,
+            "--agent", "claude", "--compaction-policy", "40,50",
+        ]
+        with patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("only supported for Pi", stderr.getvalue())
+        window_exists.assert_not_called()
 
     def test_settled_recipient_rejects_non_mailbox_ids_before_launch(self):
         extension = self._pi_mailbox_extension()
