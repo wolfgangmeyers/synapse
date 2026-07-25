@@ -29,10 +29,10 @@ class SupervisorStartTest(unittest.TestCase):
 
         self.assertEqual(command[0], "pi")
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertEqual(command[command.index("--name") + 1], "supervisor")
         extension_index = command.index("--extension")
-        self.assertEqual(command[extension_index - 1], "--no-extensions")
+        self.assertNotIn("--no-extensions", command)
         self.assertEqual(command[extension_index + 1], str(extension))
         self.assertEqual(command.count("--extension"), 1)
         self.assertIn("--approve", command)
@@ -78,10 +78,59 @@ class SupervisorStartTest(unittest.TestCase):
                 supervisor_start.main()
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
+        self.assertIn(f"export {supervisor_start.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.5", commands[0])
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--extension") + 1], str(extension))
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])
+
+    def test_supervisor_launch_exports_validated_compaction_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extension = pathlib.Path(tmpdir) / "mecha-messaging.js"
+            extension.write_text("export default () => {};\n", encoding="utf-8")
+            commands = []
+            policy = '{"postCompactionNotification":"resume after compact","levels":[40,50,90],"models":{"openai-codex/gpt-5.6-sol":{"levels":[20,30,{"percent":45,"mandatory":true}]}}}'
+            with patch.object(
+                supervisor_start.sys,
+                "argv",
+                ["supervisor_start.py", "--dir", tmpdir, "--compaction-policy", policy],
+            ), patch.dict(
+                os.environ,
+                {supervisor_start.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765"},
+                clear=True,
+            ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(extension)), patch.object(
+                supervisor_start, "session_exists", return_value=False
+            ), patch.object(supervisor_start, "ensure_session"), patch.object(
+                supervisor_start, "send_text", side_effect=lambda _window, command: commands.append(command)
+            ), patch.object(supervisor_start, "send_enter"), patch.object(supervisor_start.time, "sleep"):
+                supervisor_start.main()
+
+        self.assertIn(f"export {supervisor_start.PI_COMPACTION_POLICY_ENV}=", commands[0])
+        self.assertIn(shlex.quote(policy), commands[0])
+
+    def test_invalid_compaction_policy_exits_before_creating_tmux_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            extension = pathlib.Path(tmpdir) / "mecha-messaging.js"
+            extension.write_text("export default () => {};\n", encoding="utf-8")
+            stderr = io.StringIO()
+            with patch.object(
+                supervisor_start.sys,
+                "argv",
+                ["supervisor_start.py", "--dir", tmpdir, "--compaction-policy", '{"tiers":[{"maxContextTokens":1000000,"levels":[0,50]}]}'],
+            ), patch.dict(
+                os.environ,
+                {supervisor_start.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765"},
+                clear=True,
+            ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(extension)), patch.object(
+                supervisor_start, "ensure_session"
+            ) as ensure_session, contextlib.redirect_stderr(stderr), self.assertRaises(
+                SystemExit
+            ) as raised:
+                supervisor_start.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        ensure_session.assert_not_called()
+        self.assertIn("percentages", stderr.getvalue())
 
     def test_invalid_stable_extension_exits_before_creating_tmux_session(self):
         with tempfile.TemporaryDirectory() as tmpdir:

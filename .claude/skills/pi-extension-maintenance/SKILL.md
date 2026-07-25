@@ -101,13 +101,15 @@ PY
 
 The `packages` entry is the global package registration used by bare Pi sessions. Run the status check again, then `/reload` every existing bare Pi session after a path change. Pi only rereads global extension configuration on reload/start; never claim the new registration is active before this happens.
 
-Managed workers deliberately do **not** rely on global discovery. Their launch remains explicit and retains `--no-extensions` plus the same stable target path:
+Managed workers use Pi's default configured extensions and add the same stable Mailbox target path explicitly:
 
 ```bash
-pi --no-extensions --extension "$HOME/.mecha-developer/extensions/mecha-messaging.js"
+pi --extension "$HOME/.mecha-developer/extensions/mecha-messaging.js"
 ```
 
-Keep the managed launch's existing provider/model/router environment unchanged. Do not add global packages as a substitute for the explicit managed path.
+Keep the managed launch's existing provider/model/router environment unchanged. Do not add `--no-extensions` for ordinary managed workers; reserve bare-extension launches only for explicit diagnostics.
+
+Context-threshold/self-compaction policy is extension-owned. Managed launchers may export `MECHA_PI_COMPACTION_POLICY` through `--compaction-policy` as simple default levels plus optional per-model overrides (for example `{"levels":[40,50,60,70,80,{"percent":90,"mandatory":true}],"models":{"openai-codex/gpt-5.6-sol":{"levels":[20,30,40,{"percent":45,"mandatory":true}]}}}`) or comma-separated default percentages. Existing tiered JSON remains accepted for compatibility, but do not make tiers the recommended user-facing config. Policy JSON may include optional `postCompactionNotification` text; `mecha_context action=compact` can also provide a command-level handoff note. Include a handoff note when you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed. Pi does not expose a first-class CLI parameter for this policy; do not edit Pi settings to mimic it.
 
 ## Uninstall
 
@@ -129,7 +131,7 @@ target.unlink(missing_ok=True)
 PY
 ```
 
-Run `/reload` in every affected bare Pi session. Managed workers must continue to use their explicit `--no-extensions --extension "$TARGET"` launch only after a subsequent install.
+Run `/reload` in every affected bare Pi session. Managed workers should continue to add the explicit `--extension "$TARGET"` argument after a subsequent install while otherwise using Pi's default configured extensions.
 
 ## Final verification and recovery
 

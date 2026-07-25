@@ -8,7 +8,7 @@ A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, 
 
 ## Worker Runtime
 
-All new managed workers use Pi with provider `openai-codex` and model `gpt-5.6-terra`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. The launchers refuse stale global extension discovery. Do not launch Codex, Claude Code, or Cursor workers unless Wolfgang explicitly overrides this policy. Existing workers are grandfathered and must not be restarted only to change runtimes.
+All new managed workers use Pi with provider `openai-codex` and model `gpt-5.5`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. Managed workers use Pi's default configured extensions and add the Mailbox V2 extension explicitly; do not add `--no-extensions` unless Wolfgang asks for a bare-extension diagnostic session. Do not launch Codex, Claude Code, or Cursor workers unless Wolfgang explicitly overrides this policy. Existing workers are grandfathered and must not be restarted only to change runtimes.
 
 ## Maintenance
 

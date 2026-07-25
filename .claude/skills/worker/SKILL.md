@@ -9,7 +9,7 @@ You are a worker agent managed by a supervisor.
 
 ## Runtime
 
-You are a Pi worker running with provider `openai-codex` and model `gpt-5.6-terra`. Do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed launch loads only the explicit Mailbox V2 extension, so no subagent extension is available. Work directly in focused stages and report any review-capacity gap to the supervisor.
+You are a Pi worker running with provider `openai-codex` and model `gpt-5.5`. Do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed launch uses Pi's default configured extensions and adds the Mailbox V2 extension explicitly for routing. Use `mecha_context` self-compaction only after a Pi context-threshold notification or a direct user/supervisor instruction. Work directly in focused stages and report any review-capacity gap to the supervisor.
 
 ## Identity
 

@@ -26,13 +26,13 @@ from _tmux import _AGENT_ID, ensure_session, new_window, send_text, send_enter, 
 
 
 PI_PROVIDER = "openai-codex"
-PI_MODEL = "gpt-5.6-terra"
-PI_SUBAGENTS_EXTENSION = "npm:@gotgenes/pi-subagents"
-PI_SUBAGENTS_EXTENSION_ENV = "MECHA_PI_SUBAGENTS_EXTENSION"
+PI_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
 PI_NOTIFY_ON_SETTLED_ENV = "MECHA_PI_NOTIFY_ON_SETTLED"
+PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
+PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -61,6 +61,53 @@ def resolve_pi_router_url():
     return configured_url.rstrip("/")
 
 
+def _validate_compaction_levels(levels):
+    if not isinstance(levels, list) or not levels:
+        raise ValueError("compaction policy must define at least one percentage level")
+    for level in levels:
+        percent = level if isinstance(level, (int, float)) else level.get("percent") if isinstance(level, dict) else None
+        if not isinstance(percent, (int, float)) or percent <= 0 or percent >= 100:
+            raise ValueError("compaction policy percentages must be greater than 0 and less than 100")
+
+
+def validate_compaction_policy(policy):
+    """Validate a JSON tiered policy, JSON levels policy, or comma-list percentages for Pi."""
+    if policy is None:
+        return None
+    policy = policy.strip()
+    if not policy:
+        raise ValueError("compaction policy must not be empty")
+    try:
+        parsed = json.loads(policy)
+    except json.JSONDecodeError:
+        parsed = [float(part.strip()) for part in policy.split(",")]
+    if isinstance(parsed, list):
+        _validate_compaction_levels(parsed)
+        return policy
+    if not isinstance(parsed, dict):
+        raise ValueError("compaction policy must be a levels list or tiered object")
+    handoff = parsed.get("postCompactionNotification")
+    if handoff is not None and not isinstance(handoff, str):
+        raise ValueError("compaction policy postCompactionNotification must be a string")
+    models = parsed.get("models")
+    if models is not None and not isinstance(models, (dict, list)):
+        raise ValueError("compaction policy models must be an object or list")
+    if "levels" in parsed:
+        _validate_compaction_levels(parsed.get("levels"))
+        return policy
+    tiers = parsed.get("tiers")
+    if not isinstance(tiers, list) or not tiers:
+        raise ValueError("compaction policy must define default levels or at least one context-size tier")
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            raise ValueError("compaction policy tiers must be objects")
+        max_context = tier.get("maxContextTokens")
+        if max_context is not None and (not isinstance(max_context, int) or max_context <= 0):
+            raise ValueError("compaction policy tier maxContextTokens must be a positive integer or null")
+        _validate_compaction_levels(tier.get("levels"))
+    return policy
+
+
 def resolve_pi_mailbox_extension():
     """Return the explicit, validated Mailbox V2 extension path for Pi."""
     extension_path = (
@@ -73,18 +120,6 @@ def resolve_pi_mailbox_extension():
             f"{PI_MAILBOX_EXTENSION_ENV} must name a validated extension file. "
             f"Install the canonical Pi extension first: "
             f"python3 {os.path.join(os.path.dirname(__file__), 'install_pi_extension.py')}"
-        )
-    return extension_path
-
-
-def resolve_pi_subagents_extension():
-    """Return the default subagents package or a validated per-launch override."""
-    extension_path = os.environ.get(PI_SUBAGENTS_EXTENSION_ENV)
-    if extension_path is None:
-        return PI_SUBAGENTS_EXTENSION
-    if not os.path.isabs(extension_path) or not os.path.isfile(extension_path):
-        raise ValueError(
-            f"{PI_SUBAGENTS_EXTENSION_ENV} must name an absolute, existing regular extension file"
         )
     return extension_path
 
@@ -202,7 +237,7 @@ def main():
         "--agent",
         default="pi",
         choices=["pi", "claude", "codex", "cursor"],
-        help="Agent to launch: 'pi' (default, pinned to OpenAI Codex GPT-5.6 Terra), or a legacy runtime",
+        help="Agent to launch: 'pi' (default, pinned to OpenAI Codex GPT-5.5), or a legacy runtime",
     )
 
     parser.add_argument(
@@ -222,6 +257,12 @@ def main():
         metavar="MAILBOX_RECIPIENT",
         help="Pi-only: notify this Mailbox agent ID after the worker settles idle.",
     )
+    parser.add_argument(
+        "--compaction-policy",
+        default=None,
+        metavar="POLICY",
+        help="Pi-only: context notification policy as tiered JSON, levels JSON, or comma-separated percentages.",
+    )
 
     args = parser.parse_args()
 
@@ -232,15 +273,21 @@ def main():
         if _AGENT_ID.fullmatch(args.notify_on_settled) is None:
             print("Error: --notify-on-settled must be a valid Mailbox agent ID", file=sys.stderr)
             sys.exit(1)
+    if args.compaction_policy is not None and args.agent != "pi":
+        print("Error: --compaction-policy is only supported for Pi workers", file=sys.stderr)
+        sys.exit(1)
+    try:
+        compaction_policy = validate_compaction_policy(args.compaction_policy)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
 
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
     pi_mailbox_extension = None
     pi_router_url = None
-    pi_subagents_extension = None
     if args.agent == "pi":
         try:
             pi_mailbox_extension = resolve_pi_mailbox_extension()
-            pi_subagents_extension = resolve_pi_subagents_extension()
             pi_router_url = resolve_pi_router_url()
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
@@ -275,11 +322,9 @@ def main():
             "--name",
             args.window,
         ]
-        # Load only the required explicit extensions. Global discovery may point
-        # to stale staging checkouts and duplicate control-plane client behavior.
+        # Use Pi's default configured extensions and add the managed-worker
+        # Mailbox V2 extension explicitly so mailbox routing is always present.
         parts.extend([
-            "--no-extensions",
-            "--extension", pi_subagents_extension,
             "--extension", pi_mailbox_extension,
         ])
         # Pi has no permission mode. --approve makes the trusted project resources
@@ -361,6 +406,12 @@ def main():
                 pi_exports += (
                     f"export {PI_NOTIFY_ON_SETTLED_ENV}="
                     f"{shlex.quote(args.notify_on_settled)} && "
+                )
+            pi_exports += f"export {PI_MODEL_KEY_ENV}={shlex.quote(f'{PI_PROVIDER}/{PI_MODEL}')} && "
+            if compaction_policy is not None:
+                pi_exports += (
+                    f"export {PI_COMPACTION_POLICY_ENV}="
+                    f"{shlex.quote(compaction_policy)} && "
                 )
         full_cmd = (
             f"cd {work_dir} && unset CLAUDECODE && "

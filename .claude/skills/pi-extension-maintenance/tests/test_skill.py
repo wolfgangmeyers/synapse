@@ -38,7 +38,7 @@ class PiExtensionMaintenanceSkillTests(unittest.TestCase):
             "os.replace",
             "settings.name + \".mecha-messaging.rollback\"",
             "MECHA_ROUTER_URL",
-            "--no-extensions --extension",
+            "pi --extension",
             "`/reload`",
             "console.log",
             "Do not mutate anything until these pass",

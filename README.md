@@ -13,14 +13,16 @@ Skills live under `.claude/skills/<name>/SKILL.md` with optional `tools/` and su
 
 This repo is the home for non-review developer workflow skills.
 
-## Mailbox V2 batching and backpressure
-
-Mailbox V2 keeps each recipient's active mailbox bounded. By default, at most 15 live messages (`queued`, `leased`, or `injection_requested`) are allowed per recipient; when the cap is reached and a new send cannot be batched, the router rejects the send with `queue_full`, and `mailbox_send.py` exits non-zero with instructions to back off and wait for the mailbox to clear.
-
-Small non-sentinel messages to the same recipient are batched while they are still queued, even when senders or subjects differ. The combined body includes per-message sender, subject, and reply hints so the recipient can respond to the right agent. The combined body is capped by `maxBatchBodyChars` (default `4096` characters), configurable in `openMessageRepository({ maxBatchBodyChars })` or with `tools/run_router.mjs --max-batch-chars <chars>` / `MECHA_MAILBOX_MAX_BATCH_CHARS`. Set the value to `0` to disable batching.
-
 ## Pi context thresholds and self-compaction
 
 The Mailbox V2 Pi extension monitors `ctx.getContextUsage()` and sends direct in-session notifications when percentage thresholds are crossed. The default policy uses a sensible 40/50/60/70/80/90 ladder for ordinary 272k-token workers, keeps stricter internal defaults for very large context windows, and has tighter built-in defaults for Sol models.
 
 Agents can inspect or change the policy with the `mecha_context` tool (`status`, `set_policy`) and can request self-compaction with `mecha_context` action `compact`. Guidance intentionally says to compact only after a threshold notification or direct user instruction. `postCompactionNotification` is optional: include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed. A default handoff note can be configured in the compaction policy, and a per-compact call can override it.
+
+Managed Pi launchers accept `--compaction-policy` as simple JSON (`{"levels":[40,50,60,70,80,{"percent":90,"mandatory":true}],"models":{"openai-codex/gpt-5.6-sol":{"levels":[20,30,40,{"percent":45,"mandatory":true}]}}}`) or comma-separated default percentages (`40,50,60,70,80,90`). Optional per-model overrides match normalized keys such as `provider/model-id` or `model-id`; model-specific policy wins over the default policy, and command-level `postCompactionNotification` wins for that compact call. Existing tiered JSON remains accepted for compatibility, but the recommended config surface is default policy plus `models`. Pi does not currently expose a first-class CLI flag for this extension policy; the supported launcher path exports `MECHA_PI_COMPACTION_POLICY` and a launcher fallback `MECHA_PI_MODEL_KEY` for the extension.
+
+## Mailbox V2 batching and backpressure
+
+Mailbox V2 keeps each recipient's active mailbox bounded. By default, at most 15 live messages (`queued`, `leased`, or `injection_requested`) are allowed per recipient; when the cap is reached and a new send cannot be batched, the router rejects the send with `queue_full`, and `mailbox_send.py` exits non-zero with instructions to back off and wait for the mailbox to clear.
+
+Small non-sentinel messages to the same recipient are batched while they are still queued, even when senders or subjects differ. The combined body includes per-message sender, subject, and reply hints so the recipient can respond to the right agent. The combined body is capped by `maxBatchBodyChars` (default `4096` characters), configurable in `openMessageRepository({ maxBatchBodyChars })` or with `tools/run_router.mjs --max-batch-chars <chars>` / `MECHA_MAILBOX_MAX_BATCH_CHARS`. Set the value to `0` to disable batching.
