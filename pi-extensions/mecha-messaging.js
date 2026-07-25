@@ -14,8 +14,219 @@ export { runRecallEvaluator, validateRecallChoice } from "./recall-evaluator.js"
 
 const DEFAULT_SESSION_CHECKPOINT_RETRY_MS = 250;
 const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
+const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
+const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
+const COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY";
+const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
+const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
+
+const SMALL_CONTEXT_LEVELS = Object.freeze([
+  Object.freeze({ percent: 40, guidance: "consider compacting at a reasonable stopping point to keep future calls cheaper" }),
+  Object.freeze({ percent: 50, guidance: "compact soon, ideally at the next clean boundary" }),
+  Object.freeze({ percent: 60, guidance: "compact when practical; each call is getting meaningfully more expensive" }),
+  Object.freeze({ percent: 70, guidance: "strongly consider compacting before more expensive work" }),
+  Object.freeze({ percent: 80, guidance: "compact as soon as practical; the session is now very expensive" }),
+  Object.freeze({ percent: 90, guidance: "mandatory stop and compact before continuing", mandatory: true }),
+]);
+const LARGE_CONTEXT_LEVELS = Object.freeze([
+  Object.freeze({ percent: 20, guidance: "large-context awareness only; no compaction needed yet" }),
+  Object.freeze({ percent: 30, guidance: "compact soon, ideally at the next clean boundary" }),
+  Object.freeze({ percent: 40, guidance: "large-context calls are expensive; compact as soon as practical" }),
+  Object.freeze({ percent: 45, guidance: "mandatory stop and compact before the session reaches 500k tokens", mandatory: true }),
+]);
+const SOL_CONTEXT_LEVELS = Object.freeze([
+  Object.freeze({ percent: 15, guidance: "Sol context awareness; keep the session lean" }),
+  Object.freeze({ percent: 25, guidance: "Sol calls are expensive; plan to compact soon" }),
+  Object.freeze({ percent: 35, guidance: "strongly consider compacting this Sol session" }),
+  Object.freeze({ percent: 45, guidance: "mandatory stop and compact this Sol session", mandatory: true }),
+]);
+
+export const DEFAULT_COMPACTION_POLICY = Object.freeze({
+  tiers: Object.freeze([
+    Object.freeze({ maxContextTokens: 300_000, levels: SMALL_CONTEXT_LEVELS }),
+    Object.freeze({ maxContextTokens: 1_000_000, levels: LARGE_CONTEXT_LEVELS }),
+    Object.freeze({ maxContextTokens: null, levels: LARGE_CONTEXT_LEVELS }),
+  ]),
+  models: Object.freeze({
+    "openai-codex/gpt-5.6-sol": Object.freeze({ levels: SOL_CONTEXT_LEVELS }),
+    "gpt-5.6-sol": Object.freeze({ levels: SOL_CONTEXT_LEVELS }),
+  }),
+});
+
+function normalizePostCompactionNotification(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new TypeError("postCompactionNotification must be a string");
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed.slice(0, MAX_POST_COMPACTION_NOTE_CHARS);
+}
+
+function normalizeCompactionLevel(level) {
+  const source = typeof level === "number" ? { percent: level } : level;
+  if (source === null || typeof source !== "object") {
+    throw new TypeError("each compaction level must be a number or object");
+  }
+  const percent = Number(source.percent);
+  if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) {
+    throw new TypeError("compaction level percent must be greater than 0 and less than 100");
+  }
+  const normalized = { percent: Math.round(percent * 100) / 100 };
+  if (typeof source.guidance === "string" && source.guidance.trim().length > 0) {
+    normalized.guidance = source.guidance.trim();
+  }
+  if (source.mandatory === true) normalized.mandatory = true;
+  return normalized;
+}
+
+function normalizeCompactionLevels(rawLevels) {
+  if (!Array.isArray(rawLevels) || rawLevels.length === 0) {
+    throw new TypeError("compaction policy requires at least one percentage level");
+  }
+  const byPercent = new Map();
+  for (const level of rawLevels.map(normalizeCompactionLevel)) {
+    byPercent.set(level.percent, level);
+  }
+  return [...byPercent.values()].sort((left, right) => left.percent - right.percent);
+}
+
+function normalizeCompactionTier(tier) {
+  if (tier === null || typeof tier !== "object" || Array.isArray(tier)) {
+    throw new TypeError("each compaction tier must be an object");
+  }
+  const maxContextTokens = tier.maxContextTokens ?? null;
+  if (maxContextTokens !== null && (!Number.isSafeInteger(maxContextTokens) || maxContextTokens <= 0)) {
+    throw new TypeError("compaction tier maxContextTokens must be a positive safe integer or null");
+  }
+  return { maxContextTokens, levels: normalizeCompactionLevels(tier.levels) };
+}
+
+function normalizeModelKey(key) {
+  if (typeof key !== "string" || key.trim().length === 0) throw new TypeError("model policy key must be a non-empty string");
+  return key.trim().toLowerCase();
+}
+
+function normalizeCompactionModels(rawModels) {
+  if (rawModels === undefined || rawModels === null) return undefined;
+  const entries = Array.isArray(rawModels)
+    ? rawModels.map((entry) => [entry?.key, entry?.policy ?? entry])
+    : Object.entries(rawModels);
+  const models = {};
+  for (const [key, value] of entries) {
+    models[normalizeModelKey(key)] = resolveCompactionPolicy(value, { allowModels: false });
+  }
+  return Object.keys(models).length === 0 ? undefined : models;
+}
+
+export function resolveCompactionPolicy(input = DEFAULT_COMPACTION_POLICY, { allowModels = true } = {}) {
+  if (Array.isArray(input) || Array.isArray(input?.levels)) {
+    const source = Array.isArray(input) ? {} : input;
+    return {
+      tiers: [{ maxContextTokens: null, levels: normalizeCompactionLevels(Array.isArray(input) ? input : input.levels) }],
+      postCompactionNotification: normalizePostCompactionNotification(source.postCompactionNotification),
+      models: allowModels ? normalizeCompactionModels(source.models) : undefined,
+    };
+  }
+  const rawTiers = input?.tiers;
+  if (!Array.isArray(rawTiers) || rawTiers.length === 0) {
+    throw new TypeError("compaction policy requires default levels or at least one context-size tier");
+  }
+  const tiers = rawTiers.map(normalizeCompactionTier).sort((left, right) => {
+    if (left.maxContextTokens === null) return 1;
+    if (right.maxContextTokens === null) return -1;
+    return left.maxContextTokens - right.maxContextTokens;
+  });
+  return {
+    tiers,
+    postCompactionNotification: normalizePostCompactionNotification(input.postCompactionNotification),
+    models: allowModels ? normalizeCompactionModels(input.models) : undefined,
+  };
+}
+
+export function compactionPolicyFromEnvironment(environment = process.env) {
+  const configured = environment[COMPACTION_POLICY_ENV];
+  if (typeof configured !== "string" || configured.trim().length === 0) {
+    return resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY);
+  }
+  const trimmed = configured.trim();
+  try {
+    return resolveCompactionPolicy(JSON.parse(trimmed));
+  } catch (jsonError) {
+    if (!/^\d+(?:\.\d+)?(?:\s*,\s*\d+(?:\.\d+)?)*$/.test(trimmed)) throw jsonError;
+    return resolveCompactionPolicy(trimmed.split(",").map((part) => Number(part.trim())));
+  }
+}
+
+export function compactionModelKeys(model, environment = process.env) {
+  const keys = [];
+  const add = (value) => {
+    if (typeof value !== "string" || value.trim().length === 0) return;
+    const key = value.trim().toLowerCase();
+    if (!keys.includes(key)) keys.push(key);
+  };
+  if (model !== undefined && model !== null) {
+    add(model.provider && model.id ? `${model.provider}/${model.id}` : undefined);
+    add(model.provider && model.name ? `${model.provider}:${model.name}` : undefined);
+    add(model.id);
+    add(model.name);
+  }
+  add(environment[COMPACTION_MODEL_KEY_ENV]);
+  return keys;
+}
+
+export function effectiveCompactionPolicy(policy, modelOrKeys, environment = process.env) {
+  const basePolicy = resolveCompactionPolicy(policy);
+  const modelKeys = Array.isArray(modelOrKeys) ? modelOrKeys.map(normalizeModelKey) : compactionModelKeys(modelOrKeys, environment);
+  const matchedModelKey = modelKeys.find((key) => basePolicy.models?.[key] !== undefined);
+  return {
+    policy: matchedModelKey === undefined ? basePolicy : basePolicy.models[matchedModelKey],
+    matchedModelKey,
+    modelKeys,
+  };
+}
+
+export function selectCompactionTier(policy, contextWindow, modelOrKeys, environment = process.env) {
+  const effective = effectiveCompactionPolicy(policy, modelOrKeys, environment);
+  const tiers = effective.policy.tiers;
+  const tier = !Number.isFinite(contextWindow)
+    ? tiers[0]
+    : tiers.find((candidate) => candidate.maxContextTokens === null || contextWindow <= candidate.maxContextTokens) ?? tiers.at(-1);
+  return { ...tier, matchedModelKey: effective.matchedModelKey, modelKeys: effective.modelKeys };
+}
+
+export function nextCompactionThreshold(policy, usageOrPercent, alreadyNotifiedPercent = 0, contextWindow, modelOrKeys, environment = process.env) {
+  const percent = typeof usageOrPercent === "object" && usageOrPercent !== null ? usageOrPercent.percent : usageOrPercent;
+  const window = typeof usageOrPercent === "object" && usageOrPercent !== null ? usageOrPercent.contextWindow : contextWindow;
+  const model = typeof usageOrPercent === "object" && usageOrPercent !== null ? usageOrPercent.model : modelOrKeys;
+  if (!Number.isFinite(percent)) return undefined;
+  const tier = selectCompactionTier(policy, window, model, environment);
+  const level = tier.levels
+    .filter((candidate) => percent >= candidate.percent && candidate.percent > alreadyNotifiedPercent)
+    .at(-1);
+  return level === undefined ? undefined : { ...level, tier };
+}
+
+export function postCompactionNotificationMessage(note, result = {}) {
+  const fields = [];
+  if (Number.isFinite(result.tokensBefore)) fields.push(`tokens before: ${result.tokensBefore.toLocaleString()}`);
+  if (Number.isFinite(result.estimatedTokensAfter)) fields.push(`estimated tokens after: ${result.estimatedTokensAfter.toLocaleString()}`);
+  if (typeof result.firstKeptEntryId === "string" && result.firstKeptEntryId.length > 0) fields.push(`first kept entry: ${result.firstKeptEntryId}`);
+  if (typeof result.summary === "string") fields.push(`summary chars: ${result.summary.length.toLocaleString()}`);
+  const status = fields.length > 0 ? `\n\nCompaction status: ${fields.join("; ")}.` : "";
+  return `Post-compaction handoff note:\n\n${note}${status}`;
+}
+
+export function compactionNotificationMessage({ level, usage }) {
+  const roundedPercent = usage.percent === null ? level.percent : Math.round(usage.percent * 10) / 10;
+  const tokenText = usage.tokens === null
+    ? `${roundedPercent}% of ${usage.contextWindow.toLocaleString()} context tokens`
+    : `${usage.tokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} context tokens (${roundedPercent}%)`;
+  const guidance = level.guidance ?? (level.mandatory ? "mandatory stop and compact before continuing" : "consider compacting soon");
+  const instruction = level.mandatory
+    ? "Stop current discretionary work and call mecha_context with action=compact before continuing, unless the user explicitly told you not to compact."
+    : "Use mecha_context action=compact only if this threshold notification or a direct user instruction makes compaction appropriate.";
+  return `Pi context threshold reached: ${tokenText}. Guidance at ${level.percent}%: ${guidance}. ${instruction}`;
+}
 
 export function boundedConversationText(content, maximum = 4096) {
   const blocks = Array.isArray(content) ? content : [content];
@@ -433,6 +644,7 @@ export function createMechaMessagingExtension(pi, {
   resolveCurrentAgentId = resolveAgentId,
   createClient = createMailboxClient,
   createSettledScheduler = createSettledNotificationScheduler,
+  setTimeoutImpl = setTimeout,
 } = {}) {
   let client;
   let coordinator;
@@ -456,6 +668,70 @@ export function createMechaMessagingExtension(pi, {
   let settledNotificationAgentId;
   let settledNotificationPending = false;
   let settledNotificationRecipient;
+  let compactionPolicy;
+  let compactionPolicyError;
+  try { compactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { compactionPolicyError = error; compactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
+  let notifiedCompactionPercent = 0;
+
+  function compactionStatus(context) {
+    const usage = context?.getContextUsage?.();
+    const effective = effectiveCompactionPolicy(compactionPolicy, context?.model);
+    return {
+      policy: compactionPolicy,
+      effectivePolicy: effective.policy,
+      modelKeys: effective.modelKeys,
+      matchedModelKey: effective.matchedModelKey,
+      selectedTier: usage === undefined ? undefined : selectCompactionTier(compactionPolicy, usage.contextWindow, context?.model),
+      usage,
+      notifiedThroughPercent: notifiedCompactionPercent,
+      configurationError: compactionPolicyError?.message,
+    };
+  }
+
+  function sendPostCompactionNotification(note, result) {
+    const normalizedNote = normalizePostCompactionNotification(note);
+    if (normalizedNote === undefined) return;
+    const message = {
+      customType: POST_COMPACTION_MESSAGE_TYPE,
+      content: postCompactionNotificationMessage(normalizedNote, result),
+      display: true,
+      details: {
+        tokens_before: Number.isFinite(result?.tokensBefore) ? result.tokensBefore : undefined,
+        estimated_tokens_after: Number.isFinite(result?.estimatedTokensAfter) ? result.estimatedTokensAfter : undefined,
+        first_kept_entry_id: typeof result?.firstKeptEntryId === "string" ? result.firstKeptEntryId : undefined,
+        summary_chars: typeof result?.summary === "string" ? result.summary.length : undefined,
+      },
+    };
+    setTimeoutImpl(() => {
+      try {
+        pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
+      } catch {
+        // A post-compaction handoff must not turn a successful compaction into a failed compact call.
+      }
+    }, 0);
+  }
+
+  function monitorContextThreshold(context) {
+    if (children.has(context.sessionManager.getSessionId())) return;
+    const usage = context.getContextUsage?.();
+    if (usage?.percent === null || usage?.percent === undefined) return;
+    const level = nextCompactionThreshold(compactionPolicy, { ...usage, model: context.model }, notifiedCompactionPercent);
+    if (level === undefined) return;
+    notifiedCompactionPercent = level.percent;
+    pi.sendMessage({
+      customType: CONTEXT_THRESHOLD_MESSAGE_TYPE,
+      content: compactionNotificationMessage({ level, usage }),
+      display: true,
+      details: {
+        percent: usage.percent,
+        tokens: usage.tokens,
+        context_window: usage.contextWindow,
+        threshold_percent: level.percent,
+        tier_max_context_tokens: level.tier.maxContextTokens,
+        mandatory: level.mandatory === true,
+      },
+    }, { deliverAs: "followUp", triggerTurn: true });
+  }
   try {
     settledNotificationRecipient = assertAgentId(process.env.MECHA_PI_NOTIFY_ON_SETTLED);
   } catch {
@@ -521,6 +797,76 @@ export function createMechaMessagingExtension(pi, {
   pi.events.on("subagents:failed", (event) => {
     settledNotifications.onChildDisposed(event?.id);
   });
+
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name: "mecha_context",
+    label: "Mecha Context",
+    description: "Inspect or configure Pi context-threshold notifications, or trigger self-compaction. Use action=compact only after a threshold notification or direct user instruction. postCompactionNotification is optional: include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed. A default handoff note can be configured in the compaction policy, and a per-compact call can override it.",
+    parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
+      action: { type: "string", enum: ["status", "set_policy", "compact"], description: "status inspects usage/policy, set_policy changes thresholds/default handoff note, compact requests self-compaction." },
+      policy: { oneOf: [
+        { type: "object", additionalProperties: false, required: ["levels"], properties: {
+          postCompactionNotification: { type: "string", description: "Optional default handoff note injected after successful compaction. Include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed." },
+          models: { type: "object" },
+          levels: { type: "array", minItems: 1, items: { oneOf: [
+            { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
+            { type: "object", additionalProperties: false, required: ["percent"], properties: {
+              percent: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
+              guidance: { type: "string", minLength: 1 },
+              mandatory: { type: "boolean" },
+            } },
+          ] } },
+        } },
+        { type: "object", additionalProperties: false, required: ["tiers"], properties: {
+          postCompactionNotification: { type: "string", description: "Optional default handoff note injected after successful compaction. Include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed." },
+          models: { type: "object" },
+          tiers: { type: "array", minItems: 1, items: {
+            type: "object", additionalProperties: false, required: ["levels"], properties: {
+              maxContextTokens: { oneOf: [{ type: "integer", minimum: 1 }, { type: "null" }] },
+              levels: { type: "array", minItems: 1, items: { oneOf: [
+                { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
+                { type: "object", additionalProperties: false, required: ["percent"], properties: {
+                  percent: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 },
+                  guidance: { type: "string", minLength: 1 },
+                  mandatory: { type: "boolean" },
+                } },
+              ] } },
+            },
+          } },
+        } },
+        { type: "array", minItems: 1, items: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 100 } },
+      ] },
+      customInstructions: { type: "string", description: "Optional instructions for Pi's compaction summary." },
+      postCompactionNotification: { type: "string", description: "Optional per-compact handoff note. Include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed. Overrides any default handoff note configured in the compaction policy for this compact call." },
+    } },
+    async execute(_toolCallId, input, _signal, _onUpdate, toolContext) {
+      try {
+        if (input.action === "set_policy") {
+          compactionPolicy = resolveCompactionPolicy(input.policy);
+          compactionPolicyError = undefined;
+          notifiedCompactionPercent = 0;
+          const status = compactionStatus(toolContext);
+          return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
+        }
+        if (input.action === "compact") {
+          if (typeof toolContext?.compact !== "function") throw new Error("Pi compaction is unavailable in this context");
+          const handoffNote = input.postCompactionNotification ?? effectiveCompactionPolicy(compactionPolicy, toolContext?.model).policy.postCompactionNotification;
+          toolContext.compact({
+            customInstructions: input.customInstructions,
+            onComplete: (result) => { notifiedCompactionPercent = 0; sendPostCompactionNotification(handoffNote, result); },
+            onError: (error) => { toolContext.ui?.notify(`Self-compaction failed: ${error.message}`, "error"); },
+          });
+          return { content: [{ type: "text", text: "Self-compaction requested." }], details: { ...compactionStatus(toolContext), postCompactionNotification: normalizePostCompactionNotification(handoffNote) } };
+        }
+        if (input.action !== "status") throw new Error("unsupported mecha_context action");
+        const status = compactionStatus(toolContext);
+        return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
+      } catch (error) {
+        return { content: [{ type: "text", text: error.message }], details: {}, isError: true };
+      }
+    },
+  });
+
   pi.events.on("subagents:child:session-created", (event) => {
     const sessionId = childSessionId(event);
     if (sessionId !== undefined) children.add(sessionId);
@@ -540,6 +886,8 @@ export function createMechaMessagingExtension(pi, {
     }
   });
   pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
+  pi.on("agent_settled", (_event, context) => { monitorContextThreshold(context); });
+  pi.on("session_compact", (_event, context) => { if (!children.has(context.sessionManager.getSessionId())) notifiedCompactionPercent = 0; });
   pi.on("agent_settled", (_event, context) => {
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending) return;
 
