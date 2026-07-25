@@ -737,6 +737,8 @@ export function createAgentRouter({
 
   function deliveryEnvelope(recipientSession, message) {
     const envelope = toEnvelope(message);
+    // Batched bodies carry per-item reply hints; a single sender footer would be misleading.
+    if (envelope.body.startsWith("Mailbox message batch\n\n")) return envelope;
     // Sentinel hands the stored opaque prompt to Pi unchanged; Mailbox reply text is parent-chat-only metadata.
     if (message.sentinel !== undefined || message.from === recipientSession.agentId) return envelope;
 
@@ -996,7 +998,9 @@ export function createAgentRouter({
     try {
       if (repository.messageFor(envelope.id) === undefined) enforceRateLimit(envelope.from);
       const result = enqueueMessage(envelope);
-      sendHttpJson(response, result.created ? 201 : 200, { message: result.message });
+      sendHttpJson(response, result.created ? 201 : 200, {
+        message: result.batched ? { ...result.message, batched: true } : result.message,
+      });
     } catch (error) {
       if (error instanceof IdempotencyConflictError) {
         sendHttpError(response, 409, error.code);

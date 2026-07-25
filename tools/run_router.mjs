@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { openMessageRepository } from "../harness/db.js";
+import { DEFAULT_MAX_BATCH_BODY_CHARS, openMessageRepository } from "../harness/db.js";
 import { openMemoryCatalog } from "../harness/memory-catalog.js";
 import { createJsonlLogger } from "../harness/jsonl_logger.js";
 import { createAgentRouter } from "../harness/router.js";
@@ -14,15 +14,19 @@ import { createAgentRouter } from "../harness/router.js";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
 
 export function parseArguments(argv) {
-  const options = { host: "127.0.0.1", port: 8765 };
+  const options = {
+    host: "127.0.0.1",
+    port: 8765,
+    maxBatchChars: process.env.MECHA_MAILBOX_MAX_BATCH_CHARS ?? String(DEFAULT_MAX_BATCH_BODY_CHARS),
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument === "--database" || argument === "--host" || argument === "--port" || argument === "--log") {
+    if (argument === "--database" || argument === "--host" || argument === "--port" || argument === "--log" || argument === "--max-batch-chars") {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
         throw new Error(`${argument} requires a value`);
       }
-      options[argument.slice(2)] = value;
+      options[argument.slice(2).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase())] = value;
       index += 1;
       continue;
     }
@@ -40,11 +44,16 @@ export function parseArguments(argv) {
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
     throw new Error("--port must be an integer from 1 through 65535");
   }
+  const maxBatchChars = Number(options.maxBatchChars);
+  if (!Number.isSafeInteger(maxBatchChars) || maxBatchChars < 0) {
+    throw new Error("--max-batch-chars must be a non-negative integer");
+  }
   return {
     database: options.database,
     log: options.log ?? `${options.database}.jsonl`,
     host: options.host,
     port,
+    maxBatchChars,
   };
 }
 
@@ -55,6 +64,7 @@ export async function startRouter({
   log,
   logPath,
   output = console.log,
+  maxBatchChars = DEFAULT_MAX_BATCH_BODY_CHARS,
 } = {}) {
   if (typeof database !== "string" || database.length === 0) {
     throw new TypeError("database is required");
@@ -67,7 +77,7 @@ export async function startRouter({
   let jsonlLogger;
   let router;
   try {
-    repository = openMessageRepository({ databasePath: database });
+    repository = openMessageRepository({ databasePath: database, maxBatchBodyChars: maxBatchChars });
     const kbRoot = process.env.MECHA_KB_ROOT ?? join(homedir(), ".mecha-developer", "kb");
     memoryCatalog = openMemoryCatalog({ kbRoot });
     jsonlLogger = createJsonlLogger({ logPath: resolvedLogPath });
@@ -116,7 +126,7 @@ export async function startRouter({
 }
 
 function usage() {
-  return "Usage: node tools/run_router.mjs --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1] [--port 8765]";
+  return "Usage: node tools/run_router.mjs --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1] [--port 8765] [--max-batch-chars <chars>]";
 }
 
 async function main() {
