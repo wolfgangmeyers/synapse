@@ -21,8 +21,9 @@ const MESSAGE_INCARNATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9
 export const DEFAULT_LEASE_DURATION_MS = 30_000;
 export const DEFAULT_DELIVERY_LEASE_DURATION_MS = 30_000;
 export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
-export const DEFAULT_MAX_QUEUED_MESSAGES = 100;
+export const DEFAULT_MAX_QUEUED_MESSAGES = 15;
 export const DEFAULT_MAX_QUEUED_BYTES = 256 * 1024;
+export const DEFAULT_MAX_BATCH_BODY_CHARS = 4_096;
 const migrations = Object.freeze([
   {
     id: "001_initial",
@@ -156,6 +157,7 @@ export function openMessageRepository({
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
   maxQueuedMessages = DEFAULT_MAX_QUEUED_MESSAGES,
   maxQueuedBytes = DEFAULT_MAX_QUEUED_BYTES,
+  maxBatchBodyChars = DEFAULT_MAX_BATCH_BODY_CHARS,
   migrations: migrationPlan = migrations,
 } = {}) {
   if (typeof databasePath !== "string" || databasePath.length === 0) {
@@ -170,6 +172,7 @@ export function openMessageRepository({
   assertPositiveLimit(maxBodyBytes, "maxBodyBytes", ABSOLUTE_MAX_BODY_BYTES);
   assertPositiveLimit(maxQueuedMessages, "maxQueuedMessages");
   assertPositiveLimit(maxQueuedBytes, "maxQueuedBytes");
+  assertNonNegativeLimit(maxBatchBodyChars, "maxBatchBodyChars");
 
   const database = new DatabaseSync(databasePath, {
     timeout: busyTimeoutMs,
@@ -184,6 +187,7 @@ export function openMessageRepository({
       maxBodyBytes,
       maxQueuedMessages,
       maxQueuedBytes,
+      maxBatchBodyChars,
     });
   } catch (error) {
     database.close();
@@ -198,14 +202,16 @@ class MessageRepository {
   #maxBodyBytes;
   #maxQueuedMessages;
   #maxQueuedBytes;
+  #maxBatchBodyChars;
 
-  constructor(database, clock, databasePath, { maxBodyBytes, maxQueuedMessages, maxQueuedBytes }) {
+  constructor(database, clock, databasePath, { maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars }) {
     this.#database = database;
     this.#clock = clock;
     this.#databasePath = databasePath;
     this.#maxBodyBytes = maxBodyBytes;
     this.#maxQueuedMessages = maxQueuedMessages;
     this.#maxQueuedBytes = maxQueuedBytes;
+    this.#maxBatchBodyChars = maxBatchBodyChars;
   }
 
   close() {
@@ -219,8 +225,10 @@ class MessageRepository {
     return immediateTransaction(this.#database, this.#databasePath, () => {
       return enqueueCandidate(this.#database, candidate, {
         firstSeenAt: clockTimestamp(this.#clock),
+        maxBodyBytes: this.#maxBodyBytes,
         maxQueuedMessages: this.#maxQueuedMessages,
         maxQueuedBytes: this.#maxQueuedBytes,
+        maxBatchBodyChars: this.#maxBatchBodyChars,
       });
     });
   }
@@ -575,12 +583,12 @@ class MessageRepository {
 
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const existing = selectLease(this.#database, agentId);
-      if (existing !== undefined && !leaseExpired(existing, now)) {
+      if (existing !== undefined && !leaseExpired(existing, now) && existing.instance_id !== instanceId) {
         throw new DuplicateAgentLeaseError(agentId, existing.instance_id);
       }
 
-      const recovered = existing !== undefined;
-      if (recovered) {
+      const recovered = existing !== undefined && leaseExpired(existing, now);
+      if (existing !== undefined) {
         deleteLease(this.#database, agentId);
       }
       this.#database.prepare(`
@@ -1011,6 +1019,7 @@ class MessageRepository {
       maxBodyBytes: this.#maxBodyBytes,
       maxQueuedMessages: this.#maxQueuedMessages,
       maxQueuedBytes: this.#maxQueuedBytes,
+      maxBatchBodyChars: this.#maxBatchBodyChars,
     };
   }
 
@@ -1230,6 +1239,55 @@ function envelopeByteLength({ id, from, to, subject, body, created_at: createdAt
     + Buffer.byteLength(createdAt, "utf8");
 }
 
+const BATCH_HEADER = "Mailbox message batch";
+const BATCH_SEPARATOR = "\n\n---\n\n";
+
+function batchItem(message) {
+  return [
+    `From: ${message.from}`,
+    ...(message.subject === null ? [] : [`Subject: ${message.subject}`]),
+    "",
+    message.body,
+    "",
+    `[Reply via mailbox to ${message.from}.]`,
+  ].join("\n");
+}
+
+function isBatchedBody(body) {
+  return body.startsWith(`${BATCH_HEADER}\n\n`);
+}
+
+function batchedBody(target, candidate) {
+  const existing = isBatchedBody(target.body)
+    ? target.body
+    : `${BATCH_HEADER}\n\n${batchItem(target)}`;
+  return `${existing}${BATCH_SEPARATOR}${batchItem(candidate)}`;
+}
+
+function selectBatchTarget(database, candidate, { maxBatchBodyChars, maxBodyBytes, maxQueuedBytes, queuedBytes }) {
+  if (maxBatchBodyChars === 0 || candidate.sentinel !== undefined) return undefined;
+  const rows = database.prepare(`
+    SELECT
+      id,
+      sender AS "from",
+      subject,
+      body
+    FROM messages
+    WHERE recipient = ?
+      AND state = 'queued'
+      AND sentinel_json IS NULL
+    ORDER BY enqueue_sequence DESC
+  `).all(candidate.to);
+  return rows.find((row) => {
+    const body = batchedBody(row, candidate);
+    const previousBytes = Buffer.byteLength(row.body, "utf8");
+    const nextBytes = Buffer.byteLength(body, "utf8");
+    return body.length <= maxBatchBodyChars
+      && nextBytes <= maxBodyBytes
+      && queuedBytes + nextBytes - previousBytes <= maxQueuedBytes;
+  });
+}
+
 function prepareEnvelope(envelope) {
   const subject = envelope.subject === undefined ? null : envelope.subject;
   return {
@@ -1247,7 +1305,7 @@ function prepareEnvelope(envelope) {
 function enqueueCandidate(
   database,
   candidate,
-  { firstSeenAt, maxQueuedMessages, maxQueuedBytes },
+  { firstSeenAt, maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars },
 ) {
   const existing = selectMessage(database, candidate.id);
   if (existing !== undefined) {
@@ -1258,6 +1316,21 @@ function enqueueCandidate(
   }
 
   const usage = selectLiveQueueUsage(database, candidate.to);
+  const batchTarget = selectBatchTarget(database, candidate, {
+    maxBatchBodyChars,
+    maxBodyBytes,
+    maxQueuedBytes,
+    queuedBytes: usage.queued_bytes,
+  });
+  if (batchTarget !== undefined) {
+    database.prepare(`
+      UPDATE messages
+      SET body = ?
+      WHERE id = ? AND state = 'queued'
+    `).run(batchedBody(batchTarget, candidate), batchTarget.id);
+    return { created: false, batched: true, message: selectMessage(database, batchTarget.id) };
+  }
+
   const candidateBytes = envelopeByteLength(candidate);
   if (usage.message_count >= maxQueuedMessages
     || usage.queued_bytes + candidateBytes > maxQueuedBytes) {
@@ -1946,6 +2019,12 @@ function assertMaxDeliveryAttempts(maxDeliveryAttempts) {
 function assertPositiveLimit(value, name, maximum = Number.MAX_SAFE_INTEGER) {
   if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
     throw new TypeError(`${name} must be a positive safe integer no greater than ${maximum}`);
+  }
+}
+
+function assertNonNegativeLimit(value, name, maximum = Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new TypeError(`${name} must be a non-negative safe integer no greater than ${maximum}`);
   }
 }
 

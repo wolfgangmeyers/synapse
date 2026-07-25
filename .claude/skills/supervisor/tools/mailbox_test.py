@@ -125,6 +125,16 @@ class MailboxSendV2Test(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(router.requests[0][1]["from"], "worker_1")
 
+    def test_accepts_a_batched_router_response(self):
+        response = {"message": {"id": "existing-message", "state": "queued", "batched": True}}
+        with RecordingRouter(response=response) as router:
+            result = run_send(
+                ["--to", "worker-1", "--from", "supervisor", "--body", "Status", "--router-url", router.url]
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Message existing-message accepted: queued", result.stdout)
+
     def test_reports_router_rejections(self):
         response = {"error": {"code": "queue_full", "message": "Recipient queue is full."}}
         with RecordingRouter(status=429, response=response) as router:
@@ -134,6 +144,7 @@ class MailboxSendV2Test(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("Router rejected message: queue_full", result.stderr)
+            self.assertIn("Back off and wait for the recipient mailbox to clear", result.stderr)
 
     def test_allows_exact_non_loopback_router_urls(self):
         self.assertEqual(

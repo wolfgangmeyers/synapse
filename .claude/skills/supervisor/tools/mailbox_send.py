@@ -66,6 +66,17 @@ def fail(message: str, code: int = 2) -> int:
     return code
 
 
+def rejection_message(error: dict[str, Any]) -> str:
+    code = error.get("code", "unknown_error")
+    message = error.get("message", "unknown error")
+    if code == "queue_full":
+        return (
+            f"Router rejected message: {code} — {message} "
+            "Back off and wait for the recipient mailbox to clear before sending again."
+        )
+    return f"Router rejected message: {code} — {message}"
+
+
 def resolve_sender(explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -168,10 +179,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if status not in {200, 201}:
         error = response.get("error", {})
-        return fail(f"Router rejected message: {error.get('code', 'unknown_error')} — {error.get('message', 'unknown error')}", 1)
+        return fail(rejection_message(error if isinstance(error, dict) else {}), 1)
     message = response.get("message")
     if (not isinstance(message, dict)
-            or message.get("id") != envelope["id"]
+            or (message.get("id") != envelope["id"] and message.get("batched") is not True)
             or not isinstance(message.get("state"), str)
             or not message["state"]):
         return fail("Router returned an invalid acceptance response.", 1)

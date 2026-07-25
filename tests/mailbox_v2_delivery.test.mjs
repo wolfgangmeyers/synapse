@@ -15,7 +15,7 @@ import {
   createSettledNotificationScheduler,
   mailboxSessionDeliveryState,
 } from "../pi-extensions/mecha-messaging.js";
-import { openMessageRepository } from "../harness/db.js";
+import { QueueLimitError, openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
@@ -1002,6 +1002,212 @@ test("connection refusal requests launchd once per scheduled retry", () => {
   ]);
   client.close();
   assert.equal(reconnectTimers[1].cleared, true);
+});
+
+test("same instance reconnect registration replaces the old live socket without duplicate_identity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-reconnect-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  let firstSocket;
+  let secondSocket;
+  let frameId = 0;
+  const send = (socket, frame) => socket.send(JSON.stringify({
+    version: "v1",
+    frame_id: `client-${++frameId}`,
+    ...frame,
+  }));
+  try {
+    const websocketUrl = await router.listen();
+    firstSocket = new WebSocket(websocketUrl);
+    await new Promise((resolve, reject) => {
+      firstSocket.once("open", resolve);
+      firstSocket.once("error", reject);
+    });
+    const firstRegistered = nextRouterFrame(firstSocket);
+    send(firstSocket, { type: "register", agent_id: "worker", instance_id: "same-instance" });
+    const firstRegistration = await firstRegistered;
+    assert.equal(firstRegistration.type, "registered");
+
+    const firstClosed = new Promise((resolve) => firstSocket.once("close", resolve));
+    secondSocket = new WebSocket(websocketUrl);
+    await new Promise((resolve, reject) => {
+      secondSocket.once("open", resolve);
+      secondSocket.once("error", reject);
+    });
+    const secondRegistered = nextRouterFrame(secondSocket);
+    send(secondSocket, { type: "register", agent_id: "worker", instance_id: "same-instance" });
+    const secondRegistration = await secondRegistered;
+
+    assert.equal(secondRegistration.type, "registered");
+    assert.notEqual(secondRegistration.lease_id, firstRegistration.lease_id);
+    const activeLease = repository.leaseFor("worker");
+    assert.equal(activeLease.agent_id, "worker");
+    assert.equal(activeLease.instance_id, "same-instance");
+    assert.equal(activeLease.lease_id, secondRegistration.lease_id);
+    assert.equal(activeLease.expires_at, secondRegistration.expires_at);
+    await firstClosed;
+  } finally {
+    firstSocket?.terminate();
+    secondSocket?.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router batches roughly ten mixed-sender idle notifications into one queued delivery", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  try {
+    const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+    for (let index = 1; index <= 10; index += 1) {
+      const sender = `worker-${index}`;
+      const result = router.enqueueMessage(envelope(`idle-${index}`, {
+        from: sender,
+        to: "supervisor",
+        subject: index % 2 === 0 ? "Pi worker settled" : "Status update",
+        body: `Worker ${sender} has settled and is idle.`,
+      }));
+      assert.equal(result.message.id, "idle-1");
+      assert.equal(result.message.to, "supervisor");
+      assert.equal(result.batched === true, index > 1);
+    }
+
+    const queued = repository.queuedFor("supervisor");
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].id, "idle-1");
+    assert.match(queued[0].body, /^Mailbox message batch\n\n/);
+    for (let index = 1; index <= 10; index += 1) {
+      assert.match(queued[0].body, new RegExp(`From: worker-${index}`));
+      assert.match(queued[0].body, new RegExp(`Worker worker-${index} has settled and is idle\\.`));
+      assert.match(queued[0].body, new RegExp(`\\[Reply via mailbox to worker-${index}\\.\\]`));
+    }
+    assert.match(queued[0].body, /Subject: Status update/);
+    assert.match(queued[0].body, /Subject: Pi worker settled/);
+    assert.equal((queued[0].body.match(/\n\n---\n\n/g) ?? []).length, 9);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("batched delivery carries per-item reply hints without one global sender footer", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-delivery-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  let senderSocket;
+  let receiverSocket;
+  let frameId = 0;
+  const send = (socket, frame) => socket.send(JSON.stringify({
+    version: "v1",
+    frame_id: `client-${++frameId}`,
+    ...frame,
+  }));
+  try {
+    const websocketUrl = await router.listen();
+    senderSocket = new WebSocket(websocketUrl);
+    await new Promise((resolve, reject) => {
+      senderSocket.once("open", resolve);
+      senderSocket.once("error", reject);
+    });
+    const senderRegistered = nextRouterFrame(senderSocket);
+    send(senderSocket, { type: "register", agent_id: "worker-1", instance_id: "sender-instance" });
+    assert.equal((await senderRegistered).type, "registered");
+
+    router.enqueueMessage(envelope("batch-delivery-1", {
+      from: "worker-1",
+      to: "supervisor",
+      subject: "Pi worker settled",
+      body: "Worker worker-1 has settled and is idle.",
+    }));
+    router.enqueueMessage(envelope("batch-delivery-2", {
+      from: "worker-2",
+      to: "supervisor",
+      subject: "Status update",
+      body: "Worker worker-2 has settled and is idle.",
+    }));
+
+    receiverSocket = new WebSocket(websocketUrl);
+    await new Promise((resolve, reject) => {
+      receiverSocket.once("open", resolve);
+      receiverSocket.once("error", reject);
+    });
+    const receiverFrames = [];
+    receiverSocket.on("message", (payload) => receiverFrames.push(JSON.parse(payload.toString("utf8"))));
+    send(receiverSocket, { type: "register", agent_id: "supervisor", instance_id: "receiver-instance" });
+    await waitFor(() => receiverFrames.some((frame) => frame.type === "message"));
+    assert.equal(receiverFrames[0].type, "registered");
+    const delivery = receiverFrames.find((frame) => frame.type === "message");
+
+    assert.equal(delivery.type, "message");
+    assert.match(delivery.message.body, /^Mailbox message batch\n\n/);
+    assert.equal((delivery.message.body.match(/\[Reply via mailbox to worker-1\.\]/g) ?? []).length, 1);
+    assert.equal((delivery.message.body.match(/\[Reply via mailbox to worker-2\.\]/g) ?? []).length, 1);
+    assert.doesNotMatch(delivery.message.body, /\[Reply via mailbox to worker-1\.\]$/);
+  } finally {
+    senderSocket?.terminate();
+    receiverSocket?.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router honors the configured maximum batched body character count", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-limit-"));
+  const batched = "Mailbox message batch\n\nFrom: worker-a\nSubject: Pi worker settled\n\nfirst\n\n[Reply via mailbox to worker-a.]\n\n---\n\nFrom: worker-b\nSubject: Another subject\n\nsecond\n\n[Reply via mailbox to worker-b.]";
+  const repository = openMessageRepository({
+    databasePath: join(directory, "router.sqlite"),
+    maxBatchBodyChars: batched.length - 1,
+  });
+  try {
+    const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+    router.enqueueMessage(envelope("batch-limit-1", {
+      from: "worker-a",
+      to: "supervisor",
+      subject: "Pi worker settled",
+      body: "first",
+    }));
+    const result = router.enqueueMessage(envelope("batch-limit-2", {
+      from: "worker-b",
+      to: "supervisor",
+      subject: "Another subject",
+      body: "second",
+    }));
+
+    assert.equal(result.batched, undefined);
+    assert.deepEqual(repository.queuedFor("supervisor").map(({ id }) => id), ["batch-limit-1", "batch-limit-2"]);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router rejects the sixteenth active unbatchable mailbox message by default", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-capacity-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), maxBatchBodyChars: 0 });
+  try {
+    const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+    for (let index = 1; index <= 15; index += 1) {
+      router.enqueueMessage(envelope(`message-${index}`, {
+        from: "worker-a",
+        to: "supervisor",
+        subject: `unique-${index}`,
+        body: `message ${index}`,
+      }));
+    }
+
+    assert.equal(repository.queueUsageFor("supervisor").message_count, 15);
+    assert.throws(() => router.enqueueMessage(envelope("message-16", {
+      from: "worker-a",
+      to: "supervisor",
+      subject: "unique-16",
+      body: "message 16",
+    })), QueueLimitError);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("router and SQLite recover timed-out delivery attempts and complete one-shot reminders", async () => {
