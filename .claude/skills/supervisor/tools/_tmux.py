@@ -82,9 +82,9 @@ def list_windows():
 
 
 def new_window(name):
-    """Create a new tmux window with the given name."""
+    """Create a new tmux window without stealing focus from attached clients."""
     ensure_session()
-    run(["new-window", "-t", SESSION, "-n", name])
+    run(["new-window", "-d", "-t", SESSION, "-n", name])
 
 
 def send_text(window, text):

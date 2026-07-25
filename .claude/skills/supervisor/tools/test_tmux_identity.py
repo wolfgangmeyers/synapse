@@ -4,10 +4,30 @@
 import subprocess
 import unittest
 
-from _tmux import current_agent_id
+import _tmux
+from _tmux import current_agent_id, new_window
 
 
 class CurrentAgentIdTest(unittest.TestCase):
+    def test_new_window_is_created_detached_to_avoid_stealing_focus(self):
+        calls = []
+
+        def fake_run(args, check=True, capture=True):
+            calls.append((args, check, capture))
+            return subprocess.CompletedProcess(args, 0, stdout="")
+
+        original_run = _tmux.run
+        original_ensure_session = _tmux.ensure_session
+        try:
+            _tmux.run = fake_run
+            _tmux.ensure_session = lambda: False
+            new_window("worker")
+        finally:
+            _tmux.run = original_run
+            _tmux.ensure_session = original_ensure_session
+
+        self.assertEqual(calls, [(["new-window", "-d", "-t", _tmux.SESSION, "-n", "worker"], True, True)])
+
     def test_resolves_a_valid_current_window_name(self):
         calls = []
 
