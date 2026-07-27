@@ -51,6 +51,18 @@ When asked to run a workflow:
 3. Execute each step in sequence using the appropriate tools and commands.
 4. Report exactly what was done, and call out any errors, blockers, or deviations.
 
+## Delegating A Workflow To A Worker
+
+When handing work to a worker that is supposed to follow a workflow, do **not** paste or summarize the workflow body into the worker instructions. Embedded copies drift and are less accurate than the canonical workflow record.
+
+Instead, the worker instruction must explicitly tell the worker to:
+1. Load the `workflows` skill.
+2. Use the workflows skill to load the named workflow with `get_workflow.py <name>`.
+3. Follow that loaded workflow as the source of truth for the task.
+4. Report any deviation, missing workflow, or unclear workflow step before proceeding past it.
+
+The supervisor may include the task goal, scope, constraints, worktree, base branch, and non-goals in the handoff, but the procedural workflow itself must be loaded by the worker from the canonical workflows skill.
+
 ## Creating And Updating Workflows
 
 When writing or refining workflow bodies:

@@ -5,9 +5,14 @@ const ID = /^[a-z0-9][a-z0-9-]{0,127}$/;
 const TAG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const OMITTED = "[omitted for memory capture bounds]";
 
-export function createMemoryCaptureLifecycle({ extract = runMemoryExtractor, apply, context = async () => [], policy, now = () => Date.now() } = {}) {
+export function createMemoryCaptureLifecycle({ extract = runMemoryExtractor, apply, context = async () => [], policy, now = () => Date.now(), diagnostics } = {}) {
   if (typeof extract !== "function" || typeof apply !== "function" || typeof context !== "function" || !policy) throw new TypeError("extract, apply, context, and policy are required");
+  if (diagnostics !== undefined && typeof diagnostics !== "function") throw new TypeError("diagnostics must be a function");
   let gate = Promise.resolve(); let closing = false; let activeController;
+  const emit = (event) => {
+    if (diagnostics === undefined) return;
+    try { Promise.resolve(diagnostics({ timestamp: new Date(now()).toISOString(), ...event })).catch(() => {}); } catch {}
+  };
   const run = (trigger, messages, deadlineMs, deadlineAt = now() + deadlineMs, externalSignal) => {
     const work = async () => {
       const remaining = deadlineAt - now(); if (remaining <= 0) throw new Error("capture deadline exceeded");
@@ -16,23 +21,26 @@ export function createMemoryCaptureLifecycle({ extract = runMemoryExtractor, app
         if (controller.signal.aborted) throw new Error("capture canceled");
         const destination = boundedDestination(await Promise.race([context({ store: "default", limit: policy.capture?.destination_record_limit ?? 24, signal: controller.signal }), timeout]), policy.capture ?? policy);
         if (controller.signal.aborted) throw new Error("capture canceled");
-        const input = await (async () => {
-          const snapshot = sanitizeCaptureSource(messages, policy.capture ?? policy);
-          if (!snapshot.messages.length) return undefined;
-          const output = await Promise.race([extract({ trigger, source: snapshot, destination, policy: policy.capture ?? policy, signal: controller.signal }), timeout]);
-          if (controller.signal.aborted) throw new Error("capture deadline exceeded");
-          const result = validateCaptureResult(output, snapshot, policy.capture ?? policy, destination);
-          return result.decision === "noop" ? undefined : { store: "default", request_id: randomUUID(), operations: result.operations };
-        })();
-        if (input === undefined) return { status: "noop" };
+        const snapshot = sanitizeCaptureSource(messages, policy.capture ?? policy);
+        if (!snapshot.messages.length) { const result = { status: "noop" }; emit({ trigger, status: "noop", reason: "no-capturable-source" }); return result; }
+        const output = await Promise.race([extract({ trigger, source: snapshot, destination, policy: policy.capture ?? policy, signal: controller.signal }), timeout]);
+        if (controller.signal.aborted) throw new Error("capture deadline exceeded");
+        const result = validateCaptureResult(output, snapshot, policy.capture ?? policy, destination);
+        if (result.decision === "noop") { emit({ trigger, status: "noop", reason: "extractor-noop" }); return { status: "noop" }; }
+        const input = { store: "default", request_id: randomUUID(), operations: result.operations };
         const applied = await Promise.race([apply(input, controller.signal), timeout]);
-        if (controller.signal.aborted) throw new Error("capture deadline exceeded"); return applied;
+        if (controller.signal.aborted) throw new Error("capture deadline exceeded");
+        emit({ trigger, status: applied?.status === "applied" ? "applied" : "noop", reason: applied?.status === "applied" ? "memory-apply" : "memory-apply-noop", records: Number.isFinite(applied?.records) ? applied.records : undefined });
+        return applied;
+      } catch (error) {
+        emit({ trigger, status: "failed", reason: safeReason(error) });
+        throw error;
       } finally { externalSignal?.removeEventListener("abort", abort); if (activeController === controller) activeController = undefined; clearTimeout(timer); }
     };
     const next = gate.then(work, work); gate = next.catch(() => {}); let queueTimer; const queueTimeout = new Promise((_, reject) => { const remaining = deadlineAt - now(); queueTimer = setTimeout(() => reject(new Error("capture deadline exceeded")), Math.max(0, remaining)); }); return Promise.race([next, queueTimeout]).finally(() => clearTimeout(queueTimer));
   };
   return {
-    compact(messages, { signal } = {}) { return closing ? Promise.resolve({ status: "closed" }) : run("compaction", messages, policy.capture?.compaction_deadline_ms ?? 30_000, undefined, signal); },
+    compact(messages, { signal } = {}) { if (!closing) return run("compaction", messages, policy.capture?.compaction_deadline_ms ?? 30_000, undefined, signal); const result = { status: "closed" }; emit({ trigger: "compaction", status: "noop", reason: "capture-closed" }); return Promise.resolve(result); },
     shutdown(messages, { deadlineAt, signal } = {}) { closing = true; activeController?.abort(); const deadline = policy.capture?.shutdown_deadline_ms ?? 10_000; return run("shutdown", messages, deadline, deadlineAt ?? now() + deadline, signal); },
     close() { closing = true; },
   };
@@ -92,4 +100,5 @@ function validEvidence(evidence, snapshot, record) { return evidence && typeof e
 function matchesDestination(record, destination) { const current = destination.find((item) => item.id === record.id); if (record.mode === "create") return !current && !destination.some((item) => normalizeIdentity(item.title, item.memory) === normalizeIdentity(record.title, record.body)); return !!current && current.title === record.expected_title && current.memory === record.expected_body && current.relevant_at === record.expected_relevant_at && JSON.stringify(current.tags) === JSON.stringify(record.expected_tags) && JSON.stringify(current.related) === JSON.stringify(record.expected_related); }
 function normalizeIdentity(title, body) { return `${title.trim().toLowerCase()}\n${body.replace(/\r\n?/g, "\n").trim().replace(/\s+/g, " ")}`; }
 function boundedDestination(records, policy) { if (!Array.isArray(records)) throw new Error("invalid capture destination"); const limit = policy.destination_record_limit ?? 24; const maximum = policy.destination_max_bytes ?? 32768; const result = []; let bytes = 0; for (const record of records) { if (!record || typeof record.id !== "string" || typeof record.title !== "string" || typeof record.memory !== "string" || typeof record.relevant_at !== "string" || !Array.isArray(record.tags) || !Array.isArray(record.related)) continue; const size = Buffer.byteLength(JSON.stringify(record)); if (result.length >= limit || bytes + size > maximum) break; result.push(record); bytes += size; } return result; }
+function safeReason(error) { const message = error?.name === "AbortError" ? "capture-aborted" : String(error?.message ?? error ?? "capture failed").toLowerCase(); if (message.includes("deadline")) return "deadline-exceeded"; if (message.includes("canceled") || message.includes("cancelled") || message.includes("abort")) return "capture-aborted"; if (message.includes("policy")) return "policy-unavailable"; if (message.includes("destination")) return "destination-unavailable"; if (message.includes("apply")) return "apply-failed"; if (message.includes("extractor") || message.includes("durable capture record")) return "extractor-invalid-output"; if (message.includes("invalid capture")) return "invalid-capture-state"; return "capture-failed"; }
 function validTimestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }

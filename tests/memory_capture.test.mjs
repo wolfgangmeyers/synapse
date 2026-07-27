@@ -53,6 +53,21 @@ test("noisy source produces no extractor or write", async () => {
   assert.equal(extracted, 0); await capture.compact(source); await capture.shutdown(source); assert.equal(extracted, 2); assert.equal(applied, 0);
 });
 
+test("capture lifecycle emits bounded outcome diagnostics without source text", async () => {
+  const diagnostics = []; let applied = 0;
+  const capture = createMemoryCaptureLifecycle({ policy, now: () => Date.parse("2026-07-27T00:00:00.000Z"), diagnostics: (event) => diagnostics.push(event), extract: async ({ trigger }) => trigger === "shutdown" ? { decision: "apply", records: [record("release-process", "Use the signed production workflow.")] } : { decision: "noop", records: [] }, apply: async () => { applied += 1; return { status: "applied", records: 1 }; } });
+  await capture.compact(source);
+  await capture.shutdown(source);
+  await assert.rejects(createMemoryCaptureLifecycle({ policy, now: () => Date.parse("2026-07-27T00:00:00.000Z"), diagnostics: (event) => diagnostics.push(event), context: async () => { throw new Error("destination unavailable: Use the signed production workflow."); }, extract: async () => assert.fail("must not extract"), apply: async () => assert.fail("must not apply") }).compact(source), /destination unavailable/);
+  assert.equal(applied, 1);
+  assert.deepEqual(diagnostics, [
+    { timestamp: "2026-07-27T00:00:00.000Z", trigger: "compaction", status: "noop", reason: "extractor-noop" },
+    { timestamp: "2026-07-27T00:00:00.000Z", trigger: "shutdown", status: "applied", reason: "memory-apply", records: 1 },
+    { timestamp: "2026-07-27T00:00:00.000Z", trigger: "compaction", status: "failed", reason: "destination-unavailable" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /signed production workflow/);
+});
+
 test("configured extractor permits sixty seconds and passes cancellation to its model process", async () => {
   const controller = new AbortController(); let call; let aborted = false; let stdinClosed = false;
   const pending = runMemoryExtractor({ source: { messages: [] }, policy: RECALL_POLICY.capture, signal: controller.signal, spawn: (file, args, options, done) => {

@@ -89,6 +89,8 @@ Escalate only an actual external or irreversible boundary: missing credentials o
 
 **Internal implementation details are not delivery gates.** An internal limit, default, format, policy, retry rule, safety guard, or implementation detail is not a requirement or gate unless tied to the user request, a recorded acceptance criterion, a real external contract, or a real safety/data-loss risk. Before blocking, name that source. If there is none, treat the detail as a hypothesis or bug: make the smallest sound correction, verify the requested behavior, and continue. Do not ask for authorization or park work on it.
 
+**Spec mistakes are workaround targets, not parking brakes.** Specs and plans can be wrong, especially when Wolfgang has not reviewed them in detail. If a spec introduces an unimplemented contract, permission, slug, workflow, or dependency that blocks a keep-moving task, first search for prior decisions before parking: `~/.mecha-developer/kb`, repo docs/spec history, current code, and, when available on the machine, Notion. If the existing product decision is discoverable and the correction is reversible, update the spec/plan or task assumption with the smallest sound fix, flag the correction for later review, and continue implementation. Treat this as a general blocker-handling rule; keep project-specific permission names and product decisions in project instructions or the KB, not in shared mecha-developer skills.
+
 **Local development auth/setup is a workaround target, not a parking brake.** In a Wolfgang-controlled local dev worktree, missing browser storage state, disabled dev-login flags, absent local fixtures, stale local seed data, or an unauthenticated browser session are ordinary reversible setup problems unless production credentials, external accounts, or committed secrets are required. Do not repeatedly record these as blockers. Take the next local action immediately: open the app for Wolfgang to log in, use the repository's existing E2E/global-setup convention, create ignored local storage state, enable documented dev-only flags in uncommitted/ignored local config when needed, run the deterministic seed, and continue validation. Preserve secrets by never printing `.env` values and never committing auth state or local-only credential/config changes. If Wolfgang is physically present or has broadly authorized local environment changes, assume local login/setup work is authorized and drive every other gate while waiting for the manual login.
 
 **Repeated blocker loop breaker.** If the same blocker has been verified twice with no state change, stop spending turns only re-verifying it. Record the blocker once, downgrade future duplicate reminder notices to noise, and either execute a reversible local workaround, open the relevant UI for manual input, or move to the next unrun validation/review gate. A supervisor turn that only re-states an unchanged blocker while authorized local work remains is noncompliant.
@@ -175,6 +177,8 @@ At launch, record and send the worker a short delivery contract:
 **Supervisor owns ALL state updates — workers NEVER touch state**: Workers communicate via mailbox only. They never run `state_update_*` scripts or record their own status. If you're about to tell a worker to run a state tool, stop — always wrong.
 
 **Worker reports usually need a reply.** When a worker sends a checkpoint, blocker, completion report, spec handoff, or status report, update state and then normally answer the worker with the next instruction, acknowledgement, correction, or parking instruction. Do not leave a worker sitting after a report just because you recorded state. Exceptions are narrow: the report is purely informational and the worker explicitly says it is continuing, a newer user instruction supersedes the thread, or the worker has already been parked/shut down. If no action is needed, say so explicitly. Before calling anything a follow-up, record its owner, concrete action, due time, and reminder or mailbox ID.
+
+**Suppress worker acknowledgments by default.** Outgoing supervisor mail to workers should end with a no-ack footer unless an acknowledgement is actually needed. Use wording like: `No acknowledgment needed; reply only with new information, a blocker, a meaningful status change, validation results, a push/head change, or a decision request.` Do not invite "acknowledged" replies for routine instructions, parking messages, or monitoring directions. If a worker sends a pure acknowledgment anyway, do not answer it.
 
 **Robot review is required before pushing production code**: ALL implementation changes get reviewed. No exceptions for "small", "scripts-only", or "infrastructure." Claude Code workers run robot-review themselves. Codex workers with `multi_agent = true` run it via native subagents. Without subagent capability, the supervisor runs it after the worker reports done.
 
@@ -270,6 +274,17 @@ When all reviewers sign off with only Suggestions/Nits, **commit and push withou
 **Mailbox V2 coordination**: Send every instruction, redirect, question, authorization, and recovery follow-up with `mailbox_send.py --from supervisor --to <agent-id> --body <text>`. Do not type terminal/menu input. A missing Mailbox V2 registration or stopped agent is a lifecycle fault: restore it through `worker_launch.py` with its recorded Pi session, then retry Mailbox V2 delivery.
 
 Key tools: `worker_launch.py` (managed Pi lifecycle), `mailbox_send.py` (all coordination), `worker_capture.py` (diagnostics), `worker_kill.py` (kill window, no state/worktree effect), `worker_shutdown.py` (graceful shutdown).
+
+### Compact helper toolbox
+
+Use these read-only helpers instead of repeating token-heavy shell/Python snippets:
+
+- `pr_status.py [--repo owner/repo] <pr-url-or-number>... [--json]` — compact PR state, head branch/SHA, draft/review/merge state, and check rollup.
+- `worker_tail_summary.py [window ...] [--lines N] [--keep N]` — compact worker pane tails with routine idle/ack noise removed and a coarse state hint.
+- `state_summary.py [--json] [--all]` — compact active/blocked/parked state, priorities, verification handoffs, and active/blocked records with no live window.
+- `git_task_status.py [--task alias-or-id ... | --repo path ...] [--json]` — read-only branch/upstream/ahead/behind/dirty summary for deferred task worktrees.
+
+These helpers summarize evidence; they do not replace the mandatory independent verification gates before authorization, push, shutdown, or state disposition.
 
 ## Mailbox (companion — read with this skill)
 

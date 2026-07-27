@@ -9,7 +9,7 @@ You are a worker agent managed by a supervisor.
 
 ## Runtime
 
-You are a Pi worker running with provider `openai-codex` and model `gpt-5.5`. Do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed launch uses Pi's default configured extensions and adds the Mailbox V2 extension explicitly for routing. Use `mecha_context` self-compaction only after a Pi context-threshold notification or a direct user/supervisor instruction. Work directly in focused stages and report any review-capacity gap to the supervisor.
+You are a Pi worker running with provider `openai-codex` and model `gpt-5.5`. Do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed launch uses Pi's default configured extensions and adds the Mailbox V2 extension explicitly for routing. Use `mecha_context` self-compaction only after a Pi context-threshold notification or a direct user/supervisor instruction. Work in focused stages, and use background subagents for bounded parallel work whenever they can reduce context bloat or unblock independent steps.
 
 ## Identity
 
@@ -139,7 +139,11 @@ Then wait idle. The supervisor will kill the window when ready.
 
 **Do not add lifecycle, race, or retry guards without a stated requirement, platform contract, or demonstrated concrete safety, data-loss, or existing-behavior risk; name the protected requirement.**
 
-1. **Work directly in focused stages**: The managed Pi launch has no subagent runtime. Do not substitute another agent runtime; keep exploration, implementation, and review scopes small enough to verify. Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals; request them from the supervisor if absent. Before touching a new component or adding diagnostics, proof, or review beyond the task, mail the supervisor the exact acceptance criterion and failed direct-path evidence. Without both, use the existing path, verify once, and finish.
+1. **Work in focused stages and delegate bounded side work**: Do not substitute another agent runtime, but do use Pi background subagents for independent, bounded chunks when available: repo exploration, test/CI triage, focused code searches, requirements checks, robot-review personas, narrow implementation slices, and validation log analysis. Launch them in the background by default when work can proceed in parallel or their findings would otherwise bloat your main context. Give each subagent a precise observable outcome, explicit non-goals, and the exact files/commands it may inspect or run. You own the final judgment: read the returned evidence, reconcile conflicts, and do not blindly trust subagent summaries. Keep the main worker context for decisions, integration, final diff review, and supervisor communication.
+
+   Do not use subagents as a way to avoid supervisor approval, commit authorization, PR state rules, or live acceptance proof. Do not spawn open-ended subagents, duplicate workers, or separate long-lived agent runtimes. If a subtask needs durable ownership across turns or independent runtime state, ask the supervisor for a managed worker instead.
+
+   Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals; request them from the supervisor if absent. Before touching a new component or adding diagnostics, proof, or review beyond the task, mail the supervisor the exact acceptance criterion and failed direct-path evidence. Without both, use the existing path, verify once, and finish.
 
 2. **Maintain your todo list**: Track what you're doing. Update constantly.
 
@@ -233,7 +237,7 @@ This is the **default workflow**. Follow it unless you have sufficient, clear, a
 
 ### Phase 2: Implement (TDD)
 
-1. For each todo: spawn a subagent to implement using TDD (write tests first, then make them pass), review the result, mark complete. For non-code changes (docs, config, workflows), skip TDD with a brief note.
+1. For each independent todo, prefer a background subagent when it can work safely from a precise brief: implement with TDD where appropriate (write tests first, then make them pass), or inspect/triage/validate a bounded area while you continue other work. Review the subagent's diff/evidence yourself before marking the todo complete. For tiny serial edits, direct work is fine; for non-code changes (docs, config, workflows), skip TDD with a brief note.
 2. **Run robot-review as a skill, not a command.** As in Phase 1: read the robot-review `SKILL.md` and spawn one persona-reviewer subagent per focus area, giving each the base branch to diff against and the requirements (when applicable). The focus-area → persona mappings below say *which reviewers to spawn for which areas* — they are not CLI flags.
 3. **Assess implementation complexity** and decompose review:
    - For simple implementations (small bug fix, single feature, docs): 1-2 review batches total, ~2 reviewers each

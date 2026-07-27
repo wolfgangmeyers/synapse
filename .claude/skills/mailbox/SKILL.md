@@ -21,6 +21,20 @@ The same `[MAILBOX]` text the hook prints to stdout can appear **in this chat as
 
 Skipping Step 1 when the mandatory block is present is a **protocol violation** — stale `last_checked` / wrong ordering vs. state.
 
+## Reply discipline: avoid acknowledgment loops
+
+Do **not** reply to messages that are only acknowledgments, confirmations, or promises to stay parked, unless the message also includes a new instruction, new evidence, a blocker, a question, or a state transition that needs routing. Examples that normally need **no reply**: "Acknowledged", "Confirmed", "I'll stay parked", "I'll wait for review", or restating an instruction back to the supervisor.
+
+When closing a loop, send at most one acknowledgment. If the next message is another pure acknowledgment, do not answer it; update state only if needed.
+
+## Update discipline: avoid noisy small updates
+
+Mailbox is for durable coordination, not streaming every tiny step. Avoid frequent small progress messages that only say you are continuing, starting a command, waiting, or making expected incremental progress.
+
+Send mail when it changes what the recipient can do or needs to know: a blocker, a decision point, a meaningful status transition, a completed validation result, a push/head change, a scoped plan before risky work, or a final/parked handoff. Batch related facts into one useful message instead of several small ones.
+
+If a supervisor or worker has already asked you to stay parked or continue, do not send periodic "still parked" or "still working" messages unless new evidence, a delay/blocker, or a requested checkpoint is due.
+
 ## Canonical specification
 
 Full requirements, JSON schema, hook behavior, and cron behavior:
