@@ -9,6 +9,7 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import {
+  appendMemoryCaptureDiagnostic,
   compactionNotificationMessage,
   compactionPolicyFromEnvironment,
   createMailboxClient,
@@ -250,47 +251,6 @@ test("parent activity before each follow-up cancels that idle generation", () =>
 test("subject-bearing PR watch wakeups preserve their exact subject through durable Pi delivery", async () => {
   const message = envelope("message-1", { to: "pr-watch", subject: "PR watch wakeup" });
 
-test("default compaction policy uses context-size fallback and model-specific overrides", () => {
-  assert.deepEqual(DEFAULT_COMPACTION_POLICY.tiers[0].levels.map((level) => level.percent), [40, 50, 60, 70, 80, 90]);
-  assert.equal(selectCompactionTier(DEFAULT_COMPACTION_POLICY, 272_000).maxContextTokens, 300_000);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 39, contextWindow: 272_000 }), undefined);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 40, contextWindow: 272_000 }).guidance, "consider compacting at a reasonable stopping point to keep future calls cheaper");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 55, contextWindow: 272_000 }, 40).guidance, "compact soon, ideally at the next clean boundary");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 65, contextWindow: 272_000 }, 50).guidance, "compact when practical; each call is getting meaningfully more expensive");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 75, contextWindow: 272_000 }, 60).guidance, "strongly consider compacting before more expensive work");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 85, contextWindow: 272_000 }, 70).guidance, "compact as soon as practical; the session is now very expensive");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 91, contextWindow: 272_000 }, 80).mandatory, true);
-
-  const millionTokenTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 1_000_000);
-  assert.equal(millionTokenTier.maxContextTokens, 1_000_000);
-  assert.equal(millionTokenTier.levels.find((level) => level.mandatory).percent, 45);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 49, contextWindow: 1_000_000 }, 40).mandatory, true);
-  const solTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 272_000, { provider: "openai-codex", id: "gpt-5.6-sol", name: "Sol" });
-  assert.equal(solTier.matchedModelKey, "openai-codex/gpt-5.6-sol");
-  assert.deepEqual(solTier.levels.map((level) => level.percent), [15, 25, 35, 45]);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 36, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, 25).percent, 35);
-
-  const configured = compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: JSON.stringify({
-    levels: [40, 90],
-    models: { "openai-codex/custom-sol": { levels: [10, { percent: 30, mandatory: true }] } },
-  }) });
-  assert.deepEqual(configured.tiers[0].levels.map((level) => level.percent), [40, 90]);
-  assert.equal(effectiveCompactionPolicy(configured, { provider: "openai-codex", id: "custom-sol" }).matchedModelKey, "openai-codex/custom-sol");
-  assert.equal(effectiveCompactionPolicy(configured, undefined, { MECHA_PI_MODEL_KEY: "openai-codex/custom-sol" }).matchedModelKey, "openai-codex/custom-sol");
-  assert.equal(nextCompactionThreshold(configured, { percent: 31, contextWindow: 272_000, model: { provider: "openai-codex", id: "custom-sol" } }).mandatory, true);
-  assert.deepEqual(compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: "45, 75" }).tiers[0].levels.map((level) => level.percent), [45, 75]);
-});
-
-test("compaction threshold message includes direct self-compaction guidance", () => {
-  assert.match(
-    compactionNotificationMessage({
-      level: { percent: 90, mandatory: true },
-      usage: { tokens: 900_000, contextWindow: 1_000_000, percent: 90 },
-    }),
-    /Stop current discretionary work and call mecha_context with action=compact/,
-  );
-});
-
 test("post-compaction handoff message includes bounded note and compact status without summary text", () => {
   const message = postCompactionNotificationMessage("Resume the validation checklist.", {
     tokensBefore: 123_456,
@@ -379,6 +339,73 @@ test("post-compaction handoff message includes bounded note and compact status w
   assert.deepEqual(statuses.slice(-1), [["mecha-mailbox", "mailbox: connected"]]);
   coordinator.close();
   await session.close();
+});
+
+test("default compaction policy uses context-size fallback and model-specific overrides", () => {
+  assert.deepEqual(DEFAULT_COMPACTION_POLICY.tiers[0].levels.map((level) => level.percent), [40, 50, 60, 70, 80, 90]);
+  assert.equal(selectCompactionTier(DEFAULT_COMPACTION_POLICY, 272_000).maxContextTokens, 300_000);
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 39, contextWindow: 272_000 }), undefined);
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 40, contextWindow: 272_000 }).guidance, "consider compacting at a reasonable stopping point to keep future calls cheaper");
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 55, contextWindow: 272_000 }, 40).guidance, "compact soon, ideally at the next clean boundary");
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 65, contextWindow: 272_000 }, 50).guidance, "compact when practical; each call is getting meaningfully more expensive");
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 75, contextWindow: 272_000 }, 60).guidance, "strongly consider compacting before more expensive work");
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 85, contextWindow: 272_000 }, 70).guidance, "compact as soon as practical; the session is now very expensive");
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 91, contextWindow: 272_000 }, 80).mandatory, true);
+
+  const millionTokenTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 1_000_000);
+  assert.equal(millionTokenTier.maxContextTokens, 1_000_000);
+  assert.equal(millionTokenTier.levels.find((level) => level.mandatory).percent, 45);
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 49, contextWindow: 1_000_000 }, 40).mandatory, true);
+  const solTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 272_000, { provider: "openai-codex", id: "gpt-5.6-sol", name: "Sol" });
+  assert.equal(solTier.matchedModelKey, "openai-codex/gpt-5.6-sol");
+  assert.deepEqual(solTier.levels.map((level) => level.percent), [15, 25, 35, 45]);
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 36, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, 25).percent, 35);
+
+  const configured = compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: JSON.stringify({
+    levels: [40, 90],
+    models: { "openai-codex/custom-sol": { levels: [10, { percent: 30, mandatory: true }] } },
+  }) });
+  assert.deepEqual(configured.tiers[0].levels.map((level) => level.percent), [40, 90]);
+  assert.equal(effectiveCompactionPolicy(configured, { provider: "openai-codex", id: "custom-sol" }).matchedModelKey, "openai-codex/custom-sol");
+  assert.equal(effectiveCompactionPolicy(configured, undefined, { MECHA_PI_MODEL_KEY: "openai-codex/custom-sol" }).matchedModelKey, "openai-codex/custom-sol");
+  assert.equal(nextCompactionThreshold(configured, { percent: 31, contextWindow: 272_000, model: { provider: "openai-codex", id: "custom-sol" } }).mandatory, true);
+  assert.deepEqual(compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: "45, 75" }).tiers[0].levels.map((level) => level.percent), [45, 75]);
+});
+
+test("configured compaction policy can add early gpt-5.5 threshold nudges", () => {
+  const configured = compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: JSON.stringify({
+    levels: [99],
+    models: {
+      "openai-codex/gpt-5.5": {
+        levels: [
+          { percent: 20, guidance: "Context is around 20%. No compaction needed yet." },
+          { percent: 30, guidance: "Context is around 30%. Keep the main thread lean." },
+          { percent: 40, guidance: "Context is around 40%. Look for a clean boundary to compact soon." },
+        ],
+      },
+    },
+  }) });
+  const effective = effectiveCompactionPolicy(configured, { provider: "openai-codex", id: "gpt-5.5" });
+  assert.deepEqual(effective.policy.tiers[0].levels.map((level) => level.percent), [20, 30, 40]);
+  assert.equal(nextCompactionThreshold(configured, { percent: 20, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.5" } }).percent, 20);
+  assert.equal(nextCompactionThreshold(configured, { percent: 30, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.5" } }, 20).percent, 30);
+});
+
+test("compaction threshold message appends delegation suffix without hard-coded compact instructions", () => {
+  const early = compactionNotificationMessage({
+    level: { percent: 20, guidance: "Context is around 20%. No compaction needed yet." },
+    usage: { tokens: 54_400, contextWindow: 272_000, percent: 20 },
+  });
+  assert.match(early, /Use workers or subagents .*avoid context bloat/);
+  assert.doesNotMatch(early, /mecha_context action=compact/);
+
+  const mandatory = compactionNotificationMessage({
+    level: { percent: 90, guidance: "Context is around 90%. Stop immediately and compact before doing more work.", mandatory: true },
+    usage: { tokens: 900_000, contextWindow: 1_000_000, percent: 90 },
+  });
+  assert.match(mandatory, /Stop immediately and compact before doing more work/);
+  assert.match(mandatory, /Use workers or subagents .*avoid context bloat/);
+  assert.doesNotMatch(mandatory, /mecha_context action=compact/);
 });
 
 function settledNotificationFixture(t, {
@@ -666,7 +693,7 @@ test("context monitor injects direct threshold notifications and resets after co
   assert.equal(sent.length, 2);
 });
 
-test("mecha_context tool sets policy and requests self-compaction", async (t) => {
+test("mecha_context tool sets policy and defers self-compaction until agent_settled", async (t) => {
   const fixture = settledNotificationFixture(t);
   const contextTool = fixture.tools.get("mecha_context");
   assert.equal(typeof contextTool.execute, "function");
@@ -682,17 +709,24 @@ test("mecha_context tool sets policy and requests self-compaction", async (t) =>
   assert.equal(setResult.details.selectedTier.maxContextTokens, 300_000);
 
   const compactCalls = [];
+  const compactContext = {
+    ...fixture.context,
+    getContextUsage: () => ({ tokens: 45, contextWindow: 100, percent: 45 }),
+    isIdle: () => true,
+    compact: (options) => compactCalls.push(options),
+  };
   const compactResult = await contextTool.execute("compact", {
     action: "compact",
     customInstructions: "preserve task state",
     postCompactionNotification: "Continue with the post-compact checklist.",
-  }, undefined, undefined, {
-    ...fixture.context,
-    getContextUsage: () => ({ tokens: 45, contextWindow: 100, percent: 45 }),
-    compact: (options) => compactCalls.push(options),
-  });
-  assert.equal(compactResult.content[0].text, "Self-compaction requested.");
+  }, undefined, undefined, compactContext);
+  assert.equal(compactResult.content[0].text, "Self-compaction deferred until Pi reaches the idle settled boundary.");
+  assert.equal(compactResult.details.compactState, "deferred_until_agent_settled");
   assert.equal(compactResult.details.postCompactionNotification, "Continue with the post-compact checklist.");
+  assert.equal(compactCalls.length, 0);
+
+  fixture.handlers.get("agent_settled")({}, compactContext);
+  assert.equal(compactCalls.length, 1);
   assert.equal(compactCalls[0].customInstructions, "preserve task state");
 
   compactCalls[0].onComplete({ tokensBefore: 45, estimatedTokensAfter: 12, firstKeptEntryId: "entry-1", summary: "summary" });
@@ -704,6 +738,25 @@ test("mecha_context tool sets policy and requests self-compaction", async (t) =>
   assert.deepEqual(fixture.sent[0][1], { deliverAs: "followUp", triggerTurn: true });
 });
 
+test("mecha_context does not compact at a non-idle settled boundary", async (t) => {
+  const fixture = settledNotificationFixture(t);
+  const compactCalls = [];
+  const compactContext = {
+    ...fixture.context,
+    isIdle: () => false,
+    compact: (options) => compactCalls.push(options),
+  };
+
+  const result = await fixture.tools.get("mecha_context").execute("compact", {
+    action: "compact",
+    customInstructions: "wait for safety",
+  }, undefined, undefined, compactContext);
+
+  assert.equal(result.details.compactState, "deferred_until_agent_settled");
+  fixture.handlers.get("agent_settled")({}, compactContext);
+  assert.equal(compactCalls.length, 0);
+});
+
 test("mecha_context uses configured default post-compaction handoff when command omits one", async (t) => {
   const fixture = settledNotificationFixture(t);
   const contextTool = fixture.tools.get("mecha_context");
@@ -712,14 +765,36 @@ test("mecha_context uses configured default post-compaction handoff when command
     policy: { postCompactionNotification: "Policy handoff note.", levels: [40, 90] },
   }, undefined, undefined, fixture.context);
   const compactCalls = [];
-  await contextTool.execute("compact", { action: "compact" }, undefined, undefined, {
+  const compactContext = {
     ...fixture.context,
+    isIdle: () => true,
     compact: (options) => compactCalls.push(options),
-  });
+  };
+  await contextTool.execute("compact", { action: "compact" }, undefined, undefined, compactContext);
+  assert.equal(compactCalls.length, 0);
+  fixture.handlers.get("agent_settled")({}, compactContext);
   compactCalls[0].onComplete({ tokensBefore: 90, summary: "summary" });
   await new Promise((resolve) => setTimeout(resolve, 1));
   assert.equal(fixture.sent[0][0].customType, "mecha-post-compaction-handoff");
   assert.match(fixture.sent[0][0].content, /Policy handoff note/);
+});
+
+test("memory capture diagnostics are content-free and bounded", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-memory-diagnostics-"));
+  const path = join(directory, "memory-capture.jsonl");
+  appendMemoryCaptureDiagnostic({ timestamp: "2026-07-27T00:00:00.000Z", trigger: "compaction", status: "applied", reason: "memory-apply", records: 1, source: "do not log" }, { path, maxBytes: 260, keepBytes: 130 });
+  appendMemoryCaptureDiagnostic({ timestamp: "2026-07-27T00:00:01.000Z", trigger: "shutdown", status: "failed", reason: "capture apply failed: secret source body" }, { path, maxBytes: 260, keepBytes: 130 });
+  assert.equal(JSON.parse(readFileSync(path, "utf8").trim().split("\n").at(-1)).reason, "capture-failed");
+  for (let index = 0; index < 10; index += 1) appendMemoryCaptureDiagnostic({ timestamp: `2026-07-27T00:00:${String(index + 2).padStart(2, "0")}.000Z`, trigger: "compaction", status: "noop", reason: "extractor-noop" }, { path, maxBytes: 260, keepBytes: 130 });
+
+  const text = readFileSync(path, "utf8");
+  assert.ok(Buffer.byteLength(text) <= 260);
+  assert.doesNotMatch(text, /do not log|source body/);
+  const records = text.trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(records.length > 0);
+  assert.ok(records.every((record) => Object.keys(record).every((key) => ["timestamp", "trigger", "status", "reason", "records"].includes(key))));
+  assert.deepEqual(Object.keys(records.at(-1)).sort(), ["reason", "status", "timestamp", "trigger"].sort());
+  await rm(directory, { recursive: true, force: true });
 });
 
 test("post-compaction handoff is deferred so send failures do not fail compaction", async (t) => {
@@ -729,13 +804,17 @@ test("post-compaction handoff is deferred so send failures do not fail compactio
     sendMessage: () => { throw new Error("Cannot read properties of undefined (reading signal)"); },
   });
   const compactCalls = [];
+  const compactContext = {
+    ...fixture.context,
+    isIdle: () => true,
+    compact: (options) => compactCalls.push(options),
+  };
   await fixture.tools.get("mecha_context").execute("compact", {
     action: "compact",
     postCompactionNotification: "Do not fail compact.",
-  }, undefined, undefined, {
-    ...fixture.context,
-    compact: (options) => compactCalls.push(options),
-  });
+  }, undefined, undefined, compactContext);
+  assert.equal(compactCalls.length, 0);
+  fixture.handlers.get("agent_settled")({}, compactContext);
 
   assert.doesNotThrow(() => compactCalls[0].onComplete({ tokensBefore: 100, summary: "summary" }));
   assert.equal(deferred.length, 1);

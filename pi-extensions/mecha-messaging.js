@@ -1,7 +1,7 @@
 import { createMailboxClient, createNanoId, assertAgentId, routerHttpUrl } from "./mailbox-client.js";
 export { createMailboxClient } from "./mailbox-client.js";
 import { execFile, execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createRecallState } from "./recall-state.js";
 import { createRecallController } from "./recall-controller.js";
 import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
@@ -19,8 +19,12 @@ const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
 const COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY";
 const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
 const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
+const MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES = 128 * 1024;
+const MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES = 64 * 1024;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
+
+const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
 
 const SMALL_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 40, guidance: "consider compacting at a reasonable stopping point to keep future calls cheaper" }),
@@ -221,17 +225,44 @@ export function compactionNotificationMessage({ level, usage }) {
   const tokenText = usage.tokens === null
     ? `${roundedPercent}% of ${usage.contextWindow.toLocaleString()} context tokens`
     : `${usage.tokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} context tokens (${roundedPercent}%)`;
-  const guidance = level.guidance ?? (level.mandatory ? "mandatory stop and compact before continuing" : "consider compacting soon");
-  const instruction = level.mandatory
-    ? "Stop current discretionary work and call mecha_context with action=compact before continuing, unless the user explicitly told you not to compact."
-    : "Use mecha_context action=compact only if this threshold notification or a direct user instruction makes compaction appropriate.";
-  return `Pi context threshold reached: ${tokenText}. Guidance at ${level.percent}%: ${guidance}. ${instruction}`;
+  const guidance = level.guidance ?? (level.mandatory ? "mandatory threshold reached" : "threshold reached");
+  return `Pi context threshold reached: ${tokenText}. Guidance at ${level.percent}%: ${guidance}. ${CONTEXT_THRESHOLD_SUFFIX}`;
 }
 
 export function boundedConversationText(content, maximum = 4096) {
   const blocks = Array.isArray(content) ? content : [content];
   const text = blocks.map((block) => typeof block === "string" ? block : block?.type === "text" && typeof block.text === "string" ? block.text : "").filter(Boolean).join("\n");
   return text.slice(-maximum);
+}
+
+function memoryCaptureDiagnosticsPath(environment = process.env) {
+  if (typeof environment.MECHA_MEMORY_CAPTURE_DIAGNOSTICS_PATH === "string" && environment.MECHA_MEMORY_CAPTURE_DIAGNOSTICS_PATH.trim().length > 0) return environment.MECHA_MEMORY_CAPTURE_DIAGNOSTICS_PATH.trim();
+  const home = environment.HOME;
+  return typeof home === "string" && home.length > 0 ? `${home}/.mecha-developer/logs/memory-capture.jsonl` : undefined;
+}
+
+function normalizeMemoryCaptureDiagnosticReason(reason) {
+  return typeof reason === "string" && /^[a-z0-9-]{1,120}$/.test(reason) ? reason : "capture-failed";
+}
+
+export function appendMemoryCaptureDiagnostic(event, { path = memoryCaptureDiagnosticsPath(), maxBytes = MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES, keepBytes = MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES } = {}) {
+  if (path === undefined) return;
+  const record = {
+    timestamp: typeof event?.timestamp === "string" ? event.timestamp : new Date().toISOString(),
+    trigger: ["compaction", "shutdown"].includes(event?.trigger) ? event.trigger : "unknown",
+    status: ["noop", "applied", "failed"].includes(event?.status) ? event.status : "failed",
+    reason: normalizeMemoryCaptureDiagnosticReason(event?.reason),
+    records: Number.isFinite(event?.records) ? event.records : undefined,
+  };
+  try {
+    mkdirSync(path.replace(/\/[^/]*$/, ""), { recursive: true });
+    appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    if (statSync(path).size <= maxBytes) return;
+    const lines = readFileSync(path, "utf8").slice(-keepBytes).split("\n").slice(1).filter(Boolean);
+    writeFileSync(path, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // Diagnostics are best-effort and must never expose source text or break capture.
+  }
 }
 
 function childSessionIds() {
@@ -650,7 +681,7 @@ export function createMechaMessagingExtension(pi, {
   let coordinator;
   let startupError;
   let activeWork = ""; let recallAbort; let recallProcess; let policyAbort; let policyReady; let capture;
-  const ensureCapture = async (signal) => { if (capture !== undefined) return capture; const response = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000) }); if (!response.ok) throw new Error("capture policy unavailable"); const { recall: policy } = await response.json(); capture = createMemoryCaptureLifecycle({ policy, context: async ({ signal } = {}) => { const lookup = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/lookup`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify({ stores: ["default"] }) }); if (!lookup.ok) throw new Error("capture destination unavailable"); const { records } = await lookup.json(); return records; }, apply: async (body, signal) => { const applied = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/apply`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify(body) }); if (!applied.ok) throw new Error("capture apply failed"); return applied.json(); } }); return capture; };
+  const ensureCapture = async (signal) => { if (capture !== undefined) return capture; const response = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000) }); if (!response.ok) throw new Error("capture policy unavailable"); const { recall: policy } = await response.json(); capture = createMemoryCaptureLifecycle({ policy, context: async ({ signal } = {}) => { const lookup = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/lookup`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify({ stores: ["default"] }) }); if (!lookup.ok) throw new Error("capture destination unavailable"); const { records } = await lookup.json(); return records; }, apply: async (body, signal) => { const applied = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/apply`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify(body) }); if (!applied.ok) throw new Error("capture apply failed"); return applied.json(); }, diagnostics: appendMemoryCaptureDiagnostic }); return capture; };
   const ensureRecallPolicy = async () => { if (policyReady !== undefined) return policyReady; policyAbort = new AbortController(); const timeout = setTimeout(() => policyAbort?.abort(), 5_000); policyReady = fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: policyAbort.signal }).then((response) => { if (!response.ok) throw new Error("recall policy unavailable"); return response.json(); }).then(({ recall: policy }) => { recallController.configure(policy); return policy; }).finally(() => clearTimeout(timeout)).catch((error) => { policyReady = undefined; throw error; }); return policyReady; };
   let recall; let recallConfigurationError;
   try { recall = createRecallState(); } catch (error) { recallConfigurationError = error; recall = createRecallState({}); }
@@ -672,6 +703,7 @@ export function createMechaMessagingExtension(pi, {
   let compactionPolicyError;
   try { compactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { compactionPolicyError = error; compactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
   let notifiedCompactionPercent = 0;
+  let pendingSelfCompaction;
 
   function compactionStatus(context) {
     const usage = context?.getContextUsage?.();
@@ -709,6 +741,33 @@ export function createMechaMessagingExtension(pi, {
         // A post-compaction handoff must not turn a successful compaction into a failed compact call.
       }
     }, 0);
+  }
+
+  function requestSelfCompaction(input, context) {
+    if (typeof context?.compact !== "function") throw new Error("Pi compaction is unavailable in this context");
+    const handoffNote = input.postCompactionNotification ?? effectiveCompactionPolicy(compactionPolicy, context?.model).policy.postCompactionNotification;
+    pendingSelfCompaction = {
+      customInstructions: input.customInstructions,
+      postCompactionNotification: normalizePostCompactionNotification(handoffNote),
+    };
+    return pendingSelfCompaction;
+  }
+
+  function runPendingSelfCompaction(context) {
+    if (pendingSelfCompaction === undefined || children.has(context.sessionManager.getSessionId())) return;
+    if (typeof context?.compact !== "function") {
+      pendingSelfCompaction = undefined;
+      context.ui?.notify("Self-compaction is unavailable at the idle boundary; use /compact manually.", "error");
+      return;
+    }
+    if (typeof context.isIdle === "function" && !context.isIdle()) return;
+    const request = pendingSelfCompaction;
+    pendingSelfCompaction = undefined;
+    context.compact({
+      customInstructions: request.customInstructions,
+      onComplete: (result) => { notifiedCompactionPercent = 0; sendPostCompactionNotification(request.postCompactionNotification, result); },
+      onError: (error) => { context.ui?.notify(`Self-compaction failed: ${error.message}`, "error"); },
+    });
   }
 
   function monitorContextThreshold(context) {
@@ -849,14 +908,8 @@ export function createMechaMessagingExtension(pi, {
           return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
         }
         if (input.action === "compact") {
-          if (typeof toolContext?.compact !== "function") throw new Error("Pi compaction is unavailable in this context");
-          const handoffNote = input.postCompactionNotification ?? effectiveCompactionPolicy(compactionPolicy, toolContext?.model).policy.postCompactionNotification;
-          toolContext.compact({
-            customInstructions: input.customInstructions,
-            onComplete: (result) => { notifiedCompactionPercent = 0; sendPostCompactionNotification(handoffNote, result); },
-            onError: (error) => { toolContext.ui?.notify(`Self-compaction failed: ${error.message}`, "error"); },
-          });
-          return { content: [{ type: "text", text: "Self-compaction requested." }], details: { ...compactionStatus(toolContext), postCompactionNotification: normalizePostCompactionNotification(handoffNote) } };
+          const request = requestSelfCompaction(input, toolContext);
+          return { content: [{ type: "text", text: "Self-compaction deferred until Pi reaches the idle settled boundary." }], details: { ...compactionStatus(toolContext), compactState: "deferred_until_agent_settled", postCompactionNotification: request.postCompactionNotification } };
         }
         if (input.action !== "status") throw new Error("unsupported mecha_context action");
         const status = compactionStatus(toolContext);
@@ -889,6 +942,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("agent_settled", (_event, context) => { monitorContextThreshold(context); });
   pi.on("session_compact", (_event, context) => { if (!children.has(context.sessionManager.getSessionId())) notifiedCompactionPercent = 0; });
   pi.on("agent_settled", (_event, context) => {
+    runPendingSelfCompaction(context);
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending) return;
 
     // Consume before sendReply starts so a later run can arm independently.
@@ -1021,6 +1075,7 @@ export function createMechaMessagingExtension(pi, {
     }
     settledNotificationPending = false;
     settledNotificationAgentId = undefined;
+    pendingSelfCompaction = undefined;
     settledNotifications.dispose();
     coordinator?.close();
     coordinator = undefined;
