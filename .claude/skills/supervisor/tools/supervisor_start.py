@@ -35,6 +35,7 @@ PI_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
+DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
 PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -102,9 +103,7 @@ def validate_compaction_policy(policy):
 
 def resolve_pi_router_url():
     """Return the configured loopback HTTP(S) Mailbox V2 router base URL."""
-    configured_url = os.environ.get(PI_ROUTER_URL_ENV)
-    if not configured_url:
-        raise ValueError(f"{PI_ROUTER_URL_ENV} is required for Pi supervisor startup")
+    configured_url = os.environ.get(PI_ROUTER_URL_ENV, DEFAULT_ROUTER_URL)
     parsed = urlparse(configured_url)
     if (parsed.scheme not in {"http", "https"}
             or parsed.hostname not in LOOPBACK_ROUTER_HOSTS
