@@ -102,8 +102,8 @@ def validate_compaction_policy(policy):
 
 
 def resolve_pi_router_url():
-    """Return the configured loopback HTTP(S) Mailbox V2 router base URL."""
-    configured_url = os.environ.get(PI_ROUTER_URL_ENV, DEFAULT_ROUTER_URL)
+    """Return the configured or default loopback HTTP(S) Mailbox V2 router base URL."""
+    configured_url = os.environ.get(PI_ROUTER_URL_ENV) or DEFAULT_ROUTER_URL
     parsed = urlparse(configured_url)
     if (parsed.scheme not in {"http", "https"}
             or parsed.hostname not in LOOPBACK_ROUTER_HOSTS
