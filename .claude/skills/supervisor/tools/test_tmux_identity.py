@@ -26,7 +26,7 @@ class CurrentAgentIdTest(unittest.TestCase):
             _tmux.run = original_run
             _tmux.ensure_session = original_ensure_session
 
-        self.assertEqual(calls, [(["new-window", "-d", "-t", _tmux.SESSION, "-n", "worker"], True, True)])
+        self.assertEqual(calls, [(["new-window", "-d", "-t", f"={_tmux.SESSION}", "-n", "worker"], True, True)])
 
     def test_resolves_a_valid_current_window_name(self):
         calls = []

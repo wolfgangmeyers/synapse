@@ -51,7 +51,7 @@ def current_agent_id(environment=None, tmux_run=run):
 
 def session_exists():
     """Return True if the mecha tmux session exists."""
-    result = run(["has-session", "-t", SESSION], check=False)
+    result = run(["has-session", "-t", f"={SESSION}"], check=False)
     return result.returncode == 0
 
 
@@ -68,7 +68,7 @@ def list_windows():
     if not session_exists():
         return []
     result = run(
-        ["list-windows", "-t", SESSION, "-F", "#{window_index}: #{window_name}"],
+        ["list-windows", "-t", f"={SESSION}", "-F", "#{window_index}: #{window_name}"],
         check=False,
     )
     if result.returncode != 0:
@@ -84,7 +84,7 @@ def list_windows():
 def new_window(name):
     """Create a new tmux window without stealing focus from attached clients."""
     ensure_session()
-    run(["new-window", "-d", "-t", SESSION, "-n", name])
+    run(["new-window", "-d", "-t", f"={SESSION}", "-n", name])
 
 
 def send_text(window, text):
