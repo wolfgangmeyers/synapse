@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _tmux import capture_pane, window_exists
 
 
-def main():
+def build_parser():
+    """Return the argument parser. Exposed so docs can be checked against it."""
     parser = argparse.ArgumentParser(
         description="Capture terminal output from a worker's tmux window."
     )
@@ -35,8 +36,11 @@ def main():
         default=None,
         help="Only show the last N lines of output",
     )
+    return parser
 
-    args = parser.parse_args()
+
+def main():
+    args = build_parser().parse_args()
 
     if not window_exists(args.window):
         print(f"Error: window '{args.window}' does not exist", file=sys.stderr)
