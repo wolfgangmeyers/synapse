@@ -341,34 +341,58 @@ test("post-compaction handoff message includes bounded note and compact status w
   await session.close();
 });
 
+// Managed worker shells export MECHA_PI_MODEL_KEY (worker_launch.py pins it to
+// the worker runtime model) and may export MECHA_PI_COMPACTION_POLICY. Both are
+// legitimate runtime inputs to the compaction resolver, so assertions about the
+// default ladders pass an explicit empty environment instead of inheriting the
+// ambient worker shell.
+const NO_COMPACTION_ENV = Object.freeze({});
+const COMPACTION_ENV_KEYS = ["MECHA_PI_MODEL_KEY", "MECHA_PI_COMPACTION_POLICY"];
+const tierFor = (policy, contextWindow, model) => selectCompactionTier(policy, contextWindow, model, NO_COMPACTION_ENV);
+const thresholdFor = (policy, usage, alreadyNotifiedPercent = 0) => nextCompactionThreshold(policy, usage, alreadyNotifiedPercent, undefined, undefined, NO_COMPACTION_ENV);
+const effectivePolicyFor = (policy, model, environment = NO_COMPACTION_ENV) => effectiveCompactionPolicy(policy, model, environment);
+
+// Extension-level tests construct the extension, which reads process.env
+// directly, so the compaction keys are cleared for the duration of the test.
+function isolateCompactionEnvironment(t) {
+  const previous = COMPACTION_ENV_KEYS.map((key) => [key, process.env[key]]);
+  for (const key of COMPACTION_ENV_KEYS) delete process.env[key];
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
 test("default compaction policy uses context-size fallback and model-specific overrides", () => {
   assert.deepEqual(DEFAULT_COMPACTION_POLICY.tiers[0].levels.map((level) => level.percent), [40, 50, 60, 70, 80, 90]);
-  assert.equal(selectCompactionTier(DEFAULT_COMPACTION_POLICY, 272_000).maxContextTokens, 300_000);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 39, contextWindow: 272_000 }), undefined);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 40, contextWindow: 272_000 }).guidance, "consider compacting at a reasonable stopping point to keep future calls cheaper");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 55, contextWindow: 272_000 }, 40).guidance, "compact soon, ideally at the next clean boundary");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 65, contextWindow: 272_000 }, 50).guidance, "compact when practical; each call is getting meaningfully more expensive");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 75, contextWindow: 272_000 }, 60).guidance, "strongly consider compacting before more expensive work");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 85, contextWindow: 272_000 }, 70).guidance, "compact as soon as practical; the session is now very expensive");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 91, contextWindow: 272_000 }, 80).mandatory, true);
+  assert.equal(tierFor(DEFAULT_COMPACTION_POLICY, 272_000).maxContextTokens, 300_000);
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 39, contextWindow: 272_000 }), undefined);
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 40, contextWindow: 272_000 }).guidance, "consider compacting at a reasonable stopping point to keep future calls cheaper");
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 55, contextWindow: 272_000 }, 40).guidance, "compact soon, ideally at the next clean boundary");
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 65, contextWindow: 272_000 }, 50).guidance, "compact when practical; each call is getting meaningfully more expensive");
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 75, contextWindow: 272_000 }, 60).guidance, "strongly consider compacting before more expensive work");
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 85, contextWindow: 272_000 }, 70).guidance, "compact as soon as practical; the session is now very expensive");
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 91, contextWindow: 272_000 }, 80).mandatory, true);
 
-  const millionTokenTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 1_000_000);
+  const millionTokenTier = tierFor(DEFAULT_COMPACTION_POLICY, 1_000_000);
   assert.equal(millionTokenTier.maxContextTokens, 1_000_000);
   assert.equal(millionTokenTier.levels.find((level) => level.mandatory).percent, 45);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 49, contextWindow: 1_000_000 }, 40).mandatory, true);
-  const solTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 272_000, { provider: "openai-codex", id: "gpt-5.6-sol", name: "Sol" });
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 49, contextWindow: 1_000_000 }, 40).mandatory, true);
+  const solTier = tierFor(DEFAULT_COMPACTION_POLICY, 272_000, { provider: "openai-codex", id: "gpt-5.6-sol", name: "Sol" });
   assert.equal(solTier.matchedModelKey, "openai-codex/gpt-5.6-sol");
   assert.deepEqual(solTier.levels.map((level) => level.percent), [15, 25, 35, 45]);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 36, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, 25).percent, 35);
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 36, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, 25).percent, 35);
 
   const configured = compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: JSON.stringify({
     levels: [40, 90],
     models: { "openai-codex/custom-sol": { levels: [10, { percent: 30, mandatory: true }] } },
   }) });
   assert.deepEqual(configured.tiers[0].levels.map((level) => level.percent), [40, 90]);
-  assert.equal(effectiveCompactionPolicy(configured, { provider: "openai-codex", id: "custom-sol" }).matchedModelKey, "openai-codex/custom-sol");
+  assert.equal(effectivePolicyFor(configured, { provider: "openai-codex", id: "custom-sol" }).matchedModelKey, "openai-codex/custom-sol");
   assert.equal(effectiveCompactionPolicy(configured, undefined, { MECHA_PI_MODEL_KEY: "openai-codex/custom-sol" }).matchedModelKey, "openai-codex/custom-sol");
-  assert.equal(nextCompactionThreshold(configured, { percent: 31, contextWindow: 272_000, model: { provider: "openai-codex", id: "custom-sol" } }).mandatory, true);
+  assert.equal(thresholdFor(configured, { percent: 31, contextWindow: 272_000, model: { provider: "openai-codex", id: "custom-sol" } }).mandatory, true);
   assert.deepEqual(compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: "45, 75" }).tiers[0].levels.map((level) => level.percent), [45, 75]);
 });
 
@@ -385,12 +409,12 @@ test("claude opus 5 resolves the low-threshold ladder with small-context guidanc
 
   // Model object keys resolve the same ladder, even at a 1M context window
   // (which would otherwise select the large-context tier).
-  const opusTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 1_000_000, { provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5" });
+  const opusTier = tierFor(DEFAULT_COMPACTION_POLICY, 1_000_000, { provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5" });
   assert.equal(opusTier.matchedModelKey, "anthropic/claude-opus-5");
   assert.deepEqual(opusTier.levels.map((level) => level.percent), [15, 20, 25, 30, 35, 40]);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 14, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }), undefined);
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 15, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }).guidance, "consider compacting at a reasonable stopping point to keep future calls cheaper");
-  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 41, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }, 35).mandatory, true);
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 14, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }), undefined);
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 15, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }).guidance, "consider compacting at a reasonable stopping point to keep future calls cheaper");
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 41, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }, 35).mandatory, true);
 });
 
 test("configured compaction policy can add early gpt-5.5 threshold nudges", () => {
@@ -406,10 +430,10 @@ test("configured compaction policy can add early gpt-5.5 threshold nudges", () =
       },
     },
   }) });
-  const effective = effectiveCompactionPolicy(configured, { provider: "openai-codex", id: "gpt-5.5" });
+  const effective = effectivePolicyFor(configured, { provider: "openai-codex", id: "gpt-5.5" });
   assert.deepEqual(effective.policy.tiers[0].levels.map((level) => level.percent), [20, 30, 40]);
-  assert.equal(nextCompactionThreshold(configured, { percent: 20, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.5" } }).percent, 20);
-  assert.equal(nextCompactionThreshold(configured, { percent: 30, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.5" } }, 20).percent, 30);
+  assert.equal(thresholdFor(configured, { percent: 20, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.5" } }).percent, 20);
+  assert.equal(thresholdFor(configured, { percent: 30, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.5" } }, 20).percent, 30);
 });
 
 test("compaction threshold message appends delegation suffix without hard-coded compact instructions", () => {
@@ -436,6 +460,7 @@ function settledNotificationFixture(t, {
   sendMessage,
   setTimeoutImpl,
 } = {}) {
+  isolateCompactionEnvironment(t);
   const previousRecipient = process.env.MECHA_PI_NOTIFY_ON_SETTLED;
   if (recipient === undefined) delete process.env.MECHA_PI_NOTIFY_ON_SETTLED;
   else process.env.MECHA_PI_NOTIFY_ON_SETTLED = recipient;
@@ -674,7 +699,8 @@ test("overlapping settled notification sends make independent attempts", async (
   assert.deepEqual(fixture.notifications, []);
 });
 
-test("context monitor injects direct threshold notifications and resets after compaction", async () => {
+test("context monitor injects direct threshold notifications and resets after compaction", async (t) => {
+  isolateCompactionEnvironment(t);
   const handlers = new Map();
   const sent = [];
   const tools = new Map();
