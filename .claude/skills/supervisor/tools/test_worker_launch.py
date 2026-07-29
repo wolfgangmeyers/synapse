@@ -3,6 +3,7 @@
 
 import contextlib
 import io
+import json
 import os
 import pathlib
 import shlex
@@ -31,7 +32,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
         self.assertIn("mailbox_send.py --from supervisor", output)
         self.assertIn("--to mailbox-worker", output)
-        self.assertIn("managed Pi lifecycle/worker_launch.py", output)
+        self.assertIn("managed worker lifecycle/worker_launch.py", output)
         self.assertNotIn("worker_send.py", output)
         self.assertNotIn("set_reminder.py", output)
         self.assertNotIn("--- Reminders ---", output)
@@ -53,6 +54,71 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
         self.assertIn(f"--session {session_id}", output)
+
+    def test_machine_config_can_default_to_claude_without_pi_flags(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "claude"}), encoding="utf-8")
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, output = self._run_main("claude-worker", agent=None)
+
+        self.assertIn("node", commands[0])
+        self.assertIn("claude_sidecar.mjs", commands[0])
+        self.assertIn("--agent-id claude-worker", commands[0])
+        self.assertIn("claude --dangerously-skip-permissions", commands[0])
+        self.assertNotIn("--provider", commands[0])
+        self.assertNotIn(worker_launch.PI_MODEL_KEY_ENV, commands[0])
+        self.assertIn("Worker (claude) launched", output)
+
+    def test_explicit_agent_overrides_machine_default_runtime(self):
+        extension = self._pi_mailbox_extension()
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "claude"}), encoding="utf-8")
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", agent="pi")
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertNotIn("claude_sidecar.mjs", commands[0])
+
+    def test_invalid_machine_default_runtime_fails_before_launch(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "bad"}), encoding="utf-8")
+        argv = ["worker_launch.py", "--window", "worker", "--dir", self.tmpdir.name]
+        with patch.dict(os.environ, {"MECHA_WORKER_RUNTIME_CONFIG": str(config)}, clear=True), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("default_agent", stderr.getvalue())
+        window_exists.assert_not_called()
+
+    def test_invalid_claude_router_url_fails_before_tmux_side_effects(self):
+        argv = ["worker_launch.py", "--window", "claude-worker", "--dir", self.tmpdir.name, "--agent", "claude"]
+        with patch.dict(os.environ, {worker_launch.PI_ROUTER_URL_ENV: "http://example.com/path"}, clear=True), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             patch.object(worker_launch, "ensure_session") as ensure_session, \
+             patch.object(worker_launch, "new_window") as new_window, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn(worker_launch.PI_ROUTER_URL_ENV, stderr.getvalue())
+        window_exists.assert_not_called()
+        ensure_session.assert_not_called()
+        new_window.assert_not_called()
 
     def test_managed_pi_command_uses_default_extensions_with_explicit_mailbox(self):
         extension = self._pi_mailbox_extension()
