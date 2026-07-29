@@ -311,12 +311,14 @@ async function sendMessage(command, configured, sendBrowser, refreshAgents) {
   const agentId = configured.agentId;
   const to = normalizeAgentId(command.to ?? "");
   const body = String(command.body ?? "");
-  if (body.trim() === "") throw new Error("Message cannot be blank");
+  const attachments = normalizeImageAttachments(command.images ?? (command.image === undefined ? [] : [command.image]));
+  if (body.trim() === "" && attachments.length === 0) throw new Error("Message cannot be blank");
   const envelope = {
     id: randomUUID(),
     from: agentId,
     to,
     body,
+    ...(attachments.length === 0 ? {} : { attachments }),
     created_at: new Date().toISOString(),
   };
   const response = await fetch(new URL("/v1/messages", routerUrl), {
@@ -330,9 +332,34 @@ async function sendMessage(command, configured, sendBrowser, refreshAgents) {
     return;
   }
   const accepted = responseBody.message ?? envelope;
-  const displayMessage = { ...accepted, from: agentId, to, body, created_at: accepted.created_at ?? envelope.created_at };
+  const displayAttachments = absoluteAttachmentUrls(accepted.attachments, routerUrl);
+  const displayMessage = {
+    ...accepted,
+    from: agentId,
+    to,
+    body: displayAttachments.length === 0 ? accepted.body ?? body : body,
+    attachments: displayAttachments,
+    created_at: accepted.created_at ?? envelope.created_at,
+  };
   sendBrowser({ type: "send_result", ok: true, message: displayMessage, localId: command.localId, agentId, routerUrl });
   await refreshAgents();
+}
+
+function absoluteAttachmentUrls(attachments = [], routerUrl) {
+  return attachments.map((attachment) => ({
+    ...attachment,
+    url: new URL(attachment.url, routerUrl).toString(),
+  }));
+}
+
+function normalizeImageAttachments(images) {
+  if (!Array.isArray(images)) throw new Error("Images must be an array");
+  if (images.length > 3) throw new Error("You can attach up to 3 images");
+  return images.map((image) => {
+    const dataUrl = String(image?.dataUrl ?? image?.data_url ?? "");
+    if (!dataUrl.startsWith("data:image/")) throw new Error("Images must be data URLs");
+    return { type: "image", data_url: dataUrl, name: image?.name === undefined ? undefined : String(image.name) };
+  });
 }
 
 function normalizeRouterUrl(value) {

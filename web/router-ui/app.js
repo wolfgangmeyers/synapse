@@ -12,6 +12,11 @@ const DRAFT_LIMIT = 200;
 const DRAFT_RETENTION_DAYS = 30;
 const DRAFT_RETENTION_MS = DRAFT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const SELECTED_PEER_STORE_KEY = "mecha.web.selectedPeers";
+const MAX_IMAGES = 3;
+const MAX_IMAGE_EDGE = 1600;
+const IMAGE_WEBP_QUALITY = 0.82;
+const MAX_IMAGE_BYTES = 768 * 1024;
+const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
 const SCOPE_SEPARATOR = "\u001f";
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
@@ -24,6 +29,7 @@ const state = {
   agents: [],
   selectedPeer: "",
   agentFilter: "",
+  images: [],
   messages: {},
   draftPeers: new Set(),
 };
@@ -48,6 +54,9 @@ const elements = {
   peerDetail: document.querySelector("#peer-detail"),
   messages: document.querySelector("#messages"),
   composer: document.querySelector("#composer"),
+  imagePreview: document.querySelector("#image-preview"),
+  attachImage: document.querySelector("#attach-image"),
+  imageInput: document.querySelector("#image-input"),
   draft: document.querySelector("#draft"),
   send: document.querySelector("#send"),
 };
@@ -94,7 +103,25 @@ elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   sendDraft();
 });
-elements.draft.addEventListener("input", () => saveCurrentDraft());
+elements.draft.addEventListener("input", () => { saveCurrentDraft(); updateSendState(); });
+elements.attachImage.addEventListener("click", () => elements.imageInput.click());
+elements.imageInput.addEventListener("change", () => { void addImageFiles(elements.imageInput.files); elements.imageInput.value = ""; });
+elements.composer.addEventListener("dragover", (event) => {
+  if (!hasImageFiles(event.dataTransfer?.items)) return;
+  event.preventDefault();
+  elements.composer.classList.add("dragging");
+});
+elements.composer.addEventListener("dragleave", () => elements.composer.classList.remove("dragging"));
+elements.composer.addEventListener("drop", (event) => {
+  if (!hasImageFiles(event.dataTransfer?.items)) return;
+  event.preventDefault();
+  elements.composer.classList.remove("dragging");
+  void addImageFiles(event.dataTransfer.files);
+});
+elements.draft.addEventListener("paste", (event) => {
+  if (!hasImageFiles(event.clipboardData?.items)) return;
+  void addImageFiles(event.clipboardData.files);
+});
 elements.draft.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -266,13 +293,17 @@ function selectPeer(peer) {
 
 function sendDraft() {
   const body = elements.draft.value;
-  if (!state.selectedPeer || !body.trim()) return;
+  if (!state.selectedPeer || (body.trim() === "" && state.images.length === 0)) return;
   const localId = crypto.randomUUID();
-  const message = { id: localId, from: state.agentId, to: state.selectedPeer, body, created_at: new Date().toISOString(), direction: "outgoing", pending: true };
+  const images = state.images.map(({ dataUrl, name, sizeBytes, mimeType }) => ({ dataUrl, name, sizeBytes, mimeType }));
+  const message = { id: localId, from: state.agentId, to: state.selectedPeer, body: pendingMessageBody(body, images), attachments: images.map((image) => ({ url: image.dataUrl, mime_type: image.mimeType, size_bytes: image.sizeBytes, name: image.name })), created_at: new Date().toISOString(), direction: "outgoing", pending: true };
   void appendMessage(state.selectedPeer, message);
   elements.draft.value = "";
+  state.images = [];
+  renderImagePreview();
   clearCurrentDraft();
-  sendCommand({ type: "send_message", to: state.selectedPeer, body, localId });
+  updateSendState();
+  sendCommand({ type: "send_message", to: state.selectedPeer, body, images, localId });
 }
 
 function renderConversation() {
@@ -282,9 +313,12 @@ function renderConversation() {
   elements.peerName.textContent = peer ? humanName(peer) : "Pick an agent";
   elements.peerDetail.textContent = peer ? `${peer} · ${displayRouter(state.routerUrl)}` : "Connected agents appear on the left.";
   elements.draft.disabled = !peer;
-  elements.send.disabled = !peer;
+  elements.attachImage.disabled = !peer;
+  updateSendState();
   if (!peer) {
     elements.draft.value = "";
+    state.images = [];
+    renderImagePreview();
     elements.messages.innerHTML = `<div class="empty-state"><h3>No conversation selected</h3><p>Choose a connected agent on ${escapeHtml(displayRouter(state.routerUrl))}, or open Routers to switch.</p></div>`;
     return;
   }
@@ -306,9 +340,124 @@ function renderMessage(message) {
   label.textContent = outgoing ? (message.pending ? "You · sending" : "You") : humanName(message.from);
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = message.body;
+  const text = document.createElement("div");
+  text.textContent = message.body;
+  bubble.append(text);
+  const attachments = message.attachments || imageAttachmentsFromBody(message.body);
+  if (attachments.length > 0) bubble.append(renderMessageImages(attachments));
   wrapper.append(label, bubble);
   return wrapper;
+}
+
+function updateSendState() {
+  elements.send.disabled = !state.selectedPeer || (elements.draft.value.trim() === "" && state.images.length === 0);
+}
+
+async function addImageFiles(fileList) {
+  const files = [...(fileList || [])].filter((file) => file.type.startsWith("image/"));
+  for (const file of files) {
+    if (state.images.length >= MAX_IMAGES) {
+      setStatus("error", `You can attach up to ${MAX_IMAGES} images`);
+      break;
+    }
+    try {
+      const image = await prepareImage(file);
+      const totalBytes = state.images.reduce((sum, current) => sum + current.sizeBytes, 0) + image.sizeBytes;
+      if (totalBytes > MAX_TOTAL_IMAGE_BYTES) throw new Error("Attached images are too large together");
+      state.images.push(image);
+    } catch (error) {
+      setStatus("error", error.message || "Image could not be attached");
+    }
+  }
+  renderImagePreview();
+  updateSendState();
+}
+
+async function prepareImage(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", IMAGE_WEBP_QUALITY));
+  if (!blob) throw new Error("Image could not be converted");
+  if (blob.size > MAX_IMAGE_BYTES) throw new Error("Image is too large after compression");
+  return { dataUrl: await blobToDataUrl(blob), name: webpName(file.name), sizeBytes: blob.size, mimeType: "image/webp", width, height };
+}
+
+function renderImagePreview() {
+  elements.imagePreview.replaceChildren(...state.images.map((image, index) => {
+    const card = document.createElement("div");
+    card.className = "image-card";
+    const img = document.createElement("img");
+    img.src = image.dataUrl;
+    img.alt = image.name || `Image ${index + 1}`;
+    const label = document.createElement("small");
+    label.textContent = `${image.name || `image-${index + 1}.webp`} · ${formatBytes(image.sizeBytes)}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove ${image.name || `image ${index + 1}`}`);
+    remove.addEventListener("click", () => {
+      state.images.splice(index, 1);
+      renderImagePreview();
+      updateSendState();
+    });
+    card.append(img, label, remove);
+    return card;
+  }));
+}
+
+function renderMessageImages(attachments) {
+  const gallery = document.createElement("div");
+  gallery.className = "bubble-images";
+  gallery.append(...attachments.slice(0, MAX_IMAGES).map((attachment, index) => {
+    const image = document.createElement("img");
+    image.src = attachment.url;
+    image.alt = attachment.name || `Attached image ${index + 1}`;
+    image.addEventListener("click", () => window.open(attachment.url, "_blank", "noopener"));
+    return image;
+  }));
+  return gallery;
+}
+
+function imageAttachmentsFromBody(body) {
+  const matches = [...String(body || "").matchAll(/\/v1\/attachments\/([A-Za-z0-9._-]+\.(?:png|jpg|webp|gif))/g)];
+  return matches.map((match) => ({ url: `${state.routerUrl}${match[0]}`, name: match[1] }));
+}
+
+function pendingMessageBody(body, images) {
+  const text = body.trim();
+  if (images.length === 0) return body;
+  return `${text}${text ? "\n\n" : ""}Attached image${images.length === 1 ? "" : "s"}:\n${images.map((image, index) => `${index + 1}. ${image.name || "image.webp"}`).join("\n")}`;
+}
+
+function hasImageFiles(items) {
+  return [...(items || [])].some((item) => item.type?.startsWith("image/"));
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function webpName(name) {
+  const base = String(name || "image").replace(/\.[^.]*$/, "") || "image";
+  return `${base}.webp`;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function appendMessage(peer, message) {
@@ -381,7 +530,7 @@ async function saveRecordsForPeer(db, routerUrl, agentId, peer, messages) {
   for (const message of messages) {
     const createdAtMs = messageTime(message);
     const key = `${peerScopeValue}${SCOPE_SEPARATOR}${message.id || crypto.randomUUID()}`;
-    store.put({ key, ownerScope: ownerScope(routerUrl, agentId), peerScope: peerScopeValue, routerUrl, agentId, peer, message, createdAtMs, savedAtMs: Date.now() });
+    store.put({ key, ownerScope: ownerScope(routerUrl, agentId), peerScope: peerScopeValue, routerUrl, agentId, peer, message: messageForStorage(message), createdAtMs, savedAtMs: Date.now() });
   }
   await requestDone(transaction);
 }
@@ -442,6 +591,11 @@ function requestDone(transaction) {
   });
 }
 
+function messageForStorage(message) {
+  if (!Array.isArray(message.attachments)) return message;
+  const attachments = message.attachments.filter((attachment) => !String(attachment.url || "").startsWith("data:image/"));
+  return attachments.length === message.attachments.length ? message : { ...message, attachments };
+}
 function ownerScope(routerUrl, agentId) { return `${routerUrl}${SCOPE_SEPARATOR}${agentId}`; }
 function peerScope(routerUrl, agentId, peer) { return `${ownerScope(routerUrl, agentId)}${SCOPE_SEPARATOR}${peer}`; }
 function messageTime(message) { return Date.parse(message.created_at || message.createdAt || "") || Date.now(); }

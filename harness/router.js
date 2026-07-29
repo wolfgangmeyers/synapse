@@ -1,5 +1,9 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 
 import WebSocket, { WebSocketServer } from "ws";
 
@@ -30,10 +34,20 @@ import {
 } from "./protocol.js";
 
 const DEFAULT_MAX_FRAME_BYTES = 64 * 1024;
-// Accommodates the maximum 64 KiB body encoded entirely as JSON escapes plus every
-// schema-bounded envelope field, while still capping a single loopback request.
-const MAX_REQUEST_BYTES = 512 * 1024;
+// Accommodates text messages plus up to three browser-compressed image attachments
+// while still capping a single loopback request.
+const MAX_REQUEST_BYTES = 6 * 1024 * 1024;
 const DEFAULT_MAX_REQUEST_BYTES = MAX_REQUEST_BYTES;
+const DEFAULT_MAX_IMAGE_ATTACHMENTS = 3;
+const DEFAULT_MAX_IMAGE_ATTACHMENT_BYTES = 768 * 1024;
+const DEFAULT_MAX_IMAGE_ATTACHMENT_TOTAL_BYTES = DEFAULT_MAX_IMAGE_ATTACHMENTS * DEFAULT_MAX_IMAGE_ATTACHMENT_BYTES;
+const DEFAULT_IMAGE_ATTACHMENT_TTL_MS = 24 * 60 * 60 * 1000;
+const IMAGE_ATTACHMENT_MIMES = new Map([
+  ["image/png", { extension: "png", magic: [[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]] }],
+  ["image/jpeg", { extension: "jpg", magic: [[0xff, 0xd8, 0xff]] }],
+  ["image/webp", { extension: "webp", riff: true }],
+  ["image/gif", { extension: "gif", magic: [[0x47, 0x49, 0x46, 0x38, 0x37, 0x61], [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]] }],
+]);
 const DEFAULT_MAX_REQUESTS_PER_WINDOW = 60;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
@@ -71,6 +85,11 @@ export function createAgentRouter({
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
   maxRequestsPerWindow = DEFAULT_MAX_REQUESTS_PER_WINDOW,
+  maxImageAttachments = DEFAULT_MAX_IMAGE_ATTACHMENTS,
+  maxImageAttachmentBytes = DEFAULT_MAX_IMAGE_ATTACHMENT_BYTES,
+  maxImageAttachmentTotalBytes = DEFAULT_MAX_IMAGE_ATTACHMENT_TOTAL_BYTES,
+  imageAttachmentTtlMs = DEFAULT_IMAGE_ATTACHMENT_TTL_MS,
+  imageAttachmentDirectory = join(tmpdir(), "mecha-router-images"),
   rateLimitWindowMs = DEFAULT_RATE_LIMIT_WINDOW_MS,
   clock = () => new Date(),
   eventLogger = () => {},
@@ -115,6 +134,18 @@ export function createAgentRouter({
   }
   if (!Number.isSafeInteger(maxRequestsPerWindow) || maxRequestsPerWindow <= 0) {
     throw new TypeError("maxRequestsPerWindow must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maxImageAttachments) || maxImageAttachments < 0 || maxImageAttachments > DEFAULT_MAX_IMAGE_ATTACHMENTS) {
+    throw new TypeError("maxImageAttachments must be 0 through 3");
+  }
+  if (!Number.isSafeInteger(maxImageAttachmentBytes) || maxImageAttachmentBytes <= 0) {
+    throw new TypeError("maxImageAttachmentBytes must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maxImageAttachmentTotalBytes) || maxImageAttachmentTotalBytes < maxImageAttachmentBytes) {
+    throw new TypeError("maxImageAttachmentTotalBytes must be at least maxImageAttachmentBytes");
+  }
+  if (!Number.isSafeInteger(imageAttachmentTtlMs) || imageAttachmentTtlMs <= 0) {
+    throw new TypeError("imageAttachmentTtlMs must be a positive safe integer");
   }
   if (!Number.isSafeInteger(rateLimitWindowMs) || rateLimitWindowMs <= 0) {
     throw new TypeError("rateLimitWindowMs must be a positive safe integer");
@@ -490,8 +521,9 @@ export function createAgentRouter({
           port: address.port,
           router_url: websocketUrl,
         });
+        void sweepImageAttachments();
         sweepMessageLifecycles();
-        timeoutSweepTimer = setInterval(() => sweepMessageLifecycles(), timeoutSweepIntervalMs);
+        timeoutSweepTimer = setInterval(() => { sweepMessageLifecycles(); void sweepImageAttachments(); }, timeoutSweepIntervalMs);
         return websocketUrl;
       } catch (error) {
         await new Promise((resolve, reject) => {
@@ -512,6 +544,7 @@ export function createAgentRouter({
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
       await memoryCatalog?.close?.();
+      await sweepImageAttachments();
       emit("router_stopped");
     },
 
@@ -828,6 +861,11 @@ export function createAgentRouter({
       sendHttpJson(response, 200, connectedAgentsSnapshot());
       return;
     }
+    const attachmentId = matchAttachmentRoute(requestUrl.pathname);
+    if (request.method === "GET" && attachmentId !== undefined) {
+      await serveImageAttachment(response, attachmentId);
+      return;
+    }
     if (request.method === "POST" && requestUrl.pathname === "/v1/messages") {
       await enqueueHttpMessage(request, response);
       return;
@@ -993,8 +1031,13 @@ export function createAgentRouter({
       return;
     }
     let envelope;
+    let materialized;
+    let attachments = [];
     try {
-      envelope = validateEnvelope(await readJsonRequest(request, maxRequestBytes), {
+      const payload = await readJsonRequest(request, maxRequestBytes);
+      materialized = materializeImageAttachments(payload);
+      attachments = materialized.attachments;
+      envelope = validateEnvelope(materialized.envelope, {
         maxBodyBytes: repository.admissionLimits?.().maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
       });
     } catch (error) {
@@ -1010,11 +1053,16 @@ export function createAgentRouter({
 
     try {
       if (repository.messageFor(envelope.id) === undefined) enforceRateLimit(envelope.from);
+      await writeImageAttachments(materialized);
       const result = enqueueMessage(envelope);
       sendHttpJson(response, result.created ? 201 : 200, {
-        message: result.batched ? { ...result.message, batched: true } : result.message,
+        message: {
+          ...(result.batched ? { ...result.message, batched: true } : result.message),
+          ...(attachments.length === 0 ? {} : { attachments }),
+        },
       });
     } catch (error) {
+      await cleanupWrittenImageAttachments(materialized, envelope === undefined ? undefined : repository.messageFor(envelope.id));
       if (error instanceof IdempotencyConflictError) {
         sendHttpError(response, 409, error.code);
       } else if (error instanceof QueueLimitError) {
@@ -1031,6 +1079,117 @@ export function createAgentRouter({
         });
         sendHttpError(response, 500, "internal_error");
       }
+    }
+  }
+
+  function materializeImageAttachments(payload) {
+    const { attachments: rawAttachments = [], ...candidate } = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+    if (!Array.isArray(rawAttachments)) throw new ProtocolValidationError();
+    if (rawAttachments.length > maxImageAttachments) throw new ProtocolValidationError("payload_too_large");
+    if (rawAttachments.length === 0) return { envelope: candidate, attachments: [], files: [] };
+
+    let totalBytes = 0;
+    const files = [];
+    const attachments = [];
+    for (let index = 0; index < rawAttachments.length; index += 1) {
+      const attachment = rawAttachments[index];
+      const decoded = decodeImageDataUrl(attachment, { maxImageAttachmentBytes });
+      totalBytes += decoded.bytes.length;
+      if (totalBytes > maxImageAttachmentTotalBytes) throw new ProtocolValidationError("payload_too_large");
+      const hash = createHash("sha256").update(decoded.bytes).digest("hex");
+      const messageId = safeAttachmentMessageId(candidate.id);
+      const fileName = `${messageId}-${index + 1}-${hash.slice(0, 24)}.${decoded.extension}`;
+      const filePath = join(imageAttachmentDirectory, fileName);
+      files.push({ filePath, bytes: decoded.bytes });
+      attachments.push({
+        id: fileName,
+        url: `/v1/attachments/${encodeURIComponent(fileName)}`,
+        mime_type: decoded.mimeType,
+        size_bytes: decoded.bytes.length,
+        name: sanitizeAttachmentName(attachment.name),
+      });
+    }
+
+    return { envelope: { ...candidate, body: attachmentBody(candidate.body, files) }, attachments, files };
+  }
+
+  async function writeImageAttachments(materialized) {
+    if (!materialized?.files?.length) return;
+    await ensureSafeImageAttachmentDirectory({ create: true });
+    for (const file of materialized.files) {
+      try {
+        if (!(await lstat(file.filePath)).isFile()) throw new ProtocolValidationError();
+      } catch (error) {
+        if (error instanceof ProtocolValidationError) throw error;
+        if (error?.code !== "ENOENT") throw error;
+      }
+      await writeFile(file.filePath, file.bytes, { mode: 0o600 });
+    }
+  }
+
+  async function cleanupWrittenImageAttachments(materialized, existingMessage) {
+    if (!materialized?.files?.length) return;
+    const existingBody = String(existingMessage?.body ?? "");
+    await Promise.all(materialized.files
+      .filter((file) => !existingBody.includes(file.filePath))
+      .map((file) => rm(file.filePath, { force: true }).catch(() => {})));
+  }
+
+  async function ensureSafeImageAttachmentDirectory({ create = false } = {}) {
+    try {
+      if (create) await mkdir(imageAttachmentDirectory, { recursive: true, mode: 0o700 });
+      const metadata = await lstat(imageAttachmentDirectory);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new ProtocolValidationError();
+      if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) throw new ProtocolValidationError();
+      if ((metadata.mode & 0o077) !== 0) throw new ProtocolValidationError();
+    } catch (error) {
+      if (error?.code === "ENOENT" && !create) return false;
+      throw error;
+    }
+    return true;
+  }
+
+  async function serveImageAttachment(response, attachmentId) {
+    const safeId = basename(attachmentId);
+    if (safeId !== attachmentId || !/^[A-Za-z0-9._-]+\.(?:png|jpg|webp|gif)$/.test(safeId)) {
+      sendHttpError(response, 404, "not_found");
+      return;
+    }
+    const filePath = join(imageAttachmentDirectory, safeId);
+    try {
+      await ensureSafeImageAttachmentDirectory();
+      const linkMetadata = await lstat(filePath);
+      const metadata = await stat(filePath);
+      if (!linkMetadata.isFile() || !metadata.isFile() || metadata.mtimeMs < currentTimeMs(clock) - imageAttachmentTtlMs) {
+        sendHttpError(response, 404, "not_found");
+        return;
+      }
+      const mimeType = mimeTypeForAttachmentId(safeId);
+      response.writeHead(200, { "cache-control": "no-store", "content-type": mimeType });
+      response.end(await readFile(filePath));
+    } catch {
+      sendHttpError(response, 404, "not_found");
+    }
+  }
+
+  async function sweepImageAttachments() {
+    try {
+      if (!await ensureSafeImageAttachmentDirectory()) return;
+      const cutoff = currentTimeMs(clock) - imageAttachmentTtlMs;
+      const entries = await readdir(imageAttachmentDirectory, { withFileTypes: true });
+      await Promise.all(entries
+        .filter((entry) => entry.isFile())
+        .map(async (entry) => {
+          const filePath = join(imageAttachmentDirectory, entry.name);
+          try {
+            const metadata = await stat(filePath);
+            if (metadata.mtimeMs < cutoff) await rm(filePath, { force: true });
+          } catch {
+            // Best-effort temp cleanup should not affect router availability.
+          }
+        }));
+    } catch {
+      // The temp directory may not exist yet.
     }
   }
 
@@ -1165,6 +1324,16 @@ function matchMessageRoute(pathname) {
   }
 }
 
+function matchAttachmentRoute(pathname) {
+  const match = /^\/v1\/attachments\/([^/]+)$/.exec(pathname);
+  if (match === null) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
 function matchReminderRoute(pathname) {
   const match = /^\/v1\/reminders\/([^/]+)$/.exec(pathname);
   if (match === null) return undefined;
@@ -1173,6 +1342,56 @@ function matchReminderRoute(pathname) {
   } catch {
     return undefined;
   }
+}
+
+function decodeImageDataUrl(attachment, { maxImageAttachmentBytes }) {
+  if (attachment === null || typeof attachment !== "object" || Array.isArray(attachment) || attachment.type !== "image") {
+    throw new ProtocolValidationError();
+  }
+  const dataUrl = String(attachment.data_url ?? "");
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(dataUrl);
+  if (match === null || match[2].length % 4 !== 0) throw new ProtocolValidationError();
+  const mimeType = match[1].toLowerCase();
+  const config = IMAGE_ATTACHMENT_MIMES.get(mimeType);
+  if (config === undefined) throw new ProtocolValidationError();
+  const bytes = Buffer.from(match[2], "base64");
+  if (bytes.length === 0 || bytes.length > maxImageAttachmentBytes || bytes.toString("base64") !== match[2].replace(/=+$/, "") + "=".repeat((4 - (match[2].replace(/=+$/, "").length % 4)) % 4)) {
+    throw new ProtocolValidationError("payload_too_large");
+  }
+  if (!imageMagicMatches(bytes, config)) throw new ProtocolValidationError();
+  return { mimeType, extension: config.extension, bytes };
+}
+
+function imageMagicMatches(bytes, config) {
+  if (config.riff) return bytes.length >= 12
+    && bytes.subarray(0, 4).toString("ascii") === "RIFF"
+    && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+  return config.magic.some((magic) => magic.every((byte, index) => bytes[index] === byte));
+}
+
+function attachmentBody(body, files) {
+  const text = String(body ?? "").trim();
+  const references = files.map((file, index) => `${index + 1}. ${file.filePath}`).join("\n");
+  return `${text}${text ? "\n\n" : ""}Attached image${files.length === 1 ? "" : "s"}:\n${references}`;
+}
+
+function safeAttachmentMessageId(value) {
+  const id = String(value ?? "");
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) ? id : createHash("sha256").update(id).digest("hex").slice(0, 24);
+}
+
+function sanitizeAttachmentName(value) {
+  const name = String(value ?? "").trim();
+  if (name === "") return undefined;
+  return basename(name).replace(/[^A-Za-z0-9._ -]/g, "").slice(0, 120) || undefined;
+}
+
+function mimeTypeForAttachmentId(attachmentId) {
+  if (attachmentId.endsWith(".png")) return "image/png";
+  if (attachmentId.endsWith(".jpg")) return "image/jpeg";
+  if (attachmentId.endsWith(".webp")) return "image/webp";
+  if (attachmentId.endsWith(".gif")) return "image/gif";
+  return "application/octet-stream";
 }
 
 function readJsonRequest(request, maxRequestBytes) {

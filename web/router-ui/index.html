@@ -60,8 +60,13 @@
       </div>
 
       <form id="composer" class="composer">
-        <textarea id="draft" rows="2" placeholder="Message an agent" disabled></textarea>
-        <button id="send" type="submit" disabled>Send</button>
+        <div id="image-preview" class="image-preview" aria-live="polite"></div>
+        <div class="composer-row">
+          <button id="attach-image" class="secondary attach-image" type="button" disabled aria-label="Attach images">＋</button>
+          <input id="image-input" type="file" accept="image/*" multiple hidden>
+          <textarea id="draft" rows="2" placeholder="Message an agent or drop images here" disabled></textarea>
+          <button id="send" type="submit" disabled>Send</button>
+        </div>
       </form>
     </section>
   </main>
