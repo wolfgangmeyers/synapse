@@ -71,7 +71,12 @@ test("router web UI serves the app and relays live router messages", async () =>
 
     const appResponse = await fetch(ui.httpUrl);
     assert.equal(appResponse.status, 200);
-    assert.match(await appResponse.text(), /Your agent network/);
+    const appHtml = await appResponse.text();
+    assert.match(appHtml, /Your agent network/);
+    assert.match(appHtml, /rel="icon" type="image\/png" href="\/mecha-icon\.png"/);
+    const iconResponse = await fetch(new URL("/mecha-icon.png", ui.httpUrl));
+    assert.equal(iconResponse.status, 200);
+    assert.equal(iconResponse.headers.get("content-type"), "image/png");
 
     const peer = await connectRouterAgent(routerWsUrl, "peer-agent", sockets);
     const browser = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`);
@@ -128,6 +133,18 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.doesNotMatch(app, /Select"/);
   assert.match(app, /url\.username !== "" \|\| url\.password !== ""/);
   assert.match(app, /event\.key === "Enter" && !event\.shiftKey/);
+  assert.match(app, /elements\.draft\.addEventListener\("input", \(\) => saveCurrentDraft\(\)\)/);
+  assert.match(app, /const DRAFT_LIMIT = 200;/);
+  assert.match(app, /const DRAFT_RETENTION_DAYS = 30;/);
+  assert.match(app, /function draftScope\(routerUrl = state\.routerUrl, agentId = state\.agentId, peer = state\.selectedPeer\)/);
+  assert.match(app, /function pruneDrafts\(drafts, now = Date\.now\(\)\)/);
+  assert.match(app, /drafts\[key\] = \{ body: value, updatedAtMs: Date\.now\(\) \}/);
+  assert.match(app, /function restoreDraftForSelectedPeer\(\{ focus = false \} = \{\}\)/);
+  assert.match(app, /function focusDraftAtEnd\(\)/);
+  assert.match(app, /elements\.draft\.setSelectionRange\(end, end\)/);
+  assert.match(app, /restoreDraftForSelectedPeer\(\{ focus: true \}\)/);
+  assert.match(app, /state\.selectedPeer = loadSelectedPeer\(routerUrl, state\.agentId\)/);
+  assert.match(app, /for \(const peer of state\.draftPeers\) known\.add\(peer\)/);
   assert.match(app, /new Map\(existing\.map\(\(message\) => \[message\.id, message\]\)\)/);
   assert.doesNotMatch(app, /#main-connect/);
   assert.match(styles, /body \{[\s\S]*overflow: hidden;/);

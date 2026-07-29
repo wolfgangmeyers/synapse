@@ -18,6 +18,7 @@ const CONTENT_TYPES = new Map([
   [".js", "text/javascript; charset=utf-8"],
   [".json", "application/json; charset=utf-8"],
   [".svg", "image/svg+xml; charset=utf-8"],
+  [".png", "image/png"],
 ]);
 
 const root = resolve(fileURLToPath(new URL("../web/router-ui", import.meta.url)));
