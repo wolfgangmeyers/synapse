@@ -34,6 +34,12 @@ const SMALL_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 80, guidance: "compact as soon as practical; the session is now very expensive" }),
   Object.freeze({ percent: 90, guidance: "mandatory stop and compact before continuing", mandatory: true }),
 ]);
+// Opus 5 reuses the small-context guidance wording verbatim at lower percentages;
+// mandatory compaction lands at 40% instead of 90%.
+const OPUS_LEVEL_PERCENTS = Object.freeze([15, 20, 25, 30, 35, 40]);
+const OPUS_CONTEXT_LEVELS = Object.freeze(
+  SMALL_CONTEXT_LEVELS.map((level, index) => Object.freeze({ ...level, percent: OPUS_LEVEL_PERCENTS[index] })),
+);
 const LARGE_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 20, guidance: "large-context awareness only; no compaction needed yet" }),
   Object.freeze({ percent: 30, guidance: "compact soon, ideally at the next clean boundary" }),
@@ -56,6 +62,8 @@ export const DEFAULT_COMPACTION_POLICY = Object.freeze({
   models: Object.freeze({
     "openai-codex/gpt-5.6-sol": Object.freeze({ levels: SOL_CONTEXT_LEVELS }),
     "gpt-5.6-sol": Object.freeze({ levels: SOL_CONTEXT_LEVELS }),
+    "anthropic/claude-opus-5": Object.freeze({ levels: OPUS_CONTEXT_LEVELS }),
+    "claude-opus-5": Object.freeze({ levels: OPUS_CONTEXT_LEVELS }),
   }),
 });
 
