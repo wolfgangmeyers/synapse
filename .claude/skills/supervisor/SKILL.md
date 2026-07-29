@@ -23,7 +23,7 @@ A non-trivial reply is any user-facing response that communicates a result, deci
 
 Managed worker runtime is machine-local configuration, not a repo default. `worker_launch.py` reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}`; when the file is absent, the default remains Pi. An explicit `worker_launch.py --agent ...` always overrides the machine default. Record the actual runtime in state.
 
-For Pi workers, preserve the pinned runtime: `--provider anthropic --model claude-opus-5`. Every newly launched or resumed top-level managed Pi task worker MUST include `--notify-on-settled supervisor` in its `worker_launch.py` command. This applies to worker and pipeline task windows, including resumed sessions. It does not apply to native Pi child sessions/subagents or long-lived service windows: supervisor, watchdog, pr-watch, dashboard, or an equivalent service. A settled notification means the worker is idle, not that its task is complete: inspect the evidence, then drive its next work, reconcile/close it, or record the exact external block. Launch with `worker_launch.py --agent pi` when Pi is required and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with the default configured Pi extensions; the launcher adds the managed Mailbox V2 extension explicitly so mailbox routing is present. Do not add `--no-extensions` to managed worker launches unless Wolfgang explicitly asks for a bare-extension diagnostic session. `MECHA_PI_MAILBOX_EXTENSION` overrides the validated Mailbox path. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
+For Pi workers, preserve the pinned runtime: `--provider anthropic --model claude-opus-5`. Every newly launched or resumed top-level managed Pi task worker MUST include `--notify-on-settled supervisor` in its `worker_launch.py` command. This applies to worker and pipeline task windows, including resumed sessions. It does not apply to native Pi child sessions/subagents or long-lived service windows: supervisor, watchdog, pr-watch, or an equivalent service. A settled notification means the worker is idle, not that its task is complete: inspect the evidence, then drive its next work, reconcile/close it, or record the exact external block. Launch with `worker_launch.py --agent pi` when Pi is required and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with the default configured Pi extensions; the launcher adds the managed Mailbox V2 extension explicitly so mailbox routing is present. Do not add `--no-extensions` to managed worker launches unless Wolfgang explicitly asks for a bare-extension diagnostic session. `MECHA_PI_MAILBOX_EXTENSION` overrides the validated Mailbox path. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
 
 For Claude workers, the launcher starts Claude Code plus a Mailbox V2 sidecar registered as the worker's normal agent ID. The sidecar delivers router messages by sanitized terminal paste into the Claude tmux pane and ACKs only after tmux submission succeeds; Claude replies through `mailbox_send.py`. This is terminal delivery, not Pi-equivalent session injection, and `--notify-on-settled` remains Pi-only.
 
@@ -444,7 +444,7 @@ git worktree add -b "wolfgang/$ALIAS" "$WORKTREE_PATH" origin/main
 # wrong task and the supervisor updates the wrong state entry.
 #
 # NEVER use generic placeholder names like "worker-1", "worker-2", "worker-N".
-# At a glance — in the dashboard, in `worker_list.py`, in tmux's status bar — the
+# At a glance — in `worker_list.py`, in tmux's status bar — the
 # name should tell the reader what the window is doing. Generic names force a
 # constant cross-reference to figure out which task each worker holds.
 WORKER_NAME="$ALIAS"  # GOOD: "tab-saver", "login-timeout-fix", "pr-3645-lint"
@@ -1100,9 +1100,9 @@ python3 ~/.claude/skills/supervisor/tools/state_check_blocked.py > /tmp/workers_
 ```
 Check if worker <alias> (window: <window-name>) is blocked.
 
-Run: python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window <window-name> --force-tmux
+Run: python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window <window-name>
 
-(Use --force-tmux to get live terminal output, not the cached state summary.)
+(Output is the live tmux pane. Use --lines N for more scrollback or --tail N to trim to the last N lines.)
 
 Analyze the output and determine:
 1. Is this worker blocked? (yes/no)
@@ -1131,9 +1131,9 @@ python3 ~/.claude/skills/supervisor/tools/state_block.py <task-id-or-alias> --bl
 python3 ~/.claude/skills/supervisor/tools/state_block.py <task-id-or-alias> --unblock
 ```
 
-### Dashboard Display
+### Blocked Task Display
 
-Blocked tasks appear in a dedicated "⚠️ Blocked (Needs Attention)" section at the top of the supervisor state dashboard, making them immediately visible.
+Whenever any task is blocked, `state_read.py` output carries a dedicated `## ⚠️  Blocked (Needs Attention)` section ahead of Active, so blocked work is visible on every read.
 
 **Status Check Workflow:**
 1. Get list of workers to check with `state_check_blocked.py`
@@ -1151,9 +1151,9 @@ Use the Task tool to launch a subagent with these instructions:
 
 "Capture and interpret the terminal output from a worker.
 
-Run: python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window <window-name> --force-tmux
+Run: python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window <window-name>
 
-(--force-tmux bypasses the state file cache and returns live terminal output. Use it whenever you need to see what the worker is actually doing right now, not what it was last recorded as doing.)
+(Output is the live tmux pane on every run — always what the worker is doing right now, not what it was last recorded as doing. Use --lines N for more scrollback or --tail N to trim to the last N lines.)
 
 Read the output and return a structured summary:
 - **Status**: running / idle / waiting-for-input / errored / completed
@@ -1249,7 +1249,7 @@ Also check for: the supervisor asking the user to make a decision that Wolfgang'
 ### When the Watchdog Fires
 
 When a watchdog alert arrives in the mailbox:
-1. **Capture first, then decide per worker.** For each flagged window, run `worker_capture.py --tail 30` to see what the worker is actually doing. Do NOT batch-park all flagged windows — a worker waiting for your decision on a question is not stuck, it's blocked on you. Parking it kills momentum and delays the task.
+1. **Capture first, then decide per worker.** For each flagged window, run `worker_capture.py --window <window> --tail 30` to see what the worker is actually doing. Do NOT batch-park all flagged windows — a worker waiting for your decision on a question is not stuck, it's blocked on you. Parking it kills momentum and delays the task.
 2. For each captured window, decide:
    - **Worker answered a question / ready for next step** → send the next instruction or approval. Do NOT park.
    - **Worker completed its task and is idle** → park with context ("PR created, awaiting review").
@@ -1381,7 +1381,7 @@ Mailbox V2 is the only path for task instructions, redirects, questions, authori
 python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window WINDOW [--lines N] [--tail N]
 ```
 
-Captures terminal content including scrollback. Use for post-launch verification and monitoring. Output goes to stdout; reminders go to stderr.
+Captures terminal content including scrollback. Use for post-launch verification and monitoring. The mandatory state-update reminder block prints to stdout ahead of the captured output, so both arrive on the same stream; only errors go to stderr.
 
 ### worker_shutdown.py — Gracefully shut down a worker
 
@@ -1611,8 +1611,6 @@ python3 ~/.claude/skills/supervisor/tools/state_journal.py my-task
 python3 ~/.claude/skills/supervisor/tools/state_journal.py my-task --last 5
 ```
 
-The journal is also visible in the dashboard's expanded card view as a visual timeline.
-
 **Task IDs:**
 - Monotonically increasing: `task-N: short-alias`
 - Never reuse task IDs
@@ -1721,22 +1719,6 @@ python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to
 ```
 
 The message after compaction should carry forward anything the worker needs to know — what was accomplished, what branch it's on, any decisions made — so it doesn't have to rediscover that context.
-
-## Dashboard
-
-A Flask web server that shows all tasks (blocked / active / completed) with auto-refresh, journal timelines, and expandable cards at **http://localhost:7777**.
-
-**Start it at the beginning of every supervisor session.**
-
-```bash
-# Start — creates a 'dashboard' window in the mecha session
-python3 ~/.claude/skills/supervisor/tools/dashboard_start.py
-
-# Stop — kills the 'dashboard' window
-python3 ~/.claude/skills/supervisor/tools/dashboard_stop.py
-```
-
-The dashboard runs in the `dashboard` window of the mecha tmux session. `dashboard_start.py` is idempotent — safe to run even if already running. The dashboard venv is at `~/code/mecha-developer/tools/.venv` with Flask pre-installed. All other supervisor Python scripts use only stdlib and don't need the venv.
 
 ## PR Merge Policy
 

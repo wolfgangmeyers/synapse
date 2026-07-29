@@ -230,7 +230,7 @@ else
 fi
 ```
 
-### 6. Symlink CLI Scripts
+### 7. Symlink CLI Scripts
 
 Create `~/.local/bin/` if needed and symlink CLI entry points:
 
@@ -319,7 +319,7 @@ remain explicitly launched with `--no-extensions --extension "$TARGET"`; they
 do not rely on global extension discovery. If an existing bare Pi process needs
 the update, reload it after the final check.
 
-### 7. Symlink Hooks
+### 8. Symlink Hooks
 
 
 Symlink hook scripts from the skills directory into `~/.claude/hooks/`:
@@ -406,22 +406,6 @@ with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
 print(f"set: promptSuggestionEnabled = false in {settings_path}")
-```
-
-### 8. Set Up Dashboard Venv
-
-The supervisor dashboard (`tools/responsibilities-server.py`) runs Flask. Create a venv with Flask installed so `dashboard_start.py` can activate it.
-
-```bash
-VENV_DIR="$(pwd)/tools/.venv"
-
-if [ -d "$VENV_DIR" ] && "$VENV_DIR/bin/python3" -c "import flask" 2>/dev/null; then
-  echo "skipped: dashboard venv already exists with Flask"
-else
-  python3 -m venv "$VENV_DIR"
-  "$VENV_DIR/bin/pip" install --quiet flask
-  echo "created: $VENV_DIR with Flask installed"
-fi
 ```
 
 ### 9. Install the Priority Handoff Monitor
@@ -611,13 +595,6 @@ print(f"target registrations: {json.loads(settings.read_text()).get('packages', 
 PY
 else
   echo "MISSING: stable Pi extension or Pi settings"
-fi
-
-echo "=== Dashboard Venv ==="
-if [ -d "tools/.venv" ] && tools/.venv/bin/python3 -c "import flask" 2>/dev/null; then
-  echo "ok: tools/.venv exists with Flask"
-else
-  echo "MISSING: tools/.venv or Flask not installed"
 fi
 
 echo ""

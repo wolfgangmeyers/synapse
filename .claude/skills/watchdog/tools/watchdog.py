@@ -49,7 +49,9 @@ AUTH_FAILURE_MARKERS = (
     "run claude /login",
     "/login to authenticate",
 )
-SYSTEM_WINDOWS = {"dashboard"}
+# Windows excluded from monitoring and included in the prompt as context only. Empty
+# since the supervisor dashboard was removed; the filter stays for a future service window.
+SYSTEM_WINDOWS = set()
 
 LOG_PREFIX = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -94,9 +96,14 @@ def build_prompt(window_captures, guidance):
         sections.append(f"{header}\n{content}")
 
     windows_text = "\n\n".join(sections)
+    system_note = (
+        f" System windows named {sorted(SYSTEM_WINDOWS)} are included only for context."
+        if SYSTEM_WINDOWS
+        else ""
+    )
     return f"""You are evaluating an AI supervisor system running in tmux.
 
-Below are the current terminal captures. System windows named {sorted(SYSTEM_WINDOWS)} are included only for context.
+Below are the current terminal captures.{system_note}
 
 --- WINDOW CAPTURES ---
 
