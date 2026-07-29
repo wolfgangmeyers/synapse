@@ -125,6 +125,8 @@ test("router web UI serves the app and relays live router messages", async () =>
 test("router web app keeps router UX, scoped events, Enter handling, and fixed page layout", async () => {
   const app = await readFile(new URL("../web/router-ui/app.js", import.meta.url), "utf8");
   const styles = await readFile(new URL("../web/router-ui/styles.css", import.meta.url), "utf8");
+  const html = await readFile(new URL("../web/router-ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="agent-filter"/);
   assert.match(app, /mecha\.web\.agentIds/);
   assert.match(app, /function matchesActiveScope/);
   assert.match(app, /"message"/);
@@ -145,6 +147,11 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /restoreDraftForSelectedPeer\(\{ focus: true \}\)/);
   assert.match(app, /state\.selectedPeer = loadSelectedPeer\(routerUrl, state\.agentId\)/);
   assert.match(app, /for \(const peer of state\.draftPeers\) known\.add\(peer\)/);
+  assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
+  assert.match(app, /`\$\{peer\} \$\{humanName\(peer\)\}`\.toLowerCase\(\)\.includes\(filter\)/);
+  assert.match(app, /state\.agentFilter = "";\n  elements\.agentFilter\.value = "";/);
+  assert.match(app, /stateName === "connected" \? "" :/);
+  assert.match(styles, /p:empty \{ display: none; \}/);
   assert.match(app, /new Map\(existing\.map\(\(message\) => \[message\.id, message\]\)\)/);
   assert.doesNotMatch(app, /#main-connect/);
   assert.match(styles, /body \{[\s\S]*overflow: hidden;/);
