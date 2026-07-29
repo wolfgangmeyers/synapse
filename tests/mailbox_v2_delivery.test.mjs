@@ -372,6 +372,27 @@ test("default compaction policy uses context-size fallback and model-specific ov
   assert.deepEqual(compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: "45, 75" }).tiers[0].levels.map((level) => level.percent), [45, 75]);
 });
 
+test("claude opus 5 resolves the low-threshold ladder with small-context guidance wording", () => {
+  const smallGuidance = DEFAULT_COMPACTION_POLICY.tiers[0].levels.map((level) => level.guidance);
+  for (const modelKeyEnv of ["anthropic/claude-opus-5", "claude-opus-5"]) {
+    const effective = effectiveCompactionPolicy(DEFAULT_COMPACTION_POLICY, undefined, { MECHA_PI_MODEL_KEY: modelKeyEnv });
+    assert.equal(effective.matchedModelKey, modelKeyEnv);
+    const levels = effective.policy.tiers[0].levels;
+    assert.deepEqual(levels.map((level) => level.percent), [15, 20, 25, 30, 35, 40]);
+    assert.deepEqual(levels.map((level) => level.guidance), smallGuidance);
+    assert.deepEqual(levels.filter((level) => level.mandatory).map((level) => level.percent), [40]);
+  }
+
+  // Model object keys resolve the same ladder, even at a 1M context window
+  // (which would otherwise select the large-context tier).
+  const opusTier = selectCompactionTier(DEFAULT_COMPACTION_POLICY, 1_000_000, { provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5" });
+  assert.equal(opusTier.matchedModelKey, "anthropic/claude-opus-5");
+  assert.deepEqual(opusTier.levels.map((level) => level.percent), [15, 20, 25, 30, 35, 40]);
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 14, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }), undefined);
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 15, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }).guidance, "consider compacting at a reasonable stopping point to keep future calls cheaper");
+  assert.equal(nextCompactionThreshold(DEFAULT_COMPACTION_POLICY, { percent: 41, contextWindow: 1_000_000, model: { provider: "anthropic", id: "claude-opus-5" } }, 35).mandatory, true);
+});
+
 test("configured compaction policy can add early gpt-5.5 threshold nudges", () => {
   const configured = compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: JSON.stringify({
     levels: [99],
