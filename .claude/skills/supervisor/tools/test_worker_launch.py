@@ -20,6 +20,17 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.tmp_path = pathlib.Path(self.tmpdir.name)
+        # Pin runtime resolution away from the developer's machine-local config so
+        # default-runtime expectations stay deterministic. Tests that exercise
+        # machine-default resolution override this with their own temp config.
+        missing_config = self.tmp_path / "absent-worker-runtime.json"
+        env_patch = patch.dict(
+            os.environ,
+            {"MECHA_WORKER_RUNTIME_CONFIG": str(missing_config)},
+            clear=False,
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def test_pi_session_id_remains_a_stable_uuid5(self):
         self.assertEqual(
@@ -266,6 +277,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         stderr = io.StringIO()
         with patch.object(worker_launch.sys, "argv", argv), \
              patch.dict(os.environ, {worker_launch.PI_MAILBOX_EXTENSION_ENV: ""}, clear=False), \
+             patch.object(worker_launch, "window_exists", return_value=False), \
              contextlib.redirect_stderr(stderr), \
              self.assertRaises(SystemExit) as raised:
             worker_launch.main()
