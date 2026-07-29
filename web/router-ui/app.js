@@ -23,6 +23,7 @@ const state = {
   routers: loadRouters(),
   agents: [],
   selectedPeer: "",
+  agentFilter: "",
   messages: {},
   draftPeers: new Set(),
 };
@@ -39,6 +40,7 @@ const elements = {
   agentId: document.querySelector("#agent-id"),
   addRouter: document.querySelector("#add-router"),
   refresh: document.querySelector("#refresh"),
+  agentFilter: document.querySelector("#agent-filter"),
   agents: document.querySelector("#agents"),
   agentCount: document.querySelector("#agent-count"),
   peerAvatar: document.querySelector("#peer-avatar"),
@@ -84,6 +86,10 @@ elements.addRouter.addEventListener("click", () => {
   }
 });
 elements.refresh.addEventListener("click", () => sendCommand({ type: "refresh_agents" }));
+elements.agentFilter.addEventListener("input", () => {
+  state.agentFilter = elements.agentFilter.value;
+  renderAgents();
+});
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   sendDraft();
@@ -175,7 +181,7 @@ function removeRouter(routerUrl) {
 function setStatus(stateName, detail, agentId = state.agentId, routerUrl = state.routerUrl) {
   elements.statusDot.className = `status-dot ${stateName === "connected" ? "connected" : stateName === "connecting" || stateName === "reconnecting" ? "connecting" : "offline"}`;
   elements.statusTitle.textContent = stateName === "connected" ? `Connected as ${agentId}` : stateName[0].toUpperCase() + stateName.slice(1);
-  elements.statusDetail.textContent = `${detail || ""}${routerUrl ? ` · ${routerUrl}` : ""}`;
+  elements.statusDetail.textContent = stateName === "connected" ? "" : `${detail || ""}${routerUrl ? ` · ${routerUrl}` : ""}`;
 }
 
 function render() {
@@ -226,7 +232,11 @@ function renderAgents() {
   const known = new Set(state.agents.map((agent) => agent.agent_id));
   for (const peer of Object.keys(state.messages)) known.add(peer);
   for (const peer of state.draftPeers) known.add(peer);
-  const peers = [...known].filter((peer) => peer && peer !== state.agentId).sort();
+  const filter = state.agentFilter.trim().toLowerCase();
+  const peers = [...known]
+    .filter((peer) => peer && peer !== state.agentId)
+    .filter((peer) => !filter || `${peer} ${humanName(peer)}`.toLowerCase().includes(filter))
+    .sort();
   elements.agentCount.textContent = String(peers.length);
   elements.agents.replaceChildren(...peers.map((peer) => {
     const connected = state.agents.some((agent) => agent.agent_id === peer);
@@ -240,7 +250,10 @@ function renderAgents() {
 }
 
 function selectPeer(peer) {
+  state.agentFilter = "";
+  elements.agentFilter.value = "";
   if (peer === state.selectedPeer) {
+    renderAgents();
     restoreDraftForSelectedPeer({ focus: true });
     return;
   }
