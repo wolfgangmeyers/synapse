@@ -5,8 +5,9 @@ const HISTORY_LIMIT = 200;
 const HISTORY_RETENTION_DAYS = 30;
 const HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const HISTORY_DB_NAME = "mecha-router-web-ui";
-const HISTORY_DB_VERSION = 1;
+const HISTORY_DB_VERSION = 2;
 const HISTORY_STORE_NAME = "conversation_messages";
+const IMAGE_STORE_NAME = "image_attachments";
 const DRAFT_STORE_KEY = "mecha.web.drafts";
 const DRAFT_LIMIT = 200;
 const DRAFT_RETENTION_DAYS = 30;
@@ -17,6 +18,8 @@ const MAX_IMAGE_EDGE = 1600;
 const IMAGE_WEBP_QUALITY = 0.82;
 const MAX_IMAGE_BYTES = 768 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
+const HISTORY_IMAGE_EDGE = 360;
+const HISTORY_IMAGE_QUALITY = 0.72;
 const SCOPE_SEPARATOR = "\u001f";
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
@@ -328,7 +331,13 @@ function renderConversation() {
     return;
   }
   elements.messages.replaceChildren(...messages.map(renderMessage));
+  scrollMessagesToBottom();
+}
+
+function scrollMessagesToBottom() {
   elements.messages.scrollTop = elements.messages.scrollHeight;
+  requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; });
+  setTimeout(() => { elements.messages.scrollTop = elements.messages.scrollHeight; }, 100);
 }
 
 function renderMessage(message) {
@@ -417,9 +426,13 @@ function renderMessageImages(attachments) {
   gallery.className = "bubble-images";
   gallery.append(...attachments.slice(0, MAX_IMAGES).map((attachment, index) => {
     const image = document.createElement("img");
-    image.src = attachment.url;
+    image.src = attachment.url || "";
     image.alt = attachment.name || `Attached image ${index + 1}`;
-    image.addEventListener("click", () => window.open(attachment.url, "_blank", "noopener"));
+    image.addEventListener("load", scrollMessagesToBottom, { once: true });
+    if (attachment.cacheKey) {
+      void cachedImageUrl(attachment.cacheKey).then((url) => { if (url) image.src = url; });
+    }
+    image.addEventListener("click", () => window.open(image.src || attachment.url, "_blank", "noopener"));
     return image;
   }));
   return gallery;
@@ -460,6 +473,56 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+async function messageWithCachedImages(peer, acceptedMessage, pendingMessage) {
+  const pendingAttachments = pendingMessage?.attachments || [];
+  const attachments = await Promise.all((acceptedMessage.attachments || []).map(async (attachment, index) => {
+    const pendingUrl = pendingAttachments[index]?.url || "";
+    if (!pendingUrl.startsWith("data:image/")) return attachment;
+    const cacheKey = `${peerScope(state.routerUrl, state.agentId, peer)}${SCOPE_SEPARATOR}${acceptedMessage.id}${SCOPE_SEPARATOR}${attachment.id || index}`;
+    await saveCachedImage(cacheKey, pendingUrl, attachment);
+    return { ...attachment, cacheKey };
+  }));
+  return { ...acceptedMessage, attachments, direction: "outgoing" };
+}
+
+async function saveCachedImage(key, dataUrl, attachment) {
+  const blob = await historyThumbnailBlob(dataUrl);
+  const db = await openHistoryDb();
+  const transaction = db.transaction(IMAGE_STORE_NAME, "readwrite");
+  transaction.objectStore(IMAGE_STORE_NAME).put({ key, blob, mime_type: "image/webp", name: attachment.name, savedAtMs: Date.now() });
+  await requestDone(transaction);
+}
+
+async function historyThumbnailBlob(dataUrl) {
+  const sourceBlob = await (await fetch(dataUrl)).blob();
+  const bitmap = await createImageBitmap(sourceBlob);
+  const scale = Math.min(1, HISTORY_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", HISTORY_IMAGE_QUALITY));
+  if (!blob) throw new Error("Image history preview could not be saved");
+  return blob;
+}
+
+async function cachedImageUrl(key) {
+  try {
+    const db = await openHistoryDb();
+    const record = await new Promise((resolve, reject) => {
+      const request = db.transaction(IMAGE_STORE_NAME, "readonly").objectStore(IMAGE_STORE_NAME).get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return record?.blob ? URL.createObjectURL(record.blob) : "";
+  } catch {
+    return "";
+  }
+}
+
 async function appendMessage(peer, message) {
   state.messages[peer] = pruneHistoryMessages(mergeMessages(state.messages[peer] || [], [message]));
   render();
@@ -476,7 +539,7 @@ async function settleOutgoing(event) {
   if (event.ok && event.message?.to) {
     state.messages[event.message.to] = pruneHistoryMessages(mergeMessages(
       (state.messages[event.message.to] || []).filter((message) => message.id !== event.localId),
-      [{ ...event.message, direction: "outgoing" }],
+      [await messageWithCachedImages(event.message.to, event.message, state.messages[event.message.to]?.find((message) => message.id === event.localId))],
     ));
     touchedPeers.add(event.message.to);
   }
@@ -561,6 +624,7 @@ function openHistoryDb() {
       if (!store.indexNames.contains("ownerScope")) store.createIndex("ownerScope", "ownerScope", { unique: false });
       if (!store.indexNames.contains("peerScope")) store.createIndex("peerScope", "peerScope", { unique: false });
       if (!store.indexNames.contains("createdAtMs")) store.createIndex("createdAtMs", "createdAtMs", { unique: false });
+      if (!db.objectStoreNames.contains(IMAGE_STORE_NAME)) db.createObjectStore(IMAGE_STORE_NAME, { keyPath: "key" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -593,8 +657,10 @@ function requestDone(transaction) {
 
 function messageForStorage(message) {
   if (!Array.isArray(message.attachments)) return message;
-  const attachments = message.attachments.filter((attachment) => !String(attachment.url || "").startsWith("data:image/"));
-  return attachments.length === message.attachments.length ? message : { ...message, attachments };
+  const attachments = message.attachments
+    .filter((attachment) => !String(attachment.url || "").startsWith("data:image/"))
+    .map(({ url, id, mime_type, size_bytes, name, cacheKey }) => ({ url, id, mime_type, size_bytes, name, cacheKey }));
+  return { ...message, attachments };
 }
 function ownerScope(routerUrl, agentId) { return `${routerUrl}${SCOPE_SEPARATOR}${agentId}`; }
 function peerScope(routerUrl, agentId, peer) { return `${ownerScope(routerUrl, agentId)}${SCOPE_SEPARATOR}${peer}`; }

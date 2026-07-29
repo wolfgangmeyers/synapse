@@ -212,6 +212,8 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.draft\.addEventListener\("paste"/);
   assert.match(app, /function renderImagePreview\(\)/);
   assert.match(app, /function renderMessageImages\(attachments\)/);
+  assert.match(app, /function scrollMessagesToBottom\(\)/);
+  assert.match(app, /image\.addEventListener\("load", scrollMessagesToBottom, \{ once: true \}\)/);
   assert.doesNotMatch(app, /localStorage\.setItem\([^\n]+data:image/);
   assert.match(app, /function messageForStorage\(message\)/);
   assert.match(app, /startsWith\("data:image\/"\)/);
@@ -252,6 +254,8 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.match(app, /const HISTORY_LIMIT = 200;/);
   assert.match(app, /const HISTORY_RETENTION_DAYS = 30;/);
   assert.match(app, /indexedDB\.open\(HISTORY_DB_NAME, HISTORY_DB_VERSION\)/);
+  assert.match(app, /const HISTORY_DB_VERSION = 2;/);
+  assert.match(app, /const IMAGE_STORE_NAME = "image_attachments";/);
   assert.match(app, /createObjectStore\(HISTORY_STORE_NAME, \{ keyPath: "key" \}\)/);
   assert.match(app, /store\.createIndex\("ownerScope", "ownerScope"/);
   assert.match(app, /store\.createIndex\("peerScope", "peerScope"/);
@@ -260,6 +264,12 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.match(app, /function peerScope\(routerUrl, agentId, peer\) \{ return `\$\{ownerScope\(routerUrl, agentId\)\}\$\{SCOPE_SEPARATOR\}\$\{peer\}`; \}/);
   assert.match(app, /\.filter\(\(message\) => messageTime\(message\) >= cutoff\)/);
   assert.match(app, /\.slice\(-HISTORY_LIMIT\)/);
+  assert.match(app, /function messageWithCachedImages\(peer, acceptedMessage, pendingMessage\)/);
+  assert.match(app, /function saveCachedImage\(key, dataUrl, attachment\)/);
+  assert.match(app, /const HISTORY_IMAGE_EDGE = 360;/);
+  assert.match(app, /canvas\.toBlob\(resolve, "image\/webp", HISTORY_IMAGE_QUALITY\)/);
+  assert.match(app, /function cachedImageUrl\(key\)/);
+  assert.match(app, /cacheKey/);
   assert.doesNotMatch(app, /localStorage\.setItem\(HISTORY_STORE_KEY/);
   assert.doesNotMatch(app, /get_history/);
   const server = await readFile(new URL("../tools/router_web_ui.mjs", import.meta.url), "utf8");
