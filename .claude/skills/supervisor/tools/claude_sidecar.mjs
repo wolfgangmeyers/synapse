@@ -178,14 +178,14 @@ export async function runCli(argv = process.argv.slice(2)) {
   const stop = (signal) => { logger.write("sidecar_stop", { signal }); client.close(); process.exit(0); };
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
-  const monitor = createTmuxWindowMonitor({
+  // The monitor lives for the whole process; stop() is the only exit path.
+  createTmuxWindowMonitor({
     window: args.window,
     onMissing: () => stop("tmux_window_missing"),
   });
   await client.connect();
   logger.write("sidecar_connected", { agent_id: args.agentId });
   await new Promise(() => {});
-  monitor.close();
 }
 
 // The documented launch path is ~/.claude/skills/supervisor/tools/claude_sidecar.mjs,

@@ -85,10 +85,30 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn("--agent-id claude-worker", commands[0])
         self.assertIn("sidecar_pid=$!", commands[0])
         self.assertIn("trap 'kill $sidecar_pid >/dev/null 2>&1 || true' EXIT INT TERM", commands[0])
+        self.assertNotIn("claude_sidecar.mjs", commands[0].split("{", 1)[0])
         self.assertIn("claude --dangerously-skip-permissions", commands[0])
         self.assertNotIn("--provider", commands[0])
         self.assertNotIn(worker_launch.PI_MODEL_KEY_ENV, commands[0])
         self.assertIn("Worker (claude) launched", output)
+
+    def test_claude_sidecar_backgrounding_keeps_cd_in_the_foreground_shell(self):
+        # bash binds `&` to the whole preceding AND-list, so an ungrouped background
+        # sidecar would launch the agent in the wrong directory and capture the
+        # subshell pid instead of the sidecar's.
+        with patch.dict(os.environ, {
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("claude-worker", agent="claude")
+
+        foreground, _, backgrounded = commands[0].partition("{ ")
+        self.assertIn(f"cd {self.tmpdir.name} && unset CLAUDECODE &&", foreground)
+        self.assertNotIn("&", foreground.replace("&&", ""))
+
+        group, _, after_group = backgrounded.partition(" }")
+        self.assertIn("claude_sidecar.mjs", group)
+        self.assertTrue(group.rstrip().endswith("&"), group)
+        self.assertTrue(after_group.startswith(" && sidecar_pid=$!"), after_group)
+        self.assertNotIn("&", after_group.replace("&&", "").replace("2>&1", ""))
 
     def test_explicit_agent_overrides_machine_default_runtime(self):
         extension = self._pi_mailbox_extension()

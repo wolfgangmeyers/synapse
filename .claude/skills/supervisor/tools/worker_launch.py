@@ -443,10 +443,15 @@ def main():
                 "--router-url",
                 mailbox_router_url,
             ])
+            # The sidecar is backgrounded inside an explicit group so `&` binds only
+            # the node command. Without the group, bash attaches `&` to the whole
+            # preceding AND-list, which would background `cd`/`unset` and start the
+            # agent in the wrong directory, and would leave $! pointing at the
+            # subshell instead of the sidecar.
             agent_cmd = (
-                f"{sidecar_cmd} >/dev/null 2>&1 & "
-                f"sidecar_pid=$!; "
-                f"trap 'kill $sidecar_pid >/dev/null 2>&1 || true' EXIT INT TERM; "
+                f"{{ {sidecar_cmd} >/dev/null 2>&1 & }} && "
+                f"sidecar_pid=$! && "
+                f"trap 'kill $sidecar_pid >/dev/null 2>&1 || true' EXIT INT TERM && "
                 f"{agent_cmd}"
             )
         full_cmd = (
