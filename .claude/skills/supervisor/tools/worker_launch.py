@@ -23,7 +23,13 @@ import time
 import uuid
 from urllib.parse import urlparse
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Resolve symlinks: the documented launch path is
+# ~/.claude/skills/supervisor/tools/worker_launch.py, where ~/.claude/skills/supervisor
+# is a symlink into the repo. Sibling tool paths derived from a symlinked __file__ are
+# handed to other processes, so they must be canonical.
+TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
+
+sys.path.insert(0, TOOLS_DIR)
 from _tmux import _AGENT_ID, ensure_session, new_window, send_text, send_enter, window_exists
 from worker_runtime_config import WorkerRuntimeConfigError, resolve_agent_runtime
 
@@ -37,7 +43,7 @@ DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 PI_NOTIFY_ON_SETTLED_ENV = "MECHA_PI_NOTIFY_ON_SETTLED"
 PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
 PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
-CLAUDE_SIDECAR_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_sidecar.mjs")
+CLAUDE_SIDECAR_SCRIPT = os.path.join(TOOLS_DIR, "claude_sidecar.mjs")
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -122,7 +128,7 @@ def resolve_pi_mailbox_extension():
         raise ValueError(
             f"{PI_MAILBOX_EXTENSION_ENV} must name a validated extension file. "
             f"Install the canonical Pi extension first: "
-            f"python3 {os.path.join(os.path.dirname(__file__), 'install_pi_extension.py')}"
+            f"python3 {os.path.join(TOOLS_DIR, 'install_pi_extension.py')}"
         )
     return extension_path
 
@@ -290,6 +296,9 @@ def main():
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
+    # Deliberately abspath, not realpath: work_dir is the caller's spelling of the
+    # worktree and feeds pi_session_id() and the Claude project-dir slug. Resolving it
+    # would silently change existing session IDs and trust-dir keys.
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
     pi_mailbox_extension = None
     mailbox_router_url = None

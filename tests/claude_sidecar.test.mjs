@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import {
   claudeMailboxPrompt,
   createBodyFreeLogger,
@@ -12,6 +15,11 @@ import {
   rotateBodyFreeLog,
   sanitizeTerminalText,
 } from "../.claude/skills/supervisor/tools/claude_sidecar.mjs";
+
+const SIDECAR_PATH = fileURLToPath(
+  new URL("../.claude/skills/supervisor/tools/claude_sidecar.mjs", import.meta.url),
+);
+const TOOLS_DIR = dirname(SIDECAR_PATH);
 
 const message = {
   id: "message-1",
@@ -93,6 +101,94 @@ test("tmux injector failure errors do not include pasted mailbox text", () => {
     assert.doesNotMatch(error.message, /secret/);
     return true;
   });
+});
+
+// Starts the real CLI and reports whether it got as far as its first log write. The
+// failure being pinned is a silent exit 0, so "started" must be observed from a side
+// effect, not from the absence of a crash.
+async function startSidecarThroughDirectory(t, directory, agentId) {
+  const logDir = await mkdtemp(join(tmpdir(), "claude-sidecar-cli-log-"));
+  t.after(() => rm(logDir, { recursive: true, force: true }));
+  const child = spawn(
+    process.execPath,
+    [
+      join(directory, "claude_sidecar.mjs"),
+      "--agent-id", agentId,
+      "--window", agentId,
+      // Unroutable loopback port: connect() retries forever without a router, and runCli
+      // passes no kickstart, so the client's no-op default runs and nothing is spawned.
+      "--router-url", "http://127.0.0.1:1",
+      "--log-dir", logDir,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const exited = new Promise((resolveExit) => child.on("exit", (code) => resolveExit(code)));
+  const logPath = join(logDir, `${agentId}.log`);
+  try {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      let log;
+      try {
+        log = await readFile(logPath, "utf8");
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      if (log?.includes("event=sidecar_start")) return { started: true, log, exitCode: null };
+      if (child.exitCode !== null) return { started: false, log: log ?? "", exitCode: child.exitCode };
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 50));
+    }
+    return { started: false, log: "", exitCode: child.exitCode, timedOut: true };
+  } finally {
+    child.kill("SIGKILL");
+    await exited;
+  }
+}
+
+// The worktree this runs from has no symlink component, so a repo-relative invocation
+// would start fine either way and prove nothing. The test builds the symlink itself.
+test("sidecar CLI starts when invoked through a symlinked tools directory", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "claude-sidecar-symlink-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const symlinkedTools = join(parent, "tools");
+  await symlink(TOOLS_DIR, symlinkedTools, "dir");
+
+  const result = await startSidecarThroughDirectory(t, symlinkedTools, "claude-symlink-worker");
+
+  assert.equal(
+    result.started,
+    true,
+    `sidecar did not start through the symlinked path (exit=${result.exitCode}, timedOut=${result.timedOut ?? false})`,
+  );
+  assert.match(result.log, /event=sidecar_start agent_id="claude-symlink-worker"/);
+});
+
+test("sidecar CLI starts when invoked through its real tools directory", async (t) => {
+  const result = await startSidecarThroughDirectory(t, TOOLS_DIR, "claude-realpath-worker");
+
+  assert.equal(result.started, true, `sidecar did not start through the real path (exit=${result.exitCode})`);
+  assert.match(result.log, /event=sidecar_start agent_id="claude-realpath-worker"/);
+});
+
+test("entrypoint detection accepts every spelling of a module's own path and nothing else", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "claude-sidecar-entrypoint-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const symlinkedFile = join(parent, "sidecar-alias.mjs");
+  await symlink(SIDECAR_PATH, symlinkedFile, "file");
+  const sidecarUrl = pathToFileURL(SIDECAR_PATH).href;
+
+  assert.equal(isCliEntrypoint(sidecarUrl, SIDECAR_PATH), true);
+  assert.equal(isCliEntrypoint(sidecarUrl, symlinkedFile), true);
+  assert.equal(isCliEntrypoint(sidecarUrl, join(TOOLS_DIR, ".", "claude_sidecar.mjs")), true);
+  assert.equal(isCliEntrypoint(sidecarUrl, relative(process.cwd(), SIDECAR_PATH)), true);
+
+  assert.equal(isCliEntrypoint(sidecarUrl, join(TOOLS_DIR, "worker_capture.py")), false);
+  // Exercises the realpathSync-throws fallback: an unstattable path resolves but never matches.
+  assert.equal(isCliEntrypoint(sidecarUrl, join(TOOLS_DIR, "does-not-exist.mjs")), false);
+  assert.equal(isCliEntrypoint(sidecarUrl, "./also-does-not-exist.mjs"), false);
+  // A module with no entrypoint argv at all must not start its CLI.
+  assert.equal(isCliEntrypoint(sidecarUrl, null), false);
+  assert.equal(isCliEntrypoint(sidecarUrl, ""), false);
+  // A shared helper cannot guess the caller's module, so it must refuse to.
+  assert.throws(() => isCliEntrypoint(undefined, SIDECAR_PATH), /moduleUrl is required/);
 });
 
 test("body-free sidecar logs rotate at configured bound and omit message bodies", async () => {

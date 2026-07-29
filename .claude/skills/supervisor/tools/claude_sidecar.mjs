@@ -2,8 +2,8 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, renameSync, statSync, appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
+import { isCliEntrypoint } from "../../../../harness/cli_entrypoint.js";
 import { createMailboxClient, assertAgentId } from "../../../../pi-extensions/mailbox-client.js";
 
 export const DEFAULT_LOG_DIR = "~/.mecha-developer/claude-sidecars";
@@ -155,8 +155,10 @@ export async function runCli(argv = process.argv.slice(2)) {
   await new Promise(() => {});
 }
 
-const thisFile = fileURLToPath(import.meta.url);
-if (process.argv[1] === thisFile) {
+// The documented launch path is ~/.claude/skills/supervisor/tools/claude_sidecar.mjs,
+// where the skills directory is a symlink into the repo, so the entrypoint check must
+// canonicalize both sides. See harness/cli_entrypoint.js.
+if (isCliEntrypoint(import.meta.url)) {
   runCli().catch((error) => {
     try {
       const agentIdIndex = process.argv.indexOf("--agent-id");
