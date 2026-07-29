@@ -83,6 +83,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn("node", commands[0])
         self.assertIn("claude_sidecar.mjs", commands[0])
         self.assertIn("--agent-id claude-worker", commands[0])
+        self.assertIn("sidecar_pid=$!", commands[0])
+        self.assertIn("trap 'kill $sidecar_pid >/dev/null 2>&1 || true' EXIT INT TERM", commands[0])
         self.assertIn("claude --dangerously-skip-permissions", commands[0])
         self.assertNotIn("--provider", commands[0])
         self.assertNotIn(worker_launch.PI_MODEL_KEY_ENV, commands[0])
@@ -379,6 +381,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
              patch.object(worker_launch, "new_window"), \
              patch.object(worker_launch, "send_text", side_effect=lambda _window, command: commands.append(command)), \
              patch.object(worker_launch, "send_enter"), \
+             patch.object(worker_launch.subprocess, "run"), \
+             patch.object(worker_launch.subprocess, "Popen"), \
              patch.object(worker_launch.time, "sleep"), \
              patch.object(worker_launch.os, "makedirs"), \
              patch.object(worker_launch.os.path, "exists", return_value=True), \

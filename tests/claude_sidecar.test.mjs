@@ -12,6 +12,7 @@ import {
   createBodyFreeLogger,
   createClaudeSidecar,
   createTmuxInjector,
+  createTmuxWindowMonitor,
   rotateBodyFreeLog,
   sanitizeTerminalText,
 } from "../.claude/skills/supervisor/tools/claude_sidecar.mjs";
@@ -85,6 +86,35 @@ test("tmux injector uses bracketed paste, waits for Claude paste handling, then 
     ["sleep", 5_000],
     ["send-keys", "-t", "mecha:claude-worker", "Enter"],
   ]);
+});
+
+test("Claude sidecar monitor exits when its target tmux window disappears", () => {
+  const intervals = [];
+  const cleared = [];
+  let windowExists = true;
+  const missing = [];
+  const monitor = createTmuxWindowMonitor({
+    window: "claude-worker",
+    tmux: () => {
+      if (!windowExists) throw new Error("no such window");
+    },
+    setIntervalImpl: (callback, delay) => {
+      const timer = { callback, delay };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => cleared.push(timer),
+    onMissing: () => missing.push("missing"),
+  });
+
+  assert.equal(intervals[0].delay, 5_000);
+  intervals[0].callback();
+  assert.deepEqual(missing, []);
+  windowExists = false;
+  intervals[0].callback();
+  assert.deepEqual(missing, ["missing"]);
+  assert.deepEqual(cleared, [intervals[0]]);
+  monitor.close();
 });
 
 test("tmux injector failure errors do not include pasted mailbox text", () => {

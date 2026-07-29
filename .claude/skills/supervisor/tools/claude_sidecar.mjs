@@ -64,23 +64,50 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+function assertTmuxWindowExists({ tmux, session, window }) {
+  tmux(["display-message", "-p", "-t", `${session}:${window}`, "#{pane_id}"]);
+}
+
 export function createTmuxInjector({ tmux = (args) => execFileSync("tmux", args, { stdio: "ignore" }), session = "mecha", enterDelayMs = 5_000, sleep = sleepSync } = {}) {
   if (!Number.isSafeInteger(enterDelayMs) || enterDelayMs < 0) throw new TypeError("enterDelayMs must be a non-negative safe integer");
   if (typeof sleep !== "function") throw new TypeError("sleep must be a function");
   return function inject({ window, text }) {
     assertAgentId(window);
-    const target = `${session}:${window}`;
     try {
-      tmux(["display-message", "-p", "-t", target, "#{pane_id}"]);
-      tmux(["send-keys", "-t", target, "\x1b[200~"]);
-      tmux(["send-keys", "-l", "-t", target, text]);
-      tmux(["send-keys", "-t", target, "\x1b[201~"]);
+      assertTmuxWindowExists({ tmux, session, window });
+      tmux(["send-keys", "-t", `${session}:${window}`, "\x1b[200~"]);
+      tmux(["send-keys", "-l", "-t", `${session}:${window}`, text]);
+      tmux(["send-keys", "-t", `${session}:${window}`, "\x1b[201~"]);
       sleep(enterDelayMs);
-      tmux(["send-keys", "-t", target, "Enter"]);
+      tmux(["send-keys", "-t", `${session}:${window}`, "Enter"]);
     } catch {
       throw new Error("tmux_injection_failed");
     }
   };
+}
+
+export function createTmuxWindowMonitor({
+  window,
+  session = "mecha",
+  intervalMs = 5_000,
+  tmux = (args) => execFileSync("tmux", args, { stdio: "ignore" }),
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+  onMissing,
+} = {}) {
+  assertAgentId(window);
+  if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) throw new TypeError("intervalMs must be a positive safe integer");
+  if (typeof setIntervalImpl !== "function" || typeof clearIntervalImpl !== "function") throw new TypeError("timer functions are required");
+  if (typeof onMissing !== "function") throw new TypeError("onMissing must be a function");
+  const timer = setIntervalImpl(() => {
+    try {
+      assertTmuxWindowExists({ tmux, session, window });
+    } catch {
+      clearIntervalImpl(timer);
+      onMissing();
+    }
+  }, intervalMs);
+  return { close: () => clearIntervalImpl(timer) };
 }
 
 export function createClaudeSidecar({ agentId, window = agentId, client, inject, log = () => {} } = {}) {
@@ -148,11 +175,17 @@ export async function runCli(argv = process.argv.slice(2)) {
     log: (event, fields) => logger.write(event, fields),
   });
   logger.write("sidecar_start", { agent_id: args.agentId, window: args.window });
-  process.on("SIGTERM", () => { logger.write("sidecar_stop", { signal: "SIGTERM" }); client.close(); process.exit(0); });
-  process.on("SIGINT", () => { logger.write("sidecar_stop", { signal: "SIGINT" }); client.close(); process.exit(0); });
+  const stop = (signal) => { logger.write("sidecar_stop", { signal }); client.close(); process.exit(0); };
+  process.on("SIGTERM", () => stop("SIGTERM"));
+  process.on("SIGINT", () => stop("SIGINT"));
+  const monitor = createTmuxWindowMonitor({
+    window: args.window,
+    onMissing: () => stop("tmux_window_missing"),
+  });
   await client.connect();
   logger.write("sidecar_connected", { agent_id: args.agentId });
   await new Promise(() => {});
+  monitor.close();
 }
 
 // The documented launch path is ~/.claude/skills/supervisor/tools/claude_sidecar.mjs,
