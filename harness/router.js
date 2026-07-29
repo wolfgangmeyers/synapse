@@ -50,6 +50,13 @@ const IMAGE_ATTACHMENT_MIMES = new Map([
 ]);
 const DEFAULT_MAX_REQUESTS_PER_WINDOW = 60;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+// How long the lifecycle sweep may go unrecorded. The sweep runs every second, so
+// logging every idle pass added ~75k lines a day and no signal; logging none of them
+// made an idle router and a wedged one look identical in the log, which is the failure
+// shape that wastes the most time — something dead that reads as healthy. One record
+// an hour is 24 lines a day against a 16 MiB cap, and "no sweep record for over an
+// hour" becomes a usable liveness check.
+const DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
 const CORS_HEADERS = Object.freeze({
   "access-control-allow-origin": "*",
@@ -81,6 +88,7 @@ export function createAgentRouter({
   deliveryLeaseDurationMs = DEFAULT_DELIVERY_LEASE_DURATION_MS,
   maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
   timeoutSweepIntervalMs = 1_000,
+  sweepHeartbeatIntervalMs = DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS,
   generateFrameId = createNanoId,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
@@ -120,6 +128,9 @@ export function createAgentRouter({
   }
   if (!Number.isSafeInteger(maxDeliveryAttempts) || maxDeliveryAttempts <= 0) {
     throw new TypeError("maxDeliveryAttempts must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(sweepHeartbeatIntervalMs) || sweepHeartbeatIntervalMs <= 0) {
+    throw new TypeError("sweepHeartbeatIntervalMs must be a positive safe integer");
   }
   if (!Number.isSafeInteger(timeoutSweepIntervalMs) || timeoutSweepIntervalMs <= 0) {
     throw new TypeError("timeoutSweepIntervalMs must be a positive safe integer");
@@ -167,6 +178,8 @@ export function createAgentRouter({
   const sessions = new Map();
   const requestTimesBySender = new Map();
   let timeoutSweepTimer;
+  // When the last lifecycle_sweep_completed was written, for any reason.
+  let lastSweepRecordMs;
   const server = createServer((request, response) => {
     void handleHttpRequest(request, response).catch(() => {
       emit("router_error", { error_code: "internal_error" });
@@ -557,6 +570,7 @@ export function createAgentRouter({
     sweepDueReminders,
     sweepDueServerJobs,
     sweepStaleAgentResources,
+    sweepMessageLifecycles,
   };
 
   function sweepMessageLifecycles() {
@@ -568,7 +582,7 @@ export function createAgentRouter({
     const serverJobOutcomes = {};
     const reminders = sweepDueReminders(reminderOutcomes);
     const serverJobs = sweepDueServerJobs(serverJobOutcomes);
-    emit("lifecycle_sweep_completed", {
+    const sweepCounts = {
       stale_agent_count: staleAgents.length,
       expired_message_count: expired.length,
       timed_out_delivery_count: timedOut.length,
@@ -576,7 +590,19 @@ export function createAgentRouter({
       reminder_failure_count: reminderOutcomes.failure ?? 0,
       server_job_success_count: serverJobOutcomes.success ?? 0,
       server_job_failure_count: serverJobOutcomes.failure ?? 0,
-    });
+    };
+    // An all-zero sweep records no work, and the sweep runs every second, so logging
+    // every one of them is pure volume. Log the ones that did something, plus an
+    // all-zero heartbeat at most once per sweepHeartbeatIntervalMs so the absence of
+    // records still means something. Any record resets the interval: a busy router
+    // never pays for a heartbeat on top of its real ones.
+    const now = currentTimeMs(clock);
+    if (lastSweepRecordMs === undefined) lastSweepRecordMs = now;
+    const didWork = Object.values(sweepCounts).some((count) => count > 0);
+    if (didWork || now - lastSweepRecordMs >= sweepHeartbeatIntervalMs) {
+      emit("lifecycle_sweep_completed", sweepCounts);
+      lastSweepRecordMs = now;
+    }
     return { staleAgents, expired, timedOut, reminders, serverJobs };
   }
 

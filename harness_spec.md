@@ -799,6 +799,14 @@ Structured logs include:
 
 Do not log message bodies by default. Logs must rotate.
 
+Retention limits. All rotation uses one shared implementation (`harness/log_rotation.js`): the live file is renamed to `<log>.1` once it reaches the limit and the previous `.1` is discarded, so a log costs at most two generations. The size is checked before each append, so each generation can exceed its limit by its own final record.
+
+- The router event log (`--log`, defaulting to `<database>.jsonl` and deployed as `~/.mecha-developer/router.jsonl`) rotates at 16 MiB, bounding it at 32 MiB plus one record per generation. Sizing rationale: delivery events run about 0.35 MB/day, but `agent_lease_renewed` adds roughly 1.5 MB per connected agent per day and dominates the file, so the retained window is about three days at three connected agents and about a day at ten. If worker counts grow, raise the limit or suppress the lease heartbeat.
+- Each per-agent Claude sidecar log (`~/.mecha-developer/claude-sidecars/<agent-id>.log`) rotates at 256 KiB, so one agent's live plus rotated log stays under 512 KiB. The number of such files is one per agent ID and is not itself pruned.
+- For the router event log, rotation is best effort and never costs a record: if the rotate step fails the event is still appended, and the first failure is recorded in-band as `router_error` with `error_code: log_rotation_failed`, so a log past its bound is diagnosable rather than merely large. The sidecar log does not have this guard — a rotation failure there propagates to the caller.
+- A log already larger than its limit when rotation is introduced is moved wholesale into the first rotated generation, so the bound applies from the second rotation onward.
+- `lifecycle_sweep_completed` is emitted when at least one of its counts is non-zero, plus an all-zero heartbeat at most once an hour. The sweep runs every second, so recording every idle pass added ~75k lines a day and no signal; recording none of them made an idle router and a router whose sweep loop had wedged look identical in the log. Any record resets the hour, so a busy router never pays for a heartbeat on top of its real records, and "no `lifecycle_sweep_completed` for over an hour" is a liveness failure. Per-item events (`message_expired`, `delivery_timed_out`, `reminder_*`, `server_job_*`) still record the underlying work.
+
 ### 15.2 Metrics and diagnostics
 
 `agent_router.py status` and `/v1/health` report:
