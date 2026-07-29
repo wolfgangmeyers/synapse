@@ -1,6 +1,20 @@
 import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { rotateSizeCappedLog } from "./log_rotation.js";
+
+// Router event-log retention. The live log rotates to `<log>.1` once it reaches this
+// size and only one rotated generation is kept, so on-disk usage is bounded at 2x this
+// value (32 MiB by default) plus one record per generation.
+//
+// Why 16 MiB: measured on the deployed router, delivery events — the ones needed to
+// explain a lost message — run about 0.35 MB/day, but `agent_lease_renewed` adds
+// ~1.5 MB per connected agent per day at one renewal per agent per 10s and dominates
+// the file. 16 MiB therefore retains roughly three days of history at three connected
+// agents and about a day at ten, which is the window worth keeping for mail-loss
+// triage. Raise it if worker counts grow. Spec: harness_spec.md 15.1.
+export const DEFAULT_MAX_LOG_BYTES = 16 * 1024 * 1024;
+
 const STRING_FIELDS = new Set([
   "message_id",
   "occurrence_id",
@@ -75,18 +89,37 @@ const EVENT_SCHEMAS = Object.freeze({
   message_retried: schema(["message_id", "agent_id", "state"]),
 });
 
-export function createJsonlLogger({ logPath, clock = () => new Date() } = {}) {
+export function rotateJsonlLog(logPath, maxBytes = DEFAULT_MAX_LOG_BYTES) {
+  return rotateSizeCappedLog(logPath, maxBytes);
+}
+
+export function createJsonlLogger({ logPath, clock = () => new Date(), maxBytes = DEFAULT_MAX_LOG_BYTES } = {}) {
   if (typeof logPath !== "string" || logPath.length === 0) {
     throw new TypeError("logPath is required");
   }
   if (typeof clock !== "function") throw new TypeError("clock must be a function");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("maxBytes must be a positive safe integer");
+
+  let rotationFailureLogged = false;
 
   return {
     log(event, fields = {}) {
       try {
         const record = toRecord(event, fields, clock);
         mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
-        appendFileSync(logPath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+        // Retention is best effort. A rotation that cannot complete — an obstructed
+        // `<log>.1`, a permissions change — must not take the write down with it: the
+        // log is over its limit either way, and dropping the record would silence the
+        // event log permanently, which is far worse than an oversized file. Record the
+        // first failure so a log past its documented bound is diagnosable in-band
+        // instead of only visible to whoever thinks to run `ls`.
+        const failure = rotateOrReportFailure();
+        const pending = failure === undefined ? [record] : [failure, record];
+        appendFileSync(
+          logPath,
+          pending.map((entry) => `${JSON.stringify(entry)}\n`).join(""),
+          { encoding: "utf8", mode: 0o600 },
+        );
         chmodSync(logPath, 0o600);
         return true;
       } catch {
@@ -97,6 +130,22 @@ export function createJsonlLogger({ logPath, clock = () => new Date() } = {}) {
       return true;
     },
   };
+
+  // Returns a record describing the first rotation failure, or undefined.
+  function rotateOrReportFailure() {
+    try {
+      rotateJsonlLog(logPath, maxBytes);
+      return undefined;
+    } catch {
+      if (rotationFailureLogged) return undefined;
+      rotationFailureLogged = true;
+      try {
+        return toRecord("router_error", { error_code: "log_rotation_failed" }, clock);
+      } catch {
+        return undefined;
+      }
+    }
+  }
 }
 
 function toRecord(event, fields, clock) {
