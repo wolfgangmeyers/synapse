@@ -259,21 +259,18 @@ function renderRouters() {
 }
 
 function renderAgents() {
-  const known = new Set(state.agents.map((agent) => agent.agent_id));
-  for (const peer of Object.keys(state.messages)) known.add(peer);
-  for (const peer of state.draftPeers) known.add(peer);
   const filter = state.agentFilter.trim().toLowerCase();
-  const peers = [...known]
+  const peers = state.agents
+    .map((agent) => agent.agent_id)
     .filter((peer) => peer && peer !== state.agentId)
     .filter((peer) => !filter || `${peer} ${humanName(peer)}`.toLowerCase().includes(filter))
     .sort();
   elements.agentCount.textContent = String(peers.length);
   elements.agents.replaceChildren(...peers.map((peer) => {
-    const connected = state.agents.some((agent) => agent.agent_id === peer);
     const row = document.createElement("button");
     row.type = "button";
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}`;
-    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span><strong>${escapeHtml(humanName(peer))}</strong><span class="meta">${escapeHtml(peer)} · ${connected ? "Available" : "History"}</span></span>`;
+    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span><strong>${escapeHtml(humanName(peer))}</strong><span class="meta">${escapeHtml(peer)} · Available</span></span>`;
     row.addEventListener("click", () => selectPeer(peer));
     return row;
   }));

@@ -143,7 +143,7 @@ class MainActivity : ComponentActivity() {
         agentId = preferences.getString("agent_id", null)
             ?: "android-${instanceId.take(8)}".also { preferences.edit().putString("agent_id", it).apply() }
         activeRouter = persistedActiveRouter().orEmpty()
-        peers = knownPeers().sorted()
+        peers = emptyList()
         intent.getStringExtra("peer_id")?.takeIf { it.isNotBlank() && activeRouter.isNotBlank() }?.let(::selectPeer)
         setContent { MechaApp() }
         ensureNotificationsEnabled()
@@ -309,9 +309,8 @@ class MainActivity : ComponentActivity() {
                     for (index in 0 until agents.length()) {
                         agents.optJSONObject(index)?.optString("agent_id")?.takeIf { it.isNotBlank() && it != agentId }?.let(::add)
                     }
-                    addAll(knownPeers().filter { it != agentId })
                 }
-                peers = discovered.sorted()
+                runOnUiThread { if (generation == connectionGeneration) peers = discovered.sorted() }
             }
         } catch (_: Exception) {
             // The active connection remains usable when discovery is unavailable.
@@ -395,7 +394,6 @@ class MainActivity : ComponentActivity() {
         if (peer.isBlank()) return
         selectedPeer = peer
         messages = historyFor(peer)
-        peers = (peers + peer).distinct().sorted()
         persistKnownPeers(knownPeers() + peer)
     }
 
@@ -470,7 +468,7 @@ class MainActivity : ComponentActivity() {
         prefs().edit().putStringSet("router_endpoints", updated).putString("active_router", endpoint).commit()
         activeRouter = endpoint
         routerRevision++
-        peers = knownPeers().sorted()
+        peers = emptyList()
         returnHome()
         routerError = ""
         showRouterManager = false
@@ -486,7 +484,7 @@ class MainActivity : ComponentActivity() {
         }
         prefs().edit().putString("active_router", endpoint).commit()
         activeRouter = endpoint
-        peers = knownPeers().sorted()
+        peers = emptyList()
         returnHome()
         showRouterManager = false
         cancelConnection()
@@ -507,7 +505,7 @@ class MainActivity : ComponentActivity() {
         routerError = ""
         if (endpoint == activeRouter) {
             activeRouter = next
-            peers = knownPeers().sorted()
+            peers = emptyList()
             returnHome()
             cancelConnection()
             if (next.isNotBlank()) connect() else connection = "Add a router to connect"
@@ -638,7 +636,7 @@ private fun PeerHome(
                 }
             }
         }
-        Text("Agents", Modifier.padding(top = 28.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("Connected agents", Modifier.padding(top = 28.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         if (peers.isEmpty()) {
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
                 Text("No connected agents yet", Modifier.padding(20.dp), color = TextMuted)

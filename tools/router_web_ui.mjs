@@ -196,7 +196,7 @@ function createBrowserClient(browser, { defaultRouter }) {
         renewTimer = setInterval(() => renewLease(), 10_000);
         refreshAgents();
         clearInterval(refreshTimer);
-        refreshTimer = setInterval(refreshAgents, 30_000);
+        refreshTimer = setInterval(refreshAgents, 60_000);
         return;
       }
       if (frame.type === "lease_rejected" || frame.type === "error") {
