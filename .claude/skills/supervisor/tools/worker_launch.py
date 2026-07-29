@@ -443,7 +443,12 @@ def main():
                 "--router-url",
                 mailbox_router_url,
             ])
-            agent_cmd = f"({sidecar_cmd} >/dev/null 2>&1 &) && {agent_cmd}"
+            agent_cmd = (
+                f"{sidecar_cmd} >/dev/null 2>&1 & "
+                f"sidecar_pid=$!; "
+                f"trap 'kill $sidecar_pid >/dev/null 2>&1 || true' EXIT INT TERM; "
+                f"{agent_cmd}"
+            )
         full_cmd = (
             f"cd {work_dir} && unset CLAUDECODE && "
             f"{pi_exports}{agent_cmd}"

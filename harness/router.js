@@ -411,6 +411,7 @@ export function createAgentRouter({
             lease_id: receipt.leaseId,
             reason: frame.reason,
           });
+          emitRecurringReminderRearmed(result, frame.reason);
         }
         offerNextMessage(currentSocket, session);
       } catch (error) {
@@ -560,6 +561,7 @@ export function createAgentRouter({
           lease_id: outcome.lease_id,
           reason: "delivery_timeout",
         });
+        emitRecurringReminderRearmed(outcome, "delivery_timeout");
       }
     }
     for (const session of sessions.values()) offerSession(session);
@@ -1040,6 +1042,16 @@ export function createAgentRouter({
       if (active.length === 0) requestTimesBySender.delete(sender);
       else if (active.length !== timestamps.length) requestTimesBySender.set(sender, active);
     }
+  }
+
+  function emitRecurringReminderRearmed(outcome, reason) {
+    if (outcome.recurring_reminder_rearmed === undefined) return;
+    emit("recurring_reminder_rearmed", {
+      reminder_id: outcome.recurring_reminder_rearmed.reminder_id,
+      message_id: outcome.message_id,
+      next_due_at: outcome.recurring_reminder_rearmed.next_due_at,
+      reason,
+    });
   }
 
   function emit(event, fields = {}) {

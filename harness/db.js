@@ -303,7 +303,9 @@ class MessageRepository {
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const reminder = selectReminder(this.#database, reminderId);
       if (reminder === undefined) return undefined;
-      if (reminder.state !== "scheduled" || reminder.linked_message_id !== null) {
+      const cancelable = reminder.state === "failed"
+        || (reminder.state === "scheduled" && reminder.linked_message_id === null);
+      if (!cancelable) {
         throw new ReminderCancellationConflictError(
           reminder.id,
           reminder.state,
@@ -312,7 +314,8 @@ class MessageRepository {
       }
       const result = this.#database.prepare(`
         DELETE FROM reminders
-        WHERE id = ? AND state = 'scheduled'
+        WHERE id = ?
+          AND (state = 'failed' OR (state = 'scheduled' AND linked_message_id IS NULL))
       `).run(reminderId);
       if (result.changes !== 1) {
         const current = selectReminder(this.#database, reminderId);
@@ -964,11 +967,7 @@ class MessageRepository {
         SET state = 'queued'
         WHERE id = ? AND state = 'dead_letter'
       `).run(messageId);
-      this.#database.prepare(`
-        UPDATE reminders
-        SET state = 'message_queued'
-        WHERE linked_message_id = ? AND state = 'failed'
-      `).run(messageId);
+      rearmFailedLinkedReminderForRetry(this.#database, messageId, clockTimestamp(this.#clock));
       return selectMessage(this.#database, messageId);
     });
   }
@@ -1972,20 +1971,79 @@ function failDeliveryAttempt(
     SET state = ?
     WHERE id = ? AND state = ?
   `).run(state, delivery.message_id, delivery.message_state);
+  let recurringReminderRearmed;
   if (state === "dead_letter") {
+    recurringReminderRearmed = rearmRecurringReminderAfterDeadLetter(database, delivery.message_id, now);
     database.prepare(`
       UPDATE reminders
       SET state = 'failed',
           attempt_count = attempt_count + 1,
           last_attempt_at = ?
       WHERE linked_message_id = ?
-        AND (
-          (interval_ms IS NULL AND state = 'message_queued')
-          OR (interval_ms IS NOT NULL AND state = 'scheduled')
-        )
+        AND interval_ms IS NULL
+        AND state = 'message_queued'
     `).run(now, delivery.message_id);
   }
-  return { message_id: delivery.message_id, state };
+  return {
+    message_id: delivery.message_id,
+    state,
+    ...(recurringReminderRearmed === undefined ? {} : { recurring_reminder_rearmed: recurringReminderRearmed }),
+  };
+}
+
+function rearmRecurringReminderAfterDeadLetter(database, messageId, now) {
+  const reminder = database.prepare(`
+    SELECT id, next_due_at, interval_ms
+    FROM reminders
+    WHERE linked_message_id = ?
+      AND interval_ms IS NOT NULL
+      AND state = 'scheduled'
+  `).get(messageId);
+  if (reminder === undefined) return undefined;
+  const nextDueAt = recurringDueAtAfterNow(reminder.next_due_at, reminder.interval_ms, now);
+  const updated = database.prepare(`
+    UPDATE reminders
+    SET linked_message_id = NULL,
+        next_due_at = ?,
+        attempt_count = attempt_count + 1,
+        last_attempt_at = ?
+    WHERE id = ?
+      AND linked_message_id = ?
+      AND interval_ms IS NOT NULL
+      AND state = 'scheduled'
+  `).run(nextDueAt, now, reminder.id, messageId);
+  if (updated.changes !== 1) return undefined;
+  return { reminder_id: reminder.id, next_due_at: nextDueAt };
+}
+
+function rearmFailedLinkedReminderForRetry(database, messageId, now) {
+  const reminders = database.prepare(`
+    SELECT id, next_due_at, interval_ms
+    FROM reminders
+    WHERE linked_message_id = ? AND state = 'failed'
+  `).all(messageId);
+  for (const reminder of reminders) {
+    if (reminder.interval_ms === null) {
+      database.prepare(`
+        UPDATE reminders
+        SET state = 'message_queued'
+        WHERE id = ? AND linked_message_id = ? AND state = 'failed'
+      `).run(reminder.id, messageId);
+      continue;
+    }
+    const nextDueAt = recurringDueAtAfterNow(reminder.next_due_at, reminder.interval_ms, now);
+    database.prepare(`
+      UPDATE reminders
+      SET state = 'scheduled',
+          linked_message_id = NULL,
+          next_due_at = ?
+      WHERE id = ? AND linked_message_id = ? AND state = 'failed'
+    `).run(nextDueAt, reminder.id, messageId);
+  }
+}
+
+function recurringDueAtAfterNow(priorDueAt, intervalMs, now) {
+  return priorDueAt > now ? priorDueAt : nextRecurringDueAt(priorDueAt, intervalMs, now);
 }
 
 function deleteLease(database, agentId) {
