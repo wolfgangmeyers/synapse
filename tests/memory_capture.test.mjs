@@ -73,7 +73,7 @@ test("configured extractor permits sixty seconds and passes cancellation to its 
   const pending = runMemoryExtractor({ source: { messages: [] }, policy: RECALL_POLICY.capture, signal: controller.signal, spawn: (file, args, options, done) => {
     call = { file, args, options }; options.signal.addEventListener("abort", () => { aborted = true; done(new Error("aborted")); }, { once: true }); return { stdin: { end() { stdinClosed = true; } } };
   } });
-  assert.equal(call.file, "pi"); assert.equal(call.args[call.args.indexOf("--model") + 1], "openai-codex/gpt-5.6-sol"); assert.equal(call.args[call.args.indexOf("--thinking") + 1], "off"); assert.equal(call.options.timeout, 60_000);
+  assert.equal(call.file, "pi"); assert.equal(call.args[call.args.indexOf("--model") + 1], "anthropic/claude-sonnet-5"); assert.equal(call.args.includes("--provider"), false); assert.equal(call.args[call.args.indexOf("--thinking") + 1], "off"); assert.equal(call.options.timeout, 60_000);
   assert.equal(stdinClosed, true); controller.abort(); await assert.rejects(pending, /aborted/); assert.equal(aborted, true);
 });
 

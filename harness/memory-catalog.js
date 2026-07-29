@@ -7,10 +7,10 @@ export const RECALL_POLICY = Object.freeze({
   maximum_window_seconds: 120,
   candidate_limit: 100,
   candidate_bytes: 16384,
-  evaluator: "openai-codex/gpt-5.6-luna",
+  evaluator: "anthropic/claude-sonnet-5",
   maximum_messages: 3,
   expansion: Object.freeze({ maximum_ids: 6, maximum_terms: 3, maximum_tags: 8, maximum_matched_records: 12, maximum_bytes: 16384, maximum_related_edges: 24, maximum_graph_depth: 2 }),
-  capture: Object.freeze({ evaluator: "openai-codex/gpt-5.6-sol", compaction_deadline_ms: 30000, shutdown_deadline_ms: 10000, evaluator_timeout_ms: 60000, router_timeout_ms: 5000, source_max_bytes: 98304, source_message_max_bytes: 8192, tool_result_max_bytes: 2048, previous_summary_max_bytes: 8192, candidate_limit: 100, candidate_max_bytes: 65536, output_max_bytes: 32768, maximum_records: 6, maximum_title_bytes: 256, maximum_body_bytes_per_record: 16384, maximum_total_body_bytes: 32768, maximum_related_ids_per_record: 24 }),
+  capture: Object.freeze({ evaluator: "anthropic/claude-sonnet-5", compaction_deadline_ms: 30000, shutdown_deadline_ms: 10000, evaluator_timeout_ms: 60000, router_timeout_ms: 5000, source_max_bytes: 98304, source_message_max_bytes: 8192, tool_result_max_bytes: 2048, previous_summary_max_bytes: 8192, candidate_limit: 100, candidate_max_bytes: 65536, output_max_bytes: 32768, maximum_records: 6, maximum_title_bytes: 256, maximum_body_bytes_per_record: 16384, maximum_total_body_bytes: 32768, maximum_related_ids_per_record: 24 }),
 });
 const STORE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ID = /^[a-z0-9][a-z0-9-]{0,127}$/;
