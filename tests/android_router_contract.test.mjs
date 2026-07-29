@@ -560,6 +560,15 @@ test("discovery excludes a session after its repository lease expires", async ()
   }
 });
 
+test("Android home renders only router-discovered connected peers", () => {
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  assert.match(activity, /scheduleAtFixedRate\(60_000, 60_000\)[\s\S]*discoverPeers\(generation\)/);
+  assert.match(activity, /val discovered = buildSet \{[\s\S]*agents\.optJSONObject\(index\)\?\.optString\("agent_id"\)[\s\S]*\}\n\s*runOnUiThread \{ if \(generation == connectionGeneration\) peers = discovered\.sorted\(\) \}/);
+  assert.doesNotMatch(activity, /addAll\(knownPeers\(\)\.filter/);
+  assert.doesNotMatch(activity, /peers = \(peers \+ peer\)\.distinct\(\)\.sorted\(\)/);
+  assert.match(activity, /Text\("Connected agents"/);
+});
+
 test("discovery exposes only active sessions with role and no lease metadata", async () => {
   const directory = await mkdtemp(join(tmpdir(), "android-router-discovery-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
