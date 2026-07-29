@@ -119,6 +119,64 @@ test("failed one-shot reminders remain cancelable through the documented delete 
   assert.equal(repository.reminderFor("one-shot"), undefined);
 });
 
+test("cancel-all repairs failed reminders alongside scheduled ones", async (t) => {
+  const initialDueAt = Date.parse("2030-01-01T00:00:00.000Z");
+  let now = initialDueAt;
+  const repository = await withReminderRepository(t, () => new Date(now));
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "supervisor-instance",
+    leaseId: "supervisor-lease",
+  };
+
+  const oneShot = (id) => repository.createReminder({
+    id,
+    target: identity.agentId,
+    creator: "supervisor",
+    body: "wake up",
+    created_at: new Date(initialDueAt).toISOString(),
+    next_due_at: new Date(initialDueAt).toISOString(),
+    interval_ms: null,
+  });
+  const claimAndRequestInjection = () => {
+    const delivery = repository.claimNextMessage(identity);
+    repository.recordInjectionRequested({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+    });
+    return delivery;
+  };
+
+  repository.acquireAgentLease({ ...identity, leaseDurationMs: 60 * 60 * 1000 });
+  oneShot("failing");
+  repository.fireDueReminders();
+  const failed = claimAndRequestInjection();
+  repository.nackDelivery({
+    ...identity,
+    messageId: failed.message.id,
+    attemptNumber: failed.attempt_number,
+    reason: "delivery_failed",
+    maxDeliveryAttempts: 1,
+  });
+  assert.equal(repository.reminderFor("failing").state, "failed");
+
+  // A reminder that is genuinely mid-delivery must still block cancel-all.
+  oneShot("pending");
+  repository.fireDueReminders();
+  const pending = claimAndRequestInjection();
+  assert.throws(() => repository.cancelAllReminders(), { code: "reminder_not_cancelable" });
+
+  repository.acknowledgeDelivery({
+    ...identity,
+    messageId: pending.message.id,
+    attemptNumber: pending.attempt_number,
+  });
+  assert.equal(repository.reminderFor("pending"), undefined);
+  assert.deepEqual(repository.cancelAllReminders(), { canceled: 1 });
+  assert.equal(repository.reminderFor("failing"), undefined);
+});
+
 test("retrying an old failed recurring reminder does not leave its due time in the past", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-reminder-scheduler-"));
   t.after(async () => {

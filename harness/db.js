@@ -339,8 +339,8 @@ class MessageRepository {
           messages.state AS linked_message_state
         FROM reminders
         LEFT JOIN messages ON messages.id = reminders.linked_message_id
-        WHERE reminders.state != 'scheduled'
-          OR reminders.linked_message_id IS NOT NULL
+        WHERE reminders.state NOT IN ('scheduled', 'failed')
+          OR (reminders.state = 'scheduled' AND reminders.linked_message_id IS NOT NULL)
         ORDER BY reminders.id ASC
         LIMIT 1
       `).get();
@@ -351,7 +351,10 @@ class MessageRepository {
           linked.linked_message_state,
         );
       }
-      const result = this.#database.prepare("DELETE FROM reminders WHERE state = 'scheduled'").run();
+      const result = this.#database.prepare(`
+        DELETE FROM reminders
+        WHERE state = 'failed' OR (state = 'scheduled' AND linked_message_id IS NULL)
+      `).run();
       return { canceled: result.changes };
     });
   }
