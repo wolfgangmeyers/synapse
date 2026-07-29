@@ -28,8 +28,8 @@ from _tmux import _AGENT_ID, ensure_session, new_window, send_text, send_enter, 
 from worker_runtime_config import WorkerRuntimeConfigError, resolve_agent_runtime
 
 
-PI_PROVIDER = "openai-codex"
-PI_MODEL = "gpt-5.5"
+PI_PROVIDER = "anthropic"
+PI_MODEL = "claude-opus-5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"

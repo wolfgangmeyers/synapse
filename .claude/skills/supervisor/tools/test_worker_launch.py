@@ -48,7 +48,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertNotIn("set_reminder.py", output)
         self.assertNotIn("--- Reminders ---", output)
 
-    def test_main_defaults_to_pinned_pi_gpt_55(self):
+    def test_main_defaults_to_pinned_pi_claude_opus_5(self):
         extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
@@ -57,8 +57,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, output = self._run_main("pi-worker", agent=None)
 
         command = shlex.split(commands[0])
-        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertEqual(command[command.index("--provider") + 1], "anthropic")
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5")
         self.assertIn(str(extension), command)
         self.assertNotIn("--no-extensions", command)
         session_id = command[command.index("--session-id") + 1]
@@ -95,8 +95,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         command = shlex.split(commands[0])
-        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertEqual(command[command.index("--provider") + 1], "anthropic")
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5")
         self.assertNotIn("claude_sidecar.mjs", commands[0])
 
     def test_invalid_machine_default_runtime_fails_before_launch(self):
@@ -169,7 +169,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
-        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.5", commands[0])
+        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=anthropic/claude-opus-5", commands[0])
         self.assertNotIn(worker_launch.PI_NOTIFY_ON_SETTLED_ENV, commands[0])
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])

@@ -28,8 +28,8 @@ class SupervisorStartTest(unittest.TestCase):
             )
 
         self.assertEqual(command[0], "pi")
-        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertEqual(command[command.index("--provider") + 1], "anthropic")
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5")
         self.assertEqual(command[command.index("--name") + 1], "supervisor")
         extension_index = command.index("--extension")
         self.assertNotIn("--no-extensions", command)
@@ -78,7 +78,7 @@ class SupervisorStartTest(unittest.TestCase):
                 supervisor_start.main()
 
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
-        self.assertIn(f"export {supervisor_start.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.5", commands[0])
+        self.assertIn(f"export {supervisor_start.PI_MODEL_KEY_ENV}=anthropic/claude-opus-5", commands[0])
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--extension") + 1], str(extension))
         self.assertNotIn("MECHA_AGENT_WINDOW", commands[0])
