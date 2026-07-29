@@ -7,6 +7,11 @@ const HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const HISTORY_DB_NAME = "mecha-router-web-ui";
 const HISTORY_DB_VERSION = 1;
 const HISTORY_STORE_NAME = "conversation_messages";
+const DRAFT_STORE_KEY = "mecha.web.drafts";
+const DRAFT_LIMIT = 200;
+const DRAFT_RETENTION_DAYS = 30;
+const DRAFT_RETENTION_MS = DRAFT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+const SELECTED_PEER_STORE_KEY = "mecha.web.selectedPeers";
 const SCOPE_SEPARATOR = "\u001f";
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
@@ -19,6 +24,7 @@ const state = {
   agents: [],
   selectedPeer: "",
   messages: {},
+  draftPeers: new Set(),
 };
 
 const elements = {
@@ -52,10 +58,13 @@ if (!localStorage.getItem("mecha.web.activeRouter")) {
 }
 ensureRouter(state.routerUrl);
 state.messages = await loadMessages(state.routerUrl, state.agentId);
+state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
+state.selectedPeer = loadSelectedPeer(state.routerUrl, state.agentId);
 elements.routerUrl.value = state.routerUrl;
 elements.agentId.value = state.agentId;
 connectUiSocket();
 render();
+restoreDraftForSelectedPeer();
 
 void pruneExpiredHistory();
 
@@ -79,6 +88,7 @@ elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   sendDraft();
 });
+elements.draft.addEventListener("input", () => saveCurrentDraft());
 elements.draft.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -129,15 +139,18 @@ async function handleEvent(event) {
 }
 
 async function switchRouter(routerUrl, { connect = false } = {}) {
+  saveCurrentDraft();
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl);
   state.agents = [];
-  state.selectedPeer = "";
+  state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
   state.messages = await loadMessages(routerUrl, state.agentId);
+  state.draftPeers = loadDraftPeers(routerUrl, state.agentId);
   localStorage.setItem("mecha.web.activeRouter", routerUrl);
   elements.routerUrl.value = routerUrl;
   elements.agentId.value = state.agentId;
   render();
+  restoreDraftForSelectedPeer();
   if (connect) {
     sendCommand({ type: "connect", routerUrl, agentId: state.agentId });
     elements.routerDialog.close();
@@ -212,6 +225,7 @@ function renderRouters() {
 function renderAgents() {
   const known = new Set(state.agents.map((agent) => agent.agent_id));
   for (const peer of Object.keys(state.messages)) known.add(peer);
+  for (const peer of state.draftPeers) known.add(peer);
   const peers = [...known].filter((peer) => peer && peer !== state.agentId).sort();
   elements.agentCount.textContent = String(peers.length);
   elements.agents.replaceChildren(...peers.map((peer) => {
@@ -226,8 +240,15 @@ function renderAgents() {
 }
 
 function selectPeer(peer) {
+  if (peer === state.selectedPeer) {
+    restoreDraftForSelectedPeer({ focus: true });
+    return;
+  }
+  saveCurrentDraft();
   state.selectedPeer = peer;
+  saveSelectedPeer(peer);
   render();
+  restoreDraftForSelectedPeer({ focus: true });
 }
 
 function sendDraft() {
@@ -237,6 +258,7 @@ function sendDraft() {
   const message = { id: localId, from: state.agentId, to: state.selectedPeer, body, created_at: new Date().toISOString(), direction: "outgoing", pending: true };
   void appendMessage(state.selectedPeer, message);
   elements.draft.value = "";
+  clearCurrentDraft();
   sendCommand({ type: "send_message", to: state.selectedPeer, body, localId });
 }
 
@@ -249,6 +271,7 @@ function renderConversation() {
   elements.draft.disabled = !peer;
   elements.send.disabled = !peer;
   if (!peer) {
+    elements.draft.value = "";
     elements.messages.innerHTML = `<div class="empty-state"><h3>No conversation selected</h3><p>Choose a connected agent on ${escapeHtml(displayRouter(state.routerUrl))}, or open Routers to switch.</p></div>`;
     return;
   }
@@ -409,6 +432,60 @@ function requestDone(transaction) {
 function ownerScope(routerUrl, agentId) { return `${routerUrl}${SCOPE_SEPARATOR}${agentId}`; }
 function peerScope(routerUrl, agentId, peer) { return `${ownerScope(routerUrl, agentId)}${SCOPE_SEPARATOR}${peer}`; }
 function messageTime(message) { return Date.parse(message.created_at || message.createdAt || "") || Date.now(); }
+function draftScope(routerUrl = state.routerUrl, agentId = state.agentId, peer = state.selectedPeer) { return peer ? peerScope(routerUrl, agentId, peer) : ""; }
+function loadDrafts() {
+  try { return pruneDrafts(JSON.parse(localStorage.getItem(DRAFT_STORE_KEY) || "{}")); } catch { return {}; }
+}
+function saveDrafts(drafts) { localStorage.setItem(DRAFT_STORE_KEY, JSON.stringify(pruneDrafts(drafts))); }
+function pruneDrafts(drafts, now = Date.now()) {
+  const cutoff = now - DRAFT_RETENTION_MS;
+  return Object.fromEntries(Object.entries(drafts)
+    .map(([key, draft]) => [key, typeof draft === "string" ? { body: draft, updatedAtMs: now } : draft])
+    .filter(([, draft]) => draft?.body && (draft.updatedAtMs || 0) >= cutoff)
+    .sort(([, left], [, right]) => (left.updatedAtMs || 0) - (right.updatedAtMs || 0))
+    .slice(-DRAFT_LIMIT));
+}
+function loadDraftPeers(routerUrl, agentId) {
+  const prefix = `${ownerScope(routerUrl, agentId)}${SCOPE_SEPARATOR}`;
+  return new Set(Object.entries(loadDrafts()).filter(([key, draft]) => key.startsWith(prefix) && draft.body).map(([key]) => key.slice(prefix.length)));
+}
+function saveCurrentDraft() {
+  const key = draftScope();
+  if (!key) return;
+  const drafts = loadDrafts();
+  const value = elements.draft.value;
+  if (value) drafts[key] = { body: value, updatedAtMs: Date.now() };
+  else delete drafts[key];
+  saveDrafts(drafts);
+  state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
+}
+function clearCurrentDraft() {
+  const key = draftScope();
+  if (!key) return;
+  const drafts = loadDrafts();
+  delete drafts[key];
+  saveDrafts(drafts);
+  state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
+}
+function restoreDraftForSelectedPeer({ focus = false } = {}) {
+  const key = draftScope();
+  elements.draft.value = key ? loadDrafts()[key]?.body || "" : "";
+  if (focus && key) focusDraftAtEnd();
+}
+function focusDraftAtEnd() {
+  elements.draft.focus({ preventScroll: true });
+  const end = elements.draft.value.length;
+  elements.draft.setSelectionRange(end, end);
+}
+function loadSelectedPeers() {
+  try { return JSON.parse(localStorage.getItem(SELECTED_PEER_STORE_KEY) || "{}"); } catch { return {}; }
+}
+function loadSelectedPeer(routerUrl, agentId) { return loadSelectedPeers()[ownerScope(routerUrl, agentId)] || ""; }
+function saveSelectedPeer(peer) {
+  const selectedPeers = loadSelectedPeers();
+  selectedPeers[ownerScope(state.routerUrl, state.agentId)] = peer;
+  localStorage.setItem(SELECTED_PEER_STORE_KEY, JSON.stringify(selectedPeers));
+}
 
 function normalizeRouterInput(value) {
   const candidate = value.trim();
