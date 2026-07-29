@@ -4,8 +4,8 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
+import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import { DEFAULT_MAX_BATCH_BODY_CHARS, openMessageRepository } from "../harness/db.js";
 import { openMemoryCatalog } from "../harness/memory-catalog.js";
 import { createJsonlLogger } from "../harness/jsonl_logger.js";
@@ -168,6 +168,6 @@ async function main() {
   process.once("SIGTERM", () => { void close("SIGTERM"); });
 }
 
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isCliEntrypoint(import.meta.url)) {
   await main();
 }
