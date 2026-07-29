@@ -37,6 +37,11 @@ const DEFAULT_MAX_REQUEST_BYTES = MAX_REQUEST_BYTES;
 const DEFAULT_MAX_REQUESTS_PER_WINDOW = 60;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
+const CORS_HEADERS = Object.freeze({
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+  "access-control-allow-headers": "content-type",
+});
 const HTTP_ERROR_MESSAGES = Object.freeze({
   invalid_request: "Request does not match the mailbox protocol.",
   payload_too_large: "Request exceeds local mailbox limits.",
@@ -777,8 +782,14 @@ export function createAgentRouter({
 
   async function handleHttpRequest(request, response) {
     const requestUrl = new URL(request.url ?? "/", "http://router.local");
-    if (request.headers.origin !== undefined) {
-      sendHttpError(response, 403, "browser_origin_rejected");
+    if (isBrowserCorsRoute(request.method, requestUrl.pathname)) applyCorsHeaders(response);
+    if (request.method === "OPTIONS") {
+      if (isBrowserCorsRoute(request.method, requestUrl.pathname)) {
+        response.writeHead(204, { "cache-control": "no-store" });
+        response.end();
+      } else {
+        sendHttpError(response, 404, "not_found");
+      }
       return;
     }
     if (request.method === "GET" && requestUrl.pathname === "/v1/health") {
@@ -1206,6 +1217,16 @@ function sendHttpJson(response, statusCode, payload, headers = {}) {
     ...headers,
   });
   response.end(JSON.stringify(payload));
+}
+
+function applyCorsHeaders(response) {
+  for (const [header, value] of Object.entries(CORS_HEADERS)) response.setHeader(header, value);
+}
+
+function isBrowserCorsRoute(method, pathname) {
+  if (method === "OPTIONS") return ["/v1/agents", "/v1/messages", "/v1/health"].includes(pathname);
+  return (method === "GET" && ["/v1/agents", "/v1/health"].includes(pathname))
+    || (method === "POST" && pathname === "/v1/messages");
 }
 
 function sendHttpError(response, statusCode, code, headers = {}) {

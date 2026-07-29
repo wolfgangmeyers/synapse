@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mecha Router</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <aside class="sidebar">
+      <header class="brand">
+        <div>
+          <h1>Mecha</h1>
+          <p>Your agent network</p>
+        </div>
+        <button id="refresh" type="button" aria-label="Refresh agents">↻</button>
+      </header>
+
+      <button id="router-selector" class="router-selector" type="button">
+        <span>
+          <small>Router</small>
+          <strong id="selected-router-label">127.0.0.1:8765</strong>
+        </span>
+        <span aria-hidden="true">⌄</span>
+      </button>
+
+      <section class="status-card" aria-live="polite">
+        <span id="status-dot" class="status-dot offline"></span>
+        <div>
+          <strong id="status-title">Disconnected</strong>
+          <p id="status-detail">Open routers to connect.</p>
+        </div>
+      </section>
+
+      <div class="section-title">
+        <span>Agents</span>
+        <small id="agent-count">0</small>
+      </div>
+      <div id="agents" class="agents" role="list"></div>
+    </aside>
+
+    <section class="conversation" aria-label="Conversation">
+      <header class="conversation-header">
+        <div id="peer-avatar" class="avatar muted">?</div>
+        <div>
+          <h2 id="peer-name">Pick an agent</h2>
+          <p id="peer-detail">Connected agents appear on the left.</p>
+        </div>
+      </header>
+
+      <div id="messages" class="messages">
+        <div class="empty-state">
+          <h3>No conversation selected</h3>
+          <p>Choose a connected agent or wait for one to message this web client.</p>
+        </div>
+      </div>
+
+      <form id="composer" class="composer">
+        <textarea id="draft" rows="2" placeholder="Message an agent" disabled></textarea>
+        <button id="send" type="submit" disabled>Send</button>
+      </form>
+    </section>
+  </main>
+
+  <dialog id="router-dialog" class="router-dialog">
+    <form method="dialog" class="dialog-shell">
+      <header>
+        <div>
+          <h2>Routers</h2>
+          <p>Each router keeps its own agents and chat history.</p>
+        </div>
+        <button id="close-router-dialog" value="cancel" aria-label="Close routers">×</button>
+      </header>
+
+      <div id="saved-routers" class="saved-routers"></div>
+
+      <section class="router-setup">
+        <h3>Add router</h3>
+        <label>Hostname or URL
+          <input id="router-url" name="router-url" autocomplete="off" placeholder="http://127.0.0.1:8765">
+        </label>
+        <label>Connect as user
+          <input id="agent-id" name="agent-id" autocomplete="off" spellcheck="false">
+        </label>
+        <button id="add-router" type="button">Add router</button>
+      </section>
+    </form>
+  </dialog>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
