@@ -4,6 +4,8 @@
 Usage:
   python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--reasoning-effort low|medium|high|xhigh] [--notify-on-settled MAILBOX_RECIPIENT]
 
+When --agent is omitted, the runtime comes from the machine-local worker runtime config and falls back to Pi.
+
 Creates a tmux window, starts the agent in the specified directory,
 and waits for it to initialize. Deliver all instructions with mailbox_send.py
 after verifying the agent registered with Mailbox V2.
@@ -23,6 +25,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _tmux import _AGENT_ID, ensure_session, new_window, send_text, send_enter, window_exists
+from worker_runtime_config import WorkerRuntimeConfigError, resolve_agent_runtime
 
 
 PI_PROVIDER = "openai-codex"
@@ -34,6 +37,7 @@ DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 PI_NOTIFY_ON_SETTLED_ENV = "MECHA_PI_NOTIFY_ON_SETTLED"
 PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
 PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
+CLAUDE_SIDECAR_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_sidecar.mjs")
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -207,7 +211,7 @@ def _codex_pretrust_workspace(work_dir):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Launch a Pi worker by default in a new tmux window."
+        description="Launch a managed worker in a new tmux window."
     )
     parser.add_argument("--window", required=True, help="Tmux window name")
     parser.add_argument("--dir", required=True, help="Working directory for the agent")
@@ -234,9 +238,9 @@ def main():
 
     parser.add_argument(
         "--agent",
-        default="pi",
+        default=None,
         choices=["pi", "claude", "codex", "cursor"],
-        help="Agent to launch: 'pi' (default, pinned to OpenAI Codex GPT-5.5), or a legacy runtime",
+        help="Agent to launch. Overrides the machine-local default runtime config.",
     )
 
     parser.add_argument(
@@ -264,6 +268,11 @@ def main():
     )
 
     args = parser.parse_args()
+    try:
+        args.agent = resolve_agent_runtime(args.agent)
+    except WorkerRuntimeConfigError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
 
     if args.notify_on_settled is not None:
         if args.agent != "pi":
@@ -283,11 +292,12 @@ def main():
 
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
     pi_mailbox_extension = None
-    pi_router_url = None
-    if args.agent == "pi":
+    mailbox_router_url = None
+    if args.agent in {"pi", "claude"}:
         try:
-            pi_mailbox_extension = resolve_pi_mailbox_extension()
-            pi_router_url = resolve_pi_router_url()
+            if args.agent == "pi":
+                pi_mailbox_extension = resolve_pi_mailbox_extension()
+            mailbox_router_url = resolve_pi_router_url()
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
             sys.exit(1)
@@ -375,17 +385,18 @@ def main():
         if args.resume:
             agent_cmd += f" --resume {args.resume}"
 
-    # Pre-create the Claude project directory for this worktree with
-    # skipDangerousModePermissionPrompt=true so the workspace trust dialog
-    # is suppressed before the agent even starts.
-    encoded = work_dir.lstrip("/").replace("/", "-")
-    project_dir = os.path.join(os.path.expanduser("~/.claude/projects"), f"-{encoded}")
-    os.makedirs(project_dir, exist_ok=True)
-    project_settings = os.path.join(project_dir, "settings.json")
-    if not os.path.exists(project_settings):
-        import json as _json
-        with open(project_settings, "w") as f:
-            _json.dump({"skipDangerousModePermissionPrompt": True}, f)
+    if args.agent == "claude":
+        # Pre-create the Claude project directory for this worktree with
+        # skipDangerousModePermissionPrompt=true so the workspace trust dialog
+        # is suppressed before the agent even starts.
+        encoded = work_dir.lstrip("/").replace("/", "-")
+        project_dir = os.path.join(os.path.expanduser("~/.claude/projects"), f"-{encoded}")
+        os.makedirs(project_dir, exist_ok=True)
+        project_settings = os.path.join(project_dir, "settings.json")
+        if not os.path.exists(project_settings):
+            import json as _json
+            with open(project_settings, "w") as f:
+                _json.dump({"skipDangerousModePermissionPrompt": True}, f)
 
     created = ensure_session()
     if created:
@@ -400,7 +411,7 @@ def main():
     else:
         pi_exports = ""
         if args.agent == "pi":
-            pi_exports = f"export {PI_ROUTER_URL_ENV}={shlex.quote(pi_router_url)} && "
+            pi_exports = f"export {PI_ROUTER_URL_ENV}={shlex.quote(mailbox_router_url)} && "
             if args.notify_on_settled is not None:
                 pi_exports += (
                     f"export {PI_NOTIFY_ON_SETTLED_ENV}="
@@ -412,6 +423,18 @@ def main():
                     f"export {PI_COMPACTION_POLICY_ENV}="
                     f"{shlex.quote(compaction_policy)} && "
                 )
+        if args.agent == "claude":
+            sidecar_cmd = _quote_command([
+                "node",
+                CLAUDE_SIDECAR_SCRIPT,
+                "--agent-id",
+                args.window,
+                "--window",
+                args.window,
+                "--router-url",
+                mailbox_router_url,
+            ])
+            agent_cmd = f"({sidecar_cmd} >/dev/null 2>&1 &) && {agent_cmd}"
         full_cmd = (
             f"cd {work_dir} && unset CLAUDECODE && "
             f"{pi_exports}{agent_cmd}"
@@ -428,7 +451,12 @@ def main():
     print(f"Worker ({args.agent}) {action} in window '{args.window}' at {work_dir}")
     print()
     print("--- Next steps ---")
-    print("1. Verify the Pi worker registered with Mailbox V2, then inspect its status if needed:")
+    if args.agent == "pi":
+        print("1. Verify the Pi worker registered with Mailbox V2, then inspect its status if needed:")
+    elif args.agent == "claude":
+        print("1. Verify the Claude sidecar registered with Mailbox V2, then inspect the worker pane if needed:")
+    else:
+        print("1. Verify the worker is running, then inspect its status if needed:")
     print(f"   python3 worker_capture.py --window {args.window}")
     print("2. Deliver instructions through Mailbox V2:")
     print("   python3 mailbox_send.py --from supervisor \\")
@@ -443,7 +471,7 @@ def main():
         print(f"   python3 state_add.py --alias <alias> --type worker --agent {args.agent} ...")
     print()
     print("If the recipient is not registered or is not running, restore it through")
-    print("the managed Pi lifecycle/worker_launch.py. Do not type into its terminal or tmux pane.")
+    print("the managed worker lifecycle/worker_launch.py. Do not type into its terminal or tmux pane.")
     print("Before shutting down, verify the work is correct (background subagent).")
 
 

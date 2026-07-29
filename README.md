@@ -13,6 +13,16 @@ Skills live under `.claude/skills/<name>/SKILL.md` with optional `tools/` and su
 
 This repo is the home for non-review developer workflow skills.
 
+## Managed worker runtime
+
+`worker_launch.py` uses a machine-local default runtime from `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) with this shape:
+
+```json
+{"default_agent":"pi"}
+```
+
+Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Pi remains pinned to provider `openai-codex` and model `gpt-5.5`. Claude workers are launched with a Mailbox V2 sidecar that registers as the normal worker agent ID and pastes sanitized mailbox messages into the Claude tmux pane; phase 1 does not scrape Claude replies, so Claude workers reply with `mailbox_send.py`.
+
 ## Pi context thresholds and self-compaction
 
 The Mailbox V2 Pi extension monitors `ctx.getContextUsage()` and sends direct in-session notifications when percentage thresholds are crossed. The default policy uses a sensible 40/50/60/70/80/90 ladder for ordinary 272k-token workers, keeps stricter internal defaults for very large context windows, and has tighter built-in defaults for Sol models.
