@@ -5,7 +5,8 @@ Usage:
   python worker_shutdown.py --window WINDOW [--wait SECONDS] [--verified]
 
 Sends /exit to Claude Code, waits for it to shut down, then kills the
-tmux window. This is the standard cleanup sequence for workers and pipelines.
+tmux window and the worker's mailbox sidecar. This is the standard cleanup
+sequence for workers and pipelines.
 
 Requires verification that the worker's output has been checked before shutdown.
 """
@@ -16,6 +17,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _sidecar import cleanup_sidecar
 from _tmux import (
     send_text_and_enter,
     kill_window,
@@ -65,6 +67,10 @@ def main():
 
     if not window_exists(args.window):
         print(f"Window '{args.window}' does not exist (already cleaned up).")
+        # Still sweep the sidecar: an orphaned sidecar outliving its window is the
+        # exact leak this handles, and it keeps accepting mail for a dead worker.
+        if not cleanup_sidecar(args.window):
+            sys.exit(1)
         return
 
     # Send /exit to Claude
@@ -73,8 +79,8 @@ def main():
 
     time.sleep(args.wait)
 
-    # Kill the window
-    kill_window(args.window)
+    # Kill the window. This also sweeps the mailbox sidecar — see _tmux.kill_window.
+    sidecar_clean = kill_window(args.window)
     print(f"Killed window '{args.window}'.")
 
     # Reminders
@@ -88,6 +94,14 @@ def main():
     print("4. If abandoning, remove the worktree too:")
     print(f"   cd <project-path> && git worktree remove --force <worktree-path>")
     print(f"   python3 state_update_state.py <alias> abandoned --reason \"<reason>\"")
+
+    if not sidecar_clean:
+        print(
+            "5. FIRST: resolve the mailbox sidecar warning above. Until it is gone, "
+            "mail addressed to this agent is accepted and lost, so do not mark the "
+            "window free yet."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

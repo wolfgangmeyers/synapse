@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { mkdirSync, renameSync, statSync, appendFileSync, rmSync } from "node:fs";
+import { mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { isCliEntrypoint } from "../../../../harness/cli_entrypoint.js";
+import { rotateSizeCappedLog } from "../../../../harness/log_rotation.js";
 import { createMailboxClient, assertAgentId } from "../../../../pi-extensions/mailbox-client.js";
 
 export const DEFAULT_LOG_DIR = "~/.mecha-developer/claude-sidecars";
@@ -31,15 +32,7 @@ export function claudeMailboxPrompt(message) {
 }
 
 export function rotateBodyFreeLog(logPath, maxBytes = DEFAULT_MAX_LOG_BYTES) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("maxBytes must be a positive safe integer");
-  try {
-    if (statSync(logPath).size < maxBytes) return;
-  } catch (error) {
-    if (error?.code === "ENOENT") return;
-    throw error;
-  }
-  rmSync(`${logPath}.1`, { force: true });
-  renameSync(logPath, `${logPath}.1`);
+  rotateSizeCappedLog(logPath, maxBytes);
 }
 
 export function createBodyFreeLogger({ agentId, logDir = DEFAULT_LOG_DIR, maxBytes = DEFAULT_MAX_LOG_BYTES, now = () => new Date() } = {}) {

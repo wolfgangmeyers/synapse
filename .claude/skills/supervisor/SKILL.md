@@ -275,7 +275,7 @@ When all reviewers sign off with only Suggestions/Nits, **commit and push withou
 
 **Mailbox V2 coordination**: Send every instruction, redirect, question, authorization, and recovery follow-up with `mailbox_send.py --from supervisor --to <agent-id> --body <text>`. Do not type terminal/menu input. A missing Mailbox V2 registration or stopped agent is a lifecycle fault: restore it through `worker_launch.py` with its recorded Pi session, then retry Mailbox V2 delivery.
 
-Key tools: `worker_launch.py` (managed Pi lifecycle), `mailbox_send.py` (all coordination), `worker_capture.py` (diagnostics), `worker_kill.py` (kill window, no state/worktree effect), `worker_shutdown.py` (graceful shutdown).
+Key tools: `worker_launch.py` (managed Pi lifecycle), `mailbox_send.py` (all coordination), `worker_capture.py` (diagnostics), `worker_kill.py` (kill window and mailbox sidecar, no state/worktree effect), `worker_shutdown.py` (graceful shutdown).
 
 ### Compact helper toolbox
 
@@ -790,8 +790,11 @@ Checklist enforced: requirements checked, diff reviewed, evidence present, remin
 **Shutdown ≠ cleanup.** Killing frees RAM/CPU — task stays active, worktree intact, branch on disk. Resume anytime with `worker_launch.py`.
 
 ```bash
-# Kill the window (frees resources only)
-python3 ~/.claude/skills/supervisor/tools/worker_kill.py --window "$WORKER_NAME"
+# Kill the window and its mailbox sidecar (frees resources only).
+# A non-zero exit means a sidecar may still be running and holding this agent's
+# mailbox identity: resolve it (see worker_kill.py below) before updating state,
+# or mail addressed to the dead worker is accepted and silently lost.
+python3 ~/.claude/skills/supervisor/tools/worker_kill.py --window "$WORKER_NAME" || exit 1
 
 # Update state to reflect no active window — task stays blocked/active
 python3 ~/.claude/skills/supervisor/tools/state_update_field.py <alias> window "(none — worker exited)"
@@ -879,7 +882,7 @@ python3 ~/.claude/skills/supervisor/tools/worker_send_requirements.py --alias <a
 
 When dropping a task entirely (no intent to continue):
 
-1. Shut down the worker (`worker_shutdown.py`)
+1. Shut down the worker (`worker_shutdown.py`) — if it exits non-zero, resolve the mailbox sidecar before marking anything abandoned
 2. Run the dirty worktree cleanup gate above. If source/artifact changes remain and are not explicitly classified as abandoned, do not remove the worktree.
 3. Remove the worktree:
 
@@ -1389,7 +1392,14 @@ Captures terminal content including scrollback. Use for post-launch verification
 python3 ~/.claude/skills/supervisor/tools/worker_shutdown.py --window WINDOW [--wait SECONDS] --verified
 ```
 
-Sends `/exit`, waits for shutdown, kills the window. Standard cleanup for workers and pipelines. Requires `--verified`, which must only be passed after verifying the worker's output is correct and complete (read key files, check commits, confirm tests pass).
+Sends `/exit`, waits for shutdown, kills the window, then terminates the worker's mailbox sidecar and confirms it is gone. Standard cleanup for workers and pipelines. Requires `--verified`, which must only be passed after verifying the worker's output is correct and complete (read key files, check commits, confirm tests pass).
+
+Exits non-zero when the sidecar may still be running. The window is already gone at that point; the non-zero status means the mailbox side of the cleanup is unfinished, and a surviving sidecar stays registered with the router, so mail sent to that agent is accepted and then lost. The two causes need opposite responses, and the warning on stderr says which one you have:
+
+- **"could not confirm"** (the process table could not be read) — retryable. Re-run the tool.
+- **"survived SIGKILL"** — re-running will not help. Kill the printed PIDs by hand, then confirm.
+
+Confirm with the scoped pattern the tool prints — `pgrep -fl 'claude_sidecar.mjs --agent-id <window> '`, trailing space included so `worker-1` does not match `worker-10`. Do **not** run a bare `pgrep -fl claude_sidecar.mjs` and kill what it lists: that is every agent's sidecar, and killing them cuts mail delivery for every live Claude worker. Killing the process is all that is needed on the router side — the socket close makes the router release the lease and mark the agent disconnected. Resolve this before marking the window free in state.
 
 ### worker_compact.py — Request compaction from a worker
 
@@ -1427,7 +1437,11 @@ Write the handoff file (e.g. `/tmp/handoff-<alias>.md`), then use Mailbox V2 to 
 python3 ~/.claude/skills/supervisor/tools/worker_kill.py --window WINDOW
 ```
 
-Kills the window without sending `/exit`. Use for failed launches or already-dead windows.
+Kills the window without sending `/exit`, then terminates the worker's mailbox sidecar and confirms it is gone. Use for failed launches or already-dead windows — it sweeps the sidecar even when the window is already gone.
+
+Two indirect backstops also stop an orphaned sidecar: the launch shell's EXIT trap, and the sidecar's own 5-second tmux window poller. This tool is the direct, immediate, verified path; it closes the poller's few-second window and covers the case where neither backstop fires.
+
+Exits non-zero when the sidecar may still be running, with the same two causes and responses as `worker_shutdown.py` above. Check the status before you update state — the exit code is the only signal that a window you just freed still has a live mailbox identity.
 
 ### worker_send_requirements.py — Send task requirements to a worker
 
@@ -1473,7 +1487,7 @@ Required lookup pattern:
 
 1. Search current state broadly by PR URL/number, issue number, branch, task alias words, and key domain terms from the user's question.
 2. Include active, blocked, completed, and abandoned tasks in the search results.
-3. If the question may predate archival, search `~/.mecha-developer/supervisor-state-archive.json` too.
+3. If the question may predate archival, search `~/.mecha-developer/supervisor-state-archive.json` too. The archive holds the 200 most recent completions, so a miss there means "not in the last 200 completed tasks", not "never existed".
 4. Read the journal for every plausible related task, not just the newest task.
 5. Report the set of related tasks found before giving conclusions, and distinguish code-complete work from still-open human/admin follow-up.
 
@@ -1848,7 +1862,7 @@ window name is the mailbox identity; no identity environment variable is used.
 
 ## Archive File
 
-Completed and abandoned tasks are moved to `~/.mecha-developer/supervisor-state-archive.json` to keep the main state file lean. The archive has the same JSON structure as the main file:
+Completed tasks are moved to `~/.mecha-developer/supervisor-state-archive.json` to keep the main state file lean. `state_archive_completed.py` archives only tasks whose state is `completed` and whose `completed` date parses — abandoned tasks and tasks with no usable date stay in the state file. The archive has the same JSON structure as the main file:
 
 ```json
 {
@@ -1874,7 +1888,11 @@ for t in data['tasks']:
 jq '.tasks[] | select(.alias == "my-old-task")' ~/.mecha-developer/supervisor-state-archive.json
 ```
 
-Archiving is a manual or scripted operation — tasks are not auto-archived. When the archive file grows stale with many old entries, it can be pruned directly (it is not read by any supervisor tooling).
+Archiving is a manual or scripted operation — tasks are not auto-archived.
+
+Archive with `python3 ~/.claude/skills/supervisor/tools/state_archive_completed.py [--age DAYS] --confirmed` (omit `--confirmed` for a dry run). A run that archives nothing says so on stderr, leaves stdout empty, and still exits 0 — read the message, not the status.
+
+The archive is capped at the 200 most recently completed tasks (`ARCHIVE_MAX_TASKS` in `state_archive_completed.py`), which bounds it at roughly 1.2 MB, 2.5 MB worst case. Entries past the cap are dropped on each write and listed by alias as they go. If a dropped task was archived by that same run, the tool warns on stderr — that task is gone from both the state file and the archive, so archive regularly rather than letting hundreds of completions pile up for one run. History past the cap is gone, so a lookup that finds nothing may mean pruned, not never-existed — say so rather than reporting the task never existed.
 
 ---
 
