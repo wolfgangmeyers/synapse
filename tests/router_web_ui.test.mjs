@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -58,6 +58,53 @@ test("router HTTP API allows browser CORS for web UI requests", async () => {
   }
 });
 
+test("router image attachments reject unsafe parent temp directories", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "router-web-ui-images-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const targetDirectory = join(directory, "target-images");
+  const attachmentDirectory = join(directory, "images-link");
+  const router = createAgentRouter({ repository, imageAttachmentDirectory: attachmentDirectory, timeoutSweepIntervalMs: 60_000 });
+  try {
+    await mkdir(targetDirectory);
+    await symlink(targetDirectory, attachmentDirectory);
+    const routerWsUrl = await router.listen();
+    const routerHttpUrl = routerWsUrl.replace("ws://", "http://").replace("/v1/agents", "");
+    const response = await fetch(new URL("/v1/messages", routerHttpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "unsafe-dir-message", from: "image-sender", to: "peer-agent", body: "image", created_at: "2026-07-28T14:30:00.000Z", attachments: [{ type: "image", data_url: tinyWebpDataUrl(), name: "bad.webp" }] }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await readdir(targetDirectory).catch((error) => error.code === "ENOENT" ? [] : Promise.reject(error)), []);
+  } finally {
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router image attachments validate before writing temp files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "router-web-ui-images-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const attachmentDirectory = join(directory, "images");
+  const router = createAgentRouter({ repository, imageAttachmentDirectory: attachmentDirectory, timeoutSweepIntervalMs: 60_000 });
+  try {
+    const routerWsUrl = await router.listen();
+    const routerHttpUrl = routerWsUrl.replace("ws://", "http://").replace("/v1/agents", "");
+    const response = await fetch(new URL("/v1/messages", routerHttpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "bad-image-message", from: "bad-sender", to: "bad@peer", body: "bad", created_at: "2026-07-28T14:30:00.000Z", attachments: [{ type: "image", data_url: tinyWebpDataUrl(), name: "bad.webp" }] }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await readdir(attachmentDirectory).catch((error) => error.code === "ENOENT" ? [] : Promise.reject(error)), []);
+  } finally {
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("router web UI serves the app and relays live router messages", async () => {
   const directory = await mkdtemp(join(tmpdir(), "router-web-ui-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
@@ -98,7 +145,36 @@ test("router web UI serves the app and relays live router messages", async () =>
     const sendResult = await waitForEvent(browser, (event) => event.type === "send_result" && event.localId === "local-1");
     assert.equal(sendResult.ok, true);
     assert.equal(sendResult.message.from, webAgentId);
-    assert.equal((await deliveredToPeer).message.body, "hello from the browser\n\n[Reply via mailbox to web-test-client.]");
+    const firstDelivery = await deliveredToPeer;
+    assert.equal(firstDelivery.message.body, "hello from the browser\n\n[Reply via mailbox to web-test-client.]");
+    ackDelivery(peer.socket, peer.registered, "peer-agent", "peer-agent-instance", firstDelivery);
+
+    const deliveredImage = nextRouterFrame(peer.socket, (frame) => frame.type === "message" && frame.message.from === webAgentId && frame.message.id !== sendResult.message.id);
+    browser.send(JSON.stringify({
+      type: "send_message",
+      to: "peer-agent",
+      body: "see screenshots",
+      localId: "local-image-1",
+      images: [
+        { name: "one.webp", dataUrl: tinyWebpDataUrl() },
+        { name: "two.webp", dataUrl: tinyWebpDataUrl() },
+      ],
+    }));
+    const imageResult = await waitForEvent(browser, (event) => event.type === "send_result" && event.localId === "local-image-1");
+    assert.equal(imageResult.ok, true);
+    assert.equal(imageResult.message.attachments.length, 2);
+    assert.equal("path" in imageResult.message.attachments[0], false);
+    assert.doesNotMatch(JSON.stringify(imageResult.message), new RegExp(tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(imageResult.message.attachments[0].url, /^http:\/\/127\.0\.0\.1:\d+\/v1\/attachments\//);
+    assert.doesNotMatch(imageResult.message.body, /data:image/);
+    assert.doesNotMatch(imageResult.message.body, /Attached images:/);
+    const imageDelivery = await deliveredImage;
+    assert.match(imageDelivery.message.body, /see screenshots\n\nAttached images:\n1\. .*\.webp\n2\. .*\.webp/);
+    assert.doesNotMatch(imageDelivery.message.body, /data:image/);
+    ackDelivery(peer.socket, peer.registered, "peer-agent", "peer-agent-instance", imageDelivery);
+    const attachmentResponse = await fetch(imageResult.message.attachments[0].url);
+    assert.equal(attachmentResponse.status, 200);
+    assert.equal(attachmentResponse.headers.get("content-type"), "image/webp");
 
     const inbound = waitForEvent(browser, (event) => event.type === "message" && event.message.from === "peer-agent");
     router.enqueueMessage({
@@ -127,6 +203,18 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   const styles = await readFile(new URL("../web/router-ui/styles.css", import.meta.url), "utf8");
   const html = await readFile(new URL("../web/router-ui/index.html", import.meta.url), "utf8");
   assert.match(html, /id="agent-filter"/);
+  assert.match(html, /id="image-preview"/);
+  assert.match(html, /id="image-input" type="file" accept="image\/\*" multiple/);
+  assert.match(app, /const MAX_IMAGES = 3;/);
+  assert.match(app, /const MAX_IMAGE_EDGE = 1600;/);
+  assert.match(app, /canvas\.toBlob\(resolve, "image\/webp", IMAGE_WEBP_QUALITY\)/);
+  assert.match(app, /elements\.composer\.addEventListener\("drop"/);
+  assert.match(app, /elements\.draft\.addEventListener\("paste"/);
+  assert.match(app, /function renderImagePreview\(\)/);
+  assert.match(app, /function renderMessageImages\(attachments\)/);
+  assert.doesNotMatch(app, /localStorage\.setItem\([^\n]+data:image/);
+  assert.match(app, /function messageForStorage\(message\)/);
+  assert.match(app, /startsWith\("data:image\/"\)/);
   assert.match(app, /mecha\.web\.agentIds/);
   assert.match(app, /function matchesActiveScope/);
   assert.match(app, /"message"/);
@@ -135,7 +223,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.doesNotMatch(app, /Select"/);
   assert.match(app, /url\.username !== "" \|\| url\.password !== ""/);
   assert.match(app, /event\.key === "Enter" && !event\.shiftKey/);
-  assert.match(app, /elements\.draft\.addEventListener\("input", \(\) => saveCurrentDraft\(\)\)/);
+  assert.match(app, /elements\.draft\.addEventListener\("input", \(\) => \{ saveCurrentDraft\(\); updateSendState\(\); \}\)/);
   assert.match(app, /const DRAFT_LIMIT = 200;/);
   assert.match(app, /const DRAFT_RETENTION_DAYS = 30;/);
   assert.match(app, /function draftScope\(routerUrl = state\.routerUrl, agentId = state\.agentId, peer = state\.selectedPeer\)/);
@@ -256,6 +344,25 @@ function waitForEvent(socket, predicate, timeoutMs = 1000) {
 
 function nextRouterFrame(socket, predicate, timeoutMs = 1000) {
   return waitForEvent(socket, predicate, timeoutMs);
+}
+
+function tinyWebpDataUrl() {
+  return `data:image/webp;base64,${Buffer.from("RIFF\x10\x00\x00\x00WEBPVP8 ", "binary").toString("base64")}`;
+}
+
+function ackDelivery(socket, registered, agentId, instanceId, frame) {
+  for (const type of ["injection_requested", "ack"]) {
+    socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: `${agentId}-${type}-${frame.message.id}`,
+      type,
+      agent_id: agentId,
+      instance_id: instanceId,
+      lease_id: registered.lease_id,
+      message_id: frame.message.id,
+      attempt_number: frame.attempt_number,
+    }));
+  }
 }
 
 function acknowledgeIncoming(socket, registered, agentId, instanceId) {
