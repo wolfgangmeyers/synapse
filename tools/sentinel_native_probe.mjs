@@ -27,7 +27,7 @@ export default function sentinelNativeProbe(pi) {
     }
     const id = service.spawn("general-purpose", "Return exactly NATIVE_PROBE_CHILD_DONE and nothing else.", {
       description: "Native compatibility probe",
-      model: "gpt-5.6-terra",
+      model: "anthropic/claude-opus-5",
       inheritContext: true,
     });
     await writeFile(OUTPUT_PATH, JSON.stringify({ published: true, methods, id, phase: "spawned" }));
