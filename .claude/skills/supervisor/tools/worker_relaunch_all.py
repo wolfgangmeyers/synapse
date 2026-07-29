@@ -16,6 +16,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _state import load_state
+from _tmux import kill_window, window_exists
 
 
 def get_worker_summary(task):
@@ -69,23 +70,31 @@ def main():
         print("Dry run - no changes made.")
         return
 
-    # Kill existing windows
+    # Kill existing windows. kill_window also sweeps each window's mailbox sidecar —
+    # critical here, not just tidy: this relaunches the same window names, so a
+    # surviving Claude sidecar would keep that agent ID registered with the router
+    # while a different agent owns the window, and mail for the live agent would be
+    # handed to the stranger's sidecar.
     print("Killing existing worker windows...")
+    leaked = []
     for task in workers:
         window = task.get("window")
         if not window:
             continue
 
-        try:
-            subprocess.run(
-                ["tmux", "kill-window", "-t", f"mecha:{window}"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            print(f"  ✓ Killed {window}")
-        except subprocess.CalledProcessError:
-            print(f"  - {window} (not running)")
+        existed = window_exists(window)
+        if not kill_window(window):
+            leaked.append(window)
+        print(f"  {'✓ Killed' if existed else '-'} {window}{'' if existed else ' (not running)'}")
+
+    if leaked:
+        print(
+            "\nERROR: a mailbox sidecar survived for: " + ", ".join(leaked) + ".\n"
+            "Relaunching these windows would hand their mail to the old sidecar. "
+            "Resolve the warnings above, then re-run.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     print()
     print("Relaunching workers...")

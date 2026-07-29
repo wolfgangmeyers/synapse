@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kill a worker's tmux window.
+"""Kill a worker's tmux window and its mailbox sidecar.
 
 Usage:
   python worker_kill.py --window WINDOW
@@ -29,7 +29,9 @@ def main():
     args = parser.parse_args()
 
     existed = window_exists(args.window)
-    kill_window(args.window)
+    # kill_window also sweeps the mailbox sidecar — see _tmux.kill_window. It runs
+    # whether or not the window existed, so already-orphaned sidecars get swept.
+    sidecar_clean = kill_window(args.window)
 
     if existed:
         print(f"Killed window '{args.window}'.")
@@ -46,6 +48,14 @@ def main():
     print("3. If abandoning:")
     print(f"   python3 state_update_state.py <alias> abandoned --reason \"<reason>\"")
     print("4. If the PR is still open, keep the task active and the worktree intact.")
+
+    if not sidecar_clean:
+        print(
+            "5. FIRST: resolve the mailbox sidecar warning above. Until it is gone, "
+            "mail addressed to this agent is accepted and lost, so do not mark the "
+            "window free yet."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

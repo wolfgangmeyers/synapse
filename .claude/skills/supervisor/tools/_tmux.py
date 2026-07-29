@@ -10,6 +10,8 @@ import re
 import subprocess
 import time
 
+from _sidecar import cleanup_sidecar
+
 SESSION = "mecha"
 _AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -166,9 +168,25 @@ def capture_pane(window, lines=50):
     return result.stdout
 
 
-def kill_window(window):
-    """Kill a tmux window. Silently succeeds if the window doesn't exist."""
+def kill_window(window, sweep_sidecar=True):
+    """Kill a tmux window and the mailbox sidecar bound to its name.
+
+    Silently succeeds if the window doesn't exist. Returns True when no sidecar
+    remains, False when one may still be running (see `_sidecar.cleanup_sidecar`);
+    callers that surface an exit code should propagate that.
+
+    The sidecar sweep lives here, in the single chokepoint for ending a window, rather
+    than in each caller. A window that dies while its sidecar lives leaves that agent
+    ID registered with the router: mail addressed to it is accepted and pasted into a
+    window that is gone, or worse, into a window a different agent now owns. Every
+    path that ends a window has that defect unless it sweeps, so the primitive sweeps
+    and no new caller has to remember. Pass sweep_sidecar=False only to kill a window
+    that is deliberately keeping its mailbox identity.
+    """
     run(["kill-window", "-t", f"{SESSION}:{window}"], check=False)
+    if not sweep_sidecar:
+        return True
+    return cleanup_sidecar(window)
 
 
 def window_exists(window):
