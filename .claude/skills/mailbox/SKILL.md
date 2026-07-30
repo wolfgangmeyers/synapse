@@ -21,6 +21,10 @@ The same `[MAILBOX]` text the hook prints to stdout can appear **in this chat as
 
 Skipping Step 1 when the mandatory block is present is a **protocol violation** — stale `last_checked` / wrong ordering vs. state.
 
+## Reply discipline: preserve the channel
+
+When Wolfgang sends a message by mailbox, assume he may be communicating from his phone or another remote UI. If a response is needed, reply by mailbox instead of printing the substantive response only in the terminal/console. Keep the answer in the same channel he used.
+
 ## Reply discipline: avoid acknowledgment loops
 
 Do **not** reply to messages that are only acknowledgments, confirmations, or promises to stay parked, unless the message also includes a new instruction, new evidence, a blocker, a question, or a state transition that needs routing. Examples that normally need **no reply**: "Acknowledged", "Confirmed", "I'll stay parked", "I'll wait for review", or restating an instruction back to the supervisor.
