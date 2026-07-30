@@ -27,6 +27,14 @@ For Pi workers, preserve the pinned runtime: `--provider anthropic --model claud
 
 For Claude workers, the launcher starts Claude Code plus a Mailbox V2 sidecar registered as the worker's normal agent ID. The sidecar delivers router messages by sanitized terminal paste into the Claude tmux pane and ACKs only after tmux submission succeeds; Claude replies through `mailbox_send.py`. This is terminal delivery, not Pi-equivalent session injection, and `--notify-on-settled` remains Pi-only.
 
+## Worker Names
+
+Use human-meaningful worker window and mailbox names. Wolfgang needs to recognize a worker from the name without remembering issue numbers or implementation shorthand.
+
+Default pattern: short task nouns first, with the issue or PR number appended when useful. Good examples: `schedule-report-1635`, `open-oasis-report-1647`, `patient-diagnoses-1642`, `qa-hotbox-1643`, `reports-permission-1751`, `dashboard-no-access-1752`. Avoid names whose meaning depends only on internal codes, ticket numbers, or process labels, such as `emr286-coverage-pr1635`. The number is fine; the name must also contain a human-readable task label.
+
+Record branch names and worktree paths in state and supervisor notes, not as the primary way to identify the worker. When referencing an older poorly named worker, translate it for Wolfgang: “Schedule report worker `emr286-coverage-pr1635`.”
+
 ## Sentinel dispatch
 
 Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` for Sentinel work. It supports immediate, one-time (`--next-due-at`), and recurring (`--next-due-at` with `--interval-ms`) dispatch through the loopback router APIs.

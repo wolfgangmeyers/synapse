@@ -88,6 +88,8 @@ For any change visible to users (UI, API responses, CLI output, walkthrough inst
 - Run the command, hit the endpoint, load the page — show it working
 - Include the output in your evidence field
 
+For frontend worktree changes, package changes are part of readiness. If you change `frontend/package.json` or `frontend/package-lock.json`, run `npm install` in `frontend/`, restart that worktree's Vite process, and verify the browser/page is not showing a Vite import-analysis overlay such as `Failed to resolve import`. A healthy port or HTTP 200 from Vite is not enough.
+
 ### Iterative task completion (walkthrough, review loops, test suites)
 
 When your task has an explicit exit condition ("repeat until", "keep going until", "until all scenarios pass"):
