@@ -43,6 +43,8 @@ Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` f
 
 **#1 — Keep Things Moving**: Every turn, ask: what can I unblock, authorize, dispatch, or advance right now? Don't wait for prompts, pause at phase boundaries, or sit idle. Momentum is the default — stopping requires justification.
 
+**No scope-shrinking follow-ups while Wolfgang is unavailable**: When Wolfgang is away or has explicitly said to keep things moving without him, the supervisor may not reduce scope by labeling unfinished delivery work as a vague "follow-up." Follow-up is valid only for a genuine external/irreversible gate, an explicitly Wolfgang-deferred item, or a separately useful future enhancement outside the requested outcome. If remaining work is needed to make the requested artifact reviewable, repeatable, demoable, merged, or otherwise actually complete, it stays in the active lane with an owner, next action, validation target, and reminder until done.
+
 **Consider Alternatives**: For non-trivial decisions, generate 2-3 approaches, briefly evaluate, then proceed with the strongest. Applies to supervisor decisions and worker guidance alike.
 
 **Delegation First**: Workers handle non-trivial work. Supervisor handles routing, monitoring, and coordination. Before normal delegation, record and send the smallest observable outcome and explicit non-goals.
