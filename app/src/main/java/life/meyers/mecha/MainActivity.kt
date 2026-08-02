@@ -127,6 +127,7 @@ class MainActivity : ComponentActivity() {
     private var activeRouter by mutableStateOf("")
     private var connection by mutableStateOf("Connecting to your agents…")
     private var peers by mutableStateOf(emptyList<String>())
+    private var agentFilter by mutableStateOf("")
     private var selectedPeer by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<ChatMessage>())
     private var draft by mutableStateOf("")
@@ -392,6 +393,7 @@ class MainActivity : ComponentActivity() {
 
     private fun selectPeer(peer: String) {
         if (peer.isBlank()) return
+        agentFilter = ""
         selectedPeer = peer
         messages = historyFor(peer)
         persistKnownPeers(knownPeers() + peer)
@@ -424,7 +426,10 @@ class MainActivity : ComponentActivity() {
                         .post(body.toRequestBody("application/json".toMediaType()))
                         .build(),
                 ).execute().use { response ->
-                    if (!response.isSuccessful) runOnUiThread { connection = "Message not sent (${response.code})" }
+                    runOnUiThread {
+                        if (response.isSuccessful) refreshPeers()
+                        else connection = "Message not sent (${response.code})"
+                    }
                 }
             } catch (_: Exception) {
                 runOnUiThread { connection = "Message saved locally; router unavailable" }
@@ -581,7 +586,7 @@ class MainActivity : ComponentActivity() {
                         onSelect = ::switchRouter,
                         onRemove = ::removeRouter,
                     )
-                    selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
+                    selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, agentFilter, { agentFilter = it }, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
                         BackHandler(onBack = ::returnHome)
                         Conversation(selectedPeer, messages, draft, { draft = it }, ::send, ::returnHome)
@@ -599,11 +604,14 @@ private fun PeerHome(
     agentId: String,
     activeRouter: String,
     peers: List<String>,
+    agentFilter: String,
+    onAgentFilter: (String) -> Unit,
     onPeer: (String) -> Unit,
     onRefresh: () -> Unit,
     onEditProfile: () -> Unit,
     onManageRouters: () -> Unit,
 ) {
+    val filteredPeers = visibleConnectedPeers(peers, agentFilter)
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 18.dp)) {
         TextButton(onManageRouters, Modifier.height(36.dp)) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -636,14 +644,28 @@ private fun PeerHome(
                 }
             }
         }
-        Text("Connected agents", Modifier.padding(top = 28.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth().padding(top = 28.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Connected agents", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(filteredPeers.size.toString(), style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        }
+        OutlinedTextField(
+            value = agentFilter,
+            onValueChange = onAgentFilter,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            singleLine = true,
+            label = { Text("Filter connected agents") },
+        )
         if (peers.isEmpty()) {
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
                 Text("No connected agents yet", Modifier.padding(20.dp), color = TextMuted)
             }
+        } else if (filteredPeers.isEmpty()) {
+            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
+                Text("No connected agents match", Modifier.padding(20.dp), color = TextMuted)
+            }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(peers, key = { it }) { peer -> PeerRow(peer, { onPeer(peer) }) }
+                items(filteredPeers, key = { it }) { peer -> PeerRow(peer, { onPeer(peer) }) }
             }
         }
     }
@@ -849,6 +871,13 @@ private fun Avatar(id: String, size: androidx.compose.ui.unit.Dp = 44.dp) {
 @Composable
 private fun StatusDot(connected: Boolean) {
     Box(Modifier.size(10.dp).clip(CircleShape).background(if (connected) Teal else Color(0xFFFF8A80)))
+}
+
+internal fun visibleConnectedPeers(peers: List<String>, filter: String): List<String> {
+    val normalizedFilter = filter.trim().lowercase()
+    return peers.filter { peer ->
+        normalizedFilter.isBlank() || "${peer} ${humanName(peer)}".lowercase().contains(normalizedFilter)
+    }
 }
 
 private fun humanName(id: String): String = id.split(Regex("[._-]+"))
