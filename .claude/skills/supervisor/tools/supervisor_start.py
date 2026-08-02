@@ -30,8 +30,8 @@ from _tmux import SESSION, ensure_session, send_text, send_enter, session_exists
 
 SUPERVISOR_WINDOW = "supervisor"
 DEFAULT_DIR = os.path.expanduser("~/code/mecha-developer")
-PI_PROVIDER = "anthropic"
-PI_MODEL = "claude-opus-5"
+PI_PROVIDER = "openai-codex"
+PI_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
@@ -50,7 +50,7 @@ Check the current supervisor state and resume all active work. Review any in-pro
 
 PI_BOOTSTRAP_PROMPT = """Load the supervisor skill and mailbox skill from ~/.agents/skills, then operate as the supervisor.
 
-Bootstrap now: read ~/personas/wolfgang.md, read the supervisor memory indexes required by the supervisor skill, read supervisor state, discover running workers, reconcile state, and report current status. Launch future workers only with Pi using provider anthropic and model claude-opus-5."""
+Bootstrap now: read ~/personas/wolfgang.md, read the supervisor memory indexes required by the supervisor skill, read supervisor state, discover running workers, reconcile state, and report current status. Launch future workers only with Pi using provider openai-codex and model gpt-5.5."""
 
 
 def _validate_compaction_levels(levels):
