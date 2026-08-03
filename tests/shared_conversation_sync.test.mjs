@@ -88,6 +88,33 @@ async function connect(wsUrl, { agentId, instanceId, sync = true, role } = {}) {
   return { socket, registered: await response };
 }
 
+async function renew(client, instanceId, requestId) {
+  const response = nextFrame(client.socket, (frame) => frame.type === "registered" && frame.request_id === requestId);
+  client.socket.send(JSON.stringify({
+    version: "v1",
+    frame_id: requestId,
+    type: "lease_renew",
+    agent_id: "shared-user",
+    instance_id: instanceId,
+    lease_id: client.registered.lease_id,
+  }));
+  return response;
+}
+
+function onceClose(socket, timeoutMs = 1_000) {
+  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => cleanup(reject, new Error("timed out waiting for socket close")), timeoutMs);
+    const onClose = () => cleanup(resolve);
+    const cleanup = (done, value) => {
+      clearTimeout(timer);
+      socket.off("close", onClose);
+      done(value);
+    };
+    socket.once("close", onClose);
+  });
+}
+
 function tinyWebpDataUrl() {
   return "data:image/webp;base64,UklGRioCAABXRUJQVlA4WAoAAAAgAAAAHwAAHwAASUNDUMgBAAAAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADZWUDggPAAAAFADAJ0BKiAAIAA+YS6TRyQioaEoCACADAllAHYA/AAAgyggAP7lhz//6En4JPwSfun///hVuGIZOgAAAA==";
 }
@@ -299,21 +326,90 @@ test("a synced sender preserves batching for a legacy recipient while receiving 
   }
 });
 
-test("an opted-in reconnect with the same instance replaces only its stale socket", async () => {
-  const app = await fixture();
-  let first;
+test("synced lease survives renewal, subscriber replacement, and owner handoff without duplicate delivery", async () => {
+  const routerEvents = [];
+  const app = await fixture({ eventLogger: (event, fields) => routerEvents.push({ event, ...fields }) });
+  let owner;
+  let subscriber;
   let replacement;
   try {
-    first = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "stable-android-instance" });
-    const replaced = nextFrame(first.socket, (frame) => frame.type === "error" && frame.code === "lease_expired");
-    replacement = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "stable-android-instance" });
+    owner = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "owner-one" });
+    subscriber = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "owner-two" });
+    assert.equal(subscriber.registered.lease_id, owner.registered.lease_id);
+
+    app.setNow(at(1, 1));
+    const ownerRenewed = await renew(owner, "owner-one", "renew-owner-one");
+    app.setNow(at(1, 2));
+    const subscriberRenewed = await renew(subscriber, "owner-two", "renew-owner-two");
+    assert.equal(ownerRenewed.lease_id, owner.registered.lease_id);
+    assert.equal(subscriberRenewed.lease_id, owner.registered.lease_id);
+    assert.ok(Date.parse(subscriberRenewed.expires_at) > Date.parse(ownerRenewed.expires_at));
+
+    const replaced = nextFrame(subscriber.socket, (frame) => frame.type === "error" && frame.code === "lease_expired");
+    const subscriberClosed = onceClose(subscriber.socket);
+    replacement = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "owner-two" });
     assert.equal(replacement.registered.type, "registered");
+    assert.equal(replacement.registered.lease_id, subscriberRenewed.lease_id);
     await replaced;
-    const live = nextFrame(replacement.socket, (frame) => frame.type === "conversation_message" && frame.message.id === "after-reconnect");
-    await postMessage(app.httpUrl, { id: "after-reconnect", from: "shared-user", to: "peer", body: "still live", created_at: at(1) });
-    assert.equal((await live).message.body, "still live");
+    await subscriberClosed;
+    const activeLease = app.repository.leaseFor("shared-user");
+    assert.equal(activeLease.instance_id, "owner-one");
+    assert.equal(activeLease.lease_id, subscriberRenewed.lease_id);
+    assert.equal(activeLease.expires_at, subscriberRenewed.expires_at);
+
+    const replacementLive = nextFrame(replacement.socket, (frame) => frame.type === "conversation_message" && frame.message.id === "after-replacement");
+    await postMessage(app.httpUrl, {
+      id: "after-replacement",
+      from: "shared-user",
+      to: "peer",
+      body: "replacement remains live",
+      created_at: at(1, 3),
+    });
+    assert.equal((await replacementLive).message.body, "replacement remains live");
+
+    const ownerClosed = onceClose(owner.socket);
+    owner.socket.terminate();
+    await ownerClosed;
+
+    let deliveryCount = 0;
+    replacement.socket.on("message", (payload) => {
+      const frame = JSON.parse(payload.toString("utf8"));
+      if (frame.type === "message" && frame.message.id === "handoff-1") deliveryCount += 1;
+    });
+    const live = nextFrame(replacement.socket, (frame) => frame.type === "conversation_message" && frame.message.id === "handoff-1");
+    const delivery = nextFrame(replacement.socket, (frame) => frame.type === "message" && frame.message.id === "handoff-1");
+    const sent = await postMessage(app.httpUrl, {
+      id: "handoff-1",
+      from: "peer",
+      to: "shared-user",
+      body: "after owner close",
+      created_at: at(1, 3),
+    });
+    assert.equal(sent.response.status, 201);
+    assert.equal((await live).message.body, "after owner close");
+    const offered = await delivery;
+    for (const type of ["injection_requested", "ack"]) {
+      replacement.socket.send(JSON.stringify({
+        version: "v1",
+        frame_id: `${type}-handoff`,
+        type,
+        agent_id: "shared-user",
+        instance_id: "owner-two",
+        lease_id: replacement.registered.lease_id,
+        message_id: offered.message.id,
+        attempt_number: offered.attempt_number,
+      }));
+    }
+    for (let attempt = 0; attempt < 50 && app.repository.messageFor("handoff-1") !== undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(app.repository.messageFor("handoff-1"), undefined);
+    assert.equal(deliveryCount, 1);
+    assert.equal(routerEvents.filter(({ event, message_id: id }) => event === "delivery_offered" && id === "handoff-1").length, 1);
+    assert.equal(routerEvents.filter(({ event, message_id: id }) => event === "delivery_acknowledged" && id === "handoff-1").length, 1);
   } finally {
-    first?.socket.terminate();
+    owner?.socket.terminate();
+    subscriber?.socket.terminate();
     replacement?.socket.terminate();
     await app.close();
   }
@@ -333,49 +429,6 @@ test("a new synced instance recovers an expired in-memory subscriber lease", asy
   } finally {
     stale?.socket.terminate();
     recovered?.socket.terminate();
-    await app.close();
-  }
-});
-
-test("a remaining synced instance inherits queue delivery and can settle it after the first instance disconnects", async () => {
-  const app = await fixture();
-  let first;
-  let second;
-  try {
-    first = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "owner-one" });
-    second = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "owner-two" });
-    first.socket.terminate();
-    await new Promise((resolve) => setTimeout(resolve, 25));
-
-    const live = nextFrame(second.socket, (frame) => frame.type === "conversation_message" && frame.message.id === "handoff-1");
-    const delivery = nextFrame(second.socket, (frame) => frame.type === "message" && frame.message.id === "handoff-1");
-    const sent = await postMessage(app.httpUrl, {
-      id: "handoff-1",
-      from: "peer",
-      to: "shared-user",
-      body: "after owner close",
-      created_at: at(1),
-    });
-    assert.equal(sent.response.status, 201);
-    assert.equal((await live).message.id, "handoff-1");
-    const offered = await delivery;
-    for (const type of ["injection_requested", "ack"]) {
-      second.socket.send(JSON.stringify({
-        version: "v1",
-        frame_id: `${type}-handoff`,
-        type,
-        agent_id: "shared-user",
-        instance_id: "owner-two",
-        lease_id: second.registered.lease_id,
-        message_id: offered.message.id,
-        attempt_number: offered.attempt_number,
-      }));
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    assert.equal(app.repository.messageFor("handoff-1"), undefined);
-  } finally {
-    first?.socket.terminate();
-    second?.socket.terminate();
     await app.close();
   }
 });

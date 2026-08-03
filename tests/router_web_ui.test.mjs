@@ -9,6 +9,7 @@ import WebSocket from "ws";
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { parseArguments, startRouterWebUi } from "../tools/router_web_ui.mjs";
+import { mergeMessages } from "../web/router-ui/history.js";
 
 const webAgentId = "web-test-client";
 
@@ -284,8 +285,96 @@ test("two web sessions with one username receive live fanout and reconnect histo
   }
 });
 
+test("router web UI relay reconnects after router restart and resumes one canonical transcript", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "router-web-ui-reconnect-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), maxBatchBodyChars: 0 });
+  let router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  const sockets = [];
+  let ui;
+  try {
+    let wsUrl = await router.listen();
+    const routerHttpUrl = wsUrl.replace("ws://", "http://").replace("/v1/agents", "");
+    const routerPort = Number(new URL(routerHttpUrl).port);
+    ui = await startRouterWebUi({ router: routerHttpUrl, output: () => {} });
+    const browser = await connectBrowser(ui.httpUrl, routerHttpUrl, "reconnecting-web-user", sockets);
+    const conversationEvents = [];
+    browser.on("message", (payload) => {
+      const event = JSON.parse(payload.toString("utf8"));
+      if (event.type === "conversation_message") conversationEvents.push(event.message);
+    });
+
+    const firstLive = waitForEvent(browser, (event) => event.type === "conversation_message" && event.message.id === "before-restart");
+    const firstResponse = await fetch(new URL("/v1/messages", routerHttpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "before-restart",
+        from: "peer",
+        to: "reconnecting-web-user",
+        body: "before restart",
+        created_at: "2026-08-03T00:00:00.000Z",
+      }),
+    });
+    assert.equal(firstResponse.status, 201);
+    const first = (await firstLive).message;
+
+    const reconnecting = waitForEvent(browser, (event) => event.type === "status" && event.state === "reconnecting", 2_000);
+    await router.close();
+    await reconnecting;
+    router = createAgentRouter({ repository, port: routerPort, timeoutSweepIntervalMs: 60_000 });
+    wsUrl = await router.listen();
+    assert.equal(wsUrl.replace("ws://", "http://").replace("/v1/agents", ""), routerHttpUrl);
+    const reconnected = await waitForEvent(browser, (event) => event.type === "status" && event.state === "connected", 3_000);
+    assert.equal(reconnected.agentId, "reconnecting-web-user");
+
+    browser.send(JSON.stringify({ type: "get_history", peer: "peer", requestId: "after-router-restart" }));
+    const history = await waitForEvent(browser, (event) => event.type === "history" && event.requestId === "after-router-restart", 2_000);
+    assert.deepEqual(history.messages.map(({ id }) => id), ["before-restart"]);
+    let transcript = mergeMessages([first], history.messages);
+    assert.deepEqual(transcript.map(({ id }) => id), ["before-restart"]);
+
+    const retryResponse = await fetch(new URL("/v1/messages", routerHttpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "before-restart",
+        from: "peer",
+        to: "reconnecting-web-user",
+        body: "before restart",
+        created_at: "2026-08-03T00:00:00.000Z",
+      }),
+    });
+    assert.equal(retryResponse.status, 200);
+
+    const resumedLive = waitForEvent(browser, (event) => event.type === "conversation_message" && event.message.id === "after-restart", 2_000);
+    const resumedResponse = await fetch(new URL("/v1/messages", routerHttpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "after-restart",
+        from: "peer",
+        to: "reconnecting-web-user",
+        body: "after restart",
+        created_at: "2026-08-03T00:00:01.000Z",
+      }),
+    });
+    assert.equal(resumedResponse.status, 201);
+    transcript = mergeMessages(transcript, [(await resumedLive).message]);
+    assert.deepEqual(transcript.map(({ id }) => id), ["before-restart", "after-restart"]);
+    assert.equal(conversationEvents.filter(({ id }) => id === "before-restart").length, 1);
+    assert.equal(conversationEvents.filter(({ id }) => id === "after-restart").length, 1);
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("router web app keeps router UX, scoped events, Enter handling, and fixed page layout", async () => {
   const app = await readFile(new URL("../web/router-ui/app.js", import.meta.url), "utf8");
+  const webState = await readFile(new URL("../web/router-ui/state.js", import.meta.url), "utf8");
   const styles = await readFile(new URL("../web/router-ui/styles.css", import.meta.url), "utf8");
   const html = await readFile(new URL("../web/router-ui/index.html", import.meta.url), "utf8");
   assert.match(html, /id="agent-filter"/);
@@ -306,18 +395,18 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function messageForStorage\(message\)/);
   assert.match(app, /startsWith\("data:image\/"\)/);
   assert.match(app, /mecha\.web\.agentIds/);
-  assert.match(app, /function matchesActiveScope/);
-  assert.match(app, /"message"/);
-  assert.match(app, /event\.routerUrl === state\.routerUrl && event\.agentId === state\.agentId/);
+  assert.match(webState, /function matchesActiveScope/);
+  assert.match(webState, /"message"/);
+  assert.match(webState, /event\.routerUrl === active\.routerUrl && event\.agentId === active\.agentId/);
   assert.match(app, /row\.addEventListener\("click", \(\) => \{ void switchRouter\(routerUrl, \{ connect: true \}\); \}\)/);
   assert.doesNotMatch(app, /Select"/);
   assert.match(app, /url\.username !== "" \|\| url\.password !== ""/);
   assert.match(app, /event\.key === "Enter" && !event\.shiftKey/);
   assert.match(app, /elements\.draft\.addEventListener\("input", \(\) => \{ saveCurrentDraft\(\); updateSendState\(\); \}\)/);
-  assert.match(app, /const DRAFT_LIMIT = 200;/);
-  assert.match(app, /const DRAFT_RETENTION_DAYS = 30;/);
-  assert.match(app, /function draftScope\(routerUrl = state\.routerUrl, agentId = state\.agentId, peer = state\.selectedPeer\)/);
-  assert.match(app, /function pruneDrafts\(drafts, now = Date\.now\(\)\)/);
+  assert.match(webState, /const DRAFT_LIMIT = 200;/);
+  assert.match(webState, /const DRAFT_RETENTION_MS = 30 \* 24 \* 60 \* 60 \* 1000;/);
+  assert.match(webState, /function draftScope\(routerUrl, agentId, peer\)/);
+  assert.match(webState, /function pruneDrafts\(drafts, now = Date\.now\(\)\)/);
   assert.match(app, /drafts\[key\] = \{ body: value, updatedAtMs: Date\.now\(\) \}/);
   assert.match(app, /function restoreDraftForSelectedPeer\(\{ focus = false \} = \{\}\)/);
   assert.match(app, /function focusDraftAtEnd\(\)/);
@@ -334,7 +423,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /state\.agentFilter = "";\n  elements\.agentFilter\.value = "";/);
   assert.match(app, /stateName === "connected" \? "" :/);
   assert.match(styles, /p:empty \{ display: none; \}/);
-  assert.match(app, /import \{ mergeMessages, messageKey, messageTime, reconcileHistoryMessages \} from "\.\/history\.js"/);
+  assert.match(app, /import \{ HISTORY_RETENTION_MS, mergeMessages, messageKey, messageTime, pruneHistoryMessages, reconcileHistoryMessages \} from "\.\/history\.js"/);
   assert.doesNotMatch(app, /#main-connect/);
   assert.match(styles, /body \{[\s\S]*overflow: hidden;/);
   assert.match(styles, /\.shell \{[\s\S]*height: 100dvh;[\s\S]*overflow: hidden;/);
@@ -343,8 +432,10 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
 
 test("router web app stores bounded scoped conversation history in IndexedDB", async () => {
   const app = await readFile(new URL("../web/router-ui/app.js", import.meta.url), "utf8");
-  assert.match(app, /const HISTORY_LIMIT = 200;/);
-  assert.match(app, /const HISTORY_RETENTION_DAYS = 30;/);
+  const historyHelpers = await readFile(new URL("../web/router-ui/history.js", import.meta.url), "utf8");
+  const webState = await readFile(new URL("../web/router-ui/state.js", import.meta.url), "utf8");
+  assert.match(historyHelpers, /const HISTORY_LIMIT = 200;/);
+  assert.match(historyHelpers, /const HISTORY_RETENTION_MS = 30 \* 24 \* 60 \* 60 \* 1000;/);
   assert.match(app, /indexedDB\.open\(HISTORY_DB_NAME, HISTORY_DB_VERSION\)/);
   assert.match(app, /const HISTORY_DB_VERSION = 2;/);
   assert.match(app, /const IMAGE_STORE_NAME = "image_attachments";/);
@@ -352,10 +443,10 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.match(app, /store\.createIndex\("ownerScope", "ownerScope"/);
   assert.match(app, /store\.createIndex\("peerScope", "peerScope"/);
   assert.match(app, /store\.createIndex\("createdAtMs", "createdAtMs"/);
-  assert.match(app, /function ownerScope\(routerUrl, agentId\) \{ return `\$\{routerUrl\}\$\{SCOPE_SEPARATOR\}\$\{agentId\}`; \}/);
-  assert.match(app, /function peerScope\(routerUrl, agentId, peer\) \{ return `\$\{ownerScope\(routerUrl, agentId\)\}\$\{SCOPE_SEPARATOR\}\$\{peer\}`; \}/);
-  assert.match(app, /\.filter\(\(message\) => messageTime\(message\) >= cutoff\)/);
-  assert.match(app, /\.slice\(-HISTORY_LIMIT\)/);
+  assert.match(webState, /function ownerScope\(routerUrl, agentId\)/);
+  assert.match(webState, /function peerScope\(routerUrl, agentId, peer\)/);
+  assert.match(historyHelpers, /\.filter\(\(message\) => messageTime\(message\) >= cutoff\)/);
+  assert.match(historyHelpers, /\.slice\(-HISTORY_LIMIT\)/);
   assert.match(app, /function messageWithCachedImages\(peer, acceptedMessage, pendingMessage\)/);
   assert.match(app, /function saveCachedImage\(key, dataUrl, attachment\)/);
   assert.match(app, /const HISTORY_IMAGE_EDGE = 360;/);
@@ -365,7 +456,7 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.doesNotMatch(app, /localStorage\.setItem\(HISTORY_STORE_KEY/);
   assert.match(app, /type: "get_history"/);
   assert.match(app, /event\.type === "conversation_message"/);
-  assert.match(app, /state\.historyRequests\.get\(event\.peer\) !== event\.requestId/);
+  assert.match(app, /historyRequestMatches\(event, state\.selectedPeer, state\.historyRequests\.get\(event\.peer\)\)/);
   assert.match(app, /saveRecordsForPeer\(db, routerUrl, agentId, peer, messages\)/);
   assert.doesNotMatch(app, /saveRecordsForPeer\(db, state\.routerUrl, state\.agentId/);
   const server = await readFile(new URL("../tools/router_web_ui.mjs", import.meta.url), "utf8");
