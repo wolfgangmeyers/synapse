@@ -560,6 +560,13 @@ test("discovery excludes a session after its repository lease expires", async ()
   }
 });
 
+test("Android keeps one activity-owned router session across launcher and notification intents", () => {
+  const manifest = readFileSync(new URL("../app/src/main/AndroidManifest.xml", import.meta.url), "utf8");
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  assert.match(manifest, /<activity android:name="\.MainActivity" android:exported="true" android:launchMode="singleTask">/);
+  assert.match(activity, /override fun onNewIntent\(intent: Intent\)/);
+});
+
 test("Android opts into shared conversations, hydrates by generation, and uses the web image protocol", () => {
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
   const images = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/ImageAttachments.kt", import.meta.url), "utf8");
