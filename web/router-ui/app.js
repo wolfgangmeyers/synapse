@@ -1,19 +1,25 @@
-import { mergeMessages, messageKey, messageTime, reconcileHistoryMessages } from "./history.js";
+import { HISTORY_RETENTION_MS, mergeMessages, messageKey, messageTime, pruneHistoryMessages, reconcileHistoryMessages } from "./history.js";
+import {
+  canSendDraft,
+  draftScope,
+  historyRequestMatches,
+  matchesActiveScope,
+  ownerScope,
+  peerScope,
+  pruneDrafts,
+  replacePendingMessage,
+  SCOPE_SEPARATOR,
+  settlePendingMessages,
+} from "./state.js";
 
 localStorage.removeItem("mecha.web.messages");
 localStorage.removeItem("mecha.web.conversations");
 
-const HISTORY_LIMIT = 200;
-const HISTORY_RETENTION_DAYS = 30;
-const HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const HISTORY_DB_NAME = "mecha-router-web-ui";
 const HISTORY_DB_VERSION = 2;
 const HISTORY_STORE_NAME = "conversation_messages";
 const IMAGE_STORE_NAME = "image_attachments";
 const DRAFT_STORE_KEY = "mecha.web.drafts";
-const DRAFT_LIMIT = 200;
-const DRAFT_RETENTION_DAYS = 30;
-const DRAFT_RETENTION_MS = DRAFT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const SELECTED_PEER_STORE_KEY = "mecha.web.selectedPeers";
 const MAX_IMAGES = 3;
 const MAX_IMAGE_EDGE = 1600;
@@ -22,7 +28,6 @@ const MAX_IMAGE_BYTES = 768 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
 const HISTORY_IMAGE_EDGE = 360;
 const HISTORY_IMAGE_QUALITY = 0.72;
-const SCOPE_SEPARATOR = "\u001f";
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
 const state = {
@@ -153,7 +158,7 @@ function sendCommand(command) {
 
 async function handleEvent(event) {
   if (event.type === "ready") return;
-  if (!matchesActiveScope(event)) return;
+  if (!matchesActiveScope(event, state)) return;
   if (event.type === "status") {
     setStatus(event.state, event.detail, event.agentId, event.routerUrl);
     if (event.state === "connected" && state.selectedPeer) requestHistory(state.selectedPeer);
@@ -169,7 +174,7 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "history") {
-    if (event.peer !== state.selectedPeer || state.historyRequests.get(event.peer) !== event.requestId) return;
+    if (!historyRequestMatches(event, state.selectedPeer, state.historyRequests.get(event.peer))) return;
     const scope = { routerUrl: state.routerUrl, agentId: state.agentId };
     state.messages[event.peer] = pruneHistoryMessages(reconcileHistoryMessages(
       state.messages[event.peer] || [],
@@ -325,7 +330,7 @@ function requestHistory(peer) {
 
 function sendDraft() {
   const body = elements.draft.value;
-  if (!state.selectedPeer || (body.trim() === "" && state.images.length === 0)) return;
+  if (!canSendDraft(state.selectedPeer, body, state.images.length)) return;
   const localId = crypto.randomUUID();
   const images = state.images.map(({ dataUrl, name, sizeBytes, mimeType }) => ({ dataUrl, name, sizeBytes, mimeType }));
   const message = { id: localId, from: state.agentId, to: state.selectedPeer, body: pendingMessageBody(body, images), attachments: images.map((image) => ({ url: image.dataUrl, mime_type: image.mimeType, size_bytes: image.sizeBytes, name: image.name })), created_at: new Date().toISOString(), direction: "outgoing", pending: true };
@@ -388,7 +393,7 @@ function renderMessage(message) {
 }
 
 function updateSendState() {
-  elements.send.disabled = !state.selectedPeer || (elements.draft.value.trim() === "" && state.images.length === 0);
+  elements.send.disabled = !canSendDraft(state.selectedPeer, elements.draft.value, state.images.length);
 }
 
 async function addImageFiles(fileList) {
@@ -564,7 +569,7 @@ async function settleOutgoing(event) {
   const scope = { routerUrl: state.routerUrl, agentId: state.agentId };
   const touchedPeers = new Set();
   for (const peer of Object.keys(state.messages)) {
-    const updated = state.messages[peer].map((message) => message.id === event.localId ? { ...message, pending: false, failed: !event.ok } : message);
+    const updated = settlePendingMessages(state.messages[peer], event.localId, event.ok);
     if (updated.some((message, index) => message !== state.messages[peer][index])) touchedPeers.add(peer);
     state.messages[peer] = updated;
   }
@@ -575,23 +580,16 @@ async function settleOutgoing(event) {
       state.messages[event.message.to]?.find((message) => message.id === event.localId),
     );
     if (scope.routerUrl !== state.routerUrl || scope.agentId !== state.agentId) return;
-    state.messages[event.message.to] = pruneHistoryMessages(mergeMessages(
-      (state.messages[event.message.to] || []).filter((message) => message.id !== event.localId),
-      [cachedMessage],
+    state.messages[event.message.to] = pruneHistoryMessages(replacePendingMessage(
+      state.messages[event.message.to] || [],
+      event.localId,
+      cachedMessage,
     ));
     touchedPeers.add(event.message.to);
   }
   await Promise.all([...touchedPeers].map((peer) => savePeerMessages(peer, scope, state.messages[peer])));
   if (!event.ok) setStatus("error", event.error || "Message not sent");
   renderConversation();
-}
-
-function pruneHistoryMessages(messages, now = Date.now()) {
-  const cutoff = now - HISTORY_RETENTION_MS;
-  return messages
-    .filter((message) => messageTime(message) >= cutoff)
-    .sort((left, right) => messageTime(left) - messageTime(right))
-    .slice(-HISTORY_LIMIT);
 }
 
 async function loadMessages(routerUrl, agentId) {
@@ -699,27 +697,16 @@ function messageForStorage(message) {
     .map(({ url, id, mime_type, size_bytes, name, cacheKey }) => ({ url, id, mime_type, size_bytes, name, cacheKey }));
   return { ...message, attachments };
 }
-function ownerScope(routerUrl, agentId) { return `${routerUrl}${SCOPE_SEPARATOR}${agentId}`; }
-function peerScope(routerUrl, agentId, peer) { return `${ownerScope(routerUrl, agentId)}${SCOPE_SEPARATOR}${peer}`; }
-function draftScope(routerUrl = state.routerUrl, agentId = state.agentId, peer = state.selectedPeer) { return peer ? peerScope(routerUrl, agentId, peer) : ""; }
 function loadDrafts() {
   try { return pruneDrafts(JSON.parse(localStorage.getItem(DRAFT_STORE_KEY) || "{}")); } catch { return {}; }
 }
 function saveDrafts(drafts) { localStorage.setItem(DRAFT_STORE_KEY, JSON.stringify(pruneDrafts(drafts))); }
-function pruneDrafts(drafts, now = Date.now()) {
-  const cutoff = now - DRAFT_RETENTION_MS;
-  return Object.fromEntries(Object.entries(drafts)
-    .map(([key, draft]) => [key, typeof draft === "string" ? { body: draft, updatedAtMs: now } : draft])
-    .filter(([, draft]) => draft?.body && (draft.updatedAtMs || 0) >= cutoff)
-    .sort(([, left], [, right]) => (left.updatedAtMs || 0) - (right.updatedAtMs || 0))
-    .slice(-DRAFT_LIMIT));
-}
 function loadDraftPeers(routerUrl, agentId) {
   const prefix = `${ownerScope(routerUrl, agentId)}${SCOPE_SEPARATOR}`;
   return new Set(Object.entries(loadDrafts()).filter(([key, draft]) => key.startsWith(prefix) && draft.body).map(([key]) => key.slice(prefix.length)));
 }
 function saveCurrentDraft() {
-  const key = draftScope();
+  const key = draftScope(state.routerUrl, state.agentId, state.selectedPeer);
   if (!key) return;
   const drafts = loadDrafts();
   const value = elements.draft.value;
@@ -729,7 +716,7 @@ function saveCurrentDraft() {
   state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
 }
 function clearCurrentDraft() {
-  const key = draftScope();
+  const key = draftScope(state.routerUrl, state.agentId, state.selectedPeer);
   if (!key) return;
   const drafts = loadDrafts();
   delete drafts[key];
@@ -737,7 +724,7 @@ function clearCurrentDraft() {
   state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
 }
 function restoreDraftForSelectedPeer({ focus = false } = {}) {
-  const key = draftScope();
+  const key = draftScope(state.routerUrl, state.agentId, state.selectedPeer);
   elements.draft.value = key ? loadDrafts()[key]?.body || "" : "";
   if (focus && key) focusDraftAtEnd();
 }
@@ -772,10 +759,6 @@ function loadRouters() {
   try { return JSON.parse(localStorage.getItem("mecha.web.routers") || "[]"); } catch { return []; }
 }
 function saveRouters() { localStorage.setItem("mecha.web.routers", JSON.stringify(state.routers)); }
-function matchesActiveScope(event) {
-  if (!["agents", "agents_error", "message", "conversation_message", "history", "history_error", "send_result", "status"].includes(event.type)) return true;
-  return event.routerUrl === state.routerUrl && event.agentId === state.agentId;
-}
 function loadAgentIds() {
   try { return JSON.parse(localStorage.getItem("mecha.web.agentIds") || "{}"); } catch { return {}; }
 }
