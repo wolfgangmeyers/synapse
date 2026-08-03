@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -86,6 +87,8 @@ private const val ROUTER_RECORD_SEPARATOR = "\u001f"
 private const val PREFS = "mecha"
 private const val MESSAGE_NOTIFICATION_CHANNEL = "messages"
 private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1
+// Keeps durable unsent drafts bounded per router.
+private const val MAX_DRAFTS_PER_ROUTER = 50
 private val AGENT_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]*")
 private val ROUTER_ENDPOINT = Regex("^([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)(?::([0-9]{1,5}))?$")
 private val Ink = Color(0xFF0B0D14)
@@ -113,10 +116,39 @@ private data class RouterConfig(
     fun persist() = "$display$ROUTER_RECORD_SEPARATOR$endpoint"
 }
 
+internal class DraftStore(private val preferences: SharedPreferences) {
+    fun get(router: String, peer: String) = preferences.getString(draftPreferenceKey(router, peer), "").orEmpty()
+
+    fun save(router: String, peer: String, value: String) {
+        val existingPeers = peers(router)
+        val retainedPeers = boundedDraftPeers(existingPeers, peer)
+        val editor = preferences.edit()
+            .putString(draftPreferenceKey(router, peer), value)
+            .putString(draftPeersKey(router), retainedPeers.joinToString(","))
+        (existingPeers - retainedPeers.toSet()).forEach { editor.remove(draftPreferenceKey(router, it)) }
+        editor.commit()
+    }
+
+    fun clear(router: String, peer: String) {
+        val retainedPeers = peers(router).filterNot { it == peer }
+        val editor = preferences.edit().remove(draftPreferenceKey(router, peer))
+        if (retainedPeers.isEmpty()) editor.remove(draftPeersKey(router))
+        else editor.putString(draftPeersKey(router), retainedPeers.joinToString(","))
+        editor.commit()
+    }
+
+    private fun peers(router: String) = preferences.getString(draftPeersKey(router), "")
+        .orEmpty()
+        .split(",")
+        .filter(AGENT_ID::matches)
+        .distinct()
+}
+
 class MainActivity : ComponentActivity() {
     private val client = OkHttpClient()
     private val historyLock = Any()
     private lateinit var instanceId: String
+    private lateinit var drafts: DraftStore
     private var socket: WebSocket? = null
     private var leaseTimer: Timer? = null
     private var leaseId = ""
@@ -139,6 +171,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val preferences = prefs()
+        drafts = DraftStore(preferences)
         instanceId = preferences.getString("instance_id", null)
             ?: UUID.randomUUID().toString().also { preferences.edit().putString("instance_id", it).apply() }
         agentId = preferences.getString("agent_id", null)
@@ -188,6 +221,17 @@ class MainActivity : ComponentActivity() {
     private fun routerWs() = "ws://$activeRouter/v1/agents"
 
     private fun routerHistoryKey(peer: String) = "history:$activeRouter:$peer"
+
+    private fun draftFor(peer: String) = drafts.get(activeRouter, peer)
+
+    private fun updateDraft(value: String) {
+        draft = value
+        if (selectedPeer.isNotBlank()) drafts.save(activeRouter, selectedPeer, value)
+    }
+
+    private fun clearDraft(peer: String) {
+        drafts.clear(activeRouter, peer)
+    }
 
     private fun knownPeersKey() = "known_peers:$activeRouter"
 
@@ -386,8 +430,8 @@ class MainActivity : ComponentActivity() {
     private fun appendMessage(peer: String, message: ChatMessage): Boolean = synchronized(historyLock) {
         val existing = historyFor(peer)
         val updated = (existing + message).takeLast(200)
-        val saved = persistKnownPeers(knownPeers() + peer)
-        if (saved && persistHistory(peer, updated) && selectedPeer == peer) messages = updated
+        val saved = persistKnownPeers(knownPeers() + peer) && persistHistory(peer, updated)
+        if (saved && selectedPeer == peer) messages = updated
         saved
     }
 
@@ -395,6 +439,7 @@ class MainActivity : ComponentActivity() {
         if (peer.isBlank()) return
         agentFilter = ""
         selectedPeer = peer
+        draft = draftFor(peer)
         messages = historyFor(peer)
         persistKnownPeers(knownPeers() + peer)
     }
@@ -411,6 +456,7 @@ class MainActivity : ComponentActivity() {
         if (recipient.isBlank() || text.isBlank()) return
         val message = ChatMessage(UUID.randomUUID().toString(), agentId, text, Direction.OUTGOING, Instant.now().truncatedTo(ChronoUnit.MILLIS).toString())
         if (!appendMessage(recipient, message)) return
+        clearDraft(recipient)
         draft = ""
         val body = JSONObject()
             .put("id", message.id)
@@ -500,7 +546,7 @@ class MainActivity : ComponentActivity() {
         val remaining = routers().filterNot { it.endpoint == endpoint }
         val editor = prefs().edit()
         prefs().all.keys.filter {
-            it == knownPeersKeyFor(endpoint) || it.startsWith("history:$endpoint:") || it.startsWith("conversation_id:$endpoint:")
+            it == knownPeersKeyFor(endpoint) || it.startsWith("history:$endpoint:") || it.startsWith("draft:$endpoint:") || it == draftPeersKey(endpoint) || it.startsWith("conversation_id:$endpoint:")
         }.forEach(editor::remove)
         val next = if (endpoint == activeRouter) remaining.firstOrNull()?.endpoint.orEmpty() else activeRouter
         editor.putStringSet("router_endpoints", remaining.map { it.persist() }.toSet())
@@ -589,7 +635,7 @@ class MainActivity : ComponentActivity() {
                     selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, agentFilter, { agentFilter = it }, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
                         BackHandler(onBack = ::returnHome)
-                        Conversation(selectedPeer, messages, draft, { draft = it }, ::send, ::returnHome)
+                        Conversation(selectedPeer, messages, draft, ::updateDraft, ::send, ::returnHome)
                     }
                 }
                 if (showProfileEditor) UsernameDialog(agentId, ::saveAgentId, { showProfileEditor = false })
@@ -872,6 +918,13 @@ private fun Avatar(id: String, size: androidx.compose.ui.unit.Dp = 44.dp) {
 private fun StatusDot(connected: Boolean) {
     Box(Modifier.size(10.dp).clip(CircleShape).background(if (connected) Teal else Color(0xFFFF8A80)))
 }
+
+private fun draftPeersKey(router: String) = "draft_peers:$router"
+
+internal fun draftPreferenceKey(router: String, peer: String) = "draft:$router:$peer"
+
+internal fun boundedDraftPeers(existing: List<String>, peer: String): List<String> =
+    (existing.filterNot { it == peer } + peer).takeLast(MAX_DRAFTS_PER_ROUTER)
 
 internal fun visibleConnectedPeers(peers: List<String>, filter: String): List<String> {
     val normalizedFilter = filter.trim().lowercase()
