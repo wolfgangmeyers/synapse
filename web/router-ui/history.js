@@ -1,3 +1,6 @@
+const HISTORY_LIMIT = 200;
+export const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 export function messageKey(message) {
   return `${message.id}\u001f${message.message_incarnation_id || ""}`;
 }
@@ -22,4 +25,12 @@ export function reconcileHistoryMessages(existing, snapshot, highWaterSequence) 
     return sequence === 0 || sequence > highWaterSequence || snapshotKeys.has(messageKey(message));
   });
   return mergeMessages(retainedLive, snapshot);
+}
+
+export function pruneHistoryMessages(messages, now = Date.now()) {
+  const cutoff = now - HISTORY_RETENTION_MS;
+  return messages
+    .filter((message) => messageTime(message) >= cutoff)
+    .sort((left, right) => messageTime(left) - messageTime(right))
+    .slice(-HISTORY_LIMIT);
 }
