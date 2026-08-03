@@ -560,6 +560,26 @@ test("discovery excludes a session after its repository lease expires", async ()
   }
 });
 
+test("Android opts into shared conversations, hydrates by generation, and uses the web image protocol", () => {
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  const images = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/ImageAttachments.kt", import.meta.url), "utf8");
+  assert.match(activity, /\.put\("conversation_sync", "v1"\)/);
+  assert.match(activity, /"conversation_message" -> runOnUiThread \{\s*if \(generation == connectionGeneration\) receiveConversationMessage\(frame\)/);
+  assert.match(activity, /addPathSegments\("v1\/conversations"\)/);
+  assert.match(activity, /"history:\$activeRouter:\$agentId:\$peer"/);
+  assert.match(activity, /generation != connectionGeneration \|\| activeRouter != router \|\| agentId != owner \|\| selectedPeer != peer/);
+  assert.match(activity, /reconcileConversationMessages\(historyFor\(peer\), hydrated, highWaterSequence\)/);
+  assert.match(activity, /contentReceiver\(receiveImages\)/);
+  assert.match(activity, /acceptedImageUri\(item\.uri\?\.toString\(\), item\.intent\?\.data\?\.toString\(\), item\.text\?\.toString\(\)\)/);
+  assert.match(activity, /JSONObject\(\)\.put\("type", "image"\)\.put\("data_url", image\.dataUrl\)\.put\("name", image\.name\)/);
+  assert.match(activity, /if \(response\.isSuccessful\) \{[\s\S]*drafts\.clearIfUnchanged\(router, recipient, text\)/);
+  assert.match(images, /MAX_IMAGE_ATTACHMENTS = 3/);
+  assert.match(images, /MAX_IMAGE_BYTES = 768 \* 1024/);
+  assert.match(images, /MAX_IMAGE_INPUT_BYTES = 12 \* 1024 \* 1024/);
+  assert.match(images, /resolver\.openInputStream\(uri\)/);
+  assert.match(images, /data:image\/webp;base64/);
+});
+
 test("Android home renders only router-discovered connected peers", () => {
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
   assert.match(activity, /scheduleAtFixedRate\(60_000, 60_000\)[\s\S]*discoverPeers\(generation\)/);

@@ -178,6 +178,7 @@ function createBrowserClient(browser, { defaultRouter }) {
         agent_role: "user_interaction",
         client_type: "web",
         ack_confirmation: "correlated_v1",
+        conversation_sync: "v1",
       }));
     });
     routerSocket.on("message", (payload) => {
@@ -201,6 +202,20 @@ function createBrowserClient(browser, { defaultRouter }) {
       }
       if (frame.type === "lease_rejected" || frame.type === "error") {
         setStatus("error", frame.code ?? "Router rejected the connection");
+        return;
+      }
+      if (frame.type === "conversation_message") {
+        sendBrowser({
+          type: "conversation_message",
+          message: messageWithAbsoluteAttachments(frame.message, configured.routerUrl),
+          agentId: configured.agentId,
+          routerUrl: configured.routerUrl,
+        });
+        return;
+      }
+      if (frame.type === "message" && configured.leaseId !== "") {
+        sendReceipt("injection_requested", frame);
+        sendReceipt("ack", frame);
         return;
       }
       if (frame.type === "message") {
@@ -273,6 +288,10 @@ function createBrowserClient(browser, { defaultRouter }) {
           await refreshAgents();
           return;
         }
+        if (command.type === "get_history") {
+          await fetchHistory(command, configured, sendBrowser);
+          return;
+        }
         if (command.type === "message_received") {
           const pending = pendingDeliveries.get(command.deliveryToken);
           if (pending !== undefined) {
@@ -306,6 +325,35 @@ function createBrowserClient(browser, { defaultRouter }) {
   };
 }
 
+async function fetchHistory(command, configured, sendBrowser) {
+  const peer = normalizeConversationPeer(command.peer ?? "");
+  const url = new URL("/v1/conversations", configured.routerUrl);
+  url.searchParams.set("owner", configured.agentId);
+  url.searchParams.set("peer", peer);
+  const response = await fetch(url);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    sendBrowser({
+      type: "history_error",
+      peer,
+      requestId: command.requestId,
+      message: body.error?.message ?? `Router rejected history (${response.status})`,
+      agentId: configured.agentId,
+      routerUrl: configured.routerUrl,
+    });
+    return;
+  }
+  sendBrowser({
+    type: "history",
+    peer,
+    requestId: command.requestId,
+    highWaterSequence: body.high_water_sequence ?? 0,
+    messages: (body.messages ?? []).map((message) => messageWithAbsoluteAttachments(message, configured.routerUrl)),
+    agentId: configured.agentId,
+    routerUrl: configured.routerUrl,
+  });
+}
+
 async function sendMessage(command, configured, sendBrowser, refreshAgents) {
   const routerUrl = configured.routerUrl;
   const agentId = configured.agentId;
@@ -331,7 +379,7 @@ async function sendMessage(command, configured, sendBrowser, refreshAgents) {
     sendBrowser({ type: "send_result", ok: false, error: responseBody.error?.message ?? `Router rejected the message (${response.status})`, localId: command.localId, agentId, routerUrl });
     return;
   }
-  const accepted = responseBody.message ?? envelope;
+  const accepted = responseBody.conversation_message ?? responseBody.message ?? envelope;
   const displayAttachments = absoluteAttachmentUrls(accepted.attachments, routerUrl);
   const displayMessage = {
     ...accepted,
@@ -350,6 +398,13 @@ function absoluteAttachmentUrls(attachments = [], routerUrl) {
     ...attachment,
     url: new URL(attachment.url, routerUrl).toString(),
   }));
+}
+
+function messageWithAbsoluteAttachments(message, routerUrl) {
+  return {
+    ...message,
+    attachments: absoluteAttachmentUrls(message.attachments, routerUrl),
+  };
 }
 
 function normalizeImageAttachments(images) {
@@ -383,6 +438,12 @@ function normalizeAgentId(value) {
   const agentId = String(value).trim();
   if (!AGENT_ID.test(agentId) || agentId.length > 128) throw new Error("Agent IDs use letters, numbers, ., _, and -");
   return agentId;
+}
+
+function normalizeConversationPeer(value) {
+  const peer = String(value).trim();
+  if (peer.length === 0 || peer.length > 128) throw new Error("Conversation peer is invalid");
+  return peer;
 }
 
 function sendJson(response, statusCode, payload) {
