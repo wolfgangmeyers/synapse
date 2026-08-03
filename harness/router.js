@@ -11,6 +11,8 @@ import {
   DEFAULT_DELIVERY_LEASE_DURATION_MS,
   DEFAULT_LEASE_DURATION_MS,
   DEFAULT_MAX_DELIVERY_ATTEMPTS,
+  DEFAULT_CONVERSATION_HISTORY_LIMIT,
+  DEFAULT_CONVERSATION_RETENTION_MS,
   DeliveryNotActiveError,
   DuplicateAgentLeaseError,
   IdempotencyConflictError,
@@ -42,6 +44,8 @@ const DEFAULT_MAX_IMAGE_ATTACHMENTS = 3;
 const DEFAULT_MAX_IMAGE_ATTACHMENT_BYTES = 768 * 1024;
 const DEFAULT_MAX_IMAGE_ATTACHMENT_TOTAL_BYTES = DEFAULT_MAX_IMAGE_ATTACHMENTS * DEFAULT_MAX_IMAGE_ATTACHMENT_BYTES;
 const DEFAULT_IMAGE_ATTACHMENT_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_IMAGE_PIXELS = 40_000_000;
+const MAX_IMAGE_EDGE = 16_384;
 const IMAGE_ATTACHMENT_MIMES = new Map([
   ["image/png", { extension: "png", magic: [[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]] }],
   ["image/jpeg", { extension: "jpg", magic: [[0xff, 0xd8, 0xff]] }],
@@ -176,6 +180,7 @@ export function createAgentRouter({
   }
 
   const sessions = new Map();
+  const conversationSessions = new Map();
   const requestTimesBySender = new Map();
   let timeoutSweepTimer;
   // When the last lifecycle_sweep_completed was written, for any reason.
@@ -245,13 +250,24 @@ export function createAgentRouter({
     });
     socket.on("close", () => {
       if (session === undefined) return;
-      if (sessions.get(session.agentId) === session) {
-        sessions.delete(session.agentId);
+      if (session.conversationSync === "v1") {
+        const subscribers = conversationSessions.get(session.agentId);
+        if (subscribers?.get(session.instanceId) === session) subscribers.delete(session.instanceId);
+        if (subscribers !== undefined && subscribers.size > 0) {
+          if (sessions.get(session.agentId) === session) {
+            const replacement = subscribers.values().next().value;
+            sessions.set(session.agentId, replacement);
+            offerSession(replacement);
+          }
+          return;
+        }
+        conversationSessions.delete(session.agentId);
       }
+      if (sessions.get(session.agentId) === session) sessions.delete(session.agentId);
       try {
         const released = repository.releaseAgentLease({
           agentId: session.agentId,
-          instanceId: session.instanceId,
+          instanceId: session.deliveryInstanceId,
           leaseId: session.leaseId,
         });
         emit("agent_disconnected", {
@@ -272,6 +288,33 @@ export function createAgentRouter({
     });
 
     function register(currentSocket, frame) {
+      const subscribers = conversationSessions.get(frame.agent_id);
+      if (frame.conversation_sync === "v1" && subscribers !== undefined) {
+        const reconnecting = subscribers.get(frame.instance_id);
+        const owner = sessions.get(frame.agent_id);
+        const lease = owner === undefined ? undefined : repository.leaseFor(frame.agent_id);
+        if (owner !== undefined && lease !== undefined
+          && Date.parse(lease.expires_at) > currentTimeMs(clock)) {
+          session = createSession(currentSocket, frame, lease, owner.deliveryInstanceId);
+          subscribers.set(frame.instance_id, session);
+          if (owner === reconnecting) sessions.set(frame.agent_id, session);
+          emitRegistered(frame, lease);
+          sendRegistered(frame, lease);
+          if (reconnecting !== undefined && reconnecting.socket !== currentSocket) {
+            sendError(reconnecting.socket, generateFrameId, "lease_expired");
+            closeSocket(reconnecting.socket, 4001, "lease expired");
+          }
+          if (sessions.get(frame.agent_id) === session) offerSession(session);
+          return;
+        }
+        conversationSessions.delete(frame.agent_id);
+        sessions.delete(frame.agent_id);
+        for (const stale of subscribers.values()) {
+          sendError(stale.socket, generateFrameId, "lease_expired");
+          closeSocket(stale.socket, 4001, "lease expired");
+        }
+      }
+
       const leaseId = generateFrameId();
       try {
         const lease = repository.acquireAgentLease({
@@ -281,66 +324,86 @@ export function createAgentRouter({
           leaseDurationMs,
         });
         const replacement = sessions.get(frame.agent_id);
-        session = {
-          socket: currentSocket,
-          agentId: frame.agent_id,
-          instanceId: frame.instance_id,
-          leaseId,
-          agentRole: frame.agent_role ?? "agent",
-          clientType: frame.client_type,
-          ackConfirmation: frame.ack_confirmation,
-          connectedAt: lease.acquired_at,
-        };
-        session.offer = () => offerNextMessage(currentSocket, session);
+        session = createSession(currentSocket, frame, lease, frame.instance_id);
         sessions.set(frame.agent_id, session);
-        emit("agent_registered", {
-          agent_id: lease.agent_id,
-          instance_id: lease.instance_id,
-          lease_id: lease.lease_id,
-          recovered: lease.recovered,
-          agent_role: session.agentRole,
-          ...(session.clientType === undefined ? {} : { client_type: session.clientType }),
-          ...(session.ackConfirmation === undefined
-            ? {}
-            : { ack_confirmation: session.ackConfirmation }),
-        });
+        if (frame.conversation_sync === "v1") {
+          conversationSessions.set(frame.agent_id, new Map([[frame.instance_id, session]]));
+        }
+        emitRegistered(frame, lease);
         if (replacement !== undefined && replacement.socket !== currentSocket) {
           sendError(replacement.socket, generateFrameId, "lease_expired");
           closeSocket(replacement.socket, 4001, "lease expired");
         }
-        sendFrame(currentSocket, generateFrameId, {
-          type: "registered",
-          request_id: frame.frame_id,
-          agent_id: lease.agent_id,
-          instance_id: lease.instance_id,
-          lease_id: lease.lease_id,
-          expires_at: lease.expires_at,
-          recovered: lease.recovered,
-          agent_role: session.agentRole,
-          ...(session.ackConfirmation === undefined
-            ? {}
-            : { ack_confirmation: session.ackConfirmation }),
-        });
+        sendRegistered(frame, lease);
         offerSession(session);
       } catch (error) {
         if (error instanceof DuplicateAgentLeaseError) {
-          emit("agent_registration_rejected", {
-            agent_id: frame.agent_id,
-            instance_id: frame.instance_id,
-            error_code: error.code,
-          });
-          sendFrame(currentSocket, generateFrameId, {
-            type: "lease_rejected",
-            request_id: frame.frame_id,
-            code: error.code,
-            agent_id: frame.agent_id,
-            instance_id: frame.instance_id,
-            active_instance_id: error.activeInstanceId,
-          });
-          closeSocket(currentSocket, 4009, "duplicate identity");
+          rejectDuplicateRegistration(frame, error.activeInstanceId);
           return;
         }
         throw error;
+      }
+
+      function rejectDuplicateRegistration(candidate, activeInstanceId) {
+        emit("agent_registration_rejected", {
+          agent_id: candidate.agent_id,
+          instance_id: candidate.instance_id,
+          error_code: "duplicate_identity",
+        });
+        sendFrame(currentSocket, generateFrameId, {
+          type: "lease_rejected",
+          request_id: candidate.frame_id,
+          code: "duplicate_identity",
+          agent_id: candidate.agent_id,
+          instance_id: candidate.instance_id,
+          active_instance_id: activeInstanceId,
+        });
+        closeSocket(currentSocket, 4009, "duplicate identity");
+      }
+
+      function createSession(candidateSocket, candidate, lease, deliveryInstanceId) {
+        const registeredSession = {
+          socket: candidateSocket,
+          agentId: candidate.agent_id,
+          instanceId: candidate.instance_id,
+          deliveryInstanceId,
+          leaseId: lease.lease_id,
+          agentRole: candidate.agent_role ?? "agent",
+          clientType: candidate.client_type,
+          ackConfirmation: candidate.ack_confirmation,
+          conversationSync: candidate.conversation_sync,
+          connectedAt: lease.acquired_at,
+        };
+        registeredSession.offer = () => offerNextMessage(candidateSocket, registeredSession);
+        return registeredSession;
+      }
+
+      function emitRegistered(candidate, lease) {
+        emit("agent_registered", {
+          agent_id: lease.agent_id,
+          instance_id: candidate.instance_id,
+          lease_id: lease.lease_id,
+          recovered: lease.recovered ?? false,
+          agent_role: session.agentRole,
+          ...(session.clientType === undefined ? {} : { client_type: session.clientType }),
+          ...(session.ackConfirmation === undefined ? {} : { ack_confirmation: session.ackConfirmation }),
+          ...(session.conversationSync === undefined ? {} : { conversation_sync: session.conversationSync }),
+        });
+      }
+
+      function sendRegistered(candidate, lease) {
+        sendFrame(currentSocket, generateFrameId, {
+          type: "registered",
+          request_id: candidate.frame_id,
+          agent_id: lease.agent_id,
+          instance_id: candidate.instance_id,
+          lease_id: lease.lease_id,
+          expires_at: lease.expires_at,
+          recovered: lease.recovered ?? false,
+          agent_role: session.agentRole,
+          ...(session.ackConfirmation === undefined ? {} : { ack_confirmation: session.ackConfirmation }),
+          ...(session.conversationSync === undefined ? {} : { conversation_sync: session.conversationSync }),
+        });
       }
     }
 
@@ -356,20 +419,20 @@ export function createAgentRouter({
       try {
         const lease = repository.renewAgentLease({
           agentId: frame.agent_id,
-          instanceId: frame.instance_id,
+          instanceId: session.deliveryInstanceId,
           leaseId: frame.lease_id,
           leaseDurationMs,
         });
         emit("agent_lease_renewed", {
           agent_id: lease.agent_id,
-          instance_id: lease.instance_id,
+          instance_id: session.instanceId,
           lease_id: lease.lease_id,
         });
         sendFrame(currentSocket, generateFrameId, {
           type: "registered",
           request_id: frame.frame_id,
           agent_id: lease.agent_id,
-          instance_id: lease.instance_id,
+          instance_id: session.instanceId,
           lease_id: lease.lease_id,
           expires_at: lease.expires_at,
           recovered: false,
@@ -377,6 +440,7 @@ export function createAgentRouter({
           ...(session.ackConfirmation === undefined
             ? {}
             : { ack_confirmation: session.ackConfirmation }),
+          ...(session.conversationSync === undefined ? {} : { conversation_sync: session.conversationSync }),
         });
       } catch (error) {
         if (error instanceof LeaseNotActiveError) {
@@ -390,7 +454,7 @@ export function createAgentRouter({
 
     function receiveDeliveryReceipt(currentSocket, frame) {
       if (session === undefined
-        || sessions.get(session.agentId) !== session
+        || !sessionIsActive(session)
         || session.agentId !== frame.agent_id
         || session.instanceId !== frame.instance_id
         || session.leaseId !== frame.lease_id) {
@@ -400,7 +464,7 @@ export function createAgentRouter({
       }
       const receipt = {
         agentId: frame.agent_id,
-        instanceId: frame.instance_id,
+        instanceId: session.deliveryInstanceId,
         leaseId: frame.lease_id,
         messageId: frame.message_id,
         attemptNumber: frame.attempt_number,
@@ -429,7 +493,7 @@ export function createAgentRouter({
               type: "delivery_acknowledged",
               request_id: frame.frame_id,
               agent_id: receipt.agentId,
-              instance_id: receipt.instanceId,
+              instance_id: session.instanceId,
               lease_id: receipt.leaseId,
               message_id: acknowledged.message_id,
               message_incarnation_id: acknowledged.message_incarnation_id,
@@ -484,7 +548,7 @@ export function createAgentRouter({
       try {
         const delivery = repository.claimNextMessage({
           agentId: currentSession.agentId,
-          instanceId: currentSession.instanceId,
+          instanceId: currentSession.deliveryInstanceId,
           leaseId: currentSession.leaseId,
           deliveryLeaseDurationMs,
         });
@@ -582,6 +646,7 @@ export function createAgentRouter({
     const serverJobOutcomes = {};
     const reminders = sweepDueReminders(reminderOutcomes);
     const serverJobs = sweepDueServerJobs(serverJobOutcomes);
+    const conversations = sweepConversationHistory();
     const sweepCounts = {
       stale_agent_count: staleAgents.length,
       expired_message_count: expired.length,
@@ -590,6 +655,9 @@ export function createAgentRouter({
       reminder_failure_count: reminderOutcomes.failure ?? 0,
       server_job_success_count: serverJobOutcomes.success ?? 0,
       server_job_failure_count: serverJobOutcomes.failure ?? 0,
+      ...(conversations.deleted_count === 0
+        ? {}
+        : { conversation_message_pruned_count: conversations.deleted_count }),
     };
     // An all-zero sweep records no work, and the sweep runs every second, so logging
     // every one of them is pure volume. Log the ones that did something, plus an
@@ -603,7 +671,19 @@ export function createAgentRouter({
       emit("lifecycle_sweep_completed", sweepCounts);
       lastSweepRecordMs = now;
     }
-    return { staleAgents, expired, timedOut, reminders, serverJobs };
+    return { staleAgents, expired, timedOut, reminders, serverJobs, conversations };
+  }
+
+  function sweepConversationHistory() {
+    if (typeof repository.pruneConversationHistory !== "function") {
+      return { deleted_count: 0, unreferenced_attachment_ids: [] };
+    }
+    const result = repository.pruneConversationHistory({
+      retentionMs: DEFAULT_CONVERSATION_RETENTION_MS,
+      historyLimit: DEFAULT_CONVERSATION_HISTORY_LIMIT,
+    });
+    void removeUnreferencedAttachments(result.unreferenced_attachment_ids);
+    return result;
   }
 
   function sweepDeliveryTimeouts() {
@@ -771,6 +851,13 @@ export function createAgentRouter({
     return repository.recoverStaleAgentResources();
   }
 
+  function sessionIsActive(candidate) {
+    if (candidate.conversationSync === "v1") {
+      return conversationSessions.get(candidate.agentId)?.get(candidate.instanceId) === candidate;
+    }
+    return sessions.get(candidate.agentId) === candidate;
+  }
+
   function offerQueuedMessages(agentId) {
     if (agentId === undefined) {
       for (const session of sessions.values()) offerSession(session);
@@ -788,7 +875,7 @@ export function createAgentRouter({
       if (session.socket.readyState !== WebSocket.OPEN
         || lease === undefined
         || lease.lease_id !== session.leaseId
-        || lease.instance_id !== session.instanceId
+        || lease.instance_id !== session.deliveryInstanceId
         || lease.expires_at <= generatedAt) continue;
       agents.push({
         agent_id: session.agentId,
@@ -815,7 +902,7 @@ export function createAgentRouter({
       || senderSession.socket.readyState !== WebSocket.OPEN
       || senderLease === undefined
       || senderLease.lease_id !== senderSession.leaseId
-      || senderLease.instance_id !== senderSession.instanceId
+      || senderLease.instance_id !== senderSession.deliveryInstanceId
       || senderLease.expires_at <= now) return envelope;
 
     const footer = `\n\n[Reply via mailbox to ${message.from}.]`;
@@ -827,7 +914,10 @@ export function createAgentRouter({
   }
 
   function enqueueMessage(envelope, options = undefined) {
-    const result = repository.enqueue(envelope, options);
+    const result = repository.enqueue(envelope, {
+      ...options,
+      disableBatching: conversationSessions.has(envelope.to),
+    });
     emit("message_enqueued", {
       message_id: result.message.id,
       to: result.message.to,
@@ -835,8 +925,25 @@ export function createAgentRouter({
       state: result.message.state,
       created: result.created,
     });
+    if (result.conversation_created === true) {
+      fanoutConversationMessage(result.conversation_message);
+      sweepConversationHistory();
+    }
     offerQueuedMessages(result.message.to);
     return result;
+  }
+
+  function fanoutConversationMessage(message) {
+    const recipients = new Set([
+      ...(conversationSessions.get(message.from)?.values() ?? []),
+      ...(conversationSessions.get(message.to)?.values() ?? []),
+    ]);
+    for (const recipient of recipients) {
+      sendFrame(recipient.socket, generateFrameId, {
+        type: "conversation_message",
+        message,
+      });
+    }
   }
 
   async function handleHttpRequest(request, response) {
@@ -885,6 +992,24 @@ export function createAgentRouter({
     }
     if (request.method === "GET" && requestUrl.pathname === "/v1/agents") {
       sendHttpJson(response, 200, connectedAgentsSnapshot());
+      return;
+    }
+    if (request.method === "GET" && requestUrl.pathname === "/v1/conversations") {
+      try {
+        const owner = requestUrl.searchParams.get("owner");
+        const peer = requestUrl.searchParams.get("peer");
+        if (owner === null || peer === null) throw new TypeError("owner and peer are required");
+        const messages = repository.conversationHistory({ owner, peer });
+        sendHttpJson(response, 200, {
+          owner,
+          peer,
+          high_water_sequence: repository.conversationHighWaterSequence(),
+          messages,
+        });
+      } catch (error) {
+        if (error instanceof TypeError) sendHttpError(response, 400, "invalid_request");
+        else throw error;
+      }
       return;
     }
     const attachmentId = matchAttachmentRoute(requestUrl.pathname);
@@ -1059,8 +1184,10 @@ export function createAgentRouter({
     let envelope;
     let materialized;
     let attachments = [];
+    let conversationBody = "";
     try {
       const payload = await readJsonRequest(request, maxRequestBytes);
+      conversationBody = String(payload?.body ?? "");
       materialized = materializeImageAttachments(payload);
       attachments = materialized.attachments;
       envelope = validateEnvelope(materialized.envelope, {
@@ -1080,12 +1207,17 @@ export function createAgentRouter({
     try {
       if (repository.messageFor(envelope.id) === undefined) enforceRateLimit(envelope.from);
       await writeImageAttachments(materialized);
-      const result = enqueueMessage(envelope);
+      const result = enqueueMessage(envelope, {
+        conversation: { body: conversationBody, attachments },
+      });
       sendHttpJson(response, result.created ? 201 : 200, {
         message: {
           ...(result.batched ? { ...result.message, batched: true } : result.message),
           ...(attachments.length === 0 ? {} : { attachments }),
         },
+        ...(result.conversation_message === undefined
+          ? {}
+          : { conversation_message: result.conversation_message }),
       });
     } catch (error) {
       await cleanupWrittenImageAttachments(materialized, envelope === undefined ? undefined : repository.messageFor(envelope.id));
@@ -1186,7 +1318,9 @@ export function createAgentRouter({
       await ensureSafeImageAttachmentDirectory();
       const linkMetadata = await lstat(filePath);
       const metadata = await stat(filePath);
-      if (!linkMetadata.isFile() || !metadata.isFile() || metadata.mtimeMs < currentTimeMs(clock) - imageAttachmentTtlMs) {
+      const retained = repository.conversationAttachmentReferenced?.(safeId) === true;
+      if (!linkMetadata.isFile() || !metadata.isFile()
+        || (!retained && metadata.mtimeMs < currentTimeMs(clock) - imageAttachmentTtlMs)) {
         sendHttpError(response, 404, "not_found");
         return;
       }
@@ -1209,13 +1343,28 @@ export function createAgentRouter({
           const filePath = join(imageAttachmentDirectory, entry.name);
           try {
             const metadata = await stat(filePath);
-            if (metadata.mtimeMs < cutoff) await rm(filePath, { force: true });
+            const retained = repository.conversationAttachmentReferenced?.(entry.name) === true;
+            if (!retained && metadata.mtimeMs < cutoff) await rm(filePath, { force: true });
           } catch {
             // Best-effort temp cleanup should not affect router availability.
           }
         }));
     } catch {
       // The temp directory may not exist yet.
+    }
+  }
+
+  async function removeUnreferencedAttachments(attachmentIds) {
+    if (!Array.isArray(attachmentIds) || attachmentIds.length === 0) return;
+    try {
+      if (!await ensureSafeImageAttachmentDirectory()) return;
+      await Promise.all(attachmentIds.map((attachmentId) => {
+        const safeId = basename(attachmentId);
+        if (safeId !== attachmentId || !/^[A-Za-z0-9._-]+\.(?:png|jpg|webp|gif)$/.test(safeId)) return undefined;
+        return rm(join(imageAttachmentDirectory, safeId), { force: true });
+      }));
+    } catch {
+      // Retention cleanup is retried by the regular image sweep.
     }
   }
 
@@ -1385,6 +1534,13 @@ function decodeImageDataUrl(attachment, { maxImageAttachmentBytes }) {
     throw new ProtocolValidationError("payload_too_large");
   }
   if (!imageMagicMatches(bytes, config)) throw new ProtocolValidationError();
+  const dimensions = imageDimensions(bytes, mimeType);
+  if (dimensions === undefined
+    || dimensions.width > MAX_IMAGE_EDGE
+    || dimensions.height > MAX_IMAGE_EDGE
+    || dimensions.width * dimensions.height > MAX_IMAGE_PIXELS) {
+    throw new ProtocolValidationError();
+  }
   return { mimeType, extension: config.extension, bytes };
 }
 
@@ -1393,6 +1549,64 @@ function imageMagicMatches(bytes, config) {
     && bytes.subarray(0, 4).toString("ascii") === "RIFF"
     && bytes.subarray(8, 12).toString("ascii") === "WEBP";
   return config.magic.some((magic) => magic.every((byte, index) => bytes[index] === byte));
+}
+
+function imageDimensions(bytes, mimeType) {
+  if (mimeType === "image/png") {
+    if (bytes.length < 24 || bytes.subarray(12, 16).toString("ascii") !== "IHDR") return undefined;
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  if (mimeType === "image/gif") {
+    if (bytes.length < 10) return undefined;
+    return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+  }
+  if (mimeType === "image/jpeg") return jpegDimensions(bytes);
+  if (mimeType !== "image/webp" || bytes.length < 30 || bytes.readUInt32LE(4) + 8 !== bytes.length) return undefined;
+  const chunk = bytes.subarray(12, 16).toString("ascii");
+  if (chunk === "VP8X") {
+    return {
+      width: 1 + readUInt24LE(bytes, 24),
+      height: 1 + readUInt24LE(bytes, 27),
+    };
+  }
+  if (chunk === "VP8 " && bytes.length >= 30
+    && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+    return {
+      width: bytes.readUInt16LE(26) & 0x3fff,
+      height: bytes.readUInt16LE(28) & 0x3fff,
+    };
+  }
+  if (chunk === "VP8L" && bytes.length >= 25 && bytes[20] === 0x2f) {
+    return {
+      width: 1 + bytes[21] + ((bytes[22] & 0x3f) << 8),
+      height: 1 + (bytes[22] >> 6) + (bytes[23] << 2) + ((bytes[24] & 0x0f) << 10),
+    };
+  }
+  return undefined;
+}
+
+function jpegDimensions(bytes) {
+  let offset = 2;
+  while (offset + 4 <= bytes.length) {
+    if (bytes[offset] !== 0xff) return undefined;
+    while (bytes[offset] === 0xff) offset += 1;
+    const marker = bytes[offset++];
+    if (marker === 0xd8 || marker === 0xd9) continue;
+    if (marker === 0xda) return undefined;
+    if (offset + 2 > bytes.length) return undefined;
+    const length = bytes.readUInt16BE(offset);
+    if (length < 2 || offset + length > bytes.length) return undefined;
+    if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+      if (length < 7) return undefined;
+      return { width: bytes.readUInt16BE(offset + 5), height: bytes.readUInt16BE(offset + 3) };
+    }
+    offset += length;
+  }
+  return undefined;
+}
+
+function readUInt24LE(bytes, offset) {
+  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
 }
 
 function attachmentBody(body, files) {

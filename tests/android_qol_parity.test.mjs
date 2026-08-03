@@ -33,5 +33,5 @@ test("Android source wires the core web QOL parity behavior", async () => {
   assert.match(source, /label = \{ Text\("Filter connected agents"\) \}/);
   assert.match(source, /Text\("No connected agents match"/);
   assert.match(source, /agentFilter = ""\n        selectedPeer = peer/);
-  assert.match(source, /if \(response\.isSuccessful\) refreshPeers\(\)/);
+  assert.match(source, /if \(response\.isSuccessful\) \{[\s\S]*drafts\.clearIfUnchanged\(router, recipient, text\)[\s\S]*refreshPeers\(\)/);
 });

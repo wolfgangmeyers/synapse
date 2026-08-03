@@ -85,7 +85,14 @@ export async function startRouter({
     for (const migrationId of repository.migrationIds()) {
       eventLogger("schema_migration", { migration_id: migrationId });
     }
-    router = createAgentRouter({ repository, memoryCatalog, host, port, eventLogger });
+    router = createAgentRouter({
+      repository,
+      memoryCatalog,
+      host,
+      port,
+      eventLogger,
+      imageAttachmentDirectory: `${database}.attachments`,
+    });
     const websocketUrl = await router.listen();
     const httpUrl = websocketUrl.replace(/^ws:/, "http:").replace(/\/v1\/agents$/, "");
     readyOutput(`MECHA_V2_ROUTER_READY http=${httpUrl} ws=${websocketUrl} database=${database} log=${resolvedLogPath}`);

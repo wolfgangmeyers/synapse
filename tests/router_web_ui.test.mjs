@@ -46,6 +46,12 @@ test("router HTTP API allows browser CORS for web UI requests", async () => {
     assert.equal(agents.status, 200);
     assert.equal(agents.headers.get("access-control-allow-origin"), "*");
 
+    const history = await fetch(new URL("/v1/conversations?owner=cors-web&peer=cors-peer", router.httpUrl), {
+      headers: { origin: "https://untrusted.example" },
+    });
+    assert.equal(history.status, 200);
+    assert.equal(history.headers.get("access-control-allow-origin"), null);
+
     const message = await fetch(new URL("/v1/messages", router.httpUrl), {
       method: "POST",
       headers: { origin: "https://anywhere.example", "content-type": "application/json" },
@@ -76,6 +82,29 @@ test("router image attachments reject unsafe parent temp directories", async () 
     });
     assert.equal(response.status, 400);
     assert.deepEqual(await readdir(targetDirectory).catch((error) => error.code === "ENOENT" ? [] : Promise.reject(error)), []);
+  } finally {
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router image attachments reject truncated image structures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "router-web-ui-images-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const attachmentDirectory = join(directory, "images");
+  const router = createAgentRouter({ repository, imageAttachmentDirectory: attachmentDirectory, timeoutSweepIntervalMs: 60_000 });
+  try {
+    const routerWsUrl = await router.listen();
+    const routerHttpUrl = routerWsUrl.replace("ws://", "http://").replace("/v1/agents", "");
+    const truncated = `data:image/webp;base64,${Buffer.from("RIFF\x10\x00\x00\x00WEBPVP8 ", "binary").toString("base64")}`;
+    const response = await fetch(new URL("/v1/messages", routerHttpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "truncated-image", from: "sender", to: "peer", body: "bad", created_at: "2026-07-28T14:30:00.000Z", attachments: [{ type: "image", data_url: truncated }] }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await readdir(attachmentDirectory).catch((error) => error.code === "ENOENT" ? [] : Promise.reject(error)), []);
   } finally {
     await router.close();
     repository.close();
@@ -176,7 +205,7 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.equal(attachmentResponse.status, 200);
     assert.equal(attachmentResponse.headers.get("content-type"), "image/webp");
 
-    const inbound = waitForEvent(browser, (event) => event.type === "message" && event.message.from === "peer-agent");
+    const inbound = waitForEvent(browser, (event) => event.type === "conversation_message" && event.message.from === "peer-agent");
     router.enqueueMessage({
       id: "peer-to-web-1",
       from: "peer-agent",
@@ -185,9 +214,7 @@ test("router web UI serves the app and relays live router messages", async () =>
       created_at: "2026-07-28T13:00:00.000Z",
     });
     const inboundEvent = await inbound;
-    assert.equal(inboundEvent.message.body, "hello from a live agent\n\n[Reply via mailbox to peer-agent.]");
-    assert.notEqual(repository.messageFor("peer-to-web-1"), undefined);
-    browser.send(JSON.stringify({ type: "message_received", deliveryToken: inboundEvent.deliveryToken }));
+    assert.equal(inboundEvent.message.body, "hello from a live agent");
     await waitFor(() => repository.messageFor("peer-to-web-1") === undefined);
   } finally {
     for (const socket of sockets) socket.close?.();
@@ -195,6 +222,65 @@ test("router web UI serves the app and relays live router messages", async () =>
     await router.close();
     repository.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("two web sessions with one username receive live fanout and reconnect history", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  try {
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    const peer = await connectRouterAgent(router.wsUrl, "shared-peer", sockets);
+    acknowledgeIncoming(peer.socket, peer.registered, "shared-peer", "shared-peer-instance");
+    const first = await connectBrowser(ui.httpUrl, router.httpUrl, "shared-web-user", sockets);
+    const second = await connectBrowser(ui.httpUrl, router.httpUrl, "shared-web-user", sockets);
+
+    const firstOutbound = waitForEvent(first, (event) => event.type === "conversation_message" && event.message.body === "from first web");
+    const secondOutbound = waitForEvent(second, (event) => event.type === "conversation_message" && event.message.body === "from first web");
+    first.send(JSON.stringify({ type: "send_message", to: "shared-peer", body: "from first web", localId: "shared-web-outbound" }));
+    const firstLive = await firstOutbound;
+    const secondLive = await secondOutbound;
+    assert.equal(firstLive.message.body, "from first web");
+    assert.equal(secondLive.message.body, "from first web");
+    assert.equal(firstLive.message.sequence, secondLive.message.sequence);
+
+    const firstInbound = waitForEvent(first, (event) => event.type === "conversation_message" && event.message.id === "shared-web-inbound");
+    const secondInbound = waitForEvent(second, (event) => event.type === "conversation_message" && event.message.id === "shared-web-inbound");
+    router.router.enqueueMessage({ id: "shared-web-inbound", from: "shared-peer", to: "shared-web-user", body: "to both web sessions", created_at: "2026-07-28T15:00:00.000Z" });
+    await Promise.all([firstInbound, secondInbound]);
+
+    second.send(JSON.stringify({ type: "get_history", peer: "shared-peer", requestId: "history-before-reconnect" }));
+    const history = await waitForHistory(second, "shared-peer");
+    assert.equal(history.requestId, "history-before-reconnect");
+    assert.deepEqual(history.messages.map(({ body }) => body), ["from first web", "to both web sessions"]);
+    assert.equal(history.highWaterSequence, history.messages.at(-1).sequence);
+
+    second.close();
+    await onceClose(second);
+    const reconnected = await connectBrowser(ui.httpUrl, router.httpUrl, "shared-web-user", sockets);
+    reconnected.send(JSON.stringify({ type: "get_history", peer: "shared-peer", requestId: "history-after-reconnect" }));
+    const rehydrated = await waitForHistory(reconnected, "shared-peer");
+    assert.equal(rehydrated.requestId, "history-after-reconnect");
+    assert.deepEqual(rehydrated.messages.map(({ id }) => id), history.messages.map(({ id }) => id));
+
+    const firstImage = waitForEvent(first, (event) => event.type === "conversation_message" && event.message.body === "shared image");
+    const reconnectedImage = waitForEvent(reconnected, (event) => event.type === "conversation_message" && event.message.body === "shared image");
+    first.send(JSON.stringify({
+      type: "send_message",
+      to: "shared-peer",
+      body: "shared image",
+      localId: "shared-web-image",
+      images: [{ name: "shared.webp", dataUrl: tinyWebpDataUrl() }],
+    }));
+    const [imageOne, imageTwo] = await Promise.all([firstImage, reconnectedImage]);
+    assert.equal(imageOne.message.attachments.length, 1);
+    assert.deepEqual(imageTwo.message.attachments, imageOne.message.attachments);
+    assert.match(imageOne.message.attachments[0].url, /^http:\/\/127\.0\.0\.1:\d+\/v1\/attachments\//);
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
   }
 });
 
@@ -248,7 +334,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /state\.agentFilter = "";\n  elements\.agentFilter\.value = "";/);
   assert.match(app, /stateName === "connected" \? "" :/);
   assert.match(styles, /p:empty \{ display: none; \}/);
-  assert.match(app, /new Map\(existing\.map\(\(message\) => \[message\.id, message\]\)\)/);
+  assert.match(app, /import \{ mergeMessages, messageKey, messageTime, reconcileHistoryMessages \} from "\.\/history\.js"/);
   assert.doesNotMatch(app, /#main-connect/);
   assert.match(styles, /body \{[\s\S]*overflow: hidden;/);
   assert.match(styles, /\.shell \{[\s\S]*height: 100dvh;[\s\S]*overflow: hidden;/);
@@ -277,10 +363,16 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.match(app, /function cachedImageUrl\(key\)/);
   assert.match(app, /cacheKey/);
   assert.doesNotMatch(app, /localStorage\.setItem\(HISTORY_STORE_KEY/);
-  assert.doesNotMatch(app, /get_history/);
+  assert.match(app, /type: "get_history"/);
+  assert.match(app, /event\.type === "conversation_message"/);
+  assert.match(app, /state\.historyRequests\.get\(event\.peer\) !== event\.requestId/);
+  assert.match(app, /saveRecordsForPeer\(db, routerUrl, agentId, peer, messages\)/);
+  assert.doesNotMatch(app, /saveRecordsForPeer\(db, state\.routerUrl, state\.agentId/);
   const server = await readFile(new URL("../tools/router_web_ui.mjs", import.meta.url), "utf8");
   assert.match(server, /type: "message"[\s\S]*agentId: configured\.agentId[\s\S]*routerUrl: configured\.routerUrl/);
   assert.match(server, /refreshTimer = setInterval\(refreshAgents, 60_000\)/);
+  assert.match(server, /conversation_sync: "v1"/);
+  assert.match(server, /type: "conversation_message"/);
   assert.doesNotMatch(server, /refreshTimer = setInterval\(refreshAgents, 30_000\)/);
 });
 
@@ -291,6 +383,7 @@ async function startTestRouter() {
   const wsUrl = await router.listen();
   return {
     directory,
+    router,
     wsUrl,
     httpUrl: wsUrl.replace("ws://", "http://").replace("/v1/agents", ""),
     async close() {
@@ -365,7 +458,7 @@ function nextRouterFrame(socket, predicate, timeoutMs = 1000) {
 }
 
 function tinyWebpDataUrl() {
-  return `data:image/webp;base64,${Buffer.from("RIFF\x10\x00\x00\x00WEBPVP8 ", "binary").toString("base64")}`;
+  return "data:image/webp;base64,UklGRioCAABXRUJQVlA4WAoAAAAgAAAAHwAAHwAASUNDUMgBAAAAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADZWUDggPAAAAFADAJ0BKiAAIAA+YS6TRyQioaEoCACADAllAHYA/AAAgyggAP7lhz//6En4JPwSfun///hVuGIZOgAAAA==";
 }
 
 function ackDelivery(socket, registered, agentId, instanceId, frame) {
