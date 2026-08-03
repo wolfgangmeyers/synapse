@@ -4,10 +4,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.Manifest
 import android.app.PendingIntent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -15,8 +20,15 @@ import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.content.ReceiveContentListener
+import androidx.compose.foundation.content.TransferableContent
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -26,12 +38,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -63,6 +77,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -76,11 +93,15 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.net.URL
 import java.time.Instant
 import java.util.Timer
 import java.util.UUID
 import java.time.temporal.ChronoUnit
 import kotlin.concurrent.scheduleAtFixedRate
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private const val DEFAULT_ROUTER_PORT = 8765
 private const val ROUTER_RECORD_SEPARATOR = "\u001f"
@@ -99,15 +120,28 @@ private val Teal = Color(0xFF78E0CD)
 private val TextPrimary = Color(0xFFF2F4FF)
 private val TextMuted = Color(0xFFB5BCD0)
 
-private enum class Direction { INCOMING, OUTGOING }
+internal enum class Direction { INCOMING, OUTGOING }
 
-private data class ChatMessage(
+internal data class ImageReference(
     val id: String,
+    val url: String,
+    val mimeType: String,
+    val sizeBytes: Int,
+    val name: String,
+)
+
+internal data class ChatMessage(
+    val id: String,
+    val incarnationId: String,
+    val sequence: Long,
     val sender: String,
     val body: String,
     val direction: Direction,
     val createdAt: String,
-)
+    val attachments: List<ImageReference> = emptyList(),
+) {
+    val key get() = "$id\u001f$incarnationId"
+}
 
 private data class RouterConfig(
     val display: String,
@@ -137,6 +171,12 @@ internal class DraftStore(private val preferences: SharedPreferences) {
         editor.commit()
     }
 
+    fun clearIfUnchanged(router: String, peer: String, sent: String): Boolean {
+        if (get(router, peer) != sent) return false
+        clear(router, peer)
+        return true
+    }
+
     private fun peers(router: String) = preferences.getString(draftPeersKey(router), "")
         .orEmpty()
         .split(",")
@@ -162,6 +202,7 @@ class MainActivity : ComponentActivity() {
     private var agentFilter by mutableStateOf("")
     private var selectedPeer by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<ChatMessage>())
+    private var images by mutableStateOf(emptyList<PendingImage>())
     private var draft by mutableStateOf("")
     private var showProfileEditor by mutableStateOf(false)
     private var showRouterManager by mutableStateOf(false)
@@ -220,17 +261,15 @@ class MainActivity : ComponentActivity() {
 
     private fun routerWs() = "ws://$activeRouter/v1/agents"
 
-    private fun routerHistoryKey(peer: String) = "history:$activeRouter:$peer"
+    private fun routerHistoryKey(peer: String) = "history:$activeRouter:$agentId:$peer"
+
+    private fun legacyRouterHistoryKey(peer: String) = "history:$activeRouter:$peer"
 
     private fun draftFor(peer: String) = drafts.get(activeRouter, peer)
 
     private fun updateDraft(value: String) {
         draft = value
         if (selectedPeer.isNotBlank()) drafts.save(activeRouter, selectedPeer, value)
-    }
-
-    private fun clearDraft(peer: String) {
-        drafts.clear(activeRouter, peer)
     }
 
     private fun knownPeersKey() = "known_peers:$activeRouter"
@@ -258,6 +297,9 @@ class MainActivity : ComponentActivity() {
                         .put("type", "register")
                         .put("agent_id", agentId)
                         .put("instance_id", instanceId)
+                        .put("client_type", "android")
+                        .put("ack_confirmation", "correlated_v1")
+                        .put("conversation_sync", "v1")
                         .toString(),
                 )
             }
@@ -280,10 +322,14 @@ class MainActivity : ComponentActivity() {
                         connection = "Connected as $agentId"
                         startLeaseRenewal(webSocket, generation)
                         discoverPeers(generation)
+                        selectedPeer.takeIf { it.isNotBlank() }?.let { hydrateHistory(it, generation) }
                     }
                     "lease_rejected" -> connection = "Username is already connected elsewhere"
                     "error" -> connection = "Router error: ${frame.optString("code", "unknown")}"
-                    "message" -> receiveMessage(webSocket, frame)
+                    "conversation_message" -> runOnUiThread {
+                        if (generation == connectionGeneration) receiveConversationMessage(frame)
+                    }
+                    "message" -> settleDelivery(webSocket, frame)
                 }
             }
 
@@ -362,13 +408,18 @@ class MainActivity : ComponentActivity() {
         }
     }.start()
 
-    private fun receiveMessage(webSocket: WebSocket, frame: JSONObject) {
+    private fun receiveConversationMessage(frame: JSONObject) {
+        val payload = frame.optJSONObject("message") ?: return
+        val message = chatMessage(payload) ?: return
+        val peer = if (message.sender == agentId) payload.optString("to") else message.sender
+        if (peer.isBlank() || !appendMessage(peer, message)) return
+        if (message.direction == Direction.INCOMING) postInboundNotification(peer, message.body)
+    }
+
+    private fun settleDelivery(webSocket: WebSocket, frame: JSONObject) {
         val message = frame.optJSONObject("message") ?: return
-        val sender = message.optString("from")
-        val body = message.optString("body")
-        val id = message.optString("id", UUID.randomUUID().toString())
-        if (sender.isBlank() || !appendMessage(sender, ChatMessage(id, sender, body, Direction.INCOMING, Instant.now().toString()))) return
-        postInboundNotification(sender, body)
+        val id = message.optString("id")
+        if (id.isBlank()) return
         val delivery = JSONObject()
             .put("version", "v1")
             .put("agent_id", agentId)
@@ -382,6 +433,7 @@ class MainActivity : ComponentActivity() {
 
     private fun historyFor(peer: String): List<ChatMessage> {
         if (peer.isBlank()) return emptyList()
+        prefs().edit().remove(legacyRouterHistoryKey(peer)).apply()
         val raw = prefs().getString(routerHistoryKey(peer), null) ?: return emptyList()
         return try {
             val array = JSONArray(raw)
@@ -389,10 +441,13 @@ class MainActivity : ComponentActivity() {
                 val value = array.getJSONObject(index)
                 ChatMessage(
                     id = value.optString("id", UUID.randomUUID().toString()),
+                    incarnationId = value.optString("message_incarnation_id"),
+                    sequence = value.optLong("sequence"),
                     sender = value.optString("sender", peer),
                     body = value.optString("body"),
                     direction = if (value.optString("direction") == Direction.OUTGOING.name) Direction.OUTGOING else Direction.INCOMING,
                     createdAt = value.optString("created_at", Instant.EPOCH.toString()),
+                    attachments = imageReferences(value.optJSONArray("attachments")),
                 )
             }
         } catch (_: Exception) {
@@ -406,6 +461,8 @@ class MainActivity : ComponentActivity() {
             val outgoing = line.startsWith("You · ")
             ChatMessage(
                 id = UUID.randomUUID().toString(),
+                incarnationId = "",
+                sequence = 0,
                 sender = if (outgoing) agentId else peer,
                 body = line.substringAfter(" · ", line),
                 direction = if (outgoing) Direction.OUTGOING else Direction.INCOMING,
@@ -419,66 +476,185 @@ class MainActivity : ComponentActivity() {
         value.takeLast(200).forEach { message ->
             array.put(JSONObject()
                 .put("id", message.id)
+                .put("message_incarnation_id", message.incarnationId)
+                .put("sequence", message.sequence)
                 .put("sender", message.sender)
                 .put("body", message.body)
                 .put("direction", message.direction.name)
-                .put("created_at", message.createdAt))
+                .put("created_at", message.createdAt)
+                .put("attachments", JSONArray(message.attachments.map(::imageReferenceJson))))
         }
         return prefs().edit().putString(routerHistoryKey(peer), array.toString()).commit()
     }
 
     private fun appendMessage(peer: String, message: ChatMessage): Boolean = synchronized(historyLock) {
-        val existing = historyFor(peer)
-        val updated = (existing + message).takeLast(200)
+        val updated = mergeConversationMessages(historyFor(peer), listOf(message))
         val saved = persistKnownPeers(knownPeers() + peer) && persistHistory(peer, updated)
         if (saved && selectedPeer == peer) messages = updated
         saved
     }
+
+    private fun hydrateHistory(peer: String, generation: Int = connectionGeneration) {
+        if (peer.isBlank() || activeRouter.isBlank()) return
+        val router = activeRouter
+        val owner = agentId
+        Thread {
+            try {
+                val url = okhttp3.HttpUrl.Builder()
+                    .scheme("http")
+                    .host(router.substringBefore(':'))
+                    .port(router.substringAfter(':').toInt())
+                    .addPathSegments("v1/conversations")
+                    .addQueryParameter("owner", owner)
+                    .addQueryParameter("peer", peer)
+                    .build()
+                client.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val payload = JSONObject(response.body?.string().orEmpty())
+                    val snapshot = payload.optJSONArray("messages") ?: JSONArray()
+                    val highWaterSequence = payload.optLong("high_water_sequence")
+                    val hydrated = List(snapshot.length()) { index -> chatMessage(snapshot.getJSONObject(index)) }.filterNotNull()
+                    runOnUiThread {
+                        if (generation != connectionGeneration || activeRouter != router || agentId != owner || selectedPeer != peer) return@runOnUiThread
+                        val merged = reconcileConversationMessages(historyFor(peer), hydrated, highWaterSequence)
+                        if (persistHistory(peer, merged)) messages = merged
+                    }
+                }
+            } catch (_: Exception) {
+                // A later reconnect or peer selection retries hydration without discarding live messages.
+            }
+        }.start()
+    }
+
+    private fun chatMessage(value: JSONObject): ChatMessage? {
+        val id = value.optString("id")
+        val sender = value.optString("from")
+        if (id.isBlank() || sender.isBlank()) return null
+        return ChatMessage(
+            id = id,
+            incarnationId = value.optString("message_incarnation_id"),
+            sequence = value.optLong("sequence"),
+            sender = sender,
+            body = value.optString("body"),
+            direction = if (sender == agentId) Direction.OUTGOING else Direction.INCOMING,
+            createdAt = value.optString("created_at", Instant.EPOCH.toString()),
+            attachments = imageReferences(value.optJSONArray("attachments")),
+        )
+    }
+
+    private fun imageReferences(values: JSONArray?): List<ImageReference> = if (values == null) emptyList() else List(values.length()) { index ->
+        val value = values.getJSONObject(index)
+        val rawUrl = value.optString("url")
+        ImageReference(
+            id = value.optString("id"),
+            url = if (rawUrl.startsWith("/")) "${routerHttp()}$rawUrl" else rawUrl,
+            mimeType = value.optString("mime_type"),
+            sizeBytes = value.optInt("size_bytes"),
+            name = value.optString("name", "Attached image"),
+        )
+    }
+
+    private fun imageReferenceJson(image: ImageReference) = JSONObject()
+        .put("id", image.id)
+        .put("url", image.url)
+        .put("mime_type", image.mimeType)
+        .put("size_bytes", image.sizeBytes)
+        .put("name", image.name)
 
     private fun selectPeer(peer: String) {
         if (peer.isBlank()) return
         agentFilter = ""
         selectedPeer = peer
         draft = draftFor(peer)
+        images = emptyList()
         messages = historyFor(peer)
         persistKnownPeers(knownPeers() + peer)
+        if (leaseId.isNotBlank()) hydrateHistory(peer)
     }
 
     private fun returnHome() {
         selectedPeer = ""
         messages = emptyList()
+        images = emptyList()
         draft = ""
     }
 
+    private fun addImages(uris: List<Uri>) {
+        val router = activeRouter
+        val peer = selectedPeer
+        if (uris.isEmpty() || router.isBlank() || peer.isBlank()) return
+        Thread {
+            try {
+                val prepared = uris.take(MAX_IMAGE_ATTACHMENTS).map { uri ->
+                    prepareImageAttachment(contentResolver, uri, imageDisplayName(uri))
+                }
+                runOnUiThread {
+                    if (activeRouter != router || selectedPeer != peer) return@runOnUiThread
+                    val updated = images + prepared.take(MAX_IMAGE_ATTACHMENTS - images.size)
+                    if (updated.sumOf { it.webp.size } > MAX_IMAGE_TOTAL_BYTES) {
+                        connection = "Attached images are too large together"
+                    } else {
+                        images = updated
+                    }
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (activeRouter == router && selectedPeer == peer) {
+                        connection = error.message ?: "Image could not be attached"
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun imageDisplayName(uri: Uri): String {
+        if (uri.scheme != "content") return uri.lastPathSegment ?: "image"
+        return contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: uri.lastPathSegment ?: "image"
+    }
+
     private fun send() {
+        val router = activeRouter
         val recipient = selectedPeer
         val text = draft
-        if (recipient.isBlank() || text.isBlank()) return
-        val message = ChatMessage(UUID.randomUUID().toString(), agentId, text, Direction.OUTGOING, Instant.now().truncatedTo(ChronoUnit.MILLIS).toString())
-        if (!appendMessage(recipient, message)) return
-        clearDraft(recipient)
-        draft = ""
+        val sentImages = images
+        if (recipient.isBlank() || (text.isBlank() && sentImages.isEmpty())) return
+        val messageId = UUID.randomUUID().toString()
+        val createdAt = Instant.now().truncatedTo(ChronoUnit.MILLIS).toString()
+        val attachments = JSONArray(sentImages.map { image ->
+            JSONObject().put("type", "image").put("data_url", image.dataUrl).put("name", image.name)
+        })
         val body = JSONObject()
-            .put("id", message.id)
+            .put("id", messageId)
             .put("from", agentId)
             .put("to", recipient)
             .put("body", text)
-            .put("created_at", message.createdAt)
+            .put("created_at", createdAt)
+            .put("attachments", attachments)
             .toString()
         Thread {
             try {
                 client.newCall(
-                    Request.Builder().url("${routerHttp()}/v1/messages")
+                    Request.Builder().url("http://$router/v1/messages")
                         .post(body.toRequestBody("application/json".toMediaType()))
                         .build(),
                 ).execute().use { response ->
                     runOnUiThread {
-                        if (response.isSuccessful) refreshPeers()
-                        else connection = "Message not sent (${response.code})"
+                        if (response.isSuccessful) {
+                            drafts.clearIfUnchanged(router, recipient, text)
+                            if (activeRouter == router && selectedPeer == recipient && draft == text) draft = ""
+                            if (activeRouter == router && selectedPeer == recipient && images === sentImages) images = emptyList()
+                            if (activeRouter == router) refreshPeers()
+                        } else if (activeRouter == router) {
+                            connection = "Message not sent (${response.code})"
+                        }
                     }
                 }
             } catch (_: Exception) {
-                runOnUiThread { connection = "Message saved locally; router unavailable" }
+                runOnUiThread {
+                    if (activeRouter == router) connection = "Message not sent; router unavailable"
+                }
             }
         }.start()
     }
@@ -635,7 +811,17 @@ class MainActivity : ComponentActivity() {
                     selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, agentFilter, { agentFilter = it }, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
                         BackHandler(onBack = ::returnHome)
-                        Conversation(selectedPeer, messages, draft, ::updateDraft, ::send, ::returnHome)
+                        Conversation(
+                            selectedPeer,
+                            messages,
+                            images,
+                            draft,
+                            ::updateDraft,
+                            ::addImages,
+                            { index -> images = images.filterIndexed { current, _ -> current != index } },
+                            ::send,
+                            ::returnHome,
+                        )
                     }
                 }
                 if (showProfileEditor) UsernameDialog(agentId, ::saveAgentId, { showProfileEditor = false })
@@ -736,16 +922,32 @@ private fun PeerRow(peer: String, onClick: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Conversation(
     peer: String,
     messages: List<ChatMessage>,
+    pendingImages: List<PendingImage>,
     draft: String,
     onDraft: (String) -> Unit,
+    onImages: (List<Uri>) -> Unit,
+    onRemoveImage: (Int) -> Unit,
     onSend: () -> Unit,
     onBack: () -> Unit,
 ) {
     val transcriptState = rememberLazyListState()
+    val context = LocalContext.current
+    val receiveImages = remember(onImages) {
+        object : ReceiveContentListener {
+            override fun onReceive(transferableContent: TransferableContent): TransferableContent? {
+                val uris = imageUris(transferableContent.clipEntry.clipData)
+                if (uris.isNotEmpty()) onImages(uris)
+                return transferableContent.consume { item ->
+                    acceptedImageUri(item.uri?.toString(), item.intent?.data?.toString(), item.text?.toString()) != null
+                }
+            }
+        }
+    }
     LaunchedEffect(messages.lastOrNull()?.id) {
         if (messages.isNotEmpty()) transcriptState.animateScrollToItem(messages.lastIndex)
     }
@@ -778,29 +980,44 @@ private fun Conversation(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(messages, key = { it.id }) { message -> MessageBubble(message) }
+                items(messages, key = { it.key }) { message -> MessageBubble(message) }
             }
         }
         HorizontalDivider(color = SurfaceRaised)
-        Row(
-            Modifier.fillMaxWidth().background(SurfaceDark).padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = draft,
-                onValueChange = onDraft,
-                modifier = Modifier.weight(1f).height(56.dp),
-                singleLine = true,
-                placeholder = { Text("Message ${humanName(peer)}") },
-                shape = RoundedCornerShape(16.dp),
-            )
-            Spacer(Modifier.width(10.dp))
-            Button(
-                onClick = onSend,
-                modifier = Modifier.height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Periwinkle, contentColor = Ink),
-            ) { Text("Send", fontWeight = FontWeight.Bold) }
+        Column(Modifier.fillMaxWidth().background(SurfaceDark).padding(12.dp)) {
+            if (pendingImages.isNotEmpty()) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pendingImages.forEachIndexed { index, image -> PendingImagePreview(image) { onRemoveImage(index) } }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = {
+                        val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+                        val uris = clip?.let(::imageUris).orEmpty()
+                        if (uris.isNotEmpty()) onImages(uris)
+                    },
+                    enabled = pendingImages.size < MAX_IMAGE_ATTACHMENTS,
+                    modifier = Modifier.height(56.dp),
+                ) { Text("Paste") }
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = onDraft,
+                    modifier = Modifier.weight(1f).heightIn(min = 56.dp).contentReceiver(receiveImages),
+                    singleLine = true,
+                    placeholder = { Text("Message ${humanName(peer)}") },
+                    shape = RoundedCornerShape(16.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Button(
+                    onClick = onSend,
+                    enabled = draft.isNotBlank() || pendingImages.isNotEmpty(),
+                    modifier = Modifier.height(56.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Periwinkle, contentColor = Ink),
+                ) { Text("Send", fontWeight = FontWeight.Bold) }
+            }
         }
     }
 }
@@ -821,11 +1038,83 @@ private fun MessageBubble(message: ChatMessage) {
             colors = CardDefaults.cardColors(containerColor = if (outgoing) Periwinkle else SurfaceRaised),
             elevation = CardDefaults.cardElevation(defaultElevation = if (outgoing) 0.dp else 3.dp),
         ) {
-            Column(Modifier.padding(14.dp)) {
-                Text(message.body, color = if (outgoing) Ink else TextPrimary, style = MaterialTheme.typography.bodyLarge)
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (message.body.isNotBlank()) {
+                    Text(message.body, color = if (outgoing) Ink else TextPrimary, style = MaterialTheme.typography.bodyLarge)
+                }
+                message.attachments.forEach { attachment -> RemoteImage(attachment) }
             }
         }
     }
+}
+
+@Composable
+private fun PendingImagePreview(image: PendingImage, onRemove: () -> Unit) {
+    val bitmap = remember(image) { BitmapFactory.decodeByteArray(image.webp, 0, image.webp.size)?.asImageBitmap() }
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = image.name,
+                modifier = Modifier.size(88.dp).clip(RoundedCornerShape(12.dp)),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        TextButton(onRemove) { Text("Remove") }
+    }
+}
+
+@Composable
+private fun RemoteImage(attachment: ImageReference) {
+    var bytes by remember(attachment.url) { mutableStateOf<ByteArray?>(null) }
+    LaunchedEffect(attachment.url) {
+        bytes = withContext(Dispatchers.IO) { loadBoundedImage(attachment.url) }
+    }
+    val bitmap = remember(bytes) { bytes?.let(::decodeBoundedBitmap)?.asImageBitmap() }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap!!,
+            contentDescription = attachment.name,
+            modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp).clip(RoundedCornerShape(12.dp)),
+            contentScale = ContentScale.Fit,
+        )
+    }
+}
+
+private fun decodeBoundedBitmap(bytes: ByteArray): android.graphics.Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth < 1 || bounds.outHeight < 1 || bounds.outWidth.toLong() * bounds.outHeight > 40_000_000L) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_IMAGE_EDGE) sample *= 2
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+}
+
+private fun imageUris(clip: ClipData): List<Uri> = (0 until clip.itemCount).mapNotNull { index ->
+    val item = clip.getItemAt(index)
+    acceptedImageUri(item.uri?.toString(), item.intent?.data?.toString(), item.text?.toString())?.let(Uri::parse)
+}
+
+private fun loadBoundedImage(url: String): ByteArray? = try {
+    val connection = URL(url).openConnection().apply {
+        connectTimeout = 5_000
+        readTimeout = 5_000
+    }
+    connection.getInputStream().use { input ->
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(16 * 1024)
+        var total = 0
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            if (total > MAX_IMAGE_BYTES) return null
+            output.write(buffer, 0, count)
+        }
+        output.toByteArray()
+    }
+} catch (_: Exception) {
+    null
 }
 
 @Composable
@@ -917,6 +1206,29 @@ private fun Avatar(id: String, size: androidx.compose.ui.unit.Dp = 44.dp) {
 @Composable
 private fun StatusDot(connected: Boolean) {
     Box(Modifier.size(10.dp).clip(CircleShape).background(if (connected) Teal else Color(0xFFFF8A80)))
+}
+
+internal fun reconcileConversationMessages(
+    existing: List<ChatMessage>,
+    snapshot: List<ChatMessage>,
+    highWaterSequence: Long,
+): List<ChatMessage> {
+    val snapshotKeys = snapshot.map(ChatMessage::key).toSet()
+    val retainedLive = existing.filter { message ->
+        message.sequence > highWaterSequence || message.key in snapshotKeys
+    }
+    return mergeConversationMessages(retainedLive, snapshot)
+}
+
+internal fun mergeConversationMessages(existing: List<ChatMessage>, incoming: List<ChatMessage>): List<ChatMessage> {
+    val merged = existing.toMutableList()
+    incoming.forEach { message ->
+        val index = merged.indexOfFirst { current ->
+            current.id == message.id && (current.incarnationId == message.incarnationId || current.incarnationId.isBlank() || message.incarnationId.isBlank())
+        }
+        if (index < 0) merged += message else merged[index] = message
+    }
+    return merged.sortedWith(compareBy<ChatMessage> { if (it.sequence == 0L) Long.MAX_VALUE else it.sequence }.thenBy { it.createdAt }).takeLast(200)
 }
 
 private fun draftPeersKey(router: String) = "draft_peers:$router"
