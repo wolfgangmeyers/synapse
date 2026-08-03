@@ -30,7 +30,9 @@
     "agentRole": { "type": "string", "enum": ["agent", "user_interaction"] },
     "clientType": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
     "ackConfirmationMode": { "type": "string", "const": "correlated_v1" },
+    "conversationSyncMode": { "type": "string", "const": "v1" },
     "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "attachmentId": { "type": "string", "minLength": 1, "maxLength": 192, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 },
     "attemptNumber": { "type": "integer", "minimum": 1 },
@@ -102,7 +104,8 @@
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "agent_role": { "$ref": "#/$defs/agentRole" },
         "client_type": { "$ref": "#/$defs/clientType" },
-        "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" }
+        "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" },
+        "conversation_sync": { "$ref": "#/$defs/conversationSyncMode" }
       }
     },
     "leaseRenewFrame": {
@@ -318,7 +321,8 @@
         "expires_at": { "$ref": "#/$defs/utcMillis" },
         "recovered": { "type": "boolean" },
         "agent_role": { "$ref": "#/$defs/agentRole" },
-        "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" }
+        "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" },
+        "conversation_sync": { "$ref": "#/$defs/conversationSyncMode" }
       }
     },
     "leaseRejectedFrame": {
@@ -428,6 +432,46 @@
         "delivery_expires_at": { "$ref": "#/$defs/utcMillis" }
       }
     },
+    "attachmentReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "url", "mime_type", "size_bytes"],
+      "properties": {
+        "id": { "$ref": "#/$defs/attachmentId" },
+        "url": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^/v1/attachments/[A-Za-z0-9._~%-]+$" },
+        "mime_type": { "type": "string", "enum": ["image/png", "image/jpeg", "image/webp", "image/gif"] },
+        "size_bytes": { "type": "integer", "minimum": 1, "maximum": 786432 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 }
+      }
+    },
+    "conversationMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "id", "message_incarnation_id", "from", "to", "body", "created_at", "recorded_at", "attachments"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "id": { "$ref": "#/$defs/messageId" },
+        "message_incarnation_id": { "$ref": "#/$defs/messageIncarnationId" },
+        "from": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "to": { "$ref": "#/$defs/agentId" },
+        "subject": { "type": "string", "maxLength": 256 },
+        "body": { "type": "string", "maxLength": 65536 },
+        "created_at": { "$ref": "#/$defs/utcMillis" },
+        "recorded_at": { "$ref": "#/$defs/utcMillis" },
+        "attachments": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/attachmentReference" } }
+      }
+    },
+    "conversationMessageFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "message"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "conversation_message" },
+        "message": { "$ref": "#/$defs/conversationMessage" }
+      }
+    },
     "deliveryAcknowledgedFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -452,6 +496,7 @@
         { "$ref": "#/$defs/errorFrame" },
         { "$ref": "#/$defs/pongFrame" },
         { "$ref": "#/$defs/messageFrame" },
+        { "$ref": "#/$defs/conversationMessageFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" }
       ]
     },

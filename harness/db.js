@@ -24,6 +24,8 @@ export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
 export const DEFAULT_MAX_QUEUED_MESSAGES = 15;
 export const DEFAULT_MAX_QUEUED_BYTES = 256 * 1024;
 export const DEFAULT_MAX_BATCH_BODY_CHARS = 4_096;
+export const DEFAULT_CONVERSATION_HISTORY_LIMIT = 200;
+export const DEFAULT_CONVERSATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const migrations = Object.freeze([
   {
     id: "001_initial",
@@ -75,6 +77,10 @@ const migrations = Object.freeze([
   {
     id: "012_sentinel_native_cleanup",
     sql: readFileSync(new URL("./migrations/012_sentinel_native_cleanup.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "013_conversation_history",
+    sql: readFileSync(new URL("./migrations/013_conversation_history.sql", import.meta.url), "utf8"),
   },
 ]);
 
@@ -218,18 +224,51 @@ class MessageRepository {
     this.#database.close();
   }
 
-  enqueue(envelope) {
+  enqueue(envelope, { conversation, disableBatching = false } = {}) {
+    if (typeof disableBatching !== "boolean") throw new TypeError("disableBatching must be a boolean");
     const candidate = prepareEnvelope(validateEnvelope(envelope, {
       maxBodyBytes: this.#maxBodyBytes,
     }));
+    const conversationCandidate = prepareConversationCandidate(candidate, conversation);
     return immediateTransaction(this.#database, this.#databasePath, () => {
-      return enqueueCandidate(this.#database, candidate, {
+      const existingConversation = selectLatestConversationMessage(this.#database, candidate.id);
+      if (existingConversation !== undefined) {
+        const deliveryMessage = selectMessage(this.#database, existingConversation.delivery_message_id);
+        if (deliveryMessage !== undefined) {
+          if (!sameConversationCandidate(existingConversation, conversationCandidate)) {
+            throw new IdempotencyConflictError(candidate.id);
+          }
+          return {
+            created: false,
+            message: deliveryMessage,
+            conversation_message: toConversationMessage(existingConversation),
+          };
+        }
+      }
+      const result = enqueueCandidate(this.#database, candidate, {
         firstSeenAt: clockTimestamp(this.#clock),
         maxBodyBytes: this.#maxBodyBytes,
         maxQueuedMessages: this.#maxQueuedMessages,
         maxQueuedBytes: this.#maxQueuedBytes,
-        maxBatchBodyChars: this.#maxBatchBodyChars,
+        maxBatchBodyChars: disableBatching ? 0 : this.#maxBatchBodyChars,
       });
+      if (result.created || result.batched) {
+        const messageIncarnationId = result.message.id === candidate.id
+          ? result.message.message_incarnation_id
+          : randomUUID();
+        insertConversationMessage(this.#database, conversationCandidate, {
+          messageIncarnationId,
+          deliveryMessageId: result.message.id,
+          recordedAt: clockTimestamp(this.#clock),
+        });
+        result.conversation_message = selectConversationMessage(
+          this.#database,
+          candidate.id,
+          messageIncarnationId,
+        );
+        result.conversation_created = true;
+      }
+      return result;
     });
   }
 
@@ -1012,6 +1051,87 @@ class MessageRepository {
     return selectMessage(this.#database, messageId);
   }
 
+  conversationHistory({ owner, peer }) {
+    assertConversationOwner(owner);
+    assertConversationPeer(peer);
+    const [participantA, participantB] = conversationParticipants(owner, peer);
+    return this.#database.prepare(`
+      SELECT
+        conversation_sequence,
+        message_id,
+        message_incarnation_id,
+        sender,
+        recipient,
+        subject,
+        body,
+        created_at,
+        recorded_at,
+        attachments_json
+      FROM conversation_messages
+      WHERE participant_a = ? AND participant_b = ?
+      ORDER BY conversation_sequence ASC
+    `).all(participantA, participantB).map(toConversationMessage);
+  }
+
+  conversationHighWaterSequence() {
+    return this.#database.prepare(`
+      SELECT COALESCE(
+        (SELECT seq FROM sqlite_sequence WHERE name = 'conversation_messages'),
+        0
+      ) AS high_water_sequence
+    `).get().high_water_sequence;
+  }
+
+  conversationAttachmentReferenced(attachmentId) {
+    if (typeof attachmentId !== "string" || attachmentId.length === 0) return false;
+    return this.#database.prepare(`
+      SELECT attachments_json
+      FROM conversation_messages
+      WHERE attachments_json != '[]'
+    `).all().some((row) => conversationAttachments(row.attachments_json)
+      .some((attachment) => attachment.id === attachmentId));
+  }
+
+  pruneConversationHistory({
+    retentionMs = DEFAULT_CONVERSATION_RETENTION_MS,
+    historyLimit = DEFAULT_CONVERSATION_HISTORY_LIMIT,
+  } = {}) {
+    assertPositiveLimit(retentionMs, "retentionMs");
+    assertPositiveLimit(historyLimit, "historyLimit");
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const cutoff = timestampAfter(clockTimestamp(this.#clock), -retentionMs);
+      const rows = this.#database.prepare(`
+        SELECT conversation_sequence, participant_a, participant_b, attachments_json, recorded_at
+        FROM conversation_messages
+        ORDER BY participant_a ASC, participant_b ASC, conversation_sequence DESC
+      `).all();
+      const deleted = new Set();
+      const counts = new Map();
+      for (const row of rows) {
+        const pair = JSON.stringify([row.participant_a, row.participant_b]);
+        const count = counts.get(pair) ?? 0;
+        if (row.recorded_at < cutoff || count >= historyLimit) deleted.add(row.conversation_sequence);
+        else counts.set(pair, count + 1);
+      }
+      const candidateAttachmentIds = new Set();
+      const remove = this.#database.prepare("DELETE FROM conversation_messages WHERE conversation_sequence = ?");
+      for (const row of rows) {
+        if (!deleted.has(row.conversation_sequence)) continue;
+        for (const attachment of conversationAttachments(row.attachments_json)) {
+          candidateAttachmentIds.add(attachment.id);
+        }
+        remove.run(row.conversation_sequence);
+      }
+      const unreferencedAttachmentIds = [...candidateAttachmentIds]
+        .filter((attachmentId) => !this.conversationAttachmentReferenced(attachmentId))
+        .sort();
+      return {
+        deleted_count: deleted.size,
+        unreferenced_attachment_ids: unreferencedAttachmentIds,
+      };
+    });
+  }
+
   queueUsageFor(recipient) {
     return selectLiveQueueUsage(this.#database, recipient);
   }
@@ -1302,6 +1422,141 @@ function prepareEnvelope(envelope) {
     sentinel: envelope.sentinel,
     sentinel_json: envelope.sentinel === undefined ? null : JSON.stringify(envelope.sentinel),
   };
+}
+
+function prepareConversationCandidate(candidate, conversation) {
+  if (conversation !== undefined && (conversation === null || typeof conversation !== "object" || Array.isArray(conversation))) {
+    throw new TypeError("conversation must be an object");
+  }
+  const body = conversation?.body ?? candidate.body;
+  if (typeof body !== "string") throw new TypeError("conversation body must be a string");
+  const attachments = conversation?.attachments ?? [];
+  if (!Array.isArray(attachments)) throw new TypeError("conversation attachments must be an array");
+  return { ...candidate, body, attachments };
+}
+
+function insertConversationMessage(database, candidate, { messageIncarnationId, deliveryMessageId, recordedAt }) {
+  const [participantA, participantB] = conversationParticipants(candidate.from, candidate.to);
+  database.prepare(`
+    INSERT OR IGNORE INTO conversation_messages (
+      message_id,
+      message_incarnation_id,
+      delivery_message_id,
+      sender,
+      recipient,
+      participant_a,
+      participant_b,
+      subject,
+      body,
+      created_at,
+      recorded_at,
+      attachments_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    candidate.id,
+    messageIncarnationId,
+    deliveryMessageId,
+    candidate.from,
+    candidate.to,
+    participantA,
+    participantB,
+    candidate.subject,
+    candidate.body,
+    candidate.created_at,
+    recordedAt,
+    JSON.stringify(candidate.attachments),
+  );
+}
+
+function conversationParticipants(left, right) {
+  return left < right ? [left, right] : [right, left];
+}
+
+function conversationAttachments(value) {
+  try {
+    const attachments = JSON.parse(value);
+    return Array.isArray(attachments) ? attachments : [];
+  } catch {
+    return [];
+  }
+}
+
+function selectLatestConversationMessage(database, messageId) {
+  return database.prepare(`
+    SELECT
+      conversation_sequence,
+      message_id,
+      message_incarnation_id,
+      delivery_message_id,
+      sender,
+      recipient,
+      subject,
+      body,
+      created_at,
+      recorded_at,
+      attachments_json
+    FROM conversation_messages
+    WHERE message_id = ?
+    ORDER BY conversation_sequence DESC
+    LIMIT 1
+  `).get(messageId);
+}
+
+function sameConversationCandidate(row, candidate) {
+  return row.message_id === candidate.id
+    && row.sender === candidate.from
+    && row.recipient === candidate.to
+    && row.subject === candidate.subject
+    && row.body === candidate.body
+    && row.created_at === candidate.created_at
+    && JSON.stringify(conversationAttachments(row.attachments_json)) === JSON.stringify(candidate.attachments);
+}
+
+function selectConversationMessage(database, messageId, messageIncarnationId) {
+  const row = database.prepare(`
+    SELECT
+      conversation_sequence,
+      message_id,
+      message_incarnation_id,
+      delivery_message_id,
+      sender,
+      recipient,
+      subject,
+      body,
+      created_at,
+      recorded_at,
+      attachments_json
+    FROM conversation_messages
+    WHERE message_id = ? AND message_incarnation_id = ?
+  `).get(messageId, messageIncarnationId);
+  return row === undefined ? undefined : toConversationMessage(row);
+}
+
+function toConversationMessage(row) {
+  return {
+    sequence: row.conversation_sequence,
+    id: row.message_id,
+    message_incarnation_id: row.message_incarnation_id,
+    from: row.sender,
+    to: row.recipient,
+    ...(row.subject === null ? {} : { subject: row.subject }),
+    body: row.body,
+    created_at: row.created_at,
+    recorded_at: row.recorded_at,
+    attachments: conversationAttachments(row.attachments_json),
+  };
+}
+
+function assertConversationOwner(value) {
+  if (typeof value !== "string" || !/^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
+    throw new TypeError("owner must be an agent ID");
+  }
+}
+
+function assertConversationPeer(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128) {
+    throw new TypeError("peer must be a protocol sender");
+  }
 }
 
 function enqueueCandidate(

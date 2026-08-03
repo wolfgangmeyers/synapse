@@ -30,6 +30,46 @@ test("correlated delivery frames require a valid router-generated incarnation", 
   assert.throws(() => validateServerFrame({ ...frame, message_incarnation_id: "not-a-uuid" }));
 });
 
+test("conversation sync is additive to registration and has a canonical server event", () => {
+  assert.doesNotThrow(() => validateClientFrame({
+    version: "v1",
+    frame_id: "register-sync",
+    type: "register",
+    agent_id: "shared-user",
+    instance_id: "web-one",
+    conversation_sync: "v1",
+  }));
+  assert.doesNotThrow(() => validateServerFrame({
+    version: "v1",
+    frame_id: "conversation-event",
+    type: "conversation_message",
+    message: {
+      sequence: 1,
+      id: "message-1",
+      message_incarnation_id: "550e8400-e29b-41d4-a716-446655440000",
+      from: "shared-user",
+      to: "peer",
+      body: "image",
+      created_at: "2030-01-01T00:00:00.000Z",
+      recorded_at: "2030-01-01T00:00:00.001Z",
+      attachments: [{
+        id: "message-1-1-hash.webp",
+        url: "/v1/attachments/message-1-1-hash.webp",
+        mime_type: "image/webp",
+        size_bytes: 16,
+      }],
+    },
+  }));
+  assert.throws(() => validateClientFrame({
+    version: "v1",
+    frame_id: "register-unknown-sync",
+    type: "register",
+    agent_id: "shared-user",
+    instance_id: "web-two",
+    conversation_sync: "v2",
+  }));
+});
+
 test("new envelopes use URL-safe NanoIDs while existing UUID IDs remain valid", () => {
   const envelope = createEnvelope({ from: "sender", to: "recipient", body: "hello" });
 

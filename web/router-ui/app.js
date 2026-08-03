@@ -1,3 +1,5 @@
+import { mergeMessages, messageKey, messageTime, reconcileHistoryMessages } from "./history.js";
+
 localStorage.removeItem("mecha.web.messages");
 localStorage.removeItem("mecha.web.conversations");
 
@@ -34,6 +36,7 @@ const state = {
   agentFilter: "",
   images: [],
   messages: {},
+  historyRequests: new Map(),
   draftPeers: new Set(),
 };
 
@@ -153,6 +156,7 @@ async function handleEvent(event) {
   if (!matchesActiveScope(event)) return;
   if (event.type === "status") {
     setStatus(event.state, event.detail, event.agentId, event.routerUrl);
+    if (event.state === "connected" && state.selectedPeer) requestHistory(state.selectedPeer);
     return;
   }
   if (event.type === "agents") {
@@ -160,8 +164,27 @@ async function handleEvent(event) {
     renderAgents();
     return;
   }
-  if (event.type === "agents_error" || event.type === "command_error") {
+  if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error") {
     setStatus("error", event.message);
+    return;
+  }
+  if (event.type === "history") {
+    if (event.peer !== state.selectedPeer || state.historyRequests.get(event.peer) !== event.requestId) return;
+    const scope = { routerUrl: state.routerUrl, agentId: state.agentId };
+    state.messages[event.peer] = pruneHistoryMessages(reconcileHistoryMessages(
+      state.messages[event.peer] || [],
+      event.messages || [],
+      event.highWaterSequence || 0,
+    ));
+    await savePeerMessages(event.peer, scope, state.messages[event.peer]);
+    renderConversation();
+    return;
+  }
+  if (event.type === "conversation_message") {
+    const peer = event.message.from === state.agentId ? event.message.to : event.message.from;
+    if (!peer || peer === state.agentId) return;
+    await appendMessage(peer, event.message);
+    if (!state.selectedPeer) selectPeer(peer);
     return;
   }
   if (event.type === "message") {
@@ -181,6 +204,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.agents = [];
   state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
   state.messages = await loadMessages(routerUrl, state.agentId);
+  state.historyRequests = new Map();
   state.draftPeers = loadDraftPeers(routerUrl, state.agentId);
   localStorage.setItem("mecha.web.activeRouter", routerUrl);
   elements.routerUrl.value = routerUrl;
@@ -289,6 +313,14 @@ function selectPeer(peer) {
   saveSelectedPeer(peer);
   render();
   restoreDraftForSelectedPeer({ focus: true });
+  requestHistory(peer);
+}
+
+function requestHistory(peer) {
+  if (!peer) return;
+  const requestId = crypto.randomUUID();
+  state.historyRequests.set(peer, requestId);
+  sendCommand({ type: "get_history", peer, requestId });
 }
 
 function sendDraft() {
@@ -521,12 +553,15 @@ async function cachedImageUrl(key) {
 }
 
 async function appendMessage(peer, message) {
+  const scope = { routerUrl: state.routerUrl, agentId: state.agentId };
   state.messages[peer] = pruneHistoryMessages(mergeMessages(state.messages[peer] || [], [message]));
+  const messages = state.messages[peer];
   render();
-  await savePeerMessages(peer);
+  await savePeerMessages(peer, scope, messages);
 }
 
 async function settleOutgoing(event) {
+  const scope = { routerUrl: state.routerUrl, agentId: state.agentId };
   const touchedPeers = new Set();
   for (const peer of Object.keys(state.messages)) {
     const updated = state.messages[peer].map((message) => message.id === event.localId ? { ...message, pending: false, failed: !event.ok } : message);
@@ -534,21 +569,21 @@ async function settleOutgoing(event) {
     state.messages[peer] = updated;
   }
   if (event.ok && event.message?.to) {
+    const cachedMessage = await messageWithCachedImages(
+      event.message.to,
+      event.message,
+      state.messages[event.message.to]?.find((message) => message.id === event.localId),
+    );
+    if (scope.routerUrl !== state.routerUrl || scope.agentId !== state.agentId) return;
     state.messages[event.message.to] = pruneHistoryMessages(mergeMessages(
       (state.messages[event.message.to] || []).filter((message) => message.id !== event.localId),
-      [await messageWithCachedImages(event.message.to, event.message, state.messages[event.message.to]?.find((message) => message.id === event.localId))],
+      [cachedMessage],
     ));
     touchedPeers.add(event.message.to);
   }
-  await Promise.all([...touchedPeers].map((peer) => savePeerMessages(peer)));
+  await Promise.all([...touchedPeers].map((peer) => savePeerMessages(peer, scope, state.messages[peer])));
   if (!event.ok) setStatus("error", event.error || "Message not sent");
   renderConversation();
-}
-
-function mergeMessages(existing, incoming) {
-  const byId = new Map(existing.map((message) => [message.id, message]));
-  for (const message of incoming) byId.set(message.id, { ...byId.get(message.id), ...message });
-  return [...byId.values()].sort((left, right) => messageTime(left) - messageTime(right));
 }
 
 function pruneHistoryMessages(messages, now = Date.now()) {
@@ -575,10 +610,15 @@ async function loadMessages(routerUrl, agentId) {
   return messages;
 }
 
-async function savePeerMessages(peer) {
+async function savePeerMessages(
+  peer,
+  { routerUrl, agentId } = { routerUrl: state.routerUrl, agentId: state.agentId },
+  sourceMessages = state.messages[peer] || [],
+) {
+  const messages = pruneHistoryMessages(sourceMessages);
+  if (routerUrl === state.routerUrl && agentId === state.agentId) state.messages[peer] = messages;
   const db = await openHistoryDb();
-  state.messages[peer] = pruneHistoryMessages(state.messages[peer] || []);
-  await saveRecordsForPeer(db, state.routerUrl, state.agentId, peer, state.messages[peer]);
+  await saveRecordsForPeer(db, routerUrl, agentId, peer, messages);
 }
 
 async function saveRecordsForPeer(db, routerUrl, agentId, peer, messages) {
@@ -589,7 +629,7 @@ async function saveRecordsForPeer(db, routerUrl, agentId, peer, messages) {
   for (const key of existing) store.delete(key);
   for (const message of messages) {
     const createdAtMs = messageTime(message);
-    const key = `${peerScopeValue}${SCOPE_SEPARATOR}${message.id || crypto.randomUUID()}`;
+    const key = `${peerScopeValue}${SCOPE_SEPARATOR}${messageKey(message) || crypto.randomUUID()}`;
     store.put({ key, ownerScope: ownerScope(routerUrl, agentId), peerScope: peerScopeValue, routerUrl, agentId, peer, message: messageForStorage(message), createdAtMs, savedAtMs: Date.now() });
   }
   await requestDone(transaction);
@@ -661,7 +701,6 @@ function messageForStorage(message) {
 }
 function ownerScope(routerUrl, agentId) { return `${routerUrl}${SCOPE_SEPARATOR}${agentId}`; }
 function peerScope(routerUrl, agentId, peer) { return `${ownerScope(routerUrl, agentId)}${SCOPE_SEPARATOR}${peer}`; }
-function messageTime(message) { return Date.parse(message.created_at || message.createdAt || "") || Date.now(); }
 function draftScope(routerUrl = state.routerUrl, agentId = state.agentId, peer = state.selectedPeer) { return peer ? peerScope(routerUrl, agentId, peer) : ""; }
 function loadDrafts() {
   try { return pruneDrafts(JSON.parse(localStorage.getItem(DRAFT_STORE_KEY) || "{}")); } catch { return {}; }
@@ -734,7 +773,7 @@ function loadRouters() {
 }
 function saveRouters() { localStorage.setItem("mecha.web.routers", JSON.stringify(state.routers)); }
 function matchesActiveScope(event) {
-  if (!["agents", "agents_error", "message", "send_result", "status"].includes(event.type)) return true;
+  if (!["agents", "agents_error", "message", "conversation_message", "history", "history_error", "send_result", "status"].includes(event.type)) return true;
   return event.routerUrl === state.routerUrl && event.agentId === state.agentId;
 }
 function loadAgentIds() {

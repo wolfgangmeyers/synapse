@@ -36,3 +36,9 @@ Managed Pi launchers accept `--compaction-policy` as simple JSON (`{"levels":[40
 Mailbox V2 keeps each recipient's active mailbox bounded. By default, at most 15 live messages (`queued`, `leased`, or `injection_requested`) are allowed per recipient; when the cap is reached and a new send cannot be batched, the router rejects the send with `queue_full`, and `mailbox_send.py` exits non-zero with instructions to back off and wait for the mailbox to clear.
 
 Small non-sentinel messages to the same recipient are batched while they are still queued, even when senders or subjects differ. The combined body includes per-message sender, subject, and reply hints so the recipient can respond to the right agent. The combined body is capped by `maxBatchBodyChars` (default `4096` characters), configurable in `openMessageRepository({ maxBatchBodyChars })` or with `tools/run_router.mjs --max-batch-chars <chars>` / `MECHA_MAILBOX_MAX_BATCH_CHARS`. Set the value to `0` to disable batching.
+
+## Shared conversation history
+
+Updated web and Android clients opt in with `conversation_sync: "v1"`. The router then allows multiple client instances for one username, emits additive `conversation_message` frames, and exposes `GET /v1/conversations?owner=<id>&peer=<id>` for reconnect hydration. Clients that omit the capability keep the existing single-lease protocol.
+
+Conversation history is stored in the router SQLite database for 30 days, capped at the newest 200 messages per peer pair. The lifecycle sweep enforces both bounds. Accepted image files live in `<database>.attachments` while a retained message references them and are removed with expired/pruned history; unreferenced files retain the existing temporary-file expiry cleanup.
