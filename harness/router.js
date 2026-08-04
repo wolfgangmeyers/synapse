@@ -61,6 +61,8 @@ const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // an hour is 24 lines a day against a 16 MiB cap, and "no sweep record for over an
 // hour" becomes a usable liveness check.
 const DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
+const DEFAULT_MECHA_DEVELOPER_UPDATE_REMINDER_INTERVAL_MS = 10 * 60 * 1000;
+const MECHA_DEVELOPER_REPO_PATH = "/Users/wolfgang/code/mecha-developer";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
 const CORS_HEADERS = Object.freeze({
   "access-control-allow-origin": "*",
@@ -93,6 +95,7 @@ export function createAgentRouter({
   maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
   timeoutSweepIntervalMs = 1_000,
   sweepHeartbeatIntervalMs = DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS,
+  mechaDeveloperUpdateReminderIntervalMs = DEFAULT_MECHA_DEVELOPER_UPDATE_REMINDER_INTERVAL_MS,
   generateFrameId = createNanoId,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
@@ -139,6 +142,9 @@ export function createAgentRouter({
   if (!Number.isSafeInteger(timeoutSweepIntervalMs) || timeoutSweepIntervalMs <= 0) {
     throw new TypeError("timeoutSweepIntervalMs must be a positive safe integer");
   }
+  if (!Number.isSafeInteger(mechaDeveloperUpdateReminderIntervalMs) || mechaDeveloperUpdateReminderIntervalMs <= 0) {
+    throw new TypeError("mechaDeveloperUpdateReminderIntervalMs must be a positive safe integer");
+  }
   if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
     throw new TypeError("maxFrameBytes must be a positive safe integer");
   }
@@ -183,6 +189,7 @@ export function createAgentRouter({
   const conversationSessions = new Map();
   const requestTimesBySender = new Map();
   let timeoutSweepTimer;
+  let mechaDeveloperUpdateReminderTimer;
   // When the last lifecycle_sweep_completed was written, for any reason.
   let lastSweepRecordMs;
   const server = createServer((request, response) => {
@@ -601,6 +608,11 @@ export function createAgentRouter({
         void sweepImageAttachments();
         sweepMessageLifecycles();
         timeoutSweepTimer = setInterval(() => { sweepMessageLifecycles(); void sweepImageAttachments(); }, timeoutSweepIntervalMs);
+        mechaDeveloperUpdateReminderTimer = setInterval(
+          sendMechaDeveloperUpdateReminder,
+          mechaDeveloperUpdateReminderIntervalMs,
+        );
+        mechaDeveloperUpdateReminderTimer.unref?.();
         return websocketUrl;
       } catch (error) {
         await new Promise((resolve, reject) => {
@@ -613,6 +625,7 @@ export function createAgentRouter({
 
     async close() {
       clearInterval(timeoutSweepTimer);
+      clearInterval(mechaDeveloperUpdateReminderTimer);
       for (const socket of webSocketServer.clients) {
         socket.terminate();
       }
@@ -635,6 +648,7 @@ export function createAgentRouter({
     sweepDueServerJobs,
     sweepStaleAgentResources,
     sweepMessageLifecycles,
+    sendMechaDeveloperUpdateReminder,
   };
 
   function sweepMessageLifecycles() {
@@ -672,6 +686,32 @@ export function createAgentRouter({
       lastSweepRecordMs = now;
     }
     return { staleAgents, expired, timedOut, reminders, serverJobs, conversations };
+  }
+
+  function sendMechaDeveloperUpdateReminder() {
+    const now = clock();
+    const createdAt = now.toISOString();
+    const bucket = Math.floor(now.getTime() / mechaDeveloperUpdateReminderIntervalMs);
+    try {
+      const result = enqueueMessage({
+        id: `router-mecha-developer-update-reminder-${bucket}`,
+        from: "router-update-reminder",
+        to: "supervisor",
+        subject: "Check mecha-developer updates",
+        body: mechaDeveloperUpdateReminderBody(),
+        created_at: createdAt,
+      });
+      emit("mecha_developer_update_reminder_sent", {
+        message_id: result.message.id,
+        created: result.created,
+      });
+      return result;
+    } catch (error) {
+      emit("router_error", {
+        error_code: error?.code ?? "mecha_developer_update_reminder_failed",
+      });
+      return undefined;
+    }
   }
 
   function sweepConversationHistory() {
@@ -1667,6 +1707,10 @@ function readJsonRequest(request, maxRequestBytes) {
       }
     });
   });
+}
+
+function mechaDeveloperUpdateReminderBody() {
+  return `mecha-developer update check reminder:\n\nCheck whether ${MECHA_DEVELOPER_REPO_PATH} has upstream changes available. This router reminder is advisory only; do not auto-pull, auto-restart, deploy, or mutate external services just because it fired.\n\nSupervisor procedure:\n1. Inspect local dirty state before pulling.\n2. Check upstream for ${MECHA_DEVELOPER_REPO_PATH}.\n3. If an update is appropriate, tell any connected user an update/restart window is starting.\n4. Pull safely.\n5. Decide what needs restarting: router, web UI, affected agents/workers, or the supervisor.\n6. If router or web UI files changed, or impact is unclear, consider restarting those local processes after the pull.\n7. If workers/agents need restarting, stop them safely first and verify they are stopped or settled before restarting.\n8. If the supervisor itself needs restarting, ask watchdog to help verify continuity and confirm the supervisor comes back with the same session.\n9. Avoid voluntary compaction during the update/restart window; compact only if forced or after state is recorded at a safe checkpoint.`;
 }
 
 function sendHttpJson(response, statusCode, payload, headers = {}) {

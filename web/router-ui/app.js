@@ -28,6 +28,7 @@ const MAX_IMAGE_BYTES = 768 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
 const HISTORY_IMAGE_EDGE = 360;
 const HISTORY_IMAGE_QUALITY = 0.72;
+const MESSAGE_BOTTOM_THRESHOLD_PX = 80;
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
 const state = {
@@ -43,6 +44,7 @@ const state = {
   messages: {},
   historyRequests: new Map(),
   draftPeers: new Set(),
+  followMessages: true,
 };
 
 const elements = {
@@ -117,6 +119,7 @@ elements.composer.addEventListener("submit", (event) => {
 elements.draft.addEventListener("input", () => { saveCurrentDraft(); updateSendState(); });
 elements.attachImage.addEventListener("click", () => elements.imageInput.click());
 elements.imageInput.addEventListener("change", () => { void addImageFiles(elements.imageInput.files); elements.imageInput.value = ""; });
+elements.messages.addEventListener("scroll", () => { state.followMessages = isMessagesNearBottom(); });
 elements.composer.addEventListener("dragover", (event) => {
   if (!hasImageFiles(event.dataTransfer?.items)) return;
   event.preventDefault();
@@ -315,6 +318,7 @@ function selectPeer(peer) {
   }
   saveCurrentDraft();
   state.selectedPeer = peer;
+  state.followMessages = true;
   saveSelectedPeer(peer);
   render();
   restoreDraftForSelectedPeer({ focus: true });
@@ -334,6 +338,7 @@ function sendDraft() {
   const localId = crypto.randomUUID();
   const images = state.images.map(({ dataUrl, name, sizeBytes, mimeType }) => ({ dataUrl, name, sizeBytes, mimeType }));
   const message = { id: localId, from: state.agentId, to: state.selectedPeer, body: pendingMessageBody(body, images), attachments: images.map((image) => ({ url: image.dataUrl, mime_type: image.mimeType, size_bytes: image.sizeBytes, name: image.name })), created_at: new Date().toISOString(), direction: "outgoing", pending: true };
+  state.followMessages = true;
   void appendMessage(state.selectedPeer, message);
   elements.draft.value = "";
   state.images = [];
@@ -364,14 +369,28 @@ function renderConversation() {
     elements.messages.innerHTML = `<div class="empty-state"><h3>Start a conversation with ${escapeHtml(humanName(peer))}</h3><p>Messages use ${escapeHtml(displayRouter(state.routerUrl))}.</p></div>`;
     return;
   }
+  const shouldFollow = state.followMessages || isMessagesNearBottom();
   elements.messages.replaceChildren(...messages.map(renderMessage));
-  scrollMessagesToBottom();
+  if (shouldFollow) scrollMessagesToBottom();
+}
+
+function isMessagesNearBottom() {
+  return elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight <= MESSAGE_BOTTOM_THRESHOLD_PX;
 }
 
 function scrollMessagesToBottom() {
+  state.followMessages = true;
   elements.messages.scrollTop = elements.messages.scrollHeight;
-  requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; });
-  setTimeout(() => { elements.messages.scrollTop = elements.messages.scrollHeight; }, 100);
+  requestAnimationFrame(() => {
+    if (state.followMessages) elements.messages.scrollTop = elements.messages.scrollHeight;
+  });
+  setTimeout(() => {
+    if (state.followMessages) elements.messages.scrollTop = elements.messages.scrollHeight;
+  }, 100);
+}
+
+function scrollMessagesToBottomIfFollowing() {
+  if (state.followMessages || isMessagesNearBottom()) scrollMessagesToBottom();
 }
 
 function renderMessage(message) {
@@ -462,7 +481,7 @@ function renderMessageImages(attachments) {
     const image = document.createElement("img");
     image.src = attachment.url || "";
     image.alt = attachment.name || `Attached image ${index + 1}`;
-    image.addEventListener("load", scrollMessagesToBottom, { once: true });
+    image.addEventListener("load", scrollMessagesToBottomIfFollowing, { once: true });
     if (attachment.cacheKey) {
       void cachedImageUrl(attachment.cacheKey).then((url) => { if (url) image.src = url; });
     }

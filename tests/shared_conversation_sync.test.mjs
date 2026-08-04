@@ -144,7 +144,7 @@ test("migration 013 upgrades schema 012 without disturbing queued data", async (
     }
     repository = openMessageRepository({ databasePath });
     assert.equal(repository.messageFor("before-conversations").body, "queued");
-    assert.equal(repository.migrationIds().at(-1), "013_conversation_history");
+    assert.equal(repository.migrationIds().at(-1), "014_reminder_batch_links");
     repository.enqueue({ id: "after-conversations", from: "sender", to: "peer", body: "recorded", created_at: at(1, 1) });
     assert.equal(repository.conversationHistory({ owner: "peer", peer: "sender" })[0].id, "after-conversations");
   } finally {

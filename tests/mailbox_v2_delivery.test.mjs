@@ -1412,6 +1412,51 @@ test("router batches roughly ten mixed-sender idle notifications into one queued
   }
 });
 
+test("due reminders batch into one queued mailbox delivery", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-reminder-batch-"));
+  let now = Date.parse("2026-07-13T00:00:00.000Z");
+  const repository = openMessageRepository({
+    databasePath: join(directory, "router.sqlite"),
+    clock: () => new Date(now),
+  });
+  try {
+    const router = createAgentRouter({ repository, clock: () => new Date(now), timeoutSweepIntervalMs: 60_000 });
+    for (const [id, body] of [["reminder-a", "first due reminder"], ["reminder-b", "second due reminder"]]) {
+      repository.createReminder({
+        id,
+        target: "supervisor",
+        creator: "tester",
+        subject: "General supervisor sweep",
+        body,
+        created_at: new Date(now).toISOString(),
+        next_due_at: new Date(now + 1_000).toISOString(),
+        interval_ms: null,
+      });
+    }
+
+    now += 1_000;
+    const fired = router.sweepDueReminders();
+    assert.equal(fired.length, 2);
+    assert.equal(fired[0].message.id, "reminder-reminder-a-0");
+    assert.equal(fired[1].message.id, "reminder-reminder-a-0");
+
+    const queued = repository.queuedFor("supervisor");
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].id, "reminder-reminder-a-0");
+    assert.match(queued[0].body, /^Mailbox message batch\n\n/);
+    assert.match(queued[0].body, /From: reminders/);
+    assert.match(queued[0].body, /Subject: General supervisor sweep/);
+    assert.match(queued[0].body, /first due reminder/);
+    assert.match(queued[0].body, /second due reminder/);
+    assert.equal((queued[0].body.match(/\n\n---\n\n/g) ?? []).length, 1);
+    assert.equal(repository.reminderFor("reminder-a").linked_message_id, "reminder-reminder-a-0");
+    assert.equal(repository.reminderFor("reminder-b").linked_message_id, "reminder-reminder-a-0");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("batched delivery carries per-item reply hints without one global sender footer", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-delivery-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });

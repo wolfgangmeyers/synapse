@@ -82,6 +82,10 @@ const migrations = Object.freeze([
     id: "013_conversation_history",
     sql: readFileSync(new URL("./migrations/013_conversation_history.sql", import.meta.url), "utf8"),
   },
+  {
+    id: "014_reminder_batch_links",
+    sql: readFileSync(new URL("./migrations/014_reminder_batch_links.sql", import.meta.url), "utf8"),
+  },
 ]);
 
 export class IdempotencyConflictError extends Error {
@@ -419,6 +423,7 @@ class MessageRepository {
             maxBodyBytes: this.#maxBodyBytes,
             maxQueuedMessages: this.#maxQueuedMessages,
             maxQueuedBytes: this.#maxQueuedBytes,
+            maxBatchBodyChars: this.#maxBatchBodyChars,
             onAttempt: () => {
               try {
                 onAttempt?.({ reminderId: id, scheduledFor: nextDueAt });
@@ -1562,7 +1567,7 @@ function assertConversationPeer(value) {
 function enqueueCandidate(
   database,
   candidate,
-  { firstSeenAt, maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars },
+  { firstSeenAt, maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars = DEFAULT_MAX_BATCH_BODY_CHARS },
 ) {
   const existing = selectMessage(database, candidate.id);
   if (existing !== undefined) {
@@ -1719,11 +1724,13 @@ function fireDueOneShotReminder(database, reminder, now, limits) {
     }, { maxBodyBytes: limits.maxBodyBytes })),
     {
       firstSeenAt: now,
+      maxBodyBytes: limits.maxBodyBytes,
       maxQueuedMessages: limits.maxQueuedMessages,
       maxQueuedBytes: limits.maxQueuedBytes,
+      maxBatchBodyChars: limits.maxBatchBodyChars,
     },
   );
-  if (!message.created) {
+  if (!message.created && !message.batched) {
     throw new IdempotencyConflictError(message.message.id);
   }
   const updated = database.prepare(`
@@ -1794,11 +1801,13 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
     }, { maxBodyBytes: limits.maxBodyBytes })),
     {
       firstSeenAt: now,
+      maxBodyBytes: limits.maxBodyBytes,
       maxQueuedMessages: limits.maxQueuedMessages,
       maxQueuedBytes: limits.maxQueuedBytes,
+      maxBatchBodyChars: limits.maxBatchBodyChars,
     },
   );
-  if (!message.created) throw new IdempotencyConflictError(message.message.id);
+  if (!message.created && !message.batched) throw new IdempotencyConflictError(message.message.id);
   const updated = database.prepare(`
     UPDATE reminders
     SET linked_message_id = ?,
