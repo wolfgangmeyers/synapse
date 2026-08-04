@@ -57,6 +57,38 @@ class SupervisorStartTest(unittest.TestCase):
             ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", "/missing/stable.js"):
                 self.assertEqual(supervisor_start.resolve_pi_mailbox_extension(), str(override))
 
+    def test_bootstrap_router_skips_when_router_is_healthy(self):
+        with patch.object(supervisor_start, "router_is_healthy", return_value=True), patch.object(
+            supervisor_start, "_ensure_router_window"
+        ) as ensure_router_window:
+            started = supervisor_start.bootstrap_router("http://127.0.0.1:8765", output=lambda _message: None)
+
+        self.assertFalse(started)
+        ensure_router_window.assert_not_called()
+
+    def test_bootstrap_router_starts_router_and_web_ui_when_unhealthy(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {
+                "MECHA_ROUTER_DATABASE": str(pathlib.Path(tmpdir) / "router.sqlite"),
+                "MECHA_ROUTER_LOG": str(pathlib.Path(tmpdir) / "router.jsonl"),
+            },
+            clear=True,
+        ), patch.object(supervisor_start, "router_is_healthy", side_effect=[False, True]), patch.object(
+            supervisor_start, "_ensure_router_window", return_value=True
+        ) as ensure_router_window, patch.object(supervisor_start.time, "sleep"):
+            started = supervisor_start.bootstrap_router("http://127.0.0.1:8765", repo_dir=tmpdir, output=lambda _message: None)
+
+        self.assertTrue(started)
+        router_call, web_ui_call = ensure_router_window.call_args_list
+        self.assertEqual(router_call.args[0], supervisor_start.ROUTER_WINDOW)
+        self.assertIn("node tools/run_router.mjs", router_call.args[1])
+        self.assertIn("--database", router_call.args[1])
+        self.assertIn("--port 8765", router_call.args[1])
+        self.assertEqual(web_ui_call.args[0], supervisor_start.ROUTER_WEB_UI_WINDOW)
+        self.assertIn("node tools/router_web_ui.mjs", web_ui_call.args[1])
+        self.assertIn("--router http://127.0.0.1:8765", web_ui_call.args[1])
+
     def test_supervisor_launch_exports_router_configuration_but_not_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             extension = pathlib.Path(tmpdir) / "mecha-messaging.js"
@@ -72,11 +104,12 @@ class SupervisorStartTest(unittest.TestCase):
                 clear=True,
             ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(extension)), patch.object(
                 supervisor_start, "session_exists", return_value=False
-            ), patch.object(supervisor_start, "ensure_session"), patch.object(
+            ), patch.object(supervisor_start, "bootstrap_router") as bootstrap_router, patch.object(supervisor_start, "ensure_session"), patch.object(
                 supervisor_start, "send_text", side_effect=lambda _window, command: commands.append(command)
             ), patch.object(supervisor_start, "send_enter"), patch.object(supervisor_start.time, "sleep"):
                 supervisor_start.main()
 
+        bootstrap_router.assert_called_once_with("http://127.0.0.1:8765", repo_dir=supervisor_start.DEFAULT_DIR)
         self.assertIn("export MECHA_ROUTER_URL=http://127.0.0.1:8765", commands[0])
         self.assertIn(f"export {supervisor_start.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.5", commands[0])
         command = shlex.split(commands[0])
@@ -100,11 +133,12 @@ class SupervisorStartTest(unittest.TestCase):
                 clear=True,
             ), patch.object(supervisor_start, "PI_MAILBOX_EXTENSION_PATH", str(extension)), patch.object(
                 supervisor_start, "session_exists", return_value=False
-            ), patch.object(supervisor_start, "ensure_session"), patch.object(
+            ), patch.object(supervisor_start, "bootstrap_router") as bootstrap_router, patch.object(supervisor_start, "ensure_session"), patch.object(
                 supervisor_start, "send_text", side_effect=lambda _window, command: commands.append(command)
             ), patch.object(supervisor_start, "send_enter"), patch.object(supervisor_start.time, "sleep"):
                 supervisor_start.main()
 
+        bootstrap_router.assert_called_once_with("http://127.0.0.1:8765", repo_dir=supervisor_start.DEFAULT_DIR)
         self.assertIn(f"export {supervisor_start.PI_COMPACTION_POLICY_ENV}=", commands[0])
         self.assertIn(shlex.quote(policy), commands[0])
 
