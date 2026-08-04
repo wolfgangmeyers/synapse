@@ -288,7 +288,7 @@ test("two web sessions with one username receive live fanout and reconnect histo
 test("router web UI relay reconnects after router restart and resumes one canonical transcript", async () => {
   const directory = await mkdtemp(join(tmpdir(), "router-web-ui-reconnect-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), maxBatchBodyChars: 0 });
-  let router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  let router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000, deliveryOfferCoalesceMs: 0 });
   const sockets = [];
   let ui;
   try {
@@ -321,7 +321,7 @@ test("router web UI relay reconnects after router restart and resumes one canoni
     const reconnecting = waitForEvent(browser, (event) => event.type === "status" && event.state === "reconnecting", 2_000);
     await router.close();
     await reconnecting;
-    router = createAgentRouter({ repository, port: routerPort, timeoutSweepIntervalMs: 60_000 });
+    router = createAgentRouter({ repository, port: routerPort, timeoutSweepIntervalMs: 60_000, deliveryOfferCoalesceMs: 0 });
     wsUrl = await router.listen();
     assert.equal(wsUrl.replace("ws://", "http://").replace("/v1/agents", ""), routerHttpUrl);
     const reconnected = await waitForEvent(browser, (event) => event.type === "status" && event.state === "connected", 3_000);

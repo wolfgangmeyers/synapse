@@ -96,6 +96,7 @@ export function createAgentRouter({
   timeoutSweepIntervalMs = 1_000,
   sweepHeartbeatIntervalMs = DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS,
   mechaDeveloperUpdateReminderIntervalMs = DEFAULT_MECHA_DEVELOPER_UPDATE_REMINDER_INTERVAL_MS,
+  deliveryOfferCoalesceMs = 25,
   generateFrameId = createNanoId,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
@@ -145,6 +146,9 @@ export function createAgentRouter({
   if (!Number.isSafeInteger(mechaDeveloperUpdateReminderIntervalMs) || mechaDeveloperUpdateReminderIntervalMs <= 0) {
     throw new TypeError("mechaDeveloperUpdateReminderIntervalMs must be a positive safe integer");
   }
+  if (!Number.isSafeInteger(deliveryOfferCoalesceMs) || deliveryOfferCoalesceMs < 0 || deliveryOfferCoalesceMs > 1_000) {
+    throw new TypeError("deliveryOfferCoalesceMs must be a safe integer from 0 through 1000");
+  }
   if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
     throw new TypeError("maxFrameBytes must be a positive safe integer");
   }
@@ -188,6 +192,7 @@ export function createAgentRouter({
   const sessions = new Map();
   const conversationSessions = new Map();
   const requestTimesBySender = new Map();
+  const pendingDeliveryOffers = new Map();
   let timeoutSweepTimer;
   let mechaDeveloperUpdateReminderTimer;
   // When the last lifecycle_sweep_completed was written, for any reason.
@@ -270,7 +275,10 @@ export function createAgentRouter({
         }
         conversationSessions.delete(session.agentId);
       }
-      if (sessions.get(session.agentId) === session) sessions.delete(session.agentId);
+      if (sessions.get(session.agentId) === session) {
+        sessions.delete(session.agentId);
+        cancelPendingDeliveryOffer(session.agentId);
+      }
       try {
         const released = repository.releaseAgentLease({
           agentId: session.agentId,
@@ -332,6 +340,7 @@ export function createAgentRouter({
         });
         const replacement = sessions.get(frame.agent_id);
         session = createSession(currentSocket, frame, lease, frame.instance_id);
+        cancelPendingDeliveryOffer(frame.agent_id);
         sessions.set(frame.agent_id, session);
         if (frame.conversation_sync === "v1") {
           conversationSessions.set(frame.agent_id, new Map([[frame.instance_id, session]]));
@@ -626,6 +635,8 @@ export function createAgentRouter({
     async close() {
       clearInterval(timeoutSweepTimer);
       clearInterval(mechaDeveloperUpdateReminderTimer);
+      for (const timer of pendingDeliveryOffers.values()) clearTimeout(timer);
+      pendingDeliveryOffers.clear();
       for (const socket of webSocketServer.clients) {
         socket.terminate();
       }
@@ -900,11 +911,36 @@ export function createAgentRouter({
 
   function offerQueuedMessages(agentId) {
     if (agentId === undefined) {
-      for (const session of sessions.values()) offerSession(session);
+      for (const session of sessions.values()) scheduleDeliveryOffer(session.agentId);
       return;
     }
+    scheduleDeliveryOffer(agentId);
+  }
+
+  function scheduleDeliveryOffer(agentId) {
+    // Hold the first offer for one short tick so rapid HTTP posts can merge before
+    // any delivery attempt is created; claim-time batching still handles older queues.
     const session = sessions.get(agentId);
-    if (session !== undefined) offerSession(session);
+    if (session === undefined) return;
+    if (deliveryOfferCoalesceMs === 0) {
+      offerSession(session);
+      return;
+    }
+    if (pendingDeliveryOffers.has(agentId)) return;
+    const timer = setTimeout(() => {
+      pendingDeliveryOffers.delete(agentId);
+      const currentSession = sessions.get(agentId);
+      if (currentSession !== undefined) offerSession(currentSession);
+    }, deliveryOfferCoalesceMs);
+    timer.unref?.();
+    pendingDeliveryOffers.set(agentId, timer);
+  }
+
+  function cancelPendingDeliveryOffer(agentId) {
+    const timer = pendingDeliveryOffers.get(agentId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    pendingDeliveryOffers.delete(agentId);
   }
 
   function connectedAgentsSnapshot() {

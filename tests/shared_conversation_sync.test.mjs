@@ -326,6 +326,64 @@ test("a synced sender preserves batching for a legacy recipient while receiving 
   }
 });
 
+test("rapid posts to a connected idle recipient coalesce before the first delivery", async () => {
+  const app = await fixture({ deliveryOfferCoalesceMs: 25 }, { maxBatchBodyChars: 4_096 });
+  let recipient;
+  const delivered = [];
+  try {
+    recipient = await connect(app.wsUrl, { agentId: "burst-recipient", instanceId: "burst-owner", sync: false });
+    recipient.socket.on("message", (payload) => {
+      const frame = JSON.parse(payload.toString("utf8"));
+      if (frame.type !== "message") return;
+      delivered.push(frame);
+      for (const type of ["injection_requested", "ack"]) {
+        recipient.socket.send(JSON.stringify({
+          version: "v1",
+          frame_id: `${type}-${frame.message.id}-${frame.attempt_number}`,
+          type,
+          agent_id: "burst-recipient",
+          instance_id: "burst-owner",
+          lease_id: recipient.registered.lease_id,
+          message_id: frame.message.id,
+          attempt_number: frame.attempt_number,
+        }));
+      }
+    });
+
+    const bodies = ["1", "2", "3", "4", "5", "6", "7", "8", "98", "0"];
+    await Promise.all(bodies.map((body, index) => postMessage(app.httpUrl, {
+      id: `burst-${index}`,
+      from: "web-ui-sender",
+      to: "burst-recipient",
+      body,
+      created_at: at(1, index),
+    }).then(({ response }) => assert.ok([200, 201].includes(response.status), `unexpected status ${response.status}`))));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    assert.equal(delivered.length, 1);
+    assert.equal(delivered[0].message.id, "burst-0");
+    assert.match(delivered[0].message.body, /^Mailbox message batch\n\n/);
+    assert.equal((delivered[0].message.body.match(/\n\n---\n\n/g) ?? []).length, 9);
+    for (const body of bodies) assert.match(delivered[0].message.body, new RegExp(`\\n${body}\\n`));
+    assert.equal(app.repository.conversationHistory({ owner: "web-ui-sender", peer: "burst-recipient" }).length, 10);
+    const database = new DatabaseSync(join(app.directory, "router.sqlite"), { readOnly: true });
+    try {
+      const deliveryGroups = database.prepare(`
+        SELECT delivery_message_id, COUNT(*) AS item_count
+        FROM conversation_messages
+        WHERE sender = 'web-ui-sender' AND recipient = 'burst-recipient'
+        GROUP BY delivery_message_id
+      `).all().map((row) => ({ ...row }));
+      assert.deepEqual(deliveryGroups, [{ delivery_message_id: "burst-0", item_count: 10 }]);
+    } finally {
+      database.close();
+    }
+  } finally {
+    recipient?.socket.terminate();
+    await app.close();
+  }
+});
+
 test("synced lease survives renewal, subscriber replacement, and owner handoff without duplicate delivery", async () => {
   const routerEvents = [];
   const app = await fixture({ eventLogger: (event, fields) => routerEvents.push({ event, ...fields }) });
