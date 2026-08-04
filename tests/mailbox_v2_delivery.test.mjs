@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1519,6 +1520,371 @@ test("batched delivery carries per-item reply hints without one global sender fo
   }
 });
 
+test("delivery claim batches queued messages that could not batch while one was in flight", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-batch-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    repository.enqueue(envelope("claim-batch-1", {
+      from: "worker-1",
+      to: identity.agentId,
+      subject: "First update",
+      body: "first body",
+    }));
+    const firstDelivery = repository.claimNextMessage(identity);
+    repository.enqueue(envelope("claim-batch-2", {
+      from: "worker-2",
+      to: identity.agentId,
+      subject: "Second update",
+      body: "second body",
+    }));
+    assert.deepEqual(repository.queuedFor(identity.agentId).map(({ id }) => id), ["claim-batch-2"]);
+
+    repository.nackDelivery({
+      ...identity,
+      messageId: firstDelivery.message.id,
+      attemptNumber: firstDelivery.attempt_number,
+      reason: "injection_failed",
+    });
+    assert.deepEqual(repository.queuedFor(identity.agentId).map(({ id }) => id), ["claim-batch-1", "claim-batch-2"]);
+
+    const batchedDelivery = repository.claimNextMessage(identity);
+    assert.equal(batchedDelivery.message.id, "claim-batch-1");
+    assert.equal(batchedDelivery.attempt_number, 2);
+    assert.match(batchedDelivery.message.body, /^Mailbox message batch\n\n/);
+    assert.ok(batchedDelivery.message.body.indexOf("first body") < batchedDelivery.message.body.indexOf("second body"));
+    assert.equal((batchedDelivery.message.body.match(/\n\n---\n\n/g) ?? []).length, 1);
+    assert.equal(repository.messageFor("claim-batch-2"), undefined);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim preserves merged prior attempts for dead-letter decisions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-attempts-"));
+  const databasePath = join(directory, "router.sqlite");
+  const repository = openMessageRepository({ databasePath });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  let database;
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    repository.enqueue(envelope("attempt-batch-1", {
+      from: "worker-1",
+      to: identity.agentId,
+      body: "first body",
+    }), { disableBatching: true });
+    repository.enqueue(envelope("attempt-batch-2", {
+      from: "worker-2",
+      to: identity.agentId,
+      body: "second body",
+    }), { disableBatching: true });
+    database = new DatabaseSync(databasePath);
+    database.prepare(`
+      INSERT INTO delivery_attempts (
+        message_id, attempt_number, lease_id, owner_lease_id, state,
+        created_at, updated_at, delivery_expires_at, failure_reason
+      ) VALUES (?, 1, NULL, '', 'nacked', ?, ?, ?, 'injection_failed')
+    `).run(
+      "attempt-batch-2",
+      "2026-07-13T00:00:00.000Z",
+      "2026-07-13T00:00:00.000Z",
+      "2026-07-13T00:00:30.000Z",
+    );
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "attempt-batch-1");
+    assert.equal(delivery.attempt_number, 2);
+    assert.match(delivery.message.body, /^Mailbox message batch\n\n/);
+    repository.recordInjectionRequested({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+    });
+    const failed = repository.nackDelivery({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+      reason: "injection_failed",
+      maxDeliveryAttempts: 2,
+    });
+
+    assert.equal(failed.state, "dead_letter");
+    assert.equal(repository.messageFor("attempt-batch-1").state, "dead_letter");
+    assert.equal(repository.messageFor("attempt-batch-2"), undefined);
+  } finally {
+    database?.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim re-arms every recurring reminder linked into a dead-lettered batch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-recurring-reminders-"));
+  const databasePath = join(directory, "router.sqlite");
+  let now = Date.parse("2026-07-13T00:00:00.000Z");
+  const repository = openMessageRepository({
+    databasePath,
+    clock: () => new Date(now),
+  });
+  const router = createAgentRouter({ repository, clock: () => new Date(now), timeoutSweepIntervalMs: 60_000 });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  let database;
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    for (const [id, body] of [["recurring-a", "first recurring body"], ["recurring-b", "second recurring body"]]) {
+      repository.createReminder({
+        id,
+        target: identity.agentId,
+        creator: "tester",
+        subject: "Recurring sweep",
+        body,
+        created_at: new Date(now).toISOString(),
+        next_due_at: new Date(now).toISOString(),
+        interval_ms: 15 * 60 * 1000,
+      });
+      repository.enqueue(envelope(`reminder-${id}-0`, {
+        from: "reminders",
+        to: identity.agentId,
+        subject: "Recurring sweep",
+        body,
+      }), { disableBatching: true });
+    }
+    database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE reminders SET linked_message_id = ? WHERE id = ?")
+      .run("reminder-recurring-a-0", "recurring-a");
+    database.prepare("UPDATE reminders SET linked_message_id = ? WHERE id = ?")
+      .run("reminder-recurring-b-0", "recurring-b");
+
+    const delivery = repository.claimNextMessage(identity);
+    repository.recordInjectionRequested({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+    });
+    const failed = repository.nackDelivery({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+      reason: "injection_failed",
+      maxDeliveryAttempts: 1,
+    });
+
+    assert.equal(failed.state, "dead_letter");
+    assert.deepEqual(failed.recurring_reminder_rearmed.map(({ reminder_id }) => reminder_id), ["recurring-a", "recurring-b"]);
+    for (const id of ["recurring-a", "recurring-b"]) {
+      const reminder = repository.reminderFor(id);
+      assert.equal(reminder.linked_message_id, null);
+      assert.equal(reminder.attempt_count, 1);
+      assert.ok(reminder.next_due_at > new Date(now).toISOString());
+    }
+    assert.doesNotThrow(() => router.sweepDeliveryTimeouts());
+  } finally {
+    database?.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim batches three queued messages in enqueue order", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-three-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    for (const [id, body] of [["three-1", "first"], ["three-2", "second"], ["three-3", "third"]]) {
+      repository.enqueue(envelope(id, { to: identity.agentId, body }), { disableBatching: true });
+    }
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "three-1");
+    assert.ok(delivery.message.body.indexOf("first") < delivery.message.body.indexOf("second"));
+    assert.ok(delivery.message.body.indexOf("second") < delivery.message.body.indexOf("third"));
+    assert.equal((delivery.message.body.match(/\n\n---\n\n/g) ?? []).length, 2);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim keeps separate rows when batching would exceed queued byte limits", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-byte-limit-"));
+  const repository = openMessageRepository({
+    databasePath: join(directory, "router.sqlite"),
+    maxQueuedBytes: 100,
+  });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    repository.enqueue(envelope("qb-1", { from: "a", to: identity.agentId, body: "one" }), { disableBatching: true });
+    repository.enqueue(envelope("qb-2", { from: "b", to: identity.agentId, body: "two" }), { disableBatching: true });
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "qb-1");
+    assert.equal(delivery.message.body, "one");
+    assert.equal(repository.messageFor("qb-2").state, "queued");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim preserves conversation delivery mapping for merged rows", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-conversation-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    repository.enqueue(envelope("conversation-batch-1", {
+      from: "worker-1",
+      to: identity.agentId,
+      body: "first conversation body",
+    }), { conversation: { body: "first canonical body" }, disableBatching: true });
+    repository.enqueue(envelope("conversation-batch-2", {
+      from: "worker-2",
+      to: identity.agentId,
+      body: "second conversation body",
+    }), { conversation: { body: "second canonical body" }, disableBatching: true });
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "conversation-batch-1");
+    assert.equal(repository.messageFor("conversation-batch-2"), undefined);
+
+    const duplicate = repository.enqueue(envelope("conversation-batch-2", {
+      from: "worker-2",
+      to: identity.agentId,
+      body: "second conversation body",
+    }), { conversation: { body: "second canonical body" } });
+    assert.equal(duplicate.created, false);
+    assert.equal(duplicate.message.id, "conversation-batch-1");
+    assert.equal(duplicate.conversation_message.id, "conversation-batch-2");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim does not batch across queued sentinel messages", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-sentinel-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    repository.enqueue(envelope("before-sentinel", {
+      to: identity.agentId,
+      body: "before sentinel",
+    }), { disableBatching: true });
+    repository.enqueue(envelope("sentinel-message", {
+      to: identity.agentId,
+      body: "sentinel body",
+      sentinel: { model: "gpt-5.5" },
+    }), { disableBatching: true });
+    repository.enqueue(envelope("after-sentinel", {
+      to: identity.agentId,
+      body: "after sentinel",
+    }));
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "before-sentinel");
+    assert.equal(delivery.message.body, "before sentinel");
+    assert.equal(repository.messageFor("after-sentinel").state, "queued");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim preserves reminder links when queued reminder messages are batched", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-reminder-batch-"));
+  const databasePath = join(directory, "router.sqlite");
+  const repository = openMessageRepository({ databasePath });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  let database;
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    for (const [id, body] of [["reminder-a", "first reminder body"], ["reminder-b", "second reminder body"]]) {
+      repository.createReminder({
+        id,
+        target: identity.agentId,
+        creator: "tester",
+        subject: "General supervisor sweep",
+        body,
+        created_at: "2026-07-13T00:00:00.000Z",
+        next_due_at: "2026-07-13T00:00:01.000Z",
+        interval_ms: null,
+      });
+      repository.enqueue(envelope(`reminder-${id}-0`, {
+        from: "reminders",
+        to: identity.agentId,
+        subject: "General supervisor sweep",
+        body,
+      }), { disableBatching: true });
+    }
+    database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE reminders SET state = 'message_queued', linked_message_id = ? WHERE id = ?")
+      .run("reminder-reminder-a-0", "reminder-a");
+    database.prepare("UPDATE reminders SET state = 'message_queued', linked_message_id = ? WHERE id = ?")
+      .run("reminder-reminder-b-0", "reminder-b");
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "reminder-reminder-a-0");
+    assert.match(delivery.message.body, /^Mailbox message batch\n\n/);
+    assert.ok(delivery.message.body.indexOf("first reminder body") < delivery.message.body.indexOf("second reminder body"));
+    assert.equal(repository.reminderFor("reminder-a").linked_message_id, "reminder-reminder-a-0");
+    assert.equal(repository.reminderFor("reminder-b").linked_message_id, "reminder-reminder-a-0");
+
+    repository.recordInjectionRequested({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+    });
+    repository.acknowledgeDelivery({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+    });
+    assert.equal(repository.reminderFor("reminder-a"), undefined);
+    assert.equal(repository.reminderFor("reminder-b"), undefined);
+  } finally {
+    database?.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("router honors the configured maximum batched body character count", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-limit-"));
   const batched = "Mailbox message batch\n\nFrom: worker-a\nSubject: Pi worker settled\n\nfirst\n\n[Reply via mailbox to worker-a.]\n\n---\n\nFrom: worker-b\nSubject: Another subject\n\nsecond\n\n[Reply via mailbox to worker-b.]";
@@ -1636,7 +2002,7 @@ test("router and SQLite recover timed-out delivery attempts and complete one-sho
     assert.notEqual(registration.frame_id, leaseId);
 
     const firstOffer = nextRouterFrame(socket);
-    router.enqueueMessage(envelope("delivery-1"));
+    router.enqueueMessage(envelope("delivery-1", { body: "first delivery body" }));
     const firstDelivery = await firstOffer;
     assert.deepEqual(
       { type: firstDelivery.type, messageId: firstDelivery.message.id, attempt: firstDelivery.attempt_number },
@@ -1644,7 +2010,7 @@ test("router and SQLite recover timed-out delivery attempts and complete one-sho
     );
     receipt("injection_requested", "delivery-1", firstDelivery.attempt_number, leaseId);
     await drainAck();
-    router.enqueueMessage(envelope("delivery-2"));
+    router.enqueueMessage(envelope("delivery-2", { body: "second delivery body" }));
 
     repository.createReminder({
       id: "reminder-1",
@@ -1680,19 +2046,13 @@ test("router and SQLite recover timed-out delivery attempts and complete one-sho
       { messageId: replay.message.id, attempt: replay.attempt_number },
       { messageId: "delivery-1", attempt: 2 },
     );
+    assert.match(replay.message.body, /^Mailbox message batch\n\n/);
+    assert.ok(replay.message.body.indexOf("first delivery body") < replay.message.body.indexOf("second delivery body"));
     receipt("injection_requested", "delivery-1", replay.attempt_number, recoveredLeaseId);
-    const secondOffer = nextRouterFrame(socket);
+    await drainAck();
     receipt("ack", "delivery-1", replay.attempt_number, recoveredLeaseId);
-    const secondDelivery = await secondOffer;
     await drainAck();
     assert.equal(repository.messageFor("delivery-1"), undefined);
-    assert.deepEqual(
-      { messageId: secondDelivery.message.id, attempt: secondDelivery.attempt_number },
-      { messageId: "delivery-2", attempt: 1 },
-    );
-    receipt("injection_requested", "delivery-2", secondDelivery.attempt_number, recoveredLeaseId);
-    receipt("ack", "delivery-2", secondDelivery.attempt_number, recoveredLeaseId);
-    await drainAck();
     assert.equal(repository.messageFor("delivery-2"), undefined);
 
     const reminderOffer = nextRouterFrame(socket);

@@ -1430,13 +1430,16 @@ export function createAgentRouter({
   }
 
   function emitRecurringReminderRearmed(outcome, reason) {
-    if (outcome.recurring_reminder_rearmed === undefined) return;
-    emit("recurring_reminder_rearmed", {
-      reminder_id: outcome.recurring_reminder_rearmed.reminder_id,
-      message_id: outcome.message_id,
-      next_due_at: outcome.recurring_reminder_rearmed.next_due_at,
-      reason,
-    });
+    const rearmed = outcome.recurring_reminder_rearmed;
+    if (rearmed === undefined) return;
+    for (const reminder of Array.isArray(rearmed) ? rearmed : [rearmed]) {
+      emit("recurring_reminder_rearmed", {
+        reminder_id: reminder.reminder_id,
+        message_id: outcome.message_id,
+        next_due_at: reminder.next_due_at,
+        reason,
+      });
+    }
   }
 
   function emit(event, fields = {}) {
