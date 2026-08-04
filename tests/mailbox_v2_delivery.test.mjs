@@ -787,6 +787,87 @@ test("overlapping settled notification sends make independent attempts", async (
   assert.deepEqual(fixture.notifications, []);
 });
 
+test("mecha_reload reports support and queues reload through the command boundary", async () => {
+  const handlers = new Map();
+  const commands = new Map();
+  const tools = new Map();
+  const queued = [];
+  const pi = {
+    events: { on() {} },
+    on(type, handler) { handlers.set(type, handler); },
+    registerCommand(name, command) { commands.set(name, command); },
+    registerTool(tool) { tools.set(tool.name, tool); },
+    sendMessage() {},
+    sendUserMessage: (...args) => queued.push(args),
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "worker",
+    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
+  });
+
+  const reloadTool = tools.get("mecha_reload");
+  assert.equal(typeof reloadTool.execute, "function");
+  assert.equal(commands.has("mecha-reload-runtime"), true);
+
+  const status = await reloadTool.execute("reload-status", { action: "status" });
+  assert.equal(status.details.command, "/mecha-reload-runtime");
+  assert.equal(status.details.commandRegistered, true);
+  assert.equal(status.details.canQueueReload, true);
+
+  const result = await reloadTool.execute("reload", { action: "reload" });
+  assert.equal(result.content[0].text, "Self-reload queued for Pi's next safe follow-up boundary.");
+  assert.equal(result.details.reloadState, "queued_as_follow_up");
+  assert.deepEqual(queued, [["/mecha-reload-runtime", { deliverAs: "followUp" }]]);
+
+  const reloads = [];
+  await commands.get("mecha-reload-runtime").handler("", { reload: async () => reloads.push("reload"), ui: { notify() {} } });
+  assert.deepEqual(reloads, ["reload"]);
+});
+
+test("mecha_reload reports unavailable support without command or follow-up APIs", async () => {
+  const tools = new Map();
+  const pi = {
+    events: { on() {} },
+    on() {},
+    registerTool(tool) { tools.set(tool.name, tool); },
+    sendMessage() {},
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "worker",
+    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
+  });
+
+  const reloadTool = tools.get("mecha_reload");
+  const status = await reloadTool.execute("reload-status", { action: "status" });
+  assert.equal(status.details.commandRegistered, false);
+  assert.equal(status.details.canQueueReload, false);
+
+  const result = await reloadTool.execute("reload", { action: "reload" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Pi command registration is not available/);
+});
+
+test("mecha reload command reports unavailable runtime reload support", async () => {
+  const commands = new Map();
+  const pi = {
+    events: { on() {} },
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+    registerTool() {},
+    sendMessage() {},
+    sendUserMessage() {},
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "worker",
+    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
+  });
+  const notifications = [];
+
+  await commands.get("mecha-reload-runtime").handler("", { ui: { notify: (...args) => notifications.push(args) } });
+
+  assert.deepEqual(notifications, [["Self-reload is unavailable in this Pi context; use /reload manually.", "error"]]);
+});
+
 test("context monitor injects direct threshold notifications and resets after compaction", async (t) => {
   isolateCompactionEnvironment(t);
   const handlers = new Map();
