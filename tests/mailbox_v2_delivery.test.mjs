@@ -1581,6 +1581,32 @@ test("router batches roughly ten mixed-sender idle notifications into one queued
   }
 });
 
+test("router starts a new queued delivery after ten batched mailbox messages", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-count-limit-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  try {
+    const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+    for (let index = 1; index <= 11; index += 1) {
+      router.enqueueMessage(envelope(`idle-limit-${index}`, {
+        from: `worker-${index}`,
+        to: "supervisor",
+        subject: "Status update",
+        body: `queued body ${index}`,
+      }));
+    }
+
+    const queued = repository.queuedFor("supervisor");
+    assert.deepEqual(queued.map(({ id }) => id), ["idle-limit-1", "idle-limit-11"]);
+    assert.equal((queued[0].body.match(/\n\n---\n\n/g) ?? []).length, 9);
+    assert.match(queued[0].body, /queued body 10/);
+    assert.doesNotMatch(queued[0].body, /queued body 11/);
+    assert.equal(queued[1].body, "queued body 11");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("due reminders batch into one queued mailbox delivery", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-reminder-batch-"));
   let now = Date.parse("2026-07-13T00:00:00.000Z");
@@ -1862,6 +1888,111 @@ test("delivery claim re-arms every recurring reminder linked into a dead-lettere
     assert.doesNotThrow(() => router.sweepDeliveryTimeouts());
   } finally {
     database?.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim batches ten queued messages in one delivery", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-ten-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    for (let index = 1; index <= 10; index += 1) {
+      repository.enqueue(envelope(`claim-ten-${index}`, {
+        from: `worker-${index}`,
+        to: identity.agentId,
+        body: `claim body ${index}`,
+      }), { disableBatching: true });
+    }
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "claim-ten-1");
+    assert.match(delivery.message.body, /^Mailbox message batch\n\n/);
+    assert.equal((delivery.message.body.match(/\n\n---\n\n/g) ?? []).length, 9);
+    for (let index = 1; index <= 10; index += 1) {
+      assert.match(delivery.message.body, new RegExp(`claim body ${index}`));
+    }
+    assert.deepEqual(repository.queuedFor(identity.agentId), []);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim limits one delivery batch to ten queued messages", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-ten-limit-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    for (let index = 1; index <= 11; index += 1) {
+      repository.enqueue(envelope(`claim-limit-${index}`, {
+        from: `worker-${index}`,
+        to: identity.agentId,
+        body: `claim limit body ${index}`,
+      }), { disableBatching: true });
+    }
+
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "claim-limit-1");
+    assert.equal((delivery.message.body.match(/\n\n---\n\n/g) ?? []).length, 9);
+    assert.match(delivery.message.body, /claim limit body 10/);
+    assert.doesNotMatch(delivery.message.body, /claim limit body 11/);
+    assert.deepEqual(repository.queuedFor(identity.agentId).map(({ id }) => id), ["claim-limit-11"]);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delivery claim does not merge an in-flight replay with an already full queued batch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-claim-full-batch-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  const identity = {
+    agentId: "supervisor",
+    instanceId: "receiver-instance",
+    leaseId: "receiver-lease",
+  };
+  try {
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    router.enqueueMessage(envelope("full-batch-inflight", {
+      from: "worker-inflight",
+      to: identity.agentId,
+      body: "in-flight body",
+    }));
+    const inFlight = repository.claimNextMessage(identity);
+    for (let index = 1; index <= 10; index += 1) {
+      router.enqueueMessage(envelope(`full-batch-queued-${index}`, {
+        from: `worker-${index}`,
+        to: identity.agentId,
+        body: `queued full body ${index}`,
+      }));
+    }
+    assert.deepEqual(repository.queuedFor(identity.agentId).map(({ id }) => id), ["full-batch-queued-1"]);
+
+    repository.nackDelivery({
+      ...identity,
+      messageId: inFlight.message.id,
+      attemptNumber: inFlight.attempt_number,
+      reason: "injection_failed",
+    });
+
+    const replay = repository.claimNextMessage(identity);
+    assert.equal(replay.message.id, "full-batch-inflight");
+    assert.equal(replay.message.body, "in-flight body");
+    assert.deepEqual(repository.queuedFor(identity.agentId).map(({ id }) => id), ["full-batch-queued-1"]);
+  } finally {
     repository.close();
     await rm(directory, { recursive: true, force: true });
   }

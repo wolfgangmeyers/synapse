@@ -31,3 +31,4 @@ TASK-*.md
 REDIRECT.md
 VERIFY.md
 .claude/cache/
+.worktrees/
