@@ -19,17 +19,28 @@ the session to interact:
 """
 
 import argparse
+import json
 import os
+from pathlib import Path
 import shlex
+import subprocess
 import sys
 import time
+from urllib.error import URLError
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _tmux import SESSION, ensure_session, send_text, send_enter, session_exists
 
 SUPERVISOR_WINDOW = "supervisor"
+ROUTER_SESSION = "mecha-router"
+ROUTER_WINDOW = "router"
+ROUTER_WEB_UI_WINDOW = "router-web-ui"
 DEFAULT_DIR = os.path.expanduser("~/code/mecha-developer")
+DEFAULT_ROUTER_DATABASE = os.path.expanduser("~/.mecha-developer/router.sqlite")
+DEFAULT_ROUTER_LOG = os.path.expanduser("~/.mecha-developer/router.jsonl")
+ROUTER_WEB_UI_PORT = 8787
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
@@ -130,6 +141,103 @@ def resolve_pi_mailbox_extension():
     return extension_path
 
 
+def router_is_healthy(router_url, opener=urlopen):
+    """Return True when the Mailbox V2 router health endpoint is reachable."""
+    try:
+        with opener(f"{router_url}/v1/health", timeout=2) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read(64 * 1024))
+    except (OSError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
+        return False
+    return payload.get("status") == "ok"
+
+
+def _tmux_session_exists(session):
+    return subprocess.run(
+        ["tmux", "has-session", "-t", f"={session}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).returncode == 0
+
+
+def _tmux_window_exists(session, window):
+    if not _tmux_session_exists(session):
+        return False
+    result = subprocess.run(
+        ["tmux", "list-windows", "-t", f"={session}", "-F", "#{window_name}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and window in result.stdout.splitlines()
+
+
+def _tmux_send_command(session, window, command):
+    subprocess.run(["tmux", "send-keys", "-t", f"{session}:{window}", command, "Enter"], check=True)
+
+
+def _ensure_router_window(window, command):
+    if not _tmux_session_exists(ROUTER_SESSION):
+        subprocess.run(["tmux", "new-session", "-d", "-s", ROUTER_SESSION, "-n", window], check=True)
+        _tmux_send_command(ROUTER_SESSION, window, command)
+        return True
+    if not _tmux_window_exists(ROUTER_SESSION, window):
+        subprocess.run(["tmux", "new-window", "-d", "-t", f"={ROUTER_SESSION}", "-n", window], check=True)
+        _tmux_send_command(ROUTER_SESSION, window, command)
+        return True
+    return False
+
+
+def bootstrap_router(router_url, repo_dir=DEFAULT_DIR, output=print):
+    """Start the loopback Mailbox router in tmux when it is not already healthy."""
+    if router_is_healthy(router_url):
+        output(f"Mailbox router already healthy at {router_url}.")
+        return False
+
+    parsed = urlparse(router_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    router_database = os.path.expanduser(os.environ.get("MECHA_ROUTER_DATABASE", DEFAULT_ROUTER_DATABASE))
+    router_log = os.path.expanduser(os.environ.get("MECHA_ROUTER_LOG", DEFAULT_ROUTER_LOG))
+    Path(router_database).parent.mkdir(parents=True, exist_ok=True)
+
+    router_command = " ".join([
+        f"cd {shlex.quote(os.path.expanduser(repo_dir))}",
+        "&&",
+        "node tools/run_router.mjs",
+        "--database", shlex.quote(router_database),
+        "--log", shlex.quote(router_log),
+        "--host", shlex.quote(host),
+        "--port", shlex.quote(str(port)),
+    ])
+    web_ui_command = " ".join([
+        f"cd {shlex.quote(os.path.expanduser(repo_dir))}",
+        "&&",
+        "node tools/router_web_ui.mjs",
+        "--host", "127.0.0.1",
+        "--port", shlex.quote(str(ROUTER_WEB_UI_PORT)),
+        "--router", shlex.quote(router_url),
+    ])
+
+    started_router = _ensure_router_window(ROUTER_WINDOW, router_command)
+    _ensure_router_window(ROUTER_WEB_UI_WINDOW, web_ui_command)
+    if not started_router:
+        output(
+            f"Mailbox router is not healthy at {router_url}, but {ROUTER_SESSION}:{ROUTER_WINDOW} already exists; "
+            "leaving it untouched for inspection."
+        )
+        return False
+
+    for _attempt in range(20):
+        if router_is_healthy(router_url):
+            output(f"Started Mailbox router at {router_url} in tmux session '{ROUTER_SESSION}'.")
+            return True
+        time.sleep(0.25)
+    raise RuntimeError(f"Mailbox router did not become healthy at {router_url}")
+
+
 def agent_command(agent, prompt, pi_mailbox_extension=None):
     if agent == "pi":
         pi_mailbox_extension = pi_mailbox_extension or resolve_pi_mailbox_extension()
@@ -201,14 +309,19 @@ def main():
         sys.exit(1)
 
     pi_mailbox_extension = None
-    pi_router_url = None
-    if args.agent == "pi":
-        try:
+    try:
+        pi_router_url = resolve_pi_router_url()
+        if args.agent == "pi":
             pi_mailbox_extension = resolve_pi_mailbox_extension()
-            pi_router_url = resolve_pi_router_url()
-        except ValueError as error:
-            print(f"Error: {error}", file=sys.stderr)
-            sys.exit(1)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        bootstrap_router(pi_router_url, repo_dir=DEFAULT_DIR)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"Error: failed to bootstrap Mailbox router: {error}", file=sys.stderr)
+        sys.exit(1)
 
     if session_exists():
         print(f"Error: tmux session '{SESSION}' already exists.", file=sys.stderr)
