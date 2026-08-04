@@ -21,6 +21,8 @@ const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
 const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
 const MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES = 128 * 1024;
 const MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES = 64 * 1024;
+const ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES = 256 * 1024;
+const ORPHAN_TOOL_RESULT_DIAGNOSTIC_KEEP_BYTES = 128 * 1024;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
 
@@ -253,15 +255,8 @@ function normalizeMemoryCaptureDiagnosticReason(reason) {
   return typeof reason === "string" && /^[a-z0-9-]{1,120}$/.test(reason) ? reason : "capture-failed";
 }
 
-export function appendMemoryCaptureDiagnostic(event, { path = memoryCaptureDiagnosticsPath(), maxBytes = MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES, keepBytes = MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES } = {}) {
+function appendBoundedJsonl(record, { path, maxBytes, keepBytes }) {
   if (path === undefined) return;
-  const record = {
-    timestamp: typeof event?.timestamp === "string" ? event.timestamp : new Date().toISOString(),
-    trigger: ["compaction", "shutdown"].includes(event?.trigger) ? event.trigger : "unknown",
-    status: ["noop", "applied", "failed"].includes(event?.status) ? event.status : "failed",
-    reason: normalizeMemoryCaptureDiagnosticReason(event?.reason),
-    records: Number.isFinite(event?.records) ? event.records : undefined,
-  };
   try {
     mkdirSync(path.replace(/\/[^/]*$/, ""), { recursive: true });
     appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -269,8 +264,65 @@ export function appendMemoryCaptureDiagnostic(event, { path = memoryCaptureDiagn
     const lines = readFileSync(path, "utf8").slice(-keepBytes).split("\n").slice(1).filter(Boolean);
     writeFileSync(path, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
   } catch {
-    // Diagnostics are best-effort and must never expose source text or break capture.
+    // Diagnostics are best-effort and must never expose source text or break runtime flow.
   }
+}
+
+export function appendMemoryCaptureDiagnostic(event, { path = memoryCaptureDiagnosticsPath(), maxBytes = MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES, keepBytes = MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES } = {}) {
+  const record = {
+    timestamp: typeof event?.timestamp === "string" ? event.timestamp : new Date().toISOString(),
+    trigger: ["compaction", "shutdown"].includes(event?.trigger) ? event.trigger : "unknown",
+    status: ["noop", "applied", "failed"].includes(event?.status) ? event.status : "failed",
+    reason: normalizeMemoryCaptureDiagnosticReason(event?.reason),
+    records: Number.isFinite(event?.records) ? event.records : undefined,
+  };
+  appendBoundedJsonl(record, { path, maxBytes, keepBytes });
+}
+
+function orphanToolResultDiagnosticsPath(environment = process.env) {
+  if (typeof environment.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH === "string" && environment.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH.trim().length > 0) return environment.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH.trim();
+  const home = environment.HOME;
+  return typeof home === "string" && home.length > 0 ? `${home}/.mecha-developer/logs/orphan-tool-results.jsonl` : undefined;
+}
+
+function safeMessageRole(message) {
+  return typeof message?.role === "string" ? message.role : undefined;
+}
+
+function safeStopReason(message) {
+  return typeof message?.stopReason === "string" ? message.stopReason : undefined;
+}
+
+function messageToolCallIds(message) {
+  if (!Array.isArray(message?.content)) return [];
+  return message.content
+    .map((block) => block?.type === "toolCall" ? providerToolCallId(block.id) : undefined)
+    .filter((toolCallId) => toolCallId !== undefined);
+}
+
+export function appendOrphanToolResultDiagnostic(event, { path = orphanToolResultDiagnosticsPath(), maxBytes = ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES, keepBytes = ORPHAN_TOOL_RESULT_DIAGNOSTIC_KEEP_BYTES } = {}) {
+  const record = {
+    timestamp: new Date().toISOString(),
+    session_id: typeof event?.sessionId === "string" ? event.sessionId : undefined,
+    session_file: typeof event?.sessionFile === "string" ? event.sessionFile : undefined,
+    model: typeof event?.model === "string" ? event.model : undefined,
+    agent_id: typeof event?.agentId === "string" ? event.agentId : undefined,
+    total_messages: Number.isInteger(event?.totalMessages) ? event.totalMessages : undefined,
+    quarantined_count: Number.isInteger(event?.quarantinedCount) ? event.quarantinedCount : undefined,
+    orphans: Array.isArray(event?.orphans) ? event.orphans.map((orphan) => ({
+      message_index: Number.isInteger(orphan?.messageIndex) ? orphan.messageIndex : undefined,
+      tool_call_id: typeof orphan?.toolCallId === "string" ? orphan.toolCallId : undefined,
+      provider_tool_call_id: typeof orphan?.providerToolCallId === "string" ? orphan.providerToolCallId : undefined,
+      tool_name: typeof orphan?.toolName === "string" ? orphan.toolName : undefined,
+      previous_role: typeof orphan?.previousRole === "string" ? orphan.previousRole : undefined,
+      next_role: typeof orphan?.nextRole === "string" ? orphan.nextRole : undefined,
+      nearest_assistant_index: Number.isInteger(orphan?.nearestAssistantIndex) ? orphan.nearestAssistantIndex : undefined,
+      nearest_assistant_stop_reason: typeof orphan?.nearestAssistantStopReason === "string" ? orphan.nearestAssistantStopReason : undefined,
+      nearest_assistant_tool_call_ids: Array.isArray(orphan?.nearestAssistantToolCallIds) ? orphan.nearestAssistantToolCallIds : undefined,
+      matching_tool_call_later: orphan?.matchingToolCallLater === true,
+    })) : [],
+  };
+  appendBoundedJsonl(record, { path, maxBytes, keepBytes });
 }
 
 function childSessionIds() {
@@ -447,6 +499,60 @@ function mailboxCustomMessage(message) {
       ...(message.subject === undefined ? {} : { subject: message.subject }),
     },
   };
+}
+
+function providerToolCallId(toolCallId) {
+  return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId.split("|", 1)[0] : undefined;
+}
+
+function assistantToolCallIds(message) {
+  if (message?.role !== "assistant"
+    || message.stopReason === "error"
+    || message.stopReason === "aborted"
+    || !Array.isArray(message.content)) return [];
+  return message.content
+    .map((block) => block?.type === "toolCall" ? providerToolCallId(block.id) : undefined)
+    .filter((toolCallId) => toolCallId !== undefined);
+}
+
+export function quarantineOrphanToolResults(messages) {
+  const seenToolCalls = new Set();
+  const orphaned = [];
+  const sanitized = [];
+  let nearestAssistant;
+  let nearestAssistantIndex;
+
+  for (const [index, message] of messages.entries()) {
+    if (message?.role === "toolResult") {
+      const toolCallId = providerToolCallId(message.toolCallId);
+      if (toolCallId !== undefined && !seenToolCalls.has(toolCallId)) {
+        orphaned.push({
+          messageIndex: index,
+          toolCallId: message.toolCallId,
+          providerToolCallId: toolCallId,
+          toolName: message.toolName,
+          previousRole: safeMessageRole(messages[index - 1]),
+          nextRole: safeMessageRole(messages[index + 1]),
+          nearestAssistantIndex,
+          nearestAssistantStopReason: safeStopReason(nearestAssistant),
+          nearestAssistantToolCallIds: messageToolCallIds(nearestAssistant),
+          matchingToolCallLater: messages.slice(index + 1).some((candidate) => messageToolCallIds(candidate).includes(toolCallId)),
+        });
+        continue;
+      }
+    }
+
+    sanitized.push(message);
+    if (message?.role === "assistant") {
+      nearestAssistant = message;
+      nearestAssistantIndex = index;
+    }
+    for (const seenToolCallId of assistantToolCallIds(message)) seenToolCalls.add(seenToolCallId);
+  }
+
+  return orphaned.length === 0
+    ? { messages, orphaned }
+    : { messages: sanitized, orphaned };
 }
 
 export async function spawnNativeSentinel(message, service = globalThis[PI_SUBAGENTS_SERVICE]) {
@@ -694,6 +800,7 @@ export function createMechaMessagingExtension(pi, {
   let recall; let recallConfigurationError;
   try { recall = createRecallState(); } catch (error) { recallConfigurationError = error; recall = createRecallState({}); }
   let recallPipeline;
+  const reportedOrphanToolResults = new Set();
   const recallController = createRecallController({
     cancel: () => { policyAbort?.abort(); recallAbort?.abort(); recallProcess?.kill(); },
     evaluate: async (active) => {
@@ -938,6 +1045,33 @@ export function createMechaMessagingExtension(pi, {
   });
 
   pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
+  pi.on("context", (event, context) => {
+    const { messages, orphaned } = quarantineOrphanToolResults(event.messages);
+    if (orphaned.length === 0) return undefined;
+    const sessionId = context.sessionManager.getSessionId();
+    const fresh = orphaned.filter(({ toolCallId }) => {
+      const key = `${sessionId}:${toolCallId}`;
+      if (reportedOrphanToolResults.has(key)) return false;
+      reportedOrphanToolResults.add(key);
+      return true;
+    });
+    if (fresh.length > 0) {
+      let agentId;
+      try { agentId = resolveCurrentAgentId(); } catch {}
+      appendOrphanToolResultDiagnostic({
+        sessionId,
+        sessionFile: typeof context.sessionManager.getSessionFile === "function" ? context.sessionManager.getSessionFile() : undefined,
+        model: context.model,
+        agentId,
+        totalMessages: Array.isArray(event.messages) ? event.messages.length : undefined,
+        quarantinedCount: fresh.length,
+        orphans: fresh,
+      });
+      const callIds = fresh.map(({ toolCallId }) => toolCallId).join(", ");
+      context.ui?.notify(`Quarantined orphan tool result(s) before provider request: ${callIds}`, "error");
+    }
+    return { messages };
+  });
   pi.on("message_end", (event, context) => { if (!children.has(context.sessionManager.getSessionId())) activeWork = boundedConversationText(event.message?.content, 4096); coordinator?.onMessageEnd(event, context); });
   pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_start", (_event, context) => {
