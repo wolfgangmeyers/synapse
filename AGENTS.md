@@ -14,6 +14,12 @@ Managed worker runtime is machine-local configuration. `worker_launch.py` reads 
 
 When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
 
+## Repository workflow
+
+For this repository, make changes on `main` by default. Do not create or use a worktree for mecha-developer changes unless Wolfgang explicitly asks for one.
+
+When a change is done, merge it into `main` and push it up. Do not leave completed work parked only on a side branch or worktree unless Wolfgang explicitly asks for that.
+
 ## Data retention
 
 Any feature that accumulates data over time—ledgers, logs, histories, queues,
