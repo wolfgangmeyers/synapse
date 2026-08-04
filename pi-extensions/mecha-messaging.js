@@ -819,6 +819,15 @@ export function createMechaMessagingExtension(pi, {
   try { compactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { compactionPolicyError = error; compactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
   let notifiedCompactionPercent = 0;
   let pendingSelfCompaction;
+  let reloadCommandRegistered = false;
+
+  function reloadStatus() {
+    return {
+      command: "/mecha-reload-runtime",
+      commandRegistered: reloadCommandRegistered,
+      canQueueReload: reloadCommandRegistered && typeof pi.sendUserMessage === "function",
+    };
+  }
 
   function compactionStatus(context) {
     const usage = context?.getContextUsage?.();
@@ -970,6 +979,45 @@ export function createMechaMessagingExtension(pi, {
   });
   pi.events.on("subagents:failed", (event) => {
     settledNotifications.onChildDisposed(event?.id);
+  });
+
+  if (typeof pi.registerCommand === "function") {
+    pi.registerCommand("mecha-reload-runtime", {
+      description: "Reload Pi extensions, skills, prompts, themes, and context files",
+      handler: async (_args, commandContext) => {
+        if (typeof commandContext?.reload !== "function") {
+          commandContext?.ui?.notify?.("Self-reload is unavailable in this Pi context; use /reload manually.", "error");
+          return;
+        }
+        await commandContext.reload();
+        return;
+      },
+    });
+    reloadCommandRegistered = true;
+  }
+
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name: "mecha_reload",
+    label: "Mecha Reload",
+    description: "Inspect or request Pi self-reload. Reload refreshes extensions, skills, prompts, themes, and context files without terminal intervention.",
+    parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
+      action: { type: "string", enum: ["status", "reload"], description: "status reports reload support; reload queues a self-reload command for the next safe Pi boundary." },
+    } },
+    async execute(_toolCallId, input) {
+      try {
+        const status = reloadStatus();
+        if (input.action === "reload") {
+          if (!status.commandRegistered) throw new Error("Self-reload is unavailable: Pi command registration is not available.");
+          if (!status.canQueueReload) throw new Error("Self-reload is unavailable: Pi cannot queue follow-up user messages from this extension.");
+          pi.sendUserMessage(status.command, { deliverAs: "followUp" });
+          return { content: [{ type: "text", text: "Self-reload queued for Pi's next safe follow-up boundary." }], details: { ...status, reloadState: "queued_as_follow_up" } };
+        }
+        if (input.action !== "status") throw new Error("unsupported mecha_reload action");
+        return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
+      } catch (error) {
+        return { content: [{ type: "text", text: error.message }], details: reloadStatus(), isError: true };
+      }
+    },
   });
 
   if (typeof pi.registerTool === "function") pi.registerTool({

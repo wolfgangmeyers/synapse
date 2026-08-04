@@ -31,6 +31,10 @@ Agents can inspect or change the policy with the `mecha_context` tool (`status`,
 
 Managed Pi launchers accept `--compaction-policy` as simple JSON (`{"levels":[40,50,60,70,80,{"percent":90,"mandatory":true}],"models":{"openai-codex/gpt-5.6-sol":{"levels":[20,30,40,{"percent":45,"mandatory":true}]}}}`) or comma-separated default percentages (`40,50,60,70,80,90`). Optional per-model overrides match normalized keys such as `provider/model-id` or `model-id`; model-specific policy wins over the default policy, and command-level `postCompactionNotification` wins for that compact call. Existing tiered JSON remains accepted for compatibility, but the recommended config surface is default policy plus `models`. Pi does not currently expose a first-class CLI flag for this extension policy; the supported launcher path exports `MECHA_PI_COMPACTION_POLICY` and a launcher fallback `MECHA_PI_MODEL_KEY` for the extension.
 
+## Pi self-reload
+
+The Mailbox V2 Pi extension registers `mecha_reload` for agents to inspect or request reload support. `mecha_reload` with action `reload` queues the extension command `/mecha-reload-runtime`, which uses Pi's command-context `ctx.reload()` hook to refresh extensions, skills, prompts, themes, and context files at the next safe follow-up boundary.
+
 ## Mailbox V2 batching and backpressure
 
 Mailbox V2 keeps each recipient's active mailbox bounded. By default, at most 15 live messages (`queued`, `leased`, or `injection_requested`) are allowed per recipient; when the cap is reached and a new send cannot be batched, the router rejects the send with `queue_full`, and `mailbox_send.py` exits non-zero with instructions to back off and wait for the mailbox to clear.
