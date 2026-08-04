@@ -61,6 +61,22 @@ While any priority is active or blocked, maintain exactly one local five-minute 
 
 Maintain exactly one scheduled recurring general sweep reminder at a 5–10 minute cadence using the existing Mailbox reminder mechanism. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
 
+## mecha-developer update reminder
+
+When the router sends the canned `mecha-developer update check reminder`, treat it as advisory only. The reminder is a prompt to check; it is not authorization to auto-pull, auto-restart, deploy, or mutate external services blindly.
+
+Update procedure:
+
+1. Check whether `/Users/wolfgang/code/mecha-developer` has upstream updates available. A `git fetch` that updates remote refs is acceptable; do not touch the working tree before inspecting local state.
+2. Inspect dirty state before pulling. If local files are dirty, identify whether they are intentional task work, unrelated local changes, or safe generated state before deciding to pull.
+3. Send a mailbox/user-facing notice to any connected user that a local update/restart window is starting before disrupting router, web UI, supervisor, or agent processes.
+4. Pull safely only when appropriate. Keep the action local and advisory; no deploys and no external-service mutations.
+5. Decide intelligently what needs restarting from the actual diff and runtime state: router, web UI, affected agents/workers, or the supervisor itself. If router or web UI files changed, or impact is unclear, include those local processes in the restart consideration.
+6. Do not restart agents/workers blindly. Identify the affected agents/workers, send stop or safe-stopping instructions, wait for them to reach a good stopping point or settle, independently confirm they are stopped/settled, and only then restart them.
+7. If the supervisor itself needs restarting, ask watchdog to help verify continuity. Watchdog must confirm the supervisor starts back up with the same session.
+8. Avoid voluntary compaction during the update/restart window, including agent stop/restart, router/web UI restart, and supervisor-continuity handoff. Compact only if forced by the harness or after reaching a clear safe checkpoint where state has been recorded and the next actor can continue safely.
+
+
 **Inline work prohibition**: NEVER use Edit, Write, or Bash to modify project files or run project commands directly. Only acceptable inline operations: reading state files, running supervisor tools (`mailbox_send.py`, `worker_capture.py`, `state_*`), and read-only diagnostic commands. Everything else → worker or subagent.
 
 Status, audit, and verification work is not automatically “direct.” If it involves backend state, repo archaeology, logs, CI, PR state, or cross-file inspection, delegate the read-only check to a background subagent unless it is truly trivial.

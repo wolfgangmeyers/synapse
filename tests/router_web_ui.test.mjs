@@ -389,8 +389,12 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.draft\.addEventListener\("paste"/);
   assert.match(app, /function renderImagePreview\(\)/);
   assert.match(app, /function renderMessageImages\(attachments\)/);
+  assert.match(app, /const MESSAGE_BOTTOM_THRESHOLD_PX = 80;/);
+  assert.match(app, /elements\.messages\.addEventListener\("scroll", \(\) => \{ state\.followMessages = isMessagesNearBottom\(\); \}\)/);
   assert.match(app, /function scrollMessagesToBottom\(\)/);
-  assert.match(app, /image\.addEventListener\("load", scrollMessagesToBottom, \{ once: true \}\)/);
+  assert.match(app, /function scrollMessagesToBottomIfFollowing\(\)/);
+  assert.match(app, /if \(shouldFollow\) scrollMessagesToBottom\(\);/);
+  assert.match(app, /image\.addEventListener\("load", scrollMessagesToBottomIfFollowing, \{ once: true \}\)/);
   assert.doesNotMatch(app, /localStorage\.setItem\([^\n]+data:image/);
   assert.match(app, /function messageForStorage\(message\)/);
   assert.match(app, /startsWith\("data:image\/"\)/);
