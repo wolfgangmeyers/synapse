@@ -24,6 +24,7 @@ export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 3;
 export const DEFAULT_MAX_QUEUED_MESSAGES = 15;
 export const DEFAULT_MAX_QUEUED_BYTES = 256 * 1024;
 export const DEFAULT_MAX_BATCH_BODY_CHARS = 4_096;
+const DEFAULT_MAX_BATCH_MESSAGES = 10;
 export const DEFAULT_CONVERSATION_HISTORY_LIMIT = 200;
 export const DEFAULT_CONVERSATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const migrations = Object.freeze([
@@ -1389,11 +1390,21 @@ function isBatchedBody(body) {
   return body.startsWith(`${BATCH_HEADER}\n\n`);
 }
 
+function batchItemCount(message) {
+  if (!isBatchedBody(message.body)) return 1;
+  return (message.body.match(new RegExp(BATCH_SEPARATOR, "g")) ?? []).length + 1;
+}
+
+function batchContent(message) {
+  if (!isBatchedBody(message.body)) return batchItem(message);
+  return message.body.slice(`${BATCH_HEADER}\n\n`.length);
+}
+
 function batchedBody(target, candidate) {
   const existing = isBatchedBody(target.body)
     ? target.body
     : `${BATCH_HEADER}\n\n${batchItem(target)}`;
-  return `${existing}${BATCH_SEPARATOR}${batchItem(candidate)}`;
+  return `${existing}${BATCH_SEPARATOR}${batchContent(candidate)}`;
 }
 
 function selectBatchTarget(database, candidate, { maxBatchBodyChars, maxBodyBytes, maxQueuedBytes, queuedBytes }) {
@@ -1419,6 +1430,7 @@ function selectBatchTarget(database, candidate, { maxBatchBodyChars, maxBodyByte
     ORDER BY enqueue_sequence DESC
   `).all(candidate.to, lastSentinel.enqueue_sequence);
   return rows.find((row) => {
+    if (batchItemCount(row) >= DEFAULT_MAX_BATCH_MESSAGES) return false;
     const body = batchedBody(row, candidate);
     const previousBytes = Buffer.byteLength(row.body, "utf8");
     const nextBytes = Buffer.byteLength(body, "utf8");
@@ -1457,7 +1469,10 @@ function coalesceQueuedDeliveryBatch(database, recipient, now, { maxBatchBodyCha
   let body = mergeRows[0].body;
   let queuedBytes = selectLiveQueueUsage(database, recipient).queued_bytes;
   const mergedIds = [];
+  let batchItemTotal = batchItemCount(mergeRows[0]);
   for (const row of mergeRows.slice(1)) {
+    const rowItemCount = batchItemCount(row);
+    if (batchItemTotal + rowItemCount > DEFAULT_MAX_BATCH_MESSAGES) break;
     const candidate = { from: row.from, subject: row.subject, body: row.body };
     const nextBody = batchedBody({ ...mergeRows[0], body }, candidate);
     const previousBodyBytes = Buffer.byteLength(body, "utf8");
@@ -1466,6 +1481,7 @@ function coalesceQueuedDeliveryBatch(database, recipient, now, { maxBatchBodyCha
     if (nextBody.length > maxBatchBodyChars || nextBodyBytes > maxBodyBytes || nextQueuedBytes > maxQueuedBytes) break;
     body = nextBody;
     queuedBytes = nextQueuedBytes;
+    batchItemTotal += rowItemCount;
     mergedIds.push(row.id);
   }
   if (mergedIds.length === 0) return;
