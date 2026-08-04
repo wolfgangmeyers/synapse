@@ -23,6 +23,7 @@ import {
   mailboxSessionDeliveryState,
   nextCompactionThreshold,
   postCompactionNotificationMessage,
+  quarantineOrphanToolResults,
   selectCompactionTier,
 } from "../pi-extensions/mecha-messaging.js";
 import { QueueLimitError, openMessageRepository } from "../harness/db.js";
@@ -83,6 +84,92 @@ async function durableSession(messageId) {
     },
   };
 }
+
+test("orphan tool results are quarantined while valid tool results are preserved", () => {
+  const assistant = { role: "assistant", content: [{ type: "toolCall", id: "call-valid|fc-assistant", name: "bash", arguments: {} }] };
+  const validResult = { role: "toolResult", toolCallId: "call-valid|fc-result", toolName: "bash", content: [] };
+  const orphanResult = { role: "toolResult", toolCallId: "call-orphan|fc-result", toolName: "bash", content: [] };
+  const user = { role: "user", content: [{ type: "text", text: "continue" }] };
+
+  const result = quarantineOrphanToolResults([assistant, validResult, orphanResult, user]);
+
+  assert.deepEqual(result.messages, [assistant, validResult, user]);
+  assert.equal(result.orphaned.length, 1);
+  assert.deepEqual(result.orphaned[0], {
+    messageIndex: 2,
+    toolCallId: "call-orphan|fc-result",
+    providerToolCallId: "call-orphan",
+    toolName: "bash",
+    previousRole: "toolResult",
+    nextRole: "user",
+    nearestAssistantIndex: 0,
+    nearestAssistantStopReason: undefined,
+    nearestAssistantToolCallIds: ["call-valid"],
+    matchingToolCallLater: false,
+  });
+});
+
+test("errored assistant tool calls do not make following tool results safe", () => {
+  const erroredAssistant = {
+    role: "assistant",
+    stopReason: "error",
+    content: [{ type: "toolCall", id: "call-error|fc-assistant", name: "bash", arguments: {} }],
+  };
+  const resultAfterError = { role: "toolResult", toolCallId: "call-error|fc-result", toolName: "bash", content: [] };
+
+  const result = quarantineOrphanToolResults([erroredAssistant, resultAfterError]);
+
+  assert.deepEqual(result.messages, [erroredAssistant]);
+  assert.equal(result.orphaned.length, 1);
+  assert.equal(result.orphaned[0].toolCallId, "call-error|fc-result");
+  assert.equal(result.orphaned[0].nearestAssistantStopReason, "error");
+});
+
+test("context hook drops orphan tool results before the provider request", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-orphan-diagnostics-"));
+  const path = join(directory, "orphan-tool-results.jsonl");
+  const previousPath = process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH;
+  process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH = path;
+  const handlers = new Map();
+  const notices = [];
+  const pi = {
+    events: new EventEmitter(),
+    on(event, handler) { handlers.set(event, handler); },
+    registerTool() {},
+    registerCommand() {},
+    sendMessage() {},
+  };
+  createMechaMessagingExtension(pi, { createClient: () => ({ connect: async () => {}, close: () => {} }) });
+  const assistant = { role: "assistant", content: [{ type: "toolCall", id: "call-valid", name: "bash", arguments: {} }] };
+  const validResult = { role: "toolResult", toolCallId: "call-valid", toolName: "bash", content: [] };
+  const orphanResult = { role: "toolResult", toolCallId: "call-orphan", toolName: "bash", content: [] };
+
+  try {
+    const result = handlers.get("context")(
+      { messages: [assistant, validResult, orphanResult] },
+      {
+        sessionManager: { getSessionId: () => "session-1", getSessionFile: () => "/tmp/session.jsonl" },
+        model: "openai-codex/gpt-5.5",
+        ui: { notify: (...args) => notices.push(args) },
+      },
+    );
+
+    assert.deepEqual(result.messages, [assistant, validResult]);
+    assert.deepEqual(notices, [["Quarantined orphan tool result(s) before provider request: call-orphan", "error"]]);
+    const records = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(records.length, 1);
+    assert.equal(records[0].session_id, "session-1");
+    assert.equal(records[0].session_file, "/tmp/session.jsonl");
+    assert.equal(records[0].model, "openai-codex/gpt-5.5");
+    assert.equal(records[0].quarantined_count, 1);
+    assert.equal(records[0].orphans[0].tool_call_id, "call-orphan");
+    assert.equal(records[0].orphans[0].message_index, 2);
+  } finally {
+    if (previousPath === undefined) delete process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH;
+    else process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH = previousPath;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 function nextRouterFrame(socket) {
   return new Promise((resolve, reject) => {
