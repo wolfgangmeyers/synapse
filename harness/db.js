@@ -767,6 +767,11 @@ class MessageRepository {
       requireActiveAgentLease(this.#database, { agentId, instanceId, leaseId }, now);
       if (selectInFlightDelivery(this.#database, agentId) !== undefined) return undefined;
 
+      coalesceQueuedDeliveryBatch(this.#database, agentId, now, {
+        maxBatchBodyChars: this.#maxBatchBodyChars,
+        maxBodyBytes: this.#maxBodyBytes,
+        maxQueuedBytes: this.#maxQueuedBytes,
+      });
       const message = selectOldestQueuedMessage(this.#database, agentId, now);
       if (message === undefined) return undefined;
       if (!MESSAGE_INCARNATION_ID.test(message.message_incarnation_id ?? "")) {
@@ -1393,6 +1398,13 @@ function batchedBody(target, candidate) {
 
 function selectBatchTarget(database, candidate, { maxBatchBodyChars, maxBodyBytes, maxQueuedBytes, queuedBytes }) {
   if (maxBatchBodyChars === 0 || candidate.sentinel !== undefined) return undefined;
+  const lastSentinel = database.prepare(`
+    SELECT COALESCE(MAX(enqueue_sequence), 0) AS enqueue_sequence
+    FROM messages
+    WHERE recipient = ?
+      AND state = 'queued'
+      AND sentinel_json IS NOT NULL
+  `).get(candidate.to);
   const rows = database.prepare(`
     SELECT
       id,
@@ -1403,8 +1415,9 @@ function selectBatchTarget(database, candidate, { maxBatchBodyChars, maxBodyByte
     WHERE recipient = ?
       AND state = 'queued'
       AND sentinel_json IS NULL
+      AND enqueue_sequence > ?
     ORDER BY enqueue_sequence DESC
-  `).all(candidate.to);
+  `).all(candidate.to, lastSentinel.enqueue_sequence);
   return rows.find((row) => {
     const body = batchedBody(row, candidate);
     const previousBytes = Buffer.byteLength(row.body, "utf8");
@@ -1413,6 +1426,102 @@ function selectBatchTarget(database, candidate, { maxBatchBodyChars, maxBodyByte
       && nextBytes <= maxBodyBytes
       && queuedBytes + nextBytes - previousBytes <= maxQueuedBytes;
   });
+}
+
+function coalesceQueuedDeliveryBatch(database, recipient, now, { maxBatchBodyChars, maxBodyBytes, maxQueuedBytes }) {
+  if (maxBatchBodyChars === 0) return;
+  const deliverableRows = database.prepare(`
+    SELECT
+      id,
+      sender AS "from",
+      recipient AS "to",
+      subject,
+      body,
+      created_at,
+      sentinel_json
+    FROM messages
+    WHERE recipient = ?
+      AND state = 'queued'
+      AND (claimed_at IS NOT NULL OR expires_at > ?)
+    ORDER BY enqueue_sequence ASC
+  `).all(recipient, now);
+  if (deliverableRows.length < 2 || deliverableRows[0].sentinel_json !== null) return;
+
+  const mergeRows = [];
+  for (const row of deliverableRows) {
+    if (row.sentinel_json !== null) break;
+    mergeRows.push(row);
+  }
+  if (mergeRows.length < 2) return;
+
+  let body = mergeRows[0].body;
+  let queuedBytes = selectLiveQueueUsage(database, recipient).queued_bytes;
+  const mergedIds = [];
+  for (const row of mergeRows.slice(1)) {
+    const candidate = { from: row.from, subject: row.subject, body: row.body };
+    const nextBody = batchedBody({ ...mergeRows[0], body }, candidate);
+    const previousBodyBytes = Buffer.byteLength(body, "utf8");
+    const nextBodyBytes = Buffer.byteLength(nextBody, "utf8");
+    const nextQueuedBytes = queuedBytes + nextBodyBytes - previousBodyBytes - envelopeByteLength(row);
+    if (nextBody.length > maxBatchBodyChars || nextBodyBytes > maxBodyBytes || nextQueuedBytes > maxQueuedBytes) break;
+    body = nextBody;
+    queuedBytes = nextQueuedBytes;
+    mergedIds.push(row.id);
+  }
+  if (mergedIds.length === 0) return;
+
+  const survivorId = mergeRows[0].id;
+  preserveMergedDeliveryAttemptFloor(database, survivorId, mergedIds, now);
+  database.prepare(`
+    UPDATE messages
+    SET body = ?
+    WHERE id = ? AND state = 'queued'
+  `).run(body, survivorId);
+  const placeholders = mergedIds.map(() => "?").join(", ");
+  database.prepare(`
+    UPDATE reminders
+    SET linked_message_id = ?
+    WHERE linked_message_id IN (${placeholders})
+  `).run(survivorId, ...mergedIds);
+  database.prepare(`
+    UPDATE conversation_messages
+    SET delivery_message_id = ?
+    WHERE delivery_message_id IN (${placeholders})
+  `).run(survivorId, ...mergedIds);
+  database.prepare(`
+    DELETE FROM messages
+    WHERE id IN (${placeholders}) AND state = 'queued'
+  `).run(...mergedIds);
+}
+
+function preserveMergedDeliveryAttemptFloor(database, survivorId, mergedIds, now) {
+  if (mergedIds.length === 0) return;
+  const placeholders = mergedIds.map(() => "?").join(", ");
+  const survivorAttempt = database.prepare(`
+    SELECT COALESCE(MAX(attempt_number), 0) AS attempt_number
+    FROM delivery_attempts
+    WHERE message_id = ?
+  `).get(survivorId).attempt_number;
+  const mergedAttempt = database.prepare(`
+    SELECT COALESCE(MAX(attempt_number), 0) AS attempt_number
+    FROM delivery_attempts
+    WHERE message_id IN (${placeholders})
+  `).get(...mergedIds).attempt_number;
+  for (let attemptNumber = survivorAttempt + 1; attemptNumber <= mergedAttempt; attemptNumber += 1) {
+    database.prepare(`
+      INSERT INTO delivery_attempts (
+        message_id,
+        attempt_number,
+        lease_id,
+        owner_lease_id,
+        state,
+        created_at,
+        updated_at,
+        delivery_expires_at,
+        failure_reason
+      ) VALUES (?, ?, NULL, '', 'timed_out', ?, ?, ?, 'coalesced_delivery_batch')
+    `).run(survivorId, attemptNumber, now, now, now);
+  }
 }
 
 function prepareEnvelope(envelope) {
@@ -2240,7 +2349,7 @@ function failDeliveryAttempt(
   `).run(state, delivery.message_id, delivery.message_state);
   let recurringReminderRearmed;
   if (state === "dead_letter") {
-    recurringReminderRearmed = rearmRecurringReminderAfterDeadLetter(database, delivery.message_id, now);
+    recurringReminderRearmed = rearmRecurringRemindersAfterDeadLetter(database, delivery.message_id, now);
     database.prepare(`
       UPDATE reminders
       SET state = 'failed',
@@ -2258,29 +2367,32 @@ function failDeliveryAttempt(
   };
 }
 
-function rearmRecurringReminderAfterDeadLetter(database, messageId, now) {
-  const reminder = database.prepare(`
+function rearmRecurringRemindersAfterDeadLetter(database, messageId, now) {
+  const reminders = database.prepare(`
     SELECT id, next_due_at, interval_ms
     FROM reminders
     WHERE linked_message_id = ?
       AND interval_ms IS NOT NULL
       AND state = 'scheduled'
-  `).get(messageId);
-  if (reminder === undefined) return undefined;
-  const nextDueAt = recurringDueAtAfterNow(reminder.next_due_at, reminder.interval_ms, now);
-  const updated = database.prepare(`
-    UPDATE reminders
-    SET linked_message_id = NULL,
-        next_due_at = ?,
-        attempt_count = attempt_count + 1,
-        last_attempt_at = ?
-    WHERE id = ?
-      AND linked_message_id = ?
-      AND interval_ms IS NOT NULL
-      AND state = 'scheduled'
-  `).run(nextDueAt, now, reminder.id, messageId);
-  if (updated.changes !== 1) return undefined;
-  return { reminder_id: reminder.id, next_due_at: nextDueAt };
+    ORDER BY id ASC
+  `).all(messageId);
+  const rearmed = [];
+  for (const reminder of reminders) {
+    const nextDueAt = recurringDueAtAfterNow(reminder.next_due_at, reminder.interval_ms, now);
+    const updated = database.prepare(`
+      UPDATE reminders
+      SET linked_message_id = NULL,
+          next_due_at = ?,
+          attempt_count = attempt_count + 1,
+          last_attempt_at = ?
+      WHERE id = ?
+        AND linked_message_id = ?
+        AND interval_ms IS NOT NULL
+        AND state = 'scheduled'
+    `).run(nextDueAt, now, reminder.id, messageId);
+    if (updated.changes === 1) rearmed.push({ reminder_id: reminder.id, next_due_at: nextDueAt });
+  }
+  return rearmed.length === 0 ? undefined : rearmed;
 }
 
 function rearmFailedLinkedReminderForRetry(database, messageId, now) {
