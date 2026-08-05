@@ -420,7 +420,10 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.messages\.addEventListener\("scroll", \(\) => \{ state\.followMessages = isMessagesNearBottom\(\); \}\)/);
   assert.match(app, /function scrollMessagesToBottom\(\)/);
   assert.match(app, /function scrollMessagesToBottomIfFollowing\(\)/);
+  assert.match(app, /const appendedMessage = previousLastKey && nextLastKey !== previousLastKey && messages\.length >= previousCount;/);
+  assert.match(app, /if \(state\.renderedPeer === peer && state\.renderedMessageSignatures\[peer\] === signature\) return;/);
   assert.match(app, /if \(shouldFollow\) scrollMessagesToBottom\(\);/);
+  assert.match(app, /else elements\.messages\.scrollTop = scrollTop;/);
   assert.match(app, /image\.addEventListener\("load", scrollMessagesToBottomIfFollowing, \{ once: true \}\)/);
   assert.doesNotMatch(app, /localStorage\.setItem\([^\n]+data:image/);
   assert.match(app, /function messageForStorage\(message\)/);
