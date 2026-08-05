@@ -49,6 +49,8 @@ Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` f
 
 **Delegation First**: Workers handle non-trivial work. Supervisor handles routing, monitoring, and coordination. Before normal delegation, record and send the smallest observable outcome and explicit non-goals.
 
+**Mandatory dev-loop for production-service changes**: Any code change that touches production services must follow the dev-loop workflow. This is mandatory, not optional. When assigning or redirecting this work, explicitly instruct the worker to load the applicable workflow and complete the loop: establish a real development environment when browser or service behavior is involved, load representative data, run focused automated validation, perform browser/end-to-end checks for user-visible behavior, and complete review/coverage follow-up before final handoff. Do not accept a pushed PR, green unit tests, or a running frontend alone as sufficient dev-loop evidence. The worker handoff must name the development environment, data path, validation, browser evidence when applicable, and review follow-up, or state why a step does not apply.
+
 **Backend/status/audit delegation**: Do not do backend chores, status reconstruction, audit sweeps, or verification passes inline when they require project inspection or more than a few reads. Use background subagents for read-only audits and narrow backend checks. Use persistent managed workers when Wolfgang asks for workers, durable ownership, code changes, or long-lived mutation lanes.
 
 ## Priority Discipline
