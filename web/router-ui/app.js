@@ -314,7 +314,7 @@ function renderRouters() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "icon-button danger";
-    remove.textContent = "−";
+    remove.textContent = "🗑";
     remove.setAttribute("aria-label", `Remove ${displayRouter(routerUrl)}`);
     remove.disabled = state.routers.length === 1;
     remove.addEventListener("click", (event) => {
