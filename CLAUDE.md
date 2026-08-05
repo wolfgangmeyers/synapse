@@ -49,6 +49,7 @@ could affect files, external communication, or destructive operations.
 | `pi-extension-maintenance` | Safely inspect, install, update, uninstall, and diagnose the copied Mailbox V2 Pi extension lifecycle without touching unrelated Pi configuration. |
 | `pr-watch` | Run and maintain the read-only polling GitHub PR watcher used as a lightweight substitute for the webhook PR review bot. |
 | `reminders` | Set one-shot reminders that fire via mailbox after a delay. Set, list, or delete reminders for any tmux window. |
+| `remote-cloud-desktop` | Provision a generic Ubuntu KDE Plasma X11 desktop over xrdp with access restricted to a private overlay network. |
 | `roger-advanced-report-implementation` | Implement RogerEMR advanced/self-serve reports on the governed dataset, Parquet, DuckDB-WASM, and Report Builder architecture, distinct from fixed server-side reports. |
 | `roger-report-implementation` | Create RogerEMR fixed reports with evidence-backed source parity, Sol planning, correct permissions/stacking, screen-export agreement, isolated synthetic demos, and report-specific review gates. |
 | `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
