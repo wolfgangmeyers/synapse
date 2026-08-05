@@ -1230,6 +1230,35 @@ export function createAgentRouter({
   }
 
   async function handleReminderItem(request, response, reminderId) {
+    if (request.method === "PATCH") {
+      if (!isJsonContentType(request.headers["content-type"])) {
+        sendHttpError(response, 400, "invalid_request");
+        return;
+      }
+      try {
+        const patch = await readJsonRequest(request, maxRequestBytes);
+        const result = repository.updateReminder(reminderId, patch);
+        if (result === undefined) {
+          sendHttpError(response, 404, "not_found");
+          return;
+        }
+        // Re-sweep after a schedule change so a now-due reminder fires promptly,
+        // matching the post-create behavior in handleReminderCollection.
+        if (result.schedulingChanged) sweepDueReminders();
+        sendHttpJson(response, 200, { reminder: result.reminder });
+      } catch (error) {
+        if (error instanceof HttpRequestError) {
+          sendHttpError(response, error.statusCode, error.code);
+        } else if (error instanceof ReminderValidationError) {
+          sendHttpError(response, 400, error.code);
+        } else if (error instanceof ProtocolValidationError) {
+          sendHttpError(response, 400, error.code);
+        } else {
+          throw error;
+        }
+      }
+      return;
+    }
     if (request.method !== "DELETE") {
       sendHttpError(response, 404, "not_found");
       return;

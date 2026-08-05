@@ -403,6 +403,92 @@ class MessageRepository {
     });
   }
 
+  updateReminder(reminderId, patch) {
+    assertReminderId(reminderId);
+    if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+      throw new ReminderValidationError();
+    }
+    // PATCH intentionally does not accept `state`: scheduling transitions are
+    // driven by the delivery lifecycle, and allowing an arbitrary state write
+    // here could desync a reminder from its linked message. Callers mutate
+    // cadence/content/target only.
+    const allowedPatchKeys = new Set(["interval_ms", "next_due_at", "body", "subject", "target"]);
+    const patchKeys = Object.keys(patch);
+    if (patchKeys.length === 0 || patchKeys.some((key) => !allowedPatchKeys.has(key))) {
+      throw new ReminderValidationError();
+    }
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const existing = selectReminder(this.#database, reminderId);
+      if (existing === undefined) return undefined;
+      const nextDueAtSupplied = Object.prototype.hasOwnProperty.call(patch, "next_due_at");
+      const candidate = {
+        id: existing.id,
+        target: existing.target,
+        creator: existing.creator,
+        body: existing.body,
+        created_at: existing.created_at,
+        next_due_at: existing.next_due_at,
+        interval_ms: existing.interval_ms,
+        ...(existing.subject === undefined ? {} : { subject: existing.subject }),
+        ...(existing.sentinel === undefined ? {} : { sentinel: existing.sentinel }),
+        ...patch,
+      };
+      // subject:null clears the subject. validateReminder treats an absent
+      // subject as null, while the envelope schema rejects an explicit null,
+      // so drop the key to represent "cleared".
+      if (candidate.subject === null) delete candidate.subject;
+      // Validate the merged reminder with the same rules as create before any
+      // recompute, so a bad interval/next_due_at/body surfaces as a
+      // ReminderValidationError rather than a downstream RangeError.
+      const validated = validateReminder(candidate, { maxBodyBytes: this.#maxBodyBytes });
+      const intervalChanged = validated.interval_ms !== existing.interval_ms;
+      let nextDueAt = validated.next_due_at;
+      // When the cadence changes and the caller did not name a new due time,
+      // re-arm from "now" so the new interval takes effect immediately instead
+      // of firing once at the stale time. Setting interval_ms to null keeps
+      // the existing next_due_at (one-shot) unless the caller overrides it.
+      if (intervalChanged && !nextDueAtSupplied && validated.interval_ms !== null) {
+        nextDueAt = timestampAfter(now, validated.interval_ms);
+      }
+      const schedulingChanged = intervalChanged || nextDueAt !== existing.next_due_at;
+      // A changed target must resolve to a known agent row before the reminder
+      // can fire there, matching the createReminder precondition.
+      this.#database.prepare(`
+        INSERT INTO agents (agent_id, first_seen_at)
+        VALUES (?, ?)
+        ON CONFLICT (agent_id) DO NOTHING
+      `).run(validated.target, now);
+      // Preserve id, created_at, creator, occurrence_number, and sentinel.
+      // Reset retry accounting whenever the schedule moved so a freshly re-armed
+      // reminder is not immediately treated as a stuck failure.
+      this.#database.prepare(`
+        UPDATE reminders
+        SET target = ?,
+            subject = ?,
+            body = ?,
+            next_due_at = ?,
+            interval_ms = ?,
+            attempt_count = CASE WHEN ? THEN 0 ELSE attempt_count END,
+            last_attempt_at = CASE WHEN ? THEN NULL ELSE last_attempt_at END
+        WHERE id = ?
+      `).run(
+        validated.target,
+        validated.subject,
+        validated.body,
+        nextDueAt,
+        validated.interval_ms,
+        schedulingChanged ? 1 : 0,
+        schedulingChanged ? 1 : 0,
+        reminderId,
+      );
+      return {
+        schedulingChanged,
+        reminder: selectReminder(this.#database, reminderId),
+      };
+    });
+  }
+
   fireDueReminders({ onAttempt } = {}) {
     if (onAttempt !== undefined && typeof onAttempt !== "function") {
       throw new TypeError("onAttempt must be a function");

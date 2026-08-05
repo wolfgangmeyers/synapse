@@ -31,6 +31,13 @@ LEGACY_SCHEDULE_MARKER = "# mecha-priority-watchdog"
 RETIREMENT_KEY = "priority_handoff_monitor_retirement"
 RETIREMENT_ID_KEY = "retired_legacy_watchdog_reminder_ids"
 MAX_RETIRED_LEGACY_REMINDERS = 100
+# Acceptable cadence for the recurring supervisor general-sweep reminder. The
+# defaults match the long-standing 5-10 minute expectation; MECHA_SWEEP_CADENCE_*
+# env vars widen the window (for example, to a 30-minute sweep during the Z.AI
+# backup period) without producing a false FAIL. The "exactly one" requirement
+# is independent of these bounds.
+DEFAULT_SWEEP_CADENCE_MIN_MS = 5 * 60 * 1_000
+DEFAULT_SWEEP_CADENCE_MAX_MS = 10 * 60 * 1_000
 TERMINAL_STATES = {"failed", "dead_letter"}
 SUPERVISOR_WINDOW = "supervisor"
 ORPHAN_TOOL_RESULT_ERROR = re.compile(r"No tool call found for function call output with call_id (call_[A-Za-z0-9_-]+)")
@@ -111,6 +118,32 @@ def is_terminal(reminder: dict) -> bool:
     return reminder.get("state") in TERMINAL_STATES or reminder.get("linked_message_state") in TERMINAL_STATES
 
 
+def sweep_cadence_ms(env_name: str, default: int) -> int:
+    raw = os.environ.get(env_name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def sweep_cadence_bounds() -> tuple[int, int]:
+    """Return the acceptable general-sweep cadence window in milliseconds."""
+    return (
+        sweep_cadence_ms("MECHA_SWEEP_CADENCE_MIN_MS", DEFAULT_SWEEP_CADENCE_MIN_MS),
+        sweep_cadence_ms("MECHA_SWEEP_CADENCE_MAX_MS", DEFAULT_SWEEP_CADENCE_MAX_MS),
+    )
+
+
+def describe_cadence(min_ms: int, max_ms: int) -> str:
+    def minutes(ms: int) -> str:
+        return f"{ms // 60_000}" if ms % 60_000 == 0 else f"{ms / 60_000:g}"
+    low, high = minutes(min_ms), minutes(max_ms)
+    return f"{low} minute" if low == high else f"{low}-{high} minute"
+
+
 def priority_liveness_findings(state: dict, reminders: list[dict]) -> list[str]:
     """Return deterministic, actionable priority-handoff findings."""
     tasks = {task.get("id"): task for task in state["tasks"] if isinstance(task, dict)}
@@ -134,21 +167,23 @@ def priority_liveness_findings(state: dict, reminders: list[dict]) -> list[str]:
             "each current delivery workstream is represented by an active priority with linked tasks",
         ))
 
+    cadence_min_ms, cadence_max_ms = sweep_cadence_bounds()
     general_sweeps = [
         reminder for reminder in reminders
         if reminder.get("target") == "supervisor"
         and reminder.get("state") == "scheduled"
         and isinstance(reminder.get("interval_ms"), int)
-        and 300_000 <= reminder["interval_ms"] <= 600_000
+        and cadence_min_ms <= reminder["interval_ms"] <= cadence_max_ms
         and "sweep" in str(reminder.get("body", "")).lower()
     ]
+    cadence = describe_cadence(cadence_min_ms, cadence_max_ms)
     if (delivery_tasks or active_priorities) and len(general_sweeps) != 1:
         findings.append(actionable(
             "FAIL",
             "supervisor",
-            f"expected exactly one recurring 5-10 minute general sweep reminder, found {len(general_sweeps)}",
+            f"expected exactly one recurring {cadence} general sweep reminder, found {len(general_sweeps)}",
             "repair the recurring supervisor general-sweep reminder through Mailbox",
-            "exactly one scheduled recurring supervisor reminder at a 5-10 minute cadence names the general sweep",
+            f"exactly one scheduled recurring supervisor reminder at a {cadence} cadence names the general sweep",
         ))
 
     for priority in state["priorities"]:
