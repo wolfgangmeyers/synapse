@@ -111,18 +111,23 @@ p:empty { display: none; }
 .router-dialog::backdrop { background: rgba(5,7,12,0.68); }
 .dialog-shell { padding: 22px; }
 .dialog-shell header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
+.dialog-actions { display: flex; gap: 8px; }
 .dialog-shell header button { min-width: 44px; width: 44px; padding: 0; font-size: 24px; background: var(--surface-raised); color: var(--text); }
 .saved-routers { display: grid; gap: 10px; margin-bottom: 22px; }
-.router-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; align-items: center; padding: 12px; border-radius: 18px; background: var(--canvas); cursor: pointer; }
+.router-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 14px; border-radius: 18px; background: var(--canvas); cursor: pointer; }
 .router-row.active { outline: 1px solid rgba(120,224,205,0.42); background: var(--surface-raised); }
 .router-row:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.router-label { min-width: 0; }
+.router-label strong { display: block; overflow: hidden; text-overflow: ellipsis; }
 .router-row .meta { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
-.router-alias-input { margin-top: 8px; min-height: 40px; }
-.router-row button { min-height: 40px; }
-.router-row button.secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
+.router-row-actions, .router-form-actions { display: flex; gap: 8px; align-items: center; }
+.icon-button { min-width: 40px; width: 40px; min-height: 40px; padding: 0; font-size: 20px; }
+.router-row button.secondary, .router-form-actions button.secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
 .router-row button.danger { background: transparent; color: var(--danger); border: 1px solid rgba(255,180,171,0.28); }
 .router-setup { display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid var(--line); }
+.router-setup[hidden] { display: none; }
 .router-setup label { display: grid; gap: 6px; font-size: 13px; }
+.router-form-actions button { flex: 1; }
 .section-title {
   display: flex;
   justify-content: space-between;

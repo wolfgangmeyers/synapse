@@ -78,13 +78,16 @@
           <h2>Routers</h2>
           <p>Each router keeps its own agents and chat history.</p>
         </div>
-        <button id="close-router-dialog" value="cancel" aria-label="Close routers">×</button>
+        <div class="dialog-actions">
+          <button id="open-add-router" type="button" aria-label="Add router">+</button>
+          <button id="close-router-dialog" value="cancel" aria-label="Close routers">×</button>
+        </div>
       </header>
 
       <div id="saved-routers" class="saved-routers"></div>
 
-      <section class="router-setup">
-        <h3>Add router</h3>
+      <section id="router-setup" class="router-setup" hidden>
+        <h3 id="router-form-title">Add router</h3>
         <label>Hostname or URL
           <input id="router-url" name="router-url" autocomplete="off" placeholder="http://127.0.0.1:8765">
         </label>
@@ -94,7 +97,10 @@
         <label>Connect as user
           <input id="agent-id" name="agent-id" autocomplete="off" spellcheck="false">
         </label>
-        <button id="add-router" type="button">Add router</button>
+        <div class="router-form-actions">
+          <button id="cancel-router-edit" type="button" class="secondary">Cancel</button>
+          <button id="add-router" type="button">Save router</button>
+        </div>
       </section>
     </form>
   </dialog>

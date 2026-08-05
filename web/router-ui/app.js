@@ -38,6 +38,7 @@ const state = {
   agentId: agentIdForRouter(initialRouter),
   routers: loadRouters(),
   routerAliases: loadRouterAliases(),
+  routerEditor: null,
   agents: [],
   selectedPeer: "",
   agentFilter: "",
@@ -60,10 +61,14 @@ const elements = {
   routerSelector: document.querySelector("#router-selector"),
   routerDialog: document.querySelector("#router-dialog"),
   savedRouters: document.querySelector("#saved-routers"),
+  openAddRouter: document.querySelector("#open-add-router"),
+  routerSetup: document.querySelector("#router-setup"),
+  routerFormTitle: document.querySelector("#router-form-title"),
   routerUrl: document.querySelector("#router-url"),
   routerAlias: document.querySelector("#router-alias"),
   agentId: document.querySelector("#agent-id"),
   addRouter: document.querySelector("#add-router"),
+  cancelRouterEdit: document.querySelector("#cancel-router-edit"),
   refresh: document.querySelector("#refresh"),
   agentFilter: document.querySelector("#agent-filter"),
   agents: document.querySelector("#agents"),
@@ -100,21 +105,14 @@ restoreDraftForSelectedPeer();
 void pruneExpiredHistory();
 
 elements.routerSelector.addEventListener("click", () => {
+  closeRouterEditor();
   renderRouters();
   elements.routerDialog.showModal();
 });
+elements.openAddRouter.addEventListener("click", () => openRouterEditor("add"));
+elements.cancelRouterEdit.addEventListener("click", closeRouterEditor);
 elements.addRouter.addEventListener("click", () => {
-  try {
-    const routerUrl = normalizeRouterInput(elements.routerUrl.value);
-    state.agentId = elements.agentId.value.trim();
-    saveAgentIdForRouter(routerUrl, state.agentId);
-    ensureRouter(routerUrl);
-    const alias = elements.routerAlias.value.trim();
-    if (alias) setRouterAlias(routerUrl, alias);
-    void switchRouter(routerUrl, { connect: true });
-  } catch (error) {
-    setStatus("error", error.message);
-  }
+  void saveRouterEditor();
 });
 elements.refresh.addEventListener("click", () => sendCommand({ type: "refresh_agents" }));
 elements.agentFilter.addEventListener("input", () => {
@@ -247,9 +245,22 @@ function removeRouter(routerUrl) {
   state.routers = state.routers.filter((router) => router !== routerUrl);
   delete state.routerAliases[routerUrl];
   saveRouterAliases();
+  deleteAgentIdForRouter(routerUrl);
   if (state.routerUrl === routerUrl) void switchRouter(state.routers[0], { connect: true });
   saveRouters();
+  if (state.routerEditor?.routerUrl === routerUrl) closeRouterEditor();
   renderRouters();
+}
+
+function replaceRouter(previousUrl, nextUrl) {
+  state.routers = state.routers.map((router) => router === previousUrl ? nextUrl : router);
+  if (!state.routers.includes(nextUrl)) state.routers.push(nextUrl);
+  if (previousUrl !== nextUrl) {
+    delete state.routerAliases[previousUrl];
+    saveRouterAliases();
+    deleteAgentIdForRouter(previousUrl);
+  }
+  saveRouters();
 }
 
 function setStatus(stateName, detail, agentId = state.agentId, routerUrl = state.routerUrl) {
@@ -261,6 +272,7 @@ function setStatus(stateName, detail, agentId = state.agentId, routerUrl = state
 function render() {
   elements.selectedRouterLabel.textContent = displayRouter(state.routerUrl);
   renderRouters();
+  renderRouterEditor();
   renderAgents();
   renderConversation();
 }
@@ -279,47 +291,79 @@ function renderRouters() {
       }
     });
     const label = document.createElement("div");
+    label.className = "router-label";
     const title = document.createElement("strong");
-    title.textContent = displayRouter(routerUrl);
+    const alias = state.routerAliases[routerUrl] || "";
+    title.textContent = alias || new URL(routerUrl).host;
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = `${routerUrl}${routerUrl === state.routerUrl ? " · selected" : ""}`;
-    const alias = document.createElement("input");
-    alias.className = "router-alias-input";
-    alias.value = state.routerAliases[routerUrl] || "";
-    alias.placeholder = "Router name";
-    alias.setAttribute("aria-label", `Name for ${routerUrl}`);
-    alias.addEventListener("click", (event) => event.stopPropagation());
-    alias.addEventListener("keydown", (event) => event.stopPropagation());
-    label.append(title, meta, alias);
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "secondary";
-    rename.textContent = "Save name";
-    rename.addEventListener("click", (event) => {
+    meta.textContent = `${alias ? routerUrl : ""}${routerUrl === state.routerUrl ? `${alias ? " · " : ""}selected` : ""}`;
+    label.append(title);
+    if (meta.textContent) label.append(meta);
+    const actions = document.createElement("div");
+    actions.className = "router-row-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "icon-button secondary";
+    edit.textContent = "✎";
+    edit.setAttribute("aria-label", `Edit ${displayRouter(routerUrl)}`);
+    edit.addEventListener("click", (event) => {
       event.stopPropagation();
-      setRouterAlias(routerUrl, alias.value);
-    });
-    const select = document.createElement("button");
-    select.type = "button";
-    select.className = "secondary";
-    select.textContent = "Connect as user";
-    select.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void switchRouter(routerUrl, { connect: true });
+      openRouterEditor("edit", routerUrl);
     });
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.className = "danger";
-    remove.textContent = "Remove";
+    remove.className = "icon-button danger";
+    remove.textContent = "−";
+    remove.setAttribute("aria-label", `Remove ${displayRouter(routerUrl)}`);
     remove.disabled = state.routers.length === 1;
     remove.addEventListener("click", (event) => {
       event.stopPropagation();
       removeRouter(routerUrl);
     });
-    row.append(label, rename, select, remove);
+    actions.append(edit, remove);
+    row.append(label, actions);
     return row;
   }));
+}
+
+function openRouterEditor(mode, routerUrl = "") {
+  state.routerEditor = { mode, routerUrl };
+  elements.routerUrl.value = routerUrl || state.routerUrl;
+  elements.routerAlias.value = routerUrl ? state.routerAliases[routerUrl] || "" : "";
+  elements.agentId.value = agentIdForRouter(routerUrl || state.routerUrl);
+  renderRouterEditor();
+  elements.routerUrl.focus();
+}
+
+function closeRouterEditor() {
+  state.routerEditor = null;
+  renderRouterEditor();
+}
+
+function renderRouterEditor() {
+  const editor = state.routerEditor;
+  elements.routerSetup.hidden = !editor;
+  if (!editor) return;
+  elements.routerFormTitle.textContent = editor.mode === "edit" ? "Edit router" : "Add router";
+  elements.addRouter.textContent = editor.mode === "edit" ? "Save router" : "Add router";
+}
+
+async function saveRouterEditor() {
+  try {
+    const editor = state.routerEditor || { mode: "add", routerUrl: "" };
+    const previousUrl = editor.mode === "edit" ? editor.routerUrl : "";
+    const routerUrl = normalizeRouterInput(elements.routerUrl.value);
+    state.agentId = elements.agentId.value.trim();
+    saveAgentIdForRouter(routerUrl, state.agentId);
+    if (previousUrl && previousUrl !== routerUrl) replaceRouter(previousUrl, routerUrl);
+    else ensureRouter(routerUrl);
+    setRouterAlias(routerUrl, elements.routerAlias.value);
+    closeRouterEditor();
+    await switchRouter(routerUrl, { connect: true });
+  } catch (error) {
+    setStatus("error", error.message);
+  }
 }
 
 function renderAgents() {
@@ -851,6 +895,11 @@ function saveAgentIdForRouter(routerUrl, agentId) {
   agentIds[routerUrl] = agentId;
   localStorage.setItem("mecha.web.agentIds", JSON.stringify(agentIds));
   localStorage.setItem("mecha.web.agentId", agentId);
+}
+function deleteAgentIdForRouter(routerUrl) {
+  const agentIds = loadAgentIds();
+  delete agentIds[routerUrl];
+  localStorage.setItem("mecha.web.agentIds", JSON.stringify(agentIds));
 }
 function humanName(id) { return id.split(/[._-]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(" ") || id; }
 function monogram(id) { return (id.match(/[A-Za-z0-9]/)?.[0] || "?").toUpperCase(); }
