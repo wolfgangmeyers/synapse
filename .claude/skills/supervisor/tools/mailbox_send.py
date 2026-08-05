@@ -113,6 +113,20 @@ def post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         return error.code, read_json_response(error)
 
 
+def patch_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="PATCH",
+    )
+    try:
+        with build_opener(NoRedirect()).open(request, timeout=5) as response:
+            return response.status, read_json_response(response)
+    except HTTPError as error:
+        return error.code, read_json_response(error)
+
+
 def connection_refused(error: URLError) -> bool:
     reason = error.reason
     return isinstance(reason, ConnectionRefusedError) or getattr(reason, "errno", None) == errno.ECONNREFUSED

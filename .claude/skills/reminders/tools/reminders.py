@@ -18,7 +18,7 @@ from pathlib import Path
 SUPERVISOR_TOOLS = Path(__file__).resolve().parents[2] / "supervisor" / "tools"
 sys.path.insert(0, str(SUPERVISOR_TOOLS))
 from agent_router import request_json, router_url
-from mailbox_send import nanoid, post_json, router_endpoint
+from mailbox_send import nanoid, patch_json, post_json, router_endpoint
 from _tmux import current_agent_id
 
 
@@ -61,6 +61,16 @@ def parser() -> argparse.ArgumentParser:
     add_router_url(delete)
     delete_all = commands.add_parser("delete-all")
     add_router_url(delete_all)
+    update = commands.add_parser("update", help="Patch an existing reminder's cadence or content")
+    update.add_argument("id")
+    update.add_argument("--window")
+    update.add_argument("--message")
+    update.add_argument("--subject")
+    timing = update.add_mutually_exclusive_group()
+    timing.add_argument("--in", dest="relative_duration", metavar="DURATION")
+    timing.add_argument("--at", dest="absolute_time", metavar="ISO8601")
+    update.add_argument("--every", dest="recurrence", metavar="DURATION")
+    add_router_url(update)
     reconcile_pr_watch = commands.add_parser(
         "reconcile-pr-watch",
         help="Safely ensure the dedicated pr-watch recurrence exists exactly once",
@@ -166,6 +176,56 @@ def set_reminder(args: argparse.Namespace) -> int:
     reminder = accepted_reminder(response, payload)
     if status not in {200, 201} or reminder is None:
         print(f"Router rejected reminder: {response_error(response)}", file=sys.stderr)
+        return 1
+    print(
+        f"Reminder {reminder['id']} is {reminder['state']} "
+        f"for {reminder['target']} at {reminder['next_due_at']}",
+    )
+    return 0
+
+
+def update_reminder(args: argparse.Namespace) -> int:
+    try:
+        now = datetime.now(timezone.utc)
+        # --in nulls the interval (one-shot), which contradicts --every's recurring
+        # cadence; the --in/--at pair is already mutually exclusive via argparse.
+        if args.recurrence is not None and args.relative_duration is not None:
+            print("--every cannot be combined with --in", file=sys.stderr)
+            return 2
+        payload: dict[str, Any] = {}
+        if args.recurrence is not None:
+            interval_ms = parse_duration(args.recurrence)
+            payload["interval_ms"] = interval_ms
+            # Re-anchor the recurrence from now unless an explicit fire time was given.
+            if args.absolute_time is None and args.relative_duration is None:
+                payload["next_due_at"] = utc_timestamp(due_after(now, interval_ms))
+        if args.relative_duration is not None:
+            payload["interval_ms"] = None
+            payload["next_due_at"] = utc_timestamp(due_after(now, parse_duration(args.relative_duration)))
+        elif args.absolute_time is not None:
+            payload["next_due_at"] = utc_timestamp(parse_absolute_time(args.absolute_time))
+        if args.message is not None:
+            payload["body"] = args.message
+        if args.subject is not None:
+            payload["subject"] = args.subject
+        if args.window is not None:
+            payload["target"] = resolve_target(args.window)
+        if not payload:
+            print("update requires at least one field to change", file=sys.stderr)
+            return 2
+        endpoint = router_endpoint(args.router_url, f"/v1/reminders/{quote(args.id, safe='')}")
+        status, response = patch_json(endpoint, payload)
+    except (ValueError, URLError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if status == 404:
+        print(f"Reminder {args.id} not found", file=sys.stderr)
+        return 1
+    reminder = response.get("reminder") if isinstance(response, dict) else None
+    if status != 200 or not isinstance(reminder, dict) \
+            or not isinstance(reminder.get("state"), str) \
+            or not isinstance(reminder.get("next_due_at"), str):
+        print(f"Router rejected reminder update: {response_error(response or {})}", file=sys.stderr)
         return 1
     print(
         f"Reminder {reminder['id']} is {reminder['state']} "
@@ -348,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "set":
         return set_reminder(args)
+    if args.command == "update":
+        return update_reminder(args)
     if args.command == "list":
         return list_reminders(args)
     if args.command == "reconcile-pr-watch":
