@@ -436,6 +436,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function openRouterEditor\(mode, routerUrl = ""\)/);
   assert.match(app, /function saveRouterEditor\(\)/);
   assert.match(app, /edit\.setAttribute\("aria-label", `Edit \$\{displayRouter\(routerUrl\)\}`\)/);
+  assert.match(app, /remove\.textContent = "🗑"/);
   assert.match(app, /remove\.setAttribute\("aria-label", `Remove \$\{displayRouter\(routerUrl\)\}`\)/);
   assert.match(app, /elements\.selectedRouterLabel\.textContent = displayRouter\(state\.routerUrl\)/);
   assert.match(app, /title\.textContent = alias \|\| new URL\(routerUrl\)\.host/);
