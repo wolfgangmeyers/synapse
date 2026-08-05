@@ -408,6 +408,8 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(html, /placeholder="Filter connected agents"/);
   assert.match(html, /id="image-preview"/);
   assert.match(html, /id="router-alias"/);
+  assert.match(html, /id="open-add-router"/);
+  assert.match(html, /id="router-setup" class="router-setup" hidden/);
   assert.match(html, /id="image-input" type="file" accept="image\/\*" multiple/);
   assert.match(app, /const MAX_IMAGES = 3;/);
   assert.match(app, /const MAX_IMAGE_EDGE = 1600;/);
@@ -431,10 +433,15 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /mecha\.web\.agentIds/);
   assert.match(app, /mecha\.web\.routerAliases/);
   assert.match(app, /function setRouterAlias\(routerUrl, alias\)/);
+  assert.match(app, /function openRouterEditor\(mode, routerUrl = ""\)/);
+  assert.match(app, /function saveRouterEditor\(\)/);
+  assert.match(app, /edit\.setAttribute\("aria-label", `Edit \$\{displayRouter\(routerUrl\)\}`\)/);
+  assert.match(app, /remove\.setAttribute\("aria-label", `Remove \$\{displayRouter\(routerUrl\)\}`\)/);
   assert.match(app, /elements\.selectedRouterLabel\.textContent = displayRouter\(state\.routerUrl\)/);
-  assert.match(app, /title\.textContent = displayRouter\(routerUrl\)/);
+  assert.match(app, /title\.textContent = alias \|\| new URL\(routerUrl\)\.host/);
   assert.match(app, /elements\.peerDetail\.textContent = peer \? `\$\{peer\} · \$\{displayRouter\(state\.routerUrl\)\}`/);
-  assert.match(styles, /\.router-alias-input/);
+  assert.match(styles, /\.router-row-actions/);
+  assert.match(styles, /\.icon-button/);
   assert.match(webState, /function matchesActiveScope/);
   assert.match(webState, /"message"/);
   assert.match(webState, /event\.routerUrl === active\.routerUrl && event\.agentId === active\.agentId/);
