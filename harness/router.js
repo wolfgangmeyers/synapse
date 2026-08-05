@@ -71,6 +71,7 @@ const CORS_HEADERS = Object.freeze({
 });
 const HTTP_ERROR_MESSAGES = Object.freeze({
   invalid_request: "Request does not match the mailbox protocol.",
+  escaped_newlines: "Message body contains escaped newline text (\\n or \\r). Send real multiline content instead of escaped newline sequences.",
   payload_too_large: "Request exceeds local mailbox limits.",
   queue_full: "Recipient queue is full.",
   rate_limited: "Sender rate limit exceeded.",
@@ -1264,6 +1265,7 @@ export function createAgentRouter({
     try {
       const payload = await readJsonRequest(request, maxRequestBytes);
       conversationBody = String(payload?.body ?? "");
+      rejectEscapedNewlines(conversationBody);
       materialized = materializeImageAttachments(payload);
       attachments = materialized.attachments;
       envelope = validateEnvelope(materialized.envelope, {
@@ -1686,6 +1688,12 @@ function jpegDimensions(bytes) {
 
 function readUInt24LE(bytes, offset) {
   return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
+}
+
+function rejectEscapedNewlines(body) {
+  if (body.includes("\\n") || body.includes("\\r")) {
+    throw new ProtocolValidationError("escaped_newlines");
+  }
 }
 
 function attachmentBody(body, files) {

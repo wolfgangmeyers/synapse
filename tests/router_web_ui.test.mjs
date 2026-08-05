@@ -65,6 +65,32 @@ test("router HTTP API allows browser CORS for web UI requests", async () => {
   }
 });
 
+test("router HTTP API rejects escaped newline text in message bodies", async () => {
+  const router = await startTestRouter();
+  try {
+    for (const [id, body] of [["escaped-n", "first\\nsecond"], ["escaped-r", "first\\rsecond"]]) {
+      const response = await fetch(new URL("/v1/messages", router.httpUrl), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, from: "escaped-sender", to: "escaped-peer", body, created_at: "2026-07-28T14:30:00.000Z" }),
+      });
+      assert.equal(response.status, 400);
+      const payload = await response.json();
+      assert.equal(payload.error.code, "escaped_newlines");
+      assert.match(payload.error.message, /Send real multiline content/);
+    }
+
+    const multiline = await fetch(new URL("/v1/messages", router.httpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "real-newline", from: "escaped-sender", to: "escaped-peer", body: "first\nsecond", created_at: "2026-07-28T14:30:00.000Z" }),
+    });
+    assert.equal(multiline.status, 201);
+  } finally {
+    await router.close();
+  }
+});
+
 test("router image attachments reject unsafe parent temp directories", async () => {
   const directory = await mkdtemp(join(tmpdir(), "router-web-ui-images-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
@@ -381,6 +407,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(html, />Connected agents<\/span>/);
   assert.match(html, /placeholder="Filter connected agents"/);
   assert.match(html, /id="image-preview"/);
+  assert.match(html, /id="router-alias"/);
   assert.match(html, /id="image-input" type="file" accept="image\/\*" multiple/);
   assert.match(app, /const MAX_IMAGES = 3;/);
   assert.match(app, /const MAX_IMAGE_EDGE = 1600;/);
@@ -399,6 +426,12 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function messageForStorage\(message\)/);
   assert.match(app, /startsWith\("data:image\/"\)/);
   assert.match(app, /mecha\.web\.agentIds/);
+  assert.match(app, /mecha\.web\.routerAliases/);
+  assert.match(app, /function setRouterAlias\(routerUrl, alias\)/);
+  assert.match(app, /elements\.selectedRouterLabel\.textContent = displayRouter\(state\.routerUrl\)/);
+  assert.match(app, /title\.textContent = displayRouter\(routerUrl\)/);
+  assert.match(app, /elements\.peerDetail\.textContent = peer \? `\$\{peer\} · \$\{displayRouter\(state\.routerUrl\)\}`/);
+  assert.match(styles, /\.router-alias-input/);
   assert.match(webState, /function matchesActiveScope/);
   assert.match(webState, /"message"/);
   assert.match(webState, /event\.routerUrl === active\.routerUrl && event\.agentId === active\.agentId/);

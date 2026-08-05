@@ -37,6 +37,7 @@ const state = {
   routerUrl: initialRouter,
   agentId: agentIdForRouter(initialRouter),
   routers: loadRouters(),
+  routerAliases: loadRouterAliases(),
   agents: [],
   selectedPeer: "",
   agentFilter: "",
@@ -56,6 +57,7 @@ const elements = {
   routerDialog: document.querySelector("#router-dialog"),
   savedRouters: document.querySelector("#saved-routers"),
   routerUrl: document.querySelector("#router-url"),
+  routerAlias: document.querySelector("#router-alias"),
   agentId: document.querySelector("#agent-id"),
   addRouter: document.querySelector("#add-router"),
   refresh: document.querySelector("#refresh"),
@@ -85,6 +87,7 @@ state.messages = await loadMessages(state.routerUrl, state.agentId);
 state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
 state.selectedPeer = loadSelectedPeer(state.routerUrl, state.agentId);
 elements.routerUrl.value = state.routerUrl;
+elements.routerAlias.value = state.routerAliases[state.routerUrl] || "";
 elements.agentId.value = state.agentId;
 connectUiSocket();
 render();
@@ -102,6 +105,8 @@ elements.addRouter.addEventListener("click", () => {
     state.agentId = elements.agentId.value.trim();
     saveAgentIdForRouter(routerUrl, state.agentId);
     ensureRouter(routerUrl);
+    const alias = elements.routerAlias.value.trim();
+    if (alias) setRouterAlias(routerUrl, alias);
     void switchRouter(routerUrl, { connect: true });
   } catch (error) {
     setStatus("error", error.message);
@@ -216,6 +221,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.draftPeers = loadDraftPeers(routerUrl, state.agentId);
   localStorage.setItem("mecha.web.activeRouter", routerUrl);
   elements.routerUrl.value = routerUrl;
+  elements.routerAlias.value = state.routerAliases[routerUrl] || "";
   elements.agentId.value = state.agentId;
   render();
   restoreDraftForSelectedPeer();
@@ -235,6 +241,8 @@ function ensureRouter(routerUrl) {
 function removeRouter(routerUrl) {
   if (state.routers.length === 1) return;
   state.routers = state.routers.filter((router) => router !== routerUrl);
+  delete state.routerAliases[routerUrl];
+  saveRouterAliases();
   if (state.routerUrl === routerUrl) void switchRouter(state.routers[0], { connect: true });
   saveRouters();
   renderRouters();
@@ -243,7 +251,7 @@ function removeRouter(routerUrl) {
 function setStatus(stateName, detail, agentId = state.agentId, routerUrl = state.routerUrl) {
   elements.statusDot.className = `status-dot ${stateName === "connected" ? "connected" : stateName === "connecting" || stateName === "reconnecting" ? "connecting" : "offline"}`;
   elements.statusTitle.textContent = stateName === "connected" ? `Connected as ${agentId}` : stateName[0].toUpperCase() + stateName.slice(1);
-  elements.statusDetail.textContent = stateName === "connected" ? "" : `${detail || ""}${routerUrl ? ` · ${routerUrl}` : ""}`;
+  elements.statusDetail.textContent = stateName === "connected" ? "" : `${detail || ""}${routerUrl ? ` · ${displayRouter(routerUrl)}` : ""}`;
 }
 
 function render() {
@@ -267,7 +275,27 @@ function renderRouters() {
       }
     });
     const label = document.createElement("div");
-    label.innerHTML = `<strong>${escapeHtml(displayRouter(routerUrl))}</strong><div class="meta">${escapeHtml(routerUrl)}${routerUrl === state.routerUrl ? " · selected" : ""}</div>`;
+    const title = document.createElement("strong");
+    title.textContent = displayRouter(routerUrl);
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${routerUrl}${routerUrl === state.routerUrl ? " · selected" : ""}`;
+    const alias = document.createElement("input");
+    alias.className = "router-alias-input";
+    alias.value = state.routerAliases[routerUrl] || "";
+    alias.placeholder = "Router name";
+    alias.setAttribute("aria-label", `Name for ${routerUrl}`);
+    alias.addEventListener("click", (event) => event.stopPropagation());
+    alias.addEventListener("keydown", (event) => event.stopPropagation());
+    label.append(title, meta, alias);
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "secondary";
+    rename.textContent = "Save name";
+    rename.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setRouterAlias(routerUrl, alias.value);
+    });
     const select = document.createElement("button");
     select.type = "button";
     select.className = "secondary";
@@ -285,7 +313,7 @@ function renderRouters() {
       event.stopPropagation();
       removeRouter(routerUrl);
     });
-    row.append(label, select, remove);
+    row.append(label, rename, select, remove);
     return row;
   }));
 }
@@ -773,11 +801,22 @@ function normalizeRouterInput(value) {
   url.hash = "";
   return url.toString().replace(/\/$/, "");
 }
-function displayRouter(routerUrl) { return new URL(routerUrl).host; }
+function displayRouter(routerUrl) { return state.routerAliases[routerUrl] || new URL(routerUrl).host; }
 function loadRouters() {
   try { return JSON.parse(localStorage.getItem("mecha.web.routers") || "[]"); } catch { return []; }
 }
 function saveRouters() { localStorage.setItem("mecha.web.routers", JSON.stringify(state.routers)); }
+function loadRouterAliases() {
+  try { return JSON.parse(localStorage.getItem("mecha.web.routerAliases") || "{}"); } catch { return {}; }
+}
+function saveRouterAliases() { localStorage.setItem("mecha.web.routerAliases", JSON.stringify(state.routerAliases)); }
+function setRouterAlias(routerUrl, alias) {
+  const name = alias.trim();
+  if (name) state.routerAliases[routerUrl] = name;
+  else delete state.routerAliases[routerUrl];
+  saveRouterAliases();
+  render();
+}
 function loadAgentIds() {
   try { return JSON.parse(localStorage.getItem("mecha.web.agentIds") || "{}"); } catch { return {}; }
 }
