@@ -45,6 +45,10 @@ const state = {
   messages: {},
   historyRequests: new Map(),
   draftPeers: new Set(),
+  renderedMessageCounts: {},
+  renderedMessageSignatures: {},
+  renderedLastMessageKeys: {},
+  renderedPeer: "",
   followMessages: true,
 };
 
@@ -390,16 +394,37 @@ function renderConversation() {
     state.images = [];
     renderImagePreview();
     elements.messages.innerHTML = `<div class="empty-state"><h3>No conversation selected</h3><p>Choose a connected agent on ${escapeHtml(displayRouter(state.routerUrl))}, or open Routers to switch.</p></div>`;
+    state.renderedPeer = "";
     return;
   }
   const messages = state.messages[peer] || [];
   if (messages.length === 0) {
     elements.messages.innerHTML = `<div class="empty-state"><h3>Start a conversation with ${escapeHtml(humanName(peer))}</h3><p>Messages use ${escapeHtml(displayRouter(state.routerUrl))}.</p></div>`;
+    state.renderedMessageCounts[peer] = 0;
+    state.renderedMessageSignatures[peer] = "";
+    state.renderedLastMessageKeys[peer] = "";
+    state.renderedPeer = peer;
     return;
   }
-  const shouldFollow = state.followMessages || isMessagesNearBottom();
+  const signature = messagesSignature(messages);
+  if (state.renderedPeer === peer && state.renderedMessageSignatures[peer] === signature) return;
+  const previousCount = state.renderedMessageCounts[peer] || 0;
+  const previousLastKey = state.renderedLastMessageKeys[peer] || "";
+  const nextLastKey = messageKey(messages[messages.length - 1]);
+  const appendedMessage = previousLastKey && nextLastKey !== previousLastKey && messages.length >= previousCount;
+  const shouldFollow = !previousLastKey ? state.followMessages || isMessagesNearBottom() : appendedMessage;
+  const scrollTop = elements.messages.scrollTop;
   elements.messages.replaceChildren(...messages.map(renderMessage));
+  state.renderedMessageCounts[peer] = messages.length;
+  state.renderedMessageSignatures[peer] = signature;
+  state.renderedLastMessageKeys[peer] = nextLastKey;
+  state.renderedPeer = peer;
   if (shouldFollow) scrollMessagesToBottom();
+  else elements.messages.scrollTop = scrollTop;
+}
+
+function messagesSignature(messages) {
+  return messages.map((message) => `${messageKey(message)}\u001e${message.pending ? "1" : "0"}\u001e${message.direction || ""}\u001e${message.body || ""}\u001e${JSON.stringify(message.attachments || [])}`).join("\u001f");
 }
 
 function isMessagesNearBottom() {
@@ -418,7 +443,7 @@ function scrollMessagesToBottom() {
 }
 
 function scrollMessagesToBottomIfFollowing() {
-  if (state.followMessages || isMessagesNearBottom()) scrollMessagesToBottom();
+  if (state.followMessages) scrollMessagesToBottom();
 }
 
 function renderMessage(message) {
