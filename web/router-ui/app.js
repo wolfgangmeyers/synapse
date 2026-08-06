@@ -123,7 +123,7 @@ elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   sendDraft();
 });
-elements.draft.addEventListener("input", () => { saveCurrentDraft(); updateSendState(); });
+elements.draft.addEventListener("input", () => { normalizeDraftEscapedNewlines(); saveCurrentDraft(); updateSendState(); });
 elements.attachImage.addEventListener("click", () => elements.imageInput.click());
 elements.imageInput.addEventListener("change", () => { void addImageFiles(elements.imageInput.files); elements.imageInput.value = ""; });
 elements.messages.addEventListener("scroll", () => { state.followMessages = isMessagesNearBottom(); });
@@ -409,7 +409,8 @@ function requestHistory(peer) {
 }
 
 function sendDraft() {
-  const body = elements.draft.value;
+  const body = normalizeEscapedNewlines(elements.draft.value);
+  if (body !== elements.draft.value) elements.draft.value = body;
   if (!canSendDraft(state.selectedPeer, body, state.images.length)) return;
   const localId = crypto.randomUUID();
   const images = state.images.map(({ dataUrl, name, sizeBytes, mimeType }) => ({ dataUrl, name, sizeBytes, mimeType }));
@@ -422,6 +423,20 @@ function sendDraft() {
   clearCurrentDraft();
   updateSendState();
   sendCommand({ type: "send_message", to: state.selectedPeer, body, images, localId });
+}
+
+function normalizeEscapedNewlines(value) {
+  return value.replace(/\\r\\n|\\n|\\r/g, "\n");
+}
+
+function normalizeDraftEscapedNewlines() {
+  const value = elements.draft.value;
+  const normalized = normalizeEscapedNewlines(value);
+  if (normalized === value) return;
+  const start = normalizeEscapedNewlines(value.slice(0, elements.draft.selectionStart ?? value.length)).length;
+  const end = normalizeEscapedNewlines(value.slice(0, elements.draft.selectionEnd ?? value.length)).length;
+  elements.draft.value = normalized;
+  elements.draft.setSelectionRange(start, end);
 }
 
 function renderConversation() {

@@ -450,7 +450,10 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.doesNotMatch(app, /Select"/);
   assert.match(app, /url\.username !== "" \|\| url\.password !== ""/);
   assert.match(app, /event\.key === "Enter" && !event\.shiftKey/);
-  assert.match(app, /elements\.draft\.addEventListener\("input", \(\) => \{ saveCurrentDraft\(\); updateSendState\(\); \}\)/);
+  assert.match(app, /elements\.draft\.addEventListener\("input", \(\) => \{ normalizeDraftEscapedNewlines\(\); saveCurrentDraft\(\); updateSendState\(\); \}\)/);
+  assert.match(app, /function normalizeEscapedNewlines\(value\)/);
+  assert.match(app, /return value\.replace\(\/\\\\r\\\\n\|\\\\n\|\\\\r\/g, "\\n"\)/);
+  assert.match(app, /const body = normalizeEscapedNewlines\(elements\.draft\.value\);/);
   assert.match(webState, /const DRAFT_LIMIT = 200;/);
   assert.match(webState, /const DRAFT_RETENTION_MS = 30 \* 24 \* 60 \* 60 \* 1000;/);
   assert.match(webState, /function draftScope\(routerUrl, agentId, peer\)/);

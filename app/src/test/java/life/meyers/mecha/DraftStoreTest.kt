@@ -6,6 +6,14 @@ import org.junit.Test
 
 class DraftStoreTest {
     @Test
+    fun normalizesEscapedNewlineText() {
+        assertEquals("first\nsecond", normalizeEscapedNewlines("first\\nsecond"))
+        assertEquals("first\nsecond", normalizeEscapedNewlines("first\\rsecond"))
+        assertEquals("first\nsecond", normalizeEscapedNewlines("first\\r\\nsecond"))
+        assertEquals("first\nsecond", normalizeEscapedNewlines("first\nsecond"))
+    }
+
+    @Test
     fun restoresEachRouterAndPeerDraftAfterStoreRecreation() {
         val preferences = FakeSharedPreferences()
         DraftStore(preferences).apply {
