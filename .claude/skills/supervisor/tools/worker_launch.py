@@ -36,6 +36,7 @@ from worker_runtime_config import WorkerRuntimeConfigError, resolve_agent_runtim
 
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.5"
+CURSOR_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
@@ -380,7 +381,7 @@ def main():
         parts = [f"export CURSOR_AUTH_TOKEN={token}"]
 
         # TUI mode: interactive session, stays alive for Mailbox V2 messages.
-        agent_parts = [cursor_bin, "--yolo", "--model", "auto"]
+        agent_parts = [cursor_bin, "--yolo", "--model", CURSOR_MODEL]
         if args.resume:
             agent_parts.extend(["--resume", args.resume])
 

@@ -126,6 +126,16 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertNotIn("claude_sidecar.mjs", commands[0])
 
+    def test_cursor_launch_uses_pinned_gpt_5_5_model(self):
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"):
+            commands, output = self._run_main("cursor-worker", agent="cursor")
+
+        command = shlex.split(commands[0])
+        self.assertTrue(any(part.endswith("/cursor-agent") for part in command), command)
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertNotIn("--notify-on-settled", command)
+        self.assertIn("Worker (cursor) launched", output)
+
     def test_invalid_machine_default_runtime_fails_before_launch(self):
         config = self.tmp_path / "worker-runtime.json"
         config.write_text(json.dumps({"default_agent": "bad"}), encoding="utf-8")
