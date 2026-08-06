@@ -268,8 +268,9 @@ class MainActivity : ComponentActivity() {
     private fun draftFor(peer: String) = drafts.get(activeRouter, peer)
 
     private fun updateDraft(value: String) {
-        draft = value
-        if (selectedPeer.isNotBlank()) drafts.save(activeRouter, selectedPeer, value)
+        val normalized = normalizeEscapedNewlines(value)
+        draft = normalized
+        if (selectedPeer.isNotBlank()) drafts.save(activeRouter, selectedPeer, normalized)
     }
 
     private fun knownPeersKey() = "known_peers:$activeRouter"
@@ -617,7 +618,8 @@ class MainActivity : ComponentActivity() {
     private fun send() {
         val router = activeRouter
         val recipient = selectedPeer
-        val text = draft
+        val text = normalizeEscapedNewlines(draft)
+        if (text != draft) updateDraft(text)
         val sentImages = images
         if (recipient.isBlank() || (text.isBlank() && sentImages.isEmpty())) return
         val messageId = UUID.randomUUID().toString()
@@ -1005,7 +1007,8 @@ private fun Conversation(
                     value = draft,
                     onValueChange = onDraft,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp).contentReceiver(receiveImages),
-                    singleLine = true,
+                    singleLine = false,
+                    maxLines = 5,
                     placeholder = { Text("Message ${humanName(peer)}") },
                     shape = RoundedCornerShape(16.dp),
                 )
@@ -1234,6 +1237,11 @@ internal fun mergeConversationMessages(existing: List<ChatMessage>, incoming: Li
 private fun draftPeersKey(router: String) = "draft_peers:$router"
 
 internal fun draftPreferenceKey(router: String, peer: String) = "draft:$router:$peer"
+
+internal fun normalizeEscapedNewlines(value: String): String = value
+    .replace("\\r\\n", "\n")
+    .replace("\\n", "\n")
+    .replace("\\r", "\n")
 
 internal fun boundedDraftPeers(existing: List<String>, peer: String): List<String> =
     (existing.filterNot { it == peer } + peer).takeLast(MAX_DRAFTS_PER_ROUTER)
