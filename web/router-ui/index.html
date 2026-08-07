@@ -6,6 +6,7 @@
   <title>Mecha Router</title>
   <link rel="icon" type="image/png" href="/mecha-icon.png">
   <link rel="apple-touch-icon" href="/mecha-icon.png">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -16,7 +17,7 @@
           <h1>Mecha</h1>
           <p>Your agent network</p>
         </div>
-        <button id="refresh" type="button" aria-label="Refresh agents">↻</button>
+        <button id="refresh" type="button" aria-label="Refresh agents"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
       </header>
 
       <button id="router-selector" class="router-selector" type="button">
@@ -24,7 +25,7 @@
           <small>Router</small>
           <strong id="selected-router-label">127.0.0.1:8765</strong>
         </span>
-        <span aria-hidden="true">⌄</span>
+        <span aria-hidden="true"><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></span>
       </button>
 
       <section class="status-card" aria-live="polite">
@@ -62,7 +63,7 @@
       <form id="composer" class="composer">
         <div id="image-preview" class="image-preview" aria-live="polite"></div>
         <div class="composer-row">
-          <button id="attach-image" class="secondary attach-image" type="button" disabled aria-label="Attach images">＋</button>
+          <button id="attach-image" class="secondary attach-image" type="button" disabled aria-label="Attach images"><i class="fa-solid fa-paperclip" aria-hidden="true"></i></button>
           <input id="image-input" type="file" accept="image/*" multiple hidden>
           <textarea id="draft" rows="2" placeholder="Message an agent or drop images here" disabled></textarea>
           <button id="send" type="submit" disabled>Send</button>
@@ -79,8 +80,8 @@
           <p>Each router keeps its own agents and chat history.</p>
         </div>
         <div class="dialog-actions">
-          <button id="open-add-router" type="button" aria-label="Add router">+</button>
-          <button id="close-router-dialog" value="cancel" aria-label="Close routers">×</button>
+          <button id="open-add-router" type="button" aria-label="Add router"><i class="fa-solid fa-plus" aria-hidden="true"></i></button>
+          <button id="close-router-dialog" value="cancel" aria-label="Close routers"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
         </div>
       </header>
 
