@@ -305,7 +305,7 @@ function renderRouters() {
     const edit = document.createElement("button");
     edit.type = "button";
     edit.className = "icon-button secondary";
-    edit.textContent = "✎";
+    edit.append(icon("fa-pen"));
     edit.setAttribute("aria-label", `Edit ${displayRouter(routerUrl)}`);
     edit.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -314,7 +314,7 @@ function renderRouters() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "icon-button danger";
-    remove.textContent = "🗑";
+    remove.append(icon("fa-trash"));
     remove.setAttribute("aria-label", `Remove ${displayRouter(routerUrl)}`);
     remove.disabled = state.routers.length === 1;
     remove.addEventListener("click", (event) => {
@@ -574,7 +574,7 @@ function renderImagePreview() {
     label.textContent = `${image.name || `image-${index + 1}.webp`} · ${formatBytes(image.sizeBytes)}`;
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.textContent = "×";
+    remove.append(icon("fa-xmark"));
     remove.setAttribute("aria-label", `Remove ${image.name || `image ${index + 1}`}`);
     remove.addEventListener("click", () => {
       state.images.splice(index, 1);
@@ -630,6 +630,13 @@ function blobToDataUrl(blob) {
 function webpName(name) {
   const base = String(name || "image").replace(/\.[^.]*$/, "") || "image";
   return `${base}.webp`;
+}
+
+function icon(name) {
+  const element = document.createElement("i");
+  element.className = `fa-solid ${name}`;
+  element.setAttribute("aria-hidden", "true");
+  return element;
 }
 
 function formatBytes(bytes) {
