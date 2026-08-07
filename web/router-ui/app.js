@@ -483,7 +483,7 @@ function renderConversation() {
 }
 
 function messagesSignature(messages) {
-  return messages.map((message) => `${messageKey(message)}\u001e${message.pending ? "1" : "0"}\u001e${message.direction || ""}\u001e${message.body || ""}\u001e${JSON.stringify(message.attachments || [])}`).join("\u001f");
+  return messages.map((message) => `${messageKey(message)}\u001e${message.pending ? "1" : "0"}\u001e${message.direction || ""}\u001e${message.body || ""}\u001e${message.recorded_at || message.created_at || message.createdAt || ""}\u001e${JSON.stringify(message.attachments || [])}`).join("\u001f");
 }
 
 function isMessagesNearBottom() {
@@ -511,7 +511,12 @@ function renderMessage(message) {
   wrapper.className = `bubble-wrap ${outgoing ? "outgoing" : "incoming"}`;
   const label = document.createElement("div");
   label.className = "bubble-label";
-  label.textContent = outgoing ? (message.pending ? "You · sending" : "You") : humanName(message.from);
+  const sender = document.createElement("span");
+  sender.textContent = outgoing ? (message.pending ? "You · sending" : "You") : humanName(message.from);
+  const timestamp = document.createElement("time");
+  timestamp.dateTime = message.created_at || message.createdAt || message.recorded_at || "";
+  timestamp.textContent = formatMessageTimestamp(message);
+  label.append(sender, timestamp);
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   const text = document.createElement("div");
@@ -643,6 +648,10 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatMessageTimestamp(message) {
+  return new Intl.DateTimeFormat([], { hour: "numeric", minute: "2-digit" }).format(new Date(messageTime(message)));
 }
 
 async function messageWithCachedImages(peer, acceptedMessage, pendingMessage) {

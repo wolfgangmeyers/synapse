@@ -96,6 +96,9 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.URL
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.Timer
 import java.util.UUID
 import java.time.temporal.ChronoUnit
@@ -119,6 +122,7 @@ private val Periwinkle = Color(0xFF9DA8FF)
 private val Teal = Color(0xFF78E0CD)
 private val TextPrimary = Color(0xFFF2F4FF)
 private val TextMuted = Color(0xFFB5BCD0)
+private val MessageTimestampFormatter: DateTimeFormatter = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withZone(ZoneId.systemDefault())
 
 internal enum class Direction { INCOMING, OUTGOING }
 
@@ -1029,12 +1033,22 @@ private fun Conversation(
 private fun MessageBubble(message: ChatMessage) {
     val outgoing = message.direction == Direction.OUTGOING
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start) {
-        Text(
-            if (outgoing) "You" else humanName(message.sender),
-            style = MaterialTheme.typography.labelSmall,
-            color = if (outgoing) Periwinkle else Teal,
+        Row(
             modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-        )
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (outgoing) "You" else humanName(message.sender),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (outgoing) Periwinkle else Teal,
+            )
+            Text(
+                formatMessageTimestamp(message.createdAt),
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+            )
+        }
         Card(
             modifier = Modifier.fillMaxWidth(0.86f),
             shape = RoundedCornerShape(if (outgoing) 18.dp else 18.dp),
@@ -1252,6 +1266,10 @@ internal fun visibleConnectedPeers(peers: List<String>, filter: String): List<St
         normalizedFilter.isBlank() || "${peer} ${humanName(peer)}".lowercase().contains(normalizedFilter)
     }
 }
+
+internal fun formatMessageTimestamp(createdAt: String): String = runCatching {
+    MessageTimestampFormatter.format(Instant.parse(createdAt))
+}.getOrElse { "" }
 
 private fun humanName(id: String): String = id.split(Regex("[._-]+"))
     .filter { it.isNotBlank() }
