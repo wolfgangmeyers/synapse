@@ -190,7 +190,9 @@ p:empty { display: none; }
 .bubble-wrap { display: flex; flex-direction: column; max-width: min(720px, 76%); }
 .bubble-wrap.outgoing { align-self: flex-end; align-items: flex-end; }
 .bubble-wrap.incoming { align-self: flex-start; align-items: flex-start; }
-.bubble-label { color: var(--muted); font-size: 12px; margin: 0 6px 4px; }
+.bubble-label { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: 12px; margin: 0 6px 4px; }
+.bubble-label time { opacity: 0.72; }
+.outgoing .bubble-label { justify-content: flex-end; }
 .bubble {
   border-radius: 20px;
   padding: 13px 15px;

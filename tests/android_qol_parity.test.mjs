@@ -30,6 +30,9 @@ test("Android source wires the core web QOL parity behavior", async () => {
   assert.match(source, /"\$\{peer\} \$\{humanName\(peer\)\}"\.lowercase\(\)\.contains\(normalizedFilter\)/);
   assert.match(source, /val filteredPeers = visibleConnectedPeers\(peers, agentFilter\)/);
   assert.match(source, /Text\(filteredPeers\.size\.toString\(\), style = MaterialTheme\.typography\.bodySmall, color = TextMuted\)/);
+  assert.match(source, /internal fun formatMessageTimestamp\(createdAt: String\): String/);
+  assert.match(source, /MessageTimestampFormatter\.format\(Instant\.parse\(createdAt\)\)/);
+  assert.match(source, /horizontalArrangement = Arrangement\.spacedBy\(8\.dp\)/);
   assert.match(source, /label = \{ Text\("Filter connected agents"\) \}/);
   assert.match(source, /Text\("No connected agents match"/);
   assert.match(source, /agentFilter = ""\n        selectedPeer = peer/);

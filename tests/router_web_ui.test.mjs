@@ -430,6 +430,10 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.draft\.addEventListener\("paste"/);
   assert.match(app, /function renderImagePreview\(\)/);
   assert.match(app, /function renderMessageImages\(attachments\)/);
+  assert.match(app, /function formatMessageTimestamp\(message\)/);
+  assert.match(app, /timestamp\.dateTime = message\.created_at \|\| message\.createdAt \|\| message\.recorded_at \|\| ""/);
+  assert.match(app, /label\.append\(sender, timestamp\)/);
+  assert.match(styles, /\.bubble-label \{ display: flex; align-items: baseline; gap: 8px;/);
   assert.match(app, /const MESSAGE_BOTTOM_THRESHOLD_PX = 80;/);
   assert.match(app, /elements\.messages\.addEventListener\("scroll", \(\) => \{ state\.followMessages = isMessagesNearBottom\(\); \}\)/);
   assert.match(app, /function scrollMessagesToBottom\(\)/);
