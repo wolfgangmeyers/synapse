@@ -505,6 +505,48 @@ function providerToolCallId(toolCallId) {
   return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId.split("|", 1)[0] : undefined;
 }
 
+const VALID_TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const MAX_TOOL_NAME_LENGTH = 64;
+
+function isValidToolName(name) {
+  return typeof name === "string"
+    && name.length > 0
+    && name.length <= MAX_TOOL_NAME_LENGTH
+    && VALID_TOOL_NAME_PATTERN.test(name);
+}
+
+function quarantineMalformedToolCalls(messages) {
+  const sanitized = [];
+  const malformed = [];
+
+  for (const [index, message] of messages.entries()) {
+    if (message?.role === "assistant" && Array.isArray(message.content)) {
+      const sanitizedContent = [];
+      for (const [blockIndex, block] of message.content.entries()) {
+        if (block?.type === "toolCall" || block?.type === "tool_use") {
+          const name = block.name;
+          if (!isValidToolName(name)) {
+            malformed.push({
+              messageIndex: index,
+              blockIndex,
+              toolName: name,
+              toolNameLength: typeof name === "string" ? name.length : undefined,
+              toolCallId: block.id,
+            });
+            continue; // Skip this malformed tool call
+          }
+        }
+        sanitizedContent.push(block);
+      }
+      sanitized.push({ ...message, content: sanitizedContent });
+    } else {
+      sanitized.push(message);
+    }
+  }
+
+  return { messages: sanitized, malformed };
+}
+
 function assistantToolCallIds(message) {
   if (message?.role !== "assistant"
     || message.stopReason === "error"
@@ -801,6 +843,31 @@ export function createMechaMessagingExtension(pi, {
   try { recall = createRecallState(); } catch (error) { recallConfigurationError = error; recall = createRecallState({}); }
   let recallPipeline;
   const reportedOrphanToolResults = new Set();
+  const reportedMalformedToolCalls = new Set();
+
+  function appendMalformedToolCallDiagnostic({ sessionId, sessionFile, model, agentId, totalMessages, malformedCount, malformed }) {
+    try {
+      const ts = new Date().toISOString();
+      const payload = {
+        timestamp: ts,
+        sessionId,
+        sessionFile,
+        model,
+        agentId,
+        totalMessages,
+        malformedCount,
+        malformed: malformed.slice(0, 20).map((m) => ({
+          messageIndex: m.messageIndex,
+          blockIndex: m.blockIndex,
+          toolName: typeof m.toolName === "string" ? m.toolName.slice(0, 100) : String(m.toolName),
+          toolNameLength: m.toolNameLength,
+          toolCallId: m.toolCallId,
+        })),
+      };
+      appendDiagnostic("malformed-tool-call", payload);
+    } catch {}
+  }
+
   const recallController = createRecallController({
     cancel: () => { policyAbort?.abort(); recallAbort?.abort(); recallProcess?.kill(); },
     evaluate: async (active) => {
@@ -1094,6 +1161,35 @@ export function createMechaMessagingExtension(pi, {
 
   pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
   pi.on("context", (event, context) => {
+    // First quarantine malformed tool calls (invalid names)
+    const { messages: validMessages, malformed } = quarantineMalformedToolCalls(event.messages);
+    if (malformed.length > 0) {
+      const sessionId = context.sessionManager.getSessionId();
+      const fresh = malformed.filter(({ toolCallId }) => {
+        const key = `${sessionId}:${toolCallId}`;
+        if (reportedMalformedToolCalls.has(key)) return false;
+        reportedMalformedToolCalls.add(key);
+        return true;
+      });
+      if (fresh.length > 0) {
+        let agentId;
+        try { agentId = resolveCurrentAgentId(); } catch {}
+        appendMalformedToolCallDiagnostic({
+          sessionId,
+          sessionFile: typeof context.sessionManager.getSessionFile === "function" ? context.sessionManager.getSessionFile() : undefined,
+          model: context.model,
+          agentId,
+          totalMessages: Array.isArray(event.messages) ? event.messages.length : undefined,
+          malformedCount: fresh.length,
+          malformed: fresh,
+        });
+        const names = fresh.map(({ toolName }) => typeof toolName === "string" ? toolName.slice(0, 50) : String(toolName)).join(", ");
+        context.ui?.notify(`Quarantined malformed tool call(s): ${names}`, "error");
+      }
+    }
+    event.messages = validMessages;
+
+    // Then quarantine orphan tool results
     const { messages, orphaned } = quarantineOrphanToolResults(event.messages);
     if (orphaned.length === 0) return undefined;
     const sessionId = context.sessionManager.getSessionId();
