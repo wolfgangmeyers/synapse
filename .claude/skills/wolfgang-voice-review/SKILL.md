@@ -1,11 +1,13 @@
 ---
 name: wolfgang-voice-review
-description: Private Wolfgang-specific PR review rewrite gate. Use after robot-review or pr-validate and before posting GitHub PR review bodies or inline comments as Wolfgang, when Codex must load the Wolfgang voice persona, understand, keep/drop/rewrite, and convert validated findings into Wolfgang's concise review voice while preserving technical disposition.
+description: Private Wolfgang-specific rewrite gate for anything posted under his name that outlives the conversation. Use after robot-review or pr-validate and before posting GitHub PR review bodies and inline comments, Linear ticket comments and descriptions, RFCs and documents, commit messages, or published pages. Loads the Wolfgang voice persona, keeps/drops/rewrites validated findings into his concise voice while preserving technical disposition, and never changes what a sentence claims.
 ---
 
 # Wolfgang Voice Review
 
 Use this as the final gate before posting PR review comments as Wolfgang. This is not a generic tone pass. Understand every finding, drop weak ones, and rewrite only the comments that should actually be posted.
+
+It also gates anything else posted under his name that outlives the conversation: Linear ticket comments and descriptions, RFCs and other documents, commit messages, and published pages. The PR-specific sections below apply to reviews. **Never Change What A Sentence Claims** and **Sentence Shapes To Remove** apply to everything.
 
 ## Voice Source
 
@@ -130,6 +132,54 @@ Use the shape that matches the confidence:
 - For simple logic issues, ask the direct question first and keep the rationale to one sentence.
 - Avoid long hypothetical examples when the invariant is easy to state.
 - Avoid exhaustive internal mechanism unless it changes the requested fix.
+
+## Never Change What A Sentence Claims
+
+A rewrite may change how something reads. It may never change what it asserts.
+
+This skill reviews prose against a persona. It has no way to know what Wolfgang has read, agreed to,
+approved, or decided. So a rewrite that changes the grammatical subject can invent a fact, and no
+style check catches it.
+
+The case that caused this rule, on 2026-08-06: a ticket said `Wolfgang has signed off the
+disposition`. That was correctly flagged, because it reads like someone else writing about him in a
+document posted under his name. The repair switched it to first person, `I have signed off the
+approach`. That fixed the voice and asserted an approval he had never given, on an RFC he had not
+read.
+
+Before accepting any rewrite:
+
+- If the subject, person, tense, or voice changed, reread the new sentence and ask what it now
+  claims. Person and tense both carry claims.
+- Never write a first-person statement of approval, agreement, decision, or knowledge unless the
+  caller has confirmed it happened. When in doubt, ask the caller.
+- For anything not yet approved, write the condition instead of the claim: `The approach has been
+  approved` as a thing still to happen, never `I approved the approach`.
+- `The RFC recommends X` is safe. `So use X` reads as settled and usually is not.
+
+Flag any sentence you cannot verify rather than rewriting it into confidence.
+
+## Sentence Shapes To Remove
+
+These four accounted for most of what Wolfgang rejected on 2026-08-06, across chat, tickets, and a
+published page. None involves an unusual word, so a vocabulary check misses all of them.
+
+- **Two balanced halves, the second landing as the payoff.** `Not X. It is Y.` `X costs A, Y costs
+  B.` `It stops being X and becomes Y.` `Taken at face value that argues for ranking. Taken at face
+  value is the mistake.` Say the one true thing and stop.
+- **`rather than` and `instead of` as padding.** Nearly every use deletes cleanly. `Verify it against
+  the code rather than trusting the sender` means `verify it against the code`. If the contrast
+  matters, make it its own short sentence.
+- **A short emphatic fragment after the point.** `Six words.` `Zero.` `Eight paid calls found it.`
+  It underlines something already said.
+- **A clause tacked onto a finished sentence.** A trailing `which is…`, a `with…` carrying a second
+  idea, a `that…` explaining why the fact matters. If the tail is worth saying it is its own
+  sentence, and usually it is not.
+
+Also watch: em dashes as a pause inside a sentence (they should be almost absent), semicolons (the
+persona uses none), the rule of three, a closing line telling the reader how to feel, and negative
+constructions where a positive is shorter. Keep sentences carrying a negative under a quarter of the
+total.
 
 ## Voice Rules
 
