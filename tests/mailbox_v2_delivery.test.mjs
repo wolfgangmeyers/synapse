@@ -1227,6 +1227,38 @@ test("post-injection receipt failure retains the pending message for replay", as
   await session.close();
 });
 
+test("stale pending replay reinjects when no session entry survived", async () => {
+  const message = envelope("message-lost-across-compaction");
+  const session = await durableSession(message.id);
+  const sent = [];
+  const client = receiptClient();
+  let time = 1_000;
+  const context = { sessionManager: session.manager, ui: { setStatus() {} } };
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: context,
+    client,
+    pendingReinjectionDelayMs: 5_000,
+    now: () => time,
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 2 });
+  assert.equal(sent.length, 1);
+
+  time += 5_000;
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 3 });
+
+  assert.equal(sent.length, 2);
+  assert.deepEqual(client.receipts, [
+    { type: "injection_requested", messageId: message.id, attemptNumber: 1, reason: undefined },
+    { type: "injection_requested", messageId: message.id, attemptNumber: 2, reason: undefined },
+    { type: "injection_requested", messageId: message.id, attemptNumber: 3, reason: undefined },
+  ]);
+  coordinator.close();
+  await session.close();
+});
+
 test("client does not NACK a Pi injection when its receipt send fails", async () => {
   const socket = new EventTarget();
   socket.readyState = 0;
