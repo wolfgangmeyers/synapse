@@ -1398,6 +1398,104 @@ test("replayed in-flight delivery does not create a second Pi injection", async 
   await session.close();
 });
 
+test("mailbox client pause closes without reconnecting until resume", async () => {
+  const sockets = [];
+  const reconnectTimers = [];
+  class FakeSocket extends EventTarget {
+    readyState = 0;
+    sent = [];
+
+    send(frame) {
+      this.sent.push(JSON.parse(frame));
+    }
+
+    close() {
+      this.readyState = 3;
+      this.dispatchEvent(new Event("close"));
+    }
+  }
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
+    reconnectInitialDelayMs: 2,
+    reconnectMaxDelayMs: 4,
+    random: () => 1,
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay, cleared: false };
+      reconnectTimers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+  });
+
+  const connected = client.connect();
+  sockets[0].readyState = 1;
+  sockets[0].dispatchEvent(new Event("open"));
+  sockets[0].dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+    }),
+  }));
+  await connected;
+
+  client.pause();
+  assert.equal(sockets.length, 1);
+  assert.deepEqual(reconnectTimers, []);
+  await client.resume();
+  assert.equal(sockets.length, 2);
+  client.close();
+});
+
+test("extension pauses mailbox delivery across session compaction", async (t) => {
+  isolateCompactionEnvironment(t);
+  const handlers = new Map();
+  const clientCalls = [];
+  const client = {
+    connect: () => { clientCalls.push("connect"); return Promise.resolve(); },
+    close: () => { clientCalls.push("close"); },
+    pause: () => { clientCalls.push("pause"); },
+    resume: () => { clientCalls.push("resume"); return Promise.resolve(); },
+    sendReply: async () => ({}),
+    sendReceipt() {},
+  };
+  const pi = {
+    events: { on() {} },
+    on(type, handler) {
+      const list = handlers.get(type) ?? [];
+      list.push(handler);
+      handlers.set(type, list);
+    },
+    registerCommand() {},
+    registerTool() {},
+    sendMessage() {},
+    exec: async () => ({ code: 0, stderr: "" }),
+  };
+  const context = {
+    sessionManager: { getSessionId: () => "parent-session", getBranch: () => [], isPersisted: () => false },
+    ui: { setStatus: (...args) => clientCalls.push(["status", ...args]), notify: (...args) => clientCalls.push(["notify", ...args]) },
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "worker",
+    createClient: () => client,
+  });
+  for (const handler of handlers.get("session_start")) handler({}, context);
+
+  for (const handler of handlers.get("session_before_compact")) {
+    await handler({ signal: AbortSignal.timeout(1), preparation: { messagesToSummarize: [], turnPrefixMessages: [] } }, context);
+  }
+  assert.ok(clientCalls.some((call) => Array.isArray(call) && call[2] === "mailbox: paused for compaction"));
+  assert.ok(clientCalls.includes("pause"));
+
+  for (const handler of handlers.get("session_compact")) handler({}, context);
+  assert.ok(clientCalls.includes("resume"));
+});
+
 test("mailbox client reconnects after close and stops retrying after shutdown", async () => {
   const sockets = [];
   const reconnectTimers = [];

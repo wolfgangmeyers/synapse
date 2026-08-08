@@ -866,6 +866,7 @@ export function createMechaMessagingExtension(pi, {
 } = {}) {
   let client;
   let coordinator;
+  let mailboxPausedForCompaction = false;
   let startupError;
   let activeWork = ""; let recallAbort; let recallProcess; let policyAbort; let policyReady; let capture;
   const ensureCapture = async (signal) => { if (capture !== undefined) return capture; const response = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000) }); if (!response.ok) throw new Error("capture policy unavailable"); const { recall: policy } = await response.json(); capture = createMemoryCaptureLifecycle({ policy, context: async ({ signal } = {}) => { const lookup = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/lookup`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify({ stores: ["default"] }) }); if (!lookup.ok) throw new Error("capture destination unavailable"); const { records } = await lookup.json(); return records; }, apply: async (body, signal) => { const applied = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/apply`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify(body) }); if (!applied.ok) throw new Error("capture apply failed"); return applied.json(); }, diagnostics: appendMemoryCaptureDiagnostic }); return capture; };
@@ -918,6 +919,35 @@ export function createMechaMessagingExtension(pi, {
   let notifiedCompactionPercent = 0;
   let pendingSelfCompaction;
   let reloadCommandRegistered = false;
+
+  function createMailboxCoordinator(context, mailboxClient) {
+    return createPiMailboxDeliveryCoordinator({
+      pi,
+      sessionContext: context,
+      client: mailboxClient,
+      spawnSubagent: captureNativeSentinelSpawner(),
+    });
+  }
+
+  function pauseMailboxForCompaction(context) {
+    if (children.has(context.sessionManager.getSessionId()) || client === undefined) return;
+    mailboxPausedForCompaction = true;
+    coordinator?.close();
+    coordinator = undefined;
+    if (typeof client.pause === "function") client.pause();
+    context.ui?.setStatus("mecha-mailbox", "mailbox: paused for compaction");
+  }
+
+  function resumeMailboxAfterCompaction(context) {
+    if (children.has(context.sessionManager.getSessionId()) || client === undefined || !mailboxPausedForCompaction) return;
+    mailboxPausedForCompaction = false;
+    coordinator = createMailboxCoordinator(context, client);
+    if (typeof client.resume === "function") {
+      Promise.resolve(client.resume()).catch((error) => {
+        context.ui?.notify(`Mailbox v2 resume after compaction failed: ${error.message}`, "error");
+      });
+    }
+  }
 
   function reloadStatus() {
     return {
@@ -1190,7 +1220,7 @@ export function createMechaMessagingExtension(pi, {
     if (sessionId !== undefined) children.delete(sessionId);
   });
 
-  pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
+  pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; pauseMailboxForCompaction(context); try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
   pi.on("context", (event, context) => {
     // First quarantine malformed tool calls (invalid names)
     const { messages: validMessages, malformed } = quarantineMalformedToolCalls(event.messages);
@@ -1257,7 +1287,7 @@ export function createMechaMessagingExtension(pi, {
   });
   pi.on("agent_settled", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_settled", (_event, context) => { monitorContextThreshold(context); });
-  pi.on("session_compact", (_event, context) => { if (!children.has(context.sessionManager.getSessionId())) notifiedCompactionPercent = 0; });
+  pi.on("session_compact", (_event, context) => { if (!children.has(context.sessionManager.getSessionId())) { notifiedCompactionPercent = 0; resumeMailboxAfterCompaction(context); } });
   pi.on("agent_settled", (_event, context) => {
     runPendingSelfCompaction(context);
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending) return;
@@ -1369,12 +1399,7 @@ export function createMechaMessagingExtension(pi, {
       client = mailboxClient;
       // Child sessions inherit extensions and can replace the package's global
       // service symbol. Bind scheduled work to this resident parent service.
-      coordinator = createPiMailboxDeliveryCoordinator({
-        pi,
-        sessionContext: context,
-        client: mailboxClient,
-        spawnSubagent: captureNativeSentinelSpawner(),
-      });
+      coordinator = createMailboxCoordinator(context, mailboxClient);
       void mailboxClient.connect().catch((error) => {
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${error.message}`, "error");
       });
@@ -1393,6 +1418,7 @@ export function createMechaMessagingExtension(pi, {
     settledNotificationPending = false;
     settledNotificationAgentId = undefined;
     pendingSelfCompaction = undefined;
+    mailboxPausedForCompaction = false;
     settledNotifications.dispose();
     coordinator?.close();
     coordinator = undefined;
