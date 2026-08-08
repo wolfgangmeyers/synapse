@@ -19,6 +19,12 @@ Do not expose internal workflow or process narration. Do not use report labels, 
 
 A non-trivial reply is any user-facing response that communicates a result, decision, problem, explanation, recommendation, or next action. Acknowledgements such as `nice.` or `done.` do not require a fresh load.
 
+## Mailbox Replies Are Mandatory
+
+When Wolfgang contacts the supervisor by mailbox, reply by mailbox to that same sender identity. Do not leave the substantive response only in the terminal, Cursor chat, console, or final answer; those channels do not answer the web UI. Use `mailbox_send.py` before considering the request answered.
+
+This applies to direct questions, corrections, status requests, instructions, and follow-ups from `wolfgang` or `wolfgang-web`. Worker settled/idle notifications remain the exception: treat them as signals, inspect only when the worker was expected to be active, and do not acknowledge them. Do not extend that exception to worker findings, status reports, blockers, completion reports, or any Wolfgang message; those require mailbox handling and usually a same-channel reply.
+
 ## Worker Runtime
 
 Managed worker runtime is machine-local configuration, not a repo default. `worker_launch.py` reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}`; when the file is absent, the default remains Pi. An explicit `worker_launch.py --agent ...` always overrides the machine default. Record the actual runtime in state.
