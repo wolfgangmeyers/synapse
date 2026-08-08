@@ -439,6 +439,8 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function scrollMessagesToBottom\(\)/);
   assert.match(app, /function scrollMessagesToBottomIfFollowing\(\)/);
   assert.match(app, /const appendedMessage = previousLastKey && nextLastKey !== previousLastKey && messages\.length >= previousCount;/);
+  assert.match(app, /const wasFollowing = state\.followMessages \|\| isMessagesNearBottom\(\);/);
+  assert.match(app, /const shouldFollow = wasFollowing && \(!previousLastKey \|\| appendedMessage \|\| messages\.length >= previousCount\);/);
   assert.match(app, /if \(state\.renderedPeer === peer && state\.renderedMessageSignatures\[peer\] === signature\) return;/);
   assert.match(app, /if \(shouldFollow\) scrollMessagesToBottom\(\);/);
   assert.match(app, /else elements\.messages\.scrollTop = scrollTop;/);

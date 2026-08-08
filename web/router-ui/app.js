@@ -471,7 +471,8 @@ function renderConversation() {
   const previousLastKey = state.renderedLastMessageKeys[peer] || "";
   const nextLastKey = messageKey(messages[messages.length - 1]);
   const appendedMessage = previousLastKey && nextLastKey !== previousLastKey && messages.length >= previousCount;
-  const shouldFollow = !previousLastKey ? state.followMessages || isMessagesNearBottom() : appendedMessage;
+  const wasFollowing = state.followMessages || isMessagesNearBottom();
+  const shouldFollow = wasFollowing && (!previousLastKey || appendedMessage || messages.length >= previousCount);
   const scrollTop = elements.messages.scrollTop;
   elements.messages.replaceChildren(...messages.map(renderMessage));
   state.renderedMessageCounts[peer] = messages.length;
