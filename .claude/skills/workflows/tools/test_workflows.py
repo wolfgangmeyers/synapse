@@ -336,6 +336,40 @@ class WorkflowsToolsTest(unittest.TestCase):
             saved = json.load(fh)
         self.assertEqual(saved[0]["name"], "deploy-staging")
 
+    def test_save_workflow_writes_through_symlinked_store(self):
+        real_dir = os.path.join(self.tmpdir.name, "real")
+        link_dir = os.path.join(self.tmpdir.name, "link")
+        os.makedirs(real_dir)
+        os.makedirs(link_dir)
+        real_file = os.path.join(real_dir, "workflows.json")
+        with open(real_file, "w", encoding="utf-8") as fh:
+            fh.write("[]\n")
+        link_file = os.path.join(link_dir, "workflows.json")
+        os.symlink(real_file, link_file)
+
+        result = self.run_script(
+            "save_workflow.py",
+            "--name",
+            "deploy-staging",
+            "--description",
+            "Deploy app to staging",
+            "--body",
+            "1. Pull latest main",
+            env_extra={"MECHA_WORKFLOWS_FILE": link_file},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.assertTrue(os.path.islink(link_file))
+        with open(real_file, "r", encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["name"], "deploy-staging")
+        self.assertEqual(saved[0]["body"], "1. Pull latest main")
+
+        # The lock guards the real file, so it belongs beside the real file.
+        self.assertTrue(os.path.exists(os.path.join(real_dir, "workflows.json.lock")))
+        self.assertFalse(os.path.exists(os.path.join(link_dir, "workflows.json.lock")))
+
     def test_cleanup_rejects_all_with_name(self):
         result = self.run_script(
             "cleanup_workflows.py",

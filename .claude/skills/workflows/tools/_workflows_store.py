@@ -11,10 +11,15 @@ import fcntl
 
 
 def workflows_path():
-    return os.environ.get(
+    configured = os.environ.get(
         "MECHA_WORKFLOWS_FILE",
         os.path.expanduser("~/.mecha-developer/workflows.json"),
     )
+    # Resolve symlinks. os.replace targets a symlink itself, so an unresolved
+    # path would overwrite the link and orphan the file it points at. Resolving
+    # here also keeps the temp file, the lock file, and the created directory
+    # beside the real file.
+    return os.path.realpath(configured)
 
 
 def now_iso():
