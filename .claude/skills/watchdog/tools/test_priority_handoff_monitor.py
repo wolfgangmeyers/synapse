@@ -136,7 +136,7 @@ class PriorityHandoffMonitorTests(unittest.TestCase):
         }
         sweep = {
             "id": "sweep", "target": "supervisor", "state": "scheduled",
-            "interval_ms": 300_000, "body": "General priority sweep",
+            "interval_ms": 30 * 60 * 1_000, "body": "General priority sweep",
         }
         findings = monitor.priority_liveness_findings(state, [sweep])
         self.assertEqual(len(findings), 1)
@@ -384,16 +384,16 @@ class PriorityHandoffMonitorTests(unittest.TestCase):
             load_priority_evidence.assert_not_called()
 
 
-    def test_default_sweep_cadence_bounds_are_five_to_ten_minutes(self):
-        self.assertEqual(monitor.sweep_cadence_bounds(), (300_000, 600_000))
-        self.assertEqual(monitor.describe_cadence(300_000, 600_000), "5-10 minute")
+    def test_default_sweep_cadence_bounds_are_thirty_minutes(self):
+        self.assertEqual(monitor.sweep_cadence_bounds(), (30 * 60 * 1_000, 30 * 60 * 1_000))
+        self.assertEqual(monitor.describe_cadence(30 * 60 * 1_000, 30 * 60 * 1_000), "30 minute")
 
     def test_describe_cadence_for_a_single_value_window(self):
         self.assertEqual(monitor.describe_cadence(30 * 60 * 1_000, 30 * 60 * 1_000), "30 minute")
 
     def test_invalid_sweep_cadence_env_overrides_fall_back_to_defaults(self):
         with mock.patch.dict(os.environ, {"MECHA_SWEEP_CADENCE_MIN_MS": "garbage", "MECHA_SWEEP_CADENCE_MAX_MS": "-5"}):
-            self.assertEqual(monitor.sweep_cadence_bounds(), (300_000, 600_000))
+            self.assertEqual(monitor.sweep_cadence_bounds(), (30 * 60 * 1_000, 30 * 60 * 1_000))
 
     def _clean_active_state(self):
         # Active priority with a fully-handed-off task: with a conforming sweep
@@ -415,24 +415,23 @@ class PriorityHandoffMonitorTests(unittest.TestCase):
         sweep = {"id": "sweep", "target": "supervisor", "state": "scheduled",
                  "interval_ms": 30 * 60 * 1_000, "body": "General priority sweep"}
         ci = {"id": "ci", "target": "supervisor", "state": "scheduled"}
-        # Default 5-10 minute window rejects the 30-minute backup-period sweep.
-        self.assertTrue(any("general sweep reminder" in item for item in monitor.priority_liveness_findings(state, [sweep, ci])))
-        # Widening the ceiling to 30 minutes lets the same sweep conform; the
-        # "exactly one" requirement still holds, so findings are clean.
-        with mock.patch.dict(os.environ, {"MECHA_SWEEP_CADENCE_MAX_MS": str(30 * 60 * 1_000)}):
-            self.assertEqual(monitor.priority_liveness_findings(state, [sweep, ci]), [])
+        # The default 30-minute window accepts the cost-reduced sweep.
+        self.assertEqual(monitor.priority_liveness_findings(state, [sweep, ci]), [])
+        # Narrowing the ceiling rejects it; the "exactly one" requirement still holds.
+        with mock.patch.dict(os.environ, {"MECHA_SWEEP_CADENCE_MAX_MS": str(10 * 60 * 1_000)}):
+            self.assertTrue(any("general sweep reminder" in item for item in monitor.priority_liveness_findings(state, [sweep, ci])))
 
     def test_env_override_min_raises_general_sweep_floor(self):
         state = self._clean_active_state()
         sweep = {"id": "sweep", "target": "supervisor", "state": "scheduled",
                  "interval_ms": 5 * 60 * 1_000, "body": "General priority sweep"}
         ci = {"id": "ci", "target": "supervisor", "state": "scheduled"}
-        # 5-minute sweep conforms under the default floor...
-        self.assertEqual(monitor.priority_liveness_findings(state, [sweep, ci]), [])
-        # ...but raising the floor above 5 minutes flags it as missing.
-        with mock.patch.dict(os.environ, {"MECHA_SWEEP_CADENCE_MIN_MS": str(10 * 60 * 1_000)}):
+        # 5-minute sweep is now too frequent by default.
+        self.assertTrue(any("general sweep reminder" in item for item in monitor.priority_liveness_findings(state, [sweep, ci])))
+        # Lowering the floor back to 5 minutes accepts it.
+        with mock.patch.dict(os.environ, {"MECHA_SWEEP_CADENCE_MIN_MS": str(5 * 60 * 1_000)}):
             findings = monitor.priority_liveness_findings(state, [sweep, ci])
-        self.assertTrue(any("general sweep reminder" in item for item in findings))
+        self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":

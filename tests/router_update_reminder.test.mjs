@@ -35,7 +35,7 @@ function claimSupervisorMessage(repository) {
   return repository.claimNextMessage(identity)?.message;
 }
 
-test("router update reminder enqueues only canned advisory supervisor guidance", async (t) => {
+test("router update reminder enqueues only a concise skill pointer", async (t) => {
   const now = new Date("2030-01-01T00:00:00.000Z");
   const { repository, router, events } = await withRouter(t, { clock: () => now });
 
@@ -46,12 +46,12 @@ test("router update reminder enqueues only canned advisory supervisor guidance",
   assert.equal(result.message.to, "supervisor");
   assert.equal(result.message.subject, "Check mecha-developer updates");
   assert.match(result.message.body, /\/Users\/wolfgang\/code\/mecha-developer/);
-  assert.match(result.message.body, /advisory only/);
-  assert.match(result.message.body, /do not auto-pull, auto-restart, deploy, or mutate external services/);
-  assert.match(result.message.body, /Inspect local dirty state before pulling/);
-  assert.match(result.message.body, /router, web UI, affected agents\/workers, or the supervisor/);
-  assert.match(result.message.body, /stop them safely first and verify they are stopped or settled before restarting/);
-  assert.match(result.message.body, /Avoid voluntary compaction during the update\/restart window/);
+  assert.match(result.message.body, /supervisor skill/);
+  assert.match(result.message.body, /mecha-developer update reminder/);
+  assert.doesNotMatch(result.message.body, /Supervisor procedure:/);
+  assert.doesNotMatch(result.message.body, /Inspect local dirty state before pulling/);
+  assert.doesNotMatch(result.message.body, /stop them safely first/);
+  assert.doesNotMatch(result.message.body, /Avoid voluntary compaction/);
   assert.deepEqual(events.filter(({ event }) => event === "mecha_developer_update_reminder_sent"), [{
     event: "mecha_developer_update_reminder_sent",
     message_id: result.message.id,
@@ -78,6 +78,7 @@ test("router schedules the canned update reminder without needing git access", a
   assert.equal(message.from, "router-update-reminder");
   assert.equal(message.to, "supervisor");
   assert.match(message.body, /Check whether \/Users\/wolfgang\/code\/mecha-developer has upstream changes available/);
+  assert.match(message.body, /supervisor skill/);
 });
 
 test("router validates the update reminder interval", async (t) => {

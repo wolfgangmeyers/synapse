@@ -67,11 +67,11 @@ While any priority is active or blocked, maintain exactly one local five-minute 
 
 ## Reminder Compliance
 
-Maintain exactly one scheduled recurring general sweep reminder at a 5–10 minute cadence using the existing Mailbox reminder mechanism. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
+Maintain exactly one scheduled recurring general sweep reminder at a 30 minute cadence using the existing Mailbox reminder mechanism. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
 
 ## mecha-developer update reminder
 
-When the router sends the canned `mecha-developer update check reminder`, treat it as advisory only. The reminder is a prompt to check; it is not authorization to auto-pull, auto-restart, deploy, or mutate external services blindly.
+When the router sends the canned `mecha-developer update check reminder`, treat it as advisory only. The reminder is a short pointer to this section, not authorization to auto-pull, auto-restart, deploy, or mutate external services blindly.
 
 Update procedure:
 

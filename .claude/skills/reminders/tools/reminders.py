@@ -29,7 +29,7 @@ PR_WATCH_TARGET = "pr-watch"
 PR_WATCH_CREATOR = "pr-watch"
 PR_WATCH_SUBJECT = "PR watch wakeup"
 PR_WATCH_BODY = "Run one PR watch scan now."
-PR_WATCH_INTERVAL_MS = 15 * 60 * 1_000
+PR_WATCH_INTERVAL_MS = 30 * 60 * 1_000
 
 
 def parser() -> argparse.ArgumentParser:

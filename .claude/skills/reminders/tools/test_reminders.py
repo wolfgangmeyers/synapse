@@ -70,7 +70,7 @@ class PrWatchReconciliationTest(unittest.TestCase):
 
         self.assertEqual(canceled, ["legacy-pr-watch"])
         self.assertEqual(created[0]["subject"], reminders.PR_WATCH_SUBJECT)
-        self.assertEqual(created[0]["interval_ms"], 900_000)
+        self.assertEqual(created[0]["interval_ms"], reminders.PR_WATCH_INTERVAL_MS)
 
     def test_cancels_duplicate_scheduled_pr_watch_recurrence(self):
         records = [self.canonical(), self.canonical("z-duplicate")]
