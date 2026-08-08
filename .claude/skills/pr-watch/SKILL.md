@@ -34,7 +34,7 @@ python3 ~/.claude/skills/reminders/tools/reminders.py \
 
 This creates or reconciles exactly one **scheduled** V2 recurrence with target
 `pr-watch`, creator `pr-watch`, subject `PR watch wakeup`, and interval
-`900000` milliseconds (15 minutes). It is not a router job: the router only
+`1800000` milliseconds (30 minutes). It is not a router job: the router only
 persists and delivers visible wakeup envelopes. The Pi agent, not its
 extension, performs the watcher scan after receiving one.
 

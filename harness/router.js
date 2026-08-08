@@ -1786,7 +1786,7 @@ function readJsonRequest(request, maxRequestBytes) {
 }
 
 function mechaDeveloperUpdateReminderBody() {
-  return `mecha-developer update check reminder:\n\nCheck whether ${MECHA_DEVELOPER_REPO_PATH} has upstream changes available. This router reminder is advisory only; do not auto-pull, auto-restart, deploy, or mutate external services just because it fired.\n\nSupervisor procedure:\n1. Inspect local dirty state before pulling.\n2. Check upstream for ${MECHA_DEVELOPER_REPO_PATH}.\n3. If an update is appropriate, tell any connected user an update/restart window is starting.\n4. Pull safely.\n5. Decide what needs restarting: router, web UI, affected agents/workers, or the supervisor.\n6. If router or web UI files changed, or impact is unclear, consider restarting those local processes after the pull.\n7. If workers/agents need restarting, stop them safely first and verify they are stopped or settled before restarting.\n8. If the supervisor itself needs restarting, ask watchdog to help verify continuity and confirm the supervisor comes back with the same session.\n9. Avoid voluntary compaction during the update/restart window; compact only if forced or after state is recorded at a safe checkpoint.`;
+  return `mecha-developer update check reminder:\n\nCheck whether ${MECHA_DEVELOPER_REPO_PATH} has upstream changes available. Follow the supervisor skill section \"mecha-developer update reminder\"; this router reminder is advisory only.`;
 }
 
 function sendHttpJson(response, statusCode, payload, headers = {}) {
