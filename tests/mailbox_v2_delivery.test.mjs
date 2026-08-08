@@ -222,7 +222,7 @@ function fakeTimers() {
   };
 }
 
-test("settled scheduler sends the no-child schedule at 0, 1, 5, and 10 minutes", () => {
+test("settled scheduler sends once after the cooldown", () => {
   const clock = fakeTimers();
   const scheduler = createSettledNotificationScheduler({
     setTimeoutImpl: clock.setTimeout,
@@ -232,14 +232,14 @@ test("settled scheduler sends the no-child schedule at 0, 1, 5, and 10 minutes",
 
   scheduler.onParentActivity();
   scheduler.onParentSettled(() => sent.push("sent"));
-  clock.advanceTo(59999);
-  assert.deepEqual(sent, ["sent"]);
-  clock.advanceTo(60_000);
+  clock.advanceTo(119_999);
+  assert.deepEqual(sent, []);
+  clock.advanceTo(120_000);
   clock.advanceTo(300_000);
   clock.advanceTo(600_000);
   clock.advanceTo(600_001);
 
-  assert.deepEqual(sent, ["sent", "sent", "sent", "sent"]);
+  assert.deepEqual(sent, ["sent"]);
 });
 
 test("settled scheduler rejects missing timer functions", () => {
@@ -273,10 +273,11 @@ test("settled scheduler suppresses a settled parent while a native child is acti
 
   scheduler.onParentActivity();
   scheduler.onParentSettled(() => sent.push("next-settle"));
+  clock.advanceTo(120_000);
   assert.deepEqual(sent, ["next-settle"]);
 });
 
-test("settled scheduler disposal cancels pending follow-ups", () => {
+test("settled scheduler disposal cancels the pending cooldown", () => {
   const clock = fakeTimers();
   const scheduler = createSettledNotificationScheduler({
     setTimeoutImpl: clock.setTimeout,
@@ -289,11 +290,11 @@ test("settled scheduler disposal cancels pending follow-ups", () => {
   const staleTimers = [...clock.timers];
   scheduler.dispose();
   for (const timer of staleTimers) timer.callback();
-  assert.deepEqual(sent, ["sent"]);
+  assert.deepEqual(sent, []);
   assert.equal(scheduler.activeChildCount(), 0);
 });
 
-test("child starts and stale timers suppress pending settled follow-ups", () => {
+test("child starts and stale timers suppress pending settled cooldown", () => {
   const clock = fakeTimers();
   const scheduler = createSettledNotificationScheduler({
     setTimeoutImpl: clock.setTimeout,
@@ -307,33 +308,32 @@ test("child starts and stale timers suppress pending settled follow-ups", () => 
   scheduler.onChildStarted("child-session");
   for (const timer of staleTimers) timer.callback();
   clock.advanceTo(600_000);
-  assert.deepEqual(sent, ["first"]);
+  assert.deepEqual(sent, []);
 
   scheduler.onChildDisposed("child-session");
   scheduler.onParentSettled(() => sent.push("retroactive"));
-  assert.deepEqual(sent, ["first"]);
+  assert.deepEqual(sent, []);
   scheduler.onParentActivity();
   scheduler.onParentSettled(() => sent.push("second"));
-  assert.deepEqual(sent, ["first", "second"]);
+  clock.advanceTo(720_000);
+  assert.deepEqual(sent, ["second"]);
 });
 
-test("parent activity before each follow-up cancels that idle generation", () => {
-  for (const cutoff of [59_999, 299_999, 599_999]) {
-    const clock = fakeTimers();
-    const scheduler = createSettledNotificationScheduler({
-      setTimeoutImpl: clock.setTimeout,
-      clearTimeoutImpl: clock.clearTimeout,
-    });
-    const sent = [];
-    scheduler.onParentActivity();
-    scheduler.onParentSettled(() => sent.push("sent"));
-    clock.advanceTo(cutoff);
-    const staleTimers = [...clock.timers];
-    scheduler.onParentActivity();
-    for (const timer of staleTimers) timer.callback();
-    clock.advanceTo(600_000);
-    assert.equal(sent.length, cutoff < 60_000 ? 1 : cutoff < 300_000 ? 2 : 3);
-  }
+test("parent activity before the cooldown cancels that idle generation", () => {
+  const clock = fakeTimers();
+  const scheduler = createSettledNotificationScheduler({
+    setTimeoutImpl: clock.setTimeout,
+    clearTimeoutImpl: clock.clearTimeout,
+  });
+  const sent = [];
+  scheduler.onParentActivity();
+  scheduler.onParentSettled(() => sent.push("sent"));
+  clock.advanceTo(119_999);
+  const staleTimers = [...clock.timers];
+  scheduler.onParentActivity();
+  for (const timer of staleTimers) timer.callback();
+  clock.advanceTo(600_000);
+  assert.equal(sent.length, 0);
 });
 
 test("subject-bearing PR watch wakeups preserve their exact subject through durable Pi delivery", async () => {
@@ -541,12 +541,29 @@ test("compaction threshold message appends delegation suffix without hard-coded 
   assert.doesNotMatch(mandatory, /mecha_context action=compact/);
 });
 
+function immediateSettledScheduler() {
+  const children = new Set();
+  let parentSettled = false;
+  return {
+    onParentActivity() { parentSettled = false; },
+    onParentSettled(send) {
+      if (parentSettled || children.size > 0) return;
+      parentSettled = true;
+      send();
+    },
+    onChildStarted(id) { children.add(id); },
+    onChildDisposed(id) { children.delete(id); },
+    dispose() { children.clear(); parentSettled = false; },
+  };
+}
+
 function settledNotificationFixture(t, {
   recipient,
   sendReply = async () => ({ id: "reply" }),
   createSettledScheduler,
   sendMessage,
   setTimeoutImpl,
+  immediateScheduler = true,
 } = {}) {
   isolateCompactionEnvironment(t);
   const previousRecipient = process.env.MECHA_PI_NOTIFY_ON_SETTLED;
@@ -580,12 +597,14 @@ function settledNotificationFixture(t, {
     sendMessage: sendMessage ?? ((...args) => sent.push(args)),
     exec: async () => ({ code: 0, stderr: "" }),
   };
-  createMechaMessagingExtension(pi, {
+  const extensionOptions = {
     resolveCurrentAgentId: () => "worker",
     createClient: () => client,
-    ...(createSettledScheduler === undefined ? {} : { createSettledScheduler }),
     setTimeoutImpl,
-  });
+  };
+  if (createSettledScheduler !== undefined) extensionOptions.createSettledScheduler = createSettledScheduler;
+  else if (immediateScheduler) extensionOptions.createSettledScheduler = immediateSettledScheduler;
+  createMechaMessagingExtension(pi, extensionOptions);
   handlers.get("session_start")({}, context);
   return {
     childEvents,
@@ -598,6 +617,12 @@ function settledNotificationFixture(t, {
   };
 }
 
+async function enableSettledNotifications(fixture) {
+  const result = await fixture.tools.get("mecha_settled_notifications").execute("enable", { action: "enable" });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.enabled, true);
+}
+
 test("settled notification sends one exact reply when top-level work settles", async (t) => {
   const attempts = [];
   const fixture = settledNotificationFixture(t, {
@@ -605,6 +630,7 @@ test("settled notification sends one exact reply when top-level work settles", a
     sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
   });
 
+  await enableSettledNotifications(fixture);
   assert.deepEqual(attempts, []);
   assert.equal(fixture.handlers.has("agent_end"), false);
   fixture.handlers.get("agent_start")({}, fixture.context);
@@ -630,6 +656,116 @@ test("settled notification stays disabled without a valid opt-in", async (t) => 
   assert.equal(attempts.length, 0);
 });
 
+test("mecha_settled_notifications defaults off, then enables and disables process-local settled notices", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+  const tool = fixture.tools.get("mecha_settled_notifications");
+
+  const initial = await tool.execute("status", { action: "status" });
+  assert.equal(initial.details.enabled, false);
+  assert.equal(initial.details.configured, true);
+  assert.equal(initial.details.cooldownMs, 120_000);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.equal(attempts.length, 0);
+
+  const enabled = await tool.execute("enable", { action: "enable" });
+  assert.equal(enabled.details.enabled, true);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.equal(attempts.length, 1);
+
+  const disabled = await tool.execute("disable", { action: "disable" });
+  assert.equal(disabled.details.enabled, false);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.equal(attempts.length, 1);
+});
+
+test("mecha_settled_notifications cannot enable an unconfigured process", async (t) => {
+  const fixture = settledNotificationFixture(t);
+  const result = await fixture.tools.get("mecha_settled_notifications").execute("enable", { action: "enable" });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.configured, false);
+  assert.match(result.content[0].text, /not configured/);
+});
+
+test("settled notification integration waits for the real cooldown", async (t) => {
+  const clock = fakeTimers();
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    immediateScheduler: false,
+    createSettledScheduler: () => createSettledNotificationScheduler({
+      setTimeoutImpl: clock.setTimeout,
+      clearTimeoutImpl: clock.clearTimeout,
+    }),
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+
+  await enableSettledNotifications(fixture);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  clock.advanceTo(119_999);
+  assert.equal(attempts.length, 0);
+  clock.advanceTo(120_000);
+  assert.deepEqual(attempts, [{
+    to: "supervisor",
+    subject: "Pi worker settled",
+    body: "Worker worker has settled and is idle.",
+  }]);
+});
+
+test("settled notification integration disables and cancels a pending cooldown", async (t) => {
+  const clock = fakeTimers();
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    immediateScheduler: false,
+    createSettledScheduler: () => createSettledNotificationScheduler({
+      setTimeoutImpl: clock.setTimeout,
+      clearTimeoutImpl: clock.clearTimeout,
+    }),
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+
+  const tool = fixture.tools.get("mecha_settled_notifications");
+  await enableSettledNotifications(fixture);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  await tool.execute("disable", { action: "disable" });
+  clock.advanceTo(120_000);
+  assert.equal(attempts.length, 0);
+});
+
+test("settled notification integration cancels the cooldown when child work starts", async (t) => {
+  const clock = fakeTimers();
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    immediateScheduler: false,
+    createSettledScheduler: () => createSettledNotificationScheduler({
+      setTimeoutImpl: clock.setTimeout,
+      clearTimeoutImpl: clock.clearTimeout,
+    }),
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+
+  await enableSettledNotifications(fixture);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  fixture.childEvents.get("subagents:started")({ id: "child-run" });
+  clock.advanceTo(120_000);
+  fixture.childEvents.get("subagents:completed")({ id: "child-run" });
+  clock.advanceTo(600_000);
+  assert.equal(attempts.length, 0);
+});
+
 test("settled notification excludes child sessions", async (t) => {
   const attempts = [];
   const fixture = settledNotificationFixture(t, {
@@ -637,6 +773,7 @@ test("settled notification excludes child sessions", async (t) => {
     sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
   });
 
+  await enableSettledNotifications(fixture);
   fixture.childEvents.get("subagents:child:session-created")({ sessionId: "child-session" });
   const childContext = {
     ...fixture.context,
@@ -656,6 +793,7 @@ test("native child lifecycle suppresses parent settled notices until a new paren
     sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
   });
 
+  await enableSettledNotifications(fixture);
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.childEvents.get("subagents:started")({ id: "child-run" });
   fixture.handlers.get("agent_settled")({}, fixture.context);
@@ -677,6 +815,7 @@ test("native child failure releases parent suppression for the next parent settl
     sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
   });
 
+  await enableSettledNotifications(fixture);
   fixture.childEvents.get("subagents:started")({ id: "child-run" });
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.handlers.get("agent_settled")({}, fixture.context);
@@ -701,6 +840,7 @@ test("parent session shutdown disposes armed settled follow-ups", async (t) => {
     createSettledScheduler: () => scheduler,
   });
 
+  await enableSettledNotifications(fixture);
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.handlers.get("agent_settled")({}, fixture.context);
   fixture.handlers.get("session_shutdown")({}, fixture.context);
@@ -748,6 +888,7 @@ test("a rejected settled notification reports once and does not block a later ru
     },
   });
 
+  await enableSettledNotifications(fixture);
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.handlers.get("agent_settled")({}, fixture.context);
   await nextTurn();
@@ -772,6 +913,7 @@ test("overlapping settled notification sends make independent attempts", async (
     },
   });
 
+  await enableSettledNotifications(fixture);
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.handlers.get("agent_settled")({}, fixture.context);
   fixture.handlers.get("agent_start")({}, fixture.context);

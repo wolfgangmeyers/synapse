@@ -339,7 +339,7 @@ function childSessionId(event) {
     : undefined;
 }
 
-const SETTLED_NOTIFICATION_FOLLOW_UP_MS = [60_000, 300_000, 600_000];
+const SETTLED_NOTIFICATION_COOLDOWN_MS = 120_000;
 
 // Managed workers use background subagents, whose native started and terminal
 // events share a run ID. Foreground runs lack a matching terminal ID, so they
@@ -386,10 +386,7 @@ export function createSettledNotificationScheduler({
 
       invalidate();
       const settledGeneration = generation;
-      send();
-      for (const delay of SETTLED_NOTIFICATION_FOLLOW_UP_MS) {
-        schedule(delay, settledGeneration, send);
-      }
+      schedule(SETTLED_NOTIFICATION_COOLDOWN_MS, settledGeneration, send);
     },
     onChildStarted(sessionId) {
       if (typeof sessionId !== "string" || sessionId.length === 0 || children.has(sessionId)) return;
@@ -913,6 +910,7 @@ export function createMechaMessagingExtension(pi, {
   let settledNotificationAgentId;
   let settledNotificationPending = false;
   let settledNotificationRecipient;
+  let settledNotificationEnabled = false;
   let compactionPolicy;
   let compactionPolicyError;
   try { compactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { compactionPolicyError = error; compactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
@@ -1148,6 +1146,43 @@ export function createMechaMessagingExtension(pi, {
     },
   });
 
+  function settledNotificationStatus() {
+    return {
+      configured: settledNotificationRecipient !== undefined,
+      enabled: settledNotificationEnabled,
+      recipient: settledNotificationRecipient,
+      pending: settledNotificationPending,
+      cooldownMs: SETTLED_NOTIFICATION_COOLDOWN_MS,
+    };
+  }
+
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name: "mecha_settled_notifications",
+    label: "Mecha Settled Notifications",
+    description: "Enable, disable, or inspect this Pi process's managed-worker settled mailbox notifications.",
+    parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
+      action: { type: "string", enum: ["enable", "disable", "status"] },
+    } },
+    async execute(_toolCallId, input) {
+      try {
+        if (input.action === "disable") {
+          settledNotificationEnabled = false;
+          settledNotificationPending = false;
+          settledNotifications.dispose();
+        } else if (input.action === "enable") {
+          if (settledNotificationRecipient === undefined) throw new Error("Settled notifications are not configured for this process.");
+          settledNotificationEnabled = true;
+        } else if (input.action !== "status") {
+          throw new Error("unsupported mecha_settled_notifications action");
+        }
+        const status = settledNotificationStatus();
+        return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
+      } catch (error) {
+        return { content: [{ type: "text", text: error.message }], details: settledNotificationStatus(), isError: true };
+      }
+    },
+  });
+
   if (typeof pi.registerTool === "function") pi.registerTool({
     name: "mecha_context",
     label: "Mecha Context",
@@ -1280,7 +1315,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("message_end", (event, context) => { if (!children.has(context.sessionManager.getSessionId())) activeWork = boundedConversationText(event.message?.content, 4096); coordinator?.onMessageEnd(event, context); });
   pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_start", (_event, context) => {
-    if (settledNotificationRecipient !== undefined && !children.has(context.sessionManager.getSessionId())) {
+    if (settledNotificationEnabled && settledNotificationRecipient !== undefined && !children.has(context.sessionManager.getSessionId())) {
       settledNotificationPending = true;
       settledNotifications.onParentActivity();
     }
@@ -1290,7 +1325,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("session_compact", (_event, context) => { if (!children.has(context.sessionManager.getSessionId())) { notifiedCompactionPercent = 0; resumeMailboxAfterCompaction(context); } });
   pi.on("agent_settled", (_event, context) => {
     runPendingSelfCompaction(context);
-    if (children.has(context.sessionManager.getSessionId()) || !settledNotificationPending) return;
+    if (children.has(context.sessionManager.getSessionId()) || !settledNotificationEnabled || !settledNotificationPending) return;
 
     // Consume before sendReply starts so a later run can arm independently.
     settledNotificationPending = false;
