@@ -158,9 +158,9 @@ Never relaunch a no-window task merely because its stale state says `active`. Ne
 
 **Process Reminders**: At session start and after compaction, maintain three recurring `--every 60m` reminders: (1) dev-loop checklist — explain --overview, test-coverage, robot-review before authorizing production code, (2) don't block on terminal — send the user a Mailbox message instead, (3) simplicity — check for over-engineering against Wolfgang persona. A delivered recurrence is not re-armed; cancel it only when its purpose ends.
 
-**Set a reminder for every async action.** Any time something is kicked off in the background — deploys, CI runs, subagent tasks, pushes that trigger workflows — set a reminder to check on it. Every push or force-push to an open PR must immediately create or refresh a 5–10 minute recurring supervisor reminder that names the PR and expected head SHA, checks CI directly, drives failures back to a worker, and repeats until the PR is merged/closed or explicitly deferred. Record that reminder in the priority task's verification handoff with `state_verification_handoff.py`. Never wait for the worker/subagent completion notice to create it: native subagents report their own completion, not downstream CI failure. A one-shot reminder is insufficient for an open priority PR because it can fire while CI is still queued.
+**Set a reminder for every async action.** Any time something is kicked off in the background — deploys, CI runs, subagent tasks, pushes that trigger workflows — set a reminder to check on it. Every push or force-push to an open PR must immediately create or refresh a 30-minute recurring supervisor reminder that names the PR and expected head SHA, checks CI directly, drives failures back to a worker, and repeats until the PR is merged/closed or explicitly deferred. Record that reminder in the priority task's verification handoff with `state_verification_handoff.py`. Never wait for the worker/subagent completion notice to create it: native subagents report their own completion, not downstream CI failure. A one-shot reminder is insufficient for an open priority PR because it can fire while CI is still queued.
 
-For every worker expected to run longer than five minutes, require the worker at launch to create two recurring Mailbox V2 self-reminders: a five-minute momentum heartbeat that repeats the task's concrete goal, and a 20-minute substantive status update to the supervisor. Keep the supervisor's own 20-minute monitoring recurrence as a backstop. Use one-shot reminders only for genuinely one-off external events. Subagents notify on completion, but their downstream effects (deploys, CI, external reviews) do not. The cost of a reminder is zero; the cost of a missed failure is hours.
+For every worker expected to run longer than five minutes, require the worker at launch to create two recurring Mailbox V2 self-reminders on the 30-minute default cadence: a momentum heartbeat that repeats the task's concrete goal, and a substantive status update to the supervisor. Keep the supervisor's own 30-minute monitoring recurrence as a backstop. Use one-shot reminders only for genuinely one-off external events. Subagents notify on completion, but their downstream effects (deploys, CI, external reviews) do not. The cost of a reminder is zero; the cost of a missed failure is hours.
 
 **Use Provided Tools**: ALWAYS use Python scripts in `~/.claude/skills/supervisor/tools/` for worker management and state. Deliver every worker instruction through `mailbox_send.py`; never use terminal or tmux input. If an agent is unregistered or not running, restore it through the managed Pi lifecycle/`worker_launch.py`, not terminal typing. Never manipulate `supervisor-state.json` directly.
 
@@ -208,7 +208,7 @@ At launch, record and send the worker a short delivery contract:
 
 **Blocker classification before parking.** A worker may not be parked on a missing input until the supervisor writes one sentence answering: "Does this prevent the primary deadline artifact?" If no, defer it and continue. If yes, independently verify it, send Wolfgang one concise escalation with the default/recommendation, and keep the worker on every other executable delivery slice. Never park an implementation worker merely because a later rollout gate is unknown.
 
-**Deadline monitoring.** The five-minute worker reminder must repeat the primary usable artifact and the next action toward it. The supervisor's monitoring check must inspect actual artifact evidence: files, build output, emulator/runtime state, or live E2E logs. A status report that names only supporting work is a miss, not progress. At the deadline, report the artifact's usable state and exact remaining gap, never a list of adjacent completed work.
+**Deadline monitoring.** The 30-minute worker reminder must repeat the primary usable artifact and the next action toward it. The supervisor's monitoring check must inspect actual artifact evidence: files, build output, emulator/runtime state, or live E2E logs. A status report that names only supporting work is a miss, not progress. At the deadline, report the artifact's usable state and exact remaining gap, never a list of adjacent completed work.
 
 **Supervisor owns ALL state updates — workers NEVER touch state**: Workers communicate via mailbox only. They never run `state_update_*` scripts or record their own status. If you're about to tell a worker to run a state tool, stop — always wrong.
 
@@ -226,7 +226,7 @@ At launch, record and send the worker a short delivery contract:
 
 **Every redirect that expands scope must include the review requirement.** Failure mode: original TASK.md includes robot-review, but a freeform mailbox redirect omits it. Always include: "Run robot-review on your changes before committing."
 
-**Set Greptile reminder immediately on push.** The moment a branch is pushed to a PR, set a 15-minute reminder for Greptile inline comments. Not optional.
+**Set Greptile reminder immediately on push.** The moment a branch is pushed to a PR, set a 30-minute reminder for Greptile inline comments. Not optional.
 
 **⛔ MANDATORY GATE — Final robot-review must be clean before authorization.** Verify a clean pass ran AFTER all fixes. "I fixed all findings" alone is insufficient — fixes can introduce new issues. Confirm either:
 1. Worker ran robot-review post-fixes showing zero Blocking and zero Should Address, OR
@@ -504,17 +504,17 @@ Set requirements at creation time when possible (can add later via `state_update
 
 **At launch, for every worker expected to run longer than five minutes, set this recurring Mailbox V2 supervisor reminder — not a one-shot follow-up:**
 ```bash
-/reminders set --window supervisor --every 20m --message "Drive $DELIVERY_ARTIFACT to completion. Inspect actual artifact evidence from $ALIAS: build/run/E2E output, not planning or adjacent work. If the artifact is untouched or not runnable, immediately redirect the next vertical slice. Treat only a proven hard blocker as a reason to park. Cancel this recurrence only when the artifact is delivered, Wolfgang defers it, or the worker is shut down."
+/reminders set --window supervisor --every 30m --message "Drive $DELIVERY_ARTIFACT to completion. Inspect actual artifact evidence from $ALIAS: build/run/E2E output, not planning or adjacent work. If the artifact is untouched or not runnable, immediately redirect the next vertical slice. Treat only a proven hard blocker as a reason to park. Cancel this recurrence only when the artifact is delivered, Wolfgang defers it, or the worker is shut down."
 ```
 
-For a non-deadline task, set `DELIVERY_ARTIFACT` to its concrete acceptance outcome. For a deadline task, include the deadline in the first sentence: `Drive $DELIVERY_ARTIFACT to completion by $DEADLINE.` Never use the old generic "check activity" wording for a task Wolfgang says to keep moving, drive to completion, finish today, or deliver by a named time/event. Record the reminder ID so it can be cancelled only at the stated disposition.
+For a non-deadline task, set `DELIVERY_ARTIFACT` to its concrete acceptance outcome. Use the 30-minute reminder default unless a shorter cadence is explicitly requested or needed for a real deadline/safety window. For a deadline task, include the deadline in the first sentence: `Drive $DELIVERY_ARTIFACT to completion by $DEADLINE.` Never use the old generic "check activity" wording for a task Wolfgang says to keep moving, drive to completion, finish today, or deliver by a named time/event. Record the reminder ID so it can be cancelled only at the stated disposition.
 
 **Mandatory worker reminder handshake:** For every worker expected to run longer than five minutes, the launch instruction must explicitly require the worker to create and report two self-reminder IDs before substantive work:
 
-1. A five-minute recurrence with this meaning, using the actual artifact and deadline: **"Drive `<primary usable artifact>` to completion [by `<deadline>`]. Execute the next atomic action toward a runnable vertical slice now. Do not report status, plan, or count supporting work as progress. If a blocker does not prevent the artifact, defer it or use the conservative default and continue."**
-2. A 20-minute recurrence that requires a substantive supervisor update with **actual artifact evidence** (files plus build/run/E2E state), validation, next executable action toward completion, and exact blockers classified as hard or deferred.
+1. A 30-minute recurrence with this meaning, using the actual artifact and deadline: **"Drive `<primary usable artifact>` to completion [by `<deadline>`]. Execute the next atomic action toward a runnable vertical slice now. Do not report status, plan, or count supporting work as progress. If a blocker does not prevent the artifact, defer it or use the conservative default and continue."**
+2. A 30-minute recurrence that requires a substantive supervisor update with **actual artifact evidence** (files plus build/run/E2E state), validation, next executable action toward completion, and exact blockers classified as hard or deferred.
 
-The supervisor must verify both IDs arrived by Mailbox and record them in task state. Do not substitute a generic “keep working” or “send status” reminder for the five-minute goal reminder. When reminder policy changes during an active task, immediately replace the worker’s existing recurrence(s); editing this skill alone does not update already-running workers.
+The supervisor must verify both IDs arrived by Mailbox and record them in task state. Do not substitute a generic “keep working” or “send status” reminder for the 30-minute goal reminder. When reminder policy changes during an active task, immediately replace the worker’s existing recurrence(s); editing this skill alone does not update already-running workers.
 
 After Pi registers with Mailbox V2, send instructions and requirements:
 
@@ -524,7 +524,7 @@ python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to
 2. For large tasks (many files, multiple phases, long implementations), break into subagents aggressively — one subagent per logical chunk. Never do large batches of work inline.
 3. Maintain your todo list constantly
 4. Reference ~/personas/wolfgang.md for decisions
-5. If this task may run longer than five minutes, immediately create two recurring Mailbox V2 self-reminders and mail their IDs to the supervisor: (a) every five minutes: "Drive <primary usable artifact> to completion [by <deadline>]. Execute the next atomic action toward a runnable vertical slice now. Do not report status, plan, or count supporting work as progress." (b) every 20 minutes, send a substantive status update with artifact evidence (files plus build/run/E2E state), validation, next executable action toward completion, and exact blockers classified as hard or deferred. Cancel both only when the artifact is delivered, Wolfgang defers it, or the task is shut down.
+5. If this task may run longer than five minutes, immediately create two recurring Mailbox V2 self-reminders and mail their IDs to the supervisor: (a) every 30 minutes: "Drive <primary usable artifact> to completion [by <deadline>]. Execute the next atomic action toward a runnable vertical slice now. Do not report status, plan, or count supporting work as progress." (b) every 30 minutes, send a substantive status update with artifact evidence (files plus build/run/E2E state), validation, next executable action toward completion, and exact blockers classified as hard or deferred. Cancel both only when the artifact is delivered, Wolfgang defers it, or the task is shut down.
 6. If blocked, immediately send the supervisor a Mailbox V2 message with the command/error, observed state, whether the blocker prevents the primary usable artifact, and the proposed next step. Do not leave a blocker only in terminal output or for a later periodic status update.
 
 Your task: <TASK DESCRIPTION>
@@ -574,9 +574,9 @@ After every delegation, ask: *"Did I give the worker everything it needs to succ
 
 **Workers must create their own recurring momentum and status reminders during long-running tasks.** Include this in every TASK.md and initial delegation message:
 
-> "If this task may run longer than five minutes, create and report two recurring Mailbox V2 self-reminders. Every five minutes: `Drive <primary usable artifact> to completion [by <deadline>]. Execute the next atomic action toward a runnable vertical slice now. Do not report status, plan, or count supporting work as progress.` Every 20 minutes: send the supervisor artifact evidence (files plus build/run/E2E state), validation, the next executable action toward completion, and each blocker classified hard or deferred. Cancel both only when the artifact is delivered, Wolfgang defers it, or the task is shut down."
+> "If this task may run longer than five minutes, create and report two recurring Mailbox V2 self-reminders. Every 30 minutes: `Drive <primary usable artifact> to completion [by <deadline>]. Execute the next atomic action toward a runnable vertical slice now. Do not report status, plan, or count supporting work as progress.` Every 30 minutes: send the supervisor artifact evidence (files plus build/run/E2E state), validation, the next executable action toward completion, and each blocker classified hard or deferred. Cancel both only when the artifact is delivered, Wolfgang defers it, or the task is shut down."
 
-**Supervisor sets recurring monitoring at launch.** For every worker expected to run longer than five minutes, set the required Mailbox V2 supervisor reminder with `--every 20m` at launch. Its body must say **"Drive `<primary usable artifact>` to completion"** and require actual artifact evidence, not merely worker activity. On each recurrence, inspect the artifact. If it is untouched, not runnable when a vertical slice is due, or the worker reports only supporting work, redirect it through Mailbox V2 to the next delivery action. If no status mail has arrived, ask for artifact evidence and the next action toward completion, not a generic status report. Verify the supervisor recurrence is still scheduled after a reconnect/dead-letter event; recreate it when needed. Cancel the recurrence only when the artifact is delivered, Wolfgang explicitly defers it, or the worker is shut down.
+**Supervisor sets recurring monitoring at launch.** For every worker expected to run longer than five minutes, set the required Mailbox V2 supervisor reminder with `--every 30m` at launch. Its body must say **"Drive `<primary usable artifact>` to completion"** and require actual artifact evidence, not merely worker activity. On each recurrence, inspect the artifact. If it is untouched, not runnable when a vertical slice is due, or the worker reports only supporting work, redirect it through Mailbox V2 to the next delivery action. If no status mail has arrived, ask for artifact evidence and the next action toward completion, not a generic status report. Verify the supervisor recurrence is still scheduled after a reconnect/dead-letter event; recreate it when needed. Cancel the recurrence only when the artifact is delivered, Wolfgang explicitly defers it, or the worker is shut down.
 
 This replaces relying on tmux capture or a one-shot worker reminder for progress monitoring. Mail-based updates are reliable, searchable, and give the supervisor a clear picture of whether the worker is on track or drifting. Redirect immediately if a status report reveals the worker has gone off-track — don't wait for completion.
 
@@ -1941,7 +1941,7 @@ Use the `/reminders` skill to set deferred follow-up checks without holding the 
 /reminders set --window supervisor --in <duration> --message "<what to check>"
 
 # Recurring worker monitoring; required at launch when a worker should run >5m
-/reminders set --window supervisor --every 20m --message "Check activity for worker <alias>. Unblock any idle or errored worker through Mailbox V2. Cancel this recurrence when the worker is parked, completed, or shut down."
+/reminders set --window supervisor --every 30m --message "Check activity for worker <alias>. Unblock any idle or errored worker through Mailbox V2. Cancel this recurrence when the worker is parked, completed, or shut down."
 ```
 
 **Examples:**
@@ -1950,14 +1950,14 @@ Use the `/reminders` skill to set deferred follow-up checks without holding the 
 /reminders set --window supervisor --in 30m --message "Check Greptile comments on PR #3812 (dnsid-phase1). If nothing yet, set next reminder in 30m."
 
 # Follow up after CI finishes
-/reminders set --window supervisor --in 15m --message "Check CI status on dnsid-phase2 PR. If green, authorize push."
+/reminders set --window supervisor --in 30m --message "Check CI status on dnsid-phase2 PR. If green, authorize push."
 ```
 
 **Proactive reminder setting:** Every time you delegate work to a worker, send a message and wait for a response, or kick off any async process, set the appropriate reminder. Don't rely on the worker mailing back or the watchdog catching it — the reminder is the safety net; mail is the happy path. Examples:
-- Launched a worker expected to run >5m → immediately set the required `--every 20m` worker-monitoring recurrence
+- Launched a worker expected to run >5m → immediately set the required `--every 30m` worker-monitoring recurrence
 - Sent worker back for a final review pass → keep its recurrence active; do not replace it with a one-shot reminder
 - Pushed a PR and waiting for CI/Greptile → set a one-shot external-event follow-up and re-arm only while that external event remains pending
-- Asked a worker a question → its existing recurrence covers the check; for a short-lived worker without one, set a 15m one-shot reminder
+- Asked a worker a question → its existing recurrence covers the check; for a short-lived worker without one, set a 30m one-shot reminder
 
 **Key rules:**
 - A `--every` reminder recurs until cancelled. Use it for every worker expected to run longer than five minutes, starting at launch.
