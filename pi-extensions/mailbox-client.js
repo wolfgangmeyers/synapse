@@ -115,6 +115,7 @@ export function createMailboxClient({
   let reconnectTimer;
   let reconnectAttempt = 0;
   let stopped = false;
+  let paused = false;
   let initialConnection;
   let resolveInitialConnection;
   let rejectInitialConnection;
@@ -156,7 +157,7 @@ export function createMailboxClient({
   function clearConnectionTimers() {
     clearInterval(renewTimer);
     renewTimer = undefined;
-    clearTimeoutImpl(reconnectTimer);
+    if (reconnectTimer !== undefined) clearTimeoutImpl(reconnectTimer);
     reconnectTimer = undefined;
   }
 
@@ -171,7 +172,7 @@ export function createMailboxClient({
   }
 
   function scheduleReconnect({ kickstartRouter = false } = {}) {
-    if (stopped || reconnectTimer !== undefined || socket !== undefined) return;
+    if (stopped || paused || reconnectTimer !== undefined || socket !== undefined) return;
     if (kickstartRouter) {
       try {
         Promise.resolve(kickstart()).catch(reportKickstartFailure);
@@ -201,6 +202,7 @@ export function createMailboxClient({
     leaseId = undefined;
     if (stopped) return;
     report("disconnected", error);
+    if (paused) return;
     scheduleReconnect({ kickstartRouter });
   }
 
@@ -257,7 +259,7 @@ export function createMailboxClient({
   }
 
   function openSocket() {
-    if (stopped || socket !== undefined) return;
+    if (stopped || paused || socket !== undefined) return;
     let currentSocket;
     let opened = false;
     try {
@@ -322,6 +324,21 @@ export function createMailboxClient({
       return initialConnection;
     },
     sendReceipt: receipt,
+    pause() {
+      if (stopped || paused) return;
+      paused = true;
+      clearConnectionTimers();
+      const currentSocket = socket;
+      socket = undefined;
+      leaseId = undefined;
+      if (currentSocket !== undefined) closeSocket(currentSocket);
+    },
+    resume() {
+      if (stopped || !paused) return initialConnection ?? Promise.resolve();
+      paused = false;
+      openSocket();
+      return initialConnection ?? Promise.resolve();
+    },
     async sendReply({ to, body, subject = "Pi mailbox reply" }) {
       if (typeof to !== "string" || to.length === 0 || to.includes("@")) throw new Error("a mailbox recipient is required");
       if (typeof body !== "string" || body.length === 0) throw new Error("a reply body is required");
