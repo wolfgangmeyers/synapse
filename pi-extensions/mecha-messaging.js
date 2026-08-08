@@ -13,6 +13,7 @@ export { createRecallPipeline } from "./recall-pipeline.js";
 export { runRecallEvaluator, validateRecallChoice } from "./recall-evaluator.js";
 
 const DEFAULT_SESSION_CHECKPOINT_RETRY_MS = 250;
+const DEFAULT_PENDING_REINJECTION_DELAY_MS = 5_000;
 const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
 const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
 const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
@@ -620,8 +621,10 @@ export function createPiMailboxDeliveryCoordinator({
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
   checkpointRetryDelayMs = DEFAULT_SESSION_CHECKPOINT_RETRY_MS,
+  pendingReinjectionDelayMs = DEFAULT_PENDING_REINJECTION_DELAY_MS,
   readSessionFile = readFileSync,
   spawnSubagent = spawnNativeSentinel,
+  now = Date.now,
 } = {}) {
   if (pi === undefined || typeof pi.sendMessage !== "function") {
     throw new TypeError("pi.sendMessage is required");
@@ -639,7 +642,11 @@ export function createPiMailboxDeliveryCoordinator({
   if (!Number.isSafeInteger(checkpointRetryDelayMs) || checkpointRetryDelayMs <= 0) {
     throw new TypeError("checkpointRetryDelayMs must be a positive safe integer");
   }
+  if (!Number.isSafeInteger(pendingReinjectionDelayMs) || pendingReinjectionDelayMs <= 0) {
+    throw new TypeError("pendingReinjectionDelayMs must be a positive safe integer");
+  }
   if (typeof readSessionFile !== "function") throw new TypeError("readSessionFile must be a function");
+  if (typeof now !== "function") throw new TypeError("now must be a function");
   if (typeof spawnSubagent !== "function") throw new TypeError("spawnSubagent must be a function");
 
   const sessionId = sessionContext.sessionManager.getSessionId();
@@ -716,6 +723,18 @@ export function createPiMailboxDeliveryCoordinator({
     }, checkpointRetryDelayMs);
   }
 
+  function injectMailboxMessage(message) {
+    routeMailboxEnvelope(message, (envelope) => {
+      pi.sendMessage(mailboxCustomMessage(envelope), { deliverAs: "steer", triggerTurn: true });
+    });
+  }
+
+  function shouldReinjectPending(pendingDelivery, delivery, state) {
+    return state === "absent"
+      && delivery.attemptNumber > pendingDelivery.lastInjectedAttemptNumber
+      && now() - pendingDelivery.lastInjectedAt >= pendingReinjectionDelayMs;
+  }
+
   function recordSentinelStatus(message, subagentId) {
     // ponytail: this status deliberately contains no scheduled prompt or derived text.
     pi.sendMessage({
@@ -766,6 +785,15 @@ export function createPiMailboxDeliveryCoordinator({
     const existing = pending.get(message.id);
     if (existing !== undefined) {
       existing.delivery = delivery;
+      if (shouldReinjectPending(existing, delivery, state)) {
+        try {
+          injectMailboxMessage(message);
+          existing.lastInjectedAt = now();
+          existing.lastInjectedAttemptNumber = delivery.attemptNumber;
+        } catch {
+          // Keep the original pending delivery; the router lease timeout preserves retry.
+        }
+      }
       try {
         receipt("injection_requested", delivery);
       } catch {
@@ -778,11 +806,14 @@ export function createPiMailboxDeliveryCoordinator({
       return;
     }
 
-    pending.set(message.id, { delivery, checkpointTimer: undefined });
+    pending.set(message.id, {
+      delivery,
+      checkpointTimer: undefined,
+      lastInjectedAt: now(),
+      lastInjectedAttemptNumber: delivery.attemptNumber,
+    });
     try {
-      routeMailboxEnvelope(message, (envelope) => {
-        pi.sendMessage(mailboxCustomMessage(envelope), { deliverAs: "steer", triggerTurn: true });
-      });
+      injectMailboxMessage(message);
     } catch {
       pending.delete(message.id);
       try {
