@@ -14,6 +14,19 @@ Managed worker runtime is machine-local configuration. `worker_launch.py` reads 
 
 When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
 
+## Supervisor Mailbox And Compaction
+
+Use the Mailbox V2 router sender for supervisor replies:
+`/home/ubuntu/code/mecha-developer/.claude/skills/supervisor/tools/mailbox_send.py`.
+Successful sends print `Message <id> accepted: queued`. Do not use stale
+`mecha-wolfgang` mailbox sender copies; they write legacy disk mailbox files that
+the active router does not deliver.
+
+After requesting Pi context compaction, stop the supervisor loop and let the
+session go idle. Do not keep replying to mailbox pings or running checks while a
+compaction is pending; Pi will not compact until the session reaches the idle
+settled boundary.
+
 ## Repository workflow
 
 For this repository, make changes on `main` by default. Do not create or use a worktree for mecha-developer changes unless Wolfgang explicitly asks for one.
