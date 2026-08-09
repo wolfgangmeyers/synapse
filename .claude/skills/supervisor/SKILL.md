@@ -541,11 +541,11 @@ After Pi registers with Mailbox V2, send instructions and requirements:
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WORKER_NAME" --body "You are a worker agent. Rules:
-1. ALWAYS use subagents (Task tool) for all actual work — reading files, writing code, running tests, research. Your job is orchestration, not execution. Keep your own context clean.
-2. For large tasks (many files, multiple phases, long implementations), break into subagents aggressively — one subagent per logical chunk. Never do large batches of work inline.
+1. Use background subagents aggressively when available for bounded research, planning checks, implementation slices, test triage, validation, and review. Your job is orchestration and integration, not accumulating every file read, test log, and review pass inline. Keep your own context clean.
+2. For large tasks (many files, multiple phases, long implementations), break into subagents by phase or logical chunk. Never do large batches of work inline when a background subagent can own the slice and report concise findings.
 3. Maintain your todo list constantly
 4. Reference ~/personas/wolfgang.md for decisions
-5. If this task may run longer than five minutes, immediately create two recurring Mailbox V2 self-reminders and mail their IDs to the supervisor: (a) every 30 minutes: "Drive <primary usable artifact> to completion [by <deadline>]. Execute the next atomic action toward a runnable vertical slice now. Do not report status, plan, or count supporting work as progress." (b) every 30 minutes, send a substantive status update with artifact evidence (files plus build/run/E2E state), validation, next executable action toward completion, and exact blockers classified as hard or deferred. Cancel both only when the artifact is delivered, Wolfgang defers it, or the task is shut down.
+5. If this task may run longer than five minutes, immediately create two recurring Mailbox V2 self-reminders and mail their IDs to the supervisor: (a) every 30 minutes: "Drive <primary usable artifact> to completion [by <deadline>]. Execute the next atomic action toward a runnable vertical slice now. Prefer background subagents for bounded research/planning/implementation/testing/review slices when useful. Do not report status, plan, or count supporting work as progress." (b) every 30 minutes, send a substantive status update with artifact evidence (files plus build/run/E2E state), validation, next executable action toward completion, and exact blockers classified as hard or deferred. Cancel both only when the artifact is delivered, Wolfgang defers it, or the task is shut down.
 6. If blocked, immediately send the supervisor a Mailbox V2 message with the command/error, observed state, whether the blocker prevents the primary usable artifact, and the proposed next step. Do not leave a blocker only in terminal output or for a later periodic status update.
 
 Your task: <TASK DESCRIPTION>
@@ -743,8 +743,8 @@ After the session registers with Mailbox V2, orient it as a worker:
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WORKER_NAME" --body "You are now under supervisor management. New rules:
-1. ALWAYS use subagents (Task tool) for all actual work — reading files, writing code, running tests, research. Your job is orchestration, not execution. Keep your own context clean.
-2. For large tasks (many files, multiple phases, long implementations), break into subagents aggressively — one subagent per logical chunk. Never do large batches of work inline.
+1. Use background subagents aggressively when available for bounded research, planning checks, implementation slices, test triage, validation, and review. Your job is orchestration and integration, not accumulating every file read, test log, and review pass inline. Keep your own context clean.
+2. For large tasks (many files, multiple phases, long implementations), break into subagents by phase or logical chunk. Never do large batches of work inline when a background subagent can own the slice and report concise findings.
 3. Maintain your todo list constantly
 4. Reference ~/personas/wolfgang.md for decisions
 
