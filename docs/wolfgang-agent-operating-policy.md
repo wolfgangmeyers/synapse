@@ -31,6 +31,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 
 - Use the same channel the person used. If Wolfgang contacts an agent by mailbox, reply by mailbox.
 - Send concise status updates when async work is red, pending, blocked, or materially changed. Include links, owner, current state, and next action.
+- When a reminder asks you to take action and the work is viable to delegate, run it in a background subagent by default. This keeps the supervisor responsive and allows independent checks to proceed in parallel.
 - Do not reply to pure acknowledgments unless they contain a new instruction, blocker, evidence, decision request, or state transition.
 - Avoid noisy alerts and reminder loops. Cancel, repair, retire, or reconfigure false-positive or superseded alerts while preserving the real safety check.
 - Write human-facing text plainly and naturally. Do not include command transcripts, QA packets, or proof dumps unless asked.
