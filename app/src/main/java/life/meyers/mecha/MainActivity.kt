@@ -209,11 +209,12 @@ internal data class ChatMessage(
     val key get() = "$id\u001f$incarnationId"
 }
 
-private data class RouterConfig(
-    val display: String,
+internal data class RouterConfig(
+    val alias: String,
     val endpoint: String,
 ) {
-    fun persist() = "$display$ROUTER_RECORD_SEPARATOR$endpoint"
+    val displayName: String get() = alias.ifBlank { endpoint }
+    fun persist() = "$alias$ROUTER_RECORD_SEPARATOR$endpoint"
 }
 
 internal class DraftStore(private val preferences: SharedPreferences) {
@@ -274,6 +275,7 @@ class MainActivity : ComponentActivity() {
     private var showRouterManager by mutableStateOf(false)
     private var routerRevision by mutableStateOf(0)
     private var routerError by mutableStateOf("")
+    private var editingRouterEndpoint by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -306,16 +308,9 @@ class MainActivity : ComponentActivity() {
 
     private fun routers(): List<RouterConfig> = prefs().getStringSet("router_endpoints", emptySet())
         .orEmpty()
-        .mapNotNull { stored ->
-            val parts = stored.split(ROUTER_RECORD_SEPARATOR, limit = 2)
-            when {
-                parts.size == 2 && normalizeRouterEndpoint(parts[1]) == parts[1] -> RouterConfig(parts[0], parts[1])
-                normalizeRouterEndpoint(stored) != null -> RouterConfig(stored, normalizeRouterEndpoint(stored)!!)
-                else -> null
-            }
-        }
+        .mapNotNull(::parseRouterConfig)
         .distinctBy { it.endpoint }
-        .sortedBy { it.display.lowercase() }
+        .sortedBy { it.displayName.lowercase() }
 
     private fun persistedActiveRouter(): String? {
         val routers = routers()
@@ -756,31 +751,27 @@ class MainActivity : ComponentActivity() {
         connect()
     }
 
-    private fun normalizeRouterEndpoint(candidate: String): String? {
-        val match = ROUTER_ENDPOINT.matchEntire(candidate.trim()) ?: return null
-        val host = match.groupValues[1].lowercase()
-        val port = match.groupValues[2].ifBlank { DEFAULT_ROUTER_PORT.toString() }.toIntOrNull() ?: return null
-        return "$host:$port".takeIf { port in 1..65535 }
-    }
-
-    private fun saveRouter(candidate: String): Boolean {
-        val entered = candidate.trim()
-        val endpoint = normalizeRouterEndpoint(entered)
+    private fun saveRouter(candidate: String, alias: String): Boolean {
+        val previousEndpoint = editingRouterEndpoint
+        val endpoint = normalizeRouterEndpointCandidate(candidate)
         if (endpoint == null) {
             routerError = "Enter a hostname with an optional port, for example donuts or donuts:8765"
             return false
         }
-        val config = RouterConfig(entered, endpoint)
-        val updated = (routers().filterNot { it.endpoint == endpoint } + config).map { it.persist() }.toSet()
-        prefs().edit().putStringSet("router_endpoints", updated).putString("active_router", endpoint).commit()
-        activeRouter = endpoint
+        val nextActiveRouter = activeRouterAfterRouterSave(activeRouter, previousEndpoint, endpoint)
+        val updated = upsertRouterConfig(routers(), candidate, alias, previousEndpoint).map { it.persist() }.toSet()
+        prefs().edit().putStringSet("router_endpoints", updated).putString("active_router", nextActiveRouter).commit()
+        editingRouterEndpoint = null
         routerRevision++
-        peers = emptyList()
-        returnHome()
         routerError = ""
         showRouterManager = false
-        cancelConnection()
-        connect()
+        if (nextActiveRouter != activeRouter) {
+            activeRouter = nextActiveRouter
+            peers = emptyList()
+            returnHome()
+            cancelConnection()
+            connect()
+        }
         return true
     }
 
@@ -810,6 +801,7 @@ class MainActivity : ComponentActivity() {
         editor.commit()
         routerRevision++
         routerError = ""
+        if (editingRouterEndpoint == endpoint) editingRouterEndpoint = null
         if (endpoint == activeRouter) {
             activeRouter = next
             peers = emptyList()
@@ -884,9 +876,12 @@ class MainActivity : ComponentActivity() {
                         activeRouter = activeRouter,
                         routers = routerRevision.let { routers() },
                         error = routerError,
+                        editingEndpoint = editingRouterEndpoint,
                         onAdd = ::saveRouter,
                         onSelect = ::switchRouter,
                         onRemove = ::removeRouter,
+                        onEdit = { editingRouterEndpoint = it; routerError = "" },
+                        onCancelEdit = { editingRouterEndpoint = null; routerError = "" },
                     )
                     selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, agentFilter, { agentFilter = it }, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
                     else -> {
@@ -1341,11 +1336,16 @@ private fun RouterManagement(
     activeRouter: String,
     routers: List<RouterConfig>,
     error: String,
-    onAdd: (String) -> Boolean,
+    editingEndpoint: String?,
+    onAdd: (String, String) -> Boolean,
     onSelect: (String) -> Unit,
     onRemove: (String) -> Unit,
+    onEdit: (String) -> Unit,
+    onCancelEdit: () -> Unit,
 ) {
-    var endpoint by remember { mutableStateOf("") }
+    val editingRouter = routers.firstOrNull { it.endpoint == editingEndpoint }
+    var endpoint by remember(editingEndpoint) { mutableStateOf(editingRouter?.endpoint.orEmpty()) }
+    var alias by remember(editingEndpoint) { mutableStateOf(editingRouter?.alias.orEmpty()) }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 18.dp)) {
         Text("Routers", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("Each router keeps its own peers and chats.", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
@@ -1358,14 +1358,23 @@ private fun RouterManagement(
             placeholder = { Text("router.example.com") },
             isError = error.isNotBlank(),
         )
+        OutlinedTextField(
+            value = alias,
+            onValueChange = { alias = it },
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            singleLine = true,
+            label = { Text("Alias") },
+            placeholder = { Text("Home lab") },
+        )
         if (error.isNotBlank()) Text(error, Modifier.padding(top = 6.dp), style = MaterialTheme.typography.bodySmall, color = Color(0xFFFF8A80))
         Button(
-            onClick = { if (onAdd(endpoint)) endpoint = "" },
+            onClick = { if (onAdd(endpoint, alias)) { endpoint = ""; alias = "" } },
             enabled = endpoint.isNotBlank(),
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp).height(52.dp),
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Periwinkle, contentColor = Ink),
-        ) { Text("Add router", fontWeight = FontWeight.Bold) }
+        ) { Text(if (editingEndpoint == null) "Add router" else "Save router", fontWeight = FontWeight.Bold) }
+        if (editingEndpoint != null) TextButton(onCancelEdit, Modifier.fillMaxWidth()) { Text("Cancel edit") }
         Text("Your routers", Modifier.padding(top = 28.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         if (routers.isEmpty()) {
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
@@ -1381,9 +1390,11 @@ private fun RouterManagement(
                     ) {
                         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text(router.display, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                Text(router.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                if (router.alias.isNotBlank()) Text(router.endpoint, style = MaterialTheme.typography.bodySmall, color = TextMuted)
                                 if (router.endpoint == activeRouter) Text("Active", style = MaterialTheme.typography.bodySmall, color = Teal)
                             }
+                            TextButton({ onEdit(router.endpoint) }) { Text("Edit") }
                             TextButton({ onRemove(router.endpoint) }) { Text("Remove", color = Color(0xFFFFA4A0)) }
                         }
                     }
@@ -1429,6 +1440,38 @@ internal fun mergeConversationMessages(existing: List<ChatMessage>, incoming: Li
     }
     return merged.sortedWith(compareBy<ChatMessage> { if (it.sequence == 0L) Long.MAX_VALUE else it.sequence }.thenBy { it.createdAt }).takeLast(200)
 }
+
+internal fun normalizeRouterEndpointCandidate(candidate: String): String? {
+    val match = ROUTER_ENDPOINT.matchEntire(candidate.trim()) ?: return null
+    val host = match.groupValues[1].lowercase()
+    val port = match.groupValues[2].ifBlank { DEFAULT_ROUTER_PORT.toString() }.toIntOrNull() ?: return null
+    return "$host:$port".takeIf { port in 1..65535 }
+}
+
+internal fun parseRouterConfig(stored: String): RouterConfig? {
+    val parts = stored.split(ROUTER_RECORD_SEPARATOR, limit = 2)
+    if (parts.size == 2) {
+        val endpoint = normalizeRouterEndpointCandidate(parts[1]) ?: return null
+        return RouterConfig(parts[0].trim(), endpoint)
+    }
+    val endpoint = normalizeRouterEndpointCandidate(stored) ?: return null
+    return RouterConfig("", endpoint)
+}
+
+internal fun upsertRouterConfig(
+    routers: List<RouterConfig>,
+    candidate: String,
+    alias: String,
+    previousEndpoint: String? = null,
+): List<RouterConfig> {
+    val endpoint = normalizeRouterEndpointCandidate(candidate) ?: return routers
+    val trimmedAlias = alias.trim()
+    return (routers.filterNot { it.endpoint == endpoint || it.endpoint == previousEndpoint } + RouterConfig(trimmedAlias, endpoint))
+        .distinctBy { it.endpoint }
+}
+
+internal fun activeRouterAfterRouterSave(activeRouter: String, previousEndpoint: String?, savedEndpoint: String): String =
+    if (previousEndpoint == null || previousEndpoint == activeRouter) savedEndpoint else activeRouter
 
 private fun draftPeersKey(router: String) = "draft_peers:$router"
 
