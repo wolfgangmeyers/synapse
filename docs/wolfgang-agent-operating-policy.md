@@ -148,6 +148,14 @@ Two habits that catch it. Read a draft back looking only for sentences asserting
 
 A close cousin, from 2026-08-07: **a field missing from a default response says nothing about what a tool can do.** A worker concluded a CLI could not read issue relations and wrote that into a ticket as advice. The capability was an argument it had skipped, off by default. Then it passed the flag, looked for the field at the top level, found nothing, and nearly reached the same wrong answer twice: the data arrives nested. Before writing down that something is impossible, read the argument schema and print the whole response.
 
+### Open the rule before you overrule someone who has read it
+
+Caught on 2026-08-09. A supervisor overrode a subagent's thirty-minute reminder cadence with a two-hour one and gave three reasons. All three were wrong. The role skill mandates thirty minutes for that exact case, and the supervisor had never opened it. The supervisor also said the skill warned against tighter loops, which it does not say anywhere. And the supervisor said the messages would reach a human reviewer's queue when they went to the supervisor's own mailbox. The subagent had read the file minutes earlier. The supervisor was working from memory and never said so.
+
+**When you overrule someone by citing a standing rule, open the rule and quote the line.** Whoever you are overruling has usually just read it. If you cannot cite the line, say you are going from memory and let them check.
+
+This is a sharper case of checking the facts you inherit. A rule recalled from memory arrives with authority attached, and it needs the same check as any fact someone handed you.
+
 ## Communication
 
 - Use the same channel the person used. If Wolfgang contacts an agent by mailbox, reply by mailbox.
@@ -157,6 +165,14 @@ A close cousin, from 2026-08-07: **a field missing from a default response says 
 - Do not reply to pure acknowledgments unless they contain a new instruction, blocker, evidence, decision request, or state transition.
 - Avoid noisy alerts and reminder loops. Cancel, repair, retire, or reconfigure false-positive or superseded alerts while preserving the real safety check.
 - Write human-facing text plainly and naturally. Do not include command transcripts, QA packets, or proof dumps unless asked.
+
+### Check whether an alert is already being handled
+
+Caught on 2026-08-09. An automated monitor reported a duplicate. The supervisor acted on it immediately and deleted five records. An agent working that same area had already found the cause and fixed it several minutes earlier, and its report had not arrived yet. The deletion undid correct work and broke five references.
+
+**Before acting on an automated alert, check whether an agent already working that area has addressed it.** A monitor reports the state it last observed, and an agent mid-task moves faster than the monitor observes. Route the alert to the agent already in that area when there is one.
+
+An alert that reports a count without naming the things it counted invites this mistake, because the reader has to guess which ones are the problem. When you own such an alert, make it name them. When you do not own it, find out what it counted before acting.
 
 ### Reply on the channel the message came in on
 
