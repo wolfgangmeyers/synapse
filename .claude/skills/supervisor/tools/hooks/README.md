@@ -60,3 +60,6 @@ Two things worth knowing before debugging it:
   `$MECHA_ACTIVITY_DIR/pane$TMUX_PANE.watch` and checks the pid inside is alive. No marker, a dead
   pid, or no tmux, and it exits before it even reads stdin. An empty activity directory usually
   means no sidecar, not a broken hook.
+
+Open problems with the activity path are listed in `../ACTIVITY_KNOWN_ISSUES.md`. Every one of
+them presents as working, so read it before concluding the indicator is simply broken.
