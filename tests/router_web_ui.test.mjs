@@ -503,6 +503,8 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.draft\.setSelectionRange\(end, end\)/);
   assert.match(app, /restoreDraftForSelectedPeer\(\{ focus: true \}\)/);
   assert.match(app, /state\.selectedPeer = loadSelectedPeer\(routerUrl, state\.agentId\)/);
+  assert.match(app, /if \(event\.state === "connected"\) backfillSelectedConversation\(\)/);
+  assert.match(app, /function backfillSelectedConversation\(\) \{[\s\S]*requestHistory\(peer\);[\s\S]*setTimeout\(\(\) => \{[\s\S]*state\.selectedPeer === peer && state\.routerUrl === routerUrl && state\.agentId === agentId[\s\S]*requestHistory\(peer\);[\s\S]*\}, 500\);[\s\S]*\}/);
   assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
   assert.match(app, /event\.type === "agent_activity"/);
   assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}`/);

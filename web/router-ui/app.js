@@ -171,7 +171,7 @@ async function handleEvent(event) {
   if (!matchesActiveScope(event, state)) return;
   if (event.type === "status") {
     setStatus(event.state, event.detail, event.agentId, event.routerUrl);
-    if (event.state === "connected" && state.selectedPeer) requestHistory(state.selectedPeer);
+    if (event.state === "connected") backfillSelectedConversation();
     return;
   }
   if (event.type === "agents") {
@@ -419,6 +419,17 @@ function requestHistory(peer) {
   const requestId = crypto.randomUUID();
   state.historyRequests.set(peer, requestId);
   sendCommand({ type: "get_history", peer, requestId });
+}
+
+function backfillSelectedConversation() {
+  const peer = state.selectedPeer;
+  if (!peer) return;
+  const routerUrl = state.routerUrl;
+  const agentId = state.agentId;
+  requestHistory(peer);
+  setTimeout(() => {
+    if (state.selectedPeer === peer && state.routerUrl === routerUrl && state.agentId === agentId) requestHistory(peer);
+  }, 500);
 }
 
 function sendDraft() {
