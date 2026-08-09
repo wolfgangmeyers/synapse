@@ -23,6 +23,21 @@ test("Android connected-agent filter matches raw IDs and human names", () => {
   assert.deepEqual(visibleConnectedPeers(peers, "missing"), []);
 });
 
+test("Android source wires router aliases like the Web UI", async () => {
+  const source = await readFile(activityPath, "utf8");
+  assert.match(source, /internal data class RouterConfig\(\s*val alias: String,\s*val endpoint: String,/);
+  assert.match(source, /val displayName: String get\(\) = alias\.ifBlank \{ endpoint \}/);
+  assert.match(source, /internal fun parseRouterConfig\(stored: String\): RouterConfig\?/);
+  assert.match(source, /internal fun upsertRouterConfig\([\s\S]*previousEndpoint: String\? = null,/);
+  assert.match(source, /private var editingRouterEndpoint by mutableStateOf<String\?>\(null\)/);
+  assert.match(source, /activeRouterAfterRouterSave\(activeRouter, previousEndpoint, endpoint\)/);
+  assert.match(source, /label = \{ Text\("Alias"\) \}/);
+  assert.match(source, /if \(editingEndpoint == null\) "Add router" else "Save router"/);
+  assert.match(source, /router\.displayName/);
+  assert.match(source, /router\.alias\.isNotBlank\(\)[\s\S]*router\.endpoint/);
+  assert.match(source, /onEdit\(router\.endpoint\)/);
+});
+
 test("Android source wires the core web QOL parity behavior", async () => {
   const source = await readFile(activityPath, "utf8");
   assert.match(source, /private var agentFilter by mutableStateOf\(""\)/);
