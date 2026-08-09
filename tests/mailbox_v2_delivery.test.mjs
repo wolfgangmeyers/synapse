@@ -812,6 +812,133 @@ test("extension keeps long-running native subagent counts until a terminal event
   ]);
 });
 
+test("heartbeat reconciliation keeps event-tracked subagents missing from the native service list", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  delete globalThis[serviceSymbol];
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.childEvents.get("subagents:started")({
+    id: "event-only-child",
+    type: "general-purpose",
+    description: "Started from lifecycle event",
+  });
+  globalThis[serviceSymbol] = {
+    listAgents: () => [{
+      id: "service-child",
+      type: "general-purpose",
+      description: "Reported by native service",
+      status: "running",
+    }],
+  };
+
+  now += 5_000;
+  intervals[0].callback();
+
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1, subagents: [{ id: "event-only-child", type: "general-purpose", description: "Started from lifecycle event" }] },
+    { state: "settled", subagentCount: 2, subagents: [
+      { id: "event-only-child", type: "general-purpose", description: "Started from lifecycle event" },
+      { id: "service-child", type: "general-purpose", description: "Reported by native service" },
+    ] },
+  ]);
+});
+
+test("heartbeat reconciliation clears service-only subagents when the service drops them", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  let serviceRecords = [{
+    id: "service-only-child",
+    type: "general-purpose",
+    description: "Only reported by native service",
+    status: "running",
+  }];
+  globalThis[serviceSymbol] = { listAgents: () => serviceRecords };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const fixture = settledNotificationFixture(t);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  serviceRecords = [];
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 1, subagents: [{ id: "service-only-child", type: "general-purpose", description: "Only reported by native service" }] },
+    { state: "settled", subagentCount: 0 },
+  ]);
+});
+
+test("lifecycle terminal events prevent stale native service resurrection until ID reuse", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  let serviceRecords = [];
+  globalThis[serviceSymbol] = { listAgents: () => serviceRecords };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.childEvents.get("subagents:started")({
+    id: "reused-child",
+    type: "general-purpose",
+    description: "Original child",
+  });
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.childEvents.get("subagents:completed")({ id: "reused-child" });
+  serviceRecords = [{
+    id: "reused-child",
+    type: "general-purpose",
+    description: "Original child",
+    status: "running",
+  }];
+  now += 5_000;
+  intervals[0].callback();
+  fixture.childEvents.get("subagents:started")({
+    id: "reused-child",
+    type: "general-purpose",
+    description: "Reused child",
+  });
+
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1, subagents: [{ id: "reused-child", type: "general-purpose", description: "Original child" }] },
+    { state: "active", subagentCount: 1, subagents: [{ id: "reused-child", type: "general-purpose", description: "Original child" }] },
+    { state: "active", subagentCount: 0 },
+    { state: "active", subagentCount: 1, subagents: [{ id: "reused-child", type: "general-purpose", description: "Reused child" }] },
+  ]);
+});
+
 test("extension reconciles late-published native subagent service on heartbeat", async (t) => {
   const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
   const previousService = globalThis[serviceSymbol];

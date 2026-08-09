@@ -343,6 +343,7 @@ const SETTLED_NOTIFICATION_COOLDOWN_MS = 120_000;
 const ACTIVITY_HEARTBEAT_INTERVAL_MS = 5_000;
 const ACTIVITY_REFRESH_MIN_MS = 10_000;
 const MAX_ACTIVITY_SUBAGENTS = 999;
+const MAX_TERMINAL_SUBAGENT_TOMBSTONES = 2048;
 
 // Managed workers use background subagents, whose native started and terminal
 // events share a run ID. Foreground runs lack a matching terminal ID, so they
@@ -936,6 +937,7 @@ export function createMechaMessagingExtension(pi, {
   let activityHeartbeatActive = false;
   let lastActivitySent;
   const runningSubagents = new Map();
+  const terminalSubagentTombstones = new Map();
   let settledNotificationRecipient;
   let settledNotificationEnabled = false;
   let compactionPolicy;
@@ -983,45 +985,114 @@ export function createMechaMessagingExtension(pi, {
     }
   }
 
-  function activeNativeSubagentRecords(service = globalThis[PI_SUBAGENTS_SERVICE] ?? subagentsService) {
-    return nativeSubagentRecords(service)
-      ?.filter((entry) => {
-        const status = typeof entry?.status === "string" ? entry.status.toLowerCase() : entry?.status;
-        return [undefined, "running", "queued", "active"].includes(status);
-      })
-      ?? undefined;
+  function nativeSubagentStatus(record) {
+    return typeof record?.status === "string" ? record.status.toLowerCase() : record?.status;
   }
 
-  function nativeSubagentStartedAtMs(record, fallbackMs) {
+  function isActiveNativeSubagentRecord(record) {
+    return [undefined, "running", "queued", "active"].includes(nativeSubagentStatus(record));
+  }
+
+  function isTerminalNativeSubagentRecord(record) {
+    return [
+      "completed", "complete", "done", "finished", "failed", "failure", "error", "errored",
+      "canceled", "cancelled", "aborted", "terminated", "stopped",
+    ].includes(nativeSubagentStatus(record));
+  }
+
+  function nativeSubagentExplicitStartedAtMs(record) {
     if (Number.isFinite(record?.startedAt)) return record.startedAt;
     if (typeof record?.startedAt === "string") {
       const parsed = Date.parse(record.startedAt);
       if (Number.isFinite(parsed)) return parsed;
     }
-    return fallbackMs;
+    return undefined;
+  }
+
+  function nativeSubagentStartedAtMs(record, fallbackMs) {
+    return nativeSubagentExplicitStartedAtMs(record) ?? fallbackMs;
+  }
+
+  function rememberTerminalSubagent(id, terminalAtMs = nowImpl()) {
+    if (typeof id !== "string" || id.length === 0) return false;
+    terminalSubagentTombstones.delete(id);
+    terminalSubagentTombstones.set(id, terminalAtMs);
+    while (terminalSubagentTombstones.size > MAX_TERMINAL_SUBAGENT_TOMBSTONES) {
+      terminalSubagentTombstones.delete(terminalSubagentTombstones.keys().next().value);
+    }
+    return runningSubagents.delete(id);
+  }
+
+  function clearTerminalSubagentTombstone(id) {
+    if (typeof id === "string" && id.length > 0) terminalSubagentTombstones.delete(id);
+  }
+
+  function isTerminalTombstonedNativeRecord(id, record) {
+    const terminalAtMs = terminalSubagentTombstones.get(id);
+    if (terminalAtMs === undefined) return false;
+    const startedAtMs = nativeSubagentExplicitStartedAtMs(record);
+    if (startedAtMs !== undefined && startedAtMs > terminalAtMs) {
+      terminalSubagentTombstones.delete(id);
+      return false;
+    }
+    return true;
+  }
+
+  function mergeNativeSubagentMetadata(existing, metadata, nowMs) {
+    if (existing?.eventTracked === true) {
+      return {
+        id: existing.id,
+        type: existing.type ?? metadata.type,
+        description: existing.description ?? metadata.description,
+        eventTracked: true,
+        serviceTracked: true,
+        startedAtMs: existing.startedAtMs ?? metadata.startedAtMs,
+        lastSeenMs: nowMs,
+      };
+    }
+    return {
+      ...metadata,
+      eventTracked: false,
+      serviceTracked: true,
+      startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs,
+      lastSeenMs: nowMs,
+    };
   }
 
   function reconcileNativeSubagentService() {
-    const source = activeNativeSubagentRecords();
+    const source = nativeSubagentRecords();
     if (!Array.isArray(source)) return false;
     const nowMs = nowImpl();
-    const runningIds = new Set();
+    const serviceIds = new Set();
     let changed = false;
+    // The service list can lag behind lifecycle events, so event-tracked children
+    // stay visible until a terminal status or lifecycle event removes them.
     for (const record of source) {
       const metadata = normalizeSubagentMetadata(record, nativeSubagentStartedAtMs(record, nowMs));
       if (metadata === undefined) continue;
-      runningIds.add(metadata.id);
-      const existing = runningSubagents.get(metadata.id);
-      const merged = { ...metadata, startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs, lastSeenMs: nowMs };
-      if (!sameSubagentMetadata(existing, merged)) {
-        runningSubagents.set(metadata.id, merged);
-        changed = true;
-      } else if (existing !== undefined) {
-        existing.lastSeenMs = nowMs;
+      serviceIds.add(metadata.id);
+      if (isTerminalNativeSubagentRecord(record)) {
+        if (rememberTerminalSubagent(metadata.id, nowMs)) changed = true;
+        settledNotifications.onChildDisposed(metadata.id);
+        continue;
       }
+      if (!isActiveNativeSubagentRecord(record)) continue;
+      if (isTerminalTombstonedNativeRecord(metadata.id, record)) {
+        if (runningSubagents.delete(metadata.id)) changed = true;
+        continue;
+      }
+      const existing = runningSubagents.get(metadata.id);
+      const merged = mergeNativeSubagentMetadata(existing, metadata, nowMs);
+      if (sameSubagentMetadata(existing, merged)) {
+        existing.lastSeenMs = nowMs;
+        existing.serviceTracked = true;
+        continue;
+      }
+      runningSubagents.set(metadata.id, merged);
+      changed = true;
     }
-    for (const id of runningSubagents.keys()) {
-      if (!runningIds.has(id)) {
+    for (const [id, metadata] of runningSubagents.entries()) {
+      if (metadata?.serviceTracked === true && metadata?.eventTracked !== true && !serviceIds.has(id)) {
         runningSubagents.delete(id);
         changed = true;
       }
@@ -1272,21 +1343,29 @@ export function createMechaMessagingExtension(pi, {
 
   pi.events.on("subagents:started", (event) => {
     const metadata = normalizeSubagentMetadata(event);
+    clearTerminalSubagentTombstone(metadata?.id);
     const existing = metadata === undefined ? undefined : runningSubagents.get(metadata.id);
-    const changed = metadata !== undefined && !sameSubagentMetadata(existing, metadata);
-    if (changed) runningSubagents.set(metadata.id, { ...metadata, startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs });
+    const tracked = metadata === undefined ? undefined : {
+      ...metadata,
+      eventTracked: true,
+      serviceTracked: existing?.serviceTracked === true,
+      startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs,
+    };
+    const changed = tracked !== undefined && !sameSubagentMetadata(existing, tracked);
+    if (changed) runningSubagents.set(metadata.id, tracked);
+    else if (existing !== undefined) existing.eventTracked = true;
     settledNotifications.onChildStarted(metadata?.id ?? event?.id);
     if (changed) refreshActivityState();
   });
   pi.events.on("subagents:completed", (event) => {
     const id = event?.id;
-    const changed = typeof id === "string" && id.length > 0 && runningSubagents.delete(id);
+    const changed = rememberTerminalSubagent(id);
     settledNotifications.onChildDisposed(id);
     if (changed) refreshActivityState();
   });
   pi.events.on("subagents:failed", (event) => {
     const id = event?.id;
-    const changed = typeof id === "string" && id.length > 0 && runningSubagents.delete(id);
+    const changed = rememberTerminalSubagent(id);
     settledNotifications.onChildDisposed(id);
     if (changed) refreshActivityState();
   });
