@@ -1,0 +1,76 @@
+{"__probe_event__": "transcript_sample", "__t__": 1786295492.33819, "payload": {"transcript_bytes": -1}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295493.347219, "payload": {"transcript_bytes": -1}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295494.349901, "payload": {"transcript_bytes": -1}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295495.354814, "payload": {"transcript_bytes": -1}}
+{"__probe_event__": "SessionStart", "__t__": 1786295495.6278179, "payload": {"session_id": "cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc", "transcript_path": "/Users/wolfgang/.claude/projects/-private-tmp-claude-501--Users-wolfgang-code-mecha-developer-016998dc-be3b-4512-a295-f5eaed1233bf-scratchpad-hookprobe/cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc.jsonl", "cwd": "/private/tmp/claude-501/-Users-wolfgang-code-mecha-developer/016998dc-be3b-4512-a295-f5eaed1233bf/scratchpad/hookprobe", "hook_event_name": "SessionStart", "source": "startup"}}
+{"__probe_event__": "UserPromptSubmit", "__t__": 1786295495.6630158, "payload": {"session_id": "cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc", "transcript_path": "/Users/wolfgang/.claude/projects/-private-tmp-claude-501--Users-wolfgang-code-mecha-developer-016998dc-be3b-4512-a295-f5eaed1233bf-scratchpad-hookprobe/cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc.jsonl", "cwd": "/private/tmp/claude-501/-Users-wolfgang-code-mecha-developer/016998dc-be3b-4512-a295-f5eaed1233bf/scratchpad/hookprobe", "prompt_id": "b3ae7d63-17cc-4a8c-a271-3252b56662e1", "permission_mode": "bypassPermissions", "hook_event_name": "UserPromptSubmit", "prompt": "Run exactly this one foreground bash command, then report only the number: grep -rc zzzqqqxyzzy /Users/wolfgang 2>/dev/null | wc -l"}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295496.364867, "payload": {"transcript_bytes": 17768}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295497.369262, "payload": {"transcript_bytes": 17768}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295498.379793, "payload": {"transcript_bytes": 17768}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295499.386391, "payload": {"transcript_bytes": 17768}}
+{"__probe_event__": "PreToolUse", "__t__": 1786295499.50117, "payload": {"session_id": "cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc", "transcript_path": "/Users/wolfgang/.claude/projects/-private-tmp-claude-501--Users-wolfgang-code-mecha-developer-016998dc-be3b-4512-a295-f5eaed1233bf-scratchpad-hookprobe/cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc.jsonl", "cwd": "/private/tmp/claude-501/-Users-wolfgang-code-mecha-developer/016998dc-be3b-4512-a295-f5eaed1233bf/scratchpad/hookprobe", "prompt_id": "b3ae7d63-17cc-4a8c-a271-3252b56662e1", "permission_mode": "bypassPermissions", "effort": {"level": "high"}, "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "grep -rc zzzqqqxyzzy /Users/wolfgang 2>/dev/null | wc -l", "description": "Count matching lines for zzzqqqxyzzy under /Users/wolfgang"}, "tool_use_id": "toolu_01Uhaf2bLUFNBgXRo5aUrFd9"}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295500.387278, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295501.389923, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295502.39186, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295503.401203, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295504.407734, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295505.41103, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295506.412462, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295507.412886, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295508.423091, "payload": {"transcript_bytes": 20946}}
+{"__probe_event__": "PostToolUse", "__t__": 1786295509.1628458, "payload": {"session_id": "cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc", "transcript_path": "/Users/wolfgang/.claude/projects/-private-tmp-claude-501--Users-wolfgang-code-mecha-developer-016998dc-be3b-4512-a295-f5eaed1233bf-scratchpad-hookprobe/cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc.jsonl", "cwd": "/private/tmp/claude-501/-Users-wolfgang-code-mecha-developer/016998dc-be3b-4512-a295-f5eaed1233bf/scratchpad/hookprobe", "prompt_id": "b3ae7d63-17cc-4a8c-a271-3252b56662e1", "permission_mode": "bypassPermissions", "effort": {"level": "high"}, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "grep -rc zzzqqqxyzzy /Users/wolfgang 2>/dev/null | wc -l", "description": "Count matching lines for zzzqqqxyzzy under /Users/wolfgang"}, "tool_response": {"stdout": "  180535", "stderr": "", "interrupted": false, "isImage": false, "noOutputExpected": false}, "tool_use_id": "toolu_01Uhaf2bLUFNBgXRo5aUrFd9", "duration_ms": 9619}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295509.423451, "payload": {"transcript_bytes": 21753}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295510.4338439, "payload": {"transcript_bytes": 21753}}
+{"__probe_event__": "Stop", "__t__": 1786295511.335032, "payload": {"session_id": "cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc", "transcript_path": "/Users/wolfgang/.claude/projects/-private-tmp-claude-501--Users-wolfgang-code-mecha-developer-016998dc-be3b-4512-a295-f5eaed1233bf-scratchpad-hookprobe/cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc.jsonl", "cwd": "/private/tmp/claude-501/-Users-wolfgang-code-mecha-developer/016998dc-be3b-4512-a295-f5eaed1233bf/scratchpad/hookprobe", "prompt_id": "b3ae7d63-17cc-4a8c-a271-3252b56662e1", "permission_mode": "bypassPermissions", "effort": {"level": "high"}, "hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": "180535", "background_tasks": [], "session_crons": []}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295511.434487, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "SessionEnd", "__t__": 1786295511.555372, "payload": {"session_id": "cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc", "transcript_path": "/Users/wolfgang/.claude/projects/-private-tmp-claude-501--Users-wolfgang-code-mecha-developer-016998dc-be3b-4512-a295-f5eaed1233bf-scratchpad-hookprobe/cd8eb964-a2fb-4a1f-9238-c0e2bc4fb4dc.jsonl", "cwd": "/private/tmp/claude-501/-Users-wolfgang-code-mecha-developer/016998dc-be3b-4512-a295-f5eaed1233bf/scratchpad/hookprobe", "prompt_id": "b3ae7d63-17cc-4a8c-a271-3252b56662e1", "hook_event_name": "SessionEnd", "reason": "other"}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295512.44321, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295513.452936, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295514.460381, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295515.461956, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295516.470229, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295517.476894, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295518.485429, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295519.493593, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295520.4946802, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295521.503595, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295522.5092218, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295523.5159209, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295524.523583, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295525.53166, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295526.532779, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295527.542451, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295528.550127, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295529.558742, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295530.566187, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295531.5733771, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295532.577287, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295533.584878, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295534.594338, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295535.6017852, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295536.612313, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295537.62246, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295538.6313128, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295539.6355572, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295540.6452951, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295541.653319, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295542.663679, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295543.67236, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295544.674241, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295545.6758049, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295546.6861289, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295547.696359, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295548.701497, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295549.712068, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295550.721725, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295551.731383, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295552.7401779, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295553.743597, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295554.7540412, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295555.7568169, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295556.763904, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295557.77263, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295558.783093, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295559.792492, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295560.801801, "payload": {"transcript_bytes": 23314}}
+{"__probe_event__": "transcript_sample", "__t__": 1786295561.8100858, "payload": {"transcript_bytes": 23314}}

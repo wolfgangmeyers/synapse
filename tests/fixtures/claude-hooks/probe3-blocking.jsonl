@@ -1,0 +1,7 @@
+{"__probe_event__": "PreToolUse", "__t__": 1786292181.653198, "__t_end__": 1786292184.658676, "payload": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "toolu_01LiXXX4UyTXToLTZssf7zWs", "agent_id": null}}
+{"__probe_event__": "PostToolUse", "__t__": 1786292185.1415958, "__t_end__": 1786292188.1453161, "payload": {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "toolu_01LiXXX4UyTXToLTZssf7zWs", "agent_id": null}}
+{"__probe_event__": "PreToolUse", "__t__": 1786292189.7033741, "__t_end__": 1786292192.708547, "payload": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "toolu_01K4TQwq9299uwp7kXhW6e7g", "agent_id": null}}
+{"__probe_event__": "PostToolUse", "__t__": 1786292192.763904, "__t_end__": 1786292195.766469, "payload": {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "toolu_01K4TQwq9299uwp7kXhW6e7g", "agent_id": null}}
+{"__probe_event__": "PreToolUse", "__t__": 1786292197.321492, "__t_end__": 1786292200.324107, "payload": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "toolu_0162vkKy2Mv6USq2phDVZAWA", "agent_id": null}}
+{"__probe_event__": "PostToolUse", "__t__": 1786292200.384691, "__t_end__": 1786292203.385366, "payload": {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "toolu_0162vkKy2Mv6USq2phDVZAWA", "agent_id": null}}
+{"__probe_event__": "Stop", "__t__": 1786292204.613276, "__t_end__": 1786292207.617428, "payload": {"hook_event_name": "Stop", "tool_name": null, "tool_use_id": null, "agent_id": null}}

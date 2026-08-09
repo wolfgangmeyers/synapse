@@ -6,6 +6,7 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { assertAgentId } from "../pi-extensions/mailbox-client.js";
 import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import {
   claudeMailboxPrompt,
@@ -237,4 +238,18 @@ test("body-free sidecar logs rotate at configured bound and omit message bodies"
   await writeFile(logger.logPath, "x".repeat(81));
   rotateBodyFreeLog(logger.logPath, 80);
   assert.equal((await stat(`${logger.logPath}.1`)).size, 81);
+});
+
+// Self-registered Claude sessions use dotted agent ids so they cannot collide with a managed
+// worker's id, which is its tmux window name and can never contain a dot. assertAgentId is what
+// keeps a dotted id from ever reaching a mail-injecting sidecar. If someone widens the pattern to
+// allow dots as a harmless-looking relaxation, the two id spaces merge and an ad hoc session can
+// register under a live worker's name. This test is the tripwire for that.
+test("assertAgentId rejects the dotted ids used by self-registered sessions", () => {
+  assert.throws(() => assertAgentId("session.claude-activity-indicators.4821"), /agent identity is invalid/);
+  assert.throws(() => assertAgentId("session.supervisor.1"), /agent identity is invalid/);
+  assert.throws(() => assertAgentId("a.b"), /agent identity is invalid/);
+  // The protocol itself allows dots, so this is a deliberate narrowing and not a shared rule.
+  assert.equal(assertAgentId("claude-activity-indicators"), "claude-activity-indicators");
+  assert.equal(assertAgentId("supervisor"), "supervisor");
 });
