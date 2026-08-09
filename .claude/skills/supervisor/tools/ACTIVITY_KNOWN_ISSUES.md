@@ -7,6 +7,44 @@ looks like from outside, and what the evidence is, because every item here prese
 Read `tests/fixtures/claude-hooks/README.md` first. The fixtures are real captured payloads, and
 most of these are testable against them.
 
+**Test anything protocol-shaped against the running router, not against the schema file.** On
+2026-08-09 the router rejected every `compacting` activity frame with `invalid_frame` and closed
+the socket. `protocol/v1/schema.json` was correct and had been for a day. The stale thing was the
+process: the router had been running since 21:47:42 on 2026-08-08 and the commit that added
+compaction to the schema landed at 21:56:02, nine minutes later. Reading the file would have
+confirmed the frame was valid and been useless. Sending one frame per state at the live router and
+watching what came back is what found it.
+
+## A sidecar that exits mid-compaction leaves the agent compacting for ever
+
+**Take this one first, and it gates a router restart.** Today it is unreachable, because the
+running router rejects every `compacting` frame before it can set anything (see the note above).
+Restarting the router is the fix for that, and it also turns this path on for the first time. So
+this is smaller than the pane-sharing item below and it comes first, because everything else wants
+that restart.
+
+**What breaks.** Mail delivery for that agent stays paused, permanently, with a live-looking
+session.
+
+`stop()` closes the socket without publishing a final settled frame. The router deliberately skips
+clearing activity for a compacting agent on disconnect (`harness/router.js:295`) and gives that
+state no expiry (`:1101`), and the next registration for that id inherits `deliveryPaused: true`
+(`:409`). The ten-minute bound in `activity_state.mjs` does not help, because the process holding
+that state is gone.
+
+**What it looks like.** An agent stuck showing compacting. Mail to it is accepted and queued, and
+`mailbox_send.py` reports success, so the sender sees nothing wrong.
+
+**Why it is real.** The router lines above were read directly. Reaching it needs a sidecar to stop
+between `PreCompact` and `PostCompact`, which is a ~20 to 40 second window per compaction based on
+`probe7-compact.jsonl` and `probe8-postcompact.jsonl`.
+
+**None of the compacting behavior has ever run in production.** The router has rejected every
+`compacting` frame since 2026-08-08, so the mail pause, its release on a non-compacting frame, and
+the absorbing state built to protect it have never once fired. Everything asserted about them here
+and in the code comments is reasoning from the router source, not observation. Treat it that way
+the first time it runs for real.
+
 ## Two Claude sessions sharing one pane
 
 **What breaks.** The agent's dot goes out while it is still working, and its subagent badge
@@ -29,24 +67,6 @@ Any worker that uses headless sessions hits this on its first one.
 **Where to start.** The marker names one agent per pane, and the hook has no way to tell which
 session it is running under. `session_id` is on every payload and is the thing that distinguishes
 them.
-
-## A sidecar that exits mid-compaction leaves the agent compacting for ever
-
-**What breaks.** Mail delivery for that agent stays paused, permanently, with a live-looking
-session.
-
-`stop()` closes the socket without publishing a final settled frame. The router deliberately skips
-clearing activity for a compacting agent on disconnect (`harness/router.js:295`) and gives that
-state no expiry (`:1101`), and the next registration for that id inherits `deliveryPaused: true`
-(`:409`). The ten-minute bound in `activity_state.mjs` does not help, because the process holding
-that state is gone.
-
-**What it looks like.** An agent stuck showing compacting. Mail to it is accepted and queued, and
-`mailbox_send.py` reports success, so the sender sees nothing wrong.
-
-**Why it is real.** The router lines above were read directly. Reaching it needs a sidecar to stop
-between `PreCompact` and `PostCompact`, which is a ~20 to 40 second window per compaction based on
-`probe7-compact.jsonl` and `probe8-postcompact.jsonl`.
 
 ## `MECHA_ACTIVITY_DIR` is read from two different environments
 
