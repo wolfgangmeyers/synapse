@@ -56,7 +56,8 @@ input:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3p
   border-right: 1px solid var(--line);
   background: var(--canvas);
   padding: 22px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .brand, .conversation-header, .agent-row, .status-card, .composer-row {
   display: flex;
@@ -135,31 +136,41 @@ p:empty { display: none; }
   font-weight: 800;
 }
 .agent-filter { margin: 0 0 12px; }
-.agents { display: grid; gap: 10px; }
+.agents { display: grid; gap: 10px; min-width: 0; overflow-x: hidden; }
 .agent-row {
   width: 100%;
-  gap: 14px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  gap: 10px;
   text-align: left;
-  padding: 14px;
+  padding: 14px 44px 14px 14px;
   border-radius: 20px;
   background: var(--surface);
   color: var(--text);
 }
 .agent-row.active { background: var(--surface-raised); outline: 1px solid rgba(157,168,255,0.34); }
 .agent-row.working { background: linear-gradient(135deg, rgba(157,168,255,0.22), rgba(120,224,205,0.14)), var(--surface); }
-.agent-row .meta { display: block; color: var(--muted); font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.agent-row > span:not(.avatar):not(.working-indicator) { min-width: 0; overflow: hidden; flex: 1 1 auto; }
+.agent-row strong, .agent-row .meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-row .meta { color: var(--muted); font-size: 13px; font-weight: 500; }
 .working-indicator {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  margin-left: auto;
-  padding: 6px 10px;
+  justify-content: center;
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  padding: 0;
   border-radius: 999px;
   background: linear-gradient(120deg, rgba(157,168,255,0.22), rgba(120,224,205,0.24), rgba(157,168,255,0.22));
   background-size: 220% 100%;
   color: var(--text);
-  font-size: 12px;
-  font-weight: 800;
   animation: working-gradient 1.8s ease-in-out infinite;
 }
 .working-indicator span {
@@ -169,6 +180,7 @@ p:empty { display: none; }
   background: var(--secondary);
   box-shadow: 0 0 0 0 rgba(120,224,205,0.6);
   animation: working-pulse 1.2s ease-out infinite;
+  flex: 0 0 auto;
 }
 .avatar {
   display: grid;

@@ -384,7 +384,7 @@ function renderAgents() {
     const row = document.createElement("button");
     row.type = "button";
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}`;
-    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span><strong>${escapeHtml(humanName(peer))}</strong><span class="meta">${escapeHtml(peer)} · ${active ? "Working" : "Available"}</span></span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span>Working</span>' : ""}`;
+    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span><strong>${escapeHtml(humanName(peer))}</strong><span class="meta">${escapeHtml(peer)}</span></span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     return row;
   }));
@@ -459,7 +459,7 @@ function renderConversation() {
   elements.peerName.textContent = peer ? humanName(peer) : "Pick an agent";
   const selectedAgent = state.agents.find((agent) => agent.agent_id === peer);
   const active = selectedAgent?.activity_state === "active";
-  elements.peerDetail.textContent = peer ? `${peer} · ${active ? "Working" : "Available"} · ${displayRouter(state.routerUrl)}` : "Connected agents appear on the left.";
+  elements.peerDetail.textContent = peer ? `${peer} · ${displayRouter(state.routerUrl)}` : "Connected agents appear on the left.";
   elements.peerAvatar.classList.toggle("working", active);
   elements.draft.disabled = !peer;
   elements.attachImage.disabled = !peer;
