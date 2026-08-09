@@ -58,3 +58,5 @@ This policy is intentionally portable. Keep these out of it:
 - role mechanics that belong in supervisor or worker skills.
 
 When a habit proves broadly useful across machines, add it here. When it is role-specific, put it in the role skill. When it is project or machine knowledge, put it in the KB or repo instructions.
+
+When installing this policy on a machine, do a one-time extraction pass over that machine's `~/AGENTS.md`: move portable Wolfgang agent policies into this file and push them upstream. After that, new portable policy decisions should be made here directly, not left only in machine-local instructions.
