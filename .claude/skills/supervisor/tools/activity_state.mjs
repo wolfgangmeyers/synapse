@@ -26,6 +26,13 @@ export const INTERRUPT_GRACE_MS = 8_000;
 // A minute is long enough that a slow first thought does not flicker the dot.
 export const IDLE_SILENCE_MS = 60_000;
 
+// Compacting has no expiry at the router and pauses mail delivery while it lasts, so a lost
+// `compacted` record would pause that worker's mail for the rest of the session with no recovery
+// and no symptom. Compaction was measured at 17 and 36 seconds; this is far above both, so it
+// cannot cut a real one short, and it is the difference between a stuck indicator and a stuck
+// mailbox.
+export const COMPACTING_LIMIT_MS = 10 * 60 * 1_000;
+
 // Last resort, for when the transcript cannot be read at all and interrupts are undetectable.
 // Sized against the longest real command here, a ~90 minute eval sweep, with a wide margin.
 export const SILENCE_LIMIT_MS = 6 * 60 * 60 * 1_000;
@@ -39,6 +46,7 @@ const SETTLING_NOTIFICATIONS = new Set(["idle_prompt", "permission_prompt"]);
 export function createActivityState() {
   let state = "idle";
   let sessionId;
+  let compactingSinceMs;
   let lastHookMs;
   let lastSize;
   let pendingGrowthMs;
@@ -107,9 +115,11 @@ export function createActivityState() {
         return;
       case "compacting":
         state = "compacting";
+        compactingSinceMs = nowMs;
         return;
       case "compacted":
         state = "idle";
+        compactingSinceMs = undefined;
         return;
       case "subagent_stop": {
         // Compaction runs its summarizer as a subagent, so a stop arrives for an id that never
@@ -184,6 +194,15 @@ export function createActivityState() {
 
   // Time-driven transitions. Separate from apply() so the caller can tick without a record.
   function tick(nowMs) {
+    // Checked before the active-only guard below, because this is the one time-based transition
+    // that has to fire while the agent is NOT active.
+    if (state === "compacting" && compactingSinceMs !== undefined
+      && nowMs - compactingSinceMs >= COMPACTING_LIMIT_MS) {
+      state = "idle";
+      compactingSinceMs = undefined;
+      clearTurn();
+      return state;
+    }
     if (state !== "active") return state;
     const interrupted = pendingGrowthMs !== undefined
       && nowMs - pendingGrowthMs >= INTERRUPT_GRACE_MS;
@@ -213,6 +232,10 @@ export function createActivityState() {
         .map(([id, label]) => ({ id, description: label }));
     },
     inflightCount: () => inflight.size,
-    exhausted: (nowMs) => silentFor(nowMs) > SILENCE_LIMIT_MS,
+    // Never report exhausted while compacting: the router does not expire that state, so giving up
+    // on refreshes there would leave mail paused rather than letting it lapse.
+    exhausted: (nowMs) => state !== "compacting" && silentFor(nowMs) > SILENCE_LIMIT_MS,
+    compactingStuck: (nowMs) => state === "compacting" && compactingSinceMs !== undefined
+      && nowMs - compactingSinceMs >= COMPACTING_LIMIT_MS,
   };
 }
