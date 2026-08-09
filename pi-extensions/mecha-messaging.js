@@ -17,6 +17,7 @@ const DEFAULT_PENDING_REINJECTION_DELAY_MS = 5_000;
 const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
 const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
 const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
+const POST_RELOAD_MESSAGE_TYPE = "mecha-post-reload-handoff";
 const COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY";
 const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
 const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
@@ -983,7 +984,28 @@ export function createMechaMessagingExtension(pi, {
       command: "/mecha-reload-runtime",
       commandRegistered: reloadCommandRegistered,
       canQueueReload: reloadCommandRegistered && typeof pi.sendUserMessage === "function",
+      canSendPostReloadHandoff: typeof pi.sendMessage === "function",
     };
+  }
+
+  function sendPostReloadHandoff() {
+    if (typeof pi.sendMessage !== "function") return { sent: false, error: new Error("Pi follow-up messages are unavailable in this context") };
+    try {
+      pi.sendMessage({
+        customType: POST_RELOAD_MESSAGE_TYPE,
+        content: "Pi runtime reload completed. Resume from the latest mailbox/task state and continue the next pending supervisor action.",
+        display: true,
+        details: { command: "/mecha-reload-runtime" },
+      }, { deliverAs: "followUp", triggerTurn: true });
+      return { sent: true };
+    } catch (error) {
+      // Reload already succeeded; report the wake failure without turning reload into a command failure.
+      return { sent: false, error };
+    }
+  }
+
+  function reloadWakeRequested(args) {
+    return typeof args === "string" && /(?:^|\s)--(?:wake|resume)(?:\s|$)/.test(args);
   }
 
   function compactionStatus(context) {
@@ -1141,12 +1163,16 @@ export function createMechaMessagingExtension(pi, {
   if (typeof pi.registerCommand === "function") {
     pi.registerCommand("mecha-reload-runtime", {
       description: "Reload Pi extensions, skills, prompts, themes, and context files",
-      handler: async (_args, commandContext) => {
+      handler: async (args, commandContext) => {
         if (typeof commandContext?.reload !== "function") {
           commandContext?.ui?.notify?.("Self-reload is unavailable in this Pi context; use /reload manually.", "error");
           return;
         }
         await commandContext.reload();
+        if (reloadWakeRequested(args)) {
+          const wake = sendPostReloadHandoff();
+          if (wake.sent !== true && wake.error !== undefined) commandContext?.ui?.notify?.(`Pi reload completed, but post-reload wake failed: ${wake.error.message}`, "error");
+        }
         return;
       },
     });
@@ -1159,6 +1185,7 @@ export function createMechaMessagingExtension(pi, {
     description: "Inspect or request Pi self-reload. Reload refreshes extensions, skills, prompts, themes, and context files without terminal intervention.",
     parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
       action: { type: "string", enum: ["status", "reload"], description: "status reports reload support; reload queues a self-reload command for the next safe Pi boundary." },
+      wakeAfterReload: { type: "boolean", description: "When true, queue a durable follow-up after reload completes so the session resumes instead of staying idle." },
     } },
     async execute(_toolCallId, input) {
       try {
@@ -1166,8 +1193,12 @@ export function createMechaMessagingExtension(pi, {
         if (input.action === "reload") {
           if (!status.commandRegistered) throw new Error("Self-reload is unavailable: Pi command registration is not available.");
           if (!status.canQueueReload) throw new Error("Self-reload is unavailable: Pi cannot queue follow-up user messages from this extension.");
-          pi.sendUserMessage(status.command, { deliverAs: "followUp" });
-          return { content: [{ type: "text", text: "Self-reload queued for Pi's next safe follow-up boundary." }], details: { ...status, reloadState: "queued_as_follow_up" } };
+          const command = input.wakeAfterReload === true ? `${status.command} --wake` : status.command;
+          pi.sendUserMessage(command, { deliverAs: "followUp" });
+          const text = input.wakeAfterReload === true
+            ? "Self-reload queued for Pi's next safe follow-up boundary with post-reload wake enabled."
+            : "Self-reload queued for Pi's next safe follow-up boundary.";
+          return { content: [{ type: "text", text }], details: { ...status, reloadState: "queued_as_follow_up", wakeAfterReload: input.wakeAfterReload === true } };
         }
         if (input.action !== "status") throw new Error("unsupported mecha_reload action");
         return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
