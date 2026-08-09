@@ -8,13 +8,14 @@ import os
 import pathlib
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import worker_capture
 import worker_launch
@@ -316,6 +317,10 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         from an unresolved __file__ carries the symlink through to node. This worktree
         has no symlink component, so the test builds one and re-imports worker_launch
         through it; asserting on os.path.realpath alone would not reproduce the failure.
+
+        The subprocess inherits the real HOME, so it patches _claude_pretrust_workspace:
+        without that it would record a temporary directory in the developer's own
+        ~/.claude.json, and back that file up, every time the suite ran.
         """
         symlinked_tools = self.tmp_path / "supervisor-tools-symlink"
         symlinked_tools.symlink_to(pathlib.Path(worker_launch.__file__).resolve().parent)
@@ -342,8 +347,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
                               side_effect=lambda _w, command: commands.append(command)), \\
                  patch.object(worker_launch, "send_enter"), \\
                  patch.object(worker_launch.time, "sleep"), \\
-                 patch.object(worker_launch.os, "makedirs"), \\
-                 patch.object(worker_launch.os.path, "exists", return_value=True), \\
+                 patch.object(worker_launch, "_claude_pretrust_workspace"), \\
                  contextlib.redirect_stdout(io.StringIO()):
                 worker_launch.main()
 
@@ -398,27 +402,793 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         extension.write_text("export default () => {};\n", encoding="utf-8")
         return extension
 
-    def _run_main(self, window, *extra_args, agent="claude"):
+    def _run_main(self, window, *extra_args, agent="claude", home=None):
+        """Run main() without letting it write anything into the developer's home.
+
+        Two independent guards, because either alone is a denylist. HOME points at a
+        temporary directory, so anything main() writes under ~ lands there whether or not
+        this method knows about it. On top of that the three pretrust helpers are patched
+        by name: the Codex one creates ~/.codex/ and writes its config with no exists guard,
+        and their mocks
+        land on self.pretrust so the wiring tests can assert which runtime called which.
+
+        self.calls records the order of the calls that have to happen in order.
+        """
         argv = ["worker_launch.py", "--window", window, "--dir", self.tmpdir.name]
         if agent is not None:
             argv.extend(["--agent", agent])
         argv.extend(extra_args)
         commands = []
         output = io.StringIO()
-        with patch.object(worker_launch.sys, "argv", argv), \
+        home = home or (self.tmp_path / f"home-{window}")
+        home.mkdir(parents=True, exist_ok=True)
+        order = Mock()
+        with patch.dict(os.environ, {"HOME": str(home)}, clear=False), \
+             patch.object(worker_launch.sys, "argv", argv), \
              patch.object(worker_launch, "window_exists", return_value=False), \
              patch.object(worker_launch, "ensure_session", return_value=False), \
              patch.object(worker_launch, "new_window"), \
-             patch.object(worker_launch, "send_text", side_effect=lambda _window, command: commands.append(command)), \
+             patch.object(worker_launch, "send_text", side_effect=lambda _window, command: commands.append(command)) as send_text, \
              patch.object(worker_launch, "send_enter"), \
              patch.object(worker_launch.subprocess, "run"), \
              patch.object(worker_launch.subprocess, "Popen"), \
              patch.object(worker_launch.time, "sleep"), \
-             patch.object(worker_launch.os, "makedirs"), \
-             patch.object(worker_launch.os.path, "exists", return_value=True), \
-             contextlib.redirect_stdout(output):
+             patch.object(worker_launch, "_claude_pretrust_workspace") as claude_pretrust, \
+             patch.object(worker_launch, "_cursor_pretrust_workspace") as cursor_pretrust, \
+             patch.object(worker_launch, "_codex_pretrust_workspace") as codex_pretrust, \
+             contextlib.redirect_stdout(output), \
+             contextlib.redirect_stderr(io.StringIO()):
+            order.attach_mock(claude_pretrust, "pretrust")
+            order.attach_mock(send_text, "send_text")
+            self.pretrust = {
+                "claude": claude_pretrust,
+                "cursor": cursor_pretrust,
+                "codex": codex_pretrust,
+            }
+            self.home = home
+            self.calls = order
             worker_launch.main()
         return commands, output.getvalue()
+
+    def test_a_claude_launch_marks_its_own_work_directory_trusted_before_it_starts(self):
+        # Ordering is the whole point. Recording trust after the agent has been told to
+        # run puts back the race this exists to close, and assert_called_once_with alone
+        # says nothing about when.
+        with patch.dict(os.environ, {
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            self._run_main("claude-worker", agent="claude")
+
+        self.pretrust["claude"].assert_called_once_with(self.tmpdir.name)
+        self.pretrust["cursor"].assert_not_called()
+        self.pretrust["codex"].assert_not_called()
+        self.assertEqual([name for name, _, _ in self.calls.mock_calls],
+                         ["pretrust", "send_text"])
+
+    def test_a_real_launch_leaves_its_work_directory_trusted_on_disk(self):
+        """The claim end to end, with the real helper, observed in the file.
+
+        Everything else either drives the helper directly or asserts a mock was called.
+        This is the only place main()'s unresolved abspath and the helper's resolved key
+        meet, and it is what proves a launch actually records trust.
+        """
+        home = self.tmp_path / "real-launch-home"
+        home.mkdir()
+        argv = [
+            "worker_launch.py", "--window", "claude-worker",
+            "--dir", self.tmpdir.name, "--agent", "claude",
+        ]
+        commands = []
+        with patch.dict(os.environ, {
+            "HOME": str(home),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists", return_value=False), \
+             patch.object(worker_launch, "ensure_session", return_value=False), \
+             patch.object(worker_launch, "new_window"), \
+             patch.object(worker_launch, "send_text",
+                          side_effect=lambda _window, command: commands.append(command)), \
+             patch.object(worker_launch, "send_enter"), \
+             patch.object(worker_launch.time, "sleep"), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(stderr := io.StringIO()):
+            worker_launch.main()
+
+        written = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+        entry = written["projects"][os.path.realpath(self.tmpdir.name)]
+        self.assertIs(entry["hasTrustDialogAccepted"], True)
+        self.assertEqual(len(commands), 1)
+        # This home has no settings.json, so the bypass permissions warning is due. It
+        # reaching stderr is what proves main() calls that check against the real path,
+        # which the direct tests of the helper cannot show.
+        self.assertIn("bypass permissions", stderr.getvalue())
+
+    def test_a_launch_stays_quiet_when_the_user_settings_answer_the_bypass_dialog(self):
+        # Pins which file the launcher reads. A home with no settings at all warns either
+        # way, so only a home where the key is present and true can show that the check
+        # is pointed at ~/.claude/settings.json and not somewhere else.
+        home = self.tmp_path / "answered-home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps({"skipDangerousModePermissionPrompt": True}), encoding="utf-8"
+        )
+        argv = [
+            "worker_launch.py", "--window", "claude-worker",
+            "--dir", self.tmpdir.name, "--agent", "claude",
+        ]
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {
+            "HOME": str(home),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists", return_value=False), \
+             patch.object(worker_launch, "ensure_session", return_value=False), \
+             patch.object(worker_launch, "new_window"), \
+             patch.object(worker_launch, "send_text"), \
+             patch.object(worker_launch, "send_enter"), \
+             patch.object(worker_launch.time, "sleep"), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(stderr):
+            worker_launch.main()
+
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_a_launch_without_skip_permissions_does_not_warn_about_the_bypass_dialog(self):
+        # The warning is about --dangerously-skip-permissions. Without that flag there is
+        # no bypass dialog to warn about, and an unconditional warning would be noise.
+        home = self.tmp_path / "no-skip-home"
+        home.mkdir()
+        argv = [
+            "worker_launch.py", "--window", "claude-worker",
+            "--dir", self.tmpdir.name, "--agent", "claude", "--no-skip-permissions",
+        ]
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {
+            "HOME": str(home),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists", return_value=False), \
+             patch.object(worker_launch, "ensure_session", return_value=False), \
+             patch.object(worker_launch, "new_window"), \
+             patch.object(worker_launch, "send_text"), \
+             patch.object(worker_launch, "send_enter"), \
+             patch.object(worker_launch.time, "sleep"), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(stderr):
+            worker_launch.main()
+
+        self.assertNotIn("bypass permissions", stderr.getvalue())
+
+    def test_every_other_runtime_leaves_the_claude_config_alone(self):
+        extension = self._pi_mailbox_extension()
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            self._run_main("pi-worker", agent="pi")
+        self.pretrust["claude"].assert_not_called()
+
+        self._run_main("codex-worker", agent="codex")
+        self.pretrust["claude"].assert_not_called()
+        self.pretrust["codex"].assert_called_once_with(self.tmpdir.name)
+
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"):
+            self._run_main("cursor-worker", agent="cursor")
+        self.pretrust["claude"].assert_not_called()
+        self.pretrust["cursor"].assert_called_once_with(self.tmpdir.name)
+
+    def test_a_launch_writes_no_settings_file_under_the_claude_projects_directory(self):
+        """~/.claude/projects holds transcripts, and Claude Code reads no settings there.
+
+        HOME points at a temporary tree and the os patches are gone. Restoring the deleted
+        settings.json block makes this test fail, which was checked.
+        """
+        home = self.tmp_path / "settings-probe-home"
+        home.mkdir()
+        with patch.dict(os.environ, {
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            # home= is what main() actually runs against. Patching HOME around this call
+            # instead would be overwritten by _run_main's own redirect, and both
+            # assertions below would then read a directory nothing ever wrote to.
+            self._run_main("claude-worker", agent="claude", home=home)
+
+        self.assertEqual(list(home.rglob("settings.json")), [])
+        self.assertFalse((home / ".claude" / "projects").exists())
+
+    def test_a_config_the_helper_cannot_use_still_launches_the_worker(self):
+        """The helper never blocks the launch.
+
+        Runs the real helper, not a mock, because the promise being tested is that nothing
+        it does can stop main() from reaching send_text.
+        """
+        home = self.tmp_path / "unusable-config-home"
+        home.mkdir()
+        config = home / ".claude.json"
+        config.write_text("{not json", encoding="utf-8")
+
+        argv = [
+            "worker_launch.py", "--window", "claude-worker",
+            "--dir", self.tmpdir.name, "--agent", "claude",
+        ]
+        commands = []
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {
+            "HOME": str(home),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists", return_value=False), \
+             patch.object(worker_launch, "ensure_session", return_value=False), \
+             patch.object(worker_launch, "new_window"), \
+             patch.object(worker_launch, "send_text",
+                          side_effect=lambda _window, command: commands.append(command)), \
+             patch.object(worker_launch, "send_enter"), \
+             patch.object(worker_launch.time, "sleep"), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(stderr):
+            worker_launch.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn("claude --dangerously-skip-permissions", commands[0])
+        self.assertIn("workspace trust", stderr.getvalue())
+        self.assertEqual(config.read_text(encoding="utf-8"), "{not json")
+
+
+class ClaudeWorkspaceTrustTest(unittest.TestCase):
+    """The launcher records workspace trust so Claude Code never opens its trust dialog.
+
+    Measured against Claude Code 2.1.226: the dialog is controlled by
+    projects.<resolved path>.hasTrustDialogAccepted in ~/.claude.json. An entry written
+    under an unresolved spelling of a path containing a symlink does not suppress it, and
+    the dialog itself prints the resolved path.
+
+    ~/.claude.json is the developer's live configuration, so every test here points the
+    helper at a file inside a temporary directory. Nothing in this class may touch the
+    real home directory.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.tmp_path = pathlib.Path(self.tmpdir.name)
+        self.config = self.tmp_path / "claude.json"
+        self.backup = self.tmp_path / (
+            "claude.json" + worker_launch.CLAUDE_CONFIG_BACKUP_SUFFIX
+        )
+        self.work_dir = self.tmp_path / "worktree"
+        self.work_dir.mkdir()
+
+    def _trust(self, work_dir=None, config_path=None):
+        """Run the helper and return whatever it wrote to stderr."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            worker_launch._claude_pretrust_workspace(
+                str(work_dir if work_dir is not None else self.work_dir),
+                str(config_path if config_path is not None else self.config),
+            )
+        return stderr.getvalue()
+
+    def _key(self):
+        return os.path.realpath(self.work_dir)
+
+    def _written(self):
+        return json.loads(self.config.read_text(encoding="utf-8"))
+
+    def _write_config(self, config):
+        self.config.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    def test_an_absent_config_is_created_private_with_a_full_new_project_entry(self):
+        self.assertEqual(self._trust(), "")
+
+        written = self._written()
+        self.assertEqual(list(written), ["projects"])
+        # All nine fields Claude Code 2.1.226 puts on a fresh project. It backfills these
+        # only when the whole entry is missing, so a short entry written here stays short:
+        # an eight field entry still had no mcpContextUris after a full session ran there.
+        self.assertEqual(written["projects"], {self._key(): {
+            "allowedTools": [],
+            "disabledMcpjsonServers": [],
+            "enabledMcpjsonServers": [],
+            "hasClaudeMdExternalIncludesApproved": False,
+            "hasClaudeMdExternalIncludesWarningShown": False,
+            "hasTrustDialogAccepted": True,
+            "mcpContextUris": [],
+            "mcpServers": {},
+            "projectOnboardingSeenCount": 0,
+        }})
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+
+    def test_a_config_with_no_projects_key_gains_one_and_keeps_its_other_keys(self):
+        # config.get("projects", {}) would hand back a detached dict here, so the file
+        # would be rewritten with no trust entry at all.
+        self._write_config({"numStartups": 42})
+
+        self._trust()
+
+        written = self._written()
+        self.assertEqual(written["numStartups"], 42)
+        self.assertIs(written["projects"][self._key()]["hasTrustDialogAccepted"], True)
+
+    def test_every_other_top_level_key_and_project_survives_unchanged(self):
+        original = {
+            "numStartups": 42,
+            "oauthAccount": {"emailAddress": "someone@example.com"},
+            "projects": {
+                "/somewhere/else": {"hasTrustDialogAccepted": True, "lastCost": 1.5},
+            },
+        }
+        self._write_config(original)
+
+        self._trust()
+
+        written = self._written()
+        written["projects"].pop(self._key())
+        self.assertEqual(written, original)
+
+    def test_an_existing_entry_keeps_its_other_fields_and_only_trust_flips(self):
+        entry = {
+            "hasTrustDialogAccepted": False,
+            "lastCost": 2.5,
+            "allowedTools": ["Bash"],
+            "aFieldAFutureVersionAdded": {"kept": True},
+        }
+        self._write_config({"projects": {self._key(): entry}})
+
+        self._trust()
+
+        self.assertEqual(
+            self._written()["projects"][self._key()],
+            {**entry, "hasTrustDialogAccepted": True},
+        )
+
+    def test_an_already_trusted_directory_is_not_rewritten_and_leaves_no_backup(self):
+        self._write_config({"projects": {self._key(): {"hasTrustDialogAccepted": True}}})
+        before = self.config.read_bytes()
+
+        # Comparing bytes alone is weak here: the helper emits the same formatting
+        # _write_config does, so a rewrite would be byte-identical. Watching os.replace is
+        # what says no write happened at all.
+        with patch.object(worker_launch.os, "replace") as replace:
+            self._trust()
+
+        replace.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertFalse(self.backup.exists())
+
+    def test_the_entry_is_keyed_by_the_resolved_path_not_the_symlink_spelling(self):
+        # The fact the whole fix turns on: a trust entry under the symlink spelling does
+        # not suppress the dialog, and the dialog prints the resolved path.
+        link = self.tmp_path / "worktree-link"
+        link.symlink_to(self.work_dir)
+
+        self._trust(work_dir=link)
+
+        self.assertIn(self._key(), self._written()["projects"])
+        self.assertNotIn(str(link), self._written()["projects"])
+
+    def test_an_unparseable_config_is_left_alone_and_the_warning_says_what_to_do(self):
+        self.config.write_text("{not json", encoding="utf-8")
+        before = self.config.read_bytes()
+
+        warning = self._trust()
+
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertFalse(self.backup.exists())
+        self.assertIn(str(self.work_dir), warning)
+        self.assertIn(str(self.config), warning)
+        self.assertIn("Expecting property name", warning)
+        self.assertIn("before sending the worker its first message", warning)
+
+    def test_shapes_the_helper_does_not_understand_are_left_alone(self):
+        """A file can parse as JSON and still have a shape the helper cannot use.
+
+        The warning has to name which shape was wrong. Every one of these ends in an
+        exception either way, so asserting only that the file survived would pass even if
+        the checks were deleted and an incidental AttributeError did the work; the
+        operator would get a message about an AttributeError and no reason.
+        """
+        for name, content, reason in (
+            ("the file is empty", "", "Expecting value"),
+            ("the file is whitespace only", "   \n\t ", "Expecting value"),
+            (
+                # json.loads accepts a bare Infinity and json.dumps would write one
+                # straight back out. Claude Code reads this file with JSON.parse, which
+                # rejects it, so the config would look fine here and be unreadable there.
+                "a number is not finite",
+                '{"projects": {}, "weird": Infinity}',
+                "Out of range float",
+            ),
+            ("top level is an array", "[]", "its top level is not an object"),
+            (
+                "projects is a string",
+                json.dumps({"projects": "nope"}),
+                "its projects value is not an object",
+            ),
+            (
+                "the entry is a string",
+                json.dumps({"projects": {self._key(): "nope"}}),
+                f"its entry for {self._key()} is not an object",
+            ),
+            (
+                "the entry is null",
+                json.dumps({"projects": {self._key(): None}}),
+                f"its entry for {self._key()} is not an object",
+            ),
+        ):
+            with self.subTest(name):
+                self.config.write_text(content, encoding="utf-8")
+                before = self.config.read_bytes()
+
+                warning = self._trust()
+
+                self.assertEqual(self.config.read_bytes(), before)
+                self.assertIn(str(self.config), warning)
+                self.assertIn(reason, warning)
+
+    def test_the_config_and_its_backup_are_private_at_every_moment(self):
+        """A 0600 config stays 0600, and neither file is readable in between.
+
+        The mode is captured at os.replace time, not just at the end. shutil.copy2 writes
+        the backup at 0644 and narrows it afterwards, so a final-mode assertion alone
+        cannot tell the two apart.
+        """
+        self._write_config({"projects": {}})
+        os.chmod(self.config, 0o600)
+        previous_umask = os.umask(0o000)
+        self.addCleanup(os.umask, previous_umask)
+
+        modes_at_replace = {}
+        real_replace = os.replace
+
+        def recording_replace(source, destination):
+            modes_at_replace[os.path.basename(destination)] = stat.S_IMODE(
+                os.stat(source).st_mode
+            )
+            return real_replace(source, destination)
+
+        with patch.object(worker_launch.os, "replace", side_effect=recording_replace):
+            self._trust()
+
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.backup.stat().st_mode), 0o600)
+        self.assertEqual(modes_at_replace, {self.config.name: 0o600, self.backup.name: 0o600})
+
+    def test_the_config_keeps_its_mode_while_the_backup_stays_private(self):
+        # Asserting 0600 alone would pass with no chmod at all, since mkstemp creates the
+        # temporary file 0600 whatever the umask is. A config that is not 0600 is what
+        # shows the mode is really carried across.
+        #
+        # The backup does not follow it. The user chose the config's mode; the backup is a
+        # file they never created, holding the same account credentials, that nothing
+        # reads back. A config restored by rsync or Time Machine at 0644 must not mint a
+        # second group readable copy in the home directory.
+        self._write_config({"projects": {}})
+        os.chmod(self.config, 0o644)
+
+        self._trust()
+
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.backup.stat().st_mode), 0o600)
+
+    def test_the_backup_holds_the_bytes_that_were_on_disk_before_the_write(self):
+        self._write_config({"projects": {}})
+        original = self.config.read_bytes()
+
+        self._trust()
+
+        self.assertEqual(self.backup.read_bytes(), original)
+
+    def test_a_second_write_reuses_the_one_backup_file(self):
+        self._write_config({"projects": {}})
+        self._trust()
+        second_work_dir = self.tmp_path / "second-worktree"
+        second_work_dir.mkdir()
+        before_second_write = self.config.read_bytes()
+
+        self._trust(work_dir=second_work_dir)
+
+        backups = sorted(
+            entry.name for entry in self.tmp_path.iterdir()
+            if worker_launch.CLAUDE_CONFIG_BACKUP_SUFFIX in entry.name
+        )
+        self.assertEqual(backups, [self.backup.name])
+        self.assertEqual(self.backup.read_bytes(), before_second_write)
+
+    def test_the_rewrite_matches_how_claude_code_formats_the_file(self):
+        self._write_config({"note": "café", "projects": {}})
+
+        self._trust()
+
+        written = self.config.read_text(encoding="utf-8")
+        self.assertIn('\n  "projects": {', written)
+        self.assertIn("café", written)
+        self.assertNotIn("caf\\u00e9", written)
+
+    def test_a_failed_backup_rename_leaves_the_config_and_the_directory_as_they_were(self):
+        self._write_config({"projects": {}})
+        before = self.config.read_bytes()
+        listing = sorted(entry.name for entry in self.tmp_path.iterdir())
+
+        with patch.object(worker_launch.os, "replace",
+                          side_effect=OSError("no space left on device")):
+            warning = self._trust()
+
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(sorted(entry.name for entry in self.tmp_path.iterdir()), listing)
+        self.assertIn("no space left on device", warning)
+
+    def test_a_failed_config_rename_leaves_the_backup_holding_the_original(self):
+        """The backup is written first, so this is the state it exists for.
+
+        Failing every os.replace only ever exercises the backup's rename, since that one
+        comes first. This lets the backup through and fails the config's, which is the
+        case where a copy of the original has to be on disk.
+        """
+        self._write_config({"projects": {}})
+        before = self.config.read_bytes()
+        real_replace = os.replace
+
+        def fail_only_the_config(source, destination):
+            if os.path.basename(destination) == self.config.name:
+                raise OSError("no space left on device")
+            return real_replace(source, destination)
+
+        with patch.object(worker_launch.os, "replace", side_effect=fail_only_the_config):
+            warning = self._trust()
+
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(self.backup.read_bytes(), before)
+        self.assertEqual(
+            [entry.name for entry in self.tmp_path.iterdir() if ".tmp" in entry.name], []
+        )
+        self.assertIn("no space left on device", warning)
+
+    def test_the_backup_is_written_before_anything_replaces_the_config(self):
+        # If the config were replaced first and the backup write then failed, there would
+        # be a changed config and no copy of what it held.
+        self._write_config({"projects": {}})
+        destinations = []
+        real_replace = os.replace
+
+        def recording_replace(source, destination):
+            destinations.append(os.path.basename(destination))
+            return real_replace(source, destination)
+
+        with patch.object(worker_launch.os, "replace", side_effect=recording_replace):
+            self._trust()
+
+        self.assertEqual(destinations, [self.backup.name, self.config.name])
+
+    def test_the_temporary_file_is_created_in_the_destination_directory(self):
+        """os.replace is only atomic within one filesystem.
+
+        Letting mkstemp choose would put the temporary file under TMPDIR. That is the same
+        volume here, so the suite would stay green while every launch on a machine with a
+        separate TMPDIR failed with EXDEV and silently recorded no trust.
+        """
+        self._write_config({"projects": {}})
+        directories = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            directories.append(kwargs.get("dir"))
+            return real_mkstemp(*args, **kwargs)
+
+        with patch.object(worker_launch.tempfile, "mkstemp", side_effect=recording_mkstemp):
+            self._trust()
+
+        # The backup keeps the unresolved directory and the config gets the resolved one.
+        # Here they are the same place; the symlink test is what separates them.
+        resolved = os.path.dirname(os.path.realpath(self.config))
+        self.assertEqual(directories, [str(self.tmp_path), resolved])
+
+    def test_the_bytes_are_flushed_to_disk_before_the_rename(self):
+        self._write_config({"projects": {}})
+        order = Mock()
+
+        with patch.object(worker_launch.os, "fsync", side_effect=os.fsync) as fsync, \
+             patch.object(worker_launch.os, "replace", side_effect=os.replace) as replace:
+            order.attach_mock(fsync, "fsync")
+            order.attach_mock(replace, "replace")
+            self._trust()
+
+        names = [name for name, _, _ in order.mock_calls]
+        self.assertEqual(names, ["fsync", "replace", "fsync", "replace"])
+
+    def test_a_rewrite_that_would_drop_something_is_refused(self):
+        """Correct code never trips this, so the test calls it directly.
+
+        The atomic rename makes a well formed but wrong write permanent, and the backup
+        only holds the generation before this one, so the bytes are checked before they go
+        down.
+        """
+        trusted = {"hasTrustDialogAccepted": True}
+        original = json.dumps(
+            {"numStartups": 1, "projects": {"/a": trusted, "/b": {}}}
+        ).encode()
+
+        with self.assertRaises(ValueError) as lost_key:
+            worker_launch._verify_the_rewrite_is_sound(
+                original, json.dumps({"projects": {"/a": trusted, "/b": {}}}), "/a"
+            )
+        self.assertIn("numStartups", str(lost_key.exception))
+
+        with self.assertRaises(ValueError) as lost_project:
+            worker_launch._verify_the_rewrite_is_sound(
+                original, json.dumps({"numStartups": 1, "projects": {"/a": trusted}}), "/a"
+            )
+        self.assertIn("/b", str(lost_project.exception))
+
+        # A rewrite that keeps everything and records no trust is the failure the deleted
+        # settings.json had: written successfully, read by nothing.
+        with self.assertRaises(ValueError) as no_trust:
+            worker_launch._verify_the_rewrite_is_sound(
+                original,
+                json.dumps({"numStartups": 1, "projects": {"/a": {}, "/b": {}}}),
+                "/a",
+            )
+        self.assertIn("would not mark /a trusted", str(no_trust.exception))
+
+        # Adding is fine; that is the whole point of the write.
+        worker_launch._verify_the_rewrite_is_sound(
+            original,
+            json.dumps({"numStartups": 1, "projects": {"/a": trusted, "/b": {}, "/c": {}}}),
+            "/a",
+        )
+
+    def test_the_drop_check_stands_between_the_config_and_the_rename(self):
+        # Correct code never drops anything, so nothing else notices if the call is
+        # deleted. This makes the check refuse and asserts the write did not happen.
+        self._write_config({"projects": {}})
+        before = self.config.read_bytes()
+
+        with patch.object(worker_launch, "_verify_the_rewrite_is_sound",
+                          side_effect=ValueError("the rewrite would drop projects: ['/a']")):
+            warning = self._trust()
+
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertFalse(self.backup.exists())
+        self.assertIn("would drop projects", warning)
+
+    def test_a_failure_creating_the_temporary_file_warns_instead_of_crashing(self):
+        # This is the full-disk case. Recovering by unlinking a name mkstemp never bound
+        # would raise UnboundLocalError and abort the launch before the worker started.
+        self._write_config({"projects": {}})
+        before = self.config.read_bytes()
+        listing = sorted(entry.name for entry in self.tmp_path.iterdir())
+
+        with patch.object(worker_launch.tempfile, "mkstemp",
+                          side_effect=OSError("no space left on device")):
+            warning = self._trust()
+
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(sorted(entry.name for entry in self.tmp_path.iterdir()), listing)
+        self.assertIn("no space left on device", warning)
+
+    def test_the_bypass_permissions_warning_fires_only_when_it_is_unanswered(self):
+        """Workers launch with --dangerously-skip-permissions.
+
+        Claude Code warns about that once per machine until the key is recorded, and that
+        dialog eats a pasted message exactly like the trust dialog does. Recording trust
+        alone would leave a fresh machine with the same lost first message.
+        """
+        settings = self.tmp_path / "settings.json"
+
+        for name, content, expected in (
+            ("no settings file at all", None, True),
+            ("the key is absent", json.dumps({"theme": "dark"}), True),
+            ("the key is false", json.dumps({"skipDangerousModePermissionPrompt": False}), True),
+            # Without the isinstance guard this still warns, but through the exception
+            # path, so the operator gets an AttributeError where a plain reason belongs.
+            ("the top level is not an object", "[]", True),
+            ("the key is true", json.dumps({"skipDangerousModePermissionPrompt": True}), False),
+        ):
+            with self.subTest(name):
+                if content is None:
+                    settings.unlink(missing_ok=True)
+                else:
+                    settings.write_text(content, encoding="utf-8")
+
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    worker_launch._warn_if_bypass_permissions_will_prompt(str(settings))
+
+                self.assertEqual(bool(stderr.getvalue()), expected)
+                if expected:
+                    self.assertIn("bypass permissions", stderr.getvalue())
+                    self.assertIn(str(settings), stderr.getvalue())
+                    self.assertNotIn("has no attribute", stderr.getvalue())
+                    self.assertIn(
+                        "answer it before sending the worker its first message",
+                        stderr.getvalue(),
+                    )
+                    # The warning says what it did not check, so a machine that answered
+                    # the dialog in project or managed settings knows why it is wrong.
+                    self.assertIn("Only the user settings file was checked",
+                                  stderr.getvalue())
+
+    def test_settings_that_do_not_parse_are_reported_as_the_reason(self):
+        # A settings file Claude Code cannot read is one it cannot read the key from
+        # either, so this is the case most likely to prompt. Staying quiet here would be
+        # silence exactly when the warning is true.
+        settings = self.tmp_path / "settings.json"
+        settings.write_text("{not json", encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            worker_launch._warn_if_bypass_permissions_will_prompt(str(settings))
+
+        self.assertIn("could not be read", stderr.getvalue())
+        self.assertIn("bypass permissions", stderr.getvalue())
+
+    def test_a_cleanup_that_itself_fails_does_not_hide_the_real_error(self):
+        # Best-effort cleanup. If removing the stray temporary file raised, that error
+        # would replace the one the operator actually needs to see.
+        self._write_config({"projects": {}})
+        before = self.config.read_bytes()
+
+        with patch.object(worker_launch.os, "replace",
+                          side_effect=OSError("no space left on device")), \
+             patch.object(worker_launch.os, "remove",
+                          side_effect=OSError("cleanup also failed")):
+            warning = self._trust()
+
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertIn("no space left on device", warning)
+        self.assertNotIn("cleanup also failed", warning)
+
+    def test_a_symlinked_config_path_is_written_through_to_its_target(self):
+        # Dotfile managers symlink ~/.claude.json. Without resolving it first, os.replace
+        # would drop a regular file over the link and orphan the target.
+        target = self.tmp_path / "real-claude.json"
+        target.write_text(json.dumps({"projects": {}}, indent=2), encoding="utf-8")
+        link = self.tmp_path / "linked-claude.json"
+        link.symlink_to(target)
+
+        self._trust(config_path=link)
+
+        self.assertTrue(link.is_symlink())
+        self.assertIn(self._key(), json.loads(target.read_text(encoding="utf-8"))["projects"])
+
+    def test_a_symlinked_config_keeps_its_backup_out_of_the_target_directory(self):
+        """The config follows the link. The backup does not.
+
+        People symlink ~/.claude.json into a dotfiles repo. A backup written beside the
+        resolved target would drop a full copy of a file holding account credentials
+        inside that repo, where the next `git add -A` would commit it.
+        """
+        dotfiles = self.tmp_path / "dotfiles"
+        dotfiles.mkdir()
+        target = dotfiles / "claude.json"
+        target.write_text(json.dumps({"projects": {}}, indent=2), encoding="utf-8")
+        link = self.tmp_path / "linked-claude.json"
+        link.symlink_to(target)
+
+        self._trust(config_path=link)
+
+        self.assertEqual(sorted(entry.name for entry in dotfiles.iterdir()), ["claude.json"])
+        beside_the_link = self.tmp_path / (
+            "linked-claude.json" + worker_launch.CLAUDE_CONFIG_BACKUP_SUFFIX
+        )
+        self.assertTrue(beside_the_link.exists())
+        self.assertEqual(stat.S_IMODE(beside_the_link.stat().st_mode), 0o600)
+
+    def test_an_unreadable_config_warns_and_is_left_as_it_was(self):
+        self._write_config({"projects": {}})
+        before = self.config.read_bytes()
+        os.chmod(self.config, 0o000)
+        self.addCleanup(os.chmod, self.config, 0o600)
+
+        warning = self._trust()
+
+        os.chmod(self.config, 0o600)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertFalse(self.backup.exists())
+        self.assertIn("Permission denied", warning)
 
 
 class WorkerCaptureDocumentedFlagsTest(unittest.TestCase):
