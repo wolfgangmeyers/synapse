@@ -39,6 +39,22 @@ export function assertAgentId(agentId) {
   return agentId;
 }
 
+// Self-registered Claude sessions exist to show presence in the router UI. They are not mailbox
+// addresses and must never be able to become one, so this REQUIRES the dot that assertAgentId
+// forbids. The two validators are complements: no string satisfies both, so a presence id cannot
+// be handed to a mail-injecting sidecar and a worker id cannot be claimed by an ad hoc session.
+// The pattern otherwise matches the protocol's agentId (protocol/v1/schema.json, $defs.agentId).
+export function assertPresenceAgentId(agentId) {
+  if (typeof agentId !== "string" || agentId.length === 0) {
+    throw new Error("Mailbox v2 presence identity is required");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(agentId) || !agentId.includes(".")) {
+    throw new Error("Mailbox v2 presence identity must be dotted and cannot be a worker id");
+  }
+  if (agentId.length > 128) throw new Error("Mailbox v2 presence identity is too long");
+  return agentId;
+}
+
 export function boundedConversationText(content, maximum = 4096) {
   const blocks = Array.isArray(content) ? content : [content];
   const text = blocks.map((block) => typeof block === "string" ? block : block?.type === "text" && typeof block.text === "string" ? block.text : "").filter(Boolean).join("\n");
@@ -127,8 +143,11 @@ export function createMailboxClient({
   random = Math.random,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
+  // Which id space this client belongs to. Presence-only clients pass assertPresenceAgentId, which
+  // accepts exactly the ids assertAgentId rejects.
+  assertIdentity = assertAgentId,
 } = {}) {
-  assertAgentId(agentId);
+  assertIdentity(agentId);
   if (typeof onEnvelope !== "function") throw new TypeError("onEnvelope is required");
   if (typeof onConnectionState !== "function") throw new TypeError("onConnectionState must be a function");
   if (typeof onKickstartFailure !== "function") throw new TypeError("onKickstartFailure must be a function");
