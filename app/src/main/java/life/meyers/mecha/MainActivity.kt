@@ -22,7 +22,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -156,6 +156,8 @@ internal data class PeerStatus(
 ) {
     val active get() = activityState == "active"
 }
+
+private data class HaloPulse(val progress: Float)
 
 internal data class ChatMessage(
     val id: String,
@@ -983,19 +985,19 @@ private fun PeerActivityIndicators(peer: PeerStatus, compact: Boolean = false) {
 private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, compact: Boolean = false) {
     var expanded by remember(count, subagents) { mutableStateOf(false) }
     val canExpand = subagents.isNotEmpty()
-    val alpha = synchronizedPulseAlpha("subagent-pulse")
+    val pulse = synchronizedHaloPulse("subagent-pulse")
     val label = "$count subagent${if (count == 1) "" else "s"}"
+    val badgeShape = RoundedCornerShape(if (expanded) 12.dp else 999.dp)
     Column(
         Modifier
-            .clip(RoundedCornerShape(if (expanded) 12.dp else 999.dp))
-            .background(Color(0xFF266AFF).copy(alpha = 0.26f))
-            .border(1.dp, Color(0xFF60A5FA).copy(alpha = 0.34f), RoundedCornerShape(if (expanded) 12.dp else 999.dp))
+            .background(Color(0xFF266AFF).copy(alpha = 0.26f), badgeShape)
+            .border(1.dp, Color(0xFF60A5FA).copy(alpha = 0.34f), badgeShape)
             .then(if (canExpand) Modifier.clickable { expanded = !expanded } else Modifier)
             .padding(horizontal = if (expanded) 10.dp else 7.dp, vertical = if (expanded) 8.dp else 4.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PulsingDot(Color(0xFF60A5FA), alpha, if (compact) 6.dp else 7.dp)
+            PulsingDot(Color(0xFF60A5FA), pulse, if (compact) 6.dp else 7.dp, 8.dp)
             Spacer(Modifier.width(6.dp))
             Text(label, style = MaterialTheme.typography.labelSmall, color = Color(0xFFDBE8FF), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (canExpand) {
@@ -1006,7 +1008,7 @@ private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, comp
         if (expanded) {
             subagents.forEach { subagent ->
                 Row(Modifier.padding(start = 13.dp), verticalAlignment = Alignment.CenterVertically) {
-                    PulsingDot(Color(0xFF60A5FA), alpha, 7.dp)
+                    PulsingDot(Color(0xFF60A5FA), pulse, 7.dp, 8.dp)
                     Spacer(Modifier.width(7.dp))
                     Text(subagent.description, style = MaterialTheme.typography.labelSmall, color = Color(0xFFDBE8FF), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -1017,12 +1019,12 @@ private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, comp
 
 @Composable
 private fun WorkingIndicator(compact: Boolean = false) {
-    val alpha = synchronizedPulseAlpha("working-alpha")
+    val pulse = synchronizedHaloPulse("working-pulse")
     Row(
-        Modifier.clip(RoundedCornerShape(999.dp)).background(Teal.copy(alpha = 0.18f)).padding(horizontal = if (compact) 7.dp else 9.dp, vertical = if (compact) 4.dp else 5.dp),
+        Modifier.background(Teal.copy(alpha = 0.18f), RoundedCornerShape(999.dp)).padding(horizontal = if (compact) 7.dp else 9.dp, vertical = if (compact) 4.dp else 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PulsingDot(Teal, alpha, if (compact) 7.dp else 8.dp)
+        PulsingDot(Teal, pulse, if (compact) 7.dp else 8.dp, 10.dp)
         if (!compact) {
             Spacer(Modifier.width(6.dp))
             Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
@@ -1031,20 +1033,35 @@ private fun WorkingIndicator(compact: Boolean = false) {
 }
 
 @Composable
-private fun synchronizedPulseAlpha(label: String): Float {
+private fun synchronizedHaloPulse(label: String): HaloPulse {
     val transition = rememberInfiniteTransition(label = label)
-    val alpha by transition.animateFloat(
-        initialValue = 0.45f,
+    val progress by transition.animateFloat(
+        initialValue = 0f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(animation = tween(700), repeatMode = RepeatMode.Reverse),
-        label = "$label-value",
+        animationSpec = infiniteRepeatable(animation = tween(1_200, easing = LinearOutSlowInEasing)),
+        label = "$label-progress",
     )
-    return alpha
+    return HaloPulse(progress)
 }
 
 @Composable
-private fun PulsingDot(color: Color, alpha: Float, size: Dp) {
-    Box(Modifier.size(size).graphicsLayer { this.alpha = alpha }.clip(CircleShape).background(color))
+private fun PulsingDot(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp) {
+    val haloAlpha = (1f - pulse.progress) * 0.58f
+    val haloScale = 1f + pulse.progress * ((haloSpread.value * 2f) / size.value)
+    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = haloScale
+                    scaleY = haloScale
+                    alpha = haloAlpha
+                }
+                .clip(CircleShape)
+                .background(color),
+        )
+        Box(Modifier.fillMaxSize().clip(CircleShape).background(color))
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
