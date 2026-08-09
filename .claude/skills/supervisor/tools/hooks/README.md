@@ -63,3 +63,7 @@ Two things worth knowing before debugging it:
 
 Open problems with the activity path are listed in `../ACTIVITY_KNOWN_ISSUES.md`. Every one of
 them presents as working, so read it before concluding the indicator is simply broken.
+
+`../ACTIVITY_DECISIONS.md` holds the alternatives that were considered and lost, and the decisions
+that were reversed once evidence arrived. Read it before changing any of this, because the code
+carries the mechanics and none of the reasons.
