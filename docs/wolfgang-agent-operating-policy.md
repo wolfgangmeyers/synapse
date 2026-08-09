@@ -126,6 +126,8 @@ The question to ask: is the thing I checked byte-identical to the thing that shi
 
 **Never put a write and the check that proves it in the same command.** A worker on 2026-08-07 bundled a commit, a push and the verification into one shell block. The block failed to parse, so nothing ran, including the verification. A dead check produces no output, and no output reads the same as no problem. It was caught only by separately reading the git log and seeing the old commit. Run the write, then read the state back in a separate call.
 
+**A number you read off a screen has no source until you save the output it came from.** Twice on one task a correctly measured number was written down later with a file cited beside it, and that file held no such number. Open the file and confirm the number is in it before you cite it, because a citation attached afterward is a guess that reads as evidence.
+
 ### Say what portion of the subject your command read
 
 Three of these came out of a single day. Someone read the last eight lines of a log file and reported that the whole file held no record of an event. The record was there, earlier in the file, and a working system got reported as an outage. A coverage number computed over five files was read as a number about a service of seventy-one files. A search for a phrase came back empty because the text was formatted, so the pattern missed a string that was present. This sits next to "Measure the thing you shipped, not the source you built it from". That rule covers a check pointed at a different artifact. Here the check reads part of the right artifact and the answer describes all of it. Two of the bullets listed under that heading are this failure.
