@@ -6,6 +6,7 @@
 // this directory from growing when nothing is consuming it.
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { kill } from "node:process";
 import { join } from "node:path";
 
 export const DEFAULT_ACTIVITY_DIR = "~/.mecha-developer/claude-activity";
@@ -68,11 +69,71 @@ export function markerPath(dir, pane) {
   return join(dir, `pane${pane}.watch`);
 }
 
+// A presence agent id carries the pid of the process that made it, so a self-registered session
+// creates a new inbox directory and a new log file every time one starts. Nothing removed them,
+// and this is about to run in every Claude session on the machine, so the growth is unbounded and
+// gets worse the more the feature is used. The repo requires a bounded path before shipping.
+//
+// Removal is keyed on the pid being dead, never on age, so a live session is never touched.
+export function isProcessAlive(pid, killImpl = kill) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    killImpl(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means it exists and belongs to someone else. Only ESRCH means gone.
+    return error?.code === "EPERM";
+  }
+}
+
+export function sweepStaleArtifacts({ dir, io, aliveImpl = isProcessAlive, self }) {
+  const removed = [];
+  let names;
+  try {
+    names = io.readdirSync(dir);
+  } catch {
+    return removed;
+  }
+  const livePresenceIds = new Set();
+  for (const name of names) {
+    if (!name.endsWith(".watch")) continue;
+    const full = join(dir, name);
+    let owner;
+    let pid;
+    try {
+      [owner, pid] = io.readFileSync(full, "utf8").trim().split(/\s+/);
+    } catch {
+      continue;
+    }
+    const numericPid = Number.parseInt(pid, 10);
+    if (aliveImpl(numericPid)) {
+      livePresenceIds.add(owner);
+      continue;
+    }
+    // A marker naming a dead process suppresses that pane for ever: the hook sees the file and
+    // never respawns, and sees the dead pid and never writes.
+    try { io.rmSync(full, { force: true }); removed.push(full); } catch { /* next sweep */ }
+  }
+  // Inbox directories belonging to presence sessions whose process is gone. Worker inboxes are
+  // never touched: their ids cannot contain a dot.
+  for (const name of names) {
+    if (!name.endsWith(".d")) continue;
+    const agentId = name.slice(0, -2);
+    if (!agentId.startsWith("session.") || agentId === self) continue;
+    if (livePresenceIds.has(agentId)) continue;
+    const pid = Number.parseInt(agentId.split(".").pop(), 10);
+    if (aliveImpl(pid)) continue;
+    try { io.rmSync(join(dir, name), { recursive: true, force: true }); removed.push(join(dir, name)); } catch { /* next sweep */ }
+  }
+  return removed;
+}
+
 export function createActivityTailer({
   agentId,
   dir,
   pane = process.env.TMUX_PANE,
   onRecord,
+  onDropped = () => {},
   now = () => Date.now(),
   pid = process.pid,
   fs: io = { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync },
@@ -86,6 +147,13 @@ export function createActivityTailer({
 
   function start() {
     io.mkdirSync(inbox, { recursive: true });
+    // Bounded retention, run once per sidecar start rather than on a timer. Nothing here is
+    // removed on age: only artifacts whose owning process is gone.
+    try {
+      sweepStaleArtifacts({ dir: root, io, self: agentId });
+    } catch {
+      // Cleanup must never stop a sidecar starting.
+    }
     // Written last, so the hook never sees a marker before the directory it writes into exists.
     // The pid is what lets a marker left by a killed sidecar be ignored rather than driving
     // writes forever into a file nobody reads.
@@ -100,6 +168,11 @@ export function createActivityTailer({
       if (pane) io.rmSync(markerPath(root, pane), { force: true });
     } catch {
       // A marker we cannot remove is covered by the pid check on the hook side.
+    }
+    // A presence session's inbox is per-process and disposable. A worker's is not: its id has no
+    // dot, so this cannot remove one.
+    if (agentId.includes(".")) {
+      try { io.rmSync(inbox, { recursive: true, force: true }); } catch { /* the sweep gets it */ }
     }
   }
 
@@ -132,16 +205,24 @@ export function createActivityTailer({
         continue;
       }
       const record = toRecord(contents, now());
-      // A file still being written parses on a later tick. One that never parses is dropped, so
-      // a single bad write cannot wedge the queue.
-      if (record === undefined && !contents.endsWith("\n")) continue;
+      // A file still being written parses on a later tick. Stop the whole pass rather than
+      // skipping ahead: the files after it are newer, and delivering them first would put records
+      // out of arrival order. Ordering is what pairs each subagent launch with its start, so
+      // reordering here silently attaches the wrong task description to a running subagent for the
+      // rest of the turn.
+      if (record === undefined && !contents.endsWith("\n")) return;
       try {
         io.rmSync(file.full, { force: true });
       } catch {
         // Leaving it means replaying it; the reducer is idempotent enough for a duplicate turn
         // marker, and a file we cannot delete is a disk problem worth surfacing elsewhere.
       }
-      if (record === undefined) continue;
+      if (record === undefined) {
+        // Dropped rather than retried, but never silently: a lost Stop leaves the dot lit until
+        // the quiet rule, and a lost PostCompact would have paused mail before that was bounded.
+        onDropped(file.full);
+        continue;
+      }
       if (typeof record.transcriptPath === "string") transcriptPath = record.transcriptPath;
       onRecord(record);
     }

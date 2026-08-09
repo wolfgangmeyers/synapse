@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   createActivityTailer,
+  isProcessAlive,
   markerPath,
+  sweepStaleArtifacts,
   toRecord,
 } from "../.claude/skills/supervisor/tools/activity_tail.mjs";
 
@@ -132,6 +134,114 @@ test("an unreadable transcript reports -1 rather than throwing", () => {
   rmSync(transcript, { force: true });
   tailer.tick();
   assert.equal(seen.filter((r) => r.kind === "transcript_size").at(-1).bytes, -1);
+  tailer.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a marker naming a dead process is swept, and a live one is left alone", () => {
+  // A stale marker is worse than no marker: the hook sees the file and never respawns a sidecar,
+  // and sees the dead pid and never writes. That pane goes quiet for ever with no log.
+  const dir = scratch();
+  writeFileSync(join(dir, "pane%1.watch"), "session.a.111\n", "utf8");
+  writeFileSync(join(dir, "pane%2.watch"), "worker-b 222\n", "utf8");
+  const alive = (pid) => pid === 222;
+  const removed = sweepStaleArtifacts({
+    dir, io: { readdirSync, readFileSync, rmSync, mkdirSync, statSync, writeFileSync }, aliveImpl: alive, self: "x",
+  });
+  assert.equal(existsSync(join(dir, "pane%1.watch")), false, "dead marker was not swept");
+  assert.equal(existsSync(join(dir, "pane%2.watch")), true, "swept a live worker's marker");
+  assert.equal(removed.length, 1);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a presence inbox whose process is gone is removed, a worker's never is", () => {
+  // Presence ids carry a pid, so one directory is created per Claude session. Nothing removed
+  // them, and this runs in every session on the machine.
+  const dir = scratch();
+  mkdirSync(join(dir, "session.win.111.d"), { recursive: true });
+  mkdirSync(join(dir, "session.win.222.d"), { recursive: true });
+  mkdirSync(join(dir, "supervisor.d"), { recursive: true });
+  const alive = (pid) => pid === 222;
+  sweepStaleArtifacts({
+    dir, io: { readdirSync, readFileSync, rmSync, mkdirSync, statSync, writeFileSync }, aliveImpl: alive, self: "x",
+  });
+  assert.equal(existsSync(join(dir, "session.win.111.d")), false, "dead presence inbox was kept");
+  assert.equal(existsSync(join(dir, "session.win.222.d")), true, "removed a live session's inbox");
+  assert.equal(existsSync(join(dir, "supervisor.d")), true, "removed a managed worker's inbox");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("the sweep never removes the inbox of the sidecar running it", () => {
+  const dir = scratch();
+  mkdirSync(join(dir, "session.win.999.d"), { recursive: true });
+  sweepStaleArtifacts({
+    dir, io: { readdirSync, readFileSync, rmSync, mkdirSync, statSync, writeFileSync },
+    aliveImpl: () => false, self: "session.win.999",
+  });
+  assert.equal(existsSync(join(dir, "session.win.999.d")), true, "swept its own inbox out from under itself");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a process that exists but belongs to someone else counts as alive", () => {
+  // kill(pid, 0) raises EPERM for a process owned by another user. Treating that as dead would
+  // delete a live session's artifacts.
+  const eperm = () => { const e = new Error("not permitted"); e.code = "EPERM"; throw e; };
+  const esrch = () => { const e = new Error("no such process"); e.code = "ESRCH"; throw e; };
+  assert.equal(isProcessAlive(123, eperm), true, "EPERM was read as a dead process");
+  assert.equal(isProcessAlive(123, esrch), false);
+  assert.equal(isProcessAlive(0), false);
+  assert.equal(isProcessAlive(Number.NaN), false);
+});
+
+test("a torn file stops the pass so newer records cannot overtake it", () => {
+  // The subagent badge depends on each launch being paired with the next start in arrival order.
+  // Skipping a torn file and delivering the newer ones behind it reorders the stream, and a launch
+  // arriving after its own start mislabels every subagent for the rest of the turn.
+  const dir = scratch();
+  const seen = [];
+  const tailer = createActivityTailer({ agentId: "w", dir, pane: "%1", onRecord: (r) => seen.push(r) });
+  tailer.start();
+  const torn = join(tailer.inbox, "1.json");
+  writeFileSync(torn, '{"v":1,"event":"PreToolUse","payl', "utf8");
+  writeFileSync(join(tailer.inbox, "2.json"),
+    `${JSON.stringify({ v: 1, event: "SubagentStart", payload: { agent_id: "a1" } })}\n`, "utf8");
+  // Pin the arrival order explicitly. Two files written back to back can land on mtimes close
+  // enough to tie, and a tie makes the sort order arbitrary, which would make this test flaky
+  // rather than wrong.
+  const older = new Date(Date.now() - 2_000);
+  const newer = new Date(Date.now() - 1_000);
+  utimesSync(torn, older, older);
+  utimesSync(join(tailer.inbox, "2.json"), newer, newer);
+
+  tailer.tick();
+  const delivered = seen.filter((r) => r.kind !== "transcript_size");
+  assert.deepEqual(delivered, [], "a newer record overtook a torn one and reordered the stream");
+  assert.ok(existsSync(join(tailer.inbox, "2.json")), "the newer record was consumed out of order");
+
+  // The hook writes each file once, so a completed file keeps the mtime of when it was created.
+  // Rewriting it in the test would make it newer than the file behind it, which is an artifact of
+  // the test rather than anything the system does.
+  const createdAt = older;
+  writeFileSync(torn,
+    `${JSON.stringify({ v: 1, event: "PreToolUse", payload: { tool_name: "Agent", tool_use_id: "t1", tool_input: { description: "first" } } })}\n`, "utf8");
+  utimesSync(torn, createdAt, createdAt);
+  tailer.tick();
+  assert.deepEqual(seen.filter((r) => r.kind !== "transcript_size").map((r) => r.kind),
+    ["subagent_launch", "subagent_start"], "records did not arrive in order once the file completed");
+  tailer.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a record that can never parse is reported, not silently dropped", () => {
+  const dir = scratch();
+  const dropped = [];
+  const tailer = createActivityTailer({
+    agentId: "w", dir, pane: "%1", onRecord: () => {}, onDropped: (f) => dropped.push(f),
+  });
+  tailer.start();
+  writeFileSync(join(tailer.inbox, "1.json"), "{ not json }\n", "utf8");
+  tailer.tick();
+  assert.equal(dropped.length, 1, "an unparsable record vanished with no trace");
   tailer.stop();
   rmSync(dir, { recursive: true, force: true });
 });

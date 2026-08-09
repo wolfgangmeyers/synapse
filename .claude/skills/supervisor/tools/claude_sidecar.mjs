@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { mkdirSync, appendFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { isCliEntrypoint } from "../../../../harness/cli_entrypoint.js";
@@ -339,6 +339,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     agentId: args.agentId,
     dir: args.activityDir,
     onRecord: (record) => reporter.onRecord(record),
+    onDropped: () => logger.write("activity_record_dropped", { agent_id: args.agentId }),
   });
   const reporter = createActivityReporter({
     client,
@@ -350,6 +351,11 @@ export async function runCli(argv = process.argv.slice(2)) {
   logger.write("sidecar_start", { agent_id: args.agentId, window: args.window });
   const stop = (signal) => {
     logger.write("sidecar_stop", { signal });
+    // A presence session's log is per-process and disposable, and one is created for every Claude
+    // session on the machine. A worker's log is kept: it is the record of that worker's delivery.
+    if (args.presenceOnly) {
+      try { rmSync(logger.logPath, { force: true }); } catch { /* the next sweep is size-capped anyway */ }
+    }
     // Removing the marker stops the hook writing files nobody will read.
     try { tailer.stop(); } catch { /* the pid check covers a marker we cannot remove */ }
     client.close();
