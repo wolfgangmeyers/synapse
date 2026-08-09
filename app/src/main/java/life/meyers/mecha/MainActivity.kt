@@ -86,6 +86,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -158,6 +160,41 @@ internal data class PeerStatus(
 }
 
 private data class HaloPulse(val progress: Float)
+
+private val PaperclipIcon: ImageVector = ImageVector.Builder(
+    name = "Paperclip",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = androidx.compose.ui.graphics.SolidColor(Color.Black)) {
+        moveTo(16.5f, 6f)
+        verticalLineTo(17.5f)
+        curveTo(16.5f, 19.71f, 14.71f, 21.5f, 12.5f, 21.5f)
+        reflectiveCurveTo(8.5f, 19.71f, 8.5f, 17.5f)
+        verticalLineTo(5f)
+        curveTo(8.5f, 3.62f, 9.62f, 2.5f, 11f, 2.5f)
+        reflectiveCurveTo(13.5f, 3.62f, 13.5f, 5f)
+        verticalLineTo(15.5f)
+        curveTo(13.5f, 16.05f, 13.05f, 16.5f, 12.5f, 16.5f)
+        reflectiveCurveTo(11.5f, 16.05f, 11.5f, 15.5f)
+        verticalLineTo(6f)
+        horizontalLineTo(10f)
+        verticalLineTo(15.5f)
+        curveTo(10f, 16.88f, 11.12f, 18f, 12.5f, 18f)
+        reflectiveCurveTo(15f, 16.88f, 15f, 15.5f)
+        verticalLineTo(5f)
+        curveTo(15f, 2.79f, 13.21f, 1f, 11f, 1f)
+        reflectiveCurveTo(7f, 2.79f, 7f, 5f)
+        verticalLineTo(17.5f)
+        curveTo(7f, 20.54f, 9.46f, 23f, 12.5f, 23f)
+        reflectiveCurveTo(18f, 20.54f, 18f, 17.5f)
+        verticalLineTo(6f)
+        horizontalLineTo(16.5f)
+        close()
+    }
+}.build()
 
 internal data class ChatMessage(
     val id: String,
@@ -1020,15 +1057,19 @@ private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, comp
 @Composable
 private fun WorkingIndicator(compact: Boolean = false) {
     val pulse = synchronizedHaloPulse("working-pulse")
+    if (compact) {
+        Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+            PulsingDot(Teal, pulse, 7.dp, 10.dp)
+        }
+        return
+    }
     Row(
-        Modifier.background(Teal.copy(alpha = 0.18f), RoundedCornerShape(999.dp)).padding(horizontal = if (compact) 7.dp else 9.dp, vertical = if (compact) 4.dp else 5.dp),
+        Modifier.background(Teal.copy(alpha = 0.18f), RoundedCornerShape(999.dp)).padding(horizontal = 9.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PulsingDot(Teal, pulse, if (compact) 7.dp else 8.dp, 10.dp)
-        if (!compact) {
-            Spacer(Modifier.width(6.dp))
-            Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
-        }
+        PulsingDot(Teal, pulse, 8.dp, 10.dp)
+        Spacer(Modifier.width(6.dp))
+        Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -1048,10 +1089,10 @@ private fun synchronizedHaloPulse(label: String): HaloPulse {
 private fun PulsingDot(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp) {
     val haloAlpha = (1f - pulse.progress) * 0.58f
     val haloScale = 1f + pulse.progress * ((haloSpread.value * 2f) / size.value)
-    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+    Box(Modifier.size(size + haloSpread * 2), contentAlignment = Alignment.Center) {
         Box(
             Modifier
-                .fillMaxSize()
+                .size(size)
                 .graphicsLayer {
                     scaleX = haloScale
                     scaleY = haloScale
@@ -1060,7 +1101,7 @@ private fun PulsingDot(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp)
                 .clip(CircleShape)
                 .background(color),
         )
-        Box(Modifier.fillMaxSize().clip(CircleShape).background(color))
+        Box(Modifier.size(size).clip(CircleShape).background(color))
     }
 }
 
@@ -1143,11 +1184,11 @@ private fun Conversation(
                 Spacer(Modifier.height(8.dp))
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(
+                IconButton(
                     onClick = { imagePicker.launch("image/*") },
                     enabled = pendingImages.size < MAX_IMAGE_ATTACHMENTS,
-                    modifier = Modifier.height(56.dp),
-                ) { Text("Attach") }
+                    modifier = Modifier.size(56.dp),
+                ) { Icon(PaperclipIcon, "Attach images", tint = Periwinkle) }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraft,

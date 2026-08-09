@@ -769,10 +769,12 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.match(activity, /reconcileConversationMessages\(historyFor\(peer\), hydrated, highWaterSequence\)/);
   assert.match(activity, /rememberLauncherForActivityResult\(ActivityResultContracts\.GetMultipleContents\(\)\)/);
   assert.match(activity, /imagePicker\.launch\("image\/\*"\)/);
-  assert.match(activity, /Text\("Attach"\)/);
+  assert.match(activity, /Icon\(PaperclipIcon, "Attach images", tint = Periwinkle\)/);
+  assert.doesNotMatch(activity, /Text\("Attach"\)/);
   assert.doesNotMatch(activity, /Text\("Paste"\)/);
   assert.match(activity, /private fun synchronizedHaloPulse\(label: String\): HaloPulse/);
   assert.match(activity, /private fun PulsingDot\(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp\)/);
+  assert.match(activity, /Box\(Modifier\.size\(size \+ haloSpread \* 2\), contentAlignment = Alignment\.Center\)/);
   assert.doesNotMatch(activity, /synchronizedPulseAlpha/);
   assert.match(activity, /contentReceiver\(receiveImages\)/);
   assert.match(activity, /acceptedImageUri\(item\.uri\?\.toString\(\), item\.intent\?\.data\?\.toString\(\), item\.text\?\.toString\(\)\)/);
