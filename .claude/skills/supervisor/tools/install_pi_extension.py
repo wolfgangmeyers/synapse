@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Install the canonical Mailbox V2 Pi extension at its stable local path."""
+"""Install/register stable Pi extensions: Mailbox V2 and Codex usage HUD.
+
+Run from the mecha-developer repo root:
+    python3 .claude/skills/supervisor/tools/install_pi_extension.py
+
+Reload or restart Pi sessions after install. The Codex HUD hides gracefully when
+subscription usage is unavailable.
+"""
 
 import json
 import os
@@ -9,12 +16,19 @@ import tempfile
 
 SOURCE = Path(__file__).resolve().parents[4] / "pi-extensions" / "mecha-messaging.js"
 TARGET = Path.home() / ".mecha-developer" / "extensions" / "mecha-messaging.js"
+CODEX_USAGE_HUD_SOURCE = SOURCE.with_name("codex-usage-hud.js")
+CODEX_USAGE_HUD_TARGET = TARGET.with_name("codex-usage-hud.js")
 SETTINGS = Path.home() / ".pi" / "agent" / "settings.json"
 EXTENSION_MODULES = ("mailbox-client.js", "memory-capture.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
+REGISTERED_EXTENSIONS = (TARGET, CODEX_USAGE_HUD_TARGET)
 
 
 def extension_artifacts() -> tuple[tuple[Path, Path], ...]:
-    return ((SOURCE, TARGET), *((SOURCE.with_name(name), TARGET.with_name(name)) for name in EXTENSION_MODULES))
+    return (
+        (SOURCE, TARGET),
+        (CODEX_USAGE_HUD_SOURCE, CODEX_USAGE_HUD_TARGET),
+        *((SOURCE.with_name(name), TARGET.with_name(name)) for name in EXTENSION_MODULES),
+    )
 
 
 def is_regular_file(path: Path) -> bool:
@@ -90,13 +104,14 @@ def main() -> int:
                 atomic_copy(target, artifact_backups[target], ".mecha-messaging-backup.")
         for source, target in artifacts:
             atomic_copy(source, target, ".mecha-messaging.")
-        packages = [entry for entry in settings.get("packages", []) if entry != str(TARGET)]
-        packages.append(str(TARGET))
+        registered_paths = {str(target) for target in REGISTERED_EXTENSIONS}
+        packages = [entry for entry in settings.get("packages", []) if entry not in registered_paths]
+        packages.extend(str(target) for target in REGISTERED_EXTENSIONS)
         settings["packages"] = packages
         atomic_write_json(SETTINGS, settings)
         verified_settings, _ = load_settings()
         if (any(not is_regular_file(target) or target.read_bytes() != source.read_bytes() for source, target in artifacts)
-                or verified_settings["packages"].count(str(TARGET)) != 1):
+                or any(verified_settings["packages"].count(str(target)) != 1 for target in REGISTERED_EXTENSIONS)):
             raise RuntimeError("post-install verification failed")
     except Exception as error:
         if had_settings and settings_backup.exists():
@@ -111,6 +126,7 @@ def main() -> int:
         raise SystemExit(f"Pi extension install failed and was rolled back: {error}") from error
 
     print(f"Pi extension installed: {TARGET} (source: {SOURCE})")
+    print(f"Pi extension installed: {CODEX_USAGE_HUD_TARGET} (source: {CODEX_USAGE_HUD_SOURCE})")
     print(f"Bare Pi registration: {SETTINGS}")
     print("Rollback copies retained until final status verification passes.")
     return 0
