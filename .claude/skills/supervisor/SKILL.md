@@ -61,6 +61,8 @@ Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` f
 
 **Backend/status/audit delegation**: Do not do backend chores, status reconstruction, audit sweeps, or verification passes inline when they require project inspection or more than a few reads. Use background subagents for read-only audits and narrow backend checks. Use persistent managed workers when Wolfgang asks for workers, durable ownership, code changes, or long-lived mutation lanes.
 
+**Bounded subagents on worker follow-ups**: Whenever handing additional work to an existing worker—not only when launching it—directly encourage a bounded subagent when one is viable for a read, audit, narrow check, or context-relief pass. Keep the boundary explicit: bounded subagents handle short, self-contained reads and verification so the worker's context stays focused; the managed worker retains durable implementation ownership, mutation work, and the long-lived task lane.
+
 ## Priority Discipline
 
 When Wolfgang gives new work, immediately create or update its ordered persistent priority and associate its task record before dispatching it or reporting it as underway. Use `state_priority.py`; an empty `priorities` list while delivery tasks are active is a control-plane failure, not a valid neutral state. A PR-backed priority remains active until the PR is merged/closed or Wolfgang explicitly defers or cancels it. “Ready for review,” draft removal, a push/force-push, green local checks, a parked worker, or a native subagent completing are not terminal dispositions. If the implementation worker stops, record a live CI/review successor plus its reminder instead of closing the priority.
