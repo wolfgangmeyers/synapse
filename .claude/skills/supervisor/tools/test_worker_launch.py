@@ -1191,6 +1191,102 @@ class ClaudeWorkspaceTrustTest(unittest.TestCase):
         self.assertIn("Permission denied", warning)
 
 
+class CursorAndCodexWorkspaceTrustTest(unittest.TestCase):
+    """Direct cover for the other two pretrust helpers, against a redirected HOME.
+
+    Neither had an assertion before. The old launch tests reached the Cursor helper with
+    os.path.exists patched to True, so it took its early return and wrote nothing, and no
+    test ever ran the Codex helper at all, because no test launched with agent="codex".
+    _run_main now mocks both, so these are the only tests that run either for real.
+
+    The Codex helper is worth covering directly for a second reason: it writes
+    ~/.codex/config.toml with no exists guard, so any future test that launches a Codex
+    worker through _run_main without that mock would edit the developer's own config.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.home = pathlib.Path(self.tmpdir.name) / "home"
+        self.home.mkdir()
+        self.work_dir = "/work/tree"
+        env_patch = patch.dict(os.environ, {"HOME": str(self.home)}, clear=False)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+    def test_cursor_trust_marker_names_the_workspace_it_trusts(self):
+        worker_launch._cursor_pretrust_workspace(self.work_dir)
+
+        marker = self.home / ".cursor" / "projects" / "work-tree" / ".workspace-trusted"
+        self.assertEqual(
+            json.loads(marker.read_text(encoding="utf-8"))["workspacePath"], self.work_dir
+        )
+
+    def test_cursor_trust_marker_is_not_rewritten_once_it_exists(self):
+        worker_launch._cursor_pretrust_workspace(self.work_dir)
+        marker = self.home / ".cursor" / "projects" / "work-tree" / ".workspace-trusted"
+        marker.write_text("kept by hand", encoding="utf-8")
+
+        worker_launch._cursor_pretrust_workspace(self.work_dir)
+
+        self.assertEqual(marker.read_text(encoding="utf-8"), "kept by hand")
+
+    def test_codex_trust_is_added_without_disturbing_the_rest_of_the_config(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir()
+        config.write_text('model = "gpt-5.5"\n', encoding="utf-8")
+
+        worker_launch._codex_pretrust_workspace(self.work_dir)
+
+        written = config.read_text(encoding="utf-8")
+        self.assertIn('model = "gpt-5.5"', written)
+        self.assertIn(f'[projects."{self.work_dir}"]', written)
+        self.assertIn('trust_level = "trusted"', written)
+
+    def test_codex_trust_creates_the_config_when_there_is_none(self):
+        worker_launch._codex_pretrust_workspace(self.work_dir)
+
+        written = (self.home / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertIn(f'[projects."{self.work_dir}"]', written)
+        self.assertIn('trust_level = "trusted"', written)
+
+    def test_codex_trust_leaves_an_already_trusted_config_untouched(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir()
+        original = f'[projects."{self.work_dir}"]\ntrust_level = "trusted"\n'
+        config.write_text(original, encoding="utf-8")
+
+        worker_launch._codex_pretrust_workspace(self.work_dir)
+
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_codex_trust_adds_the_key_to_a_table_that_has_other_settings(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir()
+        config.write_text(
+            f'[projects."{self.work_dir}"]\nsome_other_key = 1\n', encoding="utf-8"
+        )
+
+        worker_launch._codex_pretrust_workspace(self.work_dir)
+
+        written = config.read_text(encoding="utf-8")
+        self.assertIn("some_other_key = 1", written)
+        self.assertIn('trust_level = "trusted"', written)
+
+    def test_codex_trust_upgrades_an_existing_untrusted_entry_in_place(self):
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir()
+        config.write_text(
+            f'[projects."{self.work_dir}"]\ntrust_level = "untrusted"\n', encoding="utf-8"
+        )
+
+        worker_launch._codex_pretrust_workspace(self.work_dir)
+
+        written = config.read_text(encoding="utf-8")
+        self.assertIn('trust_level = "trusted"', written)
+        self.assertNotIn("untrusted", written)
+
+
 class WorkerCaptureDocumentedFlagsTest(unittest.TestCase):
     """Every worker_capture.py flag the docs put in front of an agent must parse.
 
