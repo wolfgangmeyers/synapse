@@ -31,7 +31,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 
 - Use the same channel the person used. If Wolfgang contacts an agent by mailbox, reply by mailbox.
 - Send concise status updates when async work is red, pending, blocked, or materially changed. Include links, owner, current state, and next action.
-- When a reminder asks you to take action and the work is viable to delegate, run it in a background subagent by default. This keeps the supervisor responsive and allows independent checks to proceed in parallel.
+- When a reminder asks you to take action and the work is viable to delegate, run it in a background subagent by default. This keeps the supervisor responsive and allows independent checks to proceed in parallel. When creating or updating an action-oriented reminder, include that guidance in the reminder body so the receiving supervisor or worker is steered toward background delegation instead of doing status/audit work inline.
 - Recurring supervisor reminders default to a 30-minute cadence unless Wolfgang explicitly asks for a different interval. Do not create or keep tighter loops for PR checks, CI watches, status sweeps, or active-task verification just because work is busy; use 30 minutes and route urgent state changes through worker mail.
 - Do not reply to pure acknowledgments unless they contain a new instruction, blocker, evidence, decision request, or state transition.
 - Avoid noisy alerts and reminder loops. Cancel, repair, retire, or reconfigure false-positive or superseded alerts while preserving the real safety check.
