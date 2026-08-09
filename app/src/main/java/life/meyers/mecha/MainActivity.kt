@@ -28,6 +28,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.content.ReceiveContentListener
 import androidx.compose.foundation.content.TransferableContent
@@ -88,6 +89,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -140,9 +142,17 @@ internal data class ImageReference(
     val name: String,
 )
 
+internal data class SubagentSummary(
+    val id: String,
+    val description: String,
+    val type: String = "",
+)
+
 internal data class PeerStatus(
     val id: String,
     val activityState: String = "idle",
+    val subagentCount: Int = 0,
+    val subagents: List<SubagentSummary> = emptyList(),
 ) {
     val active get() = activityState == "active"
 }
@@ -421,7 +431,7 @@ class MainActivity : ComponentActivity() {
                     for (index in 0 until agents.length()) {
                         val agent = agents.optJSONObject(index) ?: continue
                         val peer = agent.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: continue
-                        add(PeerStatus(peer, agent.optString("activity_state", "idle")))
+                        add(peerStatusFromJson(peer, agent, peers.firstOrNull { it.id == peer }))
                     }
                 }
                 runOnUiThread { if (generation == connectionGeneration) peers = discovered.sortedBy { it.id } }
@@ -433,8 +443,9 @@ class MainActivity : ComponentActivity() {
 
     private fun receiveAgentActivity(frame: JSONObject) {
         val peer = frame.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: return
-        val activity = frame.optString("activity_state", "idle")
-        peers = peers.map { if (it.id == peer) it.copy(activityState = activity) else it }
+        val current = peers.firstOrNull { it.id == peer }
+        val updated = peerStatusFromJson(peer, frame, current)
+        peers = if (current == null) (peers + updated).sortedBy { it.id } else peers.map { if (it.id == peer) updated else it }
     }
 
     private fun receiveConversationMessage(frame: JSONObject) {
@@ -842,8 +853,7 @@ class MainActivity : ComponentActivity() {
                     else -> {
                         BackHandler(onBack = ::returnHome)
                         Conversation(
-                            selectedPeer,
-                            peers.firstOrNull { it.id == selectedPeer }?.active == true,
+                            peers.firstOrNull { it.id == selectedPeer } ?: PeerStatus(selectedPeer),
                             messages,
                             images,
                             draft,
@@ -946,10 +956,15 @@ private fun PeerRow(peer: PeerStatus, onClick: () -> Unit) {
             Avatar(peerId)
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(humanName(peerId), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text("$peerId · ${if (peer.active) "Working" else "Available"}", style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(humanName(peerId), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (peer.active) {
+                        Spacer(Modifier.width(8.dp))
+                        WorkingIndicator(compact = true)
+                    }
+                }
+                PeerActivityIndicators(peer)
             }
-            if (peer.active) WorkingIndicator()
             Spacer(Modifier.width(8.dp))
             Icon(Icons.Default.ChevronRight, "Open conversation", tint = TextMuted)
         }
@@ -957,29 +972,88 @@ private fun PeerRow(peer: PeerStatus, onClick: () -> Unit) {
 }
 
 @Composable
-private fun WorkingIndicator() {
-    val transition = rememberInfiniteTransition(label = "working")
+private fun PeerActivityIndicators(peer: PeerStatus, compact: Boolean = false) {
+    if (peer.subagentCount <= 0) {
+        Text(if (peer.active) "Working" else "Available", style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        return
+    }
+    Column(Modifier.padding(top = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        SubagentIndicator(peer.subagentCount, peer.subagents, compact)
+    }
+}
+
+@Composable
+private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, compact: Boolean = false) {
+    var expanded by remember(count, subagents) { mutableStateOf(false) }
+    val canExpand = subagents.isNotEmpty()
+    val alpha = synchronizedPulseAlpha("subagent-pulse")
+    val label = "$count subagent${if (count == 1) "" else "s"}"
+    Column(
+        Modifier
+            .clip(RoundedCornerShape(if (expanded) 12.dp else 999.dp))
+            .background(Color(0xFF266AFF).copy(alpha = 0.26f))
+            .border(1.dp, Color(0xFF60A5FA).copy(alpha = 0.34f), RoundedCornerShape(if (expanded) 12.dp else 999.dp))
+            .then(if (canExpand) Modifier.clickable { expanded = !expanded } else Modifier)
+            .padding(horizontal = if (expanded) 10.dp else 7.dp, vertical = if (expanded) 8.dp else 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            PulsingDot(Color(0xFF60A5FA), alpha, if (compact) 6.dp else 7.dp)
+            Spacer(Modifier.width(6.dp))
+            Text(label, style = MaterialTheme.typography.labelSmall, color = Color(0xFFDBE8FF), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (canExpand) {
+                Spacer(Modifier.width(5.dp))
+                Text(if (expanded) "▴" else "▾", style = MaterialTheme.typography.labelSmall, color = Color(0xFFDBE8FF))
+            }
+        }
+        if (expanded) {
+            subagents.forEach { subagent ->
+                Row(Modifier.padding(start = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                    PulsingDot(Color(0xFF60A5FA), alpha, 7.dp)
+                    Spacer(Modifier.width(7.dp))
+                    Text(subagent.description, style = MaterialTheme.typography.labelSmall, color = Color(0xFFDBE8FF), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkingIndicator(compact: Boolean = false) {
+    val alpha = synchronizedPulseAlpha("working-alpha")
+    Row(
+        Modifier.clip(RoundedCornerShape(999.dp)).background(Teal.copy(alpha = 0.18f)).padding(horizontal = if (compact) 7.dp else 9.dp, vertical = if (compact) 4.dp else 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PulsingDot(Teal, alpha, if (compact) 7.dp else 8.dp)
+        if (!compact) {
+            Spacer(Modifier.width(6.dp))
+            Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun synchronizedPulseAlpha(label: String): Float {
+    val transition = rememberInfiniteTransition(label = label)
     val alpha by transition.animateFloat(
         initialValue = 0.45f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(animation = tween(700), repeatMode = RepeatMode.Reverse),
-        label = "working-alpha",
+        label = "$label-value",
     )
-    Row(
-        Modifier.clip(RoundedCornerShape(999.dp)).background(Teal.copy(alpha = 0.18f)).padding(horizontal = 9.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.size(8.dp).graphicsLayer { this.alpha = alpha }.clip(CircleShape).background(Teal))
-        Spacer(Modifier.width(6.dp))
-        Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
-    }
+    return alpha
+}
+
+@Composable
+private fun PulsingDot(color: Color, alpha: Float, size: Dp) {
+    Box(Modifier.size(size).graphicsLayer { this.alpha = alpha }.clip(CircleShape).background(color))
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Conversation(
-    peer: String,
-    peerActive: Boolean,
+    peerStatus: PeerStatus,
     messages: List<ChatMessage>,
     pendingImages: List<PendingImage>,
     draft: String,
@@ -989,6 +1063,7 @@ private fun Conversation(
     onSend: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val peer = peerStatus.id
     val transcriptState = rememberLazyListState()
     val context = LocalContext.current
     val receiveImages = remember(onImages) {
@@ -1017,9 +1092,15 @@ private fun Conversation(
             }
             Avatar(peer, 34.dp)
             Spacer(Modifier.width(10.dp))
-            Column {
-                Text(humanName(peer), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("$peer · ${if (peerActive) "Working" else "Available"}", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (peerStatus.active) {
+                        Spacer(Modifier.width(8.dp))
+                        WorkingIndicator(compact = true)
+                    }
+                }
+                PeerActivityIndicators(peerStatus, compact = true)
             }
         }
         HorizontalDivider(color = SurfaceRaised)
@@ -1311,8 +1392,41 @@ internal fun boundedDraftPeers(existing: List<String>, peer: String): List<Strin
 internal fun visibleConnectedPeers(peers: List<PeerStatus>, filter: String): List<PeerStatus> {
     val normalizedFilter = filter.trim().lowercase()
     return peers.filter { peer ->
-        normalizedFilter.isBlank() || "${peer.id} ${humanName(peer.id)}".lowercase().contains(normalizedFilter)
+        val descriptions = peer.subagents.joinToString(" ") { it.description }
+        normalizedFilter.isBlank() || "${peer.id} ${humanName(peer.id)} $descriptions".lowercase().contains(normalizedFilter)
     }
+}
+
+internal fun normalizedSubagentSummaries(subagents: JSONArray?): List<SubagentSummary> {
+    if (subagents == null) return emptyList()
+    return buildList {
+        for (index in 0 until subagents.length()) {
+            val subagent = subagents.optJSONObject(index) ?: continue
+            val id = subagent.optString("id").trim().take(128)
+            val description = subagent.optString("description").trim().take(512)
+            if (id.isBlank() || description.isBlank()) continue
+            val type = subagent.optString("type").trim().take(64)
+            add(SubagentSummary(id, description, type))
+        }
+    }.take(999)
+}
+
+internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerStatus? = null): PeerStatus {
+    val summaries = normalizedSubagentSummaries(source.optJSONArray("subagents"))
+    val incomingCount = source.optInt("subagent_count", 0).coerceIn(0, 999)
+    val preservedSummaries = if (summaries.isNotEmpty()) {
+        summaries
+    } else if (incomingCount > 0 && current?.subagents?.size == incomingCount) {
+        current.subagents
+    } else {
+        emptyList()
+    }
+    return PeerStatus(
+        id = peer,
+        activityState = source.optString("activity_state", "idle"),
+        subagentCount = maxOf(incomingCount, preservedSummaries.size),
+        subagents = preservedSummaries,
+    )
 }
 
 internal fun formatMessageTimestamp(createdAt: String): String = runCatching {

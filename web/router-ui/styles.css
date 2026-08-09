@@ -264,6 +264,19 @@ p:empty { display: none; }
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
+.conversation-header > div:last-child { min-width: 0; }
+#peer-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#peer-name .working-indicator.inline {
+  position: static;
+  transform: none;
+  width: 22px;
+  height: 22px;
+  right: auto;
+  top: auto;
+  flex: 0 0 auto;
+}
+.peer-activity { min-height: 22px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; color: var(--muted); font-size: 13px; }
+.peer-activity .subagent-indicator { margin-top: 0; max-width: min(100%, 420px); }
 .messages {
   overflow: auto;
   padding: 24px;

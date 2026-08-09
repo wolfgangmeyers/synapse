@@ -867,6 +867,7 @@ export function createMechaMessagingExtension(pi, {
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
   nowImpl = Date.now,
+  subagentsService = globalThis[PI_SUBAGENTS_SERVICE],
 } = {}) {
   let client;
   let coordinator;
@@ -955,15 +956,56 @@ export function createMechaMessagingExtension(pi, {
     return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description;
   }
 
+  function nativeSubagentRecords(service = subagentsService) {
+    try {
+      const source = typeof service?.listAgents === "function"
+        ? service.listAgents()
+        : typeof service?.getRunning === "function"
+          ? service.getRunning()
+          : service?.running ?? service?.runs ?? service?.subagents;
+      return Array.isArray(source) ? source : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function activeNativeSubagentRecords(service = subagentsService) {
+    return nativeSubagentRecords(service)
+      ?.filter((entry) => {
+        const status = typeof entry?.status === "string" ? entry.status.toLowerCase() : entry?.status;
+        return [undefined, "running", "queued", "active"].includes(status);
+      })
+      ?? undefined;
+  }
+
+  function nativeSubagentStartedAtMs(record, fallbackMs) {
+    if (Number.isFinite(record?.startedAt)) return record.startedAt;
+    if (typeof record?.startedAt === "string") {
+      const parsed = Date.parse(record.startedAt);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return fallbackMs;
+  }
+
   function reconcileNativeSubagentService() {
-    const service = globalThis[PI_SUBAGENTS_SERVICE];
-    const source = service?.getRunning?.() ?? service?.running ?? service?.runs ?? service?.subagents;
+    const source = activeNativeSubagentRecords();
     if (!Array.isArray(source)) return false;
-    const runningIds = new Set(source
-      .filter((entry) => [undefined, "running", "queued", "active"].includes(entry?.status))
-      .map((entry) => typeof entry?.id === "string" ? entry.id : undefined)
-      .filter(Boolean));
+    const nowMs = nowImpl();
+    const runningIds = new Set();
     let changed = false;
+    for (const record of source) {
+      const metadata = normalizeSubagentMetadata(record, nativeSubagentStartedAtMs(record, nowMs));
+      if (metadata === undefined) continue;
+      runningIds.add(metadata.id);
+      const existing = runningSubagents.get(metadata.id);
+      const merged = { ...metadata, startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs, lastSeenMs: nowMs };
+      if (!sameSubagentMetadata(existing, merged)) {
+        runningSubagents.set(metadata.id, merged);
+        changed = true;
+      } else if (existing !== undefined) {
+        existing.lastSeenMs = nowMs;
+      }
+    }
     for (const id of runningSubagents.keys()) {
       if (!runningIds.has(id)) {
         runningSubagents.delete(id);
@@ -973,9 +1015,9 @@ export function createMechaMessagingExtension(pi, {
     return changed;
   }
 
-  function sendActivityState(state, { force = false } = {}) {
+  function sendActivityState(state, { force = false, reconcile = true } = {}) {
     const nowMs = nowImpl();
-    const reconciled = reconcileNativeSubagentService();
+    const reconciled = reconcile ? reconcileNativeSubagentService() : false;
     const subagents = publicSubagentSummaries();
     const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
     if (lastActivitySent !== undefined
@@ -1023,7 +1065,7 @@ export function createMechaMessagingExtension(pi, {
   function clearRunningSubagentsForBoundary() {
     runningSubagents.clear();
     activityHeartbeatActive = false;
-    sendActivityState("settled", { force: true });
+    sendActivityState("settled", { force: true, reconcile: false });
     clearActivityHeartbeatTimer();
   }
 
@@ -1062,10 +1104,18 @@ export function createMechaMessagingExtension(pi, {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined || !mailboxPausedForCompaction) return;
     mailboxPausedForCompaction = false;
     coordinator = createMailboxCoordinator(context, client);
+    const reconcileAfterResume = () => {
+      reconcileNativeSubagentService();
+      if (runningSubagents.size > 0) refreshActivityState();
+    };
     if (typeof client.resume === "function") {
-      Promise.resolve(client.resume()).catch((error) => {
-        context.ui?.notify(`Mailbox v2 resume after compaction failed: ${error.message}`, "error");
-      });
+      Promise.resolve(client.resume())
+        .then(reconcileAfterResume)
+        .catch((error) => {
+          context.ui?.notify(`Mailbox v2 resume after compaction failed: ${error.message}`, "error");
+        });
+    } else {
+      reconcileAfterResume();
     }
   }
 
