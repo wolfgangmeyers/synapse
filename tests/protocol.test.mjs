@@ -33,6 +33,7 @@ test("activity frames carry lease-scoped worker state", () => {
   assert.equal(validateClientFrame({ ...active, subagent_count: 2 }).subagent_count, 2);
   assert.deepEqual(validateClientFrame({ ...active, subagents: [{ id: "subagent-one", type: "audit", description: "checking the diff" }] }).subagents, [{ id: "subagent-one", type: "audit", description: "checking the diff" }]);
   assert.equal(validateClientFrame({ ...active, activity_state: "settled" }).activity_state, "settled");
+  assert.equal(validateClientFrame({ ...active, activity_state: "compacting" }).activity_state, "compacting");
   assert.throws(() => validateClientFrame({ ...active, subagent_count: -1 }), ProtocolValidationError);
   assert.throws(() => validateClientFrame({ ...active, subagent_count: 1.5 }), ProtocolValidationError);
   assert.throws(() => validateClientFrame({ ...active, activity_state: "idle" }), ProtocolValidationError);
@@ -50,6 +51,7 @@ test("activity frames carry lease-scoped worker state", () => {
   assert.equal(validateServerFrame({ ...event, subagent_count: 3 }).subagent_count, 3);
   assert.deepEqual(validateServerFrame({ ...event, subagents: [{ id: "subagent-one", description: "checking the diff" }] }).subagents, [{ id: "subagent-one", description: "checking the diff" }]);
   assert.equal(validateServerFrame({ ...event, activity_state: "idle" }).activity_state, "idle");
+  assert.equal(validateServerFrame({ ...event, activity_state: "compacting" }).activity_state, "compacting");
   assert.throws(() => validateServerFrame({ ...event, subagent_count: -1 }), ProtocolValidationError);
   assert.throws(() => validateServerFrame({ ...event, activity_state: "settled" }), ProtocolValidationError);
 });
@@ -93,6 +95,7 @@ test("conversation sync is additive to registration and has a canonical server e
         mime_type: "image/webp",
         size_bytes: 16,
       }],
+      source: { kind: "agent" },
     },
   }));
   assert.throws(() => validateClientFrame({
@@ -114,6 +117,9 @@ test("new envelopes use URL-safe NanoIDs while existing UUID IDs remain valid", 
   }).id)).size, 100);
   const legacyId = "6f2b54ae-6ff5-4bf7-a770-ba2c25ef7b31";
   assert.doesNotThrow(() => validateEnvelope({ ...envelope, id: legacyId }));
+  assert.doesNotThrow(() => validateEnvelope({ ...envelope, source: { kind: "web_ui" } }));
+  assert.doesNotThrow(() => validateEnvelope({ ...envelope, source: { kind: "reminder" } }));
+  assert.throws(() => validateEnvelope({ ...envelope, source: { kind: "browser" } }), ProtocolValidationError);
   assert.doesNotThrow(() => validateClientFrame({
     version: "v1",
     frame_id: legacyId,

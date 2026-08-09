@@ -10,6 +10,11 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <button id="arrived-message" class="arrived-message" type="button" hidden aria-live="polite">
+    <span class="arrived-icon" aria-hidden="true"><svg viewBox="0 0 24 24" role="img"><path d="M3.75 6.75A2.75 2.75 0 0 1 6.5 4h11a2.75 2.75 0 0 1 2.75 2.75v10.5A2.75 2.75 0 0 1 17.5 20h-11a2.75 2.75 0 0 1-2.75-2.75V6.75Zm2.1-.9a1.25 1.25 0 0 0-.6.9v.38l6.09 4.42c.39.28.92.28 1.31 0l6.1-4.42v-.38a1.25 1.25 0 0 0-1.25-1.25h-11c-.23 0-.45.06-.65.18Zm12.9 3.13-5.22 3.78a2.63 2.63 0 0 1-3.06 0L5.25 8.98v8.27c0 .69.56 1.25 1.25 1.25h11c.69 0 1.25-.56 1.25-1.25V8.98Z"/></svg></span>
+    <span class="arrived-copy"><strong id="arrived-sender"></strong><small id="arrived-subject"></small></span>
+  </button>
+
   <main class="shell">
     <aside class="sidebar">
       <header class="brand">
@@ -103,6 +108,20 @@
           <button id="add-router" type="button">Save router</button>
         </div>
       </section>
+    </form>
+  </dialog>
+
+  <dialog id="arrived-dialog" class="message-dialog">
+    <form method="dialog" class="dialog-shell message-dialog-shell">
+      <header>
+        <div>
+          <p class="message-dialog-label">New message</p>
+          <h2 id="arrived-dialog-sender">Sender</h2>
+          <p id="arrived-dialog-meta"></p>
+        </div>
+        <button value="cancel" aria-label="Close message"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div id="arrived-dialog-body" class="message-dialog-body"></div>
     </form>
   </dialog>
   <script type="module" src="/app.js"></script>

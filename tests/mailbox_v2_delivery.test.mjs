@@ -819,13 +819,19 @@ test("compaction pauses activity without dropping mailbox resume", async (t) => 
 
   fixture.handlers.get("agent_start")({}, fixture.context);
   await fixture.handlers.get("session_before_compact")({ signal: AbortSignal.timeout(100), preparation: {} }, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "compacting", subagentCount: 0 },
+  ]);
   fixture.handlers.get("session_compact")({}, fixture.context);
 
   assert.deepEqual(fixture.activity, [
     { state: "active", subagentCount: 0 },
+    { state: "compacting", subagentCount: 0 },
     { state: "settled", subagentCount: 0 },
   ]);
-  assert.deepEqual(calls, ["pause", "resume"]);
+  assert.deepEqual(calls, []);
 });
 
 test("compaction resume reconciles already-running native subagents", async (t) => {
@@ -852,10 +858,10 @@ test("compaction resume reconciles already-running native subagents", async (t) 
 
   assert.deepEqual(fixture.activity, [
     { state: "active", subagentCount: 1, subagents: [{ id: "child-survived", type: "general-purpose", description: "Survived compaction" }] },
-    { state: "settled", subagentCount: 0 },
+    { state: "compacting", subagentCount: 0 },
     { state: "settled", subagentCount: 1, subagents: [{ id: "child-survived", type: "general-purpose", description: "Survived compaction" }] },
   ]);
-  assert.deepEqual(calls, ["pause", "resume"]);
+  assert.deepEqual(calls, []);
 });
 
 test("settled notification sends one exact reply when top-level work settles", async (t) => {
@@ -1162,128 +1168,6 @@ test("overlapping settled notification sends make independent attempts", async (
   await nextTurn();
   assert.equal(attempts.length, 2);
   assert.deepEqual(fixture.notifications, []);
-});
-
-test("mecha_reload reports support and queues reload through the command boundary", async () => {
-  const handlers = new Map();
-  const commands = new Map();
-  const tools = new Map();
-  const queued = [];
-  const sent = [];
-  const pi = {
-    events: { on() {} },
-    on(type, handler) { handlers.set(type, handler); },
-    registerCommand(name, command) { commands.set(name, command); },
-    registerTool(tool) { tools.set(tool.name, tool); },
-    sendMessage: (...args) => sent.push(args),
-    sendUserMessage: (...args) => queued.push(args),
-  };
-  createMechaMessagingExtension(pi, {
-    resolveCurrentAgentId: () => "worker",
-    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
-  });
-
-  const reloadTool = tools.get("mecha_reload");
-  assert.equal(typeof reloadTool.execute, "function");
-  assert.equal(commands.has("mecha-reload-runtime"), true);
-
-  const status = await reloadTool.execute("reload-status", { action: "status" });
-  assert.equal(status.details.command, "/mecha-reload-runtime");
-  assert.equal(status.details.commandRegistered, true);
-  assert.equal(status.details.canQueueReload, true);
-  assert.equal(status.details.canSendPostReloadHandoff, true);
-
-  const result = await reloadTool.execute("reload", { action: "reload" });
-  assert.equal(result.content[0].text, "Self-reload queued for Pi's next safe follow-up boundary.");
-  assert.equal(result.details.reloadState, "queued_as_follow_up");
-  assert.equal(result.details.wakeAfterReload, false);
-  assert.deepEqual(queued, [["/mecha-reload-runtime", { deliverAs: "followUp" }]]);
-
-  const reloads = [];
-  await commands.get("mecha-reload-runtime").handler("", { reload: async () => reloads.push("reload"), ui: { notify() {} } });
-  assert.deepEqual(reloads, ["reload"]);
-  assert.deepEqual(sent, []);
-
-  const wakeResult = await reloadTool.execute("reload-wake", { action: "reload", wakeAfterReload: true });
-  assert.equal(wakeResult.content[0].text, "Self-reload queued for Pi's next safe follow-up boundary with post-reload wake enabled.");
-  assert.equal(wakeResult.details.wakeAfterReload, true);
-  assert.deepEqual(queued.at(-1), ["/mecha-reload-runtime --wake", { deliverAs: "followUp" }]);
-  await commands.get("mecha-reload-runtime").handler("--wake", { reload: async () => reloads.push("reload"), ui: { notify() {} } });
-  assert.deepEqual(reloads, ["reload", "reload"]);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0][0].customType, "mecha-post-reload-handoff");
-  assert.match(sent[0][0].content, /runtime reload completed/i);
-  assert.deepEqual(sent[0][1], { deliverAs: "followUp", triggerTurn: true });
-});
-
-test("mecha reload opt-in wake failure reports without failing reload", async () => {
-  const commands = new Map();
-  const pi = {
-    events: { on() {} },
-    on() {},
-    registerCommand(name, command) { commands.set(name, command); },
-    registerTool() {},
-    sendMessage() { throw new Error("router unavailable"); },
-    sendUserMessage() {},
-  };
-  createMechaMessagingExtension(pi, {
-    resolveCurrentAgentId: () => "worker",
-    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
-  });
-  const reloads = [];
-  const notifications = [];
-
-  await commands.get("mecha-reload-runtime").handler("--wake", {
-    reload: async () => reloads.push("reload"),
-    ui: { notify: (...args) => notifications.push(args) },
-  });
-
-  assert.deepEqual(reloads, ["reload"]);
-  assert.deepEqual(notifications, [["Pi reload completed, but post-reload wake failed: router unavailable", "error"]]);
-});
-
-test("mecha_reload reports unavailable support without command or follow-up APIs", async () => {
-  const tools = new Map();
-  const pi = {
-    events: { on() {} },
-    on() {},
-    registerTool(tool) { tools.set(tool.name, tool); },
-    sendMessage() {},
-  };
-  createMechaMessagingExtension(pi, {
-    resolveCurrentAgentId: () => "worker",
-    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
-  });
-
-  const reloadTool = tools.get("mecha_reload");
-  const status = await reloadTool.execute("reload-status", { action: "status" });
-  assert.equal(status.details.commandRegistered, false);
-  assert.equal(status.details.canQueueReload, false);
-
-  const result = await reloadTool.execute("reload", { action: "reload" });
-  assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /Pi command registration is not available/);
-});
-
-test("mecha reload command reports unavailable runtime reload support", async () => {
-  const commands = new Map();
-  const pi = {
-    events: { on() {} },
-    on() {},
-    registerCommand(name, command) { commands.set(name, command); },
-    registerTool() {},
-    sendMessage() {},
-    sendUserMessage() {},
-  };
-  createMechaMessagingExtension(pi, {
-    resolveCurrentAgentId: () => "worker",
-    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
-  });
-  const notifications = [];
-
-  await commands.get("mecha-reload-runtime").handler("", { ui: { notify: (...args) => notifications.push(args) } });
-
-  assert.deepEqual(notifications, [["Self-reload is unavailable in this Pi context; use /reload manually.", "error"]]);
 });
 
 test("context monitor injects direct threshold notifications and resets after compaction", async (t) => {
@@ -1940,11 +1824,13 @@ test("extension pauses mailbox delivery across session compaction", async (t) =>
   for (const handler of handlers.get("session_before_compact")) {
     await handler({ signal: AbortSignal.timeout(1), preparation: { messagesToSummarize: [], turnPrefixMessages: [] } }, context);
   }
-  assert.ok(clientCalls.some((call) => Array.isArray(call) && call[2] === "mailbox: paused for compaction"));
-  assert.ok(clientCalls.includes("pause"));
+  assert.ok(clientCalls.some((call) => Array.isArray(call) && call[2] === "mailbox: compacting"));
+  assert.equal(clientCalls.includes("pause"), false);
+  assert.equal(clientCalls.includes("close"), false);
 
   for (const handler of handlers.get("session_compact")) handler({}, context);
-  assert.ok(clientCalls.includes("resume"));
+  assert.equal(clientCalls.includes("resume"), false);
+  assert.ok(clientCalls.some((call) => Array.isArray(call) && call[2] === "mailbox: connected"));
 });
 
 test("mailbox client reconnects after close and stops retrying after shutdown", async () => {

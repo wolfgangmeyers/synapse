@@ -221,8 +221,10 @@ test("router web UI serves the app and relays live router messages", async () =>
     const sendResult = await waitForEvent(browser, (event) => event.type === "send_result" && event.localId === "local-1");
     assert.equal(sendResult.ok, true);
     assert.equal(sendResult.message.from, webAgentId);
+    assert.deepEqual(sendResult.message.source, { kind: "web_ui" });
     const firstDelivery = await deliveredToPeer;
     assert.equal(firstDelivery.message.body, "hello from the browser\n\n[Reply via mailbox to web-test-client.]");
+    assert.deepEqual(firstDelivery.message.source, { kind: "web_ui" });
     ackDelivery(peer.socket, peer.registered, "peer-agent", "peer-agent-instance", firstDelivery);
 
     const deliveredImage = nextRouterFrame(peer.socket, (frame) => frame.type === "message" && frame.message.from === webAgentId && frame.message.id !== sendResult.message.id);
@@ -262,6 +264,7 @@ test("router web UI serves the app and relays live router messages", async () =>
     });
     const inboundEvent = await inbound;
     assert.equal(inboundEvent.message.body, "hello from a live agent");
+    assert.deepEqual(inboundEvent.message.source, { kind: "agent" });
     await waitFor(() => repository.messageFor("peer-to-web-1") === undefined);
   } finally {
     for (const socket of sockets) socket.close?.();
@@ -487,8 +490,9 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.selectedRouterLabel\.textContent = displayRouter\(state\.routerUrl\)/);
   assert.match(app, /title\.textContent = alias \|\| new URL\(routerUrl\)\.host/);
   assert.match(app, /elements\.peerName\.innerHTML = peer \? `\$\{escapeHtml\(humanName\(peer\)\)\}\$\{active \? '<span class="working-indicator inline"/);
-  assert.match(app, /elements\.peerDetail\.innerHTML = peer \? subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "header"\)/);
-  assert.match(app, /attachSubagentToggle\(elements\.peerDetail, peer, subagents\.length > 0, renderConversation\)/);
+  assert.match(app, /compacting \? compactingBadgeMarkup\("inline"\)/);
+  assert.match(app, /elements\.peerDetail\.innerHTML = peer \? \(compacting \? "Mailbox is compacting; delivery is queued\." : subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "header"\)\)/);
+  assert.match(app, /attachSubagentToggle\(elements\.peerDetail, peer, !compacting && subagents\.length > 0, renderConversation\)/);
   assert.match(styles, /#peer-name \{[\s\S]*display: flex;[\s\S]*gap: 10px;/);
   assert.match(styles, /\.peer-activity \{[\s\S]*display: flex;[\s\S]*gap: 8px;/);
   assert.doesNotMatch(app, /peerDetail\.textContent = peer \? `\$\{peer\} · \$\{active \? "Working" : "Available"\}/);
@@ -521,16 +525,26 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function backfillSelectedConversation\(\) \{[\s\S]*requestHistory\(peer\);[\s\S]*setTimeout\(\(\) => \{[\s\S]*state\.selectedPeer === peer && state\.routerUrl === routerUrl && state\.agentId === agentId[\s\S]*requestHistory\(peer\);[\s\S]*\}, 500\);[\s\S]*\}/);
   assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
   assert.match(app, /event\.type === "agent_activity"/);
+  assert.match(app, /ARRIVED_MESSAGE_VISIBLE_MS = 10_000/);
+  assert.match(app, /function maybeShowArrivedMessage\(message\)/);
+  assert.match(app, /!\["agent", "discord", "reminder"\]\.includes\(sourceKind\)/);
+  assert.match(app, /setTimeout\(hideArrivedMessage, ARRIVED_MESSAGE_VISIBLE_MS\)/);
+  assert.match(app, /function showArrivedMessageDialog\(\)/);
+  assert.match(app, /elements\.arrivedDialog\.showModal\(\)/);
+  assert.match(styles, /\.arrived-message \{[\s\S]*rgba\(255,209,102,0\.96\)/);
+  assert.match(styles, /\.message-dialog-body \{[\s\S]*white-space: pre-wrap;/);
   assert.match(app, /sameSubagents\(current\.subagents, summaries\)\) return;/);
-  assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}\$\{subagentCount > 0 \? " has-subagents" : ""\}\$\{expanded \? " expanded" : ""\}`/);
+  assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}\$\{compacting \? " compacting" : ""\}\$\{subagentCount > 0 \? " has-subagents" : ""\}\$\{expanded \? " expanded" : ""\}`/);
+  assert.match(app, /function compactingBadgeMarkup/);
   assert.match(app, /working-indicator/);
   assert.match(app, /aria-label="Agent is working"/);
   assert.match(app, /class="subagent-indicator\$\{canExpandSubagents/);
   assert.match(app, /aria-label="\$\{subagentCount\} running subagent\$\{subagentCount === 1 \? "" : "s"\}"/);
-  assert.match(app, /subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "row"\)/);
+  assert.match(app, /compacting \? compactingBadgeMarkup\(\) : subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "row"\)/);
   assert.match(app, /expandedSubagentMarkup\(countLabel, subagents\)/);
   assert.match(app, /join\("\\n\\n"\)/);
   assert.match(styles, /\.subagent-indicator \{[\s\S]*rgba\(38,106,255,0\.26\)/);
+  assert.match(styles, /\.compacting-indicator \{[\s\S]*rgba\(126,34,206,0\.28\)/);
   assert.match(styles, /@keyframes subagent-pulse/);
   assert.match(styles, /\.sidebar \{[\s\S]*overflow-x: hidden;/);
   assert.match(styles, /\.agents \{ display: grid; gap: 10px; min-width: 0; overflow-x: hidden; \}/);

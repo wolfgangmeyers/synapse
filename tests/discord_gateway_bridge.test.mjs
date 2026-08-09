@@ -37,6 +37,7 @@ test("inbound messages go directly to supervisor with an UTF-8 bounded untrusted
   assert.equal(built.envelope.from, "bridge-one");
   assert.equal(built.envelope.to, "supervisor");
   assert.equal(built.envelope.subject, "discord.inbound.v1");
+  assert.deepEqual(built.envelope.source, { kind: "discord" });
   assert.match(built.envelope.body, /begin untrusted content/);
   assert.match(built.envelope.body, /\[truncated\]/);
   assert.doesNotMatch(built.envelope.body, /reply_token|channel_id|source_message_id|guild_id/);

@@ -288,7 +288,9 @@ export function createAgentRouter({
       if (sessions.get(session.agentId) === session) {
         sessions.delete(session.agentId);
         cancelPendingDeliveryOffer(session.agentId);
-        if (session.suppressActivityClearOnClose !== true) clearAgentActivity(session.agentId);
+        if (session.suppressActivityClearOnClose !== true && observableAgentActivity(session.agentId) !== "compacting") {
+          clearAgentActivity(session.agentId);
+        }
       }
       try {
         const released = repository.releaseAgentLease({
@@ -400,6 +402,7 @@ export function createAgentRouter({
           ackConfirmation: candidate.ack_confirmation,
           conversationSync: candidate.conversation_sync,
           connectedAt: lease.acquired_at,
+          deliveryPaused: observableAgentActivity(candidate.agent_id) === "compacting",
         };
         registeredSession.offer = () => offerNextMessage(candidateSocket, registeredSession);
         return registeredSession;
@@ -585,7 +588,8 @@ export function createAgentRouter({
 
     function offerNextMessage(currentSocket, currentSession) {
       if (sessions.get(currentSession.agentId) !== currentSession
-        || currentSocket.readyState !== WebSocket.OPEN) return;
+        || currentSocket.readyState !== WebSocket.OPEN
+        || currentSession.deliveryPaused === true) return;
       try {
         const delivery = repository.claimNextMessage({
           agentId: currentSession.agentId,
@@ -980,7 +984,9 @@ export function createAgentRouter({
 
   function observableAgentActivity(agentId, nowMs = currentTimeMs(clock)) {
     const activity = activityByAgentId.get(agentId);
-    return activity !== undefined && activity.expiresAtMs > nowMs && activity.activeUntilMs > nowMs ? "active" : "idle";
+    if (activity === undefined || activity.expiresAtMs <= nowMs) return "idle";
+    if (activity.state === "compacting") return "compacting";
+    return activity.activeUntilMs > nowMs ? "active" : "idle";
   }
 
   function observableSubagents(agentId, nowMs = currentTimeMs(clock)) {
@@ -1035,20 +1041,31 @@ export function createAgentRouter({
     const previousSubagents = observableSubagents(agentId, nowMs);
     const summaries = normalizeSubagents(subagents, subagentCount);
     const nextCount = Math.min(999, Math.max(0, subagentCount, summaries.length));
-    const nextState = activityState === "active" ? "active" : "idle";
-    if (nextState === "active" || nextCount > 0) {
+    const nextState = activityState === "compacting" ? "compacting" : activityState === "active" ? "active" : "idle";
+    const session = sessions.get(agentId);
+    if (session !== undefined) session.deliveryPaused = nextState === "compacting";
+    if (nextState === "active" || nextState === "compacting" || nextCount > 0) {
       activityByAgentId.set(agentId, {
+        state: nextState,
         activeUntilMs: nextState === "active" ? nowMs + activityTtlMs : nowMs,
-        expiresAtMs: nowMs + activityTtlMs,
-        subagentCount: nextCount,
-        subagents: summaries,
+        expiresAtMs: nextState === "compacting" ? Number.POSITIVE_INFINITY : nowMs + activityTtlMs,
+        subagentCount: nextState === "compacting" ? 0 : nextCount,
+        subagents: nextState === "compacting" ? [] : summaries,
       });
-      if (previousState !== nextState || previousCount !== nextCount || !sameSubagents(previousSubagents, summaries)) {
-        broadcastAgentActivity(agentId, nextState, nextCount, summaries, generatedAt);
+      if (previousState !== nextState || previousCount !== (nextState === "compacting" ? 0 : nextCount) || !sameSubagents(previousSubagents, nextState === "compacting" ? [] : summaries)) {
+        broadcastAgentActivity(agentId, nextState, nextState === "compacting" ? 0 : nextCount, nextState === "compacting" ? [] : summaries, generatedAt);
+      }
+      if (previousState === "compacting" && nextState !== "compacting" && session !== undefined) {
+        session.deliveryPaused = false;
+        offerQueuedMessages(agentId);
       }
       return;
     }
     activityByAgentId.delete(agentId);
+    if (previousState === "compacting" && session !== undefined) {
+      session.deliveryPaused = false;
+      offerQueuedMessages(agentId);
+    }
     if (previousState !== "idle" || previousCount !== 0 || previousSubagents.length > 0) broadcastAgentActivity(agentId, "idle", 0, [], generatedAt);
   }
 
@@ -1062,6 +1079,11 @@ export function createAgentRouter({
     for (const [agentId, activity] of activityByAgentId.entries()) {
       if (activity.expiresAtMs > nowMs) continue;
       activityByAgentId.delete(agentId);
+      const session = sessions.get(agentId);
+      if (session !== undefined && session.deliveryPaused === true) {
+        session.deliveryPaused = false;
+        offerQueuedMessages(agentId);
+      }
       broadcastAgentActivity(agentId, "idle", 0, [], generatedAt);
     }
   }
@@ -1112,9 +1134,10 @@ export function createAgentRouter({
   }
 
   function enqueueMessage(envelope, options = undefined) {
-    const result = repository.enqueue(envelope, {
+    const sourcedEnvelope = { ...envelope, source: normalizeMessageSource(envelope.source, envelope) };
+    const result = repository.enqueue(sourcedEnvelope, {
       ...options,
-      disableBatching: conversationSessions.has(envelope.to),
+      disableBatching: conversationSessions.has(sourcedEnvelope.to),
     });
     emit("message_enqueued", {
       message_id: result.message.id,
@@ -1129,6 +1152,22 @@ export function createAgentRouter({
     }
     offerQueuedMessages(result.message.to);
     return result;
+  }
+
+  function normalizeMessageSource(source, envelope) {
+    if (source !== undefined && source !== null && typeof source === "object" && !Array.isArray(source)) {
+      const kind = source.kind;
+      if (["agent", "web_ui", "android", "discord", "reminder", "system", "unknown"].includes(kind)) return { kind };
+    }
+    if (envelope?.subject === "discord.inbound.v1") return { kind: "discord" };
+    const senderSessions = conversationSessions.get(envelope?.from);
+    if (senderSessions !== undefined) {
+      for (const session of senderSessions.values()) {
+        if (session.clientType === "web") return { kind: "web_ui" };
+        if (session.clientType === "android") return { kind: "android" };
+      }
+    }
+    return { kind: "agent" };
   }
 
   function fanoutConversationMessage(message) {
@@ -1982,6 +2021,7 @@ function toEnvelope(message) {
     to: message.to,
     ...(message.subject === undefined ? {} : { subject: message.subject }),
     ...(message.sentinel === undefined ? {} : { sentinel: message.sentinel }),
+    ...(message.source === undefined ? {} : { source: message.source }),
     body: message.body,
     created_at: message.created_at,
   };
