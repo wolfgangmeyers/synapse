@@ -341,6 +341,20 @@ else
   echo "linked: $HOOK_LINK -> $HOOK_SRC"
 fi
 
+# Activity hook (all activity events — drives the router UI's working dot and subagent badge)
+HOOK_SRC="$(pwd)/.claude/skills/supervisor/tools/hooks/claude-activity.sh"
+HOOK_LINK="$HOME/.claude/hooks/claude-activity.sh"
+
+if [ -L "$HOOK_LINK" ]; then
+  ln -sf "$HOOK_SRC" "$HOOK_LINK"
+  echo "updated: $HOOK_LINK -> $HOOK_SRC"
+elif [ -e "$HOOK_LINK" ]; then
+  echo "skipped: $HOOK_LINK already exists (not a symlink)"
+else
+  ln -s "$HOOK_SRC" "$HOOK_LINK"
+  echo "linked: $HOOK_LINK -> $HOOK_SRC"
+fi
+
 # PR feedback reminder hook (PostToolUse — Bash)
 HOOK_SRC="$(pwd)/.claude/skills/supervisor/tools/hooks/pr-feedback-reminder.py"
 HOOK_LINK="$HOME/.claude/hooks/pr-feedback-reminder.py"
@@ -386,6 +400,31 @@ if not already_registered:
     print("added: PostToolUse mailbox delivery hook")
 else:
     print("skipped: PostToolUse mailbox delivery hook already registered")
+
+# Activity hooks: one entry per event, all running the same script with the event name.
+#
+# The dedupe matches on the script name appearing ANYWHERE in the command, not on the command
+# ending with it. These commands end with the event name, so an endswith check never matches and
+# every install run would append another eleven entries, without limit and without a symptom.
+ACTIVITY_EVENTS = [
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart",
+    "SubagentStop", "Stop", "PreCompact", "PostCompact", "Notification", "SessionEnd",
+]
+activity_added = 0
+for event_name in ACTIVITY_EVENTS:
+    entries = settings.setdefault("hooks", {}).setdefault(event_name, [])
+    already = any(
+        any("claude-activity.sh" in h.get("command", "") for h in entry.get("hooks", []))
+        for entry in entries
+    )
+    if already:
+        continue
+    entries.append({
+        "matcher": "",
+        "hooks": [{"type": "command", "command": f"~/.claude/hooks/claude-activity.sh {event_name}"}],
+    })
+    activity_added += 1
+print(f"activity hooks: added {activity_added}, already present {len(ACTIVITY_EVENTS) - activity_added}")
 
 # Ensure PostToolUse hook for PR feedback reminder exists
 pr_reminder_entry = {
