@@ -480,8 +480,13 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.ok(app.includes('remove.setAttribute("aria-label", `Remove ${image.name || `image ${index + 1}`}`)'));
   assert.match(app, /elements\.selectedRouterLabel\.textContent = displayRouter\(state\.routerUrl\)/);
   assert.match(app, /title\.textContent = alias \|\| new URL\(routerUrl\)\.host/);
-  assert.match(app, /elements\.peerDetail\.textContent = peer \? `\$\{peer\} · \$\{displayRouter\(state\.routerUrl\)\}`/);
+  assert.match(app, /elements\.peerName\.innerHTML = peer \? `\$\{escapeHtml\(humanName\(peer\)\)\}\$\{active \? '<span class="working-indicator inline"/);
+  assert.match(app, /elements\.peerDetail\.innerHTML = peer \? subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "header"\)/);
+  assert.match(app, /attachSubagentToggle\(elements\.peerDetail, peer, subagents\.length > 0, renderConversation\)/);
+  assert.match(styles, /#peer-name \{[\s\S]*display: flex;[\s\S]*gap: 10px;/);
+  assert.match(styles, /\.peer-activity \{[\s\S]*display: flex;[\s\S]*gap: 8px;/);
   assert.doesNotMatch(app, /peerDetail\.textContent = peer \? `\$\{peer\} · \$\{active \? "Working" : "Available"\}/);
+  assert.doesNotMatch(app, /peerDetail\.textContent = peer \? `\$\{peer\} · \$\{displayRouter\(state\.routerUrl\)\}`/);
   assert.match(styles, /\.router-row-actions/);
   assert.match(styles, /\.icon-button/);
   assert.match(webState, /function matchesActiveScope/);
@@ -516,6 +521,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /aria-label="Agent is working"/);
   assert.match(app, /class="subagent-indicator\$\{canExpandSubagents/);
   assert.match(app, /aria-label="\$\{subagentCount\} running subagent\$\{subagentCount === 1 \? "" : "s"\}"/);
+  assert.match(app, /subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "row"\)/);
   assert.match(app, /expandedSubagentMarkup\(countLabel, subagents\)/);
   assert.match(app, /join\("\\n\\n"\)/);
   assert.match(styles, /\.subagent-indicator \{[\s\S]*rgba\(38,106,255,0\.26\)/);

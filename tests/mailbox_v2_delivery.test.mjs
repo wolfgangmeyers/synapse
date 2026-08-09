@@ -566,6 +566,7 @@ function settledNotificationFixture(t, {
   setIntervalImpl,
   clearIntervalImpl,
   nowImpl,
+  subagentsService,
   immediateScheduler = true,
 } = {}) {
   isolateCompactionEnvironment(t);
@@ -592,7 +593,11 @@ function settledNotificationFixture(t, {
     close() {},
     sendReply,
     sendReceipt() {},
-    sendActivity: (state, options) => activity.push({ state, subagentCount: options?.subagentCount ?? 0 }),
+    sendActivity: (state, options) => activity.push({
+      state,
+      subagentCount: options?.subagentCount ?? 0,
+      ...(Array.isArray(options?.subagents) && options.subagents.length > 0 ? { subagents: options.subagents } : {}),
+    }),
   };
   const pi = {
     events: { on(type, handler) { childEvents.set(type, handler); } },
@@ -609,6 +614,7 @@ function settledNotificationFixture(t, {
     setIntervalImpl,
     clearIntervalImpl,
     nowImpl,
+    subagentsService,
   };
   if (createSettledScheduler !== undefined) extensionOptions.createSettledScheduler = createSettledScheduler;
   else if (immediateScheduler) extensionOptions.createSettledScheduler = immediateSettledScheduler;
@@ -818,6 +824,36 @@ test("compaction pauses activity without dropping mailbox resume", async (t) => 
   assert.deepEqual(fixture.activity, [
     { state: "active", subagentCount: 0 },
     { state: "settled", subagentCount: 0 },
+  ]);
+  assert.deepEqual(calls, ["pause", "resume"]);
+});
+
+test("compaction resume reconciles already-running native subagents", async (t) => {
+  const calls = [];
+  const fixture = settledNotificationFixture(t, {
+    subagentsService: {
+      listAgents: () => [{
+        id: "child-survived",
+        type: "general-purpose",
+        description: "Survived compaction",
+        status: "running",
+        startedAt: 123,
+      }],
+    },
+  });
+  fixture.client.pause = () => calls.push("pause");
+  fixture.client.resume = () => { calls.push("resume"); return Promise.resolve(); };
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  await fixture.handlers.get("session_before_compact")({ signal: AbortSignal.timeout(100), preparation: {} }, fixture.context);
+  fixture.handlers.get("session_compact")({}, fixture.context);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 1, subagents: [{ id: "child-survived", type: "general-purpose", description: "Survived compaction" }] },
+    { state: "settled", subagentCount: 0 },
+    { state: "settled", subagentCount: 1, subagents: [{ id: "child-survived", type: "general-purpose", description: "Survived compaction" }] },
   ]);
   assert.deepEqual(calls, ["pause", "resume"]);
 });

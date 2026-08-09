@@ -389,29 +389,13 @@ function renderAgents() {
     const subagentCount = Math.max(subagents.length, Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0);
     const canExpandSubagents = subagents.length > 0;
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
-    const listId = `subagents-${cssSafeId(peer)}`;
     const row = document.createElement("button");
     row.type = "button";
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
-    const countLabel = `${subagentCount} subagent${subagentCount === 1 ? "" : "s"}`;
-    const badgeContent = expanded ? expandedSubagentMarkup(countLabel, subagents) : escapeHtml(countLabel);
-    const badge = subagentCount > 0 ? `<span class="subagent-indicator${canExpandSubagents ? " expandable" : ""}${expanded ? " expanded" : ""}"${canExpandSubagents ? ` role="button" tabindex="0" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${listId}" aria-label="${expanded ? "Hide" : "Show"} running subagents for ${escapeHtml(humanName(peer))}"` : ` aria-label="${subagentCount} running subagent${subagentCount === 1 ? "" : "s"}"`}><span class="subagent-dot"></span><span id="${listId}" class="subagent-badge-content">${badgeContent}</span></span>` : "";
+    const badge = subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
     row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${badge}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
-    if (canExpandSubagents) {
-      const toggle = row.querySelector(".subagent-indicator");
-      const toggleSubagents = (event) => {
-        event.stopPropagation();
-        event.preventDefault();
-        if (state.expandedSubagents.has(peer)) state.expandedSubagents.delete(peer);
-        else state.expandedSubagents.add(peer);
-        renderAgents();
-      };
-      toggle.addEventListener("click", toggleSubagents);
-      toggle.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") toggleSubagents(event);
-      });
-    }
+    attachSubagentToggle(row, peer, canExpandSubagents, renderAgents);
     return row;
   }));
   requestAnimationFrame(updateSubagentTooltips);
@@ -504,10 +488,16 @@ function renderConversation() {
   const peer = state.selectedPeer;
   elements.peerAvatar.textContent = peer ? monogram(peer) : "?";
   elements.peerAvatar.className = `avatar${peer ? "" : " muted"}`;
-  elements.peerName.textContent = peer ? humanName(peer) : "Pick an agent";
   const selectedAgent = state.agents.find((agent) => agent.agent_id === peer);
   const active = selectedAgent?.activity_state === "active";
-  elements.peerDetail.textContent = peer ? `${peer} · ${displayRouter(state.routerUrl)}` : "Connected agents appear on the left.";
+  elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}` : "Pick an agent";
+  const subagents = normalizeSubagents(selectedAgent?.subagents);
+  const subagentCount = Math.max(subagents.length, Number.isSafeInteger(selectedAgent?.subagent_count) ? selectedAgent.subagent_count : 0);
+  const expanded = subagents.length > 0 && state.expandedSubagents.has(peer);
+  elements.peerDetail.className = `peer-activity${active ? " working" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
+  elements.peerDetail.innerHTML = peer ? subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "header") : "Connected agents appear on the left.";
+  attachSubagentToggle(elements.peerDetail, peer, subagents.length > 0, renderConversation);
+  requestAnimationFrame(updateSubagentTooltips);
   elements.peerAvatar.classList.toggle("working", active);
   elements.draft.disabled = !peer;
   elements.attachImage.disabled = !peer;
@@ -1007,7 +997,7 @@ function humanName(id) { return id.split(/[._-]+/).filter(Boolean).map((part) =>
 function monogram(id) { return (id.match(/[A-Za-z0-9]/)?.[0] || "?").toUpperCase(); }
 function cssSafeId(value) { return String(value).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 96); }
 function updateSubagentTooltips() {
-  for (const badge of elements.agents.querySelectorAll(".subagent-indicator.expanded")) {
+  for (const badge of document.querySelectorAll(".subagent-indicator.expanded")) {
     const descriptions = [...badge.querySelectorAll(".subagent-description")];
     const truncated = descriptions.some((description) => description.scrollWidth > description.clientWidth);
     if (truncated) {
@@ -1025,6 +1015,31 @@ function mergeKnownSubagentSummaries(agent) {
   const current = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
   const currentSummaries = normalizeSubagents(current?.subagents);
   return currentSummaries.length === incomingCount ? { ...agent, subagents: currentSummaries } : { ...agent, subagents: [] };
+}
+function subagentBadgeMarkup(peer, subagentCount, subagents, expanded, surface) {
+  if (subagentCount <= 0) return "";
+  const canExpandSubagents = subagents.length > 0;
+  const listId = `subagents-${surface}-${cssSafeId(peer)}`;
+  const countLabel = `${subagentCount} subagent${subagentCount === 1 ? "" : "s"}`;
+  const badgeContent = expanded ? expandedSubagentMarkup(countLabel, subagents) : escapeHtml(countLabel);
+  return `<span class="subagent-indicator${canExpandSubagents ? " expandable" : ""}${expanded ? " expanded" : ""}"${canExpandSubagents ? ` role="button" tabindex="0" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${listId}" aria-label="${expanded ? "Hide" : "Show"} running subagents for ${escapeHtml(humanName(peer))}"` : ` aria-label="${subagentCount} running subagent${subagentCount === 1 ? "" : "s"}"`}><span class="subagent-dot"></span><span id="${listId}" class="subagent-badge-content">${badgeContent}</span></span>`;
+}
+function attachSubagentToggle(root, peer, canExpandSubagents, renderAfterToggle) {
+  if (!canExpandSubagents) return;
+  const toggle = root.querySelector(".subagent-indicator");
+  if (!toggle) return;
+  const toggleSubagents = (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (state.expandedSubagents.has(peer)) state.expandedSubagents.delete(peer);
+    else state.expandedSubagents.add(peer);
+    renderAfterToggle();
+    requestAnimationFrame(updateSubagentTooltips);
+  };
+  toggle.addEventListener("click", toggleSubagents);
+  toggle.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") toggleSubagents(event);
+  });
 }
 function expandedSubagentMarkup(countLabel, subagents) {
   const descriptions = subagents.map((subagent) => `<span class="subagent-list-item"><span class="subagent-dot"></span><span class="subagent-description">${escapeHtml(subagent.description)}</span></span>`).join("");

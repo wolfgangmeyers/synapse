@@ -782,9 +782,14 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
 test("Android home renders only router-discovered connected peers", () => {
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
   assert.match(activity, /scheduleAtFixedRate\(60_000, 60_000\)[\s\S]*discoverPeers\(generation\)/);
-  assert.match(activity, /val discovered = buildList \{[\s\S]*PeerStatus\(peer, agent\.optString\("activity_state", "idle"\)\)[\s\S]*\}\n\s*runOnUiThread \{ if \(generation == connectionGeneration\) peers = discovered\.sortedBy \{ it\.id \} \}/);
+  assert.match(activity, /val discovered = buildList \{[\s\S]*peerStatusFromJson\(peer, agent, peers\.firstOrNull \{ it\.id == peer \}\)[\s\S]*\}\n\s*runOnUiThread \{ if \(generation == connectionGeneration\) peers = discovered\.sortedBy \{ it\.id \} \}/);
   assert.match(activity, /private fun receiveAgentActivity\(frame: JSONObject\)/);
-  assert.match(activity, /WorkingIndicator\(\)/);
+  assert.match(activity, /normalizedSubagentSummaries\(source\.optJSONArray\("subagents"\)\)/);
+  assert.match(activity, /current\?\.subagents\?\.size == incomingCount/);
+  assert.match(activity, /PeerActivityIndicators\(peer\)/);
+  assert.match(activity, /SubagentIndicator\(peer\.subagentCount, peer\.subagents, compact\)/);
+  assert.match(activity, /Text\(humanName\(peer\), modifier = Modifier\.weight\(1f, fill = false\)/);
+  assert.match(activity, /WorkingIndicator\(compact = true\)/);
   assert.doesNotMatch(activity, /addAll\(knownPeers\(\)\.filter/);
   assert.doesNotMatch(activity, /peers = \(peers \+ peer\)\.distinct\(\)\.sorted\(\)/);
   assert.match(activity, /Text\("Connected agents"/);
