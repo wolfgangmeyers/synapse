@@ -6,7 +6,7 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { assertAgentId } from "../pi-extensions/mailbox-client.js";
+import { assertAgentId, assertPresenceAgentId } from "../pi-extensions/mailbox-client.js";
 import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import {
   createActivityReporter,
@@ -317,4 +317,23 @@ test("an identical activity frame is not re-sent inside the resend window", () =
   clock += 11_000; // past the resend window, so the router's 15s expiry cannot lapse
   reporter.tick();
   assert.equal(sent.length, 2, "the frame was not refreshed before the router would expire it");
+});
+
+// The two id spaces are complements, not conventions. No string satisfies both validators, so a
+// presence id can never reach a mail-injecting sidecar and a worker id can never be claimed by a
+// self-registered session. Widening either pattern breaks that, and these are the tripwires.
+test("presence ids and worker ids are mutually exclusive", () => {
+  const workerIds = ["supervisor", "claude-activity-indicators", "van-770-eval-gate"];
+  const presenceIds = ["session.supervisor.4821", "session.ad-hoc.1", "s.x.2"];
+
+  for (const id of workerIds) {
+    assert.equal(assertAgentId(id), id, `${id} should be a valid worker id`);
+    assert.throws(() => assertPresenceAgentId(id), /presence identity/,
+      `${id} was accepted as a presence id, so the spaces overlap`);
+  }
+  for (const id of presenceIds) {
+    assert.equal(assertPresenceAgentId(id), id, `${id} should be a valid presence id`);
+    assert.throws(() => assertAgentId(id), /agent identity is invalid/,
+      `${id} was accepted as a worker id, so an ad hoc session could take a worker's mail`);
+  }
 });
