@@ -767,6 +767,10 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.match(activity, /"history:\$activeRouter:\$agentId:\$peer"/);
   assert.match(activity, /generation != connectionGeneration \|\| activeRouter != router \|\| agentId != owner \|\| selectedPeer != peer/);
   assert.match(activity, /reconcileConversationMessages\(historyFor\(peer\), hydrated, highWaterSequence\)/);
+  assert.match(activity, /rememberLauncherForActivityResult\(ActivityResultContracts\.GetMultipleContents\(\)\)/);
+  assert.match(activity, /imagePicker\.launch\("image\/\*"\)/);
+  assert.match(activity, /Text\("Attach"\)/);
+  assert.doesNotMatch(activity, /Text\("Paste"\)/);
   assert.match(activity, /contentReceiver\(receiveImages\)/);
   assert.match(activity, /acceptedImageUri\(item\.uri\?\.toString\(\), item\.intent\?\.data\?\.toString\(\), item\.text\?\.toString\(\)\)/);
   assert.match(activity, /JSONObject\(\)\.put\("type", "image"\)\.put\("data_url", image\.dataUrl\)\.put\("name", image\.name\)/);
@@ -787,6 +791,8 @@ test("Android home renders only router-discovered connected peers", () => {
   assert.match(activity, /normalizedSubagentSummaries\(source\.optJSONArray\("subagents"\)\)/);
   assert.match(activity, /current\?\.subagents\?\.size == incomingCount/);
   assert.match(activity, /PeerActivityIndicators\(peer\)/);
+  assert.match(activity, /if \(peer\.subagentCount <= 0\) return/);
+  assert.doesNotMatch(activity, /Text\(if \(peer\.active\) "Working" else "Available"/);
   assert.match(activity, /SubagentIndicator\(peer\.subagentCount, peer\.subagents, compact\)/);
   assert.match(activity, /Text\(humanName\(peer\), modifier = Modifier\.weight\(1f, fill = false\)/);
   assert.match(activity, /WorkingIndicator\(compact = true\)/);

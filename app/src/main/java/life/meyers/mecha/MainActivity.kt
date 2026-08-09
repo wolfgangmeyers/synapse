@@ -5,7 +5,6 @@ import android.app.NotificationManager
 import android.Manifest
 import android.app.PendingIntent
 import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.Intent
@@ -19,7 +18,9 @@ import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -86,7 +87,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -973,10 +973,7 @@ private fun PeerRow(peer: PeerStatus, onClick: () -> Unit) {
 
 @Composable
 private fun PeerActivityIndicators(peer: PeerStatus, compact: Boolean = false) {
-    if (peer.subagentCount <= 0) {
-        Text(if (peer.active) "Working" else "Available", style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        return
-    }
+    if (peer.subagentCount <= 0) return
     Column(Modifier.padding(top = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
         SubagentIndicator(peer.subagentCount, peer.subagents, compact)
     }
@@ -1065,7 +1062,9 @@ private fun Conversation(
 ) {
     val peer = peerStatus.id
     val transcriptState = rememberLazyListState()
-    val context = LocalContext.current
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNotEmpty()) onImages(uris)
+    }
     val receiveImages = remember(onImages) {
         object : ReceiveContentListener {
             override fun onReceive(transferableContent: TransferableContent): TransferableContent? {
@@ -1128,14 +1127,10 @@ private fun Conversation(
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(
-                    onClick = {
-                        val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
-                        val uris = clip?.let(::imageUris).orEmpty()
-                        if (uris.isNotEmpty()) onImages(uris)
-                    },
+                    onClick = { imagePicker.launch("image/*") },
                     enabled = pendingImages.size < MAX_IMAGE_ATTACHMENTS,
                     modifier = Modifier.height(56.dp),
-                ) { Text("Paste") }
+                ) { Text("Attach") }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraft,
