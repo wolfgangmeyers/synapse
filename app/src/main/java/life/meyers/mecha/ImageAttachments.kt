@@ -3,8 +3,9 @@ package life.meyers.mecha
 import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.net.Uri
-import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.Base64
@@ -20,15 +21,15 @@ private const val MAX_IMAGE_PIXELS = 40_000_000L
 
 internal data class PendingImage(
     val name: String,
-    val webp: ByteArray,
+    val bytes: ByteArray,
 ) {
-    val dataUrl: String get() = routerImageDataUrl(webp)
+    val dataUrl: String get() = routerImageDataUrl(bytes)
 }
 
 internal fun prepareImageAttachment(
     resolver: ContentResolver,
     uri: Uri,
-    displayName: String = "image.webp",
+    displayName: String = "image.jpg",
 ): PendingImage {
     val input = resolver.openInputStream(uri) ?: throw IllegalArgumentException("Image could not be opened")
     val encoded = input.use { it.readBounded(MAX_IMAGE_INPUT_BYTES) }
@@ -40,7 +41,7 @@ internal fun prepareImageAttachment(
     val bitmap = BitmapFactory.decodeByteArray(encoded, 0, encoded.size)
         ?: throw IllegalArgumentException("Image format is unsupported")
     return try {
-        PendingImage(webpName(displayName), normalizeBitmap(bitmap))
+        PendingImage(jpgName(displayName), normalizeBitmap(bitmap))
     } finally {
         bitmap.recycle()
     }
@@ -52,21 +53,23 @@ internal fun acceptedImageUri(uri: String?, intentData: String?, text: String?):
         .map(String::trim)
         .firstOrNull { value -> value.startsWith("content://") || value.startsWith("android.resource://") }
 
-internal fun routerImageDataUrl(webp: ByteArray): String {
-    require(webp.size in 1..MAX_IMAGE_BYTES) { "Image is too large after conversion" }
-    require(webp.size >= 12 && webp.copyOfRange(0, 4).decodeToString() == "RIFF" && webp.copyOfRange(8, 12).decodeToString() == "WEBP") {
-        "Converted image is not WebP"
+internal fun routerImageDataUrl(bytes: ByteArray): String {
+    require(bytes.size in 1..MAX_IMAGE_BYTES) { "Image is too large after conversion" }
+    require(bytes.size >= 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()) {
+        "Converted image is not JPEG"
     }
-    return "data:image/webp;base64,${Base64.getEncoder().encodeToString(webp)}"
+    return "data:image/jpeg;base64,${Base64.getEncoder().encodeToString(bytes)}"
 }
 
 internal fun normalizeBitmap(source: Bitmap): ByteArray {
-    var current = scaleToEdge(source, MAX_IMAGE_EDGE)
+    val scaled = scaleToEdge(source, MAX_IMAGE_EDGE)
+    var current = flattenOnWhite(scaled)
+    if (scaled !== source) scaled.recycle()
     try {
         repeat(5) { pass ->
-            val quality = 82 - pass * 10
+            val quality = 92 - pass * 8
             val output = ByteArrayOutputStream()
-            if (!current.compress(webpFormat(), quality, output)) throw IllegalArgumentException("Image could not be converted")
+            if (!current.compress(Bitmap.CompressFormat.JPEG, quality, output)) throw IllegalArgumentException("Image could not be converted")
             val bytes = output.toByteArray()
             if (bytes.size <= MAX_IMAGE_BYTES) return bytes
             val nextWidth = max(1, (current.width * 0.8).roundToInt())
@@ -93,9 +96,13 @@ private fun scaleToEdge(source: Bitmap, maxEdge: Int): Bitmap {
     )
 }
 
-@Suppress("DEPRECATION")
-private fun webpFormat(): Bitmap.CompressFormat =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
+private fun flattenOnWhite(source: Bitmap): Bitmap {
+    val flattened = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(flattened)
+    canvas.drawColor(Color.WHITE)
+    canvas.drawBitmap(source, 0f, 0f, null)
+    return flattened
+}
 
 private fun InputStream.readBounded(limit: Int): ByteArray {
     val output = ByteArrayOutputStream()
@@ -112,7 +119,7 @@ private fun InputStream.readBounded(limit: Int): ByteArray {
     return output.toByteArray()
 }
 
-private fun webpName(value: String): String {
+private fun jpgName(value: String): String {
     val base = value.substringAfterLast('/').substringBeforeLast('.', value.substringAfterLast('/')).ifBlank { "image" }
-    return "${base.replace(Regex("[^A-Za-z0-9._ -]"), "").take(110).ifBlank { "image" }}.webp"
+    return "${base.replace(Regex("[^A-Za-z0-9._ -]"), "").take(110).ifBlank { "image" }}.jpg"
 }

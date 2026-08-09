@@ -16,26 +16,27 @@ class ImageAttachmentsTest {
     }
 
     @Test
-    fun buildsTheWebRouterAttachmentPayloadFromNormalizedWebp() {
-        val webp = "RIFF\u0010\u0000\u0000\u0000WEBPVP8 ".toByteArray(Charsets.ISO_8859_1)
+    fun buildsTheWebRouterAttachmentPayloadFromNormalizedJpeg() {
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 0x00, 0x10)
 
-        val dataUrl = routerImageDataUrl(webp)
+        val dataUrl = routerImageDataUrl(jpeg)
 
-        assertTrue(dataUrl.startsWith("data:image/webp;base64,"))
-        assertArrayEquals(webp, Base64.getDecoder().decode(dataUrl.substringAfter(',')))
+        assertTrue(dataUrl.startsWith("data:image/jpeg;base64,"))
+        assertArrayEquals(jpeg, Base64.getDecoder().decode(dataUrl.substringAfter(',')))
         assertEquals(MAX_IMAGE_ATTACHMENTS * MAX_IMAGE_BYTES, MAX_IMAGE_TOTAL_BYTES)
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun rejectsNonWebpOutputBeforeBuildingTheRouterPayload() {
+    fun rejectsNonJpegOutputBeforeBuildingTheRouterPayload() {
         routerImageDataUrl(ByteArray(16) { 1 })
     }
 
     @Test(expected = IllegalArgumentException::class)
     fun rejectsConvertedImagesOverTheRouterPerImageLimit() {
         val oversized = ByteArray(MAX_IMAGE_BYTES + 1)
-        "RIFF".toByteArray().copyInto(oversized, 0)
-        "WEBP".toByteArray().copyInto(oversized, 8)
+        oversized[0] = 0xFF.toByte()
+        oversized[1] = 0xD8.toByte()
+        oversized[2] = 0xFF.toByte()
         routerImageDataUrl(oversized)
     }
 }

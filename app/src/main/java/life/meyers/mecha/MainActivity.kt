@@ -596,7 +596,7 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     if (activeRouter != router || selectedPeer != peer) return@runOnUiThread
                     val updated = images + prepared.take(MAX_IMAGE_ATTACHMENTS - images.size)
-                    if (updated.sumOf { it.webp.size } > MAX_IMAGE_TOTAL_BYTES) {
+                    if (updated.sumOf { it.bytes.size } > MAX_IMAGE_TOTAL_BYTES) {
                         connection = "Attached images are too large together"
                     } else {
                         images = updated
@@ -1067,7 +1067,7 @@ private fun MessageBubble(message: ChatMessage) {
 
 @Composable
 private fun PendingImagePreview(image: PendingImage, onRemove: () -> Unit) {
-    val bitmap = remember(image) { BitmapFactory.decodeByteArray(image.webp, 0, image.webp.size)?.asImageBitmap() }
+    val bitmap = remember(image) { BitmapFactory.decodeByteArray(image.bytes, 0, image.bytes.size)?.asImageBitmap() }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         if (bitmap != null) {
             Image(
