@@ -998,12 +998,13 @@ test("mecha_reload reports support and queues reload through the command boundar
   const commands = new Map();
   const tools = new Map();
   const queued = [];
+  const sent = [];
   const pi = {
     events: { on() {} },
     on(type, handler) { handlers.set(type, handler); },
     registerCommand(name, command) { commands.set(name, command); },
     registerTool(tool) { tools.set(tool.name, tool); },
-    sendMessage() {},
+    sendMessage: (...args) => sent.push(args),
     sendUserMessage: (...args) => queued.push(args),
   };
   createMechaMessagingExtension(pi, {
@@ -1019,15 +1020,55 @@ test("mecha_reload reports support and queues reload through the command boundar
   assert.equal(status.details.command, "/mecha-reload-runtime");
   assert.equal(status.details.commandRegistered, true);
   assert.equal(status.details.canQueueReload, true);
+  assert.equal(status.details.canSendPostReloadHandoff, true);
 
   const result = await reloadTool.execute("reload", { action: "reload" });
   assert.equal(result.content[0].text, "Self-reload queued for Pi's next safe follow-up boundary.");
   assert.equal(result.details.reloadState, "queued_as_follow_up");
+  assert.equal(result.details.wakeAfterReload, false);
   assert.deepEqual(queued, [["/mecha-reload-runtime", { deliverAs: "followUp" }]]);
 
   const reloads = [];
   await commands.get("mecha-reload-runtime").handler("", { reload: async () => reloads.push("reload"), ui: { notify() {} } });
   assert.deepEqual(reloads, ["reload"]);
+  assert.deepEqual(sent, []);
+
+  const wakeResult = await reloadTool.execute("reload-wake", { action: "reload", wakeAfterReload: true });
+  assert.equal(wakeResult.content[0].text, "Self-reload queued for Pi's next safe follow-up boundary with post-reload wake enabled.");
+  assert.equal(wakeResult.details.wakeAfterReload, true);
+  assert.deepEqual(queued.at(-1), ["/mecha-reload-runtime --wake", { deliverAs: "followUp" }]);
+  await commands.get("mecha-reload-runtime").handler("--wake", { reload: async () => reloads.push("reload"), ui: { notify() {} } });
+  assert.deepEqual(reloads, ["reload", "reload"]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0].customType, "mecha-post-reload-handoff");
+  assert.match(sent[0][0].content, /runtime reload completed/i);
+  assert.deepEqual(sent[0][1], { deliverAs: "followUp", triggerTurn: true });
+});
+
+test("mecha reload opt-in wake failure reports without failing reload", async () => {
+  const commands = new Map();
+  const pi = {
+    events: { on() {} },
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+    registerTool() {},
+    sendMessage() { throw new Error("router unavailable"); },
+    sendUserMessage() {},
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "worker",
+    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
+  });
+  const reloads = [];
+  const notifications = [];
+
+  await commands.get("mecha-reload-runtime").handler("--wake", {
+    reload: async () => reloads.push("reload"),
+    ui: { notify: (...args) => notifications.push(args) },
+  });
+
+  assert.deepEqual(reloads, ["reload"]);
+  assert.deepEqual(notifications, [["Pi reload completed, but post-reload wake failed: router unavailable", "error"]]);
 });
 
 test("mecha_reload reports unavailable support without command or follow-up APIs", async () => {
