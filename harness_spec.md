@@ -148,7 +148,7 @@ These constraints are acceptable. “Drop into the active context” means queue
 
 Documentation root:
 
-`/Users/wolfgang.meyers/.nvm/versions/node/v26.2.0/lib/node_modules/@earendil-works/pi-coding-agent`
+`/Users/wolfgang/.nvm/versions/node/v26.2.0/lib/node_modules/@earendil-works/pi-coding-agent`
 
 Relevant primary sources include:
 
