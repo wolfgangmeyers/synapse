@@ -401,6 +401,11 @@ if not already_registered:
 else:
     print("skipped: PostToolUse mailbox delivery hook already registered")
 
+# NOTE: hooks are read when a Claude session STARTS. Every session already running when this
+# installs will show nothing, including the ones you are watching while you install it. That is
+# not a fault and there is nothing to debug: launch a new worker, or restart an existing one, and
+# it appears. This has already sent one person looking for a bug that was not there.
+#
 # Activity hooks: one entry per event, all running the same script with the event name.
 #
 # The dedupe matches on the script name appearing ANYWHERE in the command, not on the command
