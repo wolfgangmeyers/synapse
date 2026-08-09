@@ -28,6 +28,23 @@ Two rules follow:
 - Test an error message before relaying it.
 - Do not conclude the whole session or account is blocked because one subagent failed. If you are still running, your own budget works. One agent failing is one data point about that agent, not about the account. Relaunch the work and see.
 
+## Never use plan mode or a multiple-choice prompt
+
+Two interaction modes are off by default and stay off unless Wolfgang asks for one by name.
+
+- **Plan mode.** Do not enter it, in any session, supervisor or worker. Write the plan to a file and
+  keep working. Plan mode stalls the session waiting on an approval that often never comes, and it
+  hides the plan behind a mode instead of leaving it somewhere reviewable.
+- **Multiple-choice popup questions in the terminal.** Do not present a question as a menu of
+  options to pick from. If something genuinely needs a decision, ask it in plain prose, on the
+  channel the conversation is already using, and keep working on everything the answer does not
+  block.
+
+These are the same failure in two shapes: the agent stops and waits when it could have carried on.
+Most questions that reach for a menu are not blocking. Make the ordinary call, say which call you
+made, and continue. Reserve a real question for a decision that is genuinely Wolfgang's and where
+proceeding either way would be unsafe or would waste the work.
+
 ## Durable knowledge
 
 - Check the persistent KB before looping on CI, tests, local setup, auth, tooling, blockers, review feedback, or repeated confusion.
