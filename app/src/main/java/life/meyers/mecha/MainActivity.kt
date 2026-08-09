@@ -58,6 +58,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -1394,8 +1395,12 @@ private fun RouterManagement(
                                 if (router.alias.isNotBlank()) Text(router.endpoint, style = MaterialTheme.typography.bodySmall, color = TextMuted)
                                 if (router.endpoint == activeRouter) Text("Active", style = MaterialTheme.typography.bodySmall, color = Teal)
                             }
-                            TextButton({ onEdit(router.endpoint) }) { Text("Edit") }
-                            TextButton({ onRemove(router.endpoint) }) { Text("Remove", color = Color(0xFFFFA4A0)) }
+                            IconButton({ onEdit(router.endpoint) }) {
+                                Icon(Icons.Default.Edit, "Edit router", tint = Periwinkle)
+                            }
+                            IconButton({ onRemove(router.endpoint) }) {
+                                Icon(Icons.Default.Delete, "Remove router", tint = Color(0xFFFFA4A0))
+                            }
                         }
                     }
                 }

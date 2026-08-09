@@ -35,7 +35,8 @@ test("Android source wires router aliases like the Web UI", async () => {
   assert.match(source, /if \(editingEndpoint == null\) "Add router" else "Save router"/);
   assert.match(source, /router\.displayName/);
   assert.match(source, /router\.alias\.isNotBlank\(\)[\s\S]*router\.endpoint/);
-  assert.match(source, /onEdit\(router\.endpoint\)/);
+  assert.match(source, /Icon\(Icons\.Default\.Edit, "Edit router", tint = Periwinkle\)/);
+  assert.match(source, /Icon\(Icons\.Default\.Delete, "Remove router", tint = Color\(0xFFFFA4A0\)\)/);
 });
 
 test("Android source wires the core web QOL parity behavior", async () => {
