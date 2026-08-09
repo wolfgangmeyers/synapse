@@ -753,7 +753,7 @@ test("expired leases cannot publish activity", async () => {
 test("Android keeps one activity-owned router session across launcher and notification intents", () => {
   const manifest = readFileSync(new URL("../app/src/main/AndroidManifest.xml", import.meta.url), "utf8");
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
-  assert.match(manifest, /<activity android:name="\.MainActivity" android:exported="true" android:launchMode="singleTask">/);
+  assert.match(manifest, /<activity android:name="\.MainActivity" android:exported="true" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize">/);
   assert.match(activity, /override fun onNewIntent\(intent: Intent\)/);
 });
 
@@ -771,6 +771,9 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.match(activity, /imagePicker\.launch\("image\/\*"\)/);
   assert.match(activity, /Text\("Attach"\)/);
   assert.doesNotMatch(activity, /Text\("Paste"\)/);
+  assert.match(activity, /private fun synchronizedHaloPulse\(label: String\): HaloPulse/);
+  assert.match(activity, /private fun PulsingDot\(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp\)/);
+  assert.doesNotMatch(activity, /synchronizedPulseAlpha/);
   assert.match(activity, /contentReceiver\(receiveImages\)/);
   assert.match(activity, /acceptedImageUri\(item\.uri\?\.toString\(\), item\.intent\?\.data\?\.toString\(\), item\.text\?\.toString\(\)\)/);
   assert.match(activity, /JSONObject\(\)\.put\("type", "image"\)\.put\("data_url", image\.dataUrl\)\.put\("name", image\.name\)/);

@@ -27,7 +27,7 @@ test("Android source wires the core web QOL parity behavior", async () => {
   const source = await readFile(activityPath, "utf8");
   assert.match(source, /private var agentFilter by mutableStateOf\(""\)/);
   assert.match(source, /internal fun visibleConnectedPeers\(peers: List<PeerStatus>, filter: String\): List<PeerStatus>/);
-  assert.match(source, /"\$\{peer\.id\} \$\{humanName\(peer\.id\)\}"\.lowercase\(\)\.contains\(normalizedFilter\)/);
+  assert.match(source, /"\$\{peer\.id\} \$\{humanName\(peer\.id\)\} \$descriptions"\.lowercase\(\)\.contains\(normalizedFilter\)/);
   assert.match(source, /val filteredPeers = visibleConnectedPeers\(peers, agentFilter\)/);
   assert.match(source, /Text\(filteredPeers\.size\.toString\(\), style = MaterialTheme\.typography\.bodySmall, color = TextMuted\)/);
   assert.match(source, /internal fun formatMessageTimestamp\(createdAt: String\): String/);
