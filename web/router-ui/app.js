@@ -237,7 +237,7 @@ async function handleEvent(event) {
 
 function maybeShowArrivedMessage(message) {
   const sourceKind = message?.source?.kind || "unknown";
-  if (message?.from === state.agentId || !["agent", "discord", "reminder"].includes(sourceKind)) return;
+  if (!["agent", "discord", "reminder"].includes(sourceKind)) return;
   state.arrivedMessage = message;
   elements.arrivedSender.textContent = humanName(message.from || "Unknown sender");
   elements.arrivedSubject.textContent = message.subject ? truncateText(message.subject, 80) : truncateText(message.body || "", 80);
