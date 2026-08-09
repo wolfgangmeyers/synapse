@@ -17,6 +17,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 
 - Check the persistent KB before looping on CI, tests, local setup, auth, tooling, blockers, review feedback, or repeated confusion.
 - When a CI failure, review comment, product decision, incident, or workaround teaches a reusable lesson, save the distilled lesson where future agents will find it: KB for facts and operating knowledge, review heuristics for review lessons, and skills for role workflow changes.
+- Capture these lessons periodically during active loops, not necessarily after every single failure. When a repeated pattern emerges, a fix is found, or a lane reaches a natural checkpoint, update the KB before the details are lost.
 - Do not let hard-won fixes live only in PR threads, mailbox messages, task summaries, or compaction summaries.
 
 ## Evidence and validation
