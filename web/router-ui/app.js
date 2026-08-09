@@ -46,6 +46,7 @@ const state = {
   messages: {},
   historyRequests: new Map(),
   draftPeers: new Set(),
+  expandedSubagents: new Set(),
   renderedMessageCounts: {},
   renderedMessageSignatures: {},
   renderedLastMessageKeys: {},
@@ -175,13 +176,15 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "agents") {
-    state.agents = event.agents.filter((agent) => agent.agent_id !== state.agentId);
+    state.agents = event.agents
+      .filter((agent) => agent.agent_id !== state.agentId)
+      .map((agent) => mergeKnownSubagentSummaries(agent));
     renderAgents();
     renderConversation();
     return;
   }
   if (event.type === "agent_activity") {
-    updateAgentActivity(event.agent, event.activityState);
+    updateAgentActivity(event.agent, event.activityState, event.subagentCount, event.subagents);
     return;
   }
   if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error") {
@@ -222,6 +225,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl);
   state.agents = [];
+  state.expandedSubagents.clear();
   state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
   state.messages = await loadMessages(routerUrl, state.agentId);
   state.historyRequests = new Map();
@@ -381,13 +385,36 @@ function renderAgents() {
   elements.agents.replaceChildren(...peers.map((agent) => {
     const peer = agent.agent_id;
     const active = agent.activity_state === "active";
+    const subagents = normalizeSubagents(agent.subagents);
+    const subagentCount = Math.max(subagents.length, Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0);
+    const canExpandSubagents = subagents.length > 0;
+    const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
+    const listId = `subagents-${cssSafeId(peer)}`;
     const row = document.createElement("button");
     row.type = "button";
-    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}`;
-    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span><strong>${escapeHtml(humanName(peer))}</strong><span class="meta">${escapeHtml(peer)}</span></span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
+    const countLabel = `${subagentCount} subagent${subagentCount === 1 ? "" : "s"}`;
+    const badgeContent = expanded ? expandedSubagentMarkup(countLabel, subagents) : escapeHtml(countLabel);
+    const badge = subagentCount > 0 ? `<span class="subagent-indicator${canExpandSubagents ? " expandable" : ""}${expanded ? " expanded" : ""}"${canExpandSubagents ? ` role="button" tabindex="0" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${listId}" aria-label="${expanded ? "Hide" : "Show"} running subagents for ${escapeHtml(humanName(peer))}"` : ` aria-label="${subagentCount} running subagent${subagentCount === 1 ? "" : "s"}"`}><span class="subagent-dot"></span><span id="${listId}" class="subagent-badge-content">${badgeContent}</span></span>` : "";
+    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${badge}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
+    if (canExpandSubagents) {
+      const toggle = row.querySelector(".subagent-indicator");
+      const toggleSubagents = (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (state.expandedSubagents.has(peer)) state.expandedSubagents.delete(peer);
+        else state.expandedSubagents.add(peer);
+        renderAgents();
+      };
+      toggle.addEventListener("click", toggleSubagents);
+      toggle.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") toggleSubagents(event);
+      });
+    }
     return row;
   }));
+  requestAnimationFrame(updateSubagentTooltips);
 }
 
 function selectPeer(peer) {
@@ -407,9 +434,19 @@ function selectPeer(peer) {
   requestHistory(peer);
 }
 
-function updateAgentActivity(peer, activityState) {
+function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = []) {
   if (!peer || peer === state.agentId) return;
-  state.agents = state.agents.map((agent) => agent.agent_id === peer ? { ...agent, activity_state: activityState } : agent);
+  const current = state.agents.find((agent) => agent.agent_id === peer);
+  const incomingSummaries = normalizeSubagents(subagents);
+  const incomingCount = Number.isSafeInteger(subagentCount) ? subagentCount : 0;
+  const currentSummaries = normalizeSubagents(current?.subagents);
+  const summaries = incomingSummaries.length > 0
+    ? incomingSummaries
+    : (incomingCount > 0 && currentSummaries.length === incomingCount ? currentSummaries : []);
+  const normalizedCount = Math.max(summaries.length, incomingCount);
+  if (normalizedCount === 0) state.expandedSubagents.delete(peer);
+  if (current?.activity_state === activityState && (current.subagent_count ?? 0) === normalizedCount && sameSubagents(current.subagents, summaries)) return;
+  state.agents = state.agents.map((agent) => agent.agent_id === peer ? { ...agent, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries } : agent);
   renderAgents();
   renderConversation();
 }
@@ -968,6 +1005,50 @@ function deleteAgentIdForRouter(routerUrl) {
 }
 function humanName(id) { return id.split(/[._-]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(" ") || id; }
 function monogram(id) { return (id.match(/[A-Za-z0-9]/)?.[0] || "?").toUpperCase(); }
+function cssSafeId(value) { return String(value).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 96); }
+function updateSubagentTooltips() {
+  for (const badge of elements.agents.querySelectorAll(".subagent-indicator.expanded")) {
+    const descriptions = [...badge.querySelectorAll(".subagent-description")];
+    const truncated = descriptions.some((description) => description.scrollWidth > description.clientWidth);
+    if (truncated) {
+      badge.title = descriptions.map((description) => description.textContent.trim()).filter(Boolean).join("\n\n");
+    } else {
+      badge.removeAttribute("title");
+    }
+    for (const description of descriptions) description.removeAttribute("title");
+  }
+}
+function mergeKnownSubagentSummaries(agent) {
+  const incomingSummaries = normalizeSubagents(agent.subagents);
+  const incomingCount = Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0;
+  if (incomingSummaries.length > 0 || incomingCount === 0) return { ...agent, subagents: incomingSummaries };
+  const current = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
+  const currentSummaries = normalizeSubagents(current?.subagents);
+  return currentSummaries.length === incomingCount ? { ...agent, subagents: currentSummaries } : { ...agent, subagents: [] };
+}
+function expandedSubagentMarkup(countLabel, subagents) {
+  const descriptions = subagents.map((subagent) => `<span class="subagent-list-item"><span class="subagent-dot"></span><span class="subagent-description">${escapeHtml(subagent.description)}</span></span>`).join("");
+  return `<span class="subagent-expanded"><span class="subagent-count-label">${escapeHtml(countLabel)}</span><span class="subagent-divider"></span><span class="subagent-list">${descriptions}</span></span>`;
+}
+function normalizeSubagents(subagents) {
+  if (!Array.isArray(subagents)) return [];
+  return subagents.map((subagent) => {
+    if (subagent === null || typeof subagent !== "object") return undefined;
+    const id = typeof subagent.id === "string" ? subagent.id.trim().slice(0, 128) : "";
+    const description = typeof subagent.description === "string" ? subagent.description.trim().slice(0, 512) : "";
+    if (!id || !description) return undefined;
+    const type = typeof subagent.type === "string" ? subagent.type.trim().slice(0, 64) : "";
+    return type ? { id, type, description } : { id, description };
+  }).filter(Boolean).slice(0, 999);
+}
+function sameSubagents(left = [], right = []) {
+  const normalizedLeft = normalizeSubagents(left);
+  const normalizedRight = normalizeSubagents(right);
+  return normalizedLeft.length === normalizedRight.length && normalizedLeft.every((subagent, index) => {
+    const other = normalizedRight[index];
+    return other && subagent.id === other.id && subagent.type === other.type && subagent.description === other.description;
+  });
+}
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 }

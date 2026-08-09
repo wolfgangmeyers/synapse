@@ -623,10 +623,14 @@ test("activity state is lease validated, broadcast on transitions, and expires b
     assert.equal(await rejected, "timeout");
 
     const activeEvent = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
-    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
-    assert.equal((await activeEvent).activity_state, "active");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active", subagent_count: 2 }));
+    const activeFrame = await activeEvent;
+    assert.equal(activeFrame.activity_state, "active");
+    assert.equal(activeFrame.subagent_count, 2);
     const activeSnapshot = await fetch(websocketUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/agents"));
-    assert.equal((await activeSnapshot.json()).agents.find((agent) => agent.agent_id === "worker").activity_state, "active");
+    const activeWorker = (await activeSnapshot.json()).agents.find((agent) => agent.agent_id === "worker");
+    assert.equal(activeWorker.activity_state, "active");
+    assert.equal(activeWorker.subagent_count, 2);
 
     const clearingRogue = await connect();
     const clearingRogueRegistered = nextFrame(clearingRogue);
@@ -638,8 +642,11 @@ test("activity state is lease validated, broadcast on transitions, and expires b
     assert.equal(await noRogueIdle, "timeout");
 
     now += 4_000;
-    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-2", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-2", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active", subagent_count: 2 }));
     assert.equal(await nextFrame(android, (frame) => frame.type === "agent_activity", 150).then(() => "unexpected", () => "timeout"), "timeout");
+    const countChange = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-count-change", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active", subagent_count: 1 }));
+    assert.equal((await countChange).subagent_count, 1);
     now += 1_001;
     router.sweepMessageLifecycles();
     const renewedSnapshot = await fetch(websocketUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/agents"));
@@ -648,14 +655,18 @@ test("activity state is lease validated, broadcast on transitions, and expires b
     const idleAfterRenewal = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
     now += 4_000;
     router.sweepMessageLifecycles();
-    assert.equal((await idleAfterRenewal).activity_state, "idle");
+    const idleAfterRenewalFrame = await idleAfterRenewal;
+    assert.equal(idleAfterRenewalFrame.activity_state, "idle");
+    assert.equal(idleAfterRenewalFrame.subagent_count, 0);
 
     const activeForSettle = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.activity_state === "active");
     worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-for-settle", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
     await activeForSettle;
     const idleEvent = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
     worker.send(JSON.stringify({ version: "v1", frame_id: "worker-settled", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "settled" }));
-    assert.equal((await idleEvent).activity_state, "idle");
+    const settledFrame = await idleEvent;
+    assert.equal(settledFrame.activity_state, "idle");
+    assert.equal(settledFrame.subagent_count, 0);
 
     const activeAgain = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.activity_state === "active");
     worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-3", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
@@ -810,8 +821,10 @@ test("discovery exposes only active sessions with role and no lease metadata", a
     assert.match(snapshot.agents[0].connected_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.match(snapshot.agents[0].lease_expires_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.equal(snapshot.agents[0].activity_state, "idle");
+    assert.equal(snapshot.agents[0].subagent_count, 0);
+    assert.deepEqual(snapshot.agents[0].subagents, []);
     assert.deepEqual(Object.keys(snapshot.agents[0]).sort(), [
-      "activity_state", "agent_id", "agent_role", "connected_at", "lease_expires_at",
+      "activity_state", "agent_id", "agent_role", "connected_at", "lease_expires_at", "subagent_count", "subagents",
     ]);
   } finally {
     socket?.terminate();
