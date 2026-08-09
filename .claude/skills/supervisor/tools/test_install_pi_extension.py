@@ -17,17 +17,26 @@ class InstallPiExtensionTest(unittest.TestCase):
         root = Path(self.tempdir.name)
         self.source = root / "source.js"
         self.target = root / "managed" / "mecha-messaging.js"
+        self.hud_source = self.source.with_name("codex-usage-hud.js")
+        self.hud_target = self.target.with_name("codex-usage-hud.js")
         self.settings = root / "pi" / "agent" / "settings.json"
         self.source.write_text("export default {};\n", encoding="utf-8")
+        self.hud_source.write_text("export default {};\n", encoding="utf-8")
         for name in install_pi_extension.EXTENSION_MODULES:
             self.source.with_name(name).write_text(f"export const name = {name!r};\n", encoding="utf-8")
         self.paths = patch.multiple(
-            install_pi_extension, SOURCE=self.source, TARGET=self.target, SETTINGS=self.settings,
+            install_pi_extension,
+            SOURCE=self.source,
+            TARGET=self.target,
+            CODEX_USAGE_HUD_SOURCE=self.hud_source,
+            CODEX_USAGE_HUD_TARGET=self.hud_target,
+            REGISTERED_EXTENSIONS=(self.target, self.hud_target),
+            SETTINGS=self.settings,
         )
         self.paths.start()
         self.addCleanup(self.paths.stop)
 
-    def test_installs_the_mailbox_artifact_and_deduplicates_only_its_registration(self):
+    def test_installs_extension_artifacts_and_deduplicates_their_registrations(self):
         stale = self.temp_path / "other" / "mecha-messaging.js"
         stale.parent.mkdir()
         stale.write_text("other", encoding="utf-8")
@@ -35,7 +44,8 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.target.write_text("old", encoding="utf-8")
         self.settings.parent.mkdir(parents=True)
         self.settings.write_text(json.dumps({
-            "theme": "dark", "packages": ["npm:other", str(stale), str(self.target), str(self.target)],
+            "theme": "dark",
+            "packages": ["npm:other", str(stale), str(self.target), str(self.target), str(self.hud_target)],
         }), encoding="utf-8")
 
         self.assertEqual(install_pi_extension.main(), 0)
@@ -43,8 +53,9 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
         for name in install_pi_extension.EXTENSION_MODULES:
             self.assertEqual(self.target.with_name(name).read_bytes(), self.source.with_name(name).read_bytes())
+        self.assertEqual(self.hud_target.read_bytes(), self.hud_source.read_bytes())
         settings = json.loads(self.settings.read_text(encoding="utf-8"))
-        self.assertEqual(settings["packages"], ["npm:other", str(stale), str(self.target)])
+        self.assertEqual(settings["packages"], ["npm:other", str(stale), str(self.target), str(self.hud_target)])
         self.assertTrue((self.target.with_name(self.target.name + ".rollback")).is_file())
 
     def test_rolls_back_every_bundle_file_after_a_partial_install_failure(self):

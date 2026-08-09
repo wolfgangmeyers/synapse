@@ -13,10 +13,12 @@ Use this skill for the real copied artifact lifecycle. Do not use a symlink. Do 
 REPO_ROOT="$(git -C /path/to/mecha-developer rev-parse --show-toplevel)"
 SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging.js"
 TARGET="$HOME/.mecha-developer/extensions/mecha-messaging.js"
+CODEX_USAGE_HUD_SOURCE="$REPO_ROOT/pi-extensions/codex-usage-hud.js"
+CODEX_USAGE_HUD_TARGET="$HOME/.mecha-developer/extensions/codex-usage-hud.js"
 SETTINGS="$HOME/.pi/agent/settings.json"
 ```
 
-`SOURCE` is canonical only when it is a regular, non-symlink file in the intended mecha-developer checkout. `TARGET` is the one stable installed artifact path. The router default is `http://127.0.0.1:8765`; preserve it unless an explicit `MECHA_ROUTER_URL` supplies another exact loopback HTTP(S) base URL.
+`SOURCE` is canonical only when it is a regular, non-symlink file in the intended mecha-developer checkout. `TARGET` is the one stable installed mailbox artifact path. The same installer also installs/registers `codex-usage-hud.js` at `CODEX_USAGE_HUD_TARGET`; reload or restart Pi sessions after install to see the HUD. If the Codex subscription/source is unavailable, the HUD hides gracefully. The router default is `http://127.0.0.1:8765`; preserve it unless an explicit `MECHA_ROUTER_URL` supplies another exact loopback HTTP(S) base URL.
 
 ## Status and drift check (read-only)
 
@@ -53,6 +55,14 @@ node --check "$SOURCE"
 If any command fails, stop. Do not install, alter `settings.json`, reload Pi, or remove an existing working artifact.
 
 ## Install or update
+
+Run the maintained installer from the repository root:
+
+```bash
+python3 .claude/skills/supervisor/tools/install_pi_extension.py
+```
+
+It installs/registers the stable Pi extension artifacts, including `mecha-messaging.js` and `codex-usage-hud.js`.
 
 This transaction validates the source, copies it through a same-directory temporary file, saves artifact and settings rollback copies, then atomically replaces `settings.json` without changing unrelated keys or package entries. It removes duplicate target registrations and replaces/removes only the stable target artifact. A reported non-target stale path is not deleted until an operator confirms its ownership; this prevents an unrelated Pi package from being removed by filename coincidence. It never deletes the canonical source.
 
