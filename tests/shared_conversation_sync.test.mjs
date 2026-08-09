@@ -297,6 +297,120 @@ test("two opted-in instances share live outbound and inbound events while legacy
   }
 });
 
+test("authenticated message_arrival frames broadcast to conversation sessions only after lease validation", async () => {
+  const app = await fixture({}, { maxBatchBodyChars: 0 });
+  const sockets = [];
+  try {
+    const worker = await connect(app.wsUrl, { agentId: "arrival-worker", instanceId: "worker-one" });
+    const watcher = await connect(app.wsUrl, { agentId: "arrival-watcher", instanceId: "watcher-one" });
+    sockets.push(worker.socket, watcher.socket);
+
+    const invalid = new WebSocket(app.wsUrl);
+    sockets.push(invalid);
+    await new Promise((resolve, reject) => {
+      invalid.once("open", resolve);
+      invalid.once("error", reject);
+    });
+    invalid.send(JSON.stringify({
+      version: "v1",
+      frame_id: "arrival-before-register",
+      type: "message_arrival",
+      agent_id: "arrival-worker",
+      instance_id: "worker-one",
+      lease_id: worker.registered.lease_id,
+      from: "sender",
+      source: { kind: "agent" },
+      preview: "not valid yet",
+      created_at: at(1),
+      message_id: "arrival-invalid",
+    }));
+    assert.equal(await nextFrame(watcher.socket, (frame) => frame.type === "message_arrival", 150).then(() => "unexpected", () => "timeout"), "timeout");
+
+    const live = nextFrame(watcher.socket, (frame) => frame.type === "message_arrival" && frame.message_id === "arrival-valid");
+    worker.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "arrival-valid-frame",
+      type: "message_arrival",
+      agent_id: "arrival-worker",
+      instance_id: "worker-one",
+      lease_id: worker.registered.lease_id,
+      from: "sender",
+      subject: "Arrival subject",
+      source: { kind: "agent" },
+      preview: "arrival preview",
+      body: "arrival full body\nwith a second line",
+      created_at: at(1, 1),
+      message_id: "arrival-valid",
+    }));
+    const frame = await live;
+    assert.equal(frame.agent_id, "arrival-worker");
+    assert.equal(frame.from, "sender");
+    assert.equal(frame.subject, "Arrival subject");
+    assert.deepEqual(frame.source, { kind: "agent" });
+    assert.equal(frame.preview, "arrival preview");
+    assert.equal(frame.body, "arrival full body\nwith a second line");
+    assert.equal(frame.created_at, at(1, 1));
+    assert.equal(frame.message_id, "arrival-valid");
+  } finally {
+    for (const socket of sockets) socket.terminate();
+    await app.close();
+  }
+});
+
+test("registered message_arrival frames with wrong lease or instance do not broadcast", async () => {
+  const app = await fixture({}, { maxBatchBodyChars: 0 });
+  const sockets = [];
+  try {
+    const watcher = await connect(app.wsUrl, { agentId: "arrival-negative-watcher", instanceId: "watcher-one" });
+    sockets.push(watcher.socket);
+
+    const wrongLease = await connect(app.wsUrl, { agentId: "arrival-wrong-lease", instanceId: "worker-one" });
+    sockets.push(wrongLease.socket);
+    const wrongLeaseError = nextFrame(wrongLease.socket, (frame) => frame.type === "error" && frame.request_id === "arrival-wrong-lease-frame");
+    wrongLease.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "arrival-wrong-lease-frame",
+      type: "message_arrival",
+      agent_id: "arrival-wrong-lease",
+      instance_id: "worker-one",
+      lease_id: "wrong-lease-id",
+      from: "sender",
+      source: { kind: "agent" },
+      preview: "wrong lease should not broadcast",
+      body: "wrong lease full body",
+      created_at: at(1),
+      message_id: "arrival-wrong-lease-message",
+    }));
+    assert.equal((await wrongLeaseError).code, "lease_not_active");
+    await onceClose(wrongLease.socket);
+    assert.equal(await nextFrame(watcher.socket, (frame) => frame.type === "message_arrival", 150).then(() => "unexpected", () => "timeout"), "timeout");
+
+    const wrongInstance = await connect(app.wsUrl, { agentId: "arrival-wrong-instance", instanceId: "worker-one" });
+    sockets.push(wrongInstance.socket);
+    const wrongInstanceError = nextFrame(wrongInstance.socket, (frame) => frame.type === "error" && frame.request_id === "arrival-wrong-instance-frame");
+    wrongInstance.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "arrival-wrong-instance-frame",
+      type: "message_arrival",
+      agent_id: "arrival-wrong-instance",
+      instance_id: "worker-two",
+      lease_id: wrongInstance.registered.lease_id,
+      from: "sender",
+      source: { kind: "agent" },
+      preview: "wrong instance should not broadcast",
+      body: "wrong instance full body",
+      created_at: at(1, 1),
+      message_id: "arrival-wrong-instance-message",
+    }));
+    assert.equal((await wrongInstanceError).code, "lease_not_active");
+    await onceClose(wrongInstance.socket);
+    assert.equal(await nextFrame(watcher.socket, (frame) => frame.type === "message_arrival", 150).then(() => "unexpected", () => "timeout"), "timeout");
+  } finally {
+    for (const socket of sockets) socket.terminate();
+    await app.close();
+  }
+});
+
 test("due reminders publish live synced conversation messages with reminder source", async () => {
   const app = await fixture({}, { maxBatchBodyChars: 0 });
   let browser;

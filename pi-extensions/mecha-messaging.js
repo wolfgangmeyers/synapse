@@ -651,6 +651,7 @@ export function createPiMailboxDeliveryCoordinator({
 
   const sessionId = sessionContext.sessionManager.getSessionId();
   const pending = new Map();
+  const announcedArrivals = new Set();
   const sentinelInFlight = new Map();
   const reportedPersistenceErrors = new Set();
   let active = true;
@@ -721,6 +722,15 @@ export function createPiMailboxDeliveryCoordinator({
       latest.checkpointTimer = undefined;
       checkDurableCheckpoint(messageId, context);
     }, checkpointRetryDelayMs);
+  }
+
+  function maybeSendMessageArrival(message) {
+    if (announcedArrivals.has(message.id)) return;
+    const sourceKind = message?.source?.kind;
+    if (message.from === message.to || !["agent", "discord", "reminder"].includes(sourceKind)) return;
+    if (typeof client.sendMessageArrival !== "function") return;
+    client.sendMessageArrival(message);
+    announcedArrivals.add(message.id);
   }
 
   function injectMailboxMessage(message) {
@@ -823,6 +833,11 @@ export function createPiMailboxDeliveryCoordinator({
       }
       return;
     }
+    try {
+      maybeSendMessageArrival(message);
+    } catch {
+      // Arrival indicators are ephemeral UI hints; delivery receipts own replay safety.
+    }
     // Keep this pending on a receipt-send failure: Pi may have queued the message already.
     try {
       receipt("injection_requested", delivery);
@@ -852,6 +867,7 @@ export function createPiMailboxDeliveryCoordinator({
       active = false;
       for (const pendingDelivery of pending.values()) clearCheckpointTimer(pendingDelivery);
       pending.clear();
+      announcedArrivals.clear();
       sentinelInFlight.clear();
       reportedPersistenceErrors.clear();
     },

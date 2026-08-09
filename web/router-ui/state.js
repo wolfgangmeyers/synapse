@@ -8,6 +8,7 @@ const SCOPED_EVENT_TYPES = new Set([
   "message",
   "conversation_message",
   "agent_activity",
+  "message_arrival",
   "history",
   "history_error",
   "send_result",
@@ -47,6 +48,12 @@ export function historyRequestMatches(event, selectedPeer, requestId) {
 
 export function canSendDraft(peer, body, imageCount) {
   return Boolean(peer) && (String(body).trim() !== "" || imageCount > 0);
+}
+
+export function replaceAgentArrival(arrivalsByAgent, arrival) {
+  if (!(arrivalsByAgent instanceof Map) || !arrival?.agent) return arrivalsByAgent;
+  arrivalsByAgent.set(arrival.agent, arrival);
+  return arrivalsByAgent;
 }
 
 export function settlePendingMessages(messages, localId, ok) {

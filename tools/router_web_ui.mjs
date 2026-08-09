@@ -230,6 +230,22 @@ function createBrowserClient(browser, { defaultRouter }) {
         });
         return;
       }
+      if (frame.type === "message_arrival") {
+        sendBrowser({
+          type: "message_arrival",
+          agent: frame.agent_id,
+          from: frame.from,
+          subject: frame.subject,
+          sourceKind: frame.source?.kind,
+          preview: frame.preview,
+          body: frame.body,
+          createdAt: frame.created_at,
+          messageId: frame.message_id,
+          agentId: configured.agentId,
+          routerUrl: configured.routerUrl,
+        });
+        return;
+      }
       if (frame.type === "message" && configured.leaseId !== "") {
         sendReceipt("injection_requested", frame);
         sendReceipt("ack", frame);

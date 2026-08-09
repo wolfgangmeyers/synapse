@@ -8,6 +8,7 @@ import {
   historyRequestMatches,
   matchesActiveScope,
   pruneDrafts,
+  replaceAgentArrival,
   replacePendingMessage,
   settlePendingMessages,
 } from "../web/router-ui/state.js";
@@ -90,6 +91,17 @@ test("web state helpers reject stale scope and request IDs and keep drafts owner
     [firstScope]: { body: "first draft", updatedAtMs: now },
     [otherOwnerScope]: { body: "second draft", updatedAtMs: now },
   });
+});
+
+test("web arrival state replaces the current per-agent indicator", () => {
+  const arrivals = new Map();
+  replaceAgentArrival(arrivals, { agent: "worker", messageId: "first", preview: "first preview", body: "first full body" });
+  replaceAgentArrival(arrivals, { agent: "worker", messageId: "second", preview: "second preview", body: "second full body" });
+  replaceAgentArrival(arrivals, { agent: "other", messageId: "other", preview: "other preview", body: "other full body" });
+
+  assert.equal(arrivals.size, 2);
+  assert.deepEqual(arrivals.get("worker"), { agent: "worker", messageId: "second", preview: "second preview", body: "second full body" });
+  assert.deepEqual(arrivals.get("other"), { agent: "other", messageId: "other", preview: "other preview", body: "other full body" });
 });
 
 test("web send-state helpers preserve failed drafts and replace success with canonical attachment metadata", () => {
