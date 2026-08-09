@@ -357,15 +357,13 @@ Claude Code auto-injects persistent memory into every session; Codex does not. *
 
 Mandatory startup memory reads for Codex supervisors:
 
-1. Read the Claude-style memory index: `~/.claude/projects/-home-wolfgang-code-mecha-wolfgang/memory/MEMORY.md`
+1. Read the Claude-style memory index for the session's own working directory. Claude Code keys memory to the directory the session started in and stores it at `~/.claude/projects/<encoded-cwd>/memory/`, where `<encoded-cwd>` is that absolute path with every `/` replaced by `-`. So `/Users/wolfgang/code/mecha-developer` becomes `-Users-wolfgang-code-mecha-developer`. Derive it and list the directory with `ls ~/.claude/projects/$(pwd | sed 's|/|-|g')/memory/`, then read `MEMORY.md` there. Some projects have topic files and no `MEMORY.md`; in that case read the topic file names from the listing and open the ones that match the task.
 2. Read the KB discovery index: `~/.mecha-developer/kb/INDEX.md`
 3. Lazy-load topic files only when an index entry is relevant to the current task.
 
 These index files are intentionally descriptive and small enough to load eagerly. The KB skill is useful for explicit lookup, but it is not a substitute for the always-loaded index behavior Wolfgang expects. Skipping the indexes means the Codex supervisor runs blind to accumulated user feedback, project context, and references.
 
-The legacy `codex-memory` skill lives in `~/code/mecha-wolfgang/.claude/skills/codex-memory/SKILL.md` after the repo split. If `~/.claude/skills/codex-memory/SKILL.md` exists, it may be a symlink to that file.
-
-Claude Code supervisors do not need this skill — the auto-memory system handles it.
+Claude Code supervisors do not need the memory index read. The auto-memory system loads it for them.
 
 ## Startup / Resume
 
@@ -374,7 +372,7 @@ On every activation, bootstrap situational awareness:
 ```bash
 # 0. Persona: ~/personas/wolfgang.md — full session identity (read the file, not just this comment).
 # 0b. Mailbox skill: ~/.claude/skills/mailbox/SKILL.md — see "Mailbox (companion)" above.
-# 0c. Codex memory indexes: ~/.claude/projects/-home-wolfgang-code-mecha-wolfgang/memory/MEMORY.md and ~/.mecha-developer/kb/INDEX.md
+# 0c. Codex memory indexes: ~/.claude/projects/$(pwd | sed 's|/|-|g')/memory/MEMORY.md and ~/.mecha-developer/kb/INDEX.md
 
 # 1. Load persistent state (shows blocked tasks at top if any exist)
 python3 ~/.claude/skills/supervisor/tools/state_read.py 2>/dev/null || echo "No supervisor state yet."
