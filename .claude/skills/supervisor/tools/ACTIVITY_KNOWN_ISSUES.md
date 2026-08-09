@@ -14,10 +14,10 @@ empties, which is the exact failure the feature exists to prevent.
 
 A headless `claude -p` launched from a worker's own Bash tool inherits `TMUX_PANE`. It finds the
 worker's marker, so it writes its own events into the worker's inbox under the worker's agent id.
-Then: the child's `Stop` settles the worker's dot; the child's `session_id` differs, so the
-session guard clears the running subagents on every interleaved record; and the child's
-`transcript_path` becomes the file the interrupt detector samples, so growth in the child's
-transcript is read as activity in the parent's.
+Three things then go wrong at once. The child's `Stop` settles the worker's dot. The child's
+`session_id` differs, so the session guard clears the running subagents on every interleaved
+record. And the child's `transcript_path` becomes the file the interrupt detector samples, so
+growth in the child's transcript is read as activity in the parent's.
 
 **What it looks like.** A busy worker showing idle, or flickering between the two, with its
 subagent badge emptying mid-turn. Nothing logs. The indicator looks broken rather than wrong.
