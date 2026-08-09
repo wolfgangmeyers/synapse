@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Install/register stable Pi extensions: Mailbox V2 and Codex usage HUD.
+"""Install/register the stable Mailbox V2 Pi extension bundle.
 
 Run from the mecha-developer repo root:
     python3 .claude/skills/supervisor/tools/install_pi_extension.py
 
-Reload or restart Pi sessions after install. The Codex HUD hides gracefully when
-subscription usage is unavailable.
+Reload or restart Pi sessions after install.
 """
 
 import json
@@ -16,17 +15,14 @@ import tempfile
 
 SOURCE = Path(__file__).resolve().parents[4] / "pi-extensions" / "mecha-messaging.js"
 TARGET = Path.home() / ".mecha-developer" / "extensions" / "mecha-messaging.js"
-CODEX_USAGE_HUD_SOURCE = SOURCE.with_name("codex-usage-hud.js")
-CODEX_USAGE_HUD_TARGET = TARGET.with_name("codex-usage-hud.js")
 SETTINGS = Path.home() / ".pi" / "agent" / "settings.json"
 EXTENSION_MODULES = ("mailbox-client.js", "memory-capture.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
-REGISTERED_EXTENSIONS = (TARGET, CODEX_USAGE_HUD_TARGET)
+REGISTERED_EXTENSIONS = (TARGET,)
 
 
 def extension_artifacts() -> tuple[tuple[Path, Path], ...]:
     return (
         (SOURCE, TARGET),
-        (CODEX_USAGE_HUD_SOURCE, CODEX_USAGE_HUD_TARGET),
         *((SOURCE.with_name(name), TARGET.with_name(name)) for name in EXTENSION_MODULES),
     )
 
@@ -126,7 +122,6 @@ def main() -> int:
         raise SystemExit(f"Pi extension install failed and was rolled back: {error}") from error
 
     print(f"Pi extension installed: {TARGET} (source: {SOURCE})")
-    print(f"Pi extension installed: {CODEX_USAGE_HUD_TARGET} (source: {CODEX_USAGE_HUD_SOURCE})")
     print(f"Bare Pi registration: {SETTINGS}")
     print("Rollback copies retained until final status verification passes.")
     return 0
