@@ -30,7 +30,10 @@ test("activity frames carry lease-scoped worker state", () => {
     activity_state: "active",
   };
   assert.equal(validateClientFrame(active), active);
+  assert.equal(validateClientFrame({ ...active, subagent_count: 2 }).subagent_count, 2);
   assert.equal(validateClientFrame({ ...active, activity_state: "settled" }).activity_state, "settled");
+  assert.throws(() => validateClientFrame({ ...active, subagent_count: -1 }), ProtocolValidationError);
+  assert.throws(() => validateClientFrame({ ...active, subagent_count: 1.5 }), ProtocolValidationError);
   assert.throws(() => validateClientFrame({ ...active, activity_state: "idle" }), ProtocolValidationError);
   assert.throws(() => validateClientFrame({ ...active, lease_id: undefined }), ProtocolValidationError);
 
@@ -43,7 +46,9 @@ test("activity frames carry lease-scoped worker state", () => {
     generated_at: "2030-01-01T00:00:00.000Z",
   };
   assert.equal(validateServerFrame(event), event);
+  assert.equal(validateServerFrame({ ...event, subagent_count: 3 }).subagent_count, 3);
   assert.equal(validateServerFrame({ ...event, activity_state: "idle" }).activity_state, "idle");
+  assert.throws(() => validateServerFrame({ ...event, subagent_count: -1 }), ProtocolValidationError);
   assert.throws(() => validateServerFrame({ ...event, activity_state: "settled" }), ProtocolValidationError);
 });
 

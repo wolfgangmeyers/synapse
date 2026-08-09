@@ -490,7 +490,7 @@ export function createAgentRouter({
         closeSocket(currentSocket, 4003, "lease not active");
         return;
       }
-      updateAgentActivity(session.agentId, frame.activity_state);
+      updateAgentActivity(session.agentId, frame.activity_state, frame.subagent_count ?? 0, frame.subagents);
     }
 
     function receiveDeliveryReceipt(currentSocket, frame) {
@@ -980,32 +980,76 @@ export function createAgentRouter({
 
   function observableAgentActivity(agentId, nowMs = currentTimeMs(clock)) {
     const activity = activityByAgentId.get(agentId);
-    return activity !== undefined && activity.activeUntilMs > nowMs ? "active" : "idle";
+    return activity !== undefined && activity.expiresAtMs > nowMs && activity.activeUntilMs > nowMs ? "active" : "idle";
   }
 
-  function broadcastAgentActivity(agentId, activityState, generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
+  function observableSubagents(agentId, nowMs = currentTimeMs(clock)) {
+    const activity = activityByAgentId.get(agentId);
+    return activity !== undefined && activity.expiresAtMs > nowMs ? activity.subagents : [];
+  }
+
+  function observableSubagentCount(agentId, nowMs = currentTimeMs(clock)) {
+    const activity = activityByAgentId.get(agentId);
+    return activity !== undefined && activity.expiresAtMs > nowMs ? activity.subagentCount : 0;
+  }
+
+  function normalizeSubagents(subagents, subagentCount = 0) {
+    if (!Array.isArray(subagents)) return [];
+    return subagents.map((summary) => {
+      if (summary === null || typeof summary !== "object") return undefined;
+      const id = typeof summary.id === "string" ? summary.id.trim().slice(0, 128) : "";
+      const description = typeof summary.description === "string" ? summary.description.trim().slice(0, 512) : "";
+      if (id.length === 0 || description.length === 0) return undefined;
+      const type = typeof summary.type === "string" ? summary.type.trim().slice(0, 64) : "";
+      return type.length > 0 ? { id, type, description } : { id, description };
+    }).filter(Boolean).slice(0, Math.min(999, Math.max(0, subagentCount || 999)));
+  }
+
+  function sameSubagents(left = [], right = []) {
+    return left.length === right.length && left.every((summary, index) => {
+      const other = right[index];
+      return other !== undefined && summary.id === other.id && summary.type === other.type && summary.description === other.description;
+    });
+  }
+
+  function broadcastAgentActivity(agentId, activityState, subagentCount = 0, subagents = [], generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
     for (const recipient of conversationSessions.values()) {
       for (const session of recipient.values()) {
         sendFrame(session.socket, generateFrameId, {
           type: "agent_activity",
           agent_id: agentId,
           activity_state: activityState,
+          subagent_count: subagentCount,
+          subagents,
           generated_at: generatedAt,
         });
       }
     }
   }
 
-  function updateAgentActivity(agentId, activityState) {
+  function updateAgentActivity(agentId, activityState, subagentCount = 0, subagents) {
     const nowMs = currentTimeMs(clock);
-    const previous = observableAgentActivity(agentId, nowMs);
-    if (activityState === "active") {
-      activityByAgentId.set(agentId, { activeUntilMs: nowMs + activityTtlMs });
-      if (previous !== "active") broadcastAgentActivity(agentId, "active", new Date(nowMs).toISOString());
+    const generatedAt = new Date(nowMs).toISOString();
+    const previousState = observableAgentActivity(agentId, nowMs);
+    const previousCount = observableSubagentCount(agentId, nowMs);
+    const previousSubagents = observableSubagents(agentId, nowMs);
+    const summaries = normalizeSubagents(subagents, subagentCount);
+    const nextCount = Math.min(999, Math.max(0, subagentCount, summaries.length));
+    const nextState = activityState === "active" ? "active" : "idle";
+    if (nextState === "active" || nextCount > 0) {
+      activityByAgentId.set(agentId, {
+        activeUntilMs: nextState === "active" ? nowMs + activityTtlMs : nowMs,
+        expiresAtMs: nowMs + activityTtlMs,
+        subagentCount: nextCount,
+        subagents: summaries,
+      });
+      if (previousState !== nextState || previousCount !== nextCount || !sameSubagents(previousSubagents, summaries)) {
+        broadcastAgentActivity(agentId, nextState, nextCount, summaries, generatedAt);
+      }
       return;
     }
     activityByAgentId.delete(agentId);
-    if (previous === "active") broadcastAgentActivity(agentId, "idle", new Date(nowMs).toISOString());
+    if (previousState !== "idle" || previousCount !== 0 || previousSubagents.length > 0) broadcastAgentActivity(agentId, "idle", 0, [], generatedAt);
   }
 
   function clearAgentActivity(agentId) {
@@ -1016,9 +1060,9 @@ export function createAgentRouter({
     const nowMs = currentTimeMs(clock);
     const generatedAt = new Date(nowMs).toISOString();
     for (const [agentId, activity] of activityByAgentId.entries()) {
-      if (activity.activeUntilMs > nowMs) continue;
+      if (activity.expiresAtMs > nowMs) continue;
       activityByAgentId.delete(agentId);
-      broadcastAgentActivity(agentId, "idle", generatedAt);
+      broadcastAgentActivity(agentId, "idle", 0, [], generatedAt);
     }
   }
 
@@ -1034,6 +1078,8 @@ export function createAgentRouter({
         connected_at: session.connectedAt,
         lease_expires_at: lease.expires_at,
         activity_state: observableAgentActivity(session.agentId),
+        subagent_count: observableSubagentCount(session.agentId),
+        subagents: observableSubagents(session.agentId),
       });
     }
     agents.sort((left, right) => left.agent_id < right.agent_id ? -1 : left.agent_id > right.agent_id ? 1 : 0);

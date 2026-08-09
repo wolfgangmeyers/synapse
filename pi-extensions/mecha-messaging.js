@@ -342,6 +342,8 @@ function childSessionId(event) {
 
 const SETTLED_NOTIFICATION_COOLDOWN_MS = 120_000;
 const ACTIVITY_HEARTBEAT_INTERVAL_MS = 5_000;
+const ACTIVITY_REFRESH_MIN_MS = 10_000;
+const MAX_ACTIVITY_SUBAGENTS = 999;
 
 // Managed workers use background subagents, whose native started and terminal
 // events share a run ID. Foreground runs lack a matching terminal ID, so they
@@ -864,6 +866,7 @@ export function createMechaMessagingExtension(pi, {
   setTimeoutImpl = setTimeout,
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
+  nowImpl = Date.now,
 } = {}) {
   let client;
   let coordinator;
@@ -915,6 +918,8 @@ export function createMechaMessagingExtension(pi, {
   let settledNotificationPending = false;
   let activityHeartbeatTimer;
   let activityHeartbeatActive = false;
+  let lastActivitySent;
+  const runningSubagents = new Map();
   let settledNotificationRecipient;
   let settledNotificationEnabled = false;
   let compactionPolicy;
@@ -924,29 +929,114 @@ export function createMechaMessagingExtension(pi, {
   let pendingSelfCompaction;
   let reloadCommandRegistered = false;
 
-  function sendActivityState(state) {
+  function normalizeSubagentMetadata(event, startedAtMs = nowImpl()) {
+    const id = typeof event?.id === "string" ? event.id.trim().slice(0, 128) : "";
+    if (id.length === 0) return undefined;
+    const description = typeof event?.description === "string" ? event.description.trim().slice(0, 512) : "";
+    const type = typeof event?.type === "string" ? event.type.trim().slice(0, 64) : "";
+    return {
+      id,
+      ...(type.length > 0 ? { type } : {}),
+      ...(description.length > 0 ? { description } : {}),
+      startedAtMs,
+      lastSeenMs: startedAtMs,
+    };
+  }
+
+  function publicSubagentSummaries() {
+    return [...runningSubagents.values()]
+      .filter(({ description }) => typeof description === "string" && description.length > 0)
+      .sort((left, right) => left.startedAtMs - right.startedAtMs || left.id.localeCompare(right.id))
+      .slice(0, MAX_ACTIVITY_SUBAGENTS)
+      .map(({ id, type, description }) => ({ id, ...(type !== undefined ? { type } : {}), description }));
+  }
+
+  function sameSubagentMetadata(left, right) {
+    return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description;
+  }
+
+  function reconcileNativeSubagentService() {
+    const service = globalThis[PI_SUBAGENTS_SERVICE];
+    const source = service?.getRunning?.() ?? service?.running ?? service?.runs ?? service?.subagents;
+    if (!Array.isArray(source)) return false;
+    const runningIds = new Set(source
+      .filter((entry) => [undefined, "running", "queued", "active"].includes(entry?.status))
+      .map((entry) => typeof entry?.id === "string" ? entry.id : undefined)
+      .filter(Boolean));
+    let changed = false;
+    for (const id of runningSubagents.keys()) {
+      if (!runningIds.has(id)) {
+        runningSubagents.delete(id);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  function sendActivityState(state, { force = false } = {}) {
+    const nowMs = nowImpl();
+    const reconciled = reconcileNativeSubagentService();
+    const subagents = publicSubagentSummaries();
+    const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
+    if (lastActivitySent !== undefined
+      && lastActivitySent.state === state
+      && lastActivitySent.subagentCount === subagentCount
+      && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents)
+      && !force
+      && !reconciled
+      && nowMs - lastActivitySent.sentAtMs < ACTIVITY_REFRESH_MIN_MS) {
+      return false;
+    }
     try {
-      client?.sendActivity?.(state);
+      client?.sendActivity?.(state, { subagentCount, subagents });
+      lastActivitySent = { state, subagentCount, subagents, sentAtMs: nowMs };
+      return true;
     } catch {
       // Activity is an ephemeral UI hint; mailbox delivery and reconnect behavior own real work.
+      return false;
     }
   }
 
-  function stopActivityHeartbeat({ settle = false } = {}) {
+  function ensureActivityHeartbeatTimer() {
+    if (activityHeartbeatTimer !== undefined) return;
+    activityHeartbeatTimer = setIntervalImpl(() => {
+      sendActivityState(activityHeartbeatActive ? "active" : "settled");
+      if (!activityHeartbeatActive && runningSubagents.size === 0) stopActivityHeartbeat();
+    }, ACTIVITY_HEARTBEAT_INTERVAL_MS);
+    activityHeartbeatTimer?.unref?.();
+  }
+
+  function clearActivityHeartbeatTimer() {
     if (activityHeartbeatTimer !== undefined) {
       clearIntervalImpl(activityHeartbeatTimer);
       activityHeartbeatTimer = undefined;
     }
-    if (activityHeartbeatActive && settle) sendActivityState("settled");
+  }
+
+  function stopActivityHeartbeat({ settle = false } = {}) {
+    if (activityHeartbeatActive && settle) sendActivityState("settled", { force: true });
     activityHeartbeatActive = false;
+    if (runningSubagents.size > 0) return;
+    clearActivityHeartbeatTimer();
+  }
+
+  function clearRunningSubagentsForBoundary() {
+    runningSubagents.clear();
+    activityHeartbeatActive = false;
+    sendActivityState("settled", { force: true });
+    clearActivityHeartbeatTimer();
   }
 
   function startActivityHeartbeat() {
-    if (activityHeartbeatTimer !== undefined) return;
     activityHeartbeatActive = true;
-    sendActivityState("active");
-    activityHeartbeatTimer = setIntervalImpl(() => sendActivityState("active"), ACTIVITY_HEARTBEAT_INTERVAL_MS);
-    activityHeartbeatTimer?.unref?.();
+    sendActivityState("active", { force: true });
+    ensureActivityHeartbeatTimer();
+  }
+
+  function refreshActivityState() {
+    sendActivityState(activityHeartbeatActive ? "active" : "settled", { force: true });
+    if (runningSubagents.size > 0) ensureActivityHeartbeatTimer();
+    else if (!activityHeartbeatActive) stopActivityHeartbeat();
   }
 
   function createMailboxCoordinator(context, mailboxClient) {
@@ -960,7 +1050,7 @@ export function createMechaMessagingExtension(pi, {
 
   function pauseMailboxForCompaction(context) {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined) return;
-    stopActivityHeartbeat({ settle: true });
+    clearRunningSubagentsForBoundary();
     mailboxPausedForCompaction = true;
     coordinator?.close();
     coordinator = undefined;
@@ -1151,13 +1241,24 @@ export function createMechaMessagingExtension(pi, {
   });
 
   pi.events.on("subagents:started", (event) => {
-    settledNotifications.onChildStarted(event?.id);
+    const metadata = normalizeSubagentMetadata(event);
+    const existing = metadata === undefined ? undefined : runningSubagents.get(metadata.id);
+    const changed = metadata !== undefined && !sameSubagentMetadata(existing, metadata);
+    if (changed) runningSubagents.set(metadata.id, { ...metadata, startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs });
+    settledNotifications.onChildStarted(metadata?.id ?? event?.id);
+    if (changed) refreshActivityState();
   });
   pi.events.on("subagents:completed", (event) => {
-    settledNotifications.onChildDisposed(event?.id);
+    const id = event?.id;
+    const changed = typeof id === "string" && id.length > 0 && runningSubagents.delete(id);
+    settledNotifications.onChildDisposed(id);
+    if (changed) refreshActivityState();
   });
   pi.events.on("subagents:failed", (event) => {
-    settledNotifications.onChildDisposed(event?.id);
+    const id = event?.id;
+    const changed = typeof id === "string" && id.length > 0 && runningSubagents.delete(id);
+    settledNotifications.onChildDisposed(id);
+    if (changed) refreshActivityState();
   });
 
   if (typeof pi.registerCommand === "function") {
@@ -1515,7 +1616,7 @@ export function createMechaMessagingExtension(pi, {
       childReplyClients.delete(sessionId);
       return;
     }
-    stopActivityHeartbeat({ settle: true });
+    clearRunningSubagentsForBoundary();
     settledNotificationPending = false;
     settledNotificationAgentId = undefined;
     pendingSelfCompaction = undefined;

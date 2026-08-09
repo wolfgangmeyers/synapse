@@ -565,6 +565,7 @@ function settledNotificationFixture(t, {
   setTimeoutImpl,
   setIntervalImpl,
   clearIntervalImpl,
+  nowImpl,
   immediateScheduler = true,
 } = {}) {
   isolateCompactionEnvironment(t);
@@ -591,7 +592,7 @@ function settledNotificationFixture(t, {
     close() {},
     sendReply,
     sendReceipt() {},
-    sendActivity: (state) => activity.push(state),
+    sendActivity: (state, options) => activity.push({ state, subagentCount: options?.subagentCount ?? 0 }),
   };
   const pi = {
     events: { on(type, handler) { childEvents.set(type, handler); } },
@@ -607,6 +608,7 @@ function settledNotificationFixture(t, {
     setTimeoutImpl,
     setIntervalImpl,
     clearIntervalImpl,
+    nowImpl,
   };
   if (createSettledScheduler !== undefined) extensionOptions.createSettledScheduler = createSettledScheduler;
   else if (immediateScheduler) extensionOptions.createSettledScheduler = immediateSettledScheduler;
@@ -636,12 +638,17 @@ test("extension reports top-level agent activity and settled transitions", async
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.handlers.get("agent_settled")({}, fixture.context);
 
-  assert.deepEqual(fixture.activity, ["active", "settled"]);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "settled", subagentCount: 0 },
+  ]);
 });
 
-test("extension repeats active heartbeats and stops them on settlement", async (t) => {
+test("extension refreshes unchanged activity less often than the heartbeat tick", async (t) => {
   const intervals = [];
+  let now = 0;
   const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
     setIntervalImpl: (callback, delay) => {
       const timer = { delay, cleared: false, unref() {} };
       timer.callback = () => { if (!timer.cleared) callback(); };
@@ -653,13 +660,19 @@ test("extension repeats active heartbeats and stops them on settlement", async (
 
   fixture.handlers.get("agent_start")({}, fixture.context);
   assert.equal(intervals[0].delay, 5_000);
+  now += 5_000;
   intervals[0].callback();
+  now += 5_000;
   intervals[0].callback();
   fixture.handlers.get("agent_settled")({}, fixture.context);
   intervals[0].callback();
 
   assert.equal(intervals[0].cleared, true);
-  assert.deepEqual(fixture.activity, ["active", "active", "active", "settled"]);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "active", subagentCount: 0 },
+    { state: "settled", subagentCount: 0 },
+  ]);
 });
 
 test("extension excludes child sessions from activity reporting", async (t) => {
@@ -673,6 +686,125 @@ test("extension excludes child sessions from activity reporting", async (t) => {
   assert.deepEqual(fixture.activity, []);
 });
 
+test("extension sends settled and stops active heartbeats when parent settles without subagents", async (t) => {
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  now += 5_000;
+  intervals[0].callback();
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  now += 10_000;
+  intervals[0].callback();
+
+  assert.equal(intervals[0].cleared, true);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "settled", subagentCount: 0 },
+  ]);
+});
+
+test("extension reports running native subagent counts in activity", async (t) => {
+  const fixture = settledNotificationFixture(t);
+
+  fixture.childEvents.get("subagents:started")({ id: "child-one" });
+  fixture.childEvents.get("subagents:started")({ id: "child-two" });
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.childEvents.get("subagents:completed")({ id: "child-one" });
+  fixture.childEvents.get("subagents:failed")({ id: "child-two" });
+
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1 },
+    { state: "settled", subagentCount: 2 },
+    { state: "active", subagentCount: 2 },
+    { state: "active", subagentCount: 1 },
+    { state: "active", subagentCount: 0 },
+  ]);
+});
+
+test("extension ignores no-op native subagent lifecycle events", async (t) => {
+  const fixture = settledNotificationFixture(t);
+
+  fixture.childEvents.get("subagents:started")({ id: "child-one" });
+  fixture.childEvents.get("subagents:started")({ id: "child-one" });
+  fixture.childEvents.get("subagents:completed")({ id: "unknown-child" });
+  fixture.childEvents.get("subagents:failed")({ id: "unknown-child" });
+  fixture.childEvents.get("subagents:completed")({ id: "child-one" });
+
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1 },
+    { state: "settled", subagentCount: 0 },
+  ]);
+});
+
+test("extension keeps subagent count TTL fresh without sending every heartbeat tick", async (t) => {
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.childEvents.get("subagents:started")({ id: "child-one" });
+  assert.equal(intervals[0].delay, 5_000);
+  now += 5_000;
+  intervals[0].callback();
+  now += 5_000;
+  intervals[0].callback();
+  fixture.childEvents.get("subagents:completed")({ id: "child-one" });
+  intervals[0].callback();
+
+  assert.equal(intervals[0].cleared, true);
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1 },
+    { state: "settled", subagentCount: 1 },
+    { state: "settled", subagentCount: 0 },
+  ]);
+});
+
+test("extension keeps long-running native subagent counts until a terminal event", async (t) => {
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.childEvents.get("subagents:started")({ id: "child-one" });
+  now += 10 * 60_000;
+  intervals[0].callback();
+  fixture.childEvents.get("subagents:completed")({ id: "child-one" });
+
+  assert.equal(intervals[0].cleared, true);
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1 },
+    { state: "settled", subagentCount: 1 },
+    { state: "settled", subagentCount: 0 },
+  ]);
+});
+
 test("compaction pauses activity without dropping mailbox resume", async (t) => {
   const calls = [];
   const fixture = settledNotificationFixture(t);
@@ -683,7 +815,10 @@ test("compaction pauses activity without dropping mailbox resume", async (t) => 
   await fixture.handlers.get("session_before_compact")({ signal: AbortSignal.timeout(100), preparation: {} }, fixture.context);
   fixture.handlers.get("session_compact")({}, fixture.context);
 
-  assert.deepEqual(fixture.activity, ["active", "settled"]);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "settled", subagentCount: 0 },
+  ]);
   assert.deepEqual(calls, ["pause", "resume"]);
 });
 
@@ -1528,13 +1663,13 @@ test("client sends activity frames with its registered lease identity", async ()
     }),
   }));
   await connected;
-  client.sendActivity("active");
+  client.sendActivity("active", { subagentCount: 2 });
   client.sendActivity("settled");
 
-  assert.deepEqual(socket.sent.map(({ type, agent_id, instance_id, lease_id, activity_state }) => ({ type, agent_id, instance_id, lease_id, activity_state })), [
-    { type: "register", agent_id: "worker", instance_id: client.instanceId, lease_id: undefined, activity_state: undefined },
-    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "active" },
-    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "settled" },
+  assert.deepEqual(socket.sent.map(({ type, agent_id, instance_id, lease_id, activity_state, subagent_count }) => ({ type, agent_id, instance_id, lease_id, activity_state, subagent_count })), [
+    { type: "register", agent_id: "worker", instance_id: client.instanceId, lease_id: undefined, activity_state: undefined, subagent_count: undefined },
+    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "active", subagent_count: 2 },
+    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "settled", subagent_count: 0 },
   ]);
   client.close();
 });

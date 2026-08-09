@@ -206,8 +206,11 @@ test("router web UI serves the app and relays live router messages", async () =>
       instance_id: "peer-agent-instance",
       lease_id: peer.registered.lease_id,
       activity_state: "active",
+      subagent_count: 2,
     }));
-    assert.equal((await activeEvent).activityState, "active");
+    const activity = await activeEvent;
+    assert.equal(activity.activityState, "active");
+    assert.equal(activity.subagentCount, 2);
 
     const deliveredToPeer = nextRouterFrame(peer.socket, (frame) => frame.type === "message" && frame.message.from === webAgentId);
     browser.send(JSON.stringify({ type: "send_message", to: "peer-agent", body: "hello from the browser", localId: "local-1" }));
@@ -507,19 +510,26 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function backfillSelectedConversation\(\) \{[\s\S]*requestHistory\(peer\);[\s\S]*setTimeout\(\(\) => \{[\s\S]*state\.selectedPeer === peer && state\.routerUrl === routerUrl && state\.agentId === agentId[\s\S]*requestHistory\(peer\);[\s\S]*\}, 500\);[\s\S]*\}/);
   assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
   assert.match(app, /event\.type === "agent_activity"/);
-  assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}`/);
+  assert.match(app, /sameSubagents\(current\.subagents, summaries\)\) return;/);
+  assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}\$\{subagentCount > 0 \? " has-subagents" : ""\}\$\{expanded \? " expanded" : ""\}`/);
   assert.match(app, /working-indicator/);
   assert.match(app, /aria-label="Agent is working"/);
+  assert.match(app, /class="subagent-indicator\$\{canExpandSubagents/);
+  assert.match(app, /aria-label="\$\{subagentCount\} running subagent\$\{subagentCount === 1 \? "" : "s"\}"/);
+  assert.match(app, /expandedSubagentMarkup\(countLabel, subagents\)/);
+  assert.match(app, /join\("\\n\\n"\)/);
+  assert.match(styles, /\.subagent-indicator \{[\s\S]*rgba\(38,106,255,0\.26\)/);
+  assert.match(styles, /@keyframes subagent-pulse/);
   assert.match(styles, /\.sidebar \{[\s\S]*overflow-x: hidden;/);
   assert.match(styles, /\.agents \{ display: grid; gap: 10px; min-width: 0; overflow-x: hidden; \}/);
   assert.match(styles, /\.agent-row \{[\s\S]*max-width: 100%;[\s\S]*min-width: 0;[\s\S]*overflow: hidden;[\s\S]*position: relative;[\s\S]*padding: 14px 44px 14px 14px;/);
   assert.match(styles, /\.working-indicator \{[\s\S]*position: absolute;[\s\S]*right: 14px;[\s\S]*transform: translateY\(-50%\);/);
-  assert.match(styles, /\.agent-row > span:not\(\.avatar\):not\(\.working-indicator\) \{ min-width: 0; overflow: hidden; flex: 1 1 auto; \}/);
-  assert.match(styles, /\.agent-row strong, \.agent-row \.meta \{ display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+  assert.match(styles, /\.agent-row-text \{ min-width: 0; overflow: hidden; flex: 1 1 auto; display: block; \}/);
+  assert.match(styles, /\.agent-row strong \{ display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
   assert.doesNotMatch(app, /for \(const peer of Object\.keys\(state\.messages\)\) known\.add\(peer\)/);
   assert.doesNotMatch(app, /for \(const peer of state\.draftPeers\) known\.add\(peer\)/);
   assert.match(app, /`\$\{agent\.agent_id\} \$\{humanName\(agent\.agent_id\)\}`\.toLowerCase\(\)\.includes\(filter\)/);
-  assert.match(app, /<span class="meta">\$\{escapeHtml\(peer\)\}<\/span>/);
+  assert.doesNotMatch(app, /<span class="meta">\$\{escapeHtml\(peer\)\}<\/span>/);
   assert.doesNotMatch(app, /\$\{escapeHtml\(peer\)\} · \$\{active \? "Working" : "Available"\}/);
   assert.doesNotMatch(app, /working-indicator[^`]*Working/);
   assert.doesNotMatch(app, /\? "Available" : "History"/);
@@ -564,10 +574,11 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.doesNotMatch(app, /saveRecordsForPeer\(db, state\.routerUrl, state\.agentId/);
   const server = await readFile(new URL("../tools/router_web_ui.mjs", import.meta.url), "utf8");
   assert.match(server, /type: "message"[\s\S]*agentId: configured\.agentId[\s\S]*routerUrl: configured\.routerUrl/);
-  assert.match(server, /refreshTimer = setInterval\(refreshAgents, 60_000\)/);
+  assert.match(server, /const AGENT_REFRESH_INTERVAL_MS = 10_000;/);
+  assert.match(server, /refreshTimer = setInterval\(refreshAgents, AGENT_REFRESH_INTERVAL_MS\)/);
   assert.match(server, /conversation_sync: "v1"/);
   assert.match(server, /type: "conversation_message"/);
-  assert.doesNotMatch(server, /refreshTimer = setInterval\(refreshAgents, 30_000\)/);
+  assert.doesNotMatch(server, /refreshTimer = setInterval\(refreshAgents, 60_000\)/);
 });
 
 async function startTestRouter() {

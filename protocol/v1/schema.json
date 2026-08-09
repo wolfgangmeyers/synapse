@@ -38,6 +38,18 @@
     "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 },
     "attemptNumber": { "type": "integer", "minimum": 1 },
+    "subagentCount": { "type": "integer", "minimum": 0, "maximum": 999 },
+    "subagentSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "subagentSummaries": { "type": "array", "maxItems": 999, "items": { "$ref": "#/$defs/subagentSummary" } },
     "failureReason": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$" },
     "utcMillis": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
     "leaseIdentity": {
@@ -173,7 +185,9 @@
         "agent_id": { "$ref": "#/$defs/agentId" },
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "lease_id": { "$ref": "#/$defs/leaseId" },
-        "activity_state": { "$ref": "#/$defs/clientActivityState" }
+        "activity_state": { "$ref": "#/$defs/clientActivityState" },
+        "subagent_count": { "$ref": "#/$defs/subagentCount" },
+        "subagents": { "$ref": "#/$defs/subagentSummaries" }
       }
     },
     "injectionRequestedFrame": {
@@ -501,6 +515,8 @@
         "type": { "const": "agent_activity" },
         "agent_id": { "$ref": "#/$defs/agentId" },
         "activity_state": { "$ref": "#/$defs/observableActivityState" },
+        "subagent_count": { "$ref": "#/$defs/subagentCount" },
+        "subagents": { "$ref": "#/$defs/subagentSummaries" },
         "generated_at": { "$ref": "#/$defs/utcMillis" }
       }
     },

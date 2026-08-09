@@ -11,6 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const DEFAULT_ROUTER = "http://127.0.0.1:8765";
+const AGENT_REFRESH_INTERVAL_MS = 10_000;
 const AGENT_ID = /^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CONTENT_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -197,7 +198,7 @@ function createBrowserClient(browser, { defaultRouter }) {
         renewTimer = setInterval(() => renewLease(), 10_000);
         refreshAgents();
         clearInterval(refreshTimer);
-        refreshTimer = setInterval(refreshAgents, 60_000);
+        refreshTimer = setInterval(refreshAgents, AGENT_REFRESH_INTERVAL_MS);
         return;
       }
       if (frame.type === "lease_rejected" || frame.type === "error") {
@@ -218,6 +219,8 @@ function createBrowserClient(browser, { defaultRouter }) {
           type: "agent_activity",
           agent: frame.agent_id,
           activityState: frame.activity_state,
+          subagentCount: frame.subagent_count ?? 0,
+          subagents: Array.isArray(frame.subagents) ? frame.subagents : [],
           generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,

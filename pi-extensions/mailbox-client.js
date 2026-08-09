@@ -19,6 +19,7 @@ const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
 const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_REPLY_TIMEOUT_MS = 5_000;
+const MAX_SUBAGENTS = 999;
 
 export function assertAgentId(agentId) {
   if (typeof agentId !== "string" || agentId.length === 0) {
@@ -67,6 +68,20 @@ function socketOpen(socket) {
 
 function connectionRefused(error) {
   return error?.code === "ECONNREFUSED" || error?.cause?.code === "ECONNREFUSED";
+}
+
+function normalizeSubagentSummary(summary) {
+  if (summary === undefined || summary === null || typeof summary !== "object") return undefined;
+  const id = typeof summary.id === "string" ? summary.id.trim().slice(0, 128) : "";
+  const description = typeof summary.description === "string" ? summary.description.trim().slice(0, 512) : "";
+  if (id.length === 0 || description.length === 0) return undefined;
+  const type = typeof summary.type === "string" ? summary.type.trim().slice(0, 64) : "";
+  return type.length > 0 ? { id, type, description } : { id, description };
+}
+
+function normalizeSubagents(subagents) {
+  if (!Array.isArray(subagents)) return [];
+  return subagents.map(normalizeSubagentSummary).filter(Boolean).slice(0, MAX_SUBAGENTS);
 }
 
 function validateReconnectOptions(initialDelayMs, maxDelayMs) {
@@ -135,16 +150,24 @@ export function createMailboxClient({
     return frameId;
   }
 
-  function activity(activityState) {
+  function activity(activityState, { subagentCount = 0, subagents } = {}) {
     if (!["active", "settled"].includes(activityState)) {
       throw new TypeError("unsupported mailbox activity state");
     }
+    const summaries = normalizeSubagents(subagents);
+    const count = Math.max(summaries.length, subagentCount);
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new TypeError("subagentCount must be a non-negative safe integer");
+    }
+    const clampedCount = Math.min(count, MAX_SUBAGENTS);
     send({
       type: "activity",
       agent_id: agentId,
       instance_id: instanceId,
       lease_id: leaseId,
       activity_state: activityState,
+      subagent_count: clampedCount,
+      ...(summaries.length > 0 || clampedCount === 0 ? { subagents: summaries } : {}),
     });
   }
 
