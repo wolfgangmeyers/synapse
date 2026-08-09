@@ -40,6 +40,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 ## Delegation and roles
 
 - Use persistent workers for durable implementation lanes and runtime ownership. Use background subagents for bounded read-only audits, repo inspection, verification, and parallel checks that would bloat the main context.
+- Workers should also use their own background subagents when available for bounded research, planning checks, implementation slices, test triage, validation, and review. Keep the main worker thread focused on orchestration, integration decisions, and concise handoffs rather than accumulating all investigation and test output inline.
 - Before delegation, name the smallest observable outcome and explicit non-goals.
 - Supervisors own routing, state, reminders, status, and authorization gates. Workers own implementation, local validation, evidence, and reporting.
 - Workers do not self-cleanup, self-close, or silently defer required scope. Supervisors do not rubber-stamp worker readiness.
