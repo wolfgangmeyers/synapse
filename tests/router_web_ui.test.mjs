@@ -266,6 +266,26 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.equal(inboundEvent.message.body, "hello from a live agent");
     assert.deepEqual(inboundEvent.message.source, { kind: "agent" });
     await waitFor(() => repository.messageFor("peer-to-web-1") === undefined);
+
+    repository.createReminder({
+      id: "web-ui-live-reminder",
+      target: webAgentId,
+      creator: "tester",
+      subject: "Reminder subject",
+      body: "hello from a reminder",
+      created_at: "2026-07-28T13:00:00.000Z",
+      next_due_at: "2026-07-28T13:00:00.000Z",
+      interval_ms: null,
+    });
+    const reminderLive = waitForEvent(browser, (event) => event.type === "conversation_message" && event.message.id === "reminder-web-ui-live-reminder-0");
+    const firedReminder = router.sweepDueReminders();
+    assert.equal(firedReminder.length, 1);
+    assert.deepEqual(firedReminder[0].conversation_message.source, { kind: "reminder" });
+    const reminderEvent = await reminderLive;
+    assert.equal(reminderEvent.message.from, "reminders");
+    assert.equal(reminderEvent.message.subject, "Reminder subject");
+    assert.equal(reminderEvent.message.body, "hello from a reminder");
+    assert.deepEqual(reminderEvent.message.source, { kind: "reminder" });
   } finally {
     for (const socket of sockets) socket.close?.();
     await ui?.close();

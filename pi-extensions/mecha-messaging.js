@@ -1165,8 +1165,15 @@ export function createMechaMessagingExtension(pi, {
     pendingSelfCompaction = undefined;
     context.compact({
       customInstructions: request.customInstructions,
-      onComplete: (result) => { notifiedCompactionPercent = 0; sendPostCompactionNotification(request.postCompactionNotification, result); },
-      onError: (error) => { context.ui?.notify(`Self-compaction failed: ${error.message}`, "error"); },
+      onComplete: (result) => {
+        resumeMailboxAfterCompaction(context);
+        notifiedCompactionPercent = 0;
+        sendPostCompactionNotification(request.postCompactionNotification, result);
+      },
+      onError: (error) => {
+        resumeMailboxAfterCompaction(context);
+        context.ui?.notify(`Self-compaction failed: ${error.message}`, "error");
+      },
     });
   }
 
@@ -1377,7 +1384,17 @@ export function createMechaMessagingExtension(pi, {
     if (sessionId !== undefined) children.delete(sessionId);
   });
 
-  pi.on("session_before_compact", async (event, context) => { if (children.has(context.sessionManager.getSessionId())) return undefined; pauseMailboxForCompaction(context); try { await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal }); } catch {} return undefined; });
+  pi.on("session_before_compact", async (event, context) => {
+    if (children.has(context.sessionManager.getSessionId())) return undefined;
+    pauseMailboxForCompaction(context);
+    const resumeIfCanceled = () => resumeMailboxAfterCompaction(context);
+    event.signal?.addEventListener?.("abort", resumeIfCanceled, { once: true });
+    try {
+      await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal });
+    } catch {}
+    if (event.signal?.aborted) resumeIfCanceled();
+    return undefined;
+  });
   pi.on("context", (event, context) => {
     // First quarantine malformed tool calls (invalid names)
     const { messages: validMessages, malformed } = quarantineMalformedToolCalls(event.messages);

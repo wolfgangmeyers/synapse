@@ -834,6 +834,28 @@ test("compaction pauses activity without dropping mailbox resume", async (t) => 
   assert.deepEqual(calls, []);
 });
 
+test("canceled compaction resumes mailbox activity instead of staying paused", async (t) => {
+  const fixture = settledNotificationFixture(t);
+  const controller = new AbortController();
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  const beforeCompact = fixture.handlers.get("session_before_compact")({ signal: controller.signal, preparation: {} }, fixture.context);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "compacting", subagentCount: 0 },
+  ]);
+
+  controller.abort();
+  await beforeCompact;
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "compacting", subagentCount: 0 },
+    { state: "settled", subagentCount: 0 },
+  ]);
+});
+
 test("compaction resume reconciles already-running native subagents", async (t) => {
   const calls = [];
   const fixture = settledNotificationFixture(t, {
@@ -1254,6 +1276,32 @@ test("mecha_context tool sets policy and defers self-compaction until agent_sett
   assert.match(fixture.sent[0][0].content, /Continue with the post-compact checklist/);
   assert.equal(fixture.sent[0][0].details.tokens_before, 45);
   assert.deepEqual(fixture.sent[0][1], { deliverAs: "followUp", triggerTurn: true });
+});
+
+test("failed self-compaction resumes mailbox activity instead of staying paused", async (t) => {
+  const fixture = settledNotificationFixture(t);
+  const compactCalls = [];
+  const compactContext = {
+    ...fixture.context,
+    isIdle: () => true,
+    compact: (options) => compactCalls.push(options),
+  };
+
+  await fixture.tools.get("mecha_context").execute("compact", { action: "compact" }, undefined, undefined, compactContext);
+  fixture.handlers.get("agent_settled")({}, compactContext);
+  assert.equal(compactCalls.length, 1);
+
+  await fixture.handlers.get("session_before_compact")({ signal: AbortSignal.timeout(100), preparation: {} }, compactContext);
+  assert.deepEqual(fixture.activity, [
+    { state: "compacting", subagentCount: 0 },
+  ]);
+
+  compactCalls[0].onError(new Error("canceled"));
+  assert.deepEqual(fixture.activity, [
+    { state: "compacting", subagentCount: 0 },
+    { state: "settled", subagentCount: 0 },
+  ]);
+  assert.equal(fixture.notifications.at(-1)[0], "Self-compaction failed: canceled");
 });
 
 test("mecha_context does not compact at a non-idle settled boundary", async (t) => {
@@ -2101,6 +2149,16 @@ test("due reminders batch into one queued mailbox delivery", async () => {
     assert.equal(fired.length, 2);
     assert.equal(fired[0].message.id, "reminder-reminder-a-0");
     assert.equal(fired[1].message.id, "reminder-reminder-a-0");
+    assert.equal(fired[0].conversation_message.id, "reminder-reminder-a-0");
+    assert.equal(fired[1].conversation_message.id, "reminder-reminder-b-0");
+    assert.deepEqual(fired.map(({ conversation_message: message }) => message.source), [
+      { kind: "reminder" },
+      { kind: "reminder" },
+    ]);
+    assert.deepEqual(repository.conversationHistory({ owner: "supervisor", peer: "reminders" }).map(({ id }) => id), [
+      "reminder-reminder-a-0",
+      "reminder-reminder-b-0",
+    ]);
 
     const queued = repository.queuedFor("supervisor");
     assert.equal(queued.length, 1);

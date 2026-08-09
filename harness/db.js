@@ -1943,20 +1943,20 @@ function fireDueReminder(database, reminderId, now, limits) {
   return fireDueRecurringReminder(database, reminder, now, limits);
 }
 
-function fireDueOneShotReminder(database, reminder, now, limits) {
-  limits.onAttempt();
-  const message = enqueueCandidate(
+function enqueueReminderMessage(database, reminder, now, limits) {
+  const candidate = prepareEnvelope(validateEnvelope({
+    id: reminderMessageId(reminder.id, reminder.occurrence_number),
+    from: "reminders",
+    to: reminder.target,
+    ...(reminder.subject === undefined ? {} : { subject: reminder.subject }),
+    ...(reminder.sentinel === undefined ? {} : { sentinel: reminder.sentinel }),
+    body: reminder.body,
+    created_at: now,
+    source: { kind: "reminder" },
+  }, { maxBodyBytes: limits.maxBodyBytes }));
+  const result = enqueueCandidate(
     database,
-    prepareEnvelope(validateEnvelope({
-      id: reminderMessageId(reminder.id, reminder.occurrence_number),
-      from: "reminders",
-      to: reminder.target,
-      ...(reminder.subject === undefined ? {} : { subject: reminder.subject }),
-      ...(reminder.sentinel === undefined ? {} : { sentinel: reminder.sentinel }),
-      body: reminder.body,
-      created_at: now,
-      source: { kind: "reminder" },
-    }, { maxBodyBytes: limits.maxBodyBytes })),
+    candidate,
     {
       firstSeenAt: now,
       maxBodyBytes: limits.maxBodyBytes,
@@ -1965,9 +1965,27 @@ function fireDueOneShotReminder(database, reminder, now, limits) {
       maxBatchBodyChars: limits.maxBatchBodyChars,
     },
   );
-  if (!message.created && !message.batched) {
-    throw new IdempotencyConflictError(message.message.id);
+  if (!result.created && !result.batched) {
+    throw new IdempotencyConflictError(result.message.id);
   }
+  const messageIncarnationId = result.message.id === candidate.id
+    ? result.message.message_incarnation_id
+    : randomUUID();
+  insertConversationMessage(database, prepareConversationCandidate(candidate), {
+    messageIncarnationId,
+    deliveryMessageId: result.message.id,
+    recordedAt: now,
+  });
+  return {
+    ...result,
+    conversation_message: selectConversationMessage(database, candidate.id, messageIncarnationId),
+    conversation_created: true,
+  };
+}
+
+function fireDueOneShotReminder(database, reminder, now, limits) {
+  limits.onAttempt();
+  const message = enqueueReminderMessage(database, reminder, now, limits);
   const updated = database.prepare(`
     UPDATE reminders
     SET state = 'message_queued', linked_message_id = ?
@@ -1982,6 +2000,8 @@ function fireDueOneShotReminder(database, reminder, now, limits) {
   return {
     reminder: selectReminder(database, reminder.id),
     message: message.message,
+    conversation_message: message.conversation_message,
+    conversation_created: message.conversation_created,
   };
 }
 
@@ -2023,27 +2043,7 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
     return undefined;
   }
   limits.onAttempt();
-  const message = enqueueCandidate(
-    database,
-    prepareEnvelope(validateEnvelope({
-      id: reminderMessageId(reminder.id, reminder.occurrence_number),
-      from: "reminders",
-      to: reminder.target,
-      ...(reminder.subject === undefined ? {} : { subject: reminder.subject }),
-      ...(reminder.sentinel === undefined ? {} : { sentinel: reminder.sentinel }),
-      body: reminder.body,
-      created_at: now,
-      source: { kind: "reminder" },
-    }, { maxBodyBytes: limits.maxBodyBytes })),
-    {
-      firstSeenAt: now,
-      maxBodyBytes: limits.maxBodyBytes,
-      maxQueuedMessages: limits.maxQueuedMessages,
-      maxQueuedBytes: limits.maxQueuedBytes,
-      maxBatchBodyChars: limits.maxBatchBodyChars,
-    },
-  );
-  if (!message.created && !message.batched) throw new IdempotencyConflictError(message.message.id);
+  const message = enqueueReminderMessage(database, reminder, now, limits);
   const updated = database.prepare(`
     UPDATE reminders
     SET linked_message_id = ?,
@@ -2061,6 +2061,8 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
   return {
     reminder: selectReminder(database, reminder.id),
     message: message.message,
+    conversation_message: message.conversation_message,
+    conversation_created: message.conversation_created,
   };
 }
 
