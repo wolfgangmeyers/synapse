@@ -511,6 +511,16 @@ Two things that make the loop actually work:
 - **Mutation-check the tests.** A test that cannot fail reads as coverage and is worse than a missing one. Remove the assertion and confirm the test goes red. Most of what the human reviewer found was tests present with nothing pinned.
 - **Run it on the complete head, not mid-round.** Half a round wastes the pass.
 
+### Restore only what you mutated
+
+Caught on 2026-08-09. Someone mutation-checked a change and restored the file with a git checkout. That reverted every uncommitted change in the file, including work written minutes earlier that had nothing to do with the mutation. The test covering that work had already run and passed before the revert, so the suite was green over a file that no longer held the change. The test output read the same either way. A later `git diff --stat` caught it.
+
+When you restore a file after mutating it, use a method that touches only the mutation. Copy the file aside first and copy it back, or reverse the specific edit. A checkout from the index or from a commit discards everything uncommitted in that file, and mutation checking happens exactly when a file has uncommitted work in it.
+
+Then confirm the restore. Read the diff after the mutation round and check that the file still holds what it held before you started. A test that passed before the revert stays passed in your memory of it, and nothing re-runs on its own.
+
+This is a specific case of "Measure the thing you shipped, not the source you built it from" above.
+
 ## Code review
 
 ### "Review this PR" is the whole authorization
