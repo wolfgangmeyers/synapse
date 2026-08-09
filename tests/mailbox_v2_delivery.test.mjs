@@ -811,6 +811,70 @@ test("extension keeps long-running native subagent counts until a terminal event
   ]);
 });
 
+test("extension reconciles late-published native subagent service on heartbeat", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  delete globalThis[serviceSymbol];
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.childEvents.get("subagents:started")({
+    id: "foreground-finished",
+    type: "general-purpose",
+    description: "Foreground finished",
+  });
+  fixture.childEvents.get("subagents:started")({
+    id: "child-queued",
+    type: "general-purpose",
+    description: "Queued child",
+  });
+  assert.equal(fixture.activity.at(-1).subagentCount, 2);
+
+  globalThis[serviceSymbol] = {
+    listAgents: () => [
+      {
+        id: "foreground-finished",
+        type: "general-purpose",
+        description: "Foreground finished",
+        status: "error",
+      },
+      {
+        id: "child-queued",
+        type: "general-purpose",
+        description: "Queued child",
+        status: "queued",
+      },
+    ],
+  };
+
+  now += 5_000;
+  intervals[0].callback();
+
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1, subagents: [{ id: "foreground-finished", type: "general-purpose", description: "Foreground finished" }] },
+    { state: "settled", subagentCount: 2, subagents: [
+      { id: "child-queued", type: "general-purpose", description: "Queued child" },
+      { id: "foreground-finished", type: "general-purpose", description: "Foreground finished" },
+    ] },
+    { state: "settled", subagentCount: 1, subagents: [{ id: "child-queued", type: "general-purpose", description: "Queued child" }] },
+  ]);
+});
+
 test("compaction pauses activity without dropping mailbox resume", async (t) => {
   const calls = [];
   const fixture = settledNotificationFixture(t);

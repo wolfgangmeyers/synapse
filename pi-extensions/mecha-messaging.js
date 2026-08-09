@@ -954,7 +954,7 @@ export function createMechaMessagingExtension(pi, {
     return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description;
   }
 
-  function nativeSubagentRecords(service = subagentsService) {
+  function nativeSubagentRecords(service = globalThis[PI_SUBAGENTS_SERVICE] ?? subagentsService) {
     try {
       const source = typeof service?.listAgents === "function"
         ? service.listAgents()
@@ -967,7 +967,7 @@ export function createMechaMessagingExtension(pi, {
     }
   }
 
-  function activeNativeSubagentRecords(service = subagentsService) {
+  function activeNativeSubagentRecords(service = globalThis[PI_SUBAGENTS_SERVICE] ?? subagentsService) {
     return nativeSubagentRecords(service)
       ?.filter((entry) => {
         const status = typeof entry?.status === "string" ? entry.status.toLowerCase() : entry?.status;
