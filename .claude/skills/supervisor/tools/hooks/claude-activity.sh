@@ -41,12 +41,26 @@ marker="$MECHA_ACTIVITY_DIR/pane${TMUX_PANE}.watch"
 #
 # Once per session and never on the per-tool-call path. If a live sidecar is already watching this
 # pane, this does nothing.
-if [ "$1" = "SessionStart" ] && [ ! -f "$marker" ]; then
+# The respawn gate has to agree with the write gate below. Testing only that the marker exists
+# would leave a pane suppressed for ever after a sidecar was SIGKILLed: the file is there, so
+# nothing respawns, and the pid inside it is dead, so nothing writes. Silent and permanent.
+stale_marker=0
+if [ -f "$marker" ]; then
+  read -r _agent _pid < "$marker" 2>/dev/null || _pid=""
+  [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null || stale_marker=1
+fi
+
+if [ "$1" = "SessionStart" ] && { [ ! -f "$marker" ] || [ "$stale_marker" = "1" ]; }; then
   self="$0"
   link=$(readlink "$self" 2>/dev/null) && [ -n "$link" ] && self="$link"
   sidecar="$(dirname "$self")/../claude_sidecar.mjs"
   if [ -f "$sidecar" ]; then
-    nohup node "$sidecar" --presence-only >/dev/null 2>&1 &
+    # A stale marker is removed here rather than left for the new sidecar to overwrite, so a
+    # spawn that fails leaves the pane in the "no marker" state and the next session retries.
+    [ "$stale_marker" = "1" ] && rm -f "$marker" 2>/dev/null
+    # </dev/null so the backgrounded process does not hold the read end of Claude Code's hook
+    # payload pipe for its whole life.
+    nohup node "$sidecar" --presence-only </dev/null >/dev/null 2>&1 &
   fi
 fi
 
