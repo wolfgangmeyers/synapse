@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   GROWTH_EXPLAINED_MS,
+  IDLE_SILENCE_MS,
   INTERRUPT_GRACE_MS,
   SILENCE_LIMIT_MS,
   createActivityState,
@@ -128,6 +129,43 @@ test("compaction holds, and its own summarizer does not end it", () => {
     }
     assert.equal(machine.state, "idle", `${name}: compacting never cleared`);
   }
+});
+
+test("an interrupt pressed a second into a turn still settles", () => {
+  // probe13: escape ~1.2s after submitting, while the model was thinking and no tool was running.
+  // The transcript grew at exactly 2.0s after UserPromptSubmit, which the original 2.0s explained
+  // window read as ordinary output, leaving the dot lit for good. This is the case that failed on
+  // a live worker, so it is pinned with the capture that produced it.
+  const records = loadFixture("probe13-fast-interrupt.jsonl");
+  assert.equal(records.some((r) => r.kind === "turn_end"), false, "fixture should contain no Stop");
+  const { changes } = replay(records);
+  assert.ok(changes.some((c) => c.state === "active"), "never went active");
+  const settled = changes.find((c) => c.state === "idle");
+  assert.ok(settled, "never settled after the fast interrupt");
+
+  // It must settle on the growth rule, not fall through to the 60s silence backstop. Asserting
+  // the timing is what pins the explained window: widen it back to 2.0s and this growth reads as
+  // ordinary output, so the dot survives until the backstop instead.
+  const growth = records.find((r) => r.kind === "transcript_size" && r.bytes > 20_900);
+  assert.ok(settled.at - growth.at <= INTERRUPT_GRACE_MS + 2_000,
+    `settled ${Math.round((settled.at - growth.at) / 1000)}s after the growth, so it fell through `
+    + "to the silence backstop and the growth was misread as explained");
+});
+
+test("silence settles only when no tool is in flight", () => {
+  // The backstop must never fire during a long command. A 90 minute eval sweep runs with a tool in
+  // flight and a completely flat transcript, which is the failure this whole design exists to
+  // prevent.
+  const running = createActivityState();
+  running.apply({ kind: "turn_start", at: 0, sessionId: "s" }, 0);
+  running.apply({ kind: "tool_start", at: 100, toolUseId: "t1" }, 100);
+  assert.equal(running.tick(100 + IDLE_SILENCE_MS * 10), "active",
+    "settled while a tool was still running");
+
+  const thinking = createActivityState();
+  thinking.apply({ kind: "turn_start", at: 0, sessionId: "s" }, 0);
+  assert.equal(thinking.tick(IDLE_SILENCE_MS - 1), "active", "settled too early");
+  assert.equal(thinking.tick(IDLE_SILENCE_MS + 1), "idle", "never settled with nothing in flight");
 });
 
 test("a settle arriving during compaction does not end the hold", () => {
