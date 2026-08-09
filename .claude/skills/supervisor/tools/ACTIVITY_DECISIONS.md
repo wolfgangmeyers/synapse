@@ -290,3 +290,21 @@ the pane. For a worker that is the point. For a session Wolfgang opened to read 
 text typed into it is not obviously wanted. Showing activity needs the lease, receiving mail needs
 the injection, and one process does both today. This was with the supervisor when the plan was
 written. Nothing in the hook or the state machine depends on the answer.
+
+## Declined
+
+**Making the injector confirm a paste landed before pressing Enter.** A message was lost when
+Claude Code's workspace trust dialog swallowed the paste and the injector's Enter answered the
+dialog. The proposed fix was to capture the pane after pasting, confirm the text was in the input
+box, and refuse to acknowledge when it was not, so the router redelivered.
+
+It was started and then stopped on 2026-08-09. The launcher now marks its work directory trusted
+before starting the agent, which removes the trust dialog, and that dialog is the only case anyone
+reproduced. Other full-screen selectors are expected to swallow a paste the same way, and none was
+demonstrated. So the change would have added a pane capture to the path every worker's message
+takes, on every message, to insure against a case nobody could name.
+
+What remains uncovered: a session sitting on some other modal when mail arrives. The symptom is a
+message that every layer reports as delivered and no agent ever reads. If that turns up, this is
+the fix, and the cheaper detection is the activity receipt described in the known issues page,
+which needs no pane capture and costs nothing per message.
