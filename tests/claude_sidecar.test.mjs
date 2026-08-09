@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertAgentId } from "../pi-extensions/mailbox-client.js";
 import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import {
+  createActivityReporter,
   claudeMailboxPrompt,
   createBodyFreeLogger,
   createClaudeSidecar,
@@ -252,4 +253,68 @@ test("assertAgentId rejects the dotted ids used by self-registered sessions", ()
   // The protocol itself allows dots, so this is a deliberate narrowing and not a shared rule.
   assert.equal(assertAgentId("claude-activity-indicators"), "claude-activity-indicators");
   assert.equal(assertAgentId("supervisor"), "supervisor");
+});
+
+// The sidecar has two jobs and they are not equally important. runCli parks on a promise that
+// never resolves, so an uncaught throw in the activity timer ends the process and takes mail
+// delivery with it. sendActivity genuinely throws when the socket is between reconnects
+// (pi-extensions/mailbox-client.js:157), so this is a reachable path and not defensive coding.
+test("a failing activity send never stops mail delivery", async () => {
+  const receipts = [];
+  const injected = [];
+  const logged = [];
+  const client = {
+    sendReceipt: (type) => receipts.push(type),
+    sendActivity: () => { throw new Error("Mailbox v2 socket is not connected"); },
+  };
+  const state = {
+    state: "active",
+    subagentCount: 0,
+    subagents: () => [],
+    apply: () => {},
+    tick: () => "active",
+    exhausted: () => false,
+  };
+  const tailer = { tick: () => { throw new Error("directory vanished"); } };
+  const reporter = createActivityReporter({
+    client, tailer, state, log: (event) => logged.push(event),
+  });
+
+  // Neither path may throw out of the timer.
+  assert.doesNotThrow(() => reporter.onRecord({ kind: "turn_start", at: 1 }));
+  assert.doesNotThrow(() => reporter.tick());
+  assert.ok(logged.includes("activity_send_failed"), "a failed send was not logged");
+  assert.ok(logged.includes("activity_read_failed"), "a failed read was not logged");
+
+  // And mail still flows through the same client.
+  const sidecar = createClaudeSidecar({
+    agentId: "claude-worker",
+    client,
+    inject: (payload) => injected.push(payload),
+  });
+  await sidecar.onEnvelope({ id: "m1", from: "supervisor", body: "still delivered" },
+    { attemptNumber: 1 });
+  assert.deepEqual(receipts, ["injection_requested", "ack"]);
+  assert.equal(injected.length, 1);
+});
+
+test("an identical activity frame is not re-sent inside the resend window", () => {
+  const sent = [];
+  let clock = 0;
+  const state = {
+    state: "active", subagentCount: 0, subagents: () => [],
+    apply: () => {}, tick: () => "active", exhausted: () => false,
+  };
+  const reporter = createActivityReporter({
+    client: { sendActivity: (s, extra) => sent.push({ s, ...extra }) },
+    tailer: { tick: () => {} },
+    state,
+    now: () => clock,
+  });
+  reporter.publish();
+  reporter.publish();
+  assert.equal(sent.length, 1, "an unchanged frame was re-sent immediately");
+  clock += 11_000; // past the resend window, so the router's 15s expiry cannot lapse
+  reporter.tick();
+  assert.equal(sent.length, 2, "the frame was not refreshed before the router would expire it");
 });
