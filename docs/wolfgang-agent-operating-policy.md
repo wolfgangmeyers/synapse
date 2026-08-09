@@ -126,6 +126,14 @@ The question to ask: is the thing I checked byte-identical to the thing that shi
 
 **Never put a write and the check that proves it in the same command.** A worker on 2026-08-07 bundled a commit, a push and the verification into one shell block. The block failed to parse, so nothing ran, including the verification. A dead check produces no output, and no output reads the same as no problem. It was caught only by separately reading the git log and seeing the old commit. Run the write, then read the state back in a separate call.
 
+### Say what portion of the subject your command read
+
+Three of these came out of a single day. Someone read the last eight lines of a log file and reported that the whole file held no record of an event. The record was there, earlier in the file, and a working system got reported as an outage. A coverage number computed over five files was read as a number about a service of seventy-one files. A search for a phrase came back empty because the text was formatted, so the pattern missed a string that was present. This sits next to "Measure the thing you shipped, not the source you built it from". That rule covers a check pointed at a different artifact. Here the check reads part of the right artifact and the answer describes all of it. Two of the bullets listed under that heading are this failure.
+
+The habit that catches it: before you answer from a command's output, say what portion of the subject that command examined. A tail is the end. A head is the start. A grep is one spelling of one pattern. A coverage run holds whatever is on its include list. Then ask whether the question is about that portion or about the whole subject. When it is about the whole, widen the command and run it again before you answer.
+
+The tell in your own writing is a quantifier over a whole set. Words like no, none, never, every, all, only. Each one claims something about a complete set, so each one needs a command that examined the complete set. When one turns up in a draft, go back to the evidence and check what it covered.
+
 ### Measure a change on the cases that already exist
 
 When a change is meant to improve a model's behavior, extend existing evaluation cases. A case that failed before and passes after is evidence. A new case that passes tells you the model can do the thing, and nothing about whether the change helped.
