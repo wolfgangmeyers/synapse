@@ -89,6 +89,11 @@ export function createActivityState() {
     // an agent is compacting (harness/router.js:1095) and gives that state no expiry, and any
     // non-compacting frame releases the pause. So a stray settle here would end the pause early,
     // which is the failure the whole compacting path exists to respect.
+    //
+    // None of that has ever run. The router has rejected every compacting frame as invalid since
+    // 2026-08-08, because the process predates the schema commit that allowed the state. So this
+    // rule and the mail pause it protects are reasoning from the router source, not observation.
+    // See ACTIVITY_KNOWN_ISSUES.md.
     if (state === "compacting" && record.kind !== "compacted" && record.kind !== "session_start") {
       return;
     }
