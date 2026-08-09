@@ -170,8 +170,9 @@ This is a sharper case of checking the facts you inherit. A rule recalled from m
 - Send concise status updates when async work is red, pending, blocked, or materially changed. Include links, owner, current state, and next action.
 - When a reminder asks you to take action and the work is viable to delegate, run it in a background subagent by default. This keeps the supervisor responsive and allows independent checks to proceed in parallel. When creating or updating an action-oriented reminder, include that guidance in the reminder body so the receiving supervisor or worker is steered toward background delegation instead of doing status/audit work inline.
 - Recurring supervisor reminders default to a 30-minute cadence unless Wolfgang explicitly asks for a different interval. Do not create or keep tighter loops for PR checks, CI watches, status sweeps, or active-task verification just because work is busy; use 30 minutes and route urgent state changes through worker mail.
+- Do not keep reminders that no longer drive a decision, unblock work, catch a real failure mode, or preserve an active handoff. Each reminder costs tokens when it fires. Delete or downgrade reminders once a worker is parked, a PR is only waiting on human review, CI is green with no active action, a blocker has already been reported and needs a human/environment decision, or a broader sweep already covers the same check. Keep the smallest reminder set that preserves the safety property.
 - Do not reply to pure acknowledgments unless they contain a new instruction, blocker, evidence, decision request, or state transition.
-- Avoid noisy alerts and reminder loops. Cancel, repair, retire, or reconfigure false-positive or superseded alerts while preserving the real safety check.
+- Avoid noisy alerts and reminder loops. Cancel, repair, retire, or reconfigure false-positive, redundant, or superseded alerts while preserving the real safety check.
 - Write human-facing text plainly and naturally. Do not include command transcripts, QA packets, or proof dumps unless asked.
 
 ### Check whether an alert is already being handled
