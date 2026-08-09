@@ -39,6 +39,13 @@ test("Android source wires router aliases like the Web UI", async () => {
   assert.match(source, /Icon\(Icons\.Default\.Delete, "Remove router", tint = Color\(0xFFFFA4A0\)\)/);
 });
 
+test("Android connected card keeps the username and shows display names", async () => {
+  const source = await readFile(activityPath, "utf8");
+  assert.ok(source.includes('connection = "Connected as $agentId"'));
+  assert.ok(source.includes('Text(connectedStatusDetail(agentId, activeRouterDisplayName)'));
+  assert.ok(source.includes('"${humanName(agentId)} · $routerDisplayName"'));
+});
+
 test("Android source wires the core web QOL parity behavior", async () => {
   const source = await readFile(activityPath, "utf8");
   assert.match(source, /private var agentFilter by mutableStateOf\(""\)/);
