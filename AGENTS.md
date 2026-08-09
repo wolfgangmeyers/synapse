@@ -2,6 +2,12 @@
 
 This repo holds dev-tooling skills for Wolfgang's AI agent workflow. Skills live in `.claude/skills/<name>/SKILL.md`.
 
+## Mandatory portable policy
+
+All Wolfgang-managed supervisors and workers must read `docs/wolfgang-agent-operating-policy.md` before substantive work. A machine-level `~/AGENTS.md` must include a mandatory reference to that file, or to the installed copy of that file on that machine, so the policy is loaded before role-specific supervisor or worker instructions.
+
+Keep this policy portable. Put role mechanics in the supervisor/worker skills and put machine, project, credential, and incident facts in the KB or repo-specific instructions.
+
 ## How skills work
 
 A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, Cursor) reads `SKILL.md` and follows the instructions. Skills can reference other skills, but the file is always authoritative — never assume what a skill does, look it up.
