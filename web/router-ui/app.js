@@ -23,11 +23,11 @@ const DRAFT_STORE_KEY = "mecha.web.drafts";
 const SELECTED_PEER_STORE_KEY = "mecha.web.selectedPeers";
 const MAX_IMAGES = 3;
 const MAX_IMAGE_EDGE = 1600;
-const IMAGE_WEBP_QUALITY = 0.82;
+const IMAGE_JPEG_QUALITY = 0.92;
 const MAX_IMAGE_BYTES = 768 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
 const HISTORY_IMAGE_EDGE = 360;
-const HISTORY_IMAGE_QUALITY = 0.72;
+const HISTORY_IMAGE_QUALITY = 0.88;
 const MESSAGE_BOTTOM_THRESHOLD_PX = 80;
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
@@ -561,12 +561,15 @@ async function prepareImage(file) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(bitmap, 0, 0, width, height);
   bitmap.close?.();
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", IMAGE_WEBP_QUALITY));
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", IMAGE_JPEG_QUALITY));
   if (!blob) throw new Error("Image could not be converted");
   if (blob.size > MAX_IMAGE_BYTES) throw new Error("Image is too large after compression");
-  return { dataUrl: await blobToDataUrl(blob), name: webpName(file.name), sizeBytes: blob.size, mimeType: "image/webp", width, height };
+  return { dataUrl: await blobToDataUrl(blob), name: jpgName(file.name), sizeBytes: blob.size, mimeType: "image/jpeg", width, height };
 }
 
 function renderImagePreview() {
@@ -577,7 +580,7 @@ function renderImagePreview() {
     img.src = image.dataUrl;
     img.alt = image.name || `Image ${index + 1}`;
     const label = document.createElement("small");
-    label.textContent = `${image.name || `image-${index + 1}.webp`} · ${formatBytes(image.sizeBytes)}`;
+    label.textContent = `${image.name || `image-${index + 1}.jpg`} · ${formatBytes(image.sizeBytes)}`;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.append(icon("fa-xmark"));
@@ -610,14 +613,14 @@ function renderMessageImages(attachments) {
 }
 
 function imageAttachmentsFromBody(body) {
-  const matches = [...String(body || "").matchAll(/\/v1\/attachments\/([A-Za-z0-9._-]+\.(?:png|jpg|webp|gif))/g)];
+  const matches = [...String(body || "").matchAll(/\/v1\/attachments\/([A-Za-z0-9._-]+\.(?:png|jpe?g|webp|gif))/g)];
   return matches.map((match) => ({ url: `${state.routerUrl}${match[0]}`, name: match[1] }));
 }
 
 function pendingMessageBody(body, images) {
   const text = body.trim();
   if (images.length === 0) return body;
-  return `${text}${text ? "\n\n" : ""}Attached image${images.length === 1 ? "" : "s"}:\n${images.map((image, index) => `${index + 1}. ${image.name || "image.webp"}`).join("\n")}`;
+  return `${text}${text ? "\n\n" : ""}Attached image${images.length === 1 ? "" : "s"}:\n${images.map((image, index) => `${index + 1}. ${image.name || "image.jpg"}`).join("\n")}`;
 }
 
 function hasImageFiles(items) {
@@ -633,9 +636,9 @@ function blobToDataUrl(blob) {
   });
 }
 
-function webpName(name) {
+function jpgName(name) {
   const base = String(name || "image").replace(/\.[^.]*$/, "") || "image";
-  return `${base}.webp`;
+  return `${base}.jpg`;
 }
 
 function icon(name) {
@@ -671,7 +674,7 @@ async function saveCachedImage(key, dataUrl, attachment) {
   const blob = await historyThumbnailBlob(dataUrl);
   const db = await openHistoryDb();
   const transaction = db.transaction(IMAGE_STORE_NAME, "readwrite");
-  transaction.objectStore(IMAGE_STORE_NAME).put({ key, blob, mime_type: "image/webp", name: attachment.name, savedAtMs: Date.now() });
+  transaction.objectStore(IMAGE_STORE_NAME).put({ key, blob, mime_type: "image/jpeg", name: attachment.name, savedAtMs: Date.now() });
   await requestDone(transaction);
 }
 
@@ -684,9 +687,12 @@ async function historyThumbnailBlob(dataUrl) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(bitmap, 0, 0, width, height);
   bitmap.close?.();
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", HISTORY_IMAGE_QUALITY));
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", HISTORY_IMAGE_QUALITY));
   if (!blob) throw new Error("Image history preview could not be saved");
   return blob;
 }

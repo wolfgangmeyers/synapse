@@ -212,8 +212,8 @@ test("router web UI serves the app and relays live router messages", async () =>
       body: "see screenshots",
       localId: "local-image-1",
       images: [
-        { name: "one.webp", dataUrl: tinyWebpDataUrl() },
-        { name: "two.webp", dataUrl: tinyWebpDataUrl() },
+        { name: "one.jpg", dataUrl: tinyJpegDataUrl() },
+        { name: "two.jpg", dataUrl: tinyJpegDataUrl() },
       ],
     }));
     const imageResult = await waitForEvent(browser, (event) => event.type === "send_result" && event.localId === "local-image-1");
@@ -225,12 +225,12 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.doesNotMatch(imageResult.message.body, /data:image/);
     assert.doesNotMatch(imageResult.message.body, /Attached images:/);
     const imageDelivery = await deliveredImage;
-    assert.match(imageDelivery.message.body, /see screenshots\n\nAttached images:\n1\. .*\.webp\n2\. .*\.webp/);
+    assert.match(imageDelivery.message.body, /see screenshots\n\nAttached images:\n1\. .*\.jpg\n2\. .*\.jpg/);
     assert.doesNotMatch(imageDelivery.message.body, /data:image/);
     ackDelivery(peer.socket, peer.registered, "peer-agent", "peer-agent-instance", imageDelivery);
     const attachmentResponse = await fetch(imageResult.message.attachments[0].url);
     assert.equal(attachmentResponse.status, 200);
-    assert.equal(attachmentResponse.headers.get("content-type"), "image/webp");
+    assert.equal(attachmentResponse.headers.get("content-type"), "image/jpeg");
 
     const inbound = waitForEvent(browser, (event) => event.type === "conversation_message" && event.message.from === "peer-agent");
     router.enqueueMessage({
@@ -298,7 +298,7 @@ test("two web sessions with one username receive live fanout and reconnect histo
       to: "shared-peer",
       body: "shared image",
       localId: "shared-web-image",
-      images: [{ name: "shared.webp", dataUrl: tinyWebpDataUrl() }],
+      images: [{ name: "shared.jpg", dataUrl: tinyJpegDataUrl() }],
     }));
     const [imageOne, imageTwo] = await Promise.all([firstImage, reconnectedImage]);
     assert.equal(imageOne.message.attachments.length, 1);
@@ -425,7 +425,8 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.doesNotMatch(html, />\+<\/button>/);
   assert.match(app, /const MAX_IMAGES = 3;/);
   assert.match(app, /const MAX_IMAGE_EDGE = 1600;/);
-  assert.match(app, /canvas\.toBlob\(resolve, "image\/webp", IMAGE_WEBP_QUALITY\)/);
+  assert.match(app, /canvas\.toBlob\(resolve, "image\/jpeg", IMAGE_JPEG_QUALITY\)/);
+  assert.match(app, /context\.fillStyle = "#fff"/);
   assert.match(app, /elements\.composer\.addEventListener\("drop"/);
   assert.match(app, /elements\.draft\.addEventListener\("paste"/);
   assert.match(app, /function renderImagePreview\(\)/);
@@ -524,7 +525,7 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.match(app, /function messageWithCachedImages\(peer, acceptedMessage, pendingMessage\)/);
   assert.match(app, /function saveCachedImage\(key, dataUrl, attachment\)/);
   assert.match(app, /const HISTORY_IMAGE_EDGE = 360;/);
-  assert.match(app, /canvas\.toBlob\(resolve, "image\/webp", HISTORY_IMAGE_QUALITY\)/);
+  assert.match(app, /canvas\.toBlob\(resolve, "image\/jpeg", HISTORY_IMAGE_QUALITY\)/);
   assert.match(app, /function cachedImageUrl\(key\)/);
   assert.match(app, /cacheKey/);
   assert.doesNotMatch(app, /localStorage\.setItem\(HISTORY_STORE_KEY/);
@@ -620,6 +621,10 @@ function waitForEvent(socket, predicate, timeoutMs = 1000) {
 
 function nextRouterFrame(socket, predicate, timeoutMs = 1000) {
   return waitForEvent(socket, predicate, timeoutMs);
+}
+
+function tinyJpegDataUrl() {
+  return "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EFBABAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
 }
 
 function tinyWebpDataUrl() {

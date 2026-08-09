@@ -584,7 +584,8 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.match(images, /MAX_IMAGE_BYTES = 768 \* 1024/);
   assert.match(images, /MAX_IMAGE_INPUT_BYTES = 12 \* 1024 \* 1024/);
   assert.match(images, /resolver\.openInputStream\(uri\)/);
-  assert.match(images, /data:image\/webp;base64/);
+  assert.match(images, /data:image\/jpeg;base64/);
+  assert.match(images, /Bitmap\.CompressFormat\.JPEG/);
 });
 
 test("Android home renders only router-discovered connected peers", () => {
