@@ -297,6 +297,39 @@ test("two opted-in instances share live outbound and inbound events while legacy
   }
 });
 
+test("due reminders publish live synced conversation messages with reminder source", async () => {
+  const app = await fixture({}, { maxBatchBodyChars: 0 });
+  let browser;
+  try {
+    browser = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "web-reminder", role: "user_interaction", clientType: "web" });
+    app.repository.createReminder({
+      id: "live-reminder",
+      target: "shared-user",
+      creator: "tester",
+      subject: "Reminder subject",
+      body: "review this reminder",
+      created_at: at(1),
+      next_due_at: at(1),
+      interval_ms: null,
+    });
+
+    const live = nextFrame(browser.socket, (frame) => frame.type === "conversation_message" && frame.message.id === "reminder-live-reminder-0");
+    const fired = app.router.sweepDueReminders();
+    assert.equal(fired.length, 1);
+    assert.deepEqual(fired[0].conversation_message.source, { kind: "reminder" });
+    const frame = await live;
+    assert.equal(frame.message.from, "reminders");
+    assert.equal(frame.message.to, "shared-user");
+    assert.equal(frame.message.subject, "Reminder subject");
+    assert.equal(frame.message.body, "review this reminder");
+    assert.deepEqual(frame.message.source, { kind: "reminder" });
+    assert.deepEqual(app.repository.conversationHistory({ owner: "shared-user", peer: "reminders" }).map(({ source }) => source), [{ kind: "reminder" }]);
+  } finally {
+    browser?.socket.terminate();
+    await app.close();
+  }
+});
+
 test("router keeps compacting sessions registered but gates delivery offers until resume evidence", async () => {
   const app = await fixture({}, { maxBatchBodyChars: 0 });
   const sockets = [];

@@ -822,6 +822,10 @@ export function createAgentRouter({
           linked_message_id: message.id,
           agent_id: message.to,
         });
+        if (outcome.conversation_created === true) {
+          fanoutConversationMessage(outcome.conversation_message);
+          sweepConversationHistory();
+        }
         offerQueuedMessages(reminder.target);
         continue;
       }
