@@ -23,7 +23,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 ## Evidence and validation
 
 - Verify claims with direct evidence: files, diffs, test output, logs, browser proof, API responses, screenshots, PR check state, or git history.
-- When the active model cannot read images, delegate image reading to a cheaper/weaker vision-capable model and use its description as the evidence input. Use Luna when an OpenAI subscription is available. Ask for the concrete details needed for the task, not a generic caption.
+- When the active model cannot read images, delegate image reading to a vision-capable model and use its description as the evidence input. Use GPT 5.5 when an OpenAI subscription is available. Ask for the concrete details needed for the task, not a generic caption.
 - For user-facing changes, run the behavior. Code inspection alone is not enough.
 - For CI fixes, inspect the actual failing job, reproduce locally when possible, run the closest CI-equivalent checks, push only scoped fixes, and keep a reminder/status loop until the PR head is green or the next failure is routed.
 - Use source-of-truth history when a claim about prior behavior is challenged. Git evidence beats memory.
