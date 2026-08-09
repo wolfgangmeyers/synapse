@@ -32,6 +32,24 @@
 [ -n "$TMUX_PANE" ] || exit 0
 
 marker="$MECHA_ACTIVITY_DIR/pane${TMUX_PANE}.watch"
+
+# A session with nothing watching it cannot appear in the router UI, because appearing means
+# holding a slot with the router and only managed workers get one. So on SessionStart, and only
+# then, start a presence sidecar for this pane. It registers under a dotted id that no managed
+# worker can have, and it builds no injector, so it can show activity and can never become a
+# terminal that mail is pasted into.
+#
+# Once per session and never on the per-tool-call path. If a live sidecar is already watching this
+# pane, this does nothing.
+if [ "$1" = "SessionStart" ] && [ ! -f "$marker" ]; then
+  self="$0"
+  link=$(readlink "$self" 2>/dev/null) && [ -n "$link" ] && self="$link"
+  sidecar="$(dirname "$self")/../claude_sidecar.mjs"
+  if [ -f "$sidecar" ]; then
+    nohup node "$sidecar" --presence-only >/dev/null 2>&1 &
+  fi
+fi
+
 [ -f "$marker" ] || exit 0
 
 # `agent` is the sidecar's id; `pid` lets a marker left behind by a killed sidecar be ignored.

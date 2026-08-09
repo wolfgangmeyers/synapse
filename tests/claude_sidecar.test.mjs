@@ -10,6 +10,7 @@ import { assertAgentId, assertPresenceAgentId } from "../pi-extensions/mailbox-c
 import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import {
   createActivityReporter,
+  presenceAgentId,
   claudeMailboxPrompt,
   createBodyFreeLogger,
   createClaudeSidecar,
@@ -336,4 +337,38 @@ test("presence ids and worker ids are mutually exclusive", () => {
     assert.throws(() => assertAgentId(id), /agent identity is invalid/,
       `${id} was accepted as a worker id, so an ad hoc session could take a worker's mail`);
   }
+});
+
+// The collision the id space exists to prevent. Two Claude sessions opened in windows that happen
+// to share a name must both register and must not become the same agent, and neither may land on
+// a managed worker's id even when the window is named exactly after one.
+test("two sessions in identically named windows register distinctly", () => {
+  const first = presenceAgentId({ window: "supervisor", pid: 4821 });
+  const second = presenceAgentId({ window: "supervisor", pid: 5109 });
+
+  assert.notEqual(first, second, "two sessions in the same window name collapsed to one agent");
+  assert.equal(first, "session.supervisor.4821");
+  assert.equal(second, "session.supervisor.5109");
+
+  // Neither can be a worker id, so neither can take a live worker's mail.
+  for (const id of [first, second]) {
+    assert.throws(() => assertAgentId(id), /agent identity is invalid/,
+      `${id} was accepted as a worker id`);
+    assert.equal(assertPresenceAgentId(id), id);
+  }
+});
+
+test("a window named to look like a presence id cannot become one", () => {
+  // A window called "session.supervisor.1" is not a valid tmux-derived worker id anyway, but the
+  // sanitiser must not let a crafted window name forge a different session's id either.
+  const forged = presenceAgentId({ window: "supervisor.4821", pid: 9 });
+  assert.equal(forged, "session.supervisor-4821.9",
+    "a dot in the window name survived into the id and could forge another session");
+  assert.notEqual(forged, presenceAgentId({ window: "supervisor", pid: 4821 }));
+});
+
+test("a window with no usable name still produces a valid presence id", () => {
+  assert.equal(presenceAgentId({ window: "!!!", pid: 7 }), "session.---.7");
+  assert.equal(presenceAgentId({ window: "", pid: 7 }), "session.session.7");
+  assert.equal(presenceAgentId({ window: undefined, pid: 7 }), "session.session.7");
 });
