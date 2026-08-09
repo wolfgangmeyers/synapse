@@ -6,10 +6,17 @@ import { join } from "node:path";
 import { isCliEntrypoint } from "../../../../harness/cli_entrypoint.js";
 import { rotateSizeCappedLog } from "../../../../harness/log_rotation.js";
 import { createMailboxClient, assertAgentId } from "../../../../pi-extensions/mailbox-client.js";
+import { createActivityTailer } from "./activity_tail.mjs";
+import { createActivityState } from "./activity_state.mjs";
 
 export const DEFAULT_LOG_DIR = "~/.mecha-developer/claude-sidecars";
 export const DEFAULT_MAX_LOG_BYTES = 256 * 1024;
 export const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
+// The router expires activity after 15s (activityTtlMs, harness/router.js:101), so the current
+// state has to be re-sent well inside that. 5s matches the Pi extension's cadence.
+export const ACTIVITY_REFRESH_MS = 5_000;
+export const ACTIVITY_MIN_RESEND_MS = 10_000;
+export const ACTIVITY_POLL_MS = 1_000;
 
 const ANSI_PATTERN = /(?:\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)|\x1B[P^_][\s\S]*?(?:\x1B\\)|\x1B[@-Z\\-_])/g;
 const CONTROL_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g;
@@ -121,11 +128,78 @@ export function createClaudeSidecar({ agentId, window = agentId, client, inject,
   return { onEnvelope };
 }
 
+// Drives the router's activity frames from the hook's records.
+//
+// Every callback here is isolated. runCli parks on a promise that never resolves, so an uncaught
+// throw in a timer ends the process and takes mail delivery with it, and sendActivity does throw
+// when the socket is between reconnects (pi-extensions/mailbox-client.js:157). Activity is the
+// less important of the sidecar's two jobs and must never be able to stop the other one.
+export function createActivityReporter({
+  client,
+  tailer,
+  state,
+  log = () => {},
+  now = () => Date.now(),
+  refreshIntervalMs = ACTIVITY_REFRESH_MS,
+  minResendMs = ACTIVITY_MIN_RESEND_MS,
+} = {}) {
+  let lastSentAtMs = 0;
+  let lastSignature;
+
+  function publish(force = false) {
+    const activityState = state.state === "idle" ? "settled" : state.state;
+    const subagents = state.subagents();
+    const signature = `${activityState}|${state.subagentCount}|${JSON.stringify(subagents)}`;
+    // Same suppression the Pi extension uses (mecha-messaging.js:1039-1046): skip an identical
+    // frame unless it is old enough that the router's 15s expiry would otherwise lapse.
+    if (!force && signature === lastSignature && now() - lastSentAtMs < minResendMs) return;
+    client.sendActivity(activityState, { subagentCount: state.subagentCount, subagents });
+    lastSentAtMs = now();
+    lastSignature = signature;
+  }
+
+  return {
+    // Called for every record the tailer produces.
+    onRecord(record) {
+      try {
+        state.apply(record, record.at ?? now());
+      } catch {
+        log("activity_apply_failed", { state: "error" });
+        return;
+      }
+      try {
+        publish();
+      } catch {
+        log("activity_send_failed", { state: "error" });
+      }
+    },
+    // Called on a fixed tick, independent of whether anything arrived.
+    tick() {
+      try {
+        tailer.tick();
+      } catch {
+        log("activity_read_failed", { state: "error" });
+      }
+      try {
+        state.tick(now());
+        if (state.exhausted(now())) return; // stop refreshing; the router expires the agent
+        publish(now() - lastSentAtMs >= refreshIntervalMs);
+      } catch {
+        log("activity_send_failed", { state: "error" });
+      }
+    },
+    publish,
+  };
+}
+
 function parseArgs(argv) {
   const result = {
     routerUrl: process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL,
     logDir: DEFAULT_LOG_DIR,
     maxLogBytes: DEFAULT_MAX_LOG_BYTES,
+    // One setting, read by the hook and the sidecar, so they cannot disagree about where the
+    // records live. The hook reads the same variable.
+    activityDir: process.env.MECHA_ACTIVITY_DIR,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -140,6 +214,7 @@ function parseArgs(argv) {
     else if (arg === "--router-url") result.routerUrl = next();
     else if (arg === "--log-dir") result.logDir = next();
     else if (arg === "--max-log-bytes") result.maxLogBytes = Number(next());
+    else if (arg === "--activity-dir") result.activityDir = next();
     else throw new Error(`unknown argument: ${arg}`);
   }
   if (!result.agentId) throw new Error("--agent-id is required");
@@ -167,8 +242,27 @@ export async function runCli(argv = process.argv.slice(2)) {
     inject: createTmuxInjector(),
     log: (event, fields) => logger.write(event, fields),
   });
+  const state = createActivityState();
+  const tailer = createActivityTailer({
+    agentId: args.agentId,
+    dir: args.activityDir,
+    onRecord: (record) => reporter.onRecord(record),
+  });
+  const reporter = createActivityReporter({
+    client,
+    tailer,
+    state,
+    log: (event, fields) => logger.write(event, fields),
+  });
+
   logger.write("sidecar_start", { agent_id: args.agentId, window: args.window });
-  const stop = (signal) => { logger.write("sidecar_stop", { signal }); client.close(); process.exit(0); };
+  const stop = (signal) => {
+    logger.write("sidecar_stop", { signal });
+    // Removing the marker stops the hook writing files nobody will read.
+    try { tailer.stop(); } catch { /* the pid check covers a marker we cannot remove */ }
+    client.close();
+    process.exit(0);
+  };
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
   // The monitor lives for the whole process; stop() is the only exit path.
@@ -178,6 +272,13 @@ export async function runCli(argv = process.argv.slice(2)) {
   });
   await client.connect();
   logger.write("sidecar_connected", { agent_id: args.agentId });
+
+  // Started only after the lease is held: the marker is a promise to the hook that something is
+  // reading, and until the socket is up that promise is not true.
+  tailer.start();
+  const activityTimer = setInterval(() => reporter.tick(), ACTIVITY_POLL_MS);
+  activityTimer.unref?.();
+
   await new Promise(() => {});
 }
 
