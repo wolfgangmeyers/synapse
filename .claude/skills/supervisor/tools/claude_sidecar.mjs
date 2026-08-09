@@ -21,7 +21,12 @@ export const ACTIVITY_POLL_MS = 1_000;
 // router answers a losing lease claim with silence, not an error, so a client that retries on
 // timeout looks alive and does nothing. A session that fails to register is still a working
 // session; it just does not appear in the UI.
-export const PRESENCE_MAX_ATTEMPTS = 3;
+// `client.connect()` resolves only on a `registered` frame and rejects only when the client is
+// closed, so with the router down it never settles. Retrying it is meaningless: the promise is
+// memoized, so a second await returns the same pending one. A bounded wait is the only thing that
+// actually gives up. Without this, every SessionStart in a pane spawned another process that hung
+// forever holding nothing, which is how nine of them accumulated and had to be killed by hand.
+export const PRESENCE_CONNECT_TIMEOUT_MS = 15_000;
 
 // Presence ids are dotted so they cannot collide with a managed worker id, which is a tmux window
 // name and can never contain a dot. Two sessions in identically named windows differ by pid.
@@ -91,6 +96,23 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+// Existence is checked by enumerating and looking for the name, NOT by asking tmux about the
+// target. `display-message -p -t <gone>` exits 0: for a dead pane it prints nothing, and for a
+// dead window it prints the ACTIVE pane's id, so the old check could not fail and both monitors
+// never fired. That is why sidecars outlived their windows and had to be killed by hand.
+function tmuxLists(tmux, args) {
+  const out = tmux(args);
+  return String(out ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+export function tmuxWindowExists({ tmux, session, window }) {
+  return tmuxLists(tmux, ["list-windows", "-t", session, "-F", "#{window_name}"]).includes(window);
+}
+
+export function tmuxPaneExists({ tmux, pane }) {
+  return tmuxLists(tmux, ["list-panes", "-a", "-F", "#{pane_id}"]).includes(pane);
+}
+
 function assertTmuxWindowExists({ tmux, session, window }) {
   tmux(["display-message", "-p", "-t", `${session}:${window}`, "#{pane_id}"]);
 }
@@ -117,7 +139,7 @@ export function createTmuxWindowMonitor({
   window,
   session = "mecha",
   intervalMs = 5_000,
-  tmux = (args) => execFileSync("tmux", args, { stdio: "ignore" }),
+  tmux = (args) => execFileSync("tmux", args, { encoding: "utf8" }),
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
   onMissing,
@@ -127,12 +149,15 @@ export function createTmuxWindowMonitor({
   if (typeof setIntervalImpl !== "function" || typeof clearIntervalImpl !== "function") throw new TypeError("timer functions are required");
   if (typeof onMissing !== "function") throw new TypeError("onMissing must be a function");
   const timer = setIntervalImpl(() => {
+    let present;
     try {
-      assertTmuxWindowExists({ tmux, session, window });
+      present = tmuxWindowExists({ tmux, session, window });
     } catch {
-      clearIntervalImpl(timer);
-      onMissing();
+      return; // tmux itself failed; try again next tick rather than treating it as a dead window
     }
+    if (present) return;
+    clearIntervalImpl(timer);
+    onMissing();
   }, intervalMs);
   return { close: () => clearIntervalImpl(timer) };
 }
@@ -140,7 +165,7 @@ export function createTmuxWindowMonitor({
 export function createTmuxPaneMonitor({
   pane,
   intervalMs = 5_000,
-  tmux = (args) => execFileSync("tmux", args, { stdio: "ignore" }),
+  tmux = (args) => execFileSync("tmux", args, { encoding: "utf8" }),
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
   onMissing,
@@ -148,12 +173,15 @@ export function createTmuxPaneMonitor({
   if (typeof pane !== "string" || !/^%\d+$/.test(pane)) throw new TypeError("pane must be a tmux pane id");
   if (typeof onMissing !== "function") throw new TypeError("onMissing must be a function");
   const timer = setIntervalImpl(() => {
+    let present;
     try {
-      tmux(["display-message", "-p", "-t", pane, "#{pane_id}"]);
+      present = tmuxPaneExists({ tmux, pane });
     } catch {
-      clearIntervalImpl(timer);
-      onMissing();
+      return;
     }
+    if (present) return;
+    clearIntervalImpl(timer);
+    onMissing();
   }, intervalMs);
   return { close: () => clearIntervalImpl(timer) };
 }
@@ -344,19 +372,20 @@ export async function runCli(argv = process.argv.slice(2)) {
     });
   }
   if (args.presenceOnly) {
-    // The router answers a losing lease claim with silence rather than an error, so a retry loop
-    // here would look alive and do nothing forever. Give up quietly and leave the session working.
-    let connected = false;
-    for (let attempt = 1; attempt <= PRESENCE_MAX_ATTEMPTS && !connected; attempt += 1) {
-      try {
-        await client.connect();
-        connected = true;
-      } catch {
-        logger.write("presence_register_failed", { agent_id: args.agentId, attempt: String(attempt) });
-      }
-    }
-    if (!connected) {
+    // The router answers a losing lease claim with silence rather than an error, so waiting on it
+    // is waiting on something that may never arrive. Give up and exit: a session that cannot
+    // register is still a working session, and a process that lingers is not.
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("presence_connect_timeout")), PRESENCE_CONNECT_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([client.connect(), timeout]);
+      clearTimeout(timer);
+    } catch {
       logger.write("presence_gave_up", { agent_id: args.agentId });
+      try { client.close(); } catch { /* nothing to release if it never opened */ }
       process.exit(0);
     }
   } else {
@@ -366,9 +395,18 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   // Started only after the lease is held: the marker is a promise to the hook that something is
   // reading, and until the socket is up that promise is not true.
-  tailer.start();
-  const activityTimer = setInterval(() => reporter.tick(), ACTIVITY_POLL_MS);
-  activityTimer.unref?.();
+  // Activity must never be able to stop mail delivery. A full disk or an unwritable
+  // MECHA_ACTIVITY_DIR throws here, and without this the process would exit and the worker would
+  // silently stop receiving mail because its indicator failed to start.
+  let activityTimer;
+  try {
+    tailer.start();
+    activityTimer = setInterval(() => reporter.tick(), ACTIVITY_POLL_MS);
+    activityTimer.unref?.();
+  } catch {
+    logger.write("activity_start_failed", { agent_id: args.agentId });
+    if (args.presenceOnly) process.exit(0); // presence with no activity has no purpose
+  }
 
   await new Promise(() => {});
 }

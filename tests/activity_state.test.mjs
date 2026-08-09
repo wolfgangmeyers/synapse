@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   GROWTH_EXPLAINED_MS,
+  COMPACTING_LIMIT_MS,
   IDLE_SILENCE_MS,
   INTERRUPT_GRACE_MS,
   SILENCE_LIMIT_MS,
@@ -376,4 +377,28 @@ test("every fixture replays without throwing and ends idle or compacting", () =>
     assert.ok(["idle", "active", "compacting"].includes(machine.state), `${name} ended in ${machine.state}`);
     assert.ok(machine.subagentCount <= 999, `${name} exceeded the subagent ceiling`);
   }
+});
+
+test("a compaction that never reports finishing does not pause mail for ever", () => {
+  // The router gives compacting no expiry and pauses mail delivery while it lasts, so a lost
+  // `compacted` record would leave a worker unreachable for the rest of its session with no
+  // symptom on either side. Real compactions measured 17s and 36s, so this bound cannot cut one
+  // short.
+  const machine = createActivityState();
+  machine.apply({ kind: "turn_start", at: 0, sessionId: "s" }, 0);
+  machine.apply({ kind: "compacting", at: 1_000, sessionId: "s" }, 1_000);
+  assert.equal(machine.tick(1_000 + 60_000), "compacting", "gave up on a compaction still running");
+  assert.equal(machine.tick(1_000 + COMPACTING_LIMIT_MS - 1), "compacting", "cut a compaction short");
+  assert.equal(machine.tick(1_000 + COMPACTING_LIMIT_MS + 1), "idle",
+    "a lost compacted record left mail paused for the session");
+});
+
+test("the silence bound never fires while compacting", () => {
+  // exhausted() stops the refresh on the assumption the router will expire the agent. That is true
+  // for active and false for compacting, so giving up there would strand the mail pause.
+  const machine = createActivityState();
+  machine.apply({ kind: "turn_start", at: 0, sessionId: "s" }, 0);
+  machine.apply({ kind: "compacting", at: 1_000, sessionId: "s" }, 1_000);
+  assert.equal(machine.exhausted(1_000 + SILENCE_LIMIT_MS + 1), false,
+    "stopped refreshing while compacting, which leaves mail paused");
 });

@@ -10,6 +10,7 @@ import { assertAgentId, assertPresenceAgentId } from "../pi-extensions/mailbox-c
 import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import {
   createActivityReporter,
+  createTmuxPaneMonitor,
   presenceAgentId,
   claudeMailboxPrompt,
   createBodyFreeLogger,
@@ -92,14 +93,20 @@ test("tmux injector uses bracketed paste, waits for Claude paste handling, then 
 });
 
 test("Claude sidecar monitor exits when its target tmux window disappears", () => {
+  // The fake returns what real tmux returns: a list, and exit 0 whether or not the target exists.
+  // The previous version of this test had the fake THROW for a missing window, which tmux never
+  // does. `display-message -p -t <dead window>` exits 0 and prints the active pane's id, so the
+  // old check could not fail and sidecars outlived their windows until they were killed by hand.
   const intervals = [];
   const cleared = [];
-  let windowExists = true;
   const missing = [];
+  let windows = ["claude-worker", "supervisor"];
   const monitor = createTmuxWindowMonitor({
     window: "claude-worker",
-    tmux: () => {
-      if (!windowExists) throw new Error("no such window");
+    tmux: (args) => {
+      assert.deepEqual(args, ["list-windows", "-t", "mecha", "-F", "#{window_name}"],
+        "existence must be checked by enumerating, not by asking tmux about the target");
+      return `${windows.join("\n")}\n`;
     },
     setIntervalImpl: (callback, delay) => {
       const timer = { callback, delay };
@@ -112,12 +119,50 @@ test("Claude sidecar monitor exits when its target tmux window disappears", () =
 
   assert.equal(intervals[0].delay, 5_000);
   intervals[0].callback();
-  assert.deepEqual(missing, []);
-  windowExists = false;
+  assert.deepEqual(missing, [], "reported missing while the window was listed");
+
+  windows = ["supervisor"]; // the window is gone, and tmux still exits 0
   intervals[0].callback();
-  assert.deepEqual(missing, ["missing"]);
+  assert.deepEqual(missing, ["missing"], "did not notice a window that tmux no longer lists");
   assert.deepEqual(cleared, [intervals[0]]);
   monitor.close();
+});
+
+test("a tmux command that fails outright is not treated as a dead window", () => {
+  // tmux being briefly unavailable is not evidence the window is gone. Exiting on it would kill a
+  // healthy sidecar and stop mail delivery.
+  const intervals = [];
+  const missing = [];
+  createTmuxWindowMonitor({
+    window: "claude-worker",
+    tmux: () => { throw new Error("tmux: no server running"); },
+    setIntervalImpl: (callback, delay) => { const timer = { callback, delay }; intervals.push(timer); return timer; },
+    clearIntervalImpl: () => {},
+    onMissing: () => missing.push("missing"),
+  });
+  intervals[0].callback();
+  assert.deepEqual(missing, [], "a failing tmux call was treated as a dead window");
+});
+
+test("the pane monitor exits when its pane is no longer listed", () => {
+  const intervals = [];
+  const missing = [];
+  let panes = ["%1", "%76"];
+  createTmuxPaneMonitor({
+    pane: "%76",
+    tmux: (args) => {
+      assert.deepEqual(args, ["list-panes", "-a", "-F", "#{pane_id}"]);
+      return `${panes.join("\n")}\n`;
+    },
+    setIntervalImpl: (callback, delay) => { const timer = { callback, delay }; intervals.push(timer); return timer; },
+    clearIntervalImpl: () => {},
+    onMissing: () => missing.push("missing"),
+  });
+  intervals[0].callback();
+  assert.deepEqual(missing, []);
+  panes = ["%1"];
+  intervals[0].callback();
+  assert.deepEqual(missing, ["missing"], "a presence sidecar would outlive its pane and keep a router lease");
 });
 
 test("tmux injector failure errors do not include pasted mailbox text", () => {
