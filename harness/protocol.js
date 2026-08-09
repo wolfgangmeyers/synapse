@@ -58,7 +58,7 @@ export function validateClientFrame(frame) {
 
 export function validateServerFrame(frame) {
   if (!hasOnlyUnicodeScalars(frame) || !validateServerSchema(frame)) throw new ProtocolValidationError();
-  for (const timestamp of ["expires_at", "delivery_expires_at", "generated_at"]) {
+  for (const timestamp of ["expires_at", "delivery_expires_at", "generated_at", "created_at"]) {
     if (timestamp in frame && Number.isNaN(Date.parse(frame[timestamp]))) {
       throw new ProtocolValidationError();
     }

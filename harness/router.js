@@ -251,6 +251,10 @@ export function createAgentRouter({
           receiveActivity(socket, frame);
           return;
         }
+        if (frame.type === "message_arrival") {
+          receiveMessageArrival(socket, frame);
+          return;
+        }
         if (["injection_requested", "ack", "nack"].includes(frame.type)) {
           receiveDeliveryReceipt(socket, frame);
           return;
@@ -494,6 +498,29 @@ export function createAgentRouter({
         return;
       }
       updateAgentActivity(session.agentId, frame.activity_state, frame.subagent_count ?? 0, frame.subagents);
+    }
+
+    function receiveMessageArrival(currentSocket, frame) {
+      if (session === undefined
+        || !sessionHasActiveLease(session)
+        || session.agentId !== frame.agent_id
+        || session.instanceId !== frame.instance_id
+        || session.leaseId !== frame.lease_id) {
+        if (session !== undefined) session.suppressActivityClearOnClose = true;
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      broadcastMessageArrival({
+        agentId: session.agentId,
+        from: frame.from,
+        subject: frame.subject,
+        source: frame.source,
+        preview: frame.preview,
+        body: frame.body,
+        createdAt: frame.created_at,
+        messageId: frame.message_id,
+      });
     }
 
     function receiveDeliveryReceipt(currentSocket, frame) {
@@ -1032,6 +1059,24 @@ export function createAgentRouter({
           subagent_count: subagentCount,
           subagents,
           generated_at: generatedAt,
+        });
+      }
+    }
+  }
+
+  function broadcastMessageArrival({ agentId, from, subject, source, preview, body, createdAt, messageId }) {
+    for (const recipient of conversationSessions.values()) {
+      for (const session of recipient.values()) {
+        sendFrame(session.socket, generateFrameId, {
+          type: "message_arrival",
+          agent_id: agentId,
+          from,
+          ...(subject === undefined ? {} : { subject }),
+          source,
+          preview,
+          body,
+          created_at: createdAt,
+          message_id: messageId,
         });
       }
     }

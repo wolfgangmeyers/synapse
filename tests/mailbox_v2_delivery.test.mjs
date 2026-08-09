@@ -27,6 +27,7 @@ import {
   selectCompactionTier,
 } from "../pi-extensions/mecha-messaging.js";
 import { QueueLimitError, openMessageRepository } from "../harness/db.js";
+import { validateClientFrame } from "../harness/protocol.js";
 import { createAgentRouter } from "../harness/router.js";
 
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
@@ -1706,6 +1707,90 @@ test("client sends activity frames with its registered lease identity", async ()
   client.close();
 });
 
+test("client serializes full message arrival body separately from capped preview", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+  socket.close = () => { socket.readyState = 3; };
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    webSocketFactory: () => socket,
+    generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
+  });
+
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+    }),
+  }));
+  await connected;
+
+  const body = `first line\n${"long body ".repeat(40)}`;
+  client.sendMessageArrival({
+    id: "arrival-message",
+    from: "supervisor",
+    to: "worker",
+    subject: "Full body",
+    source: { kind: "agent" },
+    body,
+    created_at: "2030-01-01T00:00:00.000Z",
+  });
+
+  const frame = socket.sent.find(({ type }) => type === "message_arrival");
+  assert.equal(frame.body, body);
+  assert.equal(frame.preview.length, 140);
+  assert.notEqual(frame.preview, body);
+  assert.match(frame.preview, /…$/);
+  client.close();
+});
+
+test("client message arrival preview does not split surrogate pairs at the cap", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+  socket.close = () => { socket.readyState = 3; };
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    webSocketFactory: () => socket,
+    generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
+  });
+
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+    }),
+  }));
+  await connected;
+
+  const body = `${"a".repeat(138)}😀 trailing body`;
+  client.sendMessageArrival({
+    id: "arrival-emoji-boundary",
+    from: "supervisor",
+    to: "worker",
+    subject: "Emoji boundary",
+    source: { kind: "agent" },
+    body,
+    created_at: "2030-01-01T00:00:00.000Z",
+  });
+
+  const frame = socket.sent.find(({ type, message_id }) => type === "message_arrival" && message_id === "arrival-emoji-boundary");
+  assert.equal(frame.body, body);
+  assert.equal(frame.preview, `${"a".repeat(138)}…`);
+  assert.ok(frame.preview.length <= 140);
+  assert.doesNotThrow(() => validateClientFrame(frame));
+  client.close();
+});
+
 test("client does not NACK a Pi injection when its receipt send fails", async () => {
   const socket = new EventTarget();
   socket.readyState = 0;
@@ -1814,6 +1899,104 @@ test("failed durable ACK is retried from persisted session history without reinj
   coordinator.close();
   await session.close();
 });
+
+test("message arrival event is emitted when a received message is injected", async () => {
+  const message = envelope("arrival-message", { source: { kind: "agent" }, subject: "Hello", body: "hello ".repeat(40) });
+  const session = await durableSession(message.id);
+  const sent = [];
+  const arrivals = [];
+  const context = { sessionManager: session.manager, ui: { setStatus() {} } };
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: context,
+    client: { ...receiptClient(), sendMessageArrival: (arrival) => arrivals.push(arrival) },
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+  assert.equal(sent.length, 1);
+  assert.equal(arrivals.length, 1);
+  assert.equal(arrivals[0].id, message.id);
+  assert.equal(arrivals[0].from, "sender");
+  assert.equal(arrivals[0].subject, "Hello");
+  assert.equal(arrivals[0].body, message.body);
+  coordinator.close();
+  await session.close();
+});
+
+test("message arrival suppresses self-sender deliveries", async () => {
+  const message = envelope("arrival-self-sender", { from: "worker", to: "worker", source: { kind: "agent" } });
+  const session = await durableSession(message.id);
+  const arrivals = [];
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: { sessionManager: session.manager, ui: { setStatus() {} } },
+    client: { ...receiptClient(), sendMessageArrival: (arrival) => arrivals.push(arrival) },
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+  assert.deepEqual(arrivals, []);
+  coordinator.close();
+  await session.close();
+});
+
+test("message arrival suppresses duplicate delivery for the same message id", async () => {
+  const message = envelope("arrival-duplicate", { source: { kind: "agent" } });
+  const session = await durableSession(message.id);
+  const arrivals = [];
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: { sessionManager: session.manager, ui: { setStatus() {} } },
+    client: { ...receiptClient(), sendMessageArrival: (arrival) => arrivals.push(arrival) },
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+  assert.equal(arrivals.length, 1);
+  coordinator.close();
+  await session.close();
+});
+
+test("message arrival dedupe survives retry replay after reconnect within the session", async () => {
+  const message = envelope("arrival-reconnect-replay", { source: { kind: "agent" } });
+  const session = await durableSession(message.id);
+  const arrivals = [];
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: { sessionManager: session.manager, ui: { setStatus() {} } },
+    client: { ...receiptClient(), sendMessageArrival: (arrival) => arrivals.push(arrival) },
+    now: () => 1_000,
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  // The router replays an unacknowledged durable delivery with a later attempt after socket reconnect.
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 2 });
+
+  assert.equal(arrivals.length, 1);
+  coordinator.close();
+  await session.close();
+});
+
+for (const kind of ["web_ui", "android", "system", "unknown"]) {
+  test(`message arrival suppresses ${kind} source`, async () => {
+    const message = envelope(`arrival-source-${kind.replace("_", "-")}`, { source: { kind } });
+    const session = await durableSession(message.id);
+    const arrivals = [];
+    const coordinator = createPiMailboxDeliveryCoordinator({
+      pi: { sendMessage() {} },
+      sessionContext: { sessionManager: session.manager, ui: { setStatus() {} } },
+      client: { ...receiptClient(), sendMessageArrival: (arrival) => arrivals.push(arrival) },
+    });
+
+    coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+    assert.deepEqual(arrivals, []);
+    coordinator.close();
+    await session.close();
+  });
+}
 
 test("replayed in-flight delivery does not create a second Pi injection", async () => {
   const message = envelope("message-4");

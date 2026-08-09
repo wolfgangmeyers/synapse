@@ -216,6 +216,32 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.equal(activity.activityState, "active");
     assert.equal(activity.subagentCount, 2);
 
+    const arrivalEvent = waitForEvent(browser, (event) => event.type === "message_arrival" && event.agent === "peer-agent");
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "peer-agent-arrival",
+      type: "message_arrival",
+      agent_id: "peer-agent",
+      instance_id: "peer-agent-instance",
+      lease_id: peer.registered.lease_id,
+      from: "supervisor",
+      subject: "Check this",
+      source: { kind: "agent" },
+      preview: "short arrival preview",
+      body: "full arrival body\nwith details that do not fit in the row",
+      created_at: "2026-07-28T12:59:00.000Z",
+      message_id: "peer-arrival-1",
+    }));
+    const arrival = await arrivalEvent;
+    assert.equal(arrival.agent, "peer-agent");
+    assert.equal(arrival.from, "supervisor");
+    assert.equal(arrival.subject, "Check this");
+    assert.equal(arrival.sourceKind, "agent");
+    assert.equal(arrival.preview, "short arrival preview");
+    assert.equal(arrival.body, "full arrival body\nwith details that do not fit in the row");
+    assert.equal(arrival.createdAt, "2026-07-28T12:59:00.000Z");
+    assert.equal(arrival.messageId, "peer-arrival-1");
+
     const deliveredToPeer = nextRouterFrame(peer.socket, (frame) => frame.type === "message" && frame.message.from === webAgentId);
     browser.send(JSON.stringify({ type: "send_message", to: "peer-agent", body: "hello from the browser", localId: "local-1" }));
     const sendResult = await waitForEvent(browser, (event) => event.type === "send_result" && event.localId === "local-1");
@@ -511,8 +537,9 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /title\.textContent = alias \|\| new URL\(routerUrl\)\.host/);
   assert.match(app, /elements\.peerName\.innerHTML = peer \? `\$\{escapeHtml\(humanName\(peer\)\)\}\$\{active \? '<span class="working-indicator inline"/);
   assert.match(app, /compacting \? compactingBadgeMarkup\("inline"\)/);
-  assert.match(app, /elements\.peerDetail\.innerHTML = peer \? \(compacting \? "Mailbox is compacting; delivery is queued\." : subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "header"\)\)/);
+  assert.match(app, /arrivalIndicatorMarkup\(arrival, "header"\)/);
   assert.match(app, /attachSubagentToggle\(elements\.peerDetail, peer, !compacting && subagents\.length > 0, renderConversation\)/);
+  assert.match(app, /attachArrivalActions\(elements\.peerDetail, arrival\)/);
   assert.match(styles, /#peer-name \{[\s\S]*display: flex;[\s\S]*gap: 10px;/);
   assert.match(styles, /\.peer-activity \{[\s\S]*display: flex;[\s\S]*gap: 8px;/);
   assert.doesNotMatch(app, /peerDetail\.textContent = peer \? `\$\{peer\} · \$\{active \? "Working" : "Available"\}/);
@@ -522,6 +549,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(webState, /function matchesActiveScope/);
   assert.match(webState, /"message"/);
   assert.match(webState, /"agent_activity"/);
+  assert.match(webState, /"message_arrival"/);
   assert.match(webState, /event\.routerUrl === active\.routerUrl && event\.agentId === active\.agentId/);
   assert.match(app, /row\.addEventListener\("click", \(\) => \{ void switchRouter\(routerUrl, \{ connect: true \}\); \}\)/);
   assert.doesNotMatch(app, /Select"/);
@@ -545,22 +573,27 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function backfillSelectedConversation\(\) \{[\s\S]*requestHistory\(peer\);[\s\S]*setTimeout\(\(\) => \{[\s\S]*state\.selectedPeer === peer && state\.routerUrl === routerUrl && state\.agentId === agentId[\s\S]*requestHistory\(peer\);[\s\S]*\}, 500\);[\s\S]*\}/);
   assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
   assert.match(app, /event\.type === "agent_activity"/);
-  assert.match(app, /ARRIVED_MESSAGE_VISIBLE_MS = 10_000/);
-  assert.match(app, /function maybeShowArrivedMessage\(message\)/);
-  assert.match(app, /!\["agent", "discord", "reminder"\]\.includes\(sourceKind\)/);
-  assert.match(app, /setTimeout\(hideArrivedMessage, ARRIVED_MESSAGE_VISIBLE_MS\)/);
-  assert.match(app, /function showArrivedMessageDialog\(\)/);
+  assert.match(app, /event\.type === "message_arrival"/);
+  assert.match(app, /ARRIVED_MESSAGE_VISIBLE_MS = 60_000/);
+  assert.match(app, /function showMessageArrival\(event\)/);
+  assert.match(app, /!\["agent", "discord", "reminder"\]\.includes\(event\.sourceKind\)/);
+  assert.match(app, /setTimeout\(\(\) => hideMessageArrival\(event\.agent\), ARRIVED_MESSAGE_VISIBLE_MS\)/);
+  assert.match(app, /function showArrivedMessageDialog\(arrival\)/);
+  assert.match(app, /elements\.arrivedDialogBody\.textContent = arrival\.body \|\| "";/);
+  assert.match(app, /const label = arrival\.subject \|\| arrival\.preview \|\| "New message";/);
+  assert.match(app, /truncateText\(label, 80\)/);
   assert.match(app, /elements\.arrivedDialog\.showModal\(\)/);
-  assert.match(styles, /\.arrived-message \{[\s\S]*rgba\(255,209,102,0\.96\)/);
+  assert.match(styles, /\.arrival-indicator \{[\s\S]*rgba\(255,209,102,0\.96\)/);
   assert.match(styles, /\.message-dialog-body \{[\s\S]*white-space: pre-wrap;/);
   assert.match(app, /sameSubagents\(current\.subagents, summaries\)\) return;/);
-  assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}\$\{compacting \? " compacting" : ""\}\$\{subagentCount > 0 \? " has-subagents" : ""\}\$\{expanded \? " expanded" : ""\}`/);
+  assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}\$\{compacting \? " compacting" : ""\}\$\{subagentCount > 0 \? " has-subagents" : ""\}\$\{arrival \? " has-arrival" : ""\}\$\{expanded \? " expanded" : ""\}`/);
   assert.match(app, /function compactingBadgeMarkup/);
   assert.match(app, /working-indicator/);
   assert.match(app, /aria-label="Agent is working"/);
   assert.match(app, /class="subagent-indicator\$\{canExpandSubagents/);
   assert.match(app, /aria-label="\$\{subagentCount\} running subagent\$\{subagentCount === 1 \? "" : "s"\}"/);
   assert.match(app, /compacting \? compactingBadgeMarkup\(\) : subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "row"\)/);
+  assert.match(app, /arrivalIndicatorMarkup\(arrival\)/);
   assert.match(app, /expandedSubagentMarkup\(countLabel, subagents\)/);
   assert.match(app, /join\("\\n\\n"\)/);
   assert.match(styles, /\.subagent-indicator \{[\s\S]*rgba\(38,106,255,0\.26\)/);

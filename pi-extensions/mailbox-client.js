@@ -20,6 +20,7 @@ const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_REPLY_TIMEOUT_MS = 5_000;
 const MAX_SUBAGENTS = 999;
+const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
 
 export function assertAgentId(agentId) {
   if (typeof agentId !== "string" || agentId.length === 0) {
@@ -82,6 +83,15 @@ function normalizeSubagentSummary(summary) {
 function normalizeSubagents(subagents) {
   if (!Array.isArray(subagents)) return [];
   return subagents.map(normalizeSubagentSummary).filter(Boolean).slice(0, MAX_SUBAGENTS);
+}
+
+function arrivalPreview(value) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= MESSAGE_ARRIVAL_PREVIEW_CHARS) return text;
+  let previewChars = MESSAGE_ARRIVAL_PREVIEW_CHARS - 1;
+  const lastCodeUnit = text.charCodeAt(previewChars - 1);
+  if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) previewChars -= 1;
+  return `${text.slice(0, previewChars)}…`;
 }
 
 function validateReconnectOptions(initialDelayMs, maxDelayMs) {
@@ -168,6 +178,27 @@ export function createMailboxClient({
       activity_state: activityState,
       subagent_count: clampedCount,
       ...(summaries.length > 0 || clampedCount === 0 ? { subagents: summaries } : {}),
+    });
+  }
+
+  function messageArrival(message) {
+    const sourceKind = message?.source?.kind;
+    if (!message || typeof message.id !== "string" || typeof message.from !== "string" || typeof message.to !== "string"
+      || !["agent", "discord", "reminder"].includes(sourceKind) || message.from === agentId) {
+      return;
+    }
+    send({
+      type: "message_arrival",
+      agent_id: agentId,
+      instance_id: instanceId,
+      lease_id: leaseId,
+      from: message.from,
+      ...(typeof message.subject === "string" ? { subject: message.subject } : {}),
+      source: { kind: sourceKind },
+      preview: arrivalPreview(message.body),
+      body: String(message.body ?? ""),
+      created_at: message.created_at,
+      message_id: message.id,
     });
   }
 
@@ -361,6 +392,7 @@ export function createMailboxClient({
     },
     sendReceipt: receipt,
     sendActivity: activity,
+    sendMessageArrival: messageArrival,
     pause() {
       if (stopped || paused) return;
       paused = true;

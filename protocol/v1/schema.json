@@ -199,6 +199,31 @@
         "subagents": { "$ref": "#/$defs/subagentSummaries" }
       }
     },
+    "messageArrivalClientFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "from", "source", "preview", "body", "created_at", "message_id"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "message_arrival" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "from": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "subject": { "type": "string", "maxLength": 256 },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "type": "string", "enum": ["agent", "discord", "reminder"] } }
+        },
+        "preview": { "type": "string", "maxLength": 140 },
+        "body": { "type": "string", "maxLength": 65536 },
+        "created_at": { "$ref": "#/$defs/utcMillis" },
+        "message_id": { "$ref": "#/$defs/messageId" }
+      }
+    },
     "injectionRequestedFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -333,6 +358,9 @@
         },
         {
           "$ref": "#/$defs/activityFrame"
+        },
+        {
+          "$ref": "#/$defs/messageArrivalClientFrame"
         },
         {
           "$ref": "#/$defs/injectionRequestedFrame"
@@ -530,6 +558,29 @@
         "generated_at": { "$ref": "#/$defs/utcMillis" }
       }
     },
+    "messageArrivalServerFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "from", "source", "preview", "body", "created_at", "message_id"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "message_arrival" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "from": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "subject": { "type": "string", "maxLength": 256 },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "type": "string", "enum": ["agent", "discord", "reminder"] } }
+        },
+        "preview": { "type": "string", "maxLength": 140 },
+        "body": { "type": "string", "maxLength": 65536 },
+        "created_at": { "$ref": "#/$defs/utcMillis" },
+        "message_id": { "$ref": "#/$defs/messageId" }
+      }
+    },
     "deliveryAcknowledgedFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -556,7 +607,8 @@
         { "$ref": "#/$defs/messageFrame" },
         { "$ref": "#/$defs/conversationMessageFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" },
-        { "$ref": "#/$defs/agentActivityFrame" }
+        { "$ref": "#/$defs/agentActivityFrame" },
+        { "$ref": "#/$defs/messageArrivalServerFrame" }
       ]
     },
     "sentinelDescriptor": {

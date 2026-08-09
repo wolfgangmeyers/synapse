@@ -56,6 +56,45 @@ test("activity frames carry lease-scoped worker state", () => {
   assert.throws(() => validateServerFrame({ ...event, activity_state: "settled" }), ProtocolValidationError);
 });
 
+test("message arrival frames carry the full body separately from the capped preview", () => {
+  const fullBody = `first line\n${"long body ".repeat(40)}`;
+  const client = {
+    version: "v1",
+    frame_id: "arrival-1",
+    type: "message_arrival",
+    agent_id: "worker",
+    instance_id: "instance",
+    lease_id: "lease",
+    from: "sender",
+    subject: "Heads up",
+    source: { kind: "agent" },
+    preview: "short body preview",
+    body: fullBody,
+    created_at: "2030-01-01T00:00:00.000Z",
+    message_id: "message-1",
+  };
+  assert.equal(validateClientFrame(client), client);
+  assert.throws(() => validateClientFrame({ ...client, preview: "x".repeat(141) }), ProtocolValidationError);
+  assert.throws(() => validateClientFrame({ ...client, body: "x".repeat(65_537) }), ProtocolValidationError);
+  assert.throws(() => validateClientFrame({ ...client, lease_id: undefined }), ProtocolValidationError);
+
+  const server = {
+    version: "v1",
+    frame_id: "arrival-event-1",
+    type: "message_arrival",
+    agent_id: "worker",
+    from: "sender",
+    source: { kind: "discord" },
+    preview: "discord preview",
+    body: fullBody,
+    created_at: "2030-01-01T00:00:00.000Z",
+    message_id: "message-2",
+  };
+  assert.equal(validateServerFrame(server), server);
+  assert.equal(validateServerFrame({ ...server, subject: "Reminder" }).subject, "Reminder");
+  assert.throws(() => validateServerFrame({ ...server, created_at: "not-a-date" }), ProtocolValidationError);
+});
+
 test("correlated delivery frames require a valid router-generated incarnation", () => {
   const frame = {
     version: "v1", frame_id: "frame", type: "message", attempt_number: 1,

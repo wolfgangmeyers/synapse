@@ -7,6 +7,7 @@ import {
   ownerScope,
   peerScope,
   pruneDrafts,
+  replaceAgentArrival,
   replacePendingMessage,
   SCOPE_SEPARATOR,
   settlePendingMessages,
@@ -29,7 +30,7 @@ const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
 const HISTORY_IMAGE_EDGE = 360;
 const HISTORY_IMAGE_QUALITY = 0.88;
 const MESSAGE_BOTTOM_THRESHOLD_PX = 80;
-const ARRIVED_MESSAGE_VISIBLE_MS = 10_000;
+const ARRIVED_MESSAGE_VISIBLE_MS = 60_000;
 const WEB_DEFAULT_AGENT_ID = "wolfgang-web";
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
@@ -55,8 +56,8 @@ const state = {
   renderedLastMessageKeys: {},
   renderedPeer: "",
   followMessages: true,
-  arrivedMessage: null,
-  arrivedMessageTimer: null,
+  arrivalsByAgent: new Map(),
+  arrivalTimers: new Map(),
 };
 
 const elements = {
@@ -89,9 +90,6 @@ const elements = {
   imageInput: document.querySelector("#image-input"),
   draft: document.querySelector("#draft"),
   send: document.querySelector("#send"),
-  arrivedMessage: document.querySelector("#arrived-message"),
-  arrivedSender: document.querySelector("#arrived-sender"),
-  arrivedSubject: document.querySelector("#arrived-subject"),
   arrivedDialog: document.querySelector("#arrived-dialog"),
   arrivedDialogSender: document.querySelector("#arrived-dialog-sender"),
   arrivedDialogMeta: document.querySelector("#arrived-dialog-meta"),
@@ -163,7 +161,6 @@ elements.draft.addEventListener("keydown", (event) => {
     sendDraft();
   }
 });
-elements.arrivedMessage.addEventListener("click", showArrivedMessageDialog);
 
 function connectUiSocket() {
   state.socket?.close();
@@ -201,6 +198,10 @@ async function handleEvent(event) {
     updateAgentActivity(event.agent, event.activityState, event.subagentCount, event.subagents);
     return;
   }
+  if (event.type === "message_arrival") {
+    showMessageArrival(event);
+    return;
+  }
   if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error") {
     setStatus("error", event.message);
     return;
@@ -221,7 +222,6 @@ async function handleEvent(event) {
     const peer = event.message.from === state.agentId ? event.message.to : event.message.from;
     if (!peer || peer === state.agentId) return;
     await appendMessage(peer, event.message);
-    maybeShowArrivedMessage(event.message);
     if (!state.selectedPeer) selectPeer(peer);
     return;
   }
@@ -235,34 +235,48 @@ async function handleEvent(event) {
   if (event.type === "send_result") await settleOutgoing(event);
 }
 
-function maybeShowArrivedMessage(message) {
-  const sourceKind = message?.source?.kind || "unknown";
-  if (!["agent", "discord", "reminder"].includes(sourceKind)) return;
-  state.arrivedMessage = message;
-  elements.arrivedSender.textContent = humanName(message.from || "Unknown sender");
-  elements.arrivedSubject.textContent = message.subject ? truncateText(message.subject, 80) : truncateText(message.body || "", 80);
-  elements.arrivedMessage.hidden = false;
-  clearTimeout(state.arrivedMessageTimer);
-  state.arrivedMessageTimer = setTimeout(hideArrivedMessage, ARRIVED_MESSAGE_VISIBLE_MS);
+function showMessageArrival(event) {
+  if (!event.agent || event.agent === state.agentId || !["agent", "discord", "reminder"].includes(event.sourceKind)) return;
+  const arrival = {
+    agent: event.agent,
+    from: event.from || "Unknown sender",
+    subject: event.subject,
+    sourceKind: event.sourceKind,
+    preview: event.preview || "",
+    body: event.body || "",
+    createdAt: event.createdAt,
+    messageId: event.messageId,
+  };
+  replaceAgentArrival(state.arrivalsByAgent, arrival);
+  const existingTimer = state.arrivalTimers.get(event.agent);
+  if (existingTimer !== undefined) clearTimeout(existingTimer);
+  state.arrivalTimers.set(event.agent, setTimeout(() => hideMessageArrival(event.agent), ARRIVED_MESSAGE_VISIBLE_MS));
+  renderAgents();
+  renderConversation();
 }
 
-function hideArrivedMessage() {
-  state.arrivedMessage = null;
-  elements.arrivedMessage.hidden = true;
-  clearTimeout(state.arrivedMessageTimer);
-  state.arrivedMessageTimer = null;
+function hideMessageArrival(agent) {
+  state.arrivalsByAgent.delete(agent);
+  const timer = state.arrivalTimers.get(agent);
+  if (timer !== undefined) clearTimeout(timer);
+  state.arrivalTimers.delete(agent);
+  renderAgents();
+  renderConversation();
 }
 
-function showArrivedMessageDialog() {
-  const message = state.arrivedMessage;
-  if (!message) return;
-  clearTimeout(state.arrivedMessageTimer);
-  state.arrivedMessageTimer = null;
-  elements.arrivedDialogSender.textContent = humanName(message.from || "Unknown sender");
-  const timestamp = message.created_at || message.createdAt || message.recorded_at || "";
-  const parts = [message.from ? `From ${message.from}` : "", message.subject ? `Subject: ${message.subject}` : "", timestamp ? new Date(timestamp).toLocaleString() : ""].filter(Boolean);
+function clearAllMessageArrivals() {
+  for (const timer of state.arrivalTimers.values()) clearTimeout(timer);
+  state.arrivalsByAgent.clear();
+  state.arrivalTimers.clear();
+}
+
+function showArrivedMessageDialog(arrival) {
+  if (!arrival) return;
+  elements.arrivedDialogSender.textContent = humanName(arrival.from || "Unknown sender");
+  const timestamp = arrival.createdAt || "";
+  const parts = [arrival.from ? `From ${arrival.from}` : "", arrival.subject ? `Subject: ${arrival.subject}` : "", timestamp ? new Date(timestamp).toLocaleString() : ""].filter(Boolean);
   elements.arrivedDialogMeta.textContent = parts.join(" · ");
-  elements.arrivedDialogBody.textContent = message.body || "";
+  elements.arrivedDialogBody.textContent = arrival.body || "";
   elements.arrivedDialog.showModal();
 }
 
@@ -275,6 +289,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
   state.messages = await loadMessages(routerUrl, state.agentId);
   state.historyRequests = new Map();
+  clearAllMessageArrivals();
   state.draftPeers = loadDraftPeers(routerUrl, state.agentId);
   localStorage.setItem("mecha.web.activeRouter", routerUrl);
   elements.routerUrl.value = routerUrl;
@@ -436,13 +451,22 @@ function renderAgents() {
     const subagentCount = Math.max(subagents.length, Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0);
     const canExpandSubagents = subagents.length > 0;
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
+    const arrival = state.arrivalsByAgent.get(peer);
+    const row = document.createElement("div");
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${arrival ? " has-arrival" : ""}${expanded ? " expanded" : ""}`;
     const badge = compacting ? compactingBadgeMarkup() : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
-    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${badge}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectPeer(peer);
+      }
+    });
     attachSubagentToggle(row, peer, canExpandSubagents, renderAgents);
+    attachArrivalActions(row, arrival);
     return row;
   }));
   requestAnimationFrame(updateSubagentTooltips);
@@ -543,8 +567,13 @@ function renderConversation() {
   const subagentCount = Math.max(subagents.length, Number.isSafeInteger(selectedAgent?.subagent_count) ? selectedAgent.subagent_count : 0);
   const expanded = subagents.length > 0 && state.expandedSubagents.has(peer);
   elements.peerDetail.className = `peer-activity${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
-  elements.peerDetail.innerHTML = peer ? (compacting ? "Mailbox is compacting; delivery is queued." : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "header")) : "Connected agents appear on the left.";
+  const arrival = state.arrivalsByAgent.get(peer);
+  elements.peerDetail.innerHTML = peer ? [
+    compacting ? "Mailbox is compacting; delivery is queued." : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "header"),
+    arrivalIndicatorMarkup(arrival, "header"),
+  ].filter(Boolean).join(" ") : "Connected agents appear on the left.";
   attachSubagentToggle(elements.peerDetail, peer, !compacting && subagents.length > 0, renderConversation);
+  attachArrivalActions(elements.peerDetail, arrival);
   requestAnimationFrame(updateSubagentTooltips);
   elements.peerAvatar.classList.toggle("working", active);
   elements.peerAvatar.classList.toggle("compacting", compacting);
@@ -1071,6 +1100,34 @@ function mergeKnownSubagentSummaries(agent) {
 }
 function compactingBadgeMarkup(extraClass = "") {
   return `<span class="compacting-indicator${extraClass ? ` ${extraClass}` : ""}" aria-label="Agent is compacting"><span class="compacting-dot"></span><span>Compacting</span></span>`;
+}
+
+function arrivalIndicatorMarkup(arrival, extraClass = "") {
+  if (!arrival) return "";
+  const sender = humanName(arrival.from || "Unknown sender");
+  const label = arrival.subject || arrival.preview || "New message";
+  return `<span class="arrival-indicator${extraClass ? ` ${extraClass}` : ""}" role="button" tabindex="0" data-arrival-message-id="${escapeHtml(arrival.messageId || "")}" aria-label="Open new message from ${escapeHtml(sender)}"><span class="arrival-dot"></span><span class="arrival-copy"><strong>${escapeHtml(sender)}</strong><small>${escapeHtml(truncateText(label, 80))}</small></span><button class="arrival-dismiss" type="button" aria-label="Dismiss message from ${escapeHtml(sender)}"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></span>`;
+}
+
+function attachArrivalActions(root, arrival) {
+  if (!arrival) return;
+  const indicator = root.querySelector(".arrival-indicator");
+  const dismiss = root.querySelector(".arrival-dismiss");
+  if (!indicator) return;
+  const openArrival = (event) => {
+    event.stopPropagation();
+    showArrivedMessageDialog(arrival);
+  };
+  indicator.addEventListener("click", openArrival);
+  indicator.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openArrival(event);
+  });
+  dismiss?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    hideMessageArrival(arrival.agent);
+  });
 }
 
 function subagentBadgeMarkup(peer, subagentCount, subagents, expanded, surface) {
