@@ -579,11 +579,15 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /!\["agent", "discord", "reminder"\]\.includes\(event\.sourceKind\)/);
   assert.match(app, /setTimeout\(\(\) => hideMessageArrival\(event\.agent\), ARRIVED_MESSAGE_VISIBLE_MS\)/);
   assert.match(app, /function showArrivedMessageDialog\(arrival\)/);
+  assert.match(app, /<i class="fa-solid fa-envelope arrival-icon" aria-hidden="true"><\/i>/);
+  assert.doesNotMatch(app, /arrival-dot/);
   assert.match(app, /elements\.arrivedDialogBody\.textContent = arrival\.body \|\| "";/);
   assert.match(app, /const label = arrival\.subject \|\| arrival\.preview \|\| "New message";/);
   assert.match(app, /truncateText\(label, 80\)/);
   assert.match(app, /elements\.arrivedDialog\.showModal\(\)/);
   assert.match(styles, /\.arrival-indicator \{[\s\S]*rgba\(255,209,102,0\.96\)/);
+  assert.match(styles, /\.arrival-icon \{[\s\S]*font-size: 11px;/);
+  assert.doesNotMatch(styles, /arrival-dot/);
   assert.match(styles, /\.message-dialog-body \{[\s\S]*white-space: pre-wrap;/);
   assert.match(app, /sameSubagents\(current\.subagents, summaries\)\) return;/);
   assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}\$\{compacting \? " compacting" : ""\}\$\{subagentCount > 0 \? " has-subagents" : ""\}\$\{arrival \? " has-arrival" : ""\}\$\{expanded \? " expanded" : ""\}`/);

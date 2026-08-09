@@ -1106,7 +1106,7 @@ function arrivalIndicatorMarkup(arrival, extraClass = "") {
   if (!arrival) return "";
   const sender = humanName(arrival.from || "Unknown sender");
   const label = arrival.subject || arrival.preview || "New message";
-  return `<span class="arrival-indicator${extraClass ? ` ${extraClass}` : ""}" role="button" tabindex="0" data-arrival-message-id="${escapeHtml(arrival.messageId || "")}" aria-label="Open new message from ${escapeHtml(sender)}"><span class="arrival-dot"></span><span class="arrival-copy"><strong>${escapeHtml(sender)}</strong><small>${escapeHtml(truncateText(label, 80))}</small></span><button class="arrival-dismiss" type="button" aria-label="Dismiss message from ${escapeHtml(sender)}"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></span>`;
+  return `<span class="arrival-indicator${extraClass ? ` ${extraClass}` : ""}" role="button" tabindex="0" data-arrival-message-id="${escapeHtml(arrival.messageId || "")}" aria-label="Open new message from ${escapeHtml(sender)}"><i class="fa-solid fa-envelope arrival-icon" aria-hidden="true"></i><span class="arrival-copy"><strong>${escapeHtml(sender)}</strong><small>${escapeHtml(truncateText(label, 80))}</small></span><button class="arrival-dismiss" type="button" aria-label="Dismiss message from ${escapeHtml(sender)}"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></span>`;
 }
 
 function attachArrivalActions(root, arrival) {
