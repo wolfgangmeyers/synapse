@@ -71,6 +71,8 @@ While any priority is active or blocked, maintain exactly one local five-minute 
 
 Maintain exactly one scheduled recurring general sweep reminder at a 30 minute cadence using the existing Mailbox reminder mechanism. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
 
+When a reminder asks the supervisor to take action and the work is viable to delegate, run that action in a background subagent by default. This is the preferred path for reminder-driven checks, audits, CI/status sweeps, and other bounded work because it preserves supervisor responsiveness and allows independent checks to run in parallel. Keep the action inline only when it is truly trivial, must use supervisor-only local state, or delegation would create more overhead than the work itself.
+
 ## mecha-developer update reminder
 
 When the router sends the canned `mecha-developer update check reminder`, treat it as advisory only. The reminder is a short pointer to this section, not authorization to auto-pull, auto-restart, deploy, or mutate external services blindly.
