@@ -884,7 +884,18 @@ class MainActivity : ComponentActivity() {
                         onEdit = { editingRouterEndpoint = it; routerError = "" },
                         onCancelEdit = { editingRouterEndpoint = null; routerError = "" },
                     )
-                    selectedPeer.isBlank() -> PeerHome(connection, agentId, activeRouter, peers, agentFilter, { agentFilter = it }, ::selectPeer, ::refreshPeers, { showProfileEditor = true }, { showRouterManager = true })
+                    selectedPeer.isBlank() -> PeerHome(
+                        connection = connection,
+                        agentId = agentId,
+                        activeRouterDisplayName = routers().firstOrNull { it.endpoint == activeRouter }?.displayName ?: activeRouter,
+                        peers = peers,
+                        agentFilter = agentFilter,
+                        onAgentFilter = { agentFilter = it },
+                        onPeer = ::selectPeer,
+                        onRefresh = ::refreshPeers,
+                        onEditProfile = { showProfileEditor = true },
+                        onManageRouters = { showRouterManager = true },
+                    )
                     else -> {
                         BackHandler(onBack = ::returnHome)
                         Conversation(
@@ -910,7 +921,7 @@ class MainActivity : ComponentActivity() {
 private fun PeerHome(
     connection: String,
     agentId: String,
-    activeRouter: String,
+    activeRouterDisplayName: String,
     peers: List<PeerStatus>,
     agentFilter: String,
     onAgentFilter: (String) -> Unit,
@@ -948,7 +959,7 @@ private fun PeerHome(
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(connection, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    Text("$agentId · $activeRouter", style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                    Text(connectedStatusDetail(agentId, activeRouterDisplayName), style = MaterialTheme.typography.bodySmall, color = TextMuted)
                 }
             }
         }
@@ -1538,3 +1549,6 @@ private fun humanName(id: String): String = id.split(Regex("[._-]+"))
     .filter { it.isNotBlank() }
     .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
     .ifBlank { id }
+
+internal fun connectedStatusDetail(agentId: String, routerDisplayName: String): String =
+    "${humanName(agentId)} · $routerDisplayName"

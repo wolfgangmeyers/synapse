@@ -43,6 +43,11 @@ class RouterAliasTest {
     }
 
     @Test
+    fun connectedStatusDetailUsesAgentDisplayNameAndRouterDisplayName() {
+        assertEquals("Android Qol Parity · Home lab", connectedStatusDetail("android-qol-parity", "Home lab"))
+    }
+
+    @Test
     fun savingInactiveRouterKeepsCurrentActiveRouter() {
         assertEquals("active:8765", activeRouterAfterRouterSave("active:8765", "inactive:8765", "renamed:8765"))
         assertEquals("renamed:8765", activeRouterAfterRouterSave("active:8765", "active:8765", "renamed:8765"))
