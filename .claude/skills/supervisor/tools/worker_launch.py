@@ -19,6 +19,7 @@ import shlex
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from urllib.parse import urlparse
@@ -46,6 +47,15 @@ PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
 PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
 CLAUDE_SIDECAR_SCRIPT = os.path.join(TOOLS_DIR, "claude_sidecar.mjs")
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
+# Unexpanded, and expanded at call time, matching the Cursor and Codex helpers so that
+# redirecting HOME moves all three. Expanding here would bind the value at import.
+CLAUDE_CONFIG_PATH = "~/.claude.json"
+CLAUDE_SETTINGS_PATH = "~/.claude/settings.json"
+# One rolling copy of the config, overwritten on each write that changes it.
+CLAUDE_CONFIG_BACKUP_SUFFIX = ".mecha-launcher-backup"
+# For a config file that does not exist yet, and for the backup every time. An existing
+# config keeps whatever mode it already had.
+NEW_CLAUDE_CONFIG_MODE = 0o600
 
 
 def _quote_command(argv):
@@ -152,7 +162,6 @@ def _cursor_pretrust_workspace(work_dir):
     workspace trust dialog. Slug = path with '/' replaced by '-', leading '/' dropped.
     e.g. /home/wolfgang/code/foo → home-wolfgang-code-foo
     """
-    import json as _json
     from datetime import datetime, timezone
 
     slug = work_dir.lstrip("/").replace("/", "-")
@@ -165,7 +174,7 @@ def _cursor_pretrust_workspace(work_dir):
             "workspacePath": work_dir,
         }
         with open(trust_file, "w") as f:
-            _json.dump(trust_data, f)
+            json.dump(trust_data, f)
 
 
 def _codex_pretrust_workspace(work_dir):
@@ -214,6 +223,239 @@ def _codex_pretrust_workspace(work_dir):
 
     with open(config_file, "w") as f:
         f.write(config)
+
+
+def _new_claude_project_entry():
+    """The fields Claude Code puts on a project it has just seen, marked trusted.
+
+    All nine of them, taken from the defaults in 2.1.226. Claude Code backfills these only
+    when the whole entry is missing, never field by field, so a partial entry written here
+    stays partial for the life of the project. Measured: an entry this helper created with
+    eight fields still had no mcpContextUris after a full session ran in that directory.
+
+    A function, so every call gets its own list and dict values.
+    """
+    return {
+        "allowedTools": [],
+        "disabledMcpjsonServers": [],
+        "enabledMcpjsonServers": [],
+        "hasClaudeMdExternalIncludesApproved": False,
+        "hasClaudeMdExternalIncludesWarningShown": False,
+        "hasTrustDialogAccepted": True,
+        "mcpContextUris": [],
+        "mcpServers": {},
+        "projectOnboardingSeenCount": 0,
+    }
+
+
+def _replace_file_atomically(path, data, mode):
+    """Replace path with data in one step, never widening who can read it.
+
+    mkstemp creates the temporary file 0600 and it is only ever widened as far as mode, so
+    the new bytes are never more readable than the file they replace. shutil.copy2 does
+    the opposite: it writes at the umask default and narrows afterwards, which leaves a
+    window where a config holding account credentials is group readable.
+
+    The fsync makes the data durable before the rename points the directory entry at it.
+    The rename is atomic, so a reader never sees a partial file, and every failure above
+    it leaves the original in place. The temporary file is created in the destination's
+    own directory, which is what keeps the rename inside one filesystem; on a machine
+    where TMPDIR is a different filesystem, the default location would fail with EXDEV.
+    """
+    tmp_path = None
+    try:
+        descriptor, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(path) or ".", prefix=".mecha-", suffix=".tmp"
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            # On the descriptor, so it cannot be redirected by a symlink swapped into the
+            # directory between here and the rename.
+            os.fchmod(handle.fileno(), mode)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        # Bound to None before the try, so a mkstemp that fails on a full or read-only
+        # filesystem raises its own OSError and not an UnboundLocalError from here.
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _write_claude_trust_entry(work_dir, config_path):
+    """Record workspace trust for work_dir in config_path, or raise saying why not."""
+    # The backup keeps the name it was asked for, while the config itself is written
+    # through to the resolved target. When ~/.claude.json is a symlink into a dotfiles
+    # repo, a backup beside the resolved path would drop a full copy of the user's
+    # account credentials inside that repo, where the next `git add` would pick it up.
+    # The temporary file still has to go in the resolved directory, because that is what
+    # makes the rename atomic, so a hard kill mid-write can still strand one there.
+    backup_path = config_path + CLAUDE_CONFIG_BACKUP_SUFFIX
+    config_path = os.path.realpath(config_path)
+    project_key = os.path.realpath(work_dir)
+
+    try:
+        with open(config_path, "rb") as handle:
+            original = handle.read()
+            # fstat on the open handle, so the mode belongs to the same inode the bytes
+            # came from, and nothing has to stat the path a second time.
+            mode = os.fstat(handle.fileno()).st_mode & 0o777
+    except FileNotFoundError:
+        original = None
+        mode = NEW_CLAUDE_CONFIG_MODE
+
+    config = {} if original is None else json.loads(original.decode("utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("its top level is not an object")
+    # setdefault, because get would hand back a detached dict when the key is missing and
+    # the mutation below would never reach config.
+    projects = config.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        raise ValueError("its projects value is not an object")
+
+    # Membership, because a JSON null is a present value of a shape we do not understand
+    # and .get() would report it as an absent entry and overwrite it.
+    if project_key in projects:
+        entry = projects[project_key]
+        if not isinstance(entry, dict):
+            raise ValueError(f"its entry for {project_key} is not an object")
+        if entry.get("hasTrustDialogAccepted") is True:
+            return
+        # Copy the existing entry and set one field, so a field a later Claude Code adds
+        # survives untouched.
+        entry = dict(entry)
+    else:
+        entry = _new_claude_project_entry()
+    entry["hasTrustDialogAccepted"] = True
+    projects[project_key] = entry
+
+    # indent=2 and unescaped non-ASCII are what Claude Code writes, so this rewrite does
+    # not reformat the parts of the file it does not own. allow_nan=False because the
+    # default emits a bare Infinity or NaN token, which is valid to json.loads and a
+    # syntax error to the JSON.parse that Claude Code reads its config with. That is a
+    # write that looks well formed and leaves the config unreadable to the tool that owns
+    # it, so it fails closed into the warning path instead.
+    payload = json.dumps(config, indent=2, ensure_ascii=False, allow_nan=False)
+    _verify_the_rewrite_is_sound(original, payload, project_key)
+
+    if original is not None:
+        # Backup first, so the copy exists before anything replaces the config. Always
+        # private: this is a file the user never created, holding whatever the config
+        # holds, and nothing reads it back.
+        _replace_file_atomically(backup_path, original, NEW_CLAUDE_CONFIG_MODE)
+    _replace_file_atomically(config_path, payload.encode("utf-8"), mode)
+
+
+def _verify_the_rewrite_is_sound(original, payload, project_key):
+    """Refuse to write a config that lost something or that failed to do its job.
+
+    Checks the transform, not the file. It compares the bytes about to be written against
+    the bytes that were read, so a change another Claude Code session made in between is
+    invisible to it. That race is accepted where this is called from.
+
+    Two ways a write can be well formed and wrong. It can drop something, which the atomic
+    rename would then make permanent and the backup only covers for one generation. Or it
+    can land perfectly and not record the trust it was called to record, which is the
+    failure the deleted per-project settings.json had for months: written successfully,
+    read by nothing.
+    """
+    after = json.loads(payload)
+    if after.get("projects", {}).get(project_key, {}).get("hasTrustDialogAccepted") is not True:
+        raise ValueError(f"the rewrite would not mark {project_key} trusted")
+    if original is None:
+        return
+    before = json.loads(original.decode("utf-8"))
+    lost_keys = set(before) - set(after)
+    if lost_keys:
+        raise ValueError(f"the rewrite would drop top level keys: {sorted(lost_keys)}")
+    lost_projects = set(before.get("projects", {})) - set(after.get("projects", {}))
+    if lost_projects:
+        raise ValueError(f"the rewrite would drop projects: {sorted(lost_projects)}")
+
+
+def _claude_pretrust_workspace(work_dir, config_path=None):
+    """Pre-trust a workspace directory so Claude Code skips its trust dialog.
+
+    Claude Code opens a workspace trust dialog the first time an interactive session runs
+    in a directory it has not seen. Trust lives in ~/.claude.json under
+    projects.<path>.hasTrustDialogAccepted. Three things measured against 2.1.226:
+
+    - A directory counts as trusted when the entry sits on it or on any ancestor. An entry
+      on a parent suppresses the dialog for a child.
+    - The paths compared are physical, so the entry has to be written under the resolved
+      path. An entry under a spelling containing an unresolved symlink does not suppress
+      the dialog, and the dialog itself prints the resolved path.
+    - Claude Code writes its own entry under the enclosing git root when a human accepts
+      the dialog. An exact entry on the work directory is found first by the ancestor walk,
+      so it works either way.
+
+    Not to be confused with skipDangerousModePermissionPrompt, which records that the
+    bypass permissions warning has been accepted and has nothing to do with trust.
+
+    Any failure is a warning, never an exception. This runs before the tmux window is
+    created, so an escaping exception would mean no worker at all, which is worse than the
+    dialog it exists to avoid. The catch is deliberately broad: the contract is that the
+    launch survives whatever goes wrong in here.
+
+    Known and accepted: Claude Code sessions write ~/.claude.json while they run, so this
+    read-modify-write can lose a field one of them set between the read here and the
+    rename. The window covers two writes with an fsync each, the launcher writes at most
+    once per launch and not at all once the directory is trusted, and a lock would not
+    help because Claude Code takes none.
+    """
+    config_path = config_path or os.path.expanduser(CLAUDE_CONFIG_PATH)
+    try:
+        _write_claude_trust_entry(work_dir, config_path)
+    except Exception as error:
+        print(
+            f"Warning: could not record workspace trust for {work_dir} in {config_path}: "
+            f"{error}. The worker may show Claude Code's workspace trust dialog, which "
+            f"discards pasted text, so answer it before sending the worker its first "
+            f"message.",
+            file=sys.stderr,
+        )
+
+
+def _warn_if_bypass_permissions_will_prompt(settings_path=None):
+    """Warn when the bypass permissions warning is still unanswered.
+
+    Workers launch with --dangerously-skip-permissions, and Claude Code shows a one-time
+    warning for that until skipDangerousModePermissionPrompt is recorded. That dialog eats
+    a pasted message the same way the trust dialog does, so a worker on a machine where it
+    has never been answered loses its first message even with trust recorded.
+
+    Only a warning. The key belongs to ~/.claude/settings.json, which is the user's global
+    configuration for every session on the machine, and the launcher has no business
+    setting that on its own.
+    """
+    settings_path = settings_path or os.path.expanduser(CLAUDE_SETTINGS_PATH)
+    try:
+        with open(settings_path, "rb") as handle:
+            settings = json.loads(handle.read().decode("utf-8"))
+        answered = isinstance(settings, dict) and settings.get(
+            "skipDangerousModePermissionPrompt"
+        ) is True
+        reason = f"skipDangerousModePermissionPrompt is not set in {settings_path}"
+    except FileNotFoundError:
+        answered = False
+        reason = f"there is no {settings_path}"
+    except Exception as error:
+        # A settings file Claude Code cannot read is a file it cannot read the key from
+        # either, so this is the case most likely to prompt, not a reason to stay quiet.
+        answered = False
+        reason = f"{settings_path} could not be read: {error}"
+    if not answered:
+        print(
+            f"Warning: {reason}, so this worker may show Claude Code's bypass permissions "
+            f"warning. That dialog discards pasted text, so answer it before sending the "
+            f"worker its first message. Only the user settings file was checked, so this "
+            f"is a false alarm if the key is set in project or managed settings.",
+            file=sys.stderr,
+        )
 
 
 def main():
@@ -298,8 +540,10 @@ def main():
         sys.exit(1)
 
     # Deliberately abspath, not realpath: work_dir is the caller's spelling of the
-    # worktree and feeds pi_session_id() and the Claude project-dir slug. Resolving it
-    # would silently change existing session IDs and trust-dir keys.
+    # worktree and feeds pi_session_id(), the tmux cd, and the Cursor and Codex trust
+    # keys. Resolving it would silently change existing session IDs and those trust keys.
+    # The Claude trust key is resolved separately inside _claude_pretrust_workspace(),
+    # because Claude Code looks a project up by its resolved physical path.
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
     pi_mailbox_extension = None
     mailbox_router_url = None
@@ -388,25 +632,30 @@ def main():
         parts.append(" ".join(agent_parts))
         agent_cmd = " && ".join(parts)
     else:
-        # Default: Claude Code
+        # Default: Claude Code, and only Claude Code. Both --agent and the machine-local
+        # runtime config validate against the same four names, and the branches above
+        # take pi, codex and cursor.
+        #
+        # Mark the work directory trusted before the agent starts. Claude Code opens a
+        # workspace trust dialog the first time an interactive session runs in a directory
+        # it has not seen. That dialog discards pasted text and reads Enter as "Yes, I
+        # trust this folder", so the mailbox injector's first message, normally the
+        # worker's brief, is lost and trust is granted by an automated keystroke.
+        #
+        # Trust is not skipDangerousModePermissionPrompt. That key records that the bypass
+        # permissions warning has been accepted, and Claude Code reads it from
+        # ~/.claude/settings.json, <cwd>/.claude/settings.local.json, CLI flags and
+        # enterprise managed settings. It never reads ~/.claude/projects/<slug>/, which
+        # holds session transcripts and memory.
+        _claude_pretrust_workspace(work_dir)
+        if args.skip_permissions:
+            _warn_if_bypass_permissions_will_prompt()
+
         agent_cmd = "claude"
         if args.skip_permissions:
             agent_cmd += " --dangerously-skip-permissions"
         if args.resume:
             agent_cmd += f" --resume {args.resume}"
-
-    if args.agent == "claude":
-        # Pre-create the Claude project directory for this worktree with
-        # skipDangerousModePermissionPrompt=true so the workspace trust dialog
-        # is suppressed before the agent even starts.
-        encoded = work_dir.lstrip("/").replace("/", "-")
-        project_dir = os.path.join(os.path.expanduser("~/.claude/projects"), f"-{encoded}")
-        os.makedirs(project_dir, exist_ok=True)
-        project_settings = os.path.join(project_dir, "settings.json")
-        if not os.path.exists(project_settings):
-            import json as _json
-            with open(project_settings, "w") as f:
-                _json.dump({"skipDangerousModePermissionPrompt": True}, f)
 
     created = ensure_session()
     if created:
