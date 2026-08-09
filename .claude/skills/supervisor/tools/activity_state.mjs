@@ -7,14 +7,24 @@
 export const MAX_TRACKED = 999; // matches the router's subagent ceiling
 
 // Growth in the session transcript is caused by a write that a hook also reports, so it lands
-// just *after* that hook record. Measured across the captures: legitimate growth trails its
-// record by 0.1s, 0.3s and 0.9s; growth after an interrupt trails the last record by 3.9s and
-// 4.9s. Anything inside this window is explained by the record before it.
-export const GROWTH_EXPLAINED_MS = 2_000;
+// just *after* that hook record. Measured: legitimate growth trails its record by 0.1s, 0.3s and
+// 0.9s. Growth after an interrupt trails the last record by 2.0s, 3.9s and 4.9s. Anything inside
+// this window is explained by the record before it.
+//
+// 1.2s rather than 2.0s because an interrupt pressed a second into a turn produced growth at
+// exactly 2.0s, which a 2.0s window read as explained and left the dot lit indefinitely.
+export const GROWTH_EXPLAINED_MS = 1_200;
 
 // An interrupt fires no hook at all: no Stop, no PostToolUse, no Notification. Unexplained
 // transcript growth is the only evidence it happened. Any hook record cancels the timer.
 export const INTERRUPT_GRACE_MS = 8_000;
+
+// Backstop for an interrupt whose growth still lands inside the explained window. Safe only while
+// no tool is in flight: a long command runs with a tool in flight and a flat transcript, which is
+// exactly the case that must never settle, and thinking between tool calls does not grow the
+// transcript (measured flat for 22s). So silence with nothing in flight means the turn ended.
+// A minute is long enough that a slow first thought does not flicker the dot.
+export const IDLE_SILENCE_MS = 60_000;
 
 // Last resort, for when the transcript cannot be read at all and interrupts are undetectable.
 // Sized against the longest real command here, a ~90 minute eval sweep, with a wide margin.
@@ -174,8 +184,13 @@ export function createActivityState() {
 
   // Time-driven transitions. Separate from apply() so the caller can tick without a record.
   function tick(nowMs) {
-    if (state === "active" && pendingGrowthMs !== undefined
-      && nowMs - pendingGrowthMs >= INTERRUPT_GRACE_MS) {
+    if (state !== "active") return state;
+    const interrupted = pendingGrowthMs !== undefined
+      && nowMs - pendingGrowthMs >= INTERRUPT_GRACE_MS;
+    // Silence only counts when nothing is running. With a tool in flight it means work.
+    const quiet = inflight.size === 0 && lastHookMs !== undefined
+      && nowMs - lastHookMs >= IDLE_SILENCE_MS;
+    if (interrupted || quiet) {
       state = "idle";
       clearTurn();
     }
