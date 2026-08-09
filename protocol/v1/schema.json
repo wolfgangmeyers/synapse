@@ -31,8 +31,17 @@
     "clientType": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
     "ackConfirmationMode": { "type": "string", "const": "correlated_v1" },
     "conversationSyncMode": { "type": "string", "const": "v1" },
-    "clientActivityState": { "type": "string", "enum": ["active", "settled"] },
-    "observableActivityState": { "type": "string", "enum": ["active", "idle"] },
+    "clientActivityState": { "type": "string", "enum": ["active", "settled", "compacting"] },
+    "observableActivityState": { "type": "string", "enum": ["active", "idle", "compacting"] },
+    "messageSourceKind": { "type": "string", "enum": ["agent", "web_ui", "android", "discord", "reminder", "system", "unknown"] },
+    "messageSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/messageSourceKind" }
+      }
+    },
     "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "attachmentId": { "type": "string", "minLength": 1, "maxLength": 192, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
@@ -491,7 +500,8 @@
         "body": { "type": "string", "maxLength": 65536 },
         "created_at": { "$ref": "#/$defs/utcMillis" },
         "recorded_at": { "$ref": "#/$defs/utcMillis" },
-        "attachments": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/attachmentReference" } }
+        "attachments": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/attachmentReference" } },
+        "source": { "$ref": "#/$defs/messageSource" }
       }
     },
     "conversationMessageFrame": {
@@ -597,6 +607,9 @@
         },
         "sentinel": {
           "$ref": "#/$defs/sentinelDescriptor"
+        },
+        "source": {
+          "$ref": "#/$defs/messageSource"
         }
       }
     }

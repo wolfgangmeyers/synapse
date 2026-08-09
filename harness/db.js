@@ -27,6 +27,7 @@ export const DEFAULT_MAX_BATCH_BODY_CHARS = 4_096;
 const DEFAULT_MAX_BATCH_MESSAGES = 10;
 export const DEFAULT_CONVERSATION_HISTORY_LIMIT = 200;
 export const DEFAULT_CONVERSATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const MESSAGE_SOURCE_KINDS = new Set(["agent", "web_ui", "android", "discord", "reminder", "system", "unknown"]);
 const migrations = Object.freeze([
   {
     id: "001_initial",
@@ -86,6 +87,10 @@ const migrations = Object.freeze([
   {
     id: "014_reminder_batch_links",
     sql: readFileSync(new URL("./migrations/014_reminder_batch_links.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "015_conversation_source",
+    sql: readFileSync(new URL("./migrations/015_conversation_source.sql", import.meta.url), "utf8"),
   },
 ]);
 
@@ -1163,7 +1168,8 @@ class MessageRepository {
         body,
         created_at,
         recorded_at,
-        attachments_json
+        attachments_json,
+        source_kind
       FROM conversation_messages
       WHERE participant_a = ? AND participant_b = ?
       ORDER BY conversation_sequence ASC
@@ -1271,7 +1277,8 @@ class MessageRepository {
         expires_at,
         message_incarnation_id,
         state,
-        sentinel_json
+        sentinel_json,
+        source_kind
       FROM messages
       WHERE recipient = ? AND state = 'queued'
       ORDER BY enqueue_sequence ASC
@@ -1420,7 +1427,8 @@ function selectMessage(database, id) {
       expires_at,
       message_incarnation_id,
       state,
-      sentinel_json
+      sentinel_json,
+      source_kind
     FROM messages
     WHERE id = ?
   `).get(id);
@@ -1536,7 +1544,8 @@ function coalesceQueuedDeliveryBatch(database, recipient, now, { maxBatchBodyCha
       subject,
       body,
       created_at,
-      sentinel_json
+      sentinel_json,
+      source_kind
     FROM messages
     WHERE recipient = ?
       AND state = 'queued'
@@ -1637,6 +1646,7 @@ function prepareEnvelope(envelope) {
     created_at: envelope.created_at,
     sentinel: envelope.sentinel,
     sentinel_json: envelope.sentinel === undefined ? null : JSON.stringify(envelope.sentinel),
+    source: normalizeMessageSource(envelope.source),
   };
 }
 
@@ -1648,7 +1658,13 @@ function prepareConversationCandidate(candidate, conversation) {
   if (typeof body !== "string") throw new TypeError("conversation body must be a string");
   const attachments = conversation?.attachments ?? [];
   if (!Array.isArray(attachments)) throw new TypeError("conversation attachments must be an array");
-  return { ...candidate, body, attachments };
+  const source = normalizeMessageSource(conversation?.source ?? candidate.source);
+  return { ...candidate, body, attachments, source };
+}
+
+function normalizeMessageSource(source) {
+  const kind = source !== undefined && source !== null && typeof source === "object" && !Array.isArray(source) ? source.kind : undefined;
+  return { kind: typeof kind === "string" && MESSAGE_SOURCE_KINDS.has(kind) ? kind : "unknown" };
 }
 
 function insertConversationMessage(database, candidate, { messageIncarnationId, deliveryMessageId, recordedAt }) {
@@ -1666,8 +1682,9 @@ function insertConversationMessage(database, candidate, { messageIncarnationId, 
       body,
       created_at,
       recorded_at,
-      attachments_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      attachments_json,
+      source_kind
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     candidate.id,
     messageIncarnationId,
@@ -1681,6 +1698,7 @@ function insertConversationMessage(database, candidate, { messageIncarnationId, 
     candidate.created_at,
     recordedAt,
     JSON.stringify(candidate.attachments),
+    candidate.source.kind,
   );
 }
 
@@ -1710,7 +1728,8 @@ function selectLatestConversationMessage(database, messageId) {
       body,
       created_at,
       recorded_at,
-      attachments_json
+      attachments_json,
+      source_kind
     FROM conversation_messages
     WHERE message_id = ?
     ORDER BY conversation_sequence DESC
@@ -1725,7 +1744,8 @@ function sameConversationCandidate(row, candidate) {
     && row.subject === candidate.subject
     && row.body === candidate.body
     && row.created_at === candidate.created_at
-    && JSON.stringify(conversationAttachments(row.attachments_json)) === JSON.stringify(candidate.attachments);
+    && JSON.stringify(conversationAttachments(row.attachments_json)) === JSON.stringify(candidate.attachments)
+    && ((row.source_kind ?? "unknown") === "unknown" || (row.source_kind ?? "unknown") === candidate.source.kind);
 }
 
 function selectConversationMessage(database, messageId, messageIncarnationId) {
@@ -1741,7 +1761,8 @@ function selectConversationMessage(database, messageId, messageIncarnationId) {
       body,
       created_at,
       recorded_at,
-      attachments_json
+      attachments_json,
+      source_kind
     FROM conversation_messages
     WHERE message_id = ? AND message_incarnation_id = ?
   `).get(messageId, messageIncarnationId);
@@ -1760,6 +1781,7 @@ function toConversationMessage(row) {
     created_at: row.created_at,
     recorded_at: row.recorded_at,
     attachments: conversationAttachments(row.attachments_json),
+    source: { kind: row.source_kind ?? "unknown" },
   };
 }
 
@@ -1817,8 +1839,8 @@ function enqueueCandidate(
   `).run(candidate.to, firstSeenAt);
   database.prepare(`
     INSERT INTO messages (
-      id, sender, recipient, subject, body, created_at, expires_at, message_incarnation_id, sentinel_json, state
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')
+      id, sender, recipient, subject, body, created_at, expires_at, message_incarnation_id, sentinel_json, source_kind, state
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')
   `).run(
     candidate.id,
     candidate.from,
@@ -1829,6 +1851,7 @@ function enqueueCandidate(
     oneHourAfter(firstSeenAt),
     randomUUID(),
     candidate.sentinel_json,
+    candidate.source.kind,
   );
   return {
     created: true,
@@ -1932,6 +1955,7 @@ function fireDueOneShotReminder(database, reminder, now, limits) {
       ...(reminder.sentinel === undefined ? {} : { sentinel: reminder.sentinel }),
       body: reminder.body,
       created_at: now,
+      source: { kind: "reminder" },
     }, { maxBodyBytes: limits.maxBodyBytes })),
     {
       firstSeenAt: now,
@@ -2009,6 +2033,7 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
       ...(reminder.sentinel === undefined ? {} : { sentinel: reminder.sentinel }),
       body: reminder.body,
       created_at: now,
+      source: { kind: "reminder" },
     }, { maxBodyBytes: limits.maxBodyBytes })),
     {
       firstSeenAt: now,
@@ -2633,6 +2658,7 @@ function toMessage(row) {
     message_incarnation_id: row.message_incarnation_id,
     state: row.state,
     ...(row.sentinel_json === null ? {} : { sentinel: JSON.parse(row.sentinel_json) }),
+    source: { kind: row.source_kind ?? "unknown" },
   };
 }
 

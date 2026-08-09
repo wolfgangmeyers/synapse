@@ -31,9 +31,9 @@ Agents can inspect or change the policy with the `mecha_context` tool (`status`,
 
 Managed Pi launchers accept `--compaction-policy` as simple JSON (`{"levels":[40,50,60,70,80,{"percent":90,"mandatory":true}],"models":{"openai-codex/gpt-5.6-sol":{"levels":[20,30,40,{"percent":45,"mandatory":true}]}}}`) or comma-separated default percentages (`40,50,60,70,80,90`). Optional per-model overrides match normalized keys such as `provider/model-id` or `model-id`; model-specific policy wins over the default policy, and command-level `postCompactionNotification` wins for that compact call. Existing tiered JSON remains accepted for compatibility, but the recommended config surface is default policy plus `models`. Pi does not currently expose a first-class CLI flag for this extension policy; the supported launcher path exports `MECHA_PI_COMPACTION_POLICY` and a launcher fallback `MECHA_PI_MODEL_KEY` for the extension.
 
-## Pi self-reload
+## Pi reload
 
-The Mailbox V2 Pi extension registers `mecha_reload` for agents to inspect or request reload support. `mecha_reload` with action `reload` queues the extension command `/mecha-reload-runtime`, which uses Pi's command-context `ctx.reload()` hook to refresh extensions, skills, prompts, themes, and context files at the next safe follow-up boundary.
+The broken `mecha_reload` tool and `/mecha-reload-runtime` command are retired. Reload is manual only: use Pi's built-in `/reload` or restart the managed worker when an extension/runtime refresh matters, then verify the reload through the UI/status or an observable runtime change.
 
 ## Mailbox V2 batching and backpressure
 

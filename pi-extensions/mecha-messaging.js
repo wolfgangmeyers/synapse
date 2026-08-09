@@ -17,7 +17,6 @@ const DEFAULT_PENDING_REINJECTION_DELAY_MS = 5_000;
 const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
 const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
 const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
-const POST_RELOAD_MESSAGE_TYPE = "mecha-post-reload-handoff";
 const COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY";
 const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
 const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
@@ -928,7 +927,6 @@ export function createMechaMessagingExtension(pi, {
   try { compactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { compactionPolicyError = error; compactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
   let notifiedCompactionPercent = 0;
   let pendingSelfCompaction;
-  let reloadCommandRegistered = false;
 
   function normalizeSubagentMetadata(event, startedAtMs = nowImpl()) {
     const id = typeof event?.id === "string" ? event.id.trim().slice(0, 128) : "";
@@ -1016,6 +1014,7 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function sendActivityState(state, { force = false, reconcile = true } = {}) {
+    if (mailboxPausedForCompaction && state !== "compacting") return;
     const nowMs = nowImpl();
     const reconciled = reconcile ? reconcileNativeSubagentService() : false;
     const subagents = publicSubagentSummaries();
@@ -1065,7 +1064,7 @@ export function createMechaMessagingExtension(pi, {
   function clearRunningSubagentsForBoundary() {
     runningSubagents.clear();
     activityHeartbeatActive = false;
-    sendActivityState("settled", { force: true, reconcile: false });
+    if (!mailboxPausedForCompaction) sendActivityState("settled", { force: true, reconcile: false });
     clearActivityHeartbeatTimer();
   }
 
@@ -1091,61 +1090,19 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function pauseMailboxForCompaction(context) {
-    if (children.has(context.sessionManager.getSessionId()) || client === undefined) return;
-    clearRunningSubagentsForBoundary();
+    if (children.has(context.sessionManager.getSessionId()) || client === undefined || mailboxPausedForCompaction) return;
     mailboxPausedForCompaction = true;
-    coordinator?.close();
-    coordinator = undefined;
-    if (typeof client.pause === "function") client.pause();
-    context.ui?.setStatus("mecha-mailbox", "mailbox: paused for compaction");
+    clearRunningSubagentsForBoundary();
+    sendActivityState("compacting", { force: true, reconcile: false });
+    context.ui?.setStatus("mecha-mailbox", "mailbox: compacting");
   }
 
   function resumeMailboxAfterCompaction(context) {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined || !mailboxPausedForCompaction) return;
     mailboxPausedForCompaction = false;
-    coordinator = createMailboxCoordinator(context, client);
-    const reconcileAfterResume = () => {
-      reconcileNativeSubagentService();
-      if (runningSubagents.size > 0) refreshActivityState();
-    };
-    if (typeof client.resume === "function") {
-      Promise.resolve(client.resume())
-        .then(reconcileAfterResume)
-        .catch((error) => {
-          context.ui?.notify(`Mailbox v2 resume after compaction failed: ${error.message}`, "error");
-        });
-    } else {
-      reconcileAfterResume();
-    }
-  }
-
-  function reloadStatus() {
-    return {
-      command: "/mecha-reload-runtime",
-      commandRegistered: reloadCommandRegistered,
-      canQueueReload: reloadCommandRegistered && typeof pi.sendUserMessage === "function",
-      canSendPostReloadHandoff: typeof pi.sendMessage === "function",
-    };
-  }
-
-  function sendPostReloadHandoff() {
-    if (typeof pi.sendMessage !== "function") return { sent: false, error: new Error("Pi follow-up messages are unavailable in this context") };
-    try {
-      pi.sendMessage({
-        customType: POST_RELOAD_MESSAGE_TYPE,
-        content: "Pi runtime reload completed. Resume from the latest mailbox/task state and continue the next pending supervisor action.",
-        display: true,
-        details: { command: "/mecha-reload-runtime" },
-      }, { deliverAs: "followUp", triggerTurn: true });
-      return { sent: true };
-    } catch (error) {
-      // Reload already succeeded; report the wake failure without turning reload into a command failure.
-      return { sent: false, error };
-    }
-  }
-
-  function reloadWakeRequested(args) {
-    return typeof args === "string" && /(?:^|\s)--(?:wake|resume)(?:\s|$)/.test(args);
+    reconcileNativeSubagentService();
+    refreshActivityState();
+    context.ui?.setStatus("mecha-mailbox", "mailbox: connected");
   }
 
   function compactionStatus(context) {
@@ -1309,54 +1266,6 @@ export function createMechaMessagingExtension(pi, {
     const changed = typeof id === "string" && id.length > 0 && runningSubagents.delete(id);
     settledNotifications.onChildDisposed(id);
     if (changed) refreshActivityState();
-  });
-
-  if (typeof pi.registerCommand === "function") {
-    pi.registerCommand("mecha-reload-runtime", {
-      description: "Reload Pi extensions, skills, prompts, themes, and context files",
-      handler: async (args, commandContext) => {
-        if (typeof commandContext?.reload !== "function") {
-          commandContext?.ui?.notify?.("Self-reload is unavailable in this Pi context; use /reload manually.", "error");
-          return;
-        }
-        await commandContext.reload();
-        if (reloadWakeRequested(args)) {
-          const wake = sendPostReloadHandoff();
-          if (wake.sent !== true && wake.error !== undefined) commandContext?.ui?.notify?.(`Pi reload completed, but post-reload wake failed: ${wake.error.message}`, "error");
-        }
-        return;
-      },
-    });
-    reloadCommandRegistered = true;
-  }
-
-  if (typeof pi.registerTool === "function") pi.registerTool({
-    name: "mecha_reload",
-    label: "Mecha Reload",
-    description: "Inspect or request Pi self-reload. Reload refreshes extensions, skills, prompts, themes, and context files without terminal intervention.",
-    parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
-      action: { type: "string", enum: ["status", "reload"], description: "status reports reload support; reload queues a self-reload command for the next safe Pi boundary." },
-      wakeAfterReload: { type: "boolean", description: "When true, queue a durable follow-up after reload completes so the session resumes instead of staying idle." },
-    } },
-    async execute(_toolCallId, input) {
-      try {
-        const status = reloadStatus();
-        if (input.action === "reload") {
-          if (!status.commandRegistered) throw new Error("Self-reload is unavailable: Pi command registration is not available.");
-          if (!status.canQueueReload) throw new Error("Self-reload is unavailable: Pi cannot queue follow-up user messages from this extension.");
-          const command = input.wakeAfterReload === true ? `${status.command} --wake` : status.command;
-          pi.sendUserMessage(command, { deliverAs: "followUp" });
-          const text = input.wakeAfterReload === true
-            ? "Self-reload queued for Pi's next safe follow-up boundary with post-reload wake enabled."
-            : "Self-reload queued for Pi's next safe follow-up boundary.";
-          return { content: [{ type: "text", text }], details: { ...status, reloadState: "queued_as_follow_up", wakeAfterReload: input.wakeAfterReload === true } };
-        }
-        if (input.action !== "status") throw new Error("unsupported mecha_reload action");
-        return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
-      } catch (error) {
-        return { content: [{ type: "text", text: error.message }], details: reloadStatus(), isError: true };
-      }
-    },
   });
 
   function settledNotificationStatus() {
@@ -1618,7 +1527,7 @@ export function createMechaMessagingExtension(pi, {
       let mailboxClient;
       mailboxClient = createClient({
         agentId,
-        onEnvelope: (message, delivery) => coordinator?.onEnvelope(message, delivery),
+        onEnvelope: (message, delivery) => { if (!mailboxPausedForCompaction) coordinator?.onEnvelope(message, delivery); },
         kickstart: async () => {
           if (typeof process.getuid !== "function") return;
           const result = await pi.exec(

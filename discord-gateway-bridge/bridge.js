@@ -56,7 +56,7 @@ export function inboundEnvelope(event, { agentId, id = randomUUID(), now = () =>
   const body = `${header}\n${marked}${footer}`;
   if (Buffer.byteLength(body, "utf8") > maxBodyBytes) throw new Error("inbound body limit violated");
   return {
-    envelope: { id, from: agentId, to: "supervisor", subject: INBOUND_SUBJECT, body, created_at: now().toISOString() },
+    envelope: { id, from: agentId, to: "supervisor", subject: INBOUND_SUBJECT, body, created_at: now().toISOString(), source: { kind: "discord" } },
     sourceMessageId, truncated,
   };
 }

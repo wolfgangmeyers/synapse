@@ -29,6 +29,7 @@ const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
 const HISTORY_IMAGE_EDGE = 360;
 const HISTORY_IMAGE_QUALITY = 0.88;
 const MESSAGE_BOTTOM_THRESHOLD_PX = 80;
+const ARRIVED_MESSAGE_VISIBLE_MS = 10_000;
 const WEB_DEFAULT_AGENT_ID = "wolfgang-web";
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
@@ -54,6 +55,8 @@ const state = {
   renderedLastMessageKeys: {},
   renderedPeer: "",
   followMessages: true,
+  arrivedMessage: null,
+  arrivedMessageTimer: null,
 };
 
 const elements = {
@@ -86,6 +89,13 @@ const elements = {
   imageInput: document.querySelector("#image-input"),
   draft: document.querySelector("#draft"),
   send: document.querySelector("#send"),
+  arrivedMessage: document.querySelector("#arrived-message"),
+  arrivedSender: document.querySelector("#arrived-sender"),
+  arrivedSubject: document.querySelector("#arrived-subject"),
+  arrivedDialog: document.querySelector("#arrived-dialog"),
+  arrivedDialogSender: document.querySelector("#arrived-dialog-sender"),
+  arrivedDialogMeta: document.querySelector("#arrived-dialog-meta"),
+  arrivedDialogBody: document.querySelector("#arrived-dialog-body"),
 };
 
 const config = await fetch("/ui/config").then((response) => response.json()).catch(() => ({}));
@@ -153,6 +163,7 @@ elements.draft.addEventListener("keydown", (event) => {
     sendDraft();
   }
 });
+elements.arrivedMessage.addEventListener("click", showArrivedMessageDialog);
 
 function connectUiSocket() {
   state.socket?.close();
@@ -210,6 +221,7 @@ async function handleEvent(event) {
     const peer = event.message.from === state.agentId ? event.message.to : event.message.from;
     if (!peer || peer === state.agentId) return;
     await appendMessage(peer, event.message);
+    maybeShowArrivedMessage(event.message);
     if (!state.selectedPeer) selectPeer(peer);
     return;
   }
@@ -221,6 +233,37 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "send_result") await settleOutgoing(event);
+}
+
+function maybeShowArrivedMessage(message) {
+  const sourceKind = message?.source?.kind || "unknown";
+  if (message?.from === state.agentId || !["agent", "discord", "reminder"].includes(sourceKind)) return;
+  state.arrivedMessage = message;
+  elements.arrivedSender.textContent = humanName(message.from || "Unknown sender");
+  elements.arrivedSubject.textContent = message.subject ? truncateText(message.subject, 80) : truncateText(message.body || "", 80);
+  elements.arrivedMessage.hidden = false;
+  clearTimeout(state.arrivedMessageTimer);
+  state.arrivedMessageTimer = setTimeout(hideArrivedMessage, ARRIVED_MESSAGE_VISIBLE_MS);
+}
+
+function hideArrivedMessage() {
+  state.arrivedMessage = null;
+  elements.arrivedMessage.hidden = true;
+  clearTimeout(state.arrivedMessageTimer);
+  state.arrivedMessageTimer = null;
+}
+
+function showArrivedMessageDialog() {
+  const message = state.arrivedMessage;
+  if (!message) return;
+  clearTimeout(state.arrivedMessageTimer);
+  state.arrivedMessageTimer = null;
+  elements.arrivedDialogSender.textContent = humanName(message.from || "Unknown sender");
+  const timestamp = message.created_at || message.createdAt || message.recorded_at || "";
+  const parts = [message.from ? `From ${message.from}` : "", message.subject ? `Subject: ${message.subject}` : "", timestamp ? new Date(timestamp).toLocaleString() : ""].filter(Boolean);
+  elements.arrivedDialogMeta.textContent = parts.join(" · ");
+  elements.arrivedDialogBody.textContent = message.body || "";
+  elements.arrivedDialog.showModal();
 }
 
 async function switchRouter(routerUrl, { connect = false } = {}) {
@@ -388,15 +431,16 @@ function renderAgents() {
   elements.agents.replaceChildren(...peers.map((agent) => {
     const peer = agent.agent_id;
     const active = agent.activity_state === "active";
+    const compacting = agent.activity_state === "compacting";
     const subagents = normalizeSubagents(agent.subagents);
     const subagentCount = Math.max(subagents.length, Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0);
     const canExpandSubagents = subagents.length > 0;
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
     const row = document.createElement("button");
     row.type = "button";
-    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
-    const badge = subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
-    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${badge}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
+    const badge = compacting ? compactingBadgeMarkup() : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
+    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${badge}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     attachSubagentToggle(row, peer, canExpandSubagents, renderAgents);
     return row;
@@ -493,15 +537,17 @@ function renderConversation() {
   elements.peerAvatar.className = `avatar${peer ? "" : " muted"}`;
   const selectedAgent = state.agents.find((agent) => agent.agent_id === peer);
   const active = selectedAgent?.activity_state === "active";
-  elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}` : "Pick an agent";
+  const compacting = selectedAgent?.activity_state === "compacting";
+  elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}${compacting ? compactingBadgeMarkup("inline") : ""}` : "Pick an agent";
   const subagents = normalizeSubagents(selectedAgent?.subagents);
   const subagentCount = Math.max(subagents.length, Number.isSafeInteger(selectedAgent?.subagent_count) ? selectedAgent.subagent_count : 0);
   const expanded = subagents.length > 0 && state.expandedSubagents.has(peer);
-  elements.peerDetail.className = `peer-activity${active ? " working" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
-  elements.peerDetail.innerHTML = peer ? subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "header") : "Connected agents appear on the left.";
-  attachSubagentToggle(elements.peerDetail, peer, subagents.length > 0, renderConversation);
+  elements.peerDetail.className = `peer-activity${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${expanded ? " expanded" : ""}`;
+  elements.peerDetail.innerHTML = peer ? (compacting ? "Mailbox is compacting; delivery is queued." : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "header")) : "Connected agents appear on the left.";
+  attachSubagentToggle(elements.peerDetail, peer, !compacting && subagents.length > 0, renderConversation);
   requestAnimationFrame(updateSubagentTooltips);
   elements.peerAvatar.classList.toggle("working", active);
+  elements.peerAvatar.classList.toggle("compacting", compacting);
   elements.draft.disabled = !peer;
   elements.attachImage.disabled = !peer;
   updateSendState();
@@ -997,6 +1043,10 @@ function deleteAgentIdForRouter(routerUrl) {
   localStorage.setItem("mecha.web.agentIds", JSON.stringify(agentIds));
 }
 function humanName(id) { return id.split(/[._-]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(" ") || id; }
+function truncateText(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 1))}…` : text;
+}
 function monogram(id) { return (id.match(/[A-Za-z0-9]/)?.[0] || "?").toUpperCase(); }
 function cssSafeId(value) { return String(value).replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 96); }
 function updateSubagentTooltips() {
@@ -1019,6 +1069,10 @@ function mergeKnownSubagentSummaries(agent) {
   const currentSummaries = normalizeSubagents(current?.subagents);
   return currentSummaries.length === incomingCount ? { ...agent, subagents: currentSummaries } : { ...agent, subagents: [] };
 }
+function compactingBadgeMarkup(extraClass = "") {
+  return `<span class="compacting-indicator${extraClass ? ` ${extraClass}` : ""}" aria-label="Agent is compacting"><span class="compacting-dot"></span><span>Compacting</span></span>`;
+}
+
 function subagentBadgeMarkup(peer, subagentCount, subagents, expanded, surface) {
   if (subagentCount <= 0) return "";
   const canExpandSubagents = subagents.length > 0;

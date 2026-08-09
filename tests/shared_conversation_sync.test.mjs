@@ -69,7 +69,7 @@ function nextFrame(socket, predicate = () => true, timeoutMs = 1_000) {
   });
 }
 
-async function connect(wsUrl, { agentId, instanceId, sync = true, role } = {}) {
+async function connect(wsUrl, { agentId, instanceId, sync = true, role, clientType } = {}) {
   const socket = new WebSocket(wsUrl);
   await new Promise((resolve, reject) => {
     socket.once("open", resolve);
@@ -83,6 +83,7 @@ async function connect(wsUrl, { agentId, instanceId, sync = true, role } = {}) {
     agent_id: agentId,
     instance_id: instanceId,
     ...(role === undefined ? {} : { agent_role: role }),
+    ...(clientType === undefined ? {} : { client_type: clientType }),
     ...(sync ? { conversation_sync: "v1" } : {}),
   }));
   return { socket, registered: await response };
@@ -138,13 +139,15 @@ test("migration 013 upgrades schema 012 without disturbing queued data", async (
     const database = new DatabaseSync(databasePath);
     try {
       database.exec("DROP TABLE conversation_messages");
+      database.exec("ALTER TABLE messages DROP COLUMN source_kind");
       database.prepare("DELETE FROM schema_migrations WHERE id = ?").run("013_conversation_history");
+      database.prepare("DELETE FROM schema_migrations WHERE id = ?").run("015_conversation_source");
     } finally {
       database.close();
     }
     repository = openMessageRepository({ databasePath });
     assert.equal(repository.messageFor("before-conversations").body, "queued");
-    assert.equal(repository.migrationIds().at(-1), "014_reminder_batch_links");
+    assert.equal(repository.migrationIds().at(-1), "015_conversation_source");
     repository.enqueue({ id: "after-conversations", from: "sender", to: "peer", body: "recorded", created_at: at(1, 1) });
     assert.equal(repository.conversationHistory({ owner: "peer", peer: "sender" })[0].id, "after-conversations");
   } finally {
@@ -171,6 +174,7 @@ test("conversation storage is idempotent and prunes by trusted age and per-peer 
       to: "peer",
       body: "first",
       created_at: "2099-01-01T00:00:00.000Z",
+      source: { kind: "web_ui" },
     };
     repository.enqueue(first, {
       conversation: {
@@ -184,7 +188,9 @@ test("conversation storage is idempotent and prunes by trusted age and per-peer 
         attachments: [{ id: "image.webp", url: "/v1/attachments/image.webp", mime_type: "image/webp", size_bytes: 16 }],
       },
     });
-    assert.equal(repository.conversationHistory({ owner: "shared-user", peer: "peer" }).length, 1);
+    const firstHistory = repository.conversationHistory({ owner: "shared-user", peer: "peer" });
+    assert.equal(firstHistory.length, 1);
+    assert.deepEqual(firstHistory[0].source, { kind: "web_ui" });
     assert.equal(repository.conversationAttachmentReferenced("image.webp"), true);
 
     for (let index = 2; index <= 202; index += 1) {
@@ -229,8 +235,8 @@ test("two opted-in instances share live outbound and inbound events while legacy
   const app = await fixture();
   const sockets = [];
   try {
-    const first = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "web-one", role: "user_interaction" });
-    const second = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "android-one" });
+    const first = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "web-one", role: "user_interaction", clientType: "web" });
+    const second = await connect(app.wsUrl, { agentId: "shared-user", instanceId: "android-one", clientType: "android" });
     sockets.push(first.socket, second.socket);
     assert.equal(first.registered.type, "registered");
     assert.equal(second.registered.type, "registered");
@@ -248,6 +254,7 @@ test("two opted-in instances share live outbound and inbound events while legacy
     });
     assert.equal(outbound.response.status, 201);
     assert.equal(outbound.body.conversation_message.id, "outbound-1");
+    assert.deepEqual(outbound.body.conversation_message.source, { kind: "web_ui" });
     assert.equal((await firstOutbound).message.body, "from web");
     assert.equal((await secondOutbound).message.body, "from web");
 
@@ -261,6 +268,7 @@ test("two opted-in instances share live outbound and inbound events while legacy
       created_at: at(1, 1),
     });
     assert.equal(inbound.response.status, 201);
+    assert.deepEqual(inbound.body.conversation_message.source, { kind: "agent" });
     assert.equal((await firstInbound).message.body, "to both clients");
     assert.equal((await secondInbound).message.body, "to both clients");
 
@@ -285,6 +293,53 @@ test("two opted-in instances share live outbound and inbound events while legacy
     assert.equal(legacyTwo.registered.type, "lease_rejected");
   } finally {
     for (const socket of sockets) socket.terminate();
+    await app.close();
+  }
+});
+
+test("router keeps compacting sessions registered but gates delivery offers until resume evidence", async () => {
+  const app = await fixture({}, { maxBatchBodyChars: 0 });
+  const sockets = [];
+  try {
+    const worker = await connect(app.wsUrl, { agentId: "compacting-worker", instanceId: "worker-one", sync: false });
+    sockets.push(worker.socket);
+    worker.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "worker-compacting",
+      type: "activity",
+      agent_id: "compacting-worker",
+      instance_id: "worker-one",
+      lease_id: worker.registered.lease_id,
+      activity_state: "compacting",
+    }));
+
+    app.router.enqueueMessage({ id: "queued-during-compact", from: "supervisor", to: "compacting-worker", body: "wait", created_at: at(1) });
+    assert.equal(await nextFrame(worker.socket, (frame) => frame.type === "message", 150).then(() => "unexpected", () => "timeout"), "timeout");
+    assert.equal(app.repository.queuedFor("compacting-worker").length, 1);
+
+    const closed = onceClose(worker.socket);
+    worker.socket.close();
+    await closed;
+
+    const reconnected = await connect(app.wsUrl, { agentId: "compacting-worker", instanceId: "worker-two", sync: false });
+    sockets.push(reconnected.socket);
+    const snapshot = await (await fetch(new URL("/v1/agents", app.httpUrl))).json();
+    assert.equal(snapshot.agents.find((agent) => agent.agent_id === "compacting-worker")?.activity_state, "compacting");
+    assert.equal(await nextFrame(reconnected.socket, (frame) => frame.type === "message", 150).then(() => "unexpected", () => "timeout"), "timeout");
+
+    const delivery = nextFrame(reconnected.socket, (frame) => frame.type === "message" && frame.message.id === "queued-during-compact");
+    reconnected.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "worker-settled-after-compact",
+      type: "activity",
+      agent_id: "compacting-worker",
+      instance_id: "worker-two",
+      lease_id: reconnected.registered.lease_id,
+      activity_state: "settled",
+    }));
+    assert.equal((await delivery).message.body, "wait");
+  } finally {
+    for (const socket of sockets) socket.close();
     await app.close();
   }
 });

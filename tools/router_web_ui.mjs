@@ -385,6 +385,7 @@ async function sendMessage(command, configured, sendBrowser, refreshAgents) {
     body,
     ...(attachments.length === 0 ? {} : { attachments }),
     created_at: new Date().toISOString(),
+    source: { kind: "web_ui" },
   };
   const response = await fetch(new URL("/v1/messages", routerUrl), {
     method: "POST",
@@ -405,6 +406,7 @@ async function sendMessage(command, configured, sendBrowser, refreshAgents) {
     body: displayAttachments.length === 0 ? accepted.body ?? body : body,
     attachments: displayAttachments,
     created_at: accepted.created_at ?? envelope.created_at,
+    source: accepted.source ?? envelope.source,
   };
   sendBrowser({ type: "send_result", ok: true, message: displayMessage, localId: command.localId, agentId, routerUrl });
   await refreshAgents();

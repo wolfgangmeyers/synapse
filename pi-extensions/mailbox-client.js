@@ -151,7 +151,7 @@ export function createMailboxClient({
   }
 
   function activity(activityState, { subagentCount = 0, subagents } = {}) {
-    if (!["active", "settled"].includes(activityState)) {
+    if (!["active", "settled", "compacting"].includes(activityState)) {
       throw new TypeError("unsupported mailbox activity state");
     }
     const summaries = normalizeSubagents(subagents);
@@ -390,6 +390,7 @@ export function createMailboxClient({
           subject,
           body,
           created_at: new Date().toISOString(),
+          source: { kind: "agent" },
         }),
       });
       const payload = await response.json();
