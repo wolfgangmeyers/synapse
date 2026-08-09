@@ -213,6 +213,17 @@ function createBrowserClient(browser, { defaultRouter }) {
         });
         return;
       }
+      if (frame.type === "agent_activity") {
+        sendBrowser({
+          type: "agent_activity",
+          agent: frame.agent_id,
+          activityState: frame.activity_state,
+          generatedAt: frame.generated_at,
+          agentId: configured.agentId,
+          routerUrl: configured.routerUrl,
+        });
+        return;
+      }
       if (frame.type === "message" && configured.leaseId !== "") {
         sendReceipt("injection_requested", frame);
         sendReceipt("ack", frame);

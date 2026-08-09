@@ -135,6 +135,19 @@ export function createMailboxClient({
     return frameId;
   }
 
+  function activity(activityState) {
+    if (!["active", "settled"].includes(activityState)) {
+      throw new TypeError("unsupported mailbox activity state");
+    }
+    send({
+      type: "activity",
+      agent_id: agentId,
+      instance_id: instanceId,
+      lease_id: leaseId,
+      activity_state: activityState,
+    });
+  }
+
   function receipt(type, delivery, reason) {
     if (!delivery || typeof delivery.messageId !== "string"
       || !Number.isSafeInteger(delivery.attemptNumber) || delivery.attemptNumber <= 0) {
@@ -324,6 +337,7 @@ export function createMailboxClient({
       return initialConnection;
     },
     sendReceipt: receipt,
+    sendActivity: activity,
     pause() {
       if (stopped || paused) return;
       paused = true;

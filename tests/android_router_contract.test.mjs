@@ -560,6 +560,185 @@ test("discovery excludes a session after its repository lease expires", async ()
   }
 });
 
+test("activity state is lease validated, broadcast on transitions, and expires by router TTL", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-activity-"));
+  let now = Date.parse("2026-07-15T06:00:00.000Z");
+  const clock = () => new Date(now);
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), clock });
+  const router = createAgentRouter({ repository, clock, activityTtlMs: 5_000, timeoutSweepIntervalMs: 60_000 });
+  const sockets = [];
+  const connect = async () => {
+    const socket = new WebSocket(await websocketUrlPromise);
+    sockets.push(socket);
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    return socket;
+  };
+  let websocketUrlPromise;
+  const nextFrame = (socket, predicate = () => true, timeoutMs = 500) => new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for router frame"));
+    }, timeoutMs);
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onMessage = (payload) => {
+      const frame = JSON.parse(payload.toString("utf8"));
+      if (!predicate(frame)) return;
+      cleanup();
+      resolve(frame);
+    };
+    socket.on("message", onMessage);
+    socket.once("error", onError);
+  });
+  try {
+    websocketUrlPromise = router.listen();
+    const websocketUrl = await websocketUrlPromise;
+    const worker = await connect();
+    const workerRegistered = nextFrame(worker);
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-register", type: "register", agent_id: "worker", instance_id: "worker-instance" }));
+    const workerLease = await workerRegistered;
+
+    const android = await connect();
+    const androidRegistered = nextFrame(android);
+    android.send(JSON.stringify({ ...register, conversation_sync: "v1" }));
+    await androidRegistered;
+
+    const rogue = await connect();
+    const rogueRegistered = nextFrame(rogue);
+    rogue.send(JSON.stringify({ version: "v1", frame_id: "rogue-register", type: "register", agent_id: "rogue", instance_id: "rogue-instance" }));
+    const rogueLease = await rogueRegistered;
+    const rejected = nextFrame(android, (frame) => frame.type === "agent_activity", 150).then(() => "unexpected", () => "timeout");
+    rogue.send(JSON.stringify({ version: "v1", frame_id: "wrong-activity", type: "activity", agent_id: "worker", instance_id: "rogue-instance", lease_id: rogueLease.lease_id, activity_state: "active" }));
+    assert.equal((await nextFrame(rogue)).code, "lease_not_active");
+    assert.equal(await rejected, "timeout");
+
+    const activeEvent = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
+    assert.equal((await activeEvent).activity_state, "active");
+    const activeSnapshot = await fetch(websocketUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/agents"));
+    assert.equal((await activeSnapshot.json()).agents.find((agent) => agent.agent_id === "worker").activity_state, "active");
+
+    const clearingRogue = await connect();
+    const clearingRogueRegistered = nextFrame(clearingRogue);
+    clearingRogue.send(JSON.stringify({ version: "v1", frame_id: "clearing-rogue-register", type: "register", agent_id: "clearing-rogue", instance_id: "clearing-rogue-instance" }));
+    const clearingRogueLease = await clearingRogueRegistered;
+    const noRogueIdle = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.activity_state === "idle", 150).then(() => "unexpected", () => "timeout");
+    clearingRogue.send(JSON.stringify({ version: "v1", frame_id: "wrong-settled", type: "activity", agent_id: "worker", instance_id: "clearing-rogue-instance", lease_id: clearingRogueLease.lease_id, activity_state: "settled" }));
+    assert.equal((await nextFrame(clearingRogue)).code, "lease_not_active");
+    assert.equal(await noRogueIdle, "timeout");
+
+    now += 4_000;
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-2", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
+    assert.equal(await nextFrame(android, (frame) => frame.type === "agent_activity", 150).then(() => "unexpected", () => "timeout"), "timeout");
+    now += 1_001;
+    router.sweepMessageLifecycles();
+    const renewedSnapshot = await fetch(websocketUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/agents"));
+    assert.equal((await renewedSnapshot.json()).agents.find((agent) => agent.agent_id === "worker").activity_state, "active");
+
+    const idleAfterRenewal = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
+    now += 4_000;
+    router.sweepMessageLifecycles();
+    assert.equal((await idleAfterRenewal).activity_state, "idle");
+
+    const activeForSettle = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.activity_state === "active");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-for-settle", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
+    await activeForSettle;
+    const idleEvent = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-settled", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "settled" }));
+    assert.equal((await idleEvent).activity_state, "idle");
+
+    const activeAgain = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.activity_state === "active");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "worker-active-3", type: "activity", agent_id: "worker", instance_id: "worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
+    await activeAgain;
+    const disconnectedIdle = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
+    worker.close();
+    assert.equal((await disconnectedIdle).activity_state, "idle");
+  } finally {
+    for (const socket of sockets) socket.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("expired leases cannot publish activity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "android-router-expired-activity-"));
+  let now = Date.parse("2026-07-15T06:00:00.000Z");
+  const clock = () => new Date(now);
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), clock });
+  const router = createAgentRouter({ repository, clock, leaseDurationMs: 1_000, activityTtlMs: 5_000, timeoutSweepIntervalMs: 60_000 });
+  const sockets = [];
+  const nextFrame = (socket, predicate = () => true, timeoutMs = 500) => new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for router frame"));
+    }, timeoutMs);
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onMessage = (payload) => {
+      const frame = JSON.parse(payload.toString("utf8"));
+      if (!predicate(frame)) return;
+      cleanup();
+      resolve(frame);
+    };
+    socket.on("message", onMessage);
+    socket.once("error", onError);
+  });
+  const connect = async (websocketUrl) => {
+    const socket = new WebSocket(websocketUrl);
+    sockets.push(socket);
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    return socket;
+  };
+  try {
+    const websocketUrl = await router.listen();
+    const worker = await connect(websocketUrl);
+    const workerRegistered = nextFrame(worker);
+    worker.send(JSON.stringify({ version: "v1", frame_id: "expired-worker-register", type: "register", agent_id: "expired-worker", instance_id: "expired-worker-instance" }));
+    const workerLease = await workerRegistered;
+
+    const android = await connect(websocketUrl);
+    const androidRegistered = nextFrame(android);
+    android.send(JSON.stringify({ ...register, conversation_sync: "v1" }));
+    await androidRegistered;
+
+    const initialActive = nextFrame(android, (frame) => frame.type === "agent_activity" && frame.activity_state === "active");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "expired-worker-initial-active", type: "activity", agent_id: "expired-worker", instance_id: "expired-worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
+    await initialActive;
+
+    now += 1_001;
+    const noActivity = nextFrame(android, (frame) => frame.type === "agent_activity", 150).then(() => "unexpected", () => "timeout");
+    worker.send(JSON.stringify({ version: "v1", frame_id: "expired-worker-active", type: "activity", agent_id: "expired-worker", instance_id: "expired-worker-instance", lease_id: workerLease.lease_id, activity_state: "active" }));
+    assert.equal((await nextFrame(worker)).code, "lease_not_active");
+    assert.equal(await noActivity, "timeout");
+  } finally {
+    for (const socket of sockets) socket.terminate();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Android keeps one activity-owned router session across launcher and notification intents", () => {
   const manifest = readFileSync(new URL("../app/src/main/AndroidManifest.xml", import.meta.url), "utf8");
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
@@ -572,6 +751,7 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   const images = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/ImageAttachments.kt", import.meta.url), "utf8");
   assert.match(activity, /\.put\("conversation_sync", "v1"\)/);
   assert.match(activity, /"conversation_message" -> runOnUiThread \{\s*if \(generation == connectionGeneration\) receiveConversationMessage\(frame\)/);
+  assert.match(activity, /"agent_activity" -> runOnUiThread \{\s*if \(generation == connectionGeneration\) receiveAgentActivity\(frame\)/);
   assert.match(activity, /addPathSegments\("v1\/conversations"\)/);
   assert.match(activity, /"history:\$activeRouter:\$agentId:\$peer"/);
   assert.match(activity, /generation != connectionGeneration \|\| activeRouter != router \|\| agentId != owner \|\| selectedPeer != peer/);
@@ -591,7 +771,9 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
 test("Android home renders only router-discovered connected peers", () => {
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
   assert.match(activity, /scheduleAtFixedRate\(60_000, 60_000\)[\s\S]*discoverPeers\(generation\)/);
-  assert.match(activity, /val discovered = buildSet \{[\s\S]*agents\.optJSONObject\(index\)\?\.optString\("agent_id"\)[\s\S]*\}\n\s*runOnUiThread \{ if \(generation == connectionGeneration\) peers = discovered\.sorted\(\) \}/);
+  assert.match(activity, /val discovered = buildList \{[\s\S]*PeerStatus\(peer, agent\.optString\("activity_state", "idle"\)\)[\s\S]*\}\n\s*runOnUiThread \{ if \(generation == connectionGeneration\) peers = discovered\.sortedBy \{ it\.id \} \}/);
+  assert.match(activity, /private fun receiveAgentActivity\(frame: JSONObject\)/);
+  assert.match(activity, /WorkingIndicator\(\)/);
   assert.doesNotMatch(activity, /addAll\(knownPeers\(\)\.filter/);
   assert.doesNotMatch(activity, /peers = \(peers \+ peer\)\.distinct\(\)\.sorted\(\)/);
   assert.match(activity, /Text\("Connected agents"/);
@@ -627,8 +809,9 @@ test("discovery exposes only active sessions with role and no lease metadata", a
     }]);
     assert.match(snapshot.agents[0].connected_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.match(snapshot.agents[0].lease_expires_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.equal(snapshot.agents[0].activity_state, "idle");
     assert.deepEqual(Object.keys(snapshot.agents[0]).sort(), [
-      "agent_id", "agent_role", "connected_at", "lease_expires_at",
+      "activity_state", "agent_id", "agent_role", "connected_at", "lease_expires_at",
     ]);
   } finally {
     socket?.terminate();

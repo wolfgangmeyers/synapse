@@ -177,6 +177,11 @@ async function handleEvent(event) {
   if (event.type === "agents") {
     state.agents = event.agents.filter((agent) => agent.agent_id !== state.agentId);
     renderAgents();
+    renderConversation();
+    return;
+  }
+  if (event.type === "agent_activity") {
+    updateAgentActivity(event.agent, event.activityState);
     return;
   }
   if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error") {
@@ -369,16 +374,17 @@ async function saveRouterEditor() {
 function renderAgents() {
   const filter = state.agentFilter.trim().toLowerCase();
   const peers = state.agents
-    .map((agent) => agent.agent_id)
-    .filter((peer) => peer && peer !== state.agentId)
-    .filter((peer) => !filter || `${peer} ${humanName(peer)}`.toLowerCase().includes(filter))
-    .sort();
+    .filter((agent) => agent.agent_id && agent.agent_id !== state.agentId)
+    .filter((agent) => !filter || `${agent.agent_id} ${humanName(agent.agent_id)}`.toLowerCase().includes(filter))
+    .sort((left, right) => left.agent_id.localeCompare(right.agent_id));
   elements.agentCount.textContent = String(peers.length);
-  elements.agents.replaceChildren(...peers.map((peer) => {
+  elements.agents.replaceChildren(...peers.map((agent) => {
+    const peer = agent.agent_id;
+    const active = agent.activity_state === "active";
     const row = document.createElement("button");
     row.type = "button";
-    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}`;
-    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span><strong>${escapeHtml(humanName(peer))}</strong><span class="meta">${escapeHtml(peer)} · Available</span></span>`;
+    row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}`;
+    row.innerHTML = `<span class="avatar">${escapeHtml(monogram(peer))}</span><span><strong>${escapeHtml(humanName(peer))}</strong><span class="meta">${escapeHtml(peer)} · ${active ? "Working" : "Available"}</span></span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span>Working</span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     return row;
   }));
@@ -399,6 +405,13 @@ function selectPeer(peer) {
   render();
   restoreDraftForSelectedPeer({ focus: true });
   requestHistory(peer);
+}
+
+function updateAgentActivity(peer, activityState) {
+  if (!peer || peer === state.agentId) return;
+  state.agents = state.agents.map((agent) => agent.agent_id === peer ? { ...agent, activity_state: activityState } : agent);
+  renderAgents();
+  renderConversation();
 }
 
 function requestHistory(peer) {
@@ -444,7 +457,10 @@ function renderConversation() {
   elements.peerAvatar.textContent = peer ? monogram(peer) : "?";
   elements.peerAvatar.className = `avatar${peer ? "" : " muted"}`;
   elements.peerName.textContent = peer ? humanName(peer) : "Pick an agent";
-  elements.peerDetail.textContent = peer ? `${peer} · ${displayRouter(state.routerUrl)}` : "Connected agents appear on the left.";
+  const selectedAgent = state.agents.find((agent) => agent.agent_id === peer);
+  const active = selectedAgent?.activity_state === "active";
+  elements.peerDetail.textContent = peer ? `${peer} · ${active ? "Working" : "Available"} · ${displayRouter(state.routerUrl)}` : "Connected agents appear on the left.";
+  elements.peerAvatar.classList.toggle("working", active);
   elements.draft.disabled = !peer;
   elements.attachImage.disabled = !peer;
   updateSendState();

@@ -563,6 +563,8 @@ function settledNotificationFixture(t, {
   createSettledScheduler,
   sendMessage,
   setTimeoutImpl,
+  setIntervalImpl,
+  clearIntervalImpl,
   immediateScheduler = true,
 } = {}) {
   isolateCompactionEnvironment(t);
@@ -579,6 +581,7 @@ function settledNotificationFixture(t, {
   const tools = new Map();
   const notifications = [];
   const sent = [];
+  const activity = [];
   const context = {
     sessionManager: { getSessionId: () => "parent-session" },
     ui: { notify: (...args) => notifications.push(args), setStatus() {} },
@@ -588,6 +591,7 @@ function settledNotificationFixture(t, {
     close() {},
     sendReply,
     sendReceipt() {},
+    sendActivity: (state) => activity.push(state),
   };
   const pi = {
     events: { on(type, handler) { childEvents.set(type, handler); } },
@@ -601,6 +605,8 @@ function settledNotificationFixture(t, {
     resolveCurrentAgentId: () => "worker",
     createClient: () => client,
     setTimeoutImpl,
+    setIntervalImpl,
+    clearIntervalImpl,
   };
   if (createSettledScheduler !== undefined) extensionOptions.createSettledScheduler = createSettledScheduler;
   else if (immediateScheduler) extensionOptions.createSettledScheduler = immediateSettledScheduler;
@@ -613,6 +619,7 @@ function settledNotificationFixture(t, {
     handlers,
     notifications,
     sent,
+    activity,
     tools,
   };
 }
@@ -622,6 +629,63 @@ async function enableSettledNotifications(fixture) {
   assert.equal(result.isError, undefined);
   assert.equal(result.details.enabled, true);
 }
+
+test("extension reports top-level agent activity and settled transitions", async (t) => {
+  const fixture = settledNotificationFixture(t);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+
+  assert.deepEqual(fixture.activity, ["active", "settled"]);
+});
+
+test("extension repeats active heartbeats and stops them on settlement", async (t) => {
+  const intervals = [];
+  const fixture = settledNotificationFixture(t, {
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  assert.equal(intervals[0].delay, 5_000);
+  intervals[0].callback();
+  intervals[0].callback();
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  intervals[0].callback();
+
+  assert.equal(intervals[0].cleared, true);
+  assert.deepEqual(fixture.activity, ["active", "active", "active", "settled"]);
+});
+
+test("extension excludes child sessions from activity reporting", async (t) => {
+  const fixture = settledNotificationFixture(t);
+  const childContext = { sessionManager: { getSessionId: () => "child-session" }, ui: { notify() {}, setStatus() {} } };
+  fixture.childEvents.get("subagents:child:session-created")({ sessionId: "child-session" });
+
+  fixture.handlers.get("agent_start")({}, childContext);
+  fixture.handlers.get("agent_settled")({}, childContext);
+
+  assert.deepEqual(fixture.activity, []);
+});
+
+test("compaction pauses activity without dropping mailbox resume", async (t) => {
+  const calls = [];
+  const fixture = settledNotificationFixture(t);
+  fixture.client.pause = () => calls.push("pause");
+  fixture.client.resume = () => { calls.push("resume"); return Promise.resolve(); };
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  await fixture.handlers.get("session_before_compact")({ signal: AbortSignal.timeout(100), preparation: {} }, fixture.context);
+  fixture.handlers.get("session_compact")({}, fixture.context);
+
+  assert.deepEqual(fixture.activity, ["active", "settled"]);
+  assert.deepEqual(calls, ["pause", "resume"]);
+});
 
 test("settled notification sends one exact reply when top-level work settles", async (t) => {
   const attempts = [];
@@ -1399,6 +1463,39 @@ test("stale pending replay reinjects when no session entry survived", async () =
   ]);
   coordinator.close();
   await session.close();
+});
+
+test("client sends activity frames with its registered lease identity", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+  socket.close = () => { socket.readyState = 3; };
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    webSocketFactory: () => socket,
+    generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
+  });
+
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+    }),
+  }));
+  await connected;
+  client.sendActivity("active");
+  client.sendActivity("settled");
+
+  assert.deepEqual(socket.sent.map(({ type, agent_id, instance_id, lease_id, activity_state }) => ({ type, agent_id, instance_id, lease_id, activity_state })), [
+    { type: "register", agent_id: "worker", instance_id: client.instanceId, lease_id: undefined, activity_state: undefined },
+    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "active" },
+    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "settled" },
+  ]);
+  client.close();
 });
 
 test("client does not NACK a Pi injection when its receipt send fails", async () => {

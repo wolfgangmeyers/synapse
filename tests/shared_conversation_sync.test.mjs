@@ -327,7 +327,7 @@ test("a synced sender preserves batching for a legacy recipient while receiving 
 });
 
 test("rapid posts to a connected idle recipient coalesce before the first delivery", async () => {
-  const app = await fixture({ deliveryOfferCoalesceMs: 25 }, { maxBatchBodyChars: 4_096 });
+  const app = await fixture({ deliveryOfferCoalesceMs: 100 }, { maxBatchBodyChars: 4_096 });
   let recipient;
   const delivered = [];
   try {

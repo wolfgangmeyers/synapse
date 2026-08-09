@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createEnvelope, validateClientFrame, validateEnvelope, validateServerFrame } from "../harness/protocol.js";
+import { createEnvelope, ProtocolValidationError, validateClientFrame, validateEnvelope, validateServerFrame } from "../harness/protocol.js";
 
 const nanoid = /^[A-Za-z0-9]{21}$/;
 
@@ -17,6 +17,34 @@ test("the shared protocol rejects retired Sentinel lifecycle frames", () => {
     version: "v1", frame_id: "frame", type: "sentinel_claim", agent_id: "receiver",
     instance_id: "instance", lease_id: "lease", message_id: "message", attempt_number: 1,
   }));
+});
+
+test("activity frames carry lease-scoped worker state", () => {
+  const active = {
+    version: "v1",
+    frame_id: "activity-1",
+    type: "activity",
+    agent_id: "worker",
+    instance_id: "instance",
+    lease_id: "lease",
+    activity_state: "active",
+  };
+  assert.equal(validateClientFrame(active), active);
+  assert.equal(validateClientFrame({ ...active, activity_state: "settled" }).activity_state, "settled");
+  assert.throws(() => validateClientFrame({ ...active, activity_state: "idle" }), ProtocolValidationError);
+  assert.throws(() => validateClientFrame({ ...active, lease_id: undefined }), ProtocolValidationError);
+
+  const event = {
+    version: "v1",
+    frame_id: "activity-event-1",
+    type: "agent_activity",
+    agent_id: "worker",
+    activity_state: "active",
+    generated_at: "2030-01-01T00:00:00.000Z",
+  };
+  assert.equal(validateServerFrame(event), event);
+  assert.equal(validateServerFrame({ ...event, activity_state: "idle" }).activity_state, "idle");
+  assert.throws(() => validateServerFrame({ ...event, activity_state: "settled" }), ProtocolValidationError);
 });
 
 test("correlated delivery frames require a valid router-generated incarnation", () => {
