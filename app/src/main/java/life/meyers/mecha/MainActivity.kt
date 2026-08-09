@@ -21,6 +21,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -78,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -133,6 +139,13 @@ internal data class ImageReference(
     val sizeBytes: Int,
     val name: String,
 )
+
+internal data class PeerStatus(
+    val id: String,
+    val activityState: String = "idle",
+) {
+    val active get() = activityState == "active"
+}
 
 internal data class ChatMessage(
     val id: String,
@@ -202,7 +215,7 @@ class MainActivity : ComponentActivity() {
     private var agentId by mutableStateOf("")
     private var activeRouter by mutableStateOf("")
     private var connection by mutableStateOf("Connecting to your agents…")
-    private var peers by mutableStateOf(emptyList<String>())
+    private var peers by mutableStateOf(emptyList<PeerStatus>())
     private var agentFilter by mutableStateOf("")
     private var selectedPeer by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<ChatMessage>())
@@ -334,6 +347,9 @@ class MainActivity : ComponentActivity() {
                     "conversation_message" -> runOnUiThread {
                         if (generation == connectionGeneration) receiveConversationMessage(frame)
                     }
+                    "agent_activity" -> runOnUiThread {
+                        if (generation == connectionGeneration) receiveAgentActivity(frame)
+                    }
                     "message" -> settleDelivery(webSocket, frame)
                 }
             }
@@ -401,17 +417,25 @@ class MainActivity : ComponentActivity() {
             client.newCall(Request.Builder().url("${routerHttp()}/v1/agents").build()).execute().use { response ->
                 if (!response.isSuccessful || generation != connectionGeneration) return@use
                 val agents = JSONObject(response.body?.string().orEmpty()).optJSONArray("agents") ?: return@use
-                val discovered = buildSet {
+                val discovered = buildList {
                     for (index in 0 until agents.length()) {
-                        agents.optJSONObject(index)?.optString("agent_id")?.takeIf { it.isNotBlank() && it != agentId }?.let(::add)
+                        val agent = agents.optJSONObject(index) ?: continue
+                        val peer = agent.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: continue
+                        add(PeerStatus(peer, agent.optString("activity_state", "idle")))
                     }
                 }
-                runOnUiThread { if (generation == connectionGeneration) peers = discovered.sorted() }
+                runOnUiThread { if (generation == connectionGeneration) peers = discovered.sortedBy { it.id } }
             }
         } catch (_: Exception) {
             // The active connection remains usable when discovery is unavailable.
         }
     }.start()
+
+    private fun receiveAgentActivity(frame: JSONObject) {
+        val peer = frame.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: return
+        val activity = frame.optString("activity_state", "idle")
+        peers = peers.map { if (it.id == peer) it.copy(activityState = activity) else it }
+    }
 
     private fun receiveConversationMessage(frame: JSONObject) {
         val payload = frame.optJSONObject("message") ?: return
@@ -819,6 +843,7 @@ class MainActivity : ComponentActivity() {
                         BackHandler(onBack = ::returnHome)
                         Conversation(
                             selectedPeer,
+                            peers.firstOrNull { it.id == selectedPeer }?.active == true,
                             messages,
                             images,
                             draft,
@@ -841,7 +866,7 @@ private fun PeerHome(
     connection: String,
     agentId: String,
     activeRouter: String,
-    peers: List<String>,
+    peers: List<PeerStatus>,
     agentFilter: String,
     onAgentFilter: (String) -> Unit,
     onPeer: (String) -> Unit,
@@ -903,28 +928,50 @@ private fun PeerHome(
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(filteredPeers, key = { it }) { peer -> PeerRow(peer, { onPeer(peer) }) }
+                items(filteredPeers, key = { it.id }) { peer -> PeerRow(peer, { onPeer(peer.id) }) }
             }
         }
     }
 }
 
 @Composable
-private fun PeerRow(peer: String, onClick: () -> Unit) {
+private fun PeerRow(peer: PeerStatus, onClick: () -> Unit) {
+    val peerId = peer.id
     Card(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable(onClick = onClick),
         colors = CardDefaults.cardColors(containerColor = SurfaceDark),
         shape = RoundedCornerShape(18.dp),
     ) {
         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Avatar(peer)
+            Avatar(peerId)
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(humanName(peer), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text("$peer · Available", style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(humanName(peerId), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("$peerId · ${if (peer.active) "Working" else "Available"}", style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            if (peer.active) WorkingIndicator()
+            Spacer(Modifier.width(8.dp))
             Icon(Icons.Default.ChevronRight, "Open conversation", tint = TextMuted)
         }
+    }
+}
+
+@Composable
+private fun WorkingIndicator() {
+    val transition = rememberInfiniteTransition(label = "working")
+    val alpha by transition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = tween(700), repeatMode = RepeatMode.Reverse),
+        label = "working-alpha",
+    )
+    Row(
+        Modifier.clip(RoundedCornerShape(999.dp)).background(Teal.copy(alpha = 0.18f)).padding(horizontal = 9.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(8.dp).graphicsLayer { this.alpha = alpha }.clip(CircleShape).background(Teal))
+        Spacer(Modifier.width(6.dp))
+        Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -932,6 +979,7 @@ private fun PeerRow(peer: String, onClick: () -> Unit) {
 @Composable
 private fun Conversation(
     peer: String,
+    peerActive: Boolean,
     messages: List<ChatMessage>,
     pendingImages: List<PendingImage>,
     draft: String,
@@ -971,7 +1019,7 @@ private fun Conversation(
             Spacer(Modifier.width(10.dp))
             Column {
                 Text(humanName(peer), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(peer, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                Text("$peer · ${if (peerActive) "Working" else "Available"}", style = MaterialTheme.typography.bodySmall, color = TextMuted)
             }
         }
         HorizontalDivider(color = SurfaceRaised)
@@ -1260,10 +1308,10 @@ internal fun normalizeEscapedNewlines(value: String): String = value
 internal fun boundedDraftPeers(existing: List<String>, peer: String): List<String> =
     (existing.filterNot { it == peer } + peer).takeLast(MAX_DRAFTS_PER_ROUTER)
 
-internal fun visibleConnectedPeers(peers: List<String>, filter: String): List<String> {
+internal fun visibleConnectedPeers(peers: List<PeerStatus>, filter: String): List<PeerStatus> {
     val normalizedFilter = filter.trim().lowercase()
     return peers.filter { peer ->
-        normalizedFilter.isBlank() || "${peer} ${humanName(peer)}".lowercase().contains(normalizedFilter)
+        normalizedFilter.isBlank() || "${peer.id} ${humanName(peer.id)}".lowercase().contains(normalizedFilter)
     }
 }
 

@@ -195,6 +195,19 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.equal(agents.routerUrl, routerHttpUrl);
     assert.equal(agents.agentId, webAgentId);
     assert.deepEqual(agents.agents.find((agent) => agent.agent_id === "peer-agent").agent_role, "agent");
+    assert.equal(agents.agents.find((agent) => agent.agent_id === "peer-agent").activity_state, "idle");
+
+    const activeEvent = waitForEvent(browser, (event) => event.type === "agent_activity" && event.agent === "peer-agent");
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "peer-agent-active",
+      type: "activity",
+      agent_id: "peer-agent",
+      instance_id: "peer-agent-instance",
+      lease_id: peer.registered.lease_id,
+      activity_state: "active",
+    }));
+    assert.equal((await activeEvent).activityState, "active");
 
     const deliveredToPeer = nextRouterFrame(peer.socket, (frame) => frame.type === "message" && frame.message.from === webAgentId);
     browser.send(JSON.stringify({ type: "send_message", to: "peer-agent", body: "hello from the browser", localId: "local-1" }));
@@ -464,11 +477,12 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.ok(app.includes('remove.setAttribute("aria-label", `Remove ${image.name || `image ${index + 1}`}`)'));
   assert.match(app, /elements\.selectedRouterLabel\.textContent = displayRouter\(state\.routerUrl\)/);
   assert.match(app, /title\.textContent = alias \|\| new URL\(routerUrl\)\.host/);
-  assert.match(app, /elements\.peerDetail\.textContent = peer \? `\$\{peer\} · \$\{displayRouter\(state\.routerUrl\)\}`/);
+  assert.match(app, /elements\.peerDetail\.textContent = peer \? `\$\{peer\} · \$\{active \? "Working" : "Available"\} · \$\{displayRouter\(state\.routerUrl\)\}`/);
   assert.match(styles, /\.router-row-actions/);
   assert.match(styles, /\.icon-button/);
   assert.match(webState, /function matchesActiveScope/);
   assert.match(webState, /"message"/);
+  assert.match(webState, /"agent_activity"/);
   assert.match(webState, /event\.routerUrl === active\.routerUrl && event\.agentId === active\.agentId/);
   assert.match(app, /row\.addEventListener\("click", \(\) => \{ void switchRouter\(routerUrl, \{ connect: true \}\); \}\)/);
   assert.doesNotMatch(app, /Select"/);
@@ -489,11 +503,13 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /restoreDraftForSelectedPeer\(\{ focus: true \}\)/);
   assert.match(app, /state\.selectedPeer = loadSelectedPeer\(routerUrl, state\.agentId\)/);
   assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
-  assert.match(app, /const peers = state\.agents\n    \.map\(\(agent\) => agent\.agent_id\)/);
+  assert.match(app, /event\.type === "agent_activity"/);
+  assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}`/);
+  assert.match(app, /working-indicator/);
   assert.doesNotMatch(app, /for \(const peer of Object\.keys\(state\.messages\)\) known\.add\(peer\)/);
   assert.doesNotMatch(app, /for \(const peer of state\.draftPeers\) known\.add\(peer\)/);
-  assert.match(app, /`\$\{peer\} \$\{humanName\(peer\)\}`\.toLowerCase\(\)\.includes\(filter\)/);
-  assert.match(app, /\$\{escapeHtml\(peer\)\} · Available/);
+  assert.match(app, /`\$\{agent\.agent_id\} \$\{humanName\(agent\.agent_id\)\}`\.toLowerCase\(\)\.includes\(filter\)/);
+  assert.match(app, /\$\{escapeHtml\(peer\)\} · \$\{active \? "Working" : "Available"\}/);
   assert.doesNotMatch(app, /\? "Available" : "History"/);
   assert.match(app, /state\.agentFilter = "";\n  elements\.agentFilter\.value = "";/);
   assert.match(app, /stateName === "connected" \? "" :/);

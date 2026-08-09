@@ -31,6 +31,8 @@
     "clientType": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
     "ackConfirmationMode": { "type": "string", "const": "correlated_v1" },
     "conversationSyncMode": { "type": "string", "const": "v1" },
+    "clientActivityState": { "type": "string", "enum": ["active", "settled"] },
+    "observableActivityState": { "type": "string", "enum": ["active", "idle"] },
     "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "attachmentId": { "type": "string", "minLength": 1, "maxLength": 192, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
@@ -158,6 +160,20 @@
         "type": {
           "const": "ping"
         }
+      }
+    },
+    "activityFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "activity_state"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "activity" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "activity_state": { "$ref": "#/$defs/clientActivityState" }
       }
     },
     "injectionRequestedFrame": {
@@ -291,6 +307,9 @@
         },
         {
           "$ref": "#/$defs/leaseRenewFrame"
+        },
+        {
+          "$ref": "#/$defs/activityFrame"
         },
         {
           "$ref": "#/$defs/injectionRequestedFrame"
@@ -472,6 +491,19 @@
         "message": { "$ref": "#/$defs/conversationMessage" }
       }
     },
+    "agentActivityFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "activity_state", "generated_at"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "agent_activity" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "activity_state": { "$ref": "#/$defs/observableActivityState" },
+        "generated_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
     "deliveryAcknowledgedFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -497,7 +529,8 @@
         { "$ref": "#/$defs/pongFrame" },
         { "$ref": "#/$defs/messageFrame" },
         { "$ref": "#/$defs/conversationMessageFrame" },
-        { "$ref": "#/$defs/deliveryAcknowledgedFrame" }
+        { "$ref": "#/$defs/deliveryAcknowledgedFrame" },
+        { "$ref": "#/$defs/agentActivityFrame" }
       ]
     },
     "sentinelDescriptor": {

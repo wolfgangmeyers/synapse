@@ -98,6 +98,7 @@ export function createAgentRouter({
   sweepHeartbeatIntervalMs = DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS,
   mechaDeveloperUpdateReminderIntervalMs = DEFAULT_MECHA_DEVELOPER_UPDATE_REMINDER_INTERVAL_MS,
   deliveryOfferCoalesceMs = 25,
+  activityTtlMs = 15_000,
   generateFrameId = createNanoId,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
@@ -150,6 +151,9 @@ export function createAgentRouter({
   if (!Number.isSafeInteger(deliveryOfferCoalesceMs) || deliveryOfferCoalesceMs < 0 || deliveryOfferCoalesceMs > 1_000) {
     throw new TypeError("deliveryOfferCoalesceMs must be a safe integer from 0 through 1000");
   }
+  if (!Number.isSafeInteger(activityTtlMs) || activityTtlMs <= 0) {
+    throw new TypeError("activityTtlMs must be a positive safe integer");
+  }
   if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
     throw new TypeError("maxFrameBytes must be a positive safe integer");
   }
@@ -194,6 +198,7 @@ export function createAgentRouter({
   const conversationSessions = new Map();
   const requestTimesBySender = new Map();
   const pendingDeliveryOffers = new Map();
+  const activityByAgentId = new Map();
   let timeoutSweepTimer;
   let mechaDeveloperUpdateReminderTimer;
   // When the last lifecycle_sweep_completed was written, for any reason.
@@ -242,6 +247,10 @@ export function createAgentRouter({
           renew(socket, frame);
           return;
         }
+        if (frame.type === "activity") {
+          receiveActivity(socket, frame);
+          return;
+        }
         if (["injection_requested", "ack", "nack"].includes(frame.type)) {
           receiveDeliveryReceipt(socket, frame);
           return;
@@ -279,6 +288,7 @@ export function createAgentRouter({
       if (sessions.get(session.agentId) === session) {
         sessions.delete(session.agentId);
         cancelPendingDeliveryOffer(session.agentId);
+        if (session.suppressActivityClearOnClose !== true) clearAgentActivity(session.agentId);
       }
       try {
         const released = repository.releaseAgentLease({
@@ -467,6 +477,20 @@ export function createAgentRouter({
         }
         throw error;
       }
+    }
+
+    function receiveActivity(currentSocket, frame) {
+      if (session === undefined
+        || !sessionHasActiveLease(session)
+        || session.agentId !== frame.agent_id
+        || session.instanceId !== frame.instance_id
+        || session.leaseId !== frame.lease_id) {
+        if (session !== undefined) session.suppressActivityClearOnClose = true;
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      updateAgentActivity(session.agentId, frame.activity_state);
     }
 
     function receiveDeliveryReceipt(currentSocket, frame) {
@@ -673,6 +697,7 @@ export function createAgentRouter({
     const reminders = sweepDueReminders(reminderOutcomes);
     const serverJobs = sweepDueServerJobs(serverJobOutcomes);
     const conversations = sweepConversationHistory();
+    sweepExpiredAgentActivity();
     const sweepCounts = {
       stale_agent_count: staleAgents.length,
       expired_message_count: expired.length,
@@ -944,21 +969,71 @@ export function createAgentRouter({
     pendingDeliveryOffers.delete(agentId);
   }
 
+  function sessionHasActiveLease(candidate, generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
+    if (!sessionIsActive(candidate)) return false;
+    const lease = repository.leaseFor(candidate.agentId);
+    return lease !== undefined
+      && lease.lease_id === candidate.leaseId
+      && lease.instance_id === candidate.deliveryInstanceId
+      && lease.expires_at > generatedAt;
+  }
+
+  function observableAgentActivity(agentId, nowMs = currentTimeMs(clock)) {
+    const activity = activityByAgentId.get(agentId);
+    return activity !== undefined && activity.activeUntilMs > nowMs ? "active" : "idle";
+  }
+
+  function broadcastAgentActivity(agentId, activityState, generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
+    for (const recipient of conversationSessions.values()) {
+      for (const session of recipient.values()) {
+        sendFrame(session.socket, generateFrameId, {
+          type: "agent_activity",
+          agent_id: agentId,
+          activity_state: activityState,
+          generated_at: generatedAt,
+        });
+      }
+    }
+  }
+
+  function updateAgentActivity(agentId, activityState) {
+    const nowMs = currentTimeMs(clock);
+    const previous = observableAgentActivity(agentId, nowMs);
+    if (activityState === "active") {
+      activityByAgentId.set(agentId, { activeUntilMs: nowMs + activityTtlMs });
+      if (previous !== "active") broadcastAgentActivity(agentId, "active", new Date(nowMs).toISOString());
+      return;
+    }
+    activityByAgentId.delete(agentId);
+    if (previous === "active") broadcastAgentActivity(agentId, "idle", new Date(nowMs).toISOString());
+  }
+
+  function clearAgentActivity(agentId) {
+    updateAgentActivity(agentId, "settled");
+  }
+
+  function sweepExpiredAgentActivity() {
+    const nowMs = currentTimeMs(clock);
+    const generatedAt = new Date(nowMs).toISOString();
+    for (const [agentId, activity] of activityByAgentId.entries()) {
+      if (activity.activeUntilMs > nowMs) continue;
+      activityByAgentId.delete(agentId);
+      broadcastAgentActivity(agentId, "idle", generatedAt);
+    }
+  }
+
   function connectedAgentsSnapshot() {
     const generatedAt = new Date(currentTimeMs(clock)).toISOString();
     const agents = [];
     for (const session of sessions.values()) {
       const lease = repository.leaseFor(session.agentId);
-      if (session.socket.readyState !== WebSocket.OPEN
-        || lease === undefined
-        || lease.lease_id !== session.leaseId
-        || lease.instance_id !== session.deliveryInstanceId
-        || lease.expires_at <= generatedAt) continue;
+      if (session.socket.readyState !== WebSocket.OPEN || !sessionHasActiveLease(session, generatedAt)) continue;
       agents.push({
         agent_id: session.agentId,
         agent_role: session.agentRole,
         connected_at: session.connectedAt,
         lease_expires_at: lease.expires_at,
+        activity_state: observableAgentActivity(session.agentId),
       });
     }
     agents.sort((left, right) => left.agent_id < right.agent_id ? -1 : left.agent_id > right.agent_id ? 1 : 0);
