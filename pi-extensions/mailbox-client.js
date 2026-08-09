@@ -22,6 +22,13 @@ const DEFAULT_REPLY_TIMEOUT_MS = 5_000;
 const MAX_SUBAGENTS = 999;
 const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
 
+// This pattern is narrower than the protocol's agentId on purpose, and the difference is a dot.
+// The protocol allows `A-Za-z0-9._-` (protocol/v1/schema.json, $defs.agentId); a tmux window name
+// cannot contain a dot, so no mailbox agent ever has one. Self-registered Claude sessions, which
+// exist to show presence in the router UI and are not mailbox addresses, take dotted ids for
+// exactly that reason. Allowing a dot here merges the two id spaces: an ad hoc session could then
+// register under a live worker's name, and this function is what stops such an id from ever
+// reaching a mail-injecting sidecar. Widening it removes that guarantee silently.
 export function assertAgentId(agentId) {
   if (typeof agentId !== "string" || agentId.length === 0) {
     throw new Error("Mailbox v2 requires a valid current tmux window name");

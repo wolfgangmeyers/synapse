@@ -13,6 +13,12 @@ import time
 from _sidecar import cleanup_sidecar
 
 SESSION = "mecha"
+
+# Deliberately narrower than the protocol's agentId, and the difference is a dot.
+# The protocol allows "A-Za-z0-9._-" (protocol/v1/schema.json, $defs.agentId). A tmux window name
+# cannot contain a dot, so no managed worker id ever has one, and self-registered Claude sessions
+# use dotted ids to stay in a separate space that cannot collide with a worker's mailbox address.
+# Allowing a dot here merges the two spaces and lets an ad hoc session claim a live worker's id.
 _AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 # Claude Code shows a "pasted text #N +N lines" confirmation dialog when it
