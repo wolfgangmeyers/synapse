@@ -45,6 +45,30 @@ Most questions that reach for a menu are not blocking. Make the ordinary call, s
 made, and continue. Reserve a real question for a decision that is genuinely Wolfgang's and where
 proceeding either way would be unsafe or would waste the work.
 
+## Restarting a local service that agents reconnect to is not dangerous
+
+Do not treat it as a risky action needing approval, and do not leave a known fix unapplied because
+a restart feels heavy. A service agents connect to is built to have them reconnect, and they do,
+in seconds.
+
+This cost real time on 2026-08-09. The mecha router was found rejecting a whole class of frame
+because the process predated the schema commit that allowed it, by nine minutes. The fix was a
+restart. It was held back on the reasoning that the router is shared and everything is connected
+to it. Wolfgang's answer: everything reconnects, it is not dangerous, do it. The restart took
+seconds and all twelve connected agents were back immediately.
+
+What restarting one does need is care about doing it faithfully, which is different from caution
+about doing it at all:
+
+- Read the exact command off the running process first, so the restart reproduces what was actually
+  running instead of what the docs say.
+- Copy any database it owns before stopping it.
+- Verify with real traffic afterward, not just that the port answers.
+
+A stale process is its own failure mode and worth suspecting directly. It looks exactly like a bug
+in current code, and reading the source will confirm the source is correct, because it is. Compare
+when the process started against when the behavior changed.
+
 ## Durable knowledge
 
 - Check the persistent KB before looping on CI, tests, local setup, auth, tooling, blockers, review feedback, or repeated confusion.
