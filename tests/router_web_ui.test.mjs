@@ -16,6 +16,8 @@ const webAgentId = "web-test-client";
 test("router web UI accepts remote HTTP routers and rejects unsafe router URLs", () => {
   assert.equal(parseArguments(["--router", "http://brick.tailcdfd89.ts.net"]).router, "http://brick.tailcdfd89.ts.net");
   assert.equal(parseArguments(["--router", "https://router.example.test:8765/path?x=1"]).router, "https://router.example.test:8765/path?x=1");
+  assert.equal(parseArguments([]).defaultAgentId, "wolfgang-web");
+  assert.equal(parseArguments(["--default-agent-id", "wolfgang"]).defaultAgentId, "wolfgang");
 
   for (const routerUrl of [
     "ws://brick.tailcdfd89.ts.net",
@@ -180,6 +182,8 @@ test("router web UI serves the app and relays live router messages", async () =>
     const iconResponse = await fetch(new URL("/mecha-icon.png", ui.httpUrl));
     assert.equal(iconResponse.status, 200);
     assert.equal(iconResponse.headers.get("content-type"), "image/png");
+    const configResponse = await fetch(new URL("/ui/config", ui.httpUrl));
+    assert.deepEqual(await configResponse.json(), { defaultRouter: routerHttpUrl, defaultAgentId: "wolfgang-web" });
 
     const peer = await connectRouterAgent(routerWsUrl, "peer-agent", sockets);
     const browser = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`);
@@ -466,6 +470,8 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function messageForStorage\(message\)/);
   assert.match(app, /startsWith\("data:image\/"\)/);
   assert.match(app, /mecha\.web\.agentIds/);
+  assert.match(app, /WEB_DEFAULT_AGENT_ID = "wolfgang-web"/);
+  assert.match(app, /config\.defaultAgentId/);
   assert.match(app, /mecha\.web\.routerAliases/);
   assert.match(app, /function setRouterAlias\(routerUrl, alias\)/);
   assert.match(app, /function openRouterEditor\(mode, routerUrl = ""\)/);

@@ -29,13 +29,15 @@ const MAX_TOTAL_IMAGE_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES;
 const HISTORY_IMAGE_EDGE = 360;
 const HISTORY_IMAGE_QUALITY = 0.88;
 const MESSAGE_BOTTOM_THRESHOLD_PX = 80;
+const WEB_DEFAULT_AGENT_ID = "wolfgang-web";
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
 const state = {
   socket: null,
   defaultRouter: "http://127.0.0.1:8765",
+  defaultAgentId: WEB_DEFAULT_AGENT_ID,
   routerUrl: initialRouter,
-  agentId: agentIdForRouter(initialRouter),
+  agentId: agentIdForRouter(initialRouter, WEB_DEFAULT_AGENT_ID),
   routers: loadRouters(),
   routerAliases: loadRouterAliases(),
   routerEditor: null,
@@ -88,9 +90,10 @@ const elements = {
 
 const config = await fetch("/ui/config").then((response) => response.json()).catch(() => ({}));
 state.defaultRouter = config.defaultRouter || state.defaultRouter;
+state.defaultAgentId = config.defaultAgentId || state.defaultAgentId;
 if (!localStorage.getItem("mecha.web.activeRouter")) {
   state.routerUrl = state.defaultRouter;
-  state.agentId = agentIdForRouter(state.routerUrl);
+  state.agentId = agentIdForRouter(state.routerUrl, state.defaultAgentId);
 }
 ensureRouter(state.routerUrl);
 state.messages = await loadMessages(state.routerUrl, state.agentId);
@@ -223,7 +226,7 @@ async function handleEvent(event) {
 async function switchRouter(routerUrl, { connect = false } = {}) {
   saveCurrentDraft();
   state.routerUrl = routerUrl;
-  state.agentId = agentIdForRouter(routerUrl);
+  state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
   state.agents = [];
   state.expandedSubagents.clear();
   state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
@@ -340,7 +343,7 @@ function openRouterEditor(mode, routerUrl = "") {
   state.routerEditor = { mode, routerUrl };
   elements.routerUrl.value = routerUrl || state.routerUrl;
   elements.routerAlias.value = routerUrl ? state.routerAliases[routerUrl] || "" : "";
-  elements.agentId.value = agentIdForRouter(routerUrl || state.routerUrl);
+  elements.agentId.value = agentIdForRouter(routerUrl || state.routerUrl, state.defaultAgentId);
   renderRouterEditor();
   elements.routerUrl.focus();
 }
@@ -981,7 +984,7 @@ function setRouterAlias(routerUrl, alias) {
 function loadAgentIds() {
   try { return JSON.parse(localStorage.getItem("mecha.web.agentIds") || "{}"); } catch { return {}; }
 }
-function agentIdForRouter(routerUrl) { return loadAgentIds()[routerUrl] || localStorage.getItem("mecha.web.agentId") || "wolfgang-web"; }
+function agentIdForRouter(routerUrl, defaultAgentId = WEB_DEFAULT_AGENT_ID) { return loadAgentIds()[routerUrl] || localStorage.getItem("mecha.web.agentId") || defaultAgentId; }
 function saveAgentIdForRouter(routerUrl, agentId) {
   const agentIds = loadAgentIds();
   agentIds[routerUrl] = agentId;

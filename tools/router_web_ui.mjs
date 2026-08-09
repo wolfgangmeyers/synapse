@@ -11,6 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const DEFAULT_ROUTER = "http://127.0.0.1:8765";
+const DEFAULT_AGENT_ID = "wolfgang-web";
 const AGENT_REFRESH_INTERVAL_MS = 10_000;
 const AGENT_ID = /^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CONTENT_TYPES = new Map([
@@ -25,13 +26,13 @@ const CONTENT_TYPES = new Map([
 const root = resolve(fileURLToPath(new URL("../web/router-ui", import.meta.url)));
 
 export function parseArguments(argv) {
-  const options = { host: DEFAULT_HOST, port: DEFAULT_PORT, router: DEFAULT_ROUTER };
+  const options = { host: DEFAULT_HOST, port: DEFAULT_PORT, router: DEFAULT_ROUTER, defaultAgentId: DEFAULT_AGENT_ID };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (["--host", "--port", "--router"].includes(argument)) {
+    if (["--host", "--port", "--router", "--default-agent-id"].includes(argument)) {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) throw new Error(`${argument} requires a value`);
-      options[argument.slice(2)] = value;
+      options[argument.slice(2).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase())] = value;
       index += 1;
       continue;
     }
@@ -42,14 +43,16 @@ export function parseArguments(argv) {
   options.port = Number(options.port);
   if (!Number.isSafeInteger(options.port) || options.port < 1 || options.port > 65535) throw new Error("--port must be 1 through 65535");
   normalizeRouterUrl(options.router);
+  options.defaultAgentId = normalizeAgentId(options.defaultAgentId);
   return options;
 }
 
-export async function startRouterWebUi({ host = DEFAULT_HOST, port = 0, router = DEFAULT_ROUTER, output = console.log } = {}) {
+export async function startRouterWebUi({ host = DEFAULT_HOST, port = 0, router = DEFAULT_ROUTER, defaultAgentId = DEFAULT_AGENT_ID, output = console.log } = {}) {
   router = normalizeRouterUrl(router);
+  defaultAgentId = normalizeAgentId(defaultAgentId);
   const clients = new Set();
   const server = createServer((request, response) => {
-    void handleRequest(request, response, { router }).catch(() => sendJson(response, 500, { error: "internal_error" }));
+    void handleRequest(request, response, { router, defaultAgentId }).catch(() => sendJson(response, 500, { error: "internal_error" }));
   });
   const browserWss = new WebSocketServer({
     server,
@@ -96,10 +99,10 @@ export async function startRouterWebUi({ host = DEFAULT_HOST, port = 0, router =
   };
 }
 
-async function handleRequest(request, response, { router }) {
+async function handleRequest(request, response, { router, defaultAgentId }) {
   const url = new URL(request.url ?? "/", "http://ui.local");
   if (request.method === "GET" && url.pathname === "/ui/config") {
-    sendJson(response, 200, { defaultRouter: normalizeRouterUrl(router) });
+    sendJson(response, 200, { defaultRouter: normalizeRouterUrl(router), defaultAgentId });
     return;
   }
   if (request.method !== "GET" && request.method !== "HEAD") {
@@ -466,7 +469,7 @@ function sendJson(response, statusCode, payload) {
 }
 
 function usage() {
-  return "Usage: node tools/router_web_ui.mjs [--host 127.0.0.1] [--port 8787] [--router http://127.0.0.1:8765]";
+  return "Usage: node tools/router_web_ui.mjs [--host 127.0.0.1] [--port 8787] [--router http://127.0.0.1:8765] [--default-agent-id wolfgang-web]";
 }
 
 async function main() {
