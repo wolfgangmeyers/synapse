@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { isCliEntrypoint } from "../../../../harness/cli_entrypoint.js";
 import { rotateSizeCappedLog } from "../../../../harness/log_rotation.js";
-import { createMailboxClient, assertAgentId } from "../../../../pi-extensions/mailbox-client.js";
+import { createMailboxClient, assertAgentId, assertPresenceAgentId } from "../../../../pi-extensions/mailbox-client.js";
 import { createActivityTailer } from "./activity_tail.mjs";
 import { createActivityState } from "./activity_state.mjs";
 
@@ -17,6 +17,31 @@ export const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
 export const ACTIVITY_REFRESH_MS = 5_000;
 export const ACTIVITY_MIN_RESEND_MS = 10_000;
 export const ACTIVITY_POLL_MS = 1_000;
+// A self-registered session that cannot claim its id gives up rather than retrying forever. The
+// router answers a losing lease claim with silence, not an error, so a client that retries on
+// timeout looks alive and does nothing. A session that fails to register is still a working
+// session; it just does not appear in the UI.
+export const PRESENCE_MAX_ATTEMPTS = 3;
+
+// Presence ids are dotted so they cannot collide with a managed worker id, which is a tmux window
+// name and can never contain a dot. Two sessions in identically named windows differ by pid.
+// Best-effort, for labelling only. A presence id stays valid even when this returns nothing,
+// because the pid is what makes it unique.
+export function tmuxWindowName(pane = process.env.TMUX_PANE) {
+  if (typeof pane !== "string" || !/^%\d+$/.test(pane)) return undefined;
+  try {
+    return execFileSync("tmux", ["display-message", "-p", "-t", pane, "#{window_name}"],
+      { encoding: "utf8" }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function presenceAgentId({ window, pid }) {
+  const safeWindow = String(window ?? "session").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 64)
+    || "session";
+  return assertPresenceAgentId(`session.${safeWindow}.${pid}`);
+}
 
 const ANSI_PATTERN = /(?:\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)|\x1B[P^_][\s\S]*?(?:\x1B\\)|\x1B[@-Z\\-_])/g;
 const CONTROL_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g;
@@ -42,8 +67,10 @@ export function rotateBodyFreeLog(logPath, maxBytes = DEFAULT_MAX_LOG_BYTES) {
   rotateSizeCappedLog(logPath, maxBytes);
 }
 
-export function createBodyFreeLogger({ agentId, logDir = DEFAULT_LOG_DIR, maxBytes = DEFAULT_MAX_LOG_BYTES, now = () => new Date() } = {}) {
-  assertAgentId(agentId);
+export function createBodyFreeLogger({ agentId, logDir = DEFAULT_LOG_DIR, maxBytes = DEFAULT_MAX_LOG_BYTES, now = () => new Date(), assertIdentity = assertAgentId } = {}) {
+  // Validated, not merely sanitized: the id becomes a filename, so it must not be able to escape
+  // the log directory. Both validators forbid a slash.
+  assertIdentity(agentId);
   const resolvedLogDir = expandHome(logDir);
   mkdirSync(resolvedLogDir, { recursive: true });
   const logPath = join(resolvedLogDir, `${agentId}.log`);
@@ -102,6 +129,27 @@ export function createTmuxWindowMonitor({
   const timer = setIntervalImpl(() => {
     try {
       assertTmuxWindowExists({ tmux, session, window });
+    } catch {
+      clearIntervalImpl(timer);
+      onMissing();
+    }
+  }, intervalMs);
+  return { close: () => clearIntervalImpl(timer) };
+}
+
+export function createTmuxPaneMonitor({
+  pane,
+  intervalMs = 5_000,
+  tmux = (args) => execFileSync("tmux", args, { stdio: "ignore" }),
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+  onMissing,
+} = {}) {
+  if (typeof pane !== "string" || !/^%\d+$/.test(pane)) throw new TypeError("pane must be a tmux pane id");
+  if (typeof onMissing !== "function") throw new TypeError("onMissing must be a function");
+  const timer = setIntervalImpl(() => {
+    try {
+      tmux(["display-message", "-p", "-t", pane, "#{pane_id}"]);
     } catch {
       clearIntervalImpl(timer);
       onMissing();
@@ -215,7 +263,13 @@ function parseArgs(argv) {
     else if (arg === "--log-dir") result.logDir = next();
     else if (arg === "--max-log-bytes") result.maxLogBytes = Number(next());
     else if (arg === "--activity-dir") result.activityDir = next();
+    else if (arg === "--presence-only") result.presenceOnly = true;
     else throw new Error(`unknown argument: ${arg}`);
+  }
+  // A self-registered session derives its own id: it is the only thing that knows its pid, and the
+  // pid is what keeps two sessions in identically named windows apart.
+  if (!result.agentId && result.presenceOnly) {
+    result.agentId = presenceAgentId({ window: result.window ?? tmuxWindowName(), pid: process.pid });
   }
   if (!result.agentId) throw new Error("--agent-id is required");
   if (!result.window) result.window = result.agentId;
@@ -227,15 +281,25 @@ function parseArgs(argv) {
 
 export async function runCli(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
-  const logger = createBodyFreeLogger({ agentId: args.agentId, logDir: args.logDir, maxBytes: args.maxLogBytes });
+  const logger = createBodyFreeLogger({
+    agentId: args.agentId,
+    logDir: args.logDir,
+    maxBytes: args.maxLogBytes,
+    assertIdentity: args.presenceOnly ? assertPresenceAgentId : assertAgentId,
+  });
   let sidecar;
   const client = createMailboxClient({
     agentId: args.agentId,
     routerUrl: args.routerUrl,
-    onEnvelope: (message, delivery) => sidecar.onEnvelope(message, delivery),
+    assertIdentity: args.presenceOnly ? assertPresenceAgentId : assertAgentId,
+    // A presence client builds no injector, so there is no code path that can paste into the
+    // terminal. The split is structural rather than a flag checked at delivery time.
+    onEnvelope: args.presenceOnly
+      ? (message, delivery) => { logger.write("presence_ignored_envelope", { message_id: message.id }); client.sendReceipt("ack", delivery); }
+      : (message, delivery) => sidecar.onEnvelope(message, delivery),
     log: () => logger.write("mailbox_client", { state: "event" }),
   });
-  sidecar = createClaudeSidecar({
+  sidecar = args.presenceOnly ? undefined : createClaudeSidecar({
     agentId: args.agentId,
     window: args.window,
     client,
@@ -266,11 +330,38 @@ export async function runCli(argv = process.argv.slice(2)) {
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
   // The monitor lives for the whole process; stop() is the only exit path.
-  createTmuxWindowMonitor({
-    window: args.window,
-    onMissing: () => stop("tmux_window_missing"),
-  });
-  await client.connect();
+  if (!args.presenceOnly) {
+    createTmuxWindowMonitor({
+      window: args.window,
+      onMissing: () => stop("tmux_window_missing"),
+    });
+  } else {
+    // A self-registered session's window can be named anything, including names that are not valid
+    // agent ids, so the pane is what gets watched.
+    createTmuxPaneMonitor({
+      pane: process.env.TMUX_PANE,
+      onMissing: () => stop("tmux_pane_missing"),
+    });
+  }
+  if (args.presenceOnly) {
+    // The router answers a losing lease claim with silence rather than an error, so a retry loop
+    // here would look alive and do nothing forever. Give up quietly and leave the session working.
+    let connected = false;
+    for (let attempt = 1; attempt <= PRESENCE_MAX_ATTEMPTS && !connected; attempt += 1) {
+      try {
+        await client.connect();
+        connected = true;
+      } catch {
+        logger.write("presence_register_failed", { agent_id: args.agentId, attempt: String(attempt) });
+      }
+    }
+    if (!connected) {
+      logger.write("presence_gave_up", { agent_id: args.agentId });
+      process.exit(0);
+    }
+  } else {
+    await client.connect();
+  }
   logger.write("sidecar_connected", { agent_id: args.agentId });
 
   // Started only after the lease is held: the marker is a promise to the hook that something is
