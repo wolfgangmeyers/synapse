@@ -37,9 +37,9 @@ settled boundary.
 
 ## Repository workflow
 
-For this repository, make changes on `main` by default. Do not create or use a worktree for mecha-developer changes unless Wolfgang explicitly asks for one.
+For this repository, make changes on `main` by default. In the primary mecha-developer checkout, dirty tracked changes are not acceptable as resting state. If the work is done, commit it and push it. If it is not done, tie the dirty files to an active task with an owner and next action.
 
-When a change is done, merge it into `main` and push it up. Do not leave completed work parked only on a side branch or worktree unless Wolfgang explicitly asks for that.
+Use a worktree for larger or riskier mecha-developer changes. Dirty state is expected there only while that task is active. When the change is done, merge it into `main` and push it up. Do not leave completed work parked only on a side branch or worktree unless Wolfgang explicitly asks for that.
 
 ## Data retention
 

@@ -39,7 +39,7 @@ For Claude workers, the launcher starts Claude Code plus a Mailbox V2 sidecar re
 
 Use human-meaningful worker window and mailbox names. Wolfgang needs to recognize a worker from the name without remembering issue numbers or implementation shorthand.
 
-Default pattern: short task nouns first, with the issue or PR number appended when useful. Good examples: `schedule-report-1635`, `open-oasis-report-1647`, `patient-diagnoses-1642`, `qa-hotbox-1643`, `reports-permission-1751`, `dashboard-no-access-1752`. Avoid names whose meaning depends only on internal codes, ticket numbers, or process labels, such as `emr286-coverage-pr1635`. The number is fine; the name must also contain a human-readable task label.
+Existing policy, made explicit: worker names need both identifiers and meaning. Use short task nouns first, and include the ticket or PR number when one applies and is available. Good examples: `schedule-report-1635`, `open-oasis-report-1647`, `patient-diagnoses-1642`, `qa-hotbox-1643`, `reports-permission-1751`, `dashboard-no-access-1752`. Avoid names whose meaning depends only on internal codes, ticket numbers, branch slugs, SHAs, or process labels, such as `emr286-coverage-pr1635`. The number is useful; the name must also say what the worker is for.
 
 Record branch names and worktree paths in state and supervisor notes, not as the primary way to identify the worker. When referencing an older poorly named worker, translate it for Wolfgang: “Schedule report worker `emr286-coverage-pr1635`.”
 
@@ -74,6 +74,10 @@ While any priority is active or blocked, maintain exactly one local five-minute 
 Maintain exactly one scheduled recurring general sweep reminder at a 30 minute cadence using the existing Mailbox reminder mechanism. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
 
 When a reminder asks the supervisor to take action and the work is viable to delegate, run that action in a background subagent by default. This is the preferred path for reminder-driven checks, audits, CI/status sweeps, and other bounded work because it preserves supervisor responsiveness and allows independent checks to run in parallel. Keep the action inline only when it is truly trivial, must use supervisor-only local state, or delegation would create more overhead than the work itself.
+
+## mecha-developer checkout state
+
+In the primary mecha-developer checkout, dirty tracked changes are not acceptable as resting state. If the work is done, commit it and push it. If it is not done, tie the dirty files to an active task with an owner and next action. Use a worktree for larger or riskier mecha-developer changes; dirty state is expected there only while that task is active.
 
 ## mecha-developer update reminder
 
