@@ -560,6 +560,14 @@ Then confirm the restore. Read the diff after the mutation round and check that 
 
 This is a specific case of "Measure the thing you shipped, not the source you built it from" above.
 
+### Review a commit, not a working tree
+
+Caught on 2026-08-10. A worker finished a phase of implementation with the work uncommitted, then launched eight review subagents against that working tree. One of them wanted to measure how the code behaved before the change, so it ran a git restore over the tracked files. Every uncommitted edit went with it. Git held no other copy. The work survived because per-file copies happened to be sitting in a temporary directory from an earlier mutation round, and one edit postdated those copies and had to be redone by hand.
+
+Commit the work first, then point the reviewers at the commit. A reviewer that reverts, checks out, or otherwise rewinds the tree then costs one checkout to undo. The worker had already told its reviewers to restore whatever they mutated. Every one of them still held a shell over an uncommitted tree, and one command was enough.
+
+The general form reaches past reviews. **An instruction addressed to the actor is not a control.** It depends on that actor reading it, understanding it, and being the one who acts. A control takes away the ability to cause the damage. "Restore only what you mutated" above is an instruction, and it did not prevent this, because the agent that reverted the tree was a different agent from the one that rule was written for.
+
 ### A mutation writes to the real path the code names
 
 Caught on 2026-08-09. A mutation table over a launcher script included "write to the settings file in the home directory." The mutation ran against a copy of the source. Path expansion still resolved to the real home directory. So the write landed in the live global config and truncated it from three thousand bytes to forty. That would have silently disabled message delivery and every other startup hook for every new session on that machine.
