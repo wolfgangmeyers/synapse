@@ -65,12 +65,60 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.5", commands[0])
         self.assertIn(str(extension), command)
         self.assertNotIn("--no-extensions", command)
         session_id = command[command.index("--session-id") + 1]
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
         self.assertIn(f"--session {session_id}", output)
+
+    def test_explicit_pi_model_updates_command_and_exported_model_key(self):
+        extension = self._pi_mailbox_extension()
+        model = "gpt-5.6 Luna"
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", "--model", model, agent="pi")
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
+        self.assertEqual(command[command.index("--model") + 1], model)
+        self.assertIn(
+            f"export {worker_launch.PI_MODEL_KEY_ENV}={shlex.quote(f'openai-codex/{model}')}",
+            commands[0],
+        )
+
+    def test_model_override_rejects_non_pi_agents_before_launch(self):
+        argv = [
+            "worker_launch.py", "--window", "worker", "--dir", self.tmpdir.name,
+            "--agent", "claude", "--model", "gpt-5.6 Luna",
+        ]
+        with patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("--model is only supported for Pi", stderr.getvalue())
+        window_exists.assert_not_called()
+
+    def test_empty_model_override_rejects_before_launch(self):
+        argv = [
+            "worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name,
+            "--agent", "pi", "--model", " ",
+        ]
+        with patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("--model must not be empty", stderr.getvalue())
+        window_exists.assert_not_called()
 
     def test_machine_config_can_default_to_claude_without_pi_flags(self):
         config = self.tmp_path / "worker-runtime.json"
