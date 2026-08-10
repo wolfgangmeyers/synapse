@@ -121,7 +121,7 @@ The watcher flags PRs that look actionable for Wolfgang:
 - Greptile or other reviewer activity needing follow-up
 - security, auth, OIDC, DNSid SDK, workflow, release, infrastructure, or cookbook changes
 
-It suppresses closed/merged PRs, Wolfgang-authored PRs, ordinary draft PRs, and quiet Dependabot churn unless checks fail or watched areas are touched.
+It suppresses closed/merged PRs, Wolfgang-authored PRs, same-lane agent PRs when known, ordinary draft PRs, and quiet Dependabot churn unless checks fail or watched areas are touched.
 
 ## Mail Behavior
 

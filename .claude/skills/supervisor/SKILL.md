@@ -1816,6 +1816,8 @@ The message after compaction should carry forward anything the worker needs to k
 
 **PR-watch findings are standing authorization to review.** When PR-watch reports an actionable non-agent-factory PR, launch the appropriate isolated review pipeline immediately. Fetch the current head, gather context, run focused robot reviews and validation, apply the normal review disposition, and post one formal GitHub review with its validated inline findings. Do not ask Wolfgang for permission, wait for a separate reply, or merely report the candidate list.
 
+Do not post a review on PRs authored or opened by Wolfgang, or on PRs produced by the same agent, worker, or lane. Skip them or route them to an independent reviewer.
+
 This authorization covers the complete review delivery: `APPROVE`, `COMMENT`, or `REQUEST_CHANGES`, the aggregate review body, validated inline findings, and concise thread replies needed to close feedback after a worker's verified fix. Use Wolfgang's review voice gate before posting. Re-review after a head change. The sole exception is a merge: merge authorization remains explicit and separate.
 
 **Rules:**

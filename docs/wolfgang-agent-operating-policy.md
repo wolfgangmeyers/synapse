@@ -578,6 +578,12 @@ See "Restore only what you mutated" above for putting the file back afterward.
 
 ## Code review
 
+### Do not review your own PRs
+
+Review authority needs an independent reviewer. Do not post a PR review on a PR Wolfgang authored or opened, or on a PR produced by your own agent, worker, or lane. Skip it, or route it to an independent review lane and say why.
+
+If intake finds one of these PRs, do not use standing review authorization to post under Wolfgang's name. Reading the PR and reporting that it needs independent review is fine.
+
 ### "Review this PR" is the whole authorization
 
 Written down on 2026-08-05 after Wolfgang said it directly: *stop waiting for me for this. If I tell you to do a review, do it.*
