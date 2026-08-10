@@ -308,3 +308,16 @@ What remains uncovered: a session sitting on some other modal when mail arrives.
 message that every layer reports as delivered and no agent ever reads. If that turns up, this is
 the fix, and the cheaper detection is the activity receipt described in the known issues page,
 which needs no pane capture and costs nothing per message.
+
+**Update, 2026-08-10.** The uncovered case turned up the same day, by a different route than
+expected. Two worker panes wedged: mail was delivered and acknowledged, the text landed in the input
+box, and nothing submitted it. Enter, Escape and a redraw sent to those panes all arrived as literal
+characters, so the terminal input was broken while the agent process stayed alive and idle. Both
+workers sat unreachable for about forty minutes and every send reported success.
+
+This is not a modal. The outcome is identical: a message every layer reports as delivered that no
+agent reads. A pane check after pasting would have caught it, because the injected text was sitting
+visible in the box and unsubmitted.
+
+Recorded here rather than reopening the decision. Anyone reversing it now has a second confirmed
+case and does not have to argue from the trust dialog alone.
