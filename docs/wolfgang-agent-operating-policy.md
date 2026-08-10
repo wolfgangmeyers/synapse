@@ -13,6 +13,10 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 - If the same blocker or failure repeats, stop re-reporting it. Check durable knowledge, find or create a workaround, or escalate the exact external boundary.
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
 
+### One worker per ticket
+
+Give each ticket one worker with clear ownership. Do not hand multiple tickets to the same worker, even when they touch the same feature area; separate tickets create separate requirements, review threads, environments, and next actions, and combining them makes scope and status easy to confuse. A worker may coordinate with another worker, but the supervisor should assign each ticket its own owner.
+
 ### A question is a question, not a work order
 
 When Wolfgang asks what something means or where it came from, answer it. Do not go edit the file instead. This happened three times in a row on 2026-07-30: he asked what a phrase meant, and each time the reply led with a change he never asked for. One of those edits left the document worse than it was.
