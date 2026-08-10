@@ -2,7 +2,7 @@
 """Launch a new worker in a tmux window.
 
 Usage:
-  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--reasoning-effort low|medium|high|xhigh] [--notify-on-settled MAILBOX_RECIPIENT]
+  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--model MODEL] [--reasoning-effort low|medium|high|xhigh] [--notify-on-settled MAILBOX_RECIPIENT]
 
 When --agent is omitted, the runtime comes from the machine-local worker runtime config and falls back to Pi.
 
@@ -471,6 +471,12 @@ def main():
         help="Unused; deliver instructions through Mailbox V2. Kept for backwards compatibility.",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help="Pi-only model override for this worker launch. Defaults to gpt-5.5 and keeps provider openai-codex.",
+    )
+    parser.add_argument(
         "--reasoning-effort",
         choices=["low", "medium", "high", "xhigh"],
         default=None,
@@ -506,6 +512,15 @@ def main():
     if args.compaction_policy is not None and args.agent != "pi":
         print("Error: --compaction-policy is only supported for Pi workers", file=sys.stderr)
         sys.exit(1)
+    if args.model is not None:
+        if args.agent != "pi":
+            print("Error: --model is only supported for Pi workers", file=sys.stderr)
+            sys.exit(1)
+        args.model = args.model.strip()
+        if not args.model:
+            print("Error: --model must not be empty", file=sys.stderr)
+            sys.exit(1)
+    pi_model = args.model or PI_MODEL
     try:
         compaction_policy = validate_compaction_policy(args.compaction_policy)
     except ValueError as error:
@@ -554,7 +569,7 @@ def main():
             "--provider",
             PI_PROVIDER,
             "--model",
-            PI_MODEL,
+            pi_model,
             "--name",
             args.window,
         ]
@@ -680,7 +695,7 @@ def main():
                     f"export {PI_NOTIFY_ON_SETTLED_ENV}="
                     f"{shlex.quote(args.notify_on_settled)} && "
                 )
-            pi_exports += f"export {PI_MODEL_KEY_ENV}={shlex.quote(f'{PI_PROVIDER}/{PI_MODEL}')} && "
+            pi_exports += f"export {PI_MODEL_KEY_ENV}={shlex.quote(f'{PI_PROVIDER}/{pi_model}')} && "
             if compaction_policy is not None:
                 pi_exports += (
                     f"export {PI_COMPACTION_POLICY_ENV}="
