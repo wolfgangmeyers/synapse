@@ -11,39 +11,57 @@ most of these are testable against them.
 2026-08-09 the router rejected every `compacting` activity frame with `invalid_frame` and closed
 the socket. `protocol/v1/schema.json` was correct and had been for a day. The stale thing was the
 process: the router had been running since 21:47:42 on 2026-08-08 and the commit that added
-compaction to the schema landed at 21:56:02, nine minutes later. Reading the file would have
-confirmed the frame was valid and been useless. Sending one frame per state at the live router and
-watching what came back is what found it.
+compaction to the schema landed at 21:56:02, eight minutes and twenty seconds later. Reading the
+file would have confirmed the frame was valid and been useless. Sending one frame per state at the
+live router and watching what came back is what found it.
 
-## A sidecar that exits mid-compaction leaves the agent compacting for ever
+It takes these frames now. `~/.mecha-developer/router.jsonl` records `router_started` at
+`2026-08-09T19:55:56.423Z` and no `router_error` of any code after it. The last one is at
+`19:51:21`. That log records UTC while the times above are local, so `19:55:56Z` is 12:55:56 on
+2026-08-09 here.
 
-**Take this one first, and it gates a router restart.** Today it is unreachable, because the
-running router rejects every `compacting` frame before it can set anything (see the note above).
-Restarting the router is the fix for that, and it also turns this path on for the first time. So
-this is smaller than the pane-sharing item below and it comes first, because everything else wants
-that restart.
+## A sidecar that exits mid-compaction pauses that agent's mail until something reports activity
 
-**What breaks.** Mail delivery for that agent stays paused, permanently, with a live-looking
-session.
+**What breaks.** Mail delivery for that agent pauses, and stays paused until any client sends the
+router a non-compacting activity frame under that agent id.
 
 `stop()` closes the socket without publishing a final settled frame. The router deliberately skips
 clearing activity for a compacting agent on disconnect (`harness/router.js:295`) and gives that
-state no expiry (`:1101`), and the next registration for that id inherits `deliveryPaused: true`
+state no expiry (`:1100`), so the next registration for that id inherits `deliveryPaused: true`
 (`:409`). The ten-minute bound in `activity_state.mjs` does not help, because the process holding
 that state is gone.
 
-**What it looks like.** An agent stuck showing compacting. Mail to it is accepted and queued, and
-`mailbox_send.py` reports success, so the sender sees nothing wrong.
+**How long it lasts.** Until the next ordinary activity frame. For a relaunched worker that is about
+a second. Every activity frame sets `deliveryPaused` from the state it carries (`:1095`), and both
+exits of `updateAgentActivity` clear the pause and offer the queued messages when the previous state
+was compacting (`:1108` and `:1115`). A new sidecar ticks every `ACTIVITY_POLL_MS`, 1000 ms
+(`claude_sidecar.mjs:19`, `:410`), and publishes on its first tick. So relaunching the worker is
+enough. It stays paused for good only for a client that registers and sends no activity at all.
 
-**Why it is real.** The router lines above were read directly. Reaching it needs a sidecar to stop
-between `PreCompact` and `PostCompact`, which is a ~20 to 40 second window per compaction based on
-`probe7-compact.jsonl` and `probe8-postcompact.jsonl`.
+**What it looks like.** An agent showing compacting with nothing running. Mail to it is accepted and
+queued, and `mailbox_send.py` reports success, so the sender sees nothing wrong until the queue
+drains on the next relaunch.
 
-**None of the compacting behavior has ever run in production.** The router has rejected every
-`compacting` frame since 2026-08-08, so the mail pause, its release on a non-compacting frame, and
-the absorbing state built to protect it have never once fired. Everything asserted about them here
-and in the code comments is reasoning from the router source, not observation. Treat it that way
-the first time it runs for real.
+**How the window was measured.** Probed on 2026-08-09 against a router started on a spare port with
+its own database. An agent sent `compacting` and disconnected. A message posted to it queued. A new
+session for the same id registered and sat for 1507 ms with nothing delivered. One `settled` frame
+released it and the message arrived 33 ms later. An `active` frame released it the same way, 31 ms
+after.
+
+The five minute case: a session registered, renewed its lease, and sent no activity frame at all.
+The message stayed queued the whole time. One frame at the end released it in 30 ms.
+
+`tests/shared_conversation_sync.test.mjs:447` covers the `settled` release and runs on every
+`npm test`. The `active` release and the client that sends nothing are measured here only.
+
+Reaching this state needs a sidecar to stop between `PreCompact` and `PostCompact`, a ~20 to 40
+second window per compaction based on `probe7-compact.jsonl` and `probe8-postcompact.jsonl`.
+
+**The compacting path first became reachable in production at the 2026-08-09 restart.** The router
+rejected every one of these frames from 2026-08-08 until then, and it accepts them now. The pause
+and its release are measured, as above. The absorbing state in `activity_state.mjs` that protects
+the compacting hold comes from reading the router source and the fixtures, so treat that part as
+unobserved the first time it runs for real.
 
 ## Two Claude sessions sharing one pane
 

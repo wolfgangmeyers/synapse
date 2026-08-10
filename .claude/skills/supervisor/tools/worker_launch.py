@@ -50,12 +50,23 @@ LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 # Unexpanded, and expanded at call time, matching the Cursor and Codex helpers so that
 # redirecting HOME moves all three. Expanding here would bind the value at import.
 CLAUDE_CONFIG_PATH = "~/.claude.json"
-CLAUDE_SETTINGS_PATH = "~/.claude/settings.json"
 # One rolling copy of the config, overwritten on each write that changes it.
 CLAUDE_CONFIG_BACKUP_SUFFIX = ".mecha-launcher-backup"
 # For a config file that does not exist yet, and for the backup every time. An existing
 # config keeps whatever mode it already had.
 NEW_CLAUDE_CONFIG_MODE = 0o600
+# Answers Claude Code's bypass permissions warning for one process. Claude Code reads
+# skipDangerousModePermissionPrompt from four sources: enterprise managed settings, command line
+# flags, <cwd>/.claude/settings.local.json and ~/.claude/settings.json. The flag is the only one
+# that writes nothing, so it leaves no file in the user's repository and none in their home.
+# Built with json.dumps so the payload cannot drift out of valid JSON, and compact because the
+# whole command is pasted into a terminal.
+#
+# Only non-secret settings belong here. This ends up in ps output, in the worker's pane and in the
+# shell history file, so anything sensitive needs a different mechanism.
+CLAUDE_BYPASS_SETTINGS_JSON = json.dumps(
+    {"skipDangerousModePermissionPrompt": True}, separators=(",", ":")
+)
 
 
 def _quote_command(argv):
@@ -420,44 +431,6 @@ def _claude_pretrust_workspace(work_dir, config_path=None):
         )
 
 
-def _warn_if_bypass_permissions_will_prompt(settings_path=None):
-    """Warn when the bypass permissions warning is still unanswered.
-
-    Workers launch with --dangerously-skip-permissions, and Claude Code shows a one-time
-    warning for that until skipDangerousModePermissionPrompt is recorded. That dialog eats
-    a pasted message the same way the trust dialog does, so a worker on a machine where it
-    has never been answered loses its first message even with trust recorded.
-
-    Only a warning. The key belongs to ~/.claude/settings.json, which is the user's global
-    configuration for every session on the machine, and the launcher has no business
-    setting that on its own.
-    """
-    settings_path = settings_path or os.path.expanduser(CLAUDE_SETTINGS_PATH)
-    try:
-        with open(settings_path, "rb") as handle:
-            settings = json.loads(handle.read().decode("utf-8"))
-        answered = isinstance(settings, dict) and settings.get(
-            "skipDangerousModePermissionPrompt"
-        ) is True
-        reason = f"skipDangerousModePermissionPrompt is not set in {settings_path}"
-    except FileNotFoundError:
-        answered = False
-        reason = f"there is no {settings_path}"
-    except Exception as error:
-        # A settings file Claude Code cannot read is a file it cannot read the key from
-        # either, so this is the case most likely to prompt, not a reason to stay quiet.
-        answered = False
-        reason = f"{settings_path} could not be read: {error}"
-    if not answered:
-        print(
-            f"Warning: {reason}, so this worker may show Claude Code's bypass permissions "
-            f"warning. That dialog discards pasted text, so answer it before sending the "
-            f"worker its first message. Only the user settings file was checked, so this "
-            f"is a false alarm if the key is set in project or managed settings.",
-            file=sys.stderr,
-        )
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Launch a managed worker in a new tmux window."
@@ -646,16 +619,47 @@ def main():
         # permissions warning has been accepted, and Claude Code reads it from
         # ~/.claude/settings.json, <cwd>/.claude/settings.local.json, CLI flags and
         # enterprise managed settings. It never reads ~/.claude/projects/<slug>/, which
-        # holds session transcripts and memory.
+        # holds session transcripts and memory. The two dialogs are answered separately:
+        # trust by the config entry written just below, and the bypass permissions warning
+        # by --settings on the command line.
         _claude_pretrust_workspace(work_dir)
-        if args.skip_permissions:
-            _warn_if_bypass_permissions_will_prompt()
 
-        agent_cmd = "claude"
+        parts = ["claude"]
         if args.skip_permissions:
-            agent_cmd += " --dangerously-skip-permissions"
+            # The second dialog, and the dangerous one. Measured against 2.1.226: a launch
+            # with no recorded answer stops at a warning whose highlighted default is "No,
+            # exit", so the injector's blind Enter exits the worker and takes its first
+            # message with it. That reads as a crash, not as a delivery problem.
+            #
+            # --settings adds a settings source and does not replace the user's. Measured
+            # with a SessionStart hook defined only in ~/.claude/settings.json: it fired on
+            # a run with the flag and on a run without it, so the mailbox and activity
+            # hooks keep working. Watch for that if this ever stops holding, because the
+            # symptom is an activity dot that never appears and nothing logged.
+            #
+            # A flag outranks the work directory's own settings. Measured: a work directory
+            # holding {"skipDangerousModePermissionPrompt": false} in
+            # .claude/settings.local.json still started with no dialog. That is wanted,
+            # because the same launch is passing --dangerously-skip-permissions and the two
+            # belong together. Enterprise managed policy outranks the flag, so a policy
+            # recording the key as false would still show the dialog. On 2026-08-09 there
+            # was no managed policy file on this machine, at the macOS path
+            # /Library/Application Support/ClaudeCode/.
+            #
+            # A Claude Code old enough to not know --settings would exit on an unrecognized
+            # option and no worker would start. Nothing here waits on the process, so the
+            # only place that shows is the pane, sitting back at a shell prompt.
+            parts.extend([
+                "--dangerously-skip-permissions", "--settings", CLAUDE_BYPASS_SETTINGS_JSON,
+            ])
         if args.resume:
-            agent_cmd += f" --resume {args.resume}"
+            parts.extend(["--resume", args.resume])
+        # Quoted per part, because the settings payload is JSON and the whole command is
+        # pasted into a shell. The payload carries no spaces, so unquoted it survives word
+        # splitting and loses its double quotes instead, and Claude Code is handed a
+        # settings value it cannot parse. Add a second key and the braces start expanding
+        # too, which splits it for real.
+        agent_cmd = _quote_command(parts)
 
     created = ensure_session()
     if created:

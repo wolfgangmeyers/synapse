@@ -90,10 +90,11 @@ export function createActivityState() {
     // non-compacting frame releases the pause. So a stray settle here would end the pause early,
     // which is the failure the whole compacting path exists to respect.
     //
-    // None of that has ever run. The router has rejected every compacting frame as invalid since
-    // 2026-08-08, because the process predates the schema commit that allowed the state. So this
-    // rule and the mail pause it protects are reasoning from the router source, not observation.
-    // See ACTIVITY_KNOWN_ISSUES.md.
+    // The router rejected every compacting frame as invalid from 2026-08-08 until it was
+    // restarted on 2026-08-09, because the process predated the schema commit that allowed the
+    // state. It takes them now, and the pause and its release have been measured. This absorbing
+    // rule itself is still reasoning from the router source and the fixtures, so treat it as
+    // unobserved the first time it runs for real. See ACTIVITY_KNOWN_ISSUES.md.
     if (state === "compacting" && record.kind !== "compacted" && record.kind !== "session_start") {
       return;
     }
@@ -240,7 +241,5 @@ export function createActivityState() {
     // Never report exhausted while compacting: the router does not expire that state, so giving up
     // on refreshes there would leave mail paused rather than letting it lapse.
     exhausted: (nowMs) => state !== "compacting" && silentFor(nowMs) > SILENCE_LIMIT_MS,
-    compactingStuck: (nowMs) => state === "compacting" && compactingSinceMs !== undefined
-      && nowMs - compactingSinceMs >= COMPACTING_LIMIT_MS,
   };
 }

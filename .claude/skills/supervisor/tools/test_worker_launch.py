@@ -499,92 +499,139 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         entry = written["projects"][os.path.realpath(self.tmpdir.name)]
         self.assertIs(entry["hasTrustDialogAccepted"], True)
         self.assertEqual(len(commands), 1)
-        # This home has no settings.json, so the bypass permissions warning is due. It
-        # reaching stderr is what proves main() calls that check against the real path,
-        # which the direct tests of the helper cannot show.
-        self.assertIn("bypass permissions", stderr.getvalue())
-
-    def test_a_launch_stays_quiet_when_the_user_settings_answer_the_bypass_dialog(self):
-        # Pins which file the launcher reads. A home with no settings at all warns either
-        # way, so only a home where the key is present and true can show that the check
-        # is pointed at ~/.claude/settings.json and not somewhere else.
-        home = self.tmp_path / "answered-home"
-        (home / ".claude").mkdir(parents=True)
-        (home / ".claude" / "settings.json").write_text(
-            json.dumps({"skipDangerousModePermissionPrompt": True}), encoding="utf-8"
-        )
-        argv = [
-            "worker_launch.py", "--window", "claude-worker",
-            "--dir", self.tmpdir.name, "--agent", "claude",
-        ]
-        stderr = io.StringIO()
-        with patch.dict(os.environ, {
-            "HOME": str(home),
-            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
-        }, clear=False), \
-             patch.object(worker_launch.sys, "argv", argv), \
-             patch.object(worker_launch, "window_exists", return_value=False), \
-             patch.object(worker_launch, "ensure_session", return_value=False), \
-             patch.object(worker_launch, "new_window"), \
-             patch.object(worker_launch, "send_text"), \
-             patch.object(worker_launch, "send_enter"), \
-             patch.object(worker_launch.time, "sleep"), \
-             contextlib.redirect_stdout(io.StringIO()), \
-             contextlib.redirect_stderr(stderr):
-            worker_launch.main()
-
+        # This home records no answer to either dialog and the launch is still silent.
+        # Both are answered without asking anyone: trust in the config file above, and the
+        # bypass permissions warning on the command line.
         self.assertEqual(stderr.getvalue(), "")
 
-    def test_a_launch_without_skip_permissions_does_not_warn_about_the_bypass_dialog(self):
-        # The warning is about --dangerously-skip-permissions. Without that flag there is
-        # no bypass dialog to warn about, and an unconditional warning would be noise.
-        home = self.tmp_path / "no-skip-home"
-        home.mkdir()
-        argv = [
-            "worker_launch.py", "--window", "claude-worker",
-            "--dir", self.tmpdir.name, "--agent", "claude", "--no-skip-permissions",
-        ]
-        stderr = io.StringIO()
+    def _claude_argv(self, command):
+        """The claude invocation inside a launch command, after quote removal and splitting.
+
+        shlex.split and not a substring check, because the settings payload is JSON with
+        braces, quotes and a colon in it. Unquoted, that payload keeps the same characters
+        and loses its double quotes, so a substring check on the JSON passes on a command
+        that hands Claude Code something it cannot parse.
+
+        This models quote removal and word splitting only. A shell also expands braces, and
+        shlex does not, so this cannot see the case where a second setting makes the payload
+        split for real. test_the_bypass_answer_reaches_claude_code_as_one_argument covers
+        that separately by pinning the quoted form itself.
+
+        The last `claude` token, because the sidecar arguments come first and carry the
+        window name twice. A worker window named `claude` would otherwise slice from there.
+        """
+        tokens = shlex.split(command)
+        return tokens[len(tokens) - 1 - tokens[::-1].index("claude"):]
+
+    def test_a_claude_worker_answers_the_bypass_permissions_dialog_on_its_command_line(self):
+        """The dialog that kills a worker, answered before it can appear.
+
+        Its highlighted default is "No, exit", so the injector's blind Enter exits the
+        session and the first message goes with it. Measured against Claude Code 2.1.226:
+        with this flag the session starts in bypass permissions mode and shows no dialog.
+        """
         with patch.dict(os.environ, {
-            "HOME": str(home),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
-        }, clear=False), \
-             patch.object(worker_launch.sys, "argv", argv), \
-             patch.object(worker_launch, "window_exists", return_value=False), \
-             patch.object(worker_launch, "ensure_session", return_value=False), \
-             patch.object(worker_launch, "new_window"), \
-             patch.object(worker_launch, "send_text"), \
-             patch.object(worker_launch, "send_enter"), \
-             patch.object(worker_launch.time, "sleep"), \
-             contextlib.redirect_stdout(io.StringIO()), \
-             contextlib.redirect_stderr(stderr):
-            worker_launch.main()
+        }, clear=False):
+            commands, _ = self._run_main("claude-worker", agent="claude")
 
-        self.assertNotIn("bypass permissions", stderr.getvalue())
+        claude_argv = self._claude_argv(commands[0])
+        self.assertIn("--dangerously-skip-permissions", claude_argv)
+        # The parsed value, not the string, so reformatting the payload cannot break this
+        # and a flag carrying the wrong key cannot pass it.
+        settings = json.loads(claude_argv[claude_argv.index("--settings") + 1])
+        self.assertIs(settings.get("skipDangerousModePermissionPrompt"), True)
 
-    def test_every_other_runtime_leaves_the_claude_config_alone(self):
+    def test_the_bypass_answer_reaches_claude_code_as_one_argument(self):
+        """Unquoted, the payload reaches Claude Code mangled and the dialog comes back.
+
+        Today it has no spaces, so word splitting leaves it whole and bash strips its double
+        quotes, which is enough to make the JSON unparseable. Add a second setting to the
+        constant and brace expansion splits it into two words as well.
+
+        Two assertions, because they fail on different mutations. The parsed one catches a
+        payload the shell mangled. The raw one pins the quoted bytes the shell is handed, so
+        it holds whatever the payload becomes, including a form shlex.split cannot model.
+        """
+        with patch.dict(os.environ, {
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("claude-worker", agent="claude")
+
+        claude_argv = self._claude_argv(commands[0])
+        self.assertEqual(claude_argv.count("--settings"), 1)
+        self.assertEqual(claude_argv[claude_argv.index("--settings") + 1], worker_launch.CLAUDE_BYPASS_SETTINGS_JSON)
+        self.assertIn(shlex.quote(worker_launch.CLAUDE_BYPASS_SETTINGS_JSON), commands[0])
+
+    def test_a_claude_worker_without_skip_permissions_gets_neither_flag(self):
+        # The dialog only appears with --dangerously-skip-permissions, so answering it
+        # without that flag would turn a setting off for a session that never asked.
+        with patch.dict(os.environ, {
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main(
+                "claude-worker", "--no-skip-permissions", agent="claude"
+            )
+
+        claude_argv = self._claude_argv(commands[0])
+        self.assertNotIn("--dangerously-skip-permissions", claude_argv)
+        self.assertNotIn("--settings", claude_argv)
+
+    def test_a_resumed_claude_worker_still_answers_the_bypass_dialog(self):
+        """A resumed session shows the same dialog, and its id has to survive the shell.
+
+        The id here carries a space and a semicolon on purpose. An ordinary id quotes to
+        itself, so it passes under the old unquoted concatenation as well and pins nothing.
+        A semicolon is the case that matters: unquoted, the shell reads it as a command
+        separator and runs whatever follows.
+        """
+        resume_id = "9d1f session; touch pwned"
+        with patch.dict(os.environ, {
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main(
+                "claude-worker", "--resume", resume_id, agent="claude"
+            )
+
+        claude_argv = self._claude_argv(commands[0])
+        self.assertIn("--settings", claude_argv)
+        self.assertEqual(claude_argv[claude_argv.index("--resume") + 1], resume_id)
+        self.assertIn(shlex.quote(resume_id), commands[0])
+
+    def test_every_other_runtime_leaves_the_claude_config_and_command_line_alone(self):
         extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
-            self._run_main("pi-worker", agent="pi")
+            commands, _ = self._run_main("pi-worker", agent="pi")
         self.pretrust["claude"].assert_not_called()
+        # None of these three takes a --settings flag, so carrying one would be an
+        # unrecognized argument and the worker would not start at all.
+        self.assertNotIn("--settings", commands[0])
 
-        self._run_main("codex-worker", agent="codex")
+        commands, _ = self._run_main("codex-worker", agent="codex")
         self.pretrust["claude"].assert_not_called()
         self.pretrust["codex"].assert_called_once_with(self.tmpdir.name)
+        self.assertNotIn("--settings", commands[0])
 
         with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"):
-            self._run_main("cursor-worker", agent="cursor")
+            commands, _ = self._run_main("cursor-worker", agent="cursor")
         self.pretrust["claude"].assert_not_called()
         self.pretrust["cursor"].assert_called_once_with(self.tmpdir.name)
+        self.assertNotIn("--settings", commands[0])
 
-    def test_a_launch_writes_no_settings_file_under_the_claude_projects_directory(self):
-        """~/.claude/projects holds transcripts, and Claude Code reads no settings there.
+    def test_a_launch_writes_no_settings_file_anywhere(self):
+        """The launcher answers the bypass dialog without writing a settings file.
 
-        HOME points at a temporary tree and the os patches are gone. Restoring the deleted
-        settings.json block makes this test fail, which was checked.
+        Two places it must not appear. ~/.claude/settings.json is the user's configuration
+        for every session on the machine. <work dir>/.claude/settings.local.json is a file
+        Claude Code reads the same key from, and it would sit untracked inside whatever
+        repository the worker was launched into, where nothing stops a worker committing
+        it. ~/.claude/projects holds transcripts and Claude Code reads no settings there.
+
+        HOME points at a temporary tree and the os patches are gone, so anything main()
+        writes under a home lands where this can see it.
         """
         home = self.tmp_path / "settings-probe-home"
         home.mkdir()
@@ -592,12 +639,14 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             # home= is what main() actually runs against. Patching HOME around this call
-            # instead would be overwritten by _run_main's own redirect, and both
-            # assertions below would then read a directory nothing ever wrote to.
+            # instead would be overwritten by _run_main's own redirect, and the assertions
+            # below would then read a directory nothing ever wrote to.
             self._run_main("claude-worker", agent="claude", home=home)
 
-        self.assertEqual(list(home.rglob("settings.json")), [])
+        self.assertEqual(list(home.rglob("settings*.json")), [])
         self.assertFalse((home / ".claude" / "projects").exists())
+        self.assertEqual(list(pathlib.Path(self.tmpdir.name).rglob("settings*.json")), [])
+        self.assertFalse((pathlib.Path(self.tmpdir.name) / ".claude").exists())
 
     def test_a_config_the_helper_cannot_use_still_launches_the_worker(self):
         """The helper never blocks the launch.
@@ -633,7 +682,10 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             worker_launch.main()
 
         self.assertEqual(len(commands), 1)
-        self.assertIn("claude --dangerously-skip-permissions", commands[0])
+        self.assertEqual(
+            self._claude_argv(commands[0])[:2],
+            ["claude", "--dangerously-skip-permissions"],
+        )
         self.assertIn("workspace trust", stderr.getvalue())
         self.assertEqual(config.read_text(encoding="utf-8"), "{not json")
 
@@ -1068,62 +1120,6 @@ class ClaudeWorkspaceTrustTest(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), before)
         self.assertEqual(sorted(entry.name for entry in self.tmp_path.iterdir()), listing)
         self.assertIn("no space left on device", warning)
-
-    def test_the_bypass_permissions_warning_fires_only_when_it_is_unanswered(self):
-        """Workers launch with --dangerously-skip-permissions.
-
-        Claude Code warns about that once per machine until the key is recorded, and that
-        dialog eats a pasted message exactly like the trust dialog does. Recording trust
-        alone would leave a fresh machine with the same lost first message.
-        """
-        settings = self.tmp_path / "settings.json"
-
-        for name, content, expected in (
-            ("no settings file at all", None, True),
-            ("the key is absent", json.dumps({"theme": "dark"}), True),
-            ("the key is false", json.dumps({"skipDangerousModePermissionPrompt": False}), True),
-            # Without the isinstance guard this still warns, but through the exception
-            # path, so the operator gets an AttributeError where a plain reason belongs.
-            ("the top level is not an object", "[]", True),
-            ("the key is true", json.dumps({"skipDangerousModePermissionPrompt": True}), False),
-        ):
-            with self.subTest(name):
-                if content is None:
-                    settings.unlink(missing_ok=True)
-                else:
-                    settings.write_text(content, encoding="utf-8")
-
-                stderr = io.StringIO()
-                with contextlib.redirect_stderr(stderr):
-                    worker_launch._warn_if_bypass_permissions_will_prompt(str(settings))
-
-                self.assertEqual(bool(stderr.getvalue()), expected)
-                if expected:
-                    self.assertIn("bypass permissions", stderr.getvalue())
-                    self.assertIn(str(settings), stderr.getvalue())
-                    self.assertNotIn("has no attribute", stderr.getvalue())
-                    self.assertIn(
-                        "answer it before sending the worker its first message",
-                        stderr.getvalue(),
-                    )
-                    # The warning says what it did not check, so a machine that answered
-                    # the dialog in project or managed settings knows why it is wrong.
-                    self.assertIn("Only the user settings file was checked",
-                                  stderr.getvalue())
-
-    def test_settings_that_do_not_parse_are_reported_as_the_reason(self):
-        # A settings file Claude Code cannot read is one it cannot read the key from
-        # either, so this is the case most likely to prompt. Staying quiet here would be
-        # silence exactly when the warning is true.
-        settings = self.tmp_path / "settings.json"
-        settings.write_text("{not json", encoding="utf-8")
-
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            worker_launch._warn_if_bypass_permissions_will_prompt(str(settings))
-
-        self.assertIn("could not be read", stderr.getvalue())
-        self.assertIn("bypass permissions", stderr.getvalue())
 
     def test_a_cleanup_that_itself_fails_does_not_hide_the_real_error(self):
         # Best-effort cleanup. If removing the stray temporary file raised, that error
