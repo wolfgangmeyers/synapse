@@ -683,7 +683,7 @@ Workflow:
 3. Run robot-review on your changes (read ~/.agents/skills/robot-review/SKILL.md for instructions)
 4. Fix any Blocking or Should Address findings, re-run tests
 5. Commit: "<commit message>"
-6. Create a draft PR targeting <target-branch>
+6. Create a draft PR targeting <target-branch>. Draft-by-default applies only to new PRs opened by agents; if a PR is already ready for review, do not move it back to draft unless Wolfgang explicitly asks after it became ready.
 7. Mail supervisor: implementation and review complete, include the robot-review focus coverage ledger and summarize review findings
 
 Mail supervisor if you get stuck or need a decision.
@@ -1807,7 +1807,8 @@ The message after compaction should carry forward anything the worker needs to k
 2. Fetch inline review comments before deciding: `gh api repos/<org>/<repo>/pulls/<N>/comments`.
 3. Compare every human approval's `commit_id` to the current `headRefOid`. If the latest approval is on an older commit but the PR is open, green, and mergeable, do **not** keep marking the task as externally blocked. Classify it as `stale-approval decision required`.
 4. If the transcript or standing-order-derived task gives scoped merge authorization for that PR, complete the normal merge gates and merge. If authorization is ambiguous, escalate once with the exact blocker: current head, latest approval commit, review requests, checks, merge state, and unresolved inline comments. Do not reschedule hourly "waiting for review" reminders for a PR that is otherwise decidable.
-5. When a dependency PR merges, immediately clear the dependent task blocker and re-check downstream work. A merged SDK/support PR should trigger the cookbook/demo update path in the same pass.
+5. Treat draft-by-default as a creation rule for new agent-opened PRs. If live state says an existing PR is ready for review, assume a human made it ready. Do not move it back to draft because an older task note says "keep draft" or because draft is the agent default. Report unexpected draft/ready mismatches unless Wolfgang explicitly instructed the mutation after the observed ready action.
+6. When a dependency PR merges, immediately clear the dependent task blocker and re-check downstream work. A merged SDK/support PR should trigger the cookbook/demo update path in the same pass.
 
 **⛔ MANDATORY GATE — Check inline review comments before authorizing a merge.** `mergeStateStatus=CLEAN` and `reviewDecision=APPROVED` only mean required checks pass — they do NOT mean reviewer feedback was addressed. Before every merge authorization, run `gh api repos/<org>/<repo>/pulls/<N>/comments` and verify each inline comment was either resolved in a commit, explicitly deferred (linked to a new ticket), or answered. Greptile/Bugbot post inline; human reviewers often do too. Missing this step = merging unaddressed feedback.
 

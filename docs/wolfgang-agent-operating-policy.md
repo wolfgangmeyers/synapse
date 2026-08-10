@@ -628,7 +628,8 @@ What this produced on 2026-08-07, from 52 findings across six human reviews: onl
 
 He asked for this on 2026-08-07 after two PRs sat green for hours with nobody looking. Two separate mistakes caused it:
 
-- **A draft PR does not get reviewed.** Mark it ready when the work is done. Draft is for work that is genuinely unfinished or waiting on a decision, and say which when leaving one that way.
+- **A draft PR does not get reviewed.** New PRs opened by agents default to draft. Mark an agent-opened PR ready only when Wolfgang explicitly says to. Draft is for work that is genuinely unfinished or waiting on a decision, and say which when leaving one that way.
+- **A ready PR stays ready.** If the PR is already ready for review, assume a human made that choice. Do not move it back to draft because an older note says "keep draft" or because draft is the default for new agent PRs. A sweep that finds a draft/ready mismatch reports it; it does not mutate GitHub state unless the instruction to mutate is explicit and newer than the observed ready state.
 - **A PR with no requested reviewer does not get reviewed either.** Add the reviewer when the PR is opened, not when someone notices the silence.
 
 Check both before reporting a PR as waiting on review. "No reviews yet" usually means nobody was asked.
