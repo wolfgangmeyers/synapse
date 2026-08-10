@@ -558,9 +558,9 @@ This is a specific case of "Measure the thing you shipped, not the source you bu
 
 ### A mutation writes to the real path the code names
 
-Caught on 2026-08-09. A mutation table over a launcher script included "write to the settings file in the home directory." The mutation ran against a copy of the source, and path expansion resolves against the real home directory whatever copy of the source it came from. So the write landed in the live global config and truncated it from three thousand bytes to forty. That would have silently disabled message delivery and every other startup hook for every new session on that machine. A backup existed and the file was rebuilt from it.
+Caught on 2026-08-09. A mutation table over a launcher script included "write to the settings file in the home directory." The mutation ran against a copy of the source. Path expansion still resolved to the real home directory. So the write landed in the live global config and truncated it from three thousand bytes to forty. That would have silently disabled message delivery and every other startup hook for every new session on that machine.
 
-When the code under test writes to a home directory or any other absolute path, redirect the environment variable that resolves that path, or point the test at a temporary directory, before you run a single mutation. Copying the source sandboxes nothing. Then confirm the redirection held by checking that the real location is untouched. A mutation that escapes writes successfully and leaves no error behind, so the run looks the same either way.
+Check where the code under test writes before you start. If it resolves a home directory or any other absolute path, redirect that path to a temporary directory first. A copy of the source writes to the same absolute path the original does. Then read the real location and confirm it still holds what it held before. A mutation that escapes the redirect still writes, and still reports success. The run reads as clean.
 
 See "Restore only what you mutated" above for putting the file back afterward.
 
