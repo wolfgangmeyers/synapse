@@ -1,8 +1,10 @@
 # Activity indicators: known issues
 
 Open problems in `hooks/claude-activity.sh`, `activity_tail.mjs`, `activity_state.mjs` and the
-activity parts of `claude_sidecar.mjs`, as of 2026-08-09. Each one says what it breaks, what it
-looks like from outside, and what the evidence is, because every item here presents as working.
+activity parts of `claude_sidecar.mjs`, as of 2026-08-09, with the duplicate-registration sections
+added on 2026-08-10. Each one says what it breaks, what it looks like from outside, and what the
+evidence is, because every item here presents as working. One section is marked Fixed and kept: its
+residuals are open, and its reasoning is what someone changing that code needs.
 
 Read `tests/fixtures/claude-hooks/README.md` first. The fixtures are real captured payloads, and
 most of these are testable against them.
@@ -35,8 +37,9 @@ that state is gone.
 a second. Every activity frame sets `deliveryPaused` from the state it carries (`:1095`), and both
 exits of `updateAgentActivity` clear the pause and offer the queued messages when the previous state
 was compacting (`:1108` and `:1115`). A new sidecar ticks every `ACTIVITY_POLL_MS`, 1000 ms
-(`claude_sidecar.mjs:19`, `:410`), and publishes on its first tick. So relaunching the worker is
-enough. It stays paused for good only for a client that registers and sends no activity at all.
+(`claude_sidecar.mjs:19`, and the activity interval in `runCli`), and publishes on its first tick.
+So relaunching the worker is enough. It stays paused for good only for a client that registers and
+sends no activity at all.
 
 **What it looks like.** An agent showing compacting with nothing running. Mail to it is accepted and
 queued, and `mailbox_send.py` reports success, so the sender sees nothing wrong until the queue
@@ -98,6 +101,119 @@ environment. `--activity-dir` overrides only the sidecar's.
 sidecar expects one, no records, no error, no log.
 
 **Why it is real.** Two processes, two environments, one variable, and nothing compares them.
+
+## The pane marker guards a pane, and a duplicate registration is about a window
+
+**Fixed on 2026-08-10. Kept because the residuals below are open and because the reasoning is what
+someone changing this code will need.**
+
+Every Claude session self-registers a presence sidecar at `SessionStart`, so a managed worker showed
+up twice: once as its mailbox agent and once as its own session, at a cost of two processes each.
+Six existed at one time on 2026-08-10, listed in `~/.mecha-developer/router.jsonl` as
+`session.supervisor.36687`, `session.claude-activity-indicators.37066`, `session.van-756-rfc.37503`,
+`session.van-758-project-model.49106`, `session.van-768-calendar-org.49288` and
+`session.van-770-eval-gate.36934`.
+
+**What the six actually show.** Every managed counterpart was registered and renewing its lease at
+the moment its duplicate appeared, by between 0.4 and 8.4 seconds. Measured from `router.jsonl`,
+each presence id against the last event of its managed counterpart before it: `supervisor` 1.97 s,
+`claude-activity-indicators` 8.36 s, `van-756-rfc` 0.38 s, `van-758-project-model` 1.90 s,
+`van-768-calendar-org` 1.45 s, `van-770-eval-gate` 2.31 s. So a check against the router at startup
+would have suppressed all six.
+
+Router times here are UTC, because that is what `router.jsonl` records. Process and commit times are
+local, seven hours behind. The same split is noted at the top of this page.
+
+**Why the marker did not stop them is a weaker claim than it looks.** Two of the six are explained
+exactly: the `supervisor` sidecar (pid 77377) started 2026-07-28 15:55 local and the
+`claude-activity-indicators` sidecar (pid 90186) started 2026-08-09 09:10 local, while the code that
+writes a marker was authored in `fe22132` at 2026-08-09 10:44 local. Both processes predate it, so
+neither could ever have written one, and neither `pane%1.watch` nor `pane%60.watch` exists. Both
+were launched from their own panes, `%1` and `%60`, so an explanation in terms of a sidecar started
+from someone else's pane does not apply to them. For the other four, whose duplicates appeared at
+17:35 and 17:56 UTC, the sidecars running then have since been replaced and their markers cannot be
+recovered, so why those panes held no marker is **not established**.
+
+What is established is structural and does not depend on the six. The marker is keyed to a pane and
+the duplication is about a window. It is written only after the managed sidecar connects, so a
+`SessionStart` inside that window can arrive before it exists. It is absent for any sidecar started
+before `fe22132`, and for any started from a pane other than the one it watches. And two sidecars in
+one pane write the same path.
+
+A presence sidecar now asks the router directly, on `GET /v1/agents`, whether an agent with its tmux
+window name is connected: before registering, and every 10 s after. The marker check stays. It is
+free, it catches the common case earlier, and it is what stops an unwatched session doing any work.
+A managed worker launched through `worker_launch.py` on 2026-08-10 never spawned a presence sidecar
+at all, because the managed sidecar won the race and wrote `pane%130.watch` first, so the hook
+stopped it before the router was asked. That worker appeared once, with one sidecar process, and
+`presence-suppressed.log` holds no record for it.
+
+**A suppressed session leaves one line in
+`~/.mecha-developer/claude-sidecars/presence-suppressed.log` and nothing else.** No router entry, no
+process, no marker, and no log of its own, because a presence sidecar removes its own log on every
+exit it controls. A `SIGKILL` leaves that log behind, so the shared file is the only one always
+written. A router that could not answer the question is recorded there too, once per process,
+because otherwise an unreachable router is indistinguishable from a free window and the check is
+silently off.
+
+**Once suppressed, nothing brings that session back.** No presence sidecar respawns for the pane
+until the next `SessionStart`. If the managed sidecar dies while its Claude keeps running, that
+window now has no representation at all, where before this change the duplicate happened to cover
+it. That is the intended trade, since a dead managed sidecar also means no mail and is the louder
+failure.
+
+## Marker ownership when two sidecars hold one pane
+
+`worker_launch.py` starts the managed sidecar inside the worker's own pane, so its marker path is
+byte-identical to the one a presence sidecar in that pane writes. For the seconds before the
+presence sidecar notices the managed one, both are live and both want that file.
+
+A sidecar removes the marker only while it still names that sidecar, and a presence sidecar does not
+take over a marker held by a live foreign owner. A managed sidecar still takes one over
+unconditionally, because one that yielded would never write a marker at all and the presence sidecar
+holding it removes it on the way out. Either rule alone still loses the file.
+
+The marker is written to a temporary name and renamed, because every ownership decision here and in
+`sweepStaleArtifacts` is a read of it and `writeFileSync` truncates before it writes. A concurrent
+reader could otherwise see an empty marker, read it as owned by nobody with pid `NaN`, and delete a
+live owner's marker as stale. A temporary left behind by a killed process is swept on the pid in its
+own name.
+
+**What that leaves uncovered.** A managed sidecar restarted by hand from a pane belonging to some
+other agent still takes that pane's marker and removes it on exit, and the agent that owned the pane
+goes dark for the rest of its session. That is not new and not a regression; it is the same
+pane-versus-window confusion as above, seen from the other side, and it is why the recovery command
+in the machine-local `~/CLAUDE.md` should be run from the pane it is recovering.
+
+`stop()` reads the marker and then removes it, which is a check and then an act rather than one
+atomic step, so a managed sidecar renaming its marker into place between the two loses it. The
+window is microseconds against a poll of up to 10 s, and there is no atomic compare-and-delete to
+reach for.
+
+And a presence sidecar that yields the marker at startup never tries again, because `start()` runs
+once. If the owner it yielded to exits and removes the file, that session stays registered with an
+indicator that can never light. Re-asserting the marker on the existing one-second tick, but only
+when it is missing, would close that and the hand-restart case above. It was left out as scope.
+
+## A second pane in a managed worker's window is now suppressed
+
+`tmuxWindowName()` resolves `#{window_name}`, so every pane in a window answers with the same name.
+A Claude session opened by hand in a second pane of a managed worker's window therefore matches that
+worker's agent id and stands down. Before this change it appeared as its own entry. The dotted id
+space keeps two ad hoc sessions apart, but it does nothing here, because the collision is an ad hoc
+session against a managed one.
+
+The same holds across tmux sessions. Coverage compares a bare window name, and window names are
+unique only within a session, so a hand-opened Claude in a window named after a live managed worker
+is suppressed even from a different tmux session. Managed workers all live in `mecha`, so also
+reading `#{session_name}` and requiring a match would narrow it.
+
+## A presence session whose window name cannot be resolved can never be suppressed
+
+`tmuxWindowName()` returns nothing when `tmux display-message` fails, and the session then registers
+as `session.session.<pid>`. It can never equal a managed agent id, so it is never suppressed, and it
+yields its pane marker to any live managed owner, so nothing ever writes activity for it. A
+duplicate entry with a dot that cannot light. No capture has produced one; it follows from the code.
 
 ## A presence sidecar outlives its session
 

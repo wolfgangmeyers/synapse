@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { isCliEntrypoint } from "../../../../harness/cli_entrypoint.js";
 import { rotateSizeCappedLog } from "../../../../harness/log_rotation.js";
-import { createMailboxClient, assertAgentId, assertPresenceAgentId } from "../../../../pi-extensions/mailbox-client.js";
+import { createMailboxClient, assertAgentId, assertPresenceAgentId, routerHttpUrl } from "../../../../pi-extensions/mailbox-client.js";
 import { createActivityTailer } from "./activity_tail.mjs";
 import { createActivityState } from "./activity_state.mjs";
 
@@ -27,6 +27,21 @@ export const ACTIVITY_POLL_MS = 1_000;
 // actually gives up. Without this, every SessionStart in a pane spawned another process that hung
 // forever holding nothing, which is how nine of them accumulated and had to be killed by hand.
 export const PRESENCE_CONNECT_TIMEOUT_MS = 15_000;
+// How often a registered presence session re-asks whether a managed sidecar has taken over its
+// window. Nothing in the router retires a duplicate on its own: connectedAgentsSnapshot
+// (harness/router.js:1140) lists every session with an open socket and a live lease, filtering at
+// :1145, so a duplicate stays visible for as long as it is connected and this is its only bound.
+export const PRESENCE_COVERAGE_POLL_MS = 10_000;
+// Bounds the GET so a wedged router cannot stall the sidecar's own startup.
+export const PRESENCE_COVERAGE_TIMEOUT_MS = 2_000;
+// One shared, size-capped file rather than a log per suppressed session. A presence log is removed
+// when its process exits, so without this a suppressed session would leave nothing at all behind:
+// no router entry, no process, no marker, no log, and no way to answer "why did my session not
+// appear". It is the only log here with more than one writer process. Appends are O_APPEND so the
+// records stay intact; rotateSizeCappedLog is check-then-rename, so two processes crossing the cap
+// together can drop a generation, which at one record per suppressed session against 256 KiB is a
+// thing that has to be said rather than a thing that will happen.
+export const PRESENCE_SUPPRESSED_LOG_ID = "presence-suppressed";
 
 // Presence ids are dotted so they cannot collide with a managed worker id, which is a tmux window
 // name and can never contain a dot. Two sessions in identically named windows differ by pid.
@@ -40,6 +55,51 @@ export function tmuxWindowName(pane = process.env.TMUX_PANE) {
   } catch {
     return undefined;
   }
+}
+
+// Whether a session is already represented is a question about the router's agent list, so the
+// router is what answers it. The alternative, scanning for a managed sidecar process locally, closes
+// the startup race better but answers a different question: a sidecar that spawned and never
+// registered, or gave up registering, would suppress the presence session and leave it invisible,
+// which is the failure this feature exists to prevent.
+//
+// Returns a Set of connected agent ids, or undefined when the answer is unavailable. Unavailable is
+// deliberately not an empty set: the caller registers on it.
+export async function fetchConnectedAgentIds({
+  routerUrl = DEFAULT_ROUTER_URL,
+  fetchImpl = fetch,
+  timeoutMs = PRESENCE_COVERAGE_TIMEOUT_MS,
+} = {}) {
+  try {
+    // routerHttpUrl validates a loopback base and strips a trailing slash. Concatenating instead
+    // would turn a MECHA_ROUTER_URL ending in "/" into //v1/agents, which the router does not
+    // route, so every answer would be a 404 read as unavailable and the check silently off.
+    const response = await fetchImpl(`${routerHttpUrl(routerUrl)}/v1/agents`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response?.ok) return undefined;
+    const body = await response.json();
+    if (!Array.isArray(body?.agents)) return undefined;
+    return new Set(body.agents.map((agent) => agent?.agent_id).filter((id) => typeof id === "string"));
+  } catch {
+    return undefined;
+  }
+}
+
+// Exact equality only. The router's list holds presence ids too, and a prefix or substring test
+// would let two ad hoc sessions in identically named windows suppress each other, which is the
+// collision the dotted id space exists to keep apart.
+export async function managedAgentPresent({ window, onUnavailable = () => {}, ...options } = {}) {
+  if (typeof window !== "string" || window.length === 0) return false;
+  const connected = await fetchConnectedAgentIds(options);
+  if (connected === undefined) {
+    // Unavailable is not absent, and the caller has to be able to tell them apart: both register,
+    // so without this an unreachable router looks exactly like a free window and the check is off
+    // with the duplicates it was meant to stop as the only evidence.
+    onUnavailable();
+    return false;
+  }
+  return connected.has(window);
 }
 
 export function presenceAgentId({ window, pid }) {
@@ -186,6 +246,42 @@ export function createTmuxPaneMonitor({
   return { close: () => clearIntervalImpl(timer) };
 }
 
+// Watches for a managed sidecar taking over this session's window after it has already registered.
+// Built like the tmux monitors above, with injectable timers, because the thing worth testing is
+// when it fires and when it stays quiet, not that it can wait ten seconds.
+export function createCoverageMonitor({
+  intervalMs = PRESENCE_COVERAGE_POLL_MS,
+  present,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+  onCovered,
+} = {}) {
+  if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) throw new TypeError("intervalMs must be a positive safe integer");
+  if (typeof present !== "function") throw new TypeError("present must be a function");
+  if (typeof onCovered !== "function") throw new TypeError("onCovered must be a function");
+  // One poll at a time. The fetch has its own 2 s bound and --coverage-poll-ms can be set below
+  // that, so without this a slow router would let polls overlap and stand the session down twice.
+  let polling = false;
+  const timer = setIntervalImpl(() => {
+    if (polling) return;
+    polling = true;
+    // runCli parks on a promise that never resolves, so an unhandled rejection here would end the
+    // process. For a presence session that costs its own entry and its indicator; it carries no
+    // mail, because a presence client builds no injector. An answer that never arrives is not
+    // coverage either way.
+    Promise.resolve()
+      .then(() => present())
+      .then((covered) => {
+        polling = false;
+        if (!covered) return;
+        clearIntervalImpl(timer);
+        onCovered();
+      })
+      .catch(() => { polling = false; });
+  }, intervalMs);
+  return { close: () => clearIntervalImpl(timer) };
+}
+
 export function createClaudeSidecar({ agentId, window = agentId, client, inject, log = () => {} } = {}) {
   assertAgentId(agentId);
   assertAgentId(window);
@@ -292,17 +388,27 @@ function parseArgs(argv) {
     else if (arg === "--max-log-bytes") result.maxLogBytes = Number(next());
     else if (arg === "--activity-dir") result.activityDir = next();
     else if (arg === "--presence-only") result.presenceOnly = true;
+    else if (arg === "--coverage-poll-ms") result.coveragePollMs = Number(next());
     else throw new Error(`unknown argument: ${arg}`);
   }
+  // The tmux window name, resolved once. It is both what the presence id is built from and the name
+  // a managed sidecar for this window would be registered under, which is what makes the coverage
+  // check possible at all. A rename after this point is not followed: the id is fixed too, and the
+  // two would otherwise disagree about which window this session is in.
+  if (result.presenceOnly) result.coverageWindow = result.window ?? tmuxWindowName();
   // A self-registered session derives its own id: it is the only thing that knows its pid, and the
   // pid is what keeps two sessions in identically named windows apart.
   if (!result.agentId && result.presenceOnly) {
-    result.agentId = presenceAgentId({ window: result.window ?? tmuxWindowName(), pid: process.pid });
+    result.agentId = presenceAgentId({ window: result.coverageWindow, pid: process.pid });
   }
   if (!result.agentId) throw new Error("--agent-id is required");
   if (!result.window) result.window = result.agentId;
   if (!Number.isSafeInteger(result.maxLogBytes) || result.maxLogBytes <= 0) {
     throw new Error("--max-log-bytes must be a positive integer");
+  }
+  if (result.coveragePollMs === undefined) result.coveragePollMs = PRESENCE_COVERAGE_POLL_MS;
+  if (!Number.isSafeInteger(result.coveragePollMs) || result.coveragePollMs <= 0) {
+    throw new Error("--coverage-poll-ms must be a positive integer");
   }
   return result;
 }
@@ -361,6 +467,40 @@ export async function runCli(argv = process.argv.slice(2)) {
     client.close();
     process.exit(0);
   };
+  // One question, asked from two places, with the "router could not answer" case recorded once.
+  // Without that record an unreachable router, a router with no /v1/agents route, or a body this
+  // client cannot parse all read exactly like "nobody holds this window", and the check is off with
+  // the duplicates it was meant to stop as the only evidence. Once per process, because the monitor
+  // asks again every poll for as long as the session lives.
+  let reportedCoverageUnavailable = false;
+  const coverageCheck = () => managedAgentPresent({
+    window: args.coverageWindow,
+    routerUrl: args.routerUrl,
+    onUnavailable: () => {
+      // Once per process: the monitor asks again every poll for the life of the session, and this
+      // goes to the shared log because stop() removes this process's own. Same argument as the
+      // suppression record, and the same failure without it: a check that is silently off.
+      if (reportedCoverageUnavailable) return;
+      reportedCoverageUnavailable = true;
+      writeSharedPresenceRecord("presence_coverage_unavailable");
+    },
+  });
+  // Records that outlive this process. A presence sidecar removes its own log on the way out, so
+  // anything worth reading afterwards has to go somewhere else.
+  const writeSharedPresenceRecord = (event, signal) => {
+    try {
+      createBodyFreeLogger({ agentId: PRESENCE_SUPPRESSED_LOG_ID, logDir: args.logDir, maxBytes: args.maxLogBytes })
+        .write(event, { window: args.coverageWindow, agent_id: args.agentId, signal });
+    } catch {
+      // Standing down, or noting that it could not be decided, must not depend on saying so.
+    }
+  };
+  // This session is already represented, so it stands down. The record goes to the shared log
+  // because stop() removes this process's own, and this is the one event someone will look for.
+  const suppressed = (reason) => {
+    writeSharedPresenceRecord("presence_suppressed", reason);
+    stop(reason);
+  };
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
   // The monitor lives for the whole process; stop() is the only exit path.
@@ -378,6 +518,10 @@ export async function runCli(argv = process.argv.slice(2)) {
     });
   }
   if (args.presenceOnly) {
+    // A managed worker already holds a slot under its window name, and a second one for the same
+    // window is the duplicate this check exists to stop: two entries in the list and two processes
+    // per worker. Asked before registering, so the usual case never claims a lease at all.
+    if (await coverageCheck()) suppressed("managed_sidecar_present");
     // The router answers a losing lease claim with silence rather than an error, so waiting on it
     // is waiting on something that may never arrive. Give up and exit: a session that cannot
     // register is still a working session, and a process that lingers is not.
@@ -414,6 +558,22 @@ export async function runCli(argv = process.argv.slice(2)) {
     if (args.presenceOnly) process.exit(0); // presence with no activity has no purpose
   }
 
+  // A managed worker starts its sidecar and its agent from one shell command, so a SessionStart can
+  // fire before the managed sidecar has registered and the check above then reads "not covered".
+  // This is what corrects that: the duplicate lasts at most one poll and needs no intervention. It
+  // also covers a managed sidecar restarted under a session that has already registered. Neither
+  // case is what produced the six duplicates of 2026-08-10 -- the startup check alone would have
+  // caught all six -- and no instance of either has been observed in the retained router log. Both
+  // follow from how worker_launch.py and the documented sidecar restart work. See
+  // ACTIVITY_DECISIONS.md, "The ordering question".
+  if (args.presenceOnly) {
+    createCoverageMonitor({
+      present: coverageCheck,
+      intervalMs: args.coveragePollMs,
+      onCovered: () => suppressed("managed_sidecar_appeared"),
+    });
+  }
+
   await new Promise(() => {});
 }
 
@@ -423,9 +583,16 @@ export async function runCli(argv = process.argv.slice(2)) {
 if (isCliEntrypoint(import.meta.url)) {
   runCli().catch((error) => {
     try {
-      const agentIdIndex = process.argv.indexOf("--agent-id");
-      const agentId = agentIdIndex >= 0 ? process.argv[agentIdIndex + 1] : "claude-sidecar";
-      createBodyFreeLogger({ agentId }).write("sidecar_fatal", { state: "failed" });
+      // --log-dir is honoured here too. Without it the one record that explains a sidecar dying
+      // goes somewhere the operator did not choose, and a test that expects a fatal exit writes
+      // into the live log directory no matter what it passes.
+      const argvValue = (flag) => {
+        const index = process.argv.indexOf(flag);
+        return index >= 0 ? process.argv[index + 1] : undefined;
+      };
+      const agentId = argvValue("--agent-id") ?? "claude-sidecar";
+      createBodyFreeLogger({ agentId, logDir: argvValue("--log-dir") ?? DEFAULT_LOG_DIR })
+        .write("sidecar_fatal", { state: "failed" });
     } catch {
       // Last-resort stderr still omits message bodies.
       console.error(`claude sidecar failed: ${error.message}`);

@@ -35,9 +35,11 @@ marker="$MECHA_ACTIVITY_DIR/pane${TMUX_PANE}.watch"
 
 # A session with nothing watching it cannot appear in the router UI, because appearing means
 # holding a slot with the router and only managed workers get one. So on SessionStart, and only
-# then, start a presence sidecar for this pane. It registers under a dotted id that no managed
-# worker can have, and it builds no injector, so it can show activity and can never become a
-# terminal that mail is pasted into.
+# then, start a presence sidecar for this pane. If it registers, it does so under a dotted id that
+# no managed worker can have, and it builds no injector, so it can show activity and can never
+# become a terminal that mail is pasted into. It may also stand down without registering: it asks
+# the router first whether this window is already represented, which is the check this marker test
+# cannot make. See ACTIVITY_KNOWN_ISSUES.md.
 #
 # Once per session and never on the per-tool-call path. If a live sidecar is already watching this
 # pane, this does nothing.

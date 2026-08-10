@@ -5,8 +5,9 @@ Why the activity path is built the way it is. `hooks/claude-activity.sh`, `activ
 else was on the table and why it lost, which is what someone needs who wants to change one of them.
 
 Taken from the plan and spec for this work before those files were cleared. Everything here was
-decided on 2026-08-09 against Claude Code 2.1.226. The measurements behind most of it are in
-`tests/fixtures/claude-hooks/`, and its README maps each probe to what it shows.
+decided on 2026-08-09 against Claude Code 2.1.226, apart from the sections dated later. The
+measurements behind most of it are in `tests/fixtures/claude-hooks/`, and its README maps each probe
+to what it shows.
 
 Decisions that were made and then overturned are marked **Reversed**, with the original reasoning
 kept. Read those first. The first answer was reasonable every time and the evidence still went the
@@ -281,6 +282,118 @@ are serial with each other.
 **Fixtures are a deliverable.** The captures moved out of the scratchpad into
 `tests/fixtures/claude-hooks/` and are committed, so the hook tests feed what Claude Code really
 sent.
+
+## Not registering twice
+
+Added 2026-08-10, after six presence sessions were found duplicating six managed agents. The problem
+and its evidence are on the known-issues page; this is why the fix is shaped the way it is.
+
+**Ask the router.** The defect is two entries in the router's agent list, and the router is the only
+thing that knows what is in that list. A presence sidecar reads `GET /v1/agents` and looks for its
+own tmux window name.
+
+**Scan for a managed sidecar process instead. Rejected.** It closes the startup race completely,
+since `worker_launch.py` backgrounds the sidecar before it starts the agent, so the process exists
+before Claude does. It was rejected because it answers a different question. A sidecar process that
+is running and has not registered, or has given up registering, would suppress the presence session
+and leave it invisible, which is the failure the feature exists to prevent, and both of those states
+are already on the known-issues page. It also matches on a command line, so it breaks quietly when
+an argument moves.
+
+**Check the marker harder. Rejected.** The marker is the guard that already failed. It is keyed to a
+pane rather than a window, it is written only after the managed sidecar connects, and both sidecars
+in one pane write the same path.
+
+**Put the check in the hook. Rejected.** The hook's first rule is that it never makes a network
+call, and it fires once, so it cannot notice a managed sidecar that appears later.
+
+**Make the router refuse a presence id whose embedded window is connected. Rejected.** It puts a
+naming convention into the protocol layer, needs a router restart to deploy, and leaves the presence
+process running and holding nothing.
+
+**Exact id equality, never a prefix or a substring.** The router's list holds presence ids too. A
+substring test would let two ad hoc sessions in identically named windows suppress each other, which
+is the collision the dotted id space exists to keep apart.
+
+**Unavailable is not absent.** A router that cannot be reached, a non-2xx, an unparseable body: all
+register. A session that cannot appear is worse than a duplicate, and a router that will not answer
+this GET will not accept the registration either, so the existing 15 s connect timeout ends it
+anyway. The caller is told which of the two happened, because otherwise a check that is silently off
+looks exactly like a healthy one.
+
+### The ordering question, and why the answer is a repeated check
+
+A managed worker starts its sidecar and its agent from one shell command, so a `SessionStart` can
+fire before the managed sidecar has registered. The check before connecting then reads "not covered"
+and the presence session registers. That window is not closed, it is corrected: the same question is
+asked again every 10 s, and the session stands down the first time the answer is yes.
+
+10 s was chosen because nothing else bounds it. `connectedAgentsSnapshot` (`harness/router.js:1140`,
+filtering at `:1145`) lists every session with an open socket and a live lease, so a duplicate stays
+visible for as long as it is connected.
+
+**Nothing observed justifies the repeated check, and it is kept anyway. Read that before removing
+it.** The six duplicates do not support it: every managed counterpart was registered and renewing
+when its duplicate appeared, so the startup check alone would have caught all six. Nor does anything
+else in the retained log. Sweeping `router.jsonl.1` and `router.jsonl` together, 2026-08-09T01:21Z
+to 2026-08-10T19:12Z, no managed agent ever registered while a presence session for the same window
+was live. The four `van-*` presence sessions disconnected at 18:04:21, 18:04:22, 18:04:24 and
+18:10:19 UTC and their managed sidecars re-registered 16 to 22 seconds afterwards, which is a window
+being torn down and relaunched rather than a sidecar restarting under a live session.
+
+What justifies it is structural. The launch race above follows from `worker_launch.py`, and the
+documented sidecar restart can be run at any time, including under a session that has already
+registered. Both follow from the code. Neither has been caught happening, and this page says so
+rather than borrowing the six as evidence for something they do not show.
+
+### Marker ownership, and why the two rules are asymmetric
+
+Both sidecars in a shared pane write the same marker path, so a sidecar removes the marker only
+while it still names that sidecar, and a presence sidecar does not take over a marker held by a live
+foreign owner. Either rule alone still loses the marker: with only the first, the presence sidecar
+clobbers the file and then owns what it deletes; with only the second, its exit removes the file
+unconditionally. Losing it is not cosmetic, because the hook exits before reading stdin when there
+is no marker, nothing rewrites it, and that worker's indicator is dead for the rest of its session
+with nothing logged.
+
+**A managed sidecar never yields,** because one that did would never write a marker at all, and the
+presence sidecar holding it removes it on the way out. The reason is not that two managed sidecars
+cannot share a pane. They can, and the residual that follows is on the known-issues page.
+
+**Presence is read off the agent id, not carried as a separate flag.** A presence id is dotted and a
+worker id cannot be, and the two validators in `pi-extensions/mailbox-client.js` are complements, so
+this is enforced rather than a convention. The inbox rule in `stop()` already read it that way. A
+flag alongside it would have been a second axis for one fact, and a caller that forgot to pass it
+would have made a managed sidecar yield its own marker with every test still green.
+
+**Liveness is checked, not inferred from the sweep.** `start()` sweeps markers whose owning process
+is gone before it writes, so it is tempting to treat whatever survived as live. The sweep swallows
+its own failures and skips a marker it cannot read, so a presence sidecar reasoning that way would
+yield to a dead owner and go dark for its whole life. `isProcessAlive` is called on the owner
+directly.
+
+**The marker is written to a temporary name and renamed.** Every ownership decision is a read of
+that file, and `writeFileSync` truncates before it writes, so a concurrent reader could see an empty
+marker, parse it as owned by nobody with pid `NaN`, and delete a live owner's marker as stale. There
+is no repair path: `start()` is the only writer and it runs once. An empty marker gets no special
+case anywhere, because it matches no agent id and is never alive, so every reader already reaches
+the right answer and a guard would be a branch no test could distinguish.
+
+### A suppressed session still says so
+
+A presence log is removed when its process exits, so a suppressed session would otherwise leave
+nothing at all behind and the "nothing logs" complaint on the known-issues page would gain another
+entry. One shared, size-capped file, `claude-sidecars/presence-suppressed.log`, written through the
+existing `createBodyFreeLogger` under a fixed id, so retention is the same two-generation rotation
+every other log here uses rather than a new mechanism.
+
+More than one process writes it, which is not unprecedented: the fatal handler falls back to the id
+`claude-sidecar` for any sidecar launched without `--agent-id`, and every presence sidecar is.
+Appends are `O_APPEND`, so records stay intact. `rotateSizeCappedLog` is check-then-rename, so two
+processes crossing the cap together lose both generations rather than one: the first renames the
+live file over `.1`, and the second removes that `.1` and finds nothing left to rename. At one
+record per suppressed session against 256 KiB that is worth stating rather than worth solving.
+Writing it is wrapped, because standing down must not depend on being able to say so.
 
 ## Left open
 
