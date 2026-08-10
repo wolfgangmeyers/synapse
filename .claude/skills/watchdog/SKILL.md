@@ -12,13 +12,13 @@ The LLM-based Watchdog is separate from the deterministic **Priority Handoff Mon
 
 When you first load this skill in a watchdog window, immediately verify that the watchdog itself has exactly one scheduled recurring Mailbox reminder addressed to the current watchdog window. Do this before evaluating the supervisor or relying on any supervisor-owned reminder. A supervisor general sweep reminder is not a substitute; the watchdog owns its own cadence.
 
-Use the current tmux window name, usually `watchdog`, and set a recurring ten-minute reminder if one is missing. The reminder should tell the watchdog to reload this skill, inspect supervisor state, panes, reminders, priority PR/work evidence, and nudge only for concrete corrective action. Use the Mailbox reminder mechanism, for example:
+Use the current tmux window name, usually `watchdog`, and set a recurring thirty-minute reminder if one is missing. The reminder should tell the watchdog to reload this skill, inspect supervisor state, panes, reminders, priority PR/work evidence, and nudge only for concrete corrective action. Use the Mailbox reminder mechanism, for example:
 
 ```bash
 python3 ~/.claude/skills/reminders/tools/reminders.py set \
   --window watchdog \
   --message "Evaluate the supervisor and managed workers now. Read the watchdog skill first. Capture current evidence from supervisor state, panes, reminders, and priority PR/work evidence. Get a substantive update from the supervisor if needed. Verify the work is on the priority list, is following Wolfgang's current spec, and is still moving. Send the supervisor a concise mailbox nudge only when a concrete corrective action is required: off-priority work, drift from the spec, missing evidence, stalled worker, premature integration/network action, or reminder/priority handoff failure. Otherwise stay quiet. Do not mutate state, reminders, workers, files, or external systems." \
-  --every 10m
+  --every 30m
 ```
 
 If more than one scheduled recurring watchdog reminder exists, report that duplicate as a concrete corrective action for the supervisor to repair; do not create another duplicate. If you cannot verify or create the watchdog reminder because the router/tool is unavailable, treat that as a concrete watchdog setup failure and tell the supervisor exactly what failed and what command needs to succeed.
