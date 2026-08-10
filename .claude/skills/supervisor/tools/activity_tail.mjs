@@ -5,7 +5,7 @@
 // the marker is what stops an unwatched session from writing files nobody reads, and what stops
 // this directory from growing when nothing is consuming it.
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { kill } from "node:process";
 import { join } from "node:path";
 
@@ -69,6 +69,22 @@ export function markerPath(dir, pane) {
   return join(dir, `pane${pane}.watch`);
 }
 
+// A marker holds "<agent id> <pid>". Parsed in one place because three readers depend on the same
+// two fields: the sweep, the tailer's ownership rules, and the hook, which has its own copy in
+// shell that cannot be shared. Returns undefined only when the file cannot be read; a marker that
+// is present but malformed comes back with whatever it holds, so the sweep can treat it as stale
+// rather than skipping it for ever.
+export function readMarker(io, path) {
+  let contents;
+  try {
+    contents = io.readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  const [owner, ownerPid] = contents.trim().split(/\s+/);
+  return { owner, pid: Number.parseInt(ownerPid, 10) };
+}
+
 // A presence agent id carries the pid of the process that made it, so a self-registered session
 // creates a new inbox directory and a new log file every time one starts. Nothing removed them,
 // and this is about to run in every Claude session on the machine, so the growth is unbounded and
@@ -94,20 +110,23 @@ export function sweepStaleArtifacts({ dir, io, aliveImpl = isProcessAlive, self 
   } catch {
     return removed;
   }
+  // A marker is written to a temporary name and renamed. A process killed between those two steps
+  // leaves the temporary behind, and nothing else ever looks at it, so this is the only thing that
+  // would bound it. The pid is in the name, exactly as it is in the marker itself.
+  for (const name of names) {
+    const temporary = /\.(\d+)\.tmp$/.exec(name);
+    if (temporary === null) continue;
+    if (aliveImpl(Number.parseInt(temporary[1], 10))) continue;
+    try { io.rmSync(join(dir, name), { force: true }); removed.push(join(dir, name)); } catch { /* next sweep */ }
+  }
   const livePresenceIds = new Set();
   for (const name of names) {
     if (!name.endsWith(".watch")) continue;
     const full = join(dir, name);
-    let owner;
-    let pid;
-    try {
-      [owner, pid] = io.readFileSync(full, "utf8").trim().split(/\s+/);
-    } catch {
-      continue;
-    }
-    const numericPid = Number.parseInt(pid, 10);
-    if (aliveImpl(numericPid)) {
-      livePresenceIds.add(owner);
+    const held = readMarker(io, full);
+    if (held === undefined) continue;
+    if (aliveImpl(held.pid)) {
+      livePresenceIds.add(held.owner);
       continue;
     }
     // A marker naming a dead process suppresses that pane for ever: the hook sees the file and
@@ -136,42 +155,93 @@ export function createActivityTailer({
   onDropped = () => {},
   now = () => Date.now(),
   pid = process.pid,
-  fs: io = { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync },
+  aliveImpl = isProcessAlive,
+  fs: io = { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync },
 } = {}) {
   if (typeof agentId !== "string" || agentId.length === 0) throw new TypeError("agentId is required");
   if (typeof onRecord !== "function") throw new TypeError("onRecord is required");
   const root = expandHome(dir ?? DEFAULT_ACTIVITY_DIR);
   const inbox = join(root, `${agentId}.d`);
+  // A self-registered session's id is dotted and a managed worker's is its tmux window name, which
+  // cannot contain a dot. The two validators in pi-extensions/mailbox-client.js are complements, so
+  // this is enforced rather than a convention. It is the same test the inbox rule in stop() uses,
+  // deliberately: one fact about this sidecar, read one way, so the two rules cannot drift apart.
+  const isPresence = agentId.includes(".");
   let transcriptPath;
   let started = false;
+
+  // The marker is keyed on the pane, and a pane can hold two sidecars: worker_launch.py starts the
+  // managed sidecar inside the worker's own pane, so its marker path is byte-identical to the one a
+  // presence sidecar in that pane would write. The file itself is the record of who holds it, read
+  // fresh each time rather than remembered, because the other sidecar can take it over in between.
+  //
+  // Losing the marker is not a small thing: the hook exits before reading stdin when there is none
+  // (hooks/claude-activity.sh), nothing rewrites it, and that agent's indicator is dead for the rest
+  // of its session with nothing logged.
+  // An empty or truncated marker needs no special case and does not get one. It parses to an empty
+  // owner and pid NaN, so it matches no agent id and is never alive: this sidecar neither yields to
+  // it nor claims to own it, and the sweep clears it as stale. A guard here would be a branch no
+  // test could distinguish.
+  const markerOwner = () => readMarker(io, markerPath(root, pane));
 
   function start() {
     io.mkdirSync(inbox, { recursive: true });
     // Bounded retention, run once per sidecar start rather than on a timer. Nothing here is
     // removed on age: only artifacts whose owning process is gone.
     try {
-      sweepStaleArtifacts({ dir: root, io, self: agentId });
+      sweepStaleArtifacts({ dir: root, io, aliveImpl, self: agentId });
     } catch {
       // Cleanup must never stop a sidecar starting.
     }
     // Written last, so the hook never sees a marker before the directory it writes into exists.
     // The pid is what lets a marker left by a killed sidecar be ignored rather than driving
     // writes forever into a file nobody reads.
-    if (pane) io.writeFileSync(markerPath(root, pane), `${agentId} ${pid}\n`, "utf8");
+    //
+    // A presence sidecar yields to a live foreign owner. Liveness is checked here rather than
+    // inferred from the sweep above having left the file alone: that sweep swallows its own
+    // failures and skips a marker it cannot read, so yielding on the inference would leave this
+    // session dark for its whole life. A managed sidecar never yields, because one that did would
+    // never write a marker at all, and the presence sidecar holding it removes it on the way out.
+    if (pane && !(isPresence && holdsForeignLiveMarker())) writeMarker();
     started = true;
+  }
+
+  // Written to a temporary name and renamed, because two sidecars can share a pane and every
+  // ownership decision here and in sweepStaleArtifacts is a read of this file. writeFileSync
+  // truncates before it writes, so a concurrent reader can see an empty marker, read it as owned by
+  // nobody with pid NaN, and delete a live owner's marker as stale. rename is atomic, so a reader
+  // sees either the old contents or the new ones. Losing the marker has no repair path: start() is
+  // the only writer and it runs once, so the pane stays unwatched for the rest of that session.
+  function writeMarker() {
+    const target = markerPath(root, pane);
+    const temporary = `${target}.${pid}.tmp`;
+    try {
+      io.writeFileSync(temporary, `${agentId} ${pid}\n`, "utf8");
+      io.renameSync(temporary, target);
+    } catch (error) {
+      try { io.rmSync(temporary, { force: true }); } catch { /* the sweep does not read .tmp files */ }
+      throw error;
+    }
+  }
+
+  function holdsForeignLiveMarker() {
+    const held = markerOwner();
+    if (held === undefined || held.owner === agentId) return false;
+    return aliveImpl(held.pid);
   }
 
   function stop() {
     if (!started) return;
     started = false;
     try {
-      if (pane) io.rmSync(markerPath(root, pane), { force: true });
+      // Only a marker that still names this agent. The other sidecar in this pane may have taken it
+      // over since start(), and removing it there is the failure described above.
+      if (pane && markerOwner()?.owner === agentId) io.rmSync(markerPath(root, pane), { force: true });
     } catch {
       // A marker we cannot remove is covered by the pid check on the hook side.
     }
-    // A presence session's inbox is per-process and disposable. A worker's is not: its id has no
-    // dot, so this cannot remove one.
-    if (agentId.includes(".")) {
+    // A presence session's inbox is per-process and disposable. A worker's is not.
+    if (isPresence) {
       try { io.rmSync(inbox, { recursive: true, force: true }); } catch { /* the sweep gets it */ }
     }
   }
