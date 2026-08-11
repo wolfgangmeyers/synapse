@@ -242,11 +242,9 @@ At launch, record and send the worker a short delivery contract:
 
 **Set Greptile reminder immediately on push.** The moment a branch is pushed to a PR, set a 30-minute reminder for Greptile inline comments. Not optional.
 
-**⛔ MANDATORY GATE — Final robot-review must be clean before authorization.** Verify a clean pass ran AFTER all fixes. "I fixed all findings" alone is insufficient — fixes can introduce new issues. Confirm either:
-1. Worker ran robot-review post-fixes showing zero Blocking and zero Should Address, OR
-2. Supervisor ran its own pass on the final state
+**⛔ MANDATORY GATE — Final robot-review must be clean before authorization.** Verify robot-review ran after every fix round on the updated head. "I fixed all findings" alone is insufficient because fixes can introduce new issues. Repeat the review/fix loop until the final pass has zero Blocking and zero Should Address. The final result must include a focus ledger: focus area -> reviewer/persona -> result/disposition, with a concrete justification for every skipped relevant area.
 
-If unconfirmed: `"Before I authorize: run one final robot-review (against base branch <base-branch>) to confirm it's clean. Report the results."`
+If unconfirmed: `"Before I authorize: run robot-review after each fix round until the final pass has zero Blocking and zero Should Address. Report the final focus ledger with skipped-area justifications."`
 
 **⛔ MANDATORY GATE — Requirements compliance review before every push.** Applies to every task with stated requirements. The worker's review checks technical correctness; the supervisor's compliance check verifies intent was implemented. Different questions.
 
@@ -290,23 +288,7 @@ The completion mail is a trigger to verify, not a conclusion to accept.
 
 If the worker says "scope-corrected," "all findings addressed," "tests prove it," or "ready," treat that as a prompt to verify the relevant files directly. Summaries are useful for navigation, not for acceptance.
 
-**⛔ MANDATORY GATE — Wolfgang-style worker interrogation before accepting readiness.** This is a quality gate on supervisor tracking. Use it to discover shortcomings before Wolfgang does. Trigger it whenever a worker says the work is done, ready for review, ready for commit/push, blocked, parked, validated, or otherwise asks the supervisor to accept a state transition.
-
-The supervisor must interrogate the worker's claim against the actual requirements, diff, runtime, and evidence. Do not accept a worker's readiness summary until these questions are answered with direct evidence or a recorded, valid deferral:
-
-1. **Goal and requirements:** What exact user/ticket/spec requirements were supposed to be satisfied? Are all of them mapped to files, tests, and live proof? Did the worker change the solution shape, omit a negative constraint, or turn an explicit requirement into a follow-up?
-2. **Data and environment:** Was representative data actually loaded into the worker's isolated environment? Which seed/load command, agency/user, ports, and row counts prove it? Does the page/API show representative rows/data, or only an empty shell/login/resources page? Browser validation must use a new tab/window, not Wolfgang's active tab.
-3. **Tests and coverage:** Which backend, frontend, API, integration, regression, and edge-case tests prove the behavior? Did the worker run the `test-coverage` skill when dev-loop applies, or only talk about coverage? If coverage could not run, is the exact tool failure recorded and is the normal test baseline strong enough to continue?
-4. **Browser/live proof:** For user-visible or service behavior, did a real browser/end-to-end/dev-loop check run against the correct worktree, branch, services, and loaded data? Were console errors, Vite overlays, failed requests, mobile/narrow width, exports/downloads, and the exact acceptance path checked?
-5. **Permissions and security:** Are route/API gates server-side, not only frontend? Is the correct existing permission used unless Wolfgang approved a new one? Are negative authorization, object-level access, tenant isolation, and admin/role semantics tested? Are secrets/auth state kept out of logs and commits?
-6. **Scope and diff hygiene:** Does every changed file belong to the task? Are planning files, local state, unrelated lockfiles, generated artifacts, deleted files, or broad refactors intentionally included? If not, send the worker back to revert/exclude them before commit.
-7. **Documentation, KB, and durable knowledge:** Did the worker check the relevant KB before starting, and is that check recorded durably enough to audit? Did it update or preserve required docs, specs, KB entries, migration comments, generated contracts, and user-facing copy? If a reusable lesson or product fact was learned, is it captured where future agents will find it?
-8. **Review completeness:** Did robot-review run after the final fixes with relevant focus areas and clean Blocking/Should Address results? Were review findings independently mapped to requirements or real risks? Did fixes introduce new issues requiring another pass?
-9. **Blocker reality:** If the worker claims a blocker, what explicit requirement, external contract, credential boundary, safety risk, or irreversible decision makes it real? If the blocker is local setup, missing data, auth state, runtime ownership, or a reversible prerequisite, direct the worker to fix it and continue.
-10. **PR, handoff, and done-state proof:** What is the next irreversible or user-visible action being authorized? Before committing, pushing, parking, completing, or cleaning up, does direct evidence show the artifact is reviewable, repeatable, demoable, and scoped? If a PR exists or will be pushed, is the branch/head correct, CI/watch/reminder path attached, and human-facing PR body accurate to the final diff?
-11. **Production topology and source of truth:** For production-service changes, is this a real vertical seam in the deployed system, or only a helper that works inside one process? How many processes, hosts, regions, or tasks can run this code? What is the durable source of truth? How does state reach every process that can receive traffic? What happens after restart, deploy, or partial rollout? What cardinality is expected now and at scale? Does process memory grow with global data or only local ownership? What happens on cache miss? What routing, ownership, readiness, or publish-ordering rule makes the local state correct? A helper that is correct in isolation is not enough if the next PR still has to answer the core production lifecycle question.
-
-If any answer is missing, vague, or based only on the worker's summary, ask the worker the pointed question or launch a bounded verification subagent. Send back concrete findings, not generic "be thorough" instructions. Useful prompts: `Before I can accept this as done, reply with an evidence ledger for requirements, changed-file scope, tests/coverage, data/browser proof, permissions, docs/KB, review findings, and blockers. Name paths, commands, URLs, seed counts, and skipped gates.` Or: `You said this is blocked. What requirement or external contract makes it hard, what KB/repo/current-code workaround did you check, and does it prevent the primary artifact?` A readiness report that lacks data proof, coverage/test detail, browser/live proof, documentation/KB handling, permission negatives, or diff-scope classification is incomplete by default.
+**⛔ MANDATORY GATE — supervisor-review before accepting readiness.** When a worker says work is done, ready for review, ready for commit/push, blocked, parked, validated, or otherwise asks the supervisor to accept a state transition, activate the `supervisor-review` skill and complete its readiness interrogation before accepting the transition. Follow the skill's subagent and mailbox loops exactly; do not substitute prior or equivalent checks, and do not skip the worker mailbox results just because preliminary checks are clean.
 
 **Pass user requirements to workers explicitly.** Include stated requirements verbatim in TASK.md, including negative constraints and solution-shape constraints. "Make a new X" is not equivalent to "wrap or sanitize the old X." Instruct workers to give the requirements to robot-review's reviewers as their requirements input. A review that doesn't know the requirements cannot flag gaps. Skipping this wastes a full round-trip.
 
@@ -690,10 +672,10 @@ Workflow:
 1. Implement the changes described above
 2. Verify all tests and lint pass (scoped lint on changed files only)
 3. Run robot-review on your changes (read ~/.agents/skills/robot-review/SKILL.md for instructions)
-4. Fix any Blocking or Should Address findings, re-run tests
+4. Fix any Blocking or Should Address findings, re-run tests, and re-run robot-review after each fix round until the final pass has zero Blocking and zero Should Address
 5. Commit: "<commit message>"
 6. Create a draft PR targeting <target-branch>. Draft-by-default applies only to new PRs opened by agents; if a PR is already ready for review, do not move it back to draft unless Wolfgang explicitly asks after it became ready.
-7. Mail supervisor: implementation and review complete, include the robot-review focus coverage ledger and summarize review findings
+7. Mail supervisor: implementation and review complete, include the final robot-review focus ledger with skipped-area justifications and summarize review findings
 
 Mail supervisor if you get stuck or need a decision.
 ```
@@ -812,8 +794,8 @@ Without a park instruction, watchdog classifies the worker as stuck. Park elimin
 2. **Cross-validate** findings as usual (spawn subagents with different personas to verify).
 3. **Send validated findings to the worker** via `mailbox_send.py`. Write findings to a file in the worktree (e.g., `REVIEW-FINDINGS.md`) if useful, then send a pointer: `"Read REVIEW-FINDINGS.md — fix all Blocking and Should Address items, then mail me when done."`.
 4. **Wait for Codex to fix** and mail back.
-5. **Re-run robot-review** on the updated diff. Only re-review focus areas where findings were reported — don't repeat clean batches.
-6. **Repeat** steps 2-5 until a clean pass (zero Blocking, zero Should Address).
+5. **Re-run robot-review** on the updated diff after each fix round. Cover every relevant focus area unless the final focus ledger gives a concrete skipped-area justification.
+6. **Repeat** steps 2-5 until a clean pass (zero Blocking, zero Should Address), then record the final focus ledger.
 7. **Only then** authorize push/PR.
 
 ### Redirecting a Blocked Worker
