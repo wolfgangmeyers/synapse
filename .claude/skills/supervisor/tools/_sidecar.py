@@ -35,6 +35,31 @@ import time
 SIDECAR_SCRIPT = "claude_sidecar.mjs"
 SIDECAR_INTERPRETER = "node"
 AGENT_ID_FLAG = "--agent-id"
+# realpath, not abspath. This module is reached through `~/.local/bin` symlinks, and a
+# path built from the as-invoked location hands `node` a script that is not there.
+# worker_launch.py hit exactly that and carries a guard test for it.
+SIDECAR_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), SIDECAR_SCRIPT)
+
+
+def sidecar_argv(window, router_url):
+    """The argv that starts the mailbox sidecar for *window*.
+
+    This lives beside `_is_sidecar_argv`, which has to recognise what this produces. They
+    are two halves of one fact: how a sidecar is started and how a running one is found.
+    Held apart, a flag added to one launcher still matches the finder while meaning
+    something different, and a sidecar can be started that nothing can later locate or
+    clean up. Every launcher calls this rather than spelling the tokens out.
+
+    `--agent-id` and `--window` are deliberately the same value. The agent id is the
+    mailbox address and the window is where mail gets pasted; splitting them delivers one
+    agent's mail into another agent's pane.
+    """
+    return [
+        SIDECAR_INTERPRETER, SIDECAR_SCRIPT_PATH,
+        AGENT_ID_FLAG, window,
+        "--window", window,
+        "--router-url", router_url,
+    ]
 
 # node options that consume the following argv token as their value, so that token is
 # not the entrypoint. Options written as `--opt=value` need no entry here.

@@ -159,6 +159,22 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertTrue(after_group.startswith(" && sidecar_pid=$!"), after_group)
         self.assertNotIn("&", after_group.replace("&&", "").replace("2>&1", ""))
 
+    def test_claude_sidecar_argv_carries_the_actual_window_and_router(self):
+        # sidecar_argv is shared with supervisor_start.py via _sidecar.py. Asserting only
+        # that the call happened, without checking what it was called WITH, would not catch
+        # a regression that always builds the argv for the wrong window or the wrong router
+        # — exactly the defect class --agent-id/--window drift is meant to guard against.
+        with patch.dict(os.environ, {
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8799",
+        }, clear=False):
+            commands, _ = self._run_main("claude-worker-nondefault", agent="claude")
+
+        self.assertIn(
+            "--agent-id claude-worker-nondefault --window claude-worker-nondefault "
+            "--router-url http://127.0.0.1:8799",
+            commands[0],
+        )
+
     def test_explicit_agent_overrides_machine_default_runtime(self):
         extension = self._pi_mailbox_extension()
         config = self.tmp_path / "worker-runtime.json"

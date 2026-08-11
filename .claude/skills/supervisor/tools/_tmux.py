@@ -19,7 +19,9 @@ SESSION = "mecha"
 # cannot contain a dot, so no managed worker id ever has one, and self-registered Claude sessions
 # use dotted ids to stay in a separate space that cannot collide with a worker's mailbox address.
 # Allowing a dot here merges the two spaces and lets an ad hoc session claim a live worker's id.
-_AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# Historic name, kept so existing importers keep working. New code uses AGENT_ID.
+_AGENT_ID = AGENT_ID
 
 # Claude Code shows a "pasted text #N +N lines" confirmation dialog when it
 # receives large input. A longer delay before sending Enter gives Claude Code
@@ -93,6 +95,42 @@ def new_window(name):
     """Create a new tmux window without stealing focus from attached clients."""
     ensure_session()
     run(["new-window", "-d", "-t", f"={SESSION}", "-n", name])
+
+
+def pane_commands(window):
+    """Foreground process names for every pane in *window*, outermost list order.
+
+    Returns [] when the window does not exist or tmux cannot be asked. `list-panes` exits 1
+    for a missing window, unlike `display-message -p -t`, which exits 0 and answers about
+    the active pane instead. Callers that need "is anything running here" must look at
+    every pane, not just the first: a window split so a human can work beside the agent has
+    the agent in one pane and a shell in another.
+    """
+    result = run(
+        ["list-panes", "-t", f"{SESSION}:{window}", "-F", "#{pane_current_command}"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def send_command_line(window, line):
+    """Type a shell command into *window* and press Enter.
+
+    For starting a service in a fresh pane. Interactive agents get `send_text` plus
+    `send_enter` instead, because their TUIs need the bracketed-paste form and a delay.
+    """
+    run(["send-keys", "-t", f"{SESSION}:{window}", line, "Enter"])
+
+
+def clear_input_line(window):
+    """Discard whatever is sitting unsubmitted at the pane's prompt.
+
+    C-u is readline's kill-line. Without it, anything a human left half-typed at that shell
+    becomes a prefix of the command sent next, and Enter runs the concatenation.
+    """
+    run(["send-keys", "-t", f"{SESSION}:{window}", "C-u"])
 
 
 def send_text(window, text):

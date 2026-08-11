@@ -31,7 +31,8 @@ from urllib.parse import urlparse
 TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
 
 sys.path.insert(0, TOOLS_DIR)
-from _tmux import _AGENT_ID, ensure_session, new_window, send_text, send_enter, window_exists
+from _sidecar import SIDECAR_SCRIPT_PATH as CLAUDE_SIDECAR_SCRIPT, sidecar_argv
+from _tmux import AGENT_ID, ensure_session, new_window, send_text, send_enter, window_exists
 from worker_runtime_config import WorkerRuntimeConfigError, resolve_agent_runtime
 
 
@@ -45,7 +46,6 @@ DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 PI_NOTIFY_ON_SETTLED_ENV = "MECHA_PI_NOTIFY_ON_SETTLED"
 PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
 PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
-CLAUDE_SIDECAR_SCRIPT = os.path.join(TOOLS_DIR, "claude_sidecar.mjs")
 LOOPBACK_ROUTER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 # Unexpanded, and expanded at call time, matching the Cursor and Codex helpers so that
 # redirecting HOME moves all three. Expanding here would bind the value at import.
@@ -506,7 +506,7 @@ def main():
         if args.agent != "pi":
             print("Error: --notify-on-settled is only supported for Pi workers", file=sys.stderr)
             sys.exit(1)
-        if _AGENT_ID.fullmatch(args.notify_on_settled) is None:
+        if AGENT_ID.fullmatch(args.notify_on_settled) is None:
             print("Error: --notify-on-settled must be a valid Mailbox agent ID", file=sys.stderr)
             sys.exit(1)
     if args.compaction_policy is not None and args.agent != "pi":
@@ -702,16 +702,9 @@ def main():
                     f"{shlex.quote(compaction_policy)} && "
                 )
         if args.agent == "claude":
-            sidecar_cmd = _quote_command([
-                "node",
-                CLAUDE_SIDECAR_SCRIPT,
-                "--agent-id",
-                args.window,
-                "--window",
-                args.window,
-                "--router-url",
-                mailbox_router_url,
-            ])
+            # Built by _sidecar, which also owns the matcher that has to recognise it.
+            # Spelling the tokens out here once let the launcher and the finder drift.
+            sidecar_cmd = _quote_command(sidecar_argv(args.window, mailbox_router_url))
             # The sidecar is backgrounded inside an explicit group so `&` binds only
             # the node command. Without the group, bash attaches `&` to the whole
             # preceding AND-list, which would background `cd`/`unset` and start the
