@@ -8,7 +8,10 @@ A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, 
 
 ## Worker Runtime
 
-Managed worker runtime is machine-local configuration. `worker_launch.py` reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}` and falls back to Pi when absent; explicit `--agent` overrides it. When runtime is Pi, preserve provider `anthropic` and model `claude-opus-5`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. Managed Pi workers use Pi's default configured extensions and add the Mailbox V2 extension explicitly; do not add `--no-extensions` unless Wolfgang asks for a bare-extension diagnostic session. Claude workers use the launcher-managed Mailbox sidecar for terminal delivery and reply through `mailbox_send.py`.
+Managed worker runtime is machine-local configuration. `worker_launch.py` reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}` and falls back to Pi when absent; explicit `--agent` overrides it. The file has a second reader
+with a deliberately different contract: `supervisor_start.py` refuses to start and exits 2 when the
+file is missing, rather than falling back, because a supervisor launched on a runtime this machine
+cannot run fails silently on its first model call. When runtime is Pi, preserve provider `anthropic` and model `claude-opus-5`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. Managed Pi workers use Pi's default configured extensions and add the Mailbox V2 extension explicitly; do not add `--no-extensions` unless Wolfgang asks for a bare-extension diagnostic session. Claude workers use the launcher-managed Mailbox sidecar for terminal delivery and reply through `mailbox_send.py`.
 
 ## Maintenance
 
@@ -55,6 +58,7 @@ could affect files, external communication, or destructive operations.
 | `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
 | `supervisor-review` | Supervisor readiness interrogation and quality gate before accepting worker done, blocked, parked, commit/push, draft PR, or review-ready state transitions. |
 | `test-coverage` | Run language-agnostic code coverage analysis and identify gaps with concrete test suggestions across supported project toolchains. |
+| `unramble` | Compress verbose Claude output into concise Wolfgang voice. Use when Claude sends wall-of-text output that needs condensation before forwarding to a human. |
 | `voice` | Generate a voice profile from writing samples so an LLM can reproduce how someone speaks and writes. Source-agnostic: works with Facebook exports, chat logs, email archives, plain text, or any writing samples. |
 | `voice-review-builder` | Collect and distill Wolfgang's feedback on PR review comments to improve review voice and review quality. |
 | `watchdog` | LLM-based Watchdog momentum-nudge guidance. The separate Priority Handoff Monitor owns deterministic five-minute checks. Not for direct invocation. |
