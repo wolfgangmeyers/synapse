@@ -76,10 +76,15 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
     def test_explicit_pi_model_updates_command_and_exported_model_key(self):
         extension = self._pi_mailbox_extension()
         model = "gpt-5.6 Luna"
-        with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
-            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
-        }, clear=False):
+        # This model is not meant to resolve to a real provider entry, so the store is
+        # pinned to a path that cannot exist rather than left to read whatever
+        # ~/.pi/agent/models-store.json happens to hold on the machine running the suite.
+        missing_store = self.tmp_path / "no-such-models-store.json"
+        with patch.object(worker_launch, "PI_MODELS_STORE_PATH", str(missing_store)), \
+             patch.dict(os.environ, {
+                 worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+                 worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+             }, clear=False):
             commands, _ = self._run_main("pi-worker", "--model", model, agent="pi")
 
         command = shlex.split(commands[0])
@@ -138,6 +143,19 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
     def test_resolve_pi_provider_falls_back_when_the_store_is_unparsable(self):
         store = self.tmp_path / "broken-models-store.json"
         store.write_text("{not json", encoding="utf-8")
+        self.assertEqual(
+            worker_launch.resolve_pi_provider("zai.glm-5", models_store_path=str(store)),
+            worker_launch.PI_PROVIDER,
+        )
+
+    def test_resolve_pi_provider_falls_back_when_the_store_is_not_valid_utf8(self):
+        # A store caught mid-write (or written by something that is not Pi) can hold bytes
+        # that are not valid UTF-8. json.JSONDecodeError alone would miss this: decoding
+        # fails before json.load ever sees a string to parse, so the read raises
+        # UnicodeDecodeError instead, and that must fall back too rather than crash the
+        # launch.
+        store = self.tmp_path / "non-utf8-models-store.json"
+        store.write_bytes(b'{"amazon-bedrock": {"models": [{"id": "zai.glm-5\xff"}]}}')
         self.assertEqual(
             worker_launch.resolve_pi_provider("zai.glm-5", models_store_path=str(store)),
             worker_launch.PI_PROVIDER,

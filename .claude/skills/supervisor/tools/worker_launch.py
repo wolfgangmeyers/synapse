@@ -126,7 +126,12 @@ def resolve_pi_provider(model, models_store_path=None):
     try:
         with open(store_path, "r", encoding="utf-8") as handle:
             store = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    # OSError covers a missing/unreadable file. ValueError covers a decode failure: not just
+    # json.JSONDecodeError (raised on malformed JSON) but also UnicodeDecodeError (raised on
+    # non-UTF-8 bytes, e.g. a store file caught mid-write), which is a ValueError subclass.
+    # Either way this is Pi's catalog, not this launcher's, so a store it cannot read falls
+    # back to the pinned default instead of crashing the launch.
+    except (OSError, ValueError):
         return PI_PROVIDER
     if not isinstance(store, dict):
         return PI_PROVIDER
