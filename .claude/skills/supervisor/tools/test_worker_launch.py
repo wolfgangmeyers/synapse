@@ -90,6 +90,87 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands[0],
         )
 
+    def _write_models_store(self, mapping):
+        """Write a minimal models-store.json: {provider: [model_id, ...]}."""
+        store = {
+            provider: {"models": [{"id": model_id} for model_id in model_ids]}
+            for provider, model_ids in mapping.items()
+        }
+        path = self.tmp_path / "models-store.json"
+        path.write_text(json.dumps(store), encoding="utf-8")
+        return path
+
+    def test_resolve_pi_provider_keeps_the_pinned_default_with_no_model_override(self):
+        # No --model at all must never consult the store, so even a store that maps
+        # PI_MODEL to some other provider cannot move the untouched default launch.
+        store = self._write_models_store({"amazon-bedrock": [worker_launch.PI_MODEL]})
+        self.assertEqual(
+            worker_launch.resolve_pi_provider(None, models_store_path=str(store)),
+            worker_launch.PI_PROVIDER,
+        )
+
+    def test_resolve_pi_provider_looks_up_an_explicit_model_in_the_store(self):
+        # The real-world case this exists for: a model hosted under a provider other than
+        # the pinned default (amazon-bedrock's zai.glm-5, not openai-codex).
+        store = self._write_models_store({
+            "openai-codex": ["gpt-5.5"],
+            "amazon-bedrock": ["zai.glm-5"],
+        })
+        self.assertEqual(
+            worker_launch.resolve_pi_provider("zai.glm-5", models_store_path=str(store)),
+            "amazon-bedrock",
+        )
+
+    def test_resolve_pi_provider_falls_back_when_the_model_is_not_listed(self):
+        store = self._write_models_store({"openai-codex": ["gpt-5.5"]})
+        self.assertEqual(
+            worker_launch.resolve_pi_provider("some-future-model", models_store_path=str(store)),
+            worker_launch.PI_PROVIDER,
+        )
+
+    def test_resolve_pi_provider_falls_back_when_the_store_is_missing(self):
+        missing = self.tmp_path / "no-such-models-store.json"
+        self.assertEqual(
+            worker_launch.resolve_pi_provider("zai.glm-5", models_store_path=str(missing)),
+            worker_launch.PI_PROVIDER,
+        )
+
+    def test_resolve_pi_provider_falls_back_when_the_store_is_unparsable(self):
+        store = self.tmp_path / "broken-models-store.json"
+        store.write_text("{not json", encoding="utf-8")
+        self.assertEqual(
+            worker_launch.resolve_pi_provider("zai.glm-5", models_store_path=str(store)),
+            worker_launch.PI_PROVIDER,
+        )
+
+    def test_launching_a_bedrock_hosted_model_uses_its_own_provider_not_the_pinned_default(self):
+        """The actual bug: --model zai.glm-5 must launch with --provider amazon-bedrock.
+
+        Before the fix, PI_PROVIDER was hardcoded onto the pi command line for every
+        --model override, so this worker would register with Mailbox V2 and look launched,
+        then fail its first real message with "Provider is not configured: openai-codex"
+        because openai-codex was never the provider hosting zai.glm-5.
+        """
+        extension = self._pi_mailbox_extension()
+        store = self._write_models_store({
+            "openai-codex": ["gpt-5.5"],
+            "amazon-bedrock": ["zai.glm-5"],
+        })
+        with patch.object(worker_launch, "PI_MODELS_STORE_PATH", str(store)), \
+             patch.dict(os.environ, {
+                 worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+                 worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+             }, clear=False):
+            commands, _ = self._run_main("pi-worker", "--model", "zai.glm-5", agent="pi")
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--provider") + 1], "amazon-bedrock")
+        self.assertEqual(command[command.index("--model") + 1], "zai.glm-5")
+        self.assertIn(
+            f"export {worker_launch.PI_MODEL_KEY_ENV}=amazon-bedrock/zai.glm-5",
+            commands[0],
+        )
+
     def test_model_override_rejects_non_pi_agents_before_launch(self):
         argv = [
             "worker_launch.py", "--window", "worker", "--dir", self.tmpdir.name,
