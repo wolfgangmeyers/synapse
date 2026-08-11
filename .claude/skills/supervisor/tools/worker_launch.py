@@ -38,6 +38,14 @@ from worker_runtime_config import WorkerRuntimeConfigError, resolve_agent_runtim
 
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.5"
+# Pi's own model catalog, kept up to date by Pi itself as providers and models are added or
+# removed. This launcher used to hardcode PI_PROVIDER for every --model override, which broke
+# the day a worker asked for a model hosted under a different provider (amazon-bedrock's
+# zai.glm-5, while PI_PROVIDER stayed pinned to openai-codex): the worker registered and looked
+# launched, but its first real message failed with "Provider is not configured: openai-codex"
+# because that provider was never the one hosting the requested model. resolve_pi_provider()
+# below looks the model up here instead of assuming it.
+PI_MODELS_STORE_PATH = os.path.expanduser("~/.pi/agent/models-store.json")
 CURSOR_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
@@ -90,6 +98,46 @@ def resolve_pi_router_url():
             f"{PI_ROUTER_URL_ENV} must be a loopback HTTP(S) base URL without a path"
         )
     return configured_url.rstrip("/")
+
+
+def resolve_pi_provider(model, models_store_path=None):
+    """Return the Pi provider that hosts model, or the pinned default when unknown.
+
+    Which provider hosts a given model id is Pi's own catalog to own, not this launcher's to
+    guess, so this reads models-store.json (top level keyed by provider, each holding a
+    "models" list of {"id": ..., ...}) and maps the requested model id back to the provider
+    listing it. Two cases fall back to the historical PI_PROVIDER/PI_MODEL pairing instead of
+    raising:
+
+    - model is None, meaning the caller took no --model override at all. This keeps the
+      pinned openai-codex/gpt-5.5 default exactly as it always launched.
+    - model was given but the store is missing, unparsable, or simply does not list that id
+      (a typo, or a model newer than the cached store). Pi itself will reject an unknown
+      model id with a clearer error than this launcher could give, so failing the launch here
+      would only duplicate that message worse.
+
+    Checked against the live store on this machine: every model id appears under exactly one
+    top-level provider key, and that key always matches the model entry's own "provider"
+    field, so the first (and only) match is unambiguous.
+    """
+    if model is None:
+        return PI_PROVIDER
+    store_path = models_store_path or PI_MODELS_STORE_PATH
+    try:
+        with open(store_path, "r", encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return PI_PROVIDER
+    if not isinstance(store, dict):
+        return PI_PROVIDER
+    for provider, payload in store.items():
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(models, list):
+            continue
+        for entry in models:
+            if isinstance(entry, dict) and entry.get("id") == model:
+                return provider
+    return PI_PROVIDER
 
 
 def _validate_compaction_levels(levels):
@@ -474,7 +522,12 @@ def main():
         "--model",
         default=None,
         metavar="MODEL",
-        help="Pi-only model override for this worker launch. Defaults to gpt-5.5 and keeps provider openai-codex.",
+        help=(
+            "Pi-only model override for this worker launch. Defaults to gpt-5.5 on provider "
+            "openai-codex; an explicit override's provider is looked up in "
+            "~/.pi/agent/models-store.json, falling back to openai-codex if the model is not "
+            "listed there."
+        ),
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -521,6 +574,7 @@ def main():
             print("Error: --model must not be empty", file=sys.stderr)
             sys.exit(1)
     pi_model = args.model or PI_MODEL
+    pi_provider = resolve_pi_provider(args.model)
     try:
         compaction_policy = validate_compaction_policy(args.compaction_policy)
     except ValueError as error:
@@ -567,7 +621,7 @@ def main():
         parts = [
             "pi",
             "--provider",
-            PI_PROVIDER,
+            pi_provider,
             "--model",
             pi_model,
             "--name",
@@ -695,7 +749,7 @@ def main():
                     f"export {PI_NOTIFY_ON_SETTLED_ENV}="
                     f"{shlex.quote(args.notify_on_settled)} && "
                 )
-            pi_exports += f"export {PI_MODEL_KEY_ENV}={shlex.quote(f'{PI_PROVIDER}/{pi_model}')} && "
+            pi_exports += f"export {PI_MODEL_KEY_ENV}={shlex.quote(f'{pi_provider}/{pi_model}')} && "
             if compaction_policy is not None:
                 pi_exports += (
                     f"export {PI_COMPACTION_POLICY_ENV}="
