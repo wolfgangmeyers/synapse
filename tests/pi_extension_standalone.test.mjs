@@ -196,7 +196,7 @@ test("agent_start resets integrated inline tool counters", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("top-level tool calls send inline work nudge as a follow-up", async () => {
+test("top-level tool calls send inline work nudge as a steer", async () => {
   const sent = [];
   const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
   for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, fixture.context);
@@ -213,10 +213,10 @@ test("top-level tool calls send inline work nudge as a follow-up", async () => {
     threshold: 4,
     tool_name: "edit",
   });
-  assert.deepEqual(sent[0][1], { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(sent[0][1], { deliverAs: "steer", triggerTurn: true });
 });
 
-test("top-level read calls send inline work nudge as a follow-up", async () => {
+test("top-level read calls send inline work nudge as a steer", async () => {
   const sent = [];
   const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
 
@@ -231,7 +231,7 @@ test("top-level read calls send inline work nudge as a follow-up", async () => {
     threshold: 8,
     tool_name: "read",
   });
-  assert.deepEqual(sent[0][1], { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(sent[0][1], { deliverAs: "steer", triggerTurn: true });
 });
 
 test("inline nudge send failures do not block tool execution and still reset", async () => {
