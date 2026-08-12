@@ -24,7 +24,7 @@ const CONTENT_TYPES = new Map([
 ]);
 
 const root = resolve(fileURLToPath(new URL("../web/router-ui", import.meta.url)));
-const markdownItBrowserPath = resolve(fileURLToPath(new URL("../node_modules/markdown-it/dist/markdown-it.js", import.meta.url)));
+const markdownItBrowserPath = resolve(fileURLToPath(new URL("../web/router-ui/vendor/markdown-it.js", import.meta.url)));
 
 export function parseArguments(argv) {
   const options = { host: DEFAULT_HOST, port: DEFAULT_PORT, router: DEFAULT_ROUTER, defaultAgentId: DEFAULT_AGENT_ID };
