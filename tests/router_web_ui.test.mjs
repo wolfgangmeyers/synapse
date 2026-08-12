@@ -4,14 +4,98 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import MarkdownIt from "markdown-it";
 import WebSocket from "ws";
 
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { parseArguments, startRouterWebUi } from "../tools/router_web_ui.mjs";
 import { mergeMessages } from "../web/router-ui/history.js";
+import { isAllowedMarkdownLink, markdownToSafeHtml, renderMarkdownBody, textWithoutMarkdownImages } from "../web/router-ui/markdown.js";
 
 const webAgentId = "web-test-client";
+
+const renderMarkdown = (body) => markdownToSafeHtml(body, MarkdownIt);
+
+test("router web UI renders common Markdown safely", () => {
+  const html = renderMarkdown(`First paragraph\n\nSecond paragraph\n\n- one\n- two\n\n[site](https://example.com)\n\n\`\`\`js\nconst value = "<safe>";\n\`\`\``);
+  assert.match(html, /<p>First paragraph<\/p>\n<p>Second paragraph<\/p>/);
+  assert.match(html, /<ul>\n<li>one<\/li>\n<li>two<\/li>\n<\/ul>/);
+  assert.match(html, /<a href="https:\/\/example\.com">site<\/a>/);
+  assert.match(html, /<pre><code class="language-js">const value = &quot;&lt;safe&gt;&quot;;\n<\/code><\/pre>/);
+});
+
+test("router web UI preserves plain multiline text in Markdown output", () => {
+  assert.equal(renderMarkdown("first line\nsecond line"), "<p>first line<br>\nsecond line</p>\n");
+});
+
+test("router web UI rejects unsafe Markdown HTML, URLs, and images", () => {
+  const html = renderMarkdown(`<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n[relative](/local)\n[protocol](//example.com)\n[ftp](ftp://example.com/file)\n![track](https://example.com/pixel.png)`);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /href="javascript:/);
+  assert.doesNotMatch(html, /href="\/local"/);
+  assert.doesNotMatch(html, /href="\/\/example\.com"/);
+  assert.doesNotMatch(html, /href="ftp:/);
+  assert.doesNotMatch(html, /<img\b/);
+  assert.doesNotMatch(html, /href="https:\/\/example\.com\/pixel\.png"/);
+  assert.match(html, /!\[track\]\(https:\/\/example\.com\/pixel\.png\)/);
+});
+
+test("router web UI renders Markdown into a DOM container and normalizes links", () => {
+  const links = [{ target: "", rel: "" }];
+  const fakeDocument = {
+    createElement(tagName) {
+      assert.equal(tagName, "div");
+      return {
+        className: "",
+        innerHTML: "",
+        querySelectorAll(selector) {
+          assert.equal(selector, "a[href]");
+          return links;
+        },
+      };
+    },
+  };
+  const originalMarkdownIt = globalThis.markdownit;
+  globalThis.markdownit = MarkdownIt;
+  try {
+    const element = markdownToSafeHtml("[site](https://example.com)");
+    assert.match(element, /<a href="https:\/\/example\.com">site<\/a>/);
+  } finally {
+    globalThis.markdownit = originalMarkdownIt;
+  }
+  globalThis.markdownit = MarkdownIt;
+  try {
+    const element = renderMarkdownBody(fakeDocument, "[site](https://example.com)");
+    assert.equal(element.className, "markdown-body");
+    assert.match(element.innerHTML, /<a href="https:\/\/example\.com">site<\/a>/);
+    assert.equal(links[0].target, "_blank");
+    assert.equal(links[0].rel, "noopener noreferrer");
+  } finally {
+    globalThis.markdownit = originalMarkdownIt;
+  }
+});
+
+test("router web UI allows only absolute http, https, and mailto Markdown links", () => {
+  for (const url of ["http://example.com", "https://example.com/path", "mailto:test@example.com"]) {
+    assert.equal(isAllowedMarkdownLink(url), true, url);
+  }
+  for (const url of ["/relative", "relative/path", "//example.com", "javascript:alert(1)", "data:text/html,<b>x</b>", "ftp://example.com", "http://", "http:example.com", "http:/example.com", "https:example.com", "https://[::1", " https://example.com", "https://example.com ", ""]) {
+    assert.equal(isAllowedMarkdownLink(url), false, url);
+  }
+  assert.equal(isAllowedMarkdownLink(null), false);
+  assert.equal(isAllowedMarkdownLink({ href: "https://example.com" }), false);
+});
+
+test("router web UI strips Markdown image syntax before legacy attachment scanning", () => {
+  const stripped = textWithoutMarkdownImages("keep /v1/attachments/real.png\n![ignore](/v1/attachments/tracker.png)\n![remote](https://example.com/pixel.png \"title\")\n![ref][Image Ref]\n![Shortcut Ref]\n\n[image ref]: /v1/attachments/ref.png\n[shortcut ref]: /v1/attachments/shortcut.png");
+  assert.match(stripped, /keep \/v1\/attachments\/real\.png/);
+  assert.doesNotMatch(stripped, /tracker\.png/);
+  assert.doesNotMatch(stripped, /pixel\.png/);
+  assert.doesNotMatch(stripped, /ref\.png/);
+  assert.doesNotMatch(stripped, /shortcut\.png/);
+});
 
 test("router web UI accepts remote HTTP routers and rejects unsafe router URLs", () => {
   assert.equal(parseArguments(["--router", "http://brick.tailcdfd89.ts.net"]).router, "http://brick.tailcdfd89.ts.net");
@@ -179,6 +263,16 @@ test("router web UI serves the app and relays live router messages", async () =>
     const appHtml = await appResponse.text();
     assert.match(appHtml, /Your agent network/);
     assert.match(appHtml, /rel="icon" type="image\/png" href="\/mecha-icon\.png"/);
+    assert.match(appHtml, /<script src="\/vendor\/markdown-it\.js"><\/script>/);
+    const vendorResponse = await fetch(new URL("/vendor/markdown-it.js", ui.httpUrl));
+    assert.equal(vendorResponse.status, 200);
+    assert.match(vendorResponse.headers.get("content-type") ?? "", /text\/javascript/);
+    assert.match(await vendorResponse.text(), /markdownit/);
+    const vendorHeadResponse = await fetch(new URL("/vendor/markdown-it.js", ui.httpUrl), { method: "HEAD" });
+    assert.equal(vendorHeadResponse.status, 200);
+    assert.equal(await vendorHeadResponse.text(), "");
+    const missingVendorResponse = await fetch(new URL("/vendor/markdown-it.min.js", ui.httpUrl));
+    assert.equal(missingVendorResponse.status, 404);
     const iconResponse = await fetch(new URL("/mecha-icon.png", ui.httpUrl));
     assert.equal(iconResponse.status, 200);
     assert.equal(iconResponse.headers.get("content-type"), "image/png");
@@ -481,6 +575,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(html, /id="router-setup" class="router-setup" hidden/);
   assert.match(html, /id="image-input" type="file" accept="image\/\*" multiple/);
   assert.match(html, /font-awesome\/6\.7\.2\/css\/all\.min\.css/);
+  assert.match(html, /<script src="\/vendor\/markdown-it\.js"><\/script>/);
   assert.match(html, /id="refresh" type="button" aria-label="Refresh agents"/);
   assert.match(html, /id="attach-image" class="secondary attach-image" type="button" disabled aria-label="Attach images"/);
   assert.match(html, /id="open-add-router" type="button" aria-label="Add router"/);
@@ -581,14 +676,15 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /function showArrivedMessageDialog\(arrival\)/);
   assert.match(app, /<i class="fa-solid fa-envelope arrival-icon" aria-hidden="true"><\/i>/);
   assert.doesNotMatch(app, /arrival-dot/);
-  assert.match(app, /elements\.arrivedDialogBody\.textContent = arrival\.body \|\| "";/);
+  assert.match(app, /elements\.arrivedDialogBody\.replaceChildren\(renderMarkdownBody\(document, arrival\.body \|\| ""\)\)/);
   assert.match(app, /const label = arrival\.subject \|\| arrival\.preview \|\| "New message";/);
   assert.match(app, /truncateText\(label, 80\)/);
   assert.match(app, /elements\.arrivedDialog\.showModal\(\)/);
   assert.match(styles, /\.arrival-indicator \{[\s\S]*rgba\(255,209,102,0\.96\)/);
   assert.match(styles, /\.arrival-icon \{[\s\S]*font-size: 11px;/);
   assert.doesNotMatch(styles, /arrival-dot/);
-  assert.match(styles, /\.message-dialog-body \{[\s\S]*white-space: pre-wrap;/);
+  assert.match(styles, /\.message-dialog-body \{[\s\S]*word-break: break-word;/);
+  assert.doesNotMatch(styles, /\.message-dialog-body \{[^}]*white-space: pre-wrap;/);
   assert.match(app, /sameSubagents\(current\.subagents, summaries\)\) return;/);
   assert.match(app, /className = `agent-row\$\{peer === state\.selectedPeer \? " active" : ""\}\$\{active \? " working" : ""\}\$\{compacting \? " compacting" : ""\}\$\{subagentCount > 0 \? " has-subagents" : ""\}\$\{arrival \? " has-arrival" : ""\}\$\{expanded \? " expanded" : ""\}`/);
   assert.match(app, /function compactingBadgeMarkup/);

@@ -1,208 +1,130 @@
-# Sentinel target-worker subagent plan
+# WebUI Markdown Rendering Plan
 
-## Delivery contract
+## Requirements source
 
-**Outcome:** replace the current policy-driven detached Sentinel with a generic
-unauthenticated scheduler that asks any target Pi worker to create a hidden,
-context-inheriting native subagent. Sentinel does not inject or persist the raw
-scheduled prompt in the target parent; its native final completion returns there.
+SPEC.md is approved. Supervisor added these explicit requirements after approval:
 
-**Non-goals:** no deployment, shared-router mutation, extension installation,
-process launch/RPC host, child result relay, fixed supervisor path, receiver
-profile, sender authorization, or watchdog-specific behavior.
+- Use a small browser Markdown dependency, not ReactMarkdown.
+- Keep raw HTML as text.
+- Allow only `http`, `https`, and `mailto` links.
+- Reject executable URL schemes.
+- Test paragraphs, lists, links, fenced code, plain multiline text, unsafe HTML, and unsafe URLs.
+- Keep arrival-dialog behavior explicit.
+- Preserve attachments.
+- Do not touch router batching or mailbox protocol.
 
-This plan implements `SPEC.md` and nothing beyond it.
+## Chosen implementation
 
-## Evidence-led design choice
+Use `markdown-it` as the single Markdown dependency.
 
-### Options considered
+Why this dependency:
 
-1. **Keep the current detached Pi/RPC runner and add more context.** Reject. It
-   strips the target context/tools/skills/permissions, makes a private relay
-   protocol necessary, and conflicts with the required native completion path.
-2. **Have the router run a child.** Reject. It moves target-worker context and
-   Pi runtime ownership into the scheduler, which must only route and schedule.
-3. **Use the installed `@gotgenes/pi-subagents` service from the target
-   extension.** Choose. It is already enabled in the local Pi configuration and
-   documented as an in-process native subagent integration. Its public service
-   can spawn a background `general-purpose` child with a model and inherited
-   target context; the package owns completion notification.
+- It works in a no-build browser app through its distributed browser module.
+- It supports common Markdown, including fenced code blocks, without adding a React or bundler dependency.
+- It can keep raw HTML disabled, which makes HTML input render as text.
+- It exposes `validateLink`, so the WebUI can enforce `http`, `https`, and `mailto` only.
 
-The implementation must dynamically import `getSubagentsService()` in the
-extension, fail as an ordinary pre-handoff delivery failure if unavailable, and
-otherwise make one background native spawn. It must not substitute a custom
-subprocess implementation.
+## File changes
 
-The present managed-worker command explicitly uses `--no-extensions` with only
-the Mailbox extension, so the service is absent despite the package being
-installed locally. The implementation must add the validated native package as
-a second explicit `--extension` path. Pi documents that `--extension` may be
-used multiple times. It must not re-enable global extension discovery.
+### `package.json` and `package-lock.json`
 
-## Implementation stages
+- Add `markdown-it` as a normal dependency.
+- Run `npm install` so the lockfile records the exact package and transitive dependencies.
+- Avoid unrelated dependency updates.
 
-### 1. Collapse Sentinel transport to scheduling metadata
+### `tools/router_web_ui.mjs`
 
-**Files:** `protocol/v1/schema.json`, `harness/protocol.js`, `harness/db.js`,
-`harness/router.js`, current Sentinel migrations plus a new forward-only cleanup
-migration if persistent columns/tables must be removed safely.
+- Add a narrowly scoped static route for `/vendor/markdown-it.js`.
+- Serve only the installed `node_modules/markdown-it/dist/markdown-it.js` file.
+- Do not expose a general `node_modules` file server.
+- Keep existing WebSocket, router polling, message send, batching, and protocol handling unchanged.
 
-1. Define the optional Sentinel request metadata as model selection only; the
-   existing message `to` and reminder `target` select the target worker.
-2. Remove `receiver_policy`, `origin_sender`, `sentinel_child`, relay token, and
-   all fixed-recipient/capability fields from protocol validation, persistence,
-   reads, and responses.
-3. Remove Sentinel admission/policy validation from the router. Preserve normal
-   shape/body/queue/rate-limit validation only. Do not use sender identity to
-   gate Sentinel or prevent cross-agent targets.
-4. Remove Sentinel claim/launch/exit lifecycle frames and repository state.
-   Sentinel delivery is one existing mailbox delivery: the target extension
-   hands it to Pi's native subagent service, then acknowledges through the
-   existing receipt path.
-5. Delete the child-result HTTP endpoint and all relay capability data. Do not
-   replace either with another endpoint, table, queue, or message format.
-6. Preserve migrations safely. Existing databases must continue opening; any
-   removal happens through a new forward-only migration, never by editing a
-   migration that may already have run.
+### `web/router-ui/index.html`
 
-### 2. Load the native integration in managed target workers
+- Load the Markdown browser bundle from `/vendor/markdown-it.js` before the existing no-build module script for `/app.js`.
+- Keep the existing no-build module script for `/app.js`.
 
-**Files:** `.claude/skills/supervisor/tools/worker_launch.py`, its focused
-launcher tests, and the target-extension installation/validation path.
+### `web/router-ui/markdown.js`
 
-1. Resolve a validated local `@gotgenes/pi-subagents` extension entry point and
-   pass it as a second explicit `--extension` argument after `--no-extensions`
-   and the validated Mailbox extension.
-2. Keep global extension discovery disabled. This adds the required native
-   integration without allowing stale globally discovered extensions back into
-   managed workers.
-3. Test that a managed Pi command has exactly the two required explicit
-   extensions, that both paths are validated before tmux creation, and that
-   legacy/non-Sentinel worker launch behavior is otherwise unchanged.
+Add a small renderer module:
 
-### 3. Make the target extension a native-service adapter
+- Read `MarkdownIt` from the browser bundle's `globalThis.markdownit`; tests pass the package import directly.
+- Create one configured parser with:
+  - `html: false` so raw HTML is escaped and displayed as text;
+  - `linkify: false` so only explicit Markdown links become anchors;
+  - `breaks: true` so plain multiline text keeps visible line breaks.
+- Add one URL helper used by the parser and tests. It allows only absolute `http:`, `https:`, and `mailto:` URLs, and rejects relative URLs, protocol-relative URLs, malformed URLs, `javascript:`, `data:`, and any other scheme.
+- Disable Markdown image rendering so `![alt](url)` remains text-like content and never creates an `<img>` or external image request from agent text. Existing mailbox image attachments remain the only image path.
+- Expose `renderMarkdownBody(document, body)`:
+  - returns a `.markdown-body` element;
+  - parses the string body into safe HTML;
+  - assigns the parser output to a detached container;
+  - normalizes allowed anchors with `target="_blank"` and `rel="noopener noreferrer"`.
+- No app code should pass unsanitized user content directly into `innerHTML`; the only `innerHTML` use for message bodies will be inside this helper after Markdown parsing with raw HTML disabled, image rendering disabled, and link validation enforced.
 
-**Files:** `pi-extensions/mecha-messaging.js`; delete
-`pi-extensions/sentinel-child.js` and `pi-extensions/sentinel-receiver-policies.json`.
+### `web/router-ui/app.js`
 
-1. Keep ordinary mailbox delivery unchanged.
-2. Identify Sentinel before the ordinary body-rendering route. Write only a
-   body-free custom status entry in the parent session.
-3. Dynamically import `@gotgenes/pi-subagents`, obtain its published
-   `getSubagentsService()` service, and call:
+- Import `renderMarkdownBody`.
+- Replace the current message body `textContent` node in `renderMessage(message)` with `renderMarkdownBody(document, message.body || "")`.
+- Keep attachments below the rendered body exactly as they are now.
+- Update the arrival dialog to use the same renderer by replacing its body children with `renderMarkdownBody(document, arrival.body || "")`. This makes the dialog match conversation bubbles and avoids two rendering rules for agent output.
 
-   ```js
-   service.spawn("general-purpose", message.body, {
-     description: "Scheduled Sentinel work",
-     model: message.sentinel.model,
-     inheritContext: true,
-   })
+### `web/router-ui/styles.css`
+
+- Move the whitespace behavior from `.bubble` to Markdown body content where needed.
+- Add scoped `.markdown-body` styles for paragraphs, lists, anchors, inline code, and fenced code blocks.
+- Keep spacing compact so single-line plain text still looks like today.
+- Ensure long URLs and words wrap inside bubbles and the arrival dialog.
+
+### `tests/router_web_ui.test.mjs`
+
+Add focused tests for the rendering boundary:
+
+- Import `markdownToSafeHtml` or equivalent pure helper from `web/router-ui/markdown.js`.
+- Assert paragraphs produce paragraph tags.
+- Assert unordered or ordered lists produce list tags and items.
+- Assert Markdown links render as anchors for `http`, `https`, and `mailto`.
+- Assert fenced code renders as a pre/code block and escapes code content.
+- Assert plain multiline text keeps visible line breaks.
+- Assert raw HTML input renders escaped text and does not create a real tag.
+- Assert `javascript:`, `data:`, relative URLs, protocol-relative URLs, malformed URLs, and other disallowed schemes do not become anchors.
+- Assert Markdown image syntax does not create an `<img>` and does not trigger the attachment renderer.
+- Assert the WebUI server serves `/vendor/markdown-it.js` with JavaScript content.
+- Update any existing static assertions that currently expect `textContent` for arrival bodies.
+
+## Validation plan
+
+1. Run the targeted WebUI/router tests:
+
+   ```sh
+   node --test tests/router_web_ui.test.mjs
    ```
 
-   Do not pass a reduced tool list, private cwd, skills/extensions toggle,
-   fixed recipient, profile, auth file, or subprocess/RPC option. Omit
-   `foreground` so native background behavior applies.
-4. Treat a missing service or a synchronous spawn failure as pre-handoff
-   failure: retain the ordinary delivery for existing retry/replay. Treat a
-   returned native subagent ID as handoff success and acknowledge by the
-   ordinary durable-delivery path.
-5. Persist only message/occurrence ID and native subagent ID/status necessary
-   for observation. Do not persist prompt content, prompt-derived data, model
-   output, or a manual result relay.
-6. Let child sessions retain the ordinary Mailbox send capability with a
-   transient child sender identity and their target parent as the ordinary
-   delivery destination. This supports interim parent-visible child messages
-   without adding a Sentinel result route, frame, token, or fixed supervisor.
-7. Do not observe native lifecycle events merely to create a duplicate result.
-   The installed package already appends its native record and sends its normal
-   `subagent-notification` completion to the target parent.
+2. Run the full repository test script if targeted tests pass:
 
-### 4. Simplify the caller
+   ```sh
+   npm test
+   ```
 
-**Files:** `tools/sentinel_dispatch.py` and focused script tests.
+3. Run a syntax check through the existing `npm test` check script coverage for changed JavaScript files. If needed, also run direct `node --check` on changed Node-served files.
 
-1. Retain the thin existing API client and current immediate/reminder request
-   shapes.
-2. Require `--to`, one `--prompt`, and `--model`; retain optional normal
-   sender/subject/id/schedule inputs only where existing API compatibility needs
-   them.
-3. Delete policy-file/policy/template loading and all profile/model allowlist
-   checks. The caller must not inspect a receiver policy or pick child
-   configuration.
-4. Print the ordinary durable message/reminder ID and endpoint response. It
-   does not wait for, parse, or report a child result.
+4. Run coverage using Node's built-in coverage output for the targeted WebUI test path unless the repo has a stronger existing coverage command:
 
-### 5. Delete retired behavior and its tests
+   ```sh
+   rm -rf /tmp/webui-markdown-coverage
+   NODE_V8_COVERAGE=/tmp/webui-markdown-coverage node --test tests/router_web_ui.test.mjs
+   ```
 
-**Files:** a new forward Sentinel cleanup migration as needed,
-`tests/sentinel_*`, router/protocol/extension suites, `harness_spec.md`, and
-any current docs that describe removed behavior.
+5. For user-visible behavior, start a separate WebUI process from this worktree on a separate port after tests:
 
-1. Delete tests asserting sender allowlists, receiver policies, copied auth,
-   reduced tools/context, fixed supervisor relay, relay tokens, child-result
-   endpoint, or Sentinel lifecycle WebSocket controls.
-2. Replace them with behavior tests below. No test should encode the removed
-   architecture as a compatibility requirement.
-3. Update references that claim Sentinel launches a detached `pi --mode rpc`
-   child or requires a special relay. Do not broaden this into unrelated
-   documentation work.
+   ```sh
+   npm run router-web-ui -- --port 0
+   ```
 
-## Verification matrix
+   Do not touch the existing WebUI runtime/window. If the separate runtime or browser validation genuinely fails for local-environment reasons, report the failure and use the strongest automated renderer/server tests available.
 
-### Unit and contract tests
+## Review plan
 
-- schema/protocol accepts model-only Sentinel metadata and rejects only invalid
-  data shape, not unknown sender, target profile, or model policy;
-- immediate, one-time, and recurring requests preserve existing durable
-  idempotency and scheduling semantics;
-- managed worker-launch tests prove the validated native package and Mailbox
-  extension are both explicit while `--no-extensions` remains present;
-- target extension hands a valid delivery exactly once to a fake native service
-  with `general-purpose`, the submitted model, and `inheritContext: true`;
-- target parent Sentinel dispatch entries and extension diagnostics omit the raw
-  prompt and all prompt-derived content; native model output is not rewritten;
-- absent/malformed native service and synchronous spawn error leave delivery
-  unacknowledged for normal replay; replay after a successful handoff does not
-  make a second child;
-- a child interim parent message is an ordinary Mailbox delivery from a
-  transient child identity, while native final completion remains separate;
-- ordinary messages/reminders are unchanged;
-- no protocol, router, or extension code retains policy/relay/RPC/capability
-  strings or accepts retired Sentinel lifecycle frames/endpoints.
+Run robot-review on this plan with one reviewer covering plan completeness, plan consistency, plan architecture, requirements, security, and scope. Validate any findings with a different persona through pr-validate rules. Iterate until the plan reviewer signs off before implementation.
 
-### Native compatibility probe — required before implementation completion
-
-Run this only against an isolated router/database and a fresh test Pi parent
-with the installed package enabled. The probe must prove from runtime evidence:
-
-1. `getSubagentsService()` is present in the target extension session.
-2. A background service spawn with `general-purpose`, a selected model, and
-   `inheritContext: true` creates a native child.
-3. The child transcript shows target-parent context and target effective cwd,
-   system prompt, extensions, skills, tools, and permission behavior.
-4. The target parent receives the package's ordinary native final completion
-   notification while its persisted parent session contains no scheduled prompt.
-5. An immediate dispatch, delayed dispatch, and two recurring occurrences each
-   obey existing router scheduling/replay behavior.
-
-The probe must record that the package has no native arbitrary-progress API and
-then prove an interim child message through the inherited ordinary Mailbox send
-capability, from a transient child identity to its target parent. This remains
-separate from the native final completion and must not add a Sentinel relay,
-result endpoint, token, lifecycle frame, or equivalent side channel.
-
-## Review gates
-
-1. **Design review:** confirm the diff removes every forbidden policy/relay
-   mechanism and does not recreate it under a new name.
-2. **Contract review:** confirm the target extension is only an adapter to the
-   installed native service and that normal mailbox behavior is unchanged.
-3. **Compatibility review:** validate the isolated native probe before any
-   shared-router or extension rollout is proposed.
-
-## Completion criteria
-
-The implementation is ready only when every `SPEC.md` acceptance criterion is
-proven by the listed tests/probe, the three review gates find no blocking issue,
-and the unresolved parent-progress API fact is answered from the installed
-runtime. No deployment is part of this plan.
+Implementation review later will include at least requirements, security, test-coverage, scope, and diff-reading focus areas, with pr-validate on findings and a fresh follow-up review after fixes.

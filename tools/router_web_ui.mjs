@@ -24,6 +24,7 @@ const CONTENT_TYPES = new Map([
 ]);
 
 const root = resolve(fileURLToPath(new URL("../web/router-ui", import.meta.url)));
+const markdownItBrowserPath = resolve(fileURLToPath(new URL("../node_modules/markdown-it/dist/markdown-it.js", import.meta.url)));
 
 export function parseArguments(argv) {
   const options = { host: DEFAULT_HOST, port: DEFAULT_PORT, router: DEFAULT_ROUTER, defaultAgentId: DEFAULT_AGENT_ID };
@@ -103,6 +104,13 @@ async function handleRequest(request, response, { router, defaultAgentId }) {
   const url = new URL(request.url ?? "/", "http://ui.local");
   if (request.method === "GET" && url.pathname === "/ui/config") {
     sendJson(response, 200, { defaultRouter: normalizeRouterUrl(router), defaultAgentId });
+    return;
+  }
+  if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/vendor/markdown-it.js") {
+    const body = await readFile(markdownItBrowserPath);
+    response.writeHead(200, { "cache-control": "no-store", "content-type": "text/javascript; charset=utf-8" });
+    if (request.method === "GET") response.end(body);
+    else response.end();
     return;
   }
   if (request.method !== "GET" && request.method !== "HEAD") {
