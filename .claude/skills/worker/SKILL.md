@@ -89,6 +89,17 @@ For any change visible to users (UI, API responses, CLI output, walkthrough inst
 
 For frontend worktree changes, package changes are part of readiness. If you change `frontend/package.json` or `frontend/package-lock.json`, run `npm install` in `frontend/`, restart that worktree's Vite process, and verify the browser/page is not showing a Vite import-analysis overlay such as `Failed to resolve import`. A healthy port or HTTP 200 from Vite is not enough.
 
+### Mandatory RogerEMR representative data gate
+
+For RogerEMR worktree setup, manual testing, browser checks, demo readiness, and report work, read both KB entries before validating or handing off:
+
+- `/Users/wolfgang/.mecha-developer/kb/roger-worktree-environments.md`
+- `/Users/wolfgang/.mecha-developer/kb/roger-reporting-demo-data.md`
+
+Use representative loaded data for the task: a preprod worktree clone or restore when realistic existing data is needed, and the synthetic reporting demo seed when report/demo coverage needs deterministic rows and negative controls. Record the safe data path in status and completion mail: worktree/Compose project, clone or restore source, synthetic seed command when used, migration result, and non-secret aggregate counts or scenario keys. Do not include patient details, secrets, raw snapshots, or credential values.
+
+Do not hand off RogerEMR manual/browser/demo/report work until representative data is loaded and verified. If representative data does not apply, say why in the completion mail. If it should apply but cannot be loaded, report a blocker instead of declaring done.
+
 ### Iterative task completion (walkthrough, review loops, test suites)
 
 When your task has an explicit exit condition ("repeat until", "keep going until", "until all scenarios pass"):
