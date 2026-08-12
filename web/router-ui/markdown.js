@@ -69,10 +69,30 @@ function escapePlainText(value) {
     .replace(/\n/g, "<br>");
 }
 
+function fallbackMarkdown(body) {
+  const codeBlocks = [];
+  const withoutBlocks = body.replace(/^\s*```[^\n]*\n([\s\S]*?)^\s*```\s*$/gm, (_match, code) => {
+    const token = `\u0000CODE_BLOCK_${codeBlocks.length}\u0000`;
+    codeBlocks.push(`<pre><code>${escapePlainText(code.replace(/\n$/, ""))}</code></pre>`);
+    return token;
+  });
+  const inlineCode = [];
+  const withInlineCode = withoutBlocks.replace(/`([^`\n]+)`/g, (_match, code) => {
+    const token = `\u0000INLINE_CODE_${inlineCode.length}\u0000`;
+    inlineCode.push(`<code>${escapePlainText(code)}</code>`);
+    return token;
+  });
+  let html = escapePlainText(withInlineCode);
+  for (const [index, value] of codeBlocks.entries()) html = html.replace(`\u0000CODE_BLOCK_${index}\u0000`, value);
+  for (const [index, value] of inlineCode.entries()) html = html.replace(`\u0000INLINE_CODE_${index}\u0000`, value);
+  return html;
+}
+
 export function markdownToSafeHtml(body, MarkdownIt) {
-  if (MarkdownIt) return createMarkdownRenderer(MarkdownIt).render(String(body ?? ""));
-  if (typeof globalThis.markdownit !== "function") return escapePlainText(String(body ?? ""));
-  return markdownRenderer().render(String(body ?? ""));
+  const source = String(body ?? "");
+  if (MarkdownIt) return createMarkdownRenderer(MarkdownIt).render(source);
+  if (typeof globalThis.markdownit !== "function") return fallbackMarkdown(source);
+  return markdownRenderer().render(source);
 }
 
 export function renderMarkdownBody(document, body) {
