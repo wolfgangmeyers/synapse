@@ -7,6 +7,7 @@ import argparse
 import errno
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,14 @@ DEFAULT_LAUNCHD_LABEL = "life.meyers.mecha-router"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 MAX_RESPONSE_BYTES = 512 * 1024
 NANOID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+MESSAGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MESSAGE_STATES = frozenset({
+    "queued",
+    "leased",
+    "injection_requested",
+    "acknowledged",
+    "dead_letter",
+})
 
 
 def nanoid(size: int = 21) -> str:
@@ -195,10 +204,13 @@ def main(argv: list[str] | None = None) -> int:
         error = response.get("error", {})
         return fail(rejection_message(error if isinstance(error, dict) else {}), 1)
     message = response.get("message")
+    # A dedupe can return the existing delivery ID while conversation_message records the submitted envelope ID.
+    # Validate the returned delivery record, but do not require those IDs to match.
     if (not isinstance(message, dict)
-            or (message.get("id") != envelope["id"] and message.get("batched") is not True)
+            or not isinstance(message.get("id"), str)
+            or MESSAGE_ID_PATTERN.fullmatch(message["id"]) is None
             or not isinstance(message.get("state"), str)
-            or not message["state"]):
+            or message["state"] not in MESSAGE_STATES):
         return fail("Router returned an invalid acceptance response.", 1)
     print(f"Message {message['id']} accepted: {message['state']}")
     return 0
