@@ -61,11 +61,13 @@ python3 ~/.claude/skills/supervisor/tools/state_update_field.py "$ALIAS" supervi
 
 Window name must match the task alias and must be recognizable. Avoid generic names such as `worker-1`, `test-window`, or branch-only slugs. Use short task nouns and include the ticket or PR number when one exists.
 
-After the agent registers, send the task through Mailbox V2 when the runtime has verified delivery:
+After the agent registers, send the task through Mailbox V2 when the runtime has verified delivery. The supervisor handoff must explicitly encourage bounded background subagents when useful. Reason: subagents keep the worker's main context smaller, reduce compaction frequency, preserve continuity on long tasks, and keep the worker responsive to supervisor direction instead of blocking inside long-running reads, tests, or analysis.
 
 ```bash
 BODY=$(cat <<'EOF'
 Read ~/.agents/skills/worker/SKILL.md first. Your task: <TASK DESCRIPTION>.
+
+Use bounded background subagents proactively for focused exploration, implementation slices, validation/log triage, and robot-review where useful. Keep them bounded with clear outcomes/non-goals and retain final judgment. This keeps your main context small, reduces compaction churn, preserves task continuity, and keeps you reachable for direction changes while long-running work happens in the background.
 
 If this may run longer than five minutes, create the two required recurring Mailbox V2 self-reminders before substantive work:
 
