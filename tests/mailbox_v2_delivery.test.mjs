@@ -1162,6 +1162,58 @@ test("settled notification sends one exact reply when top-level work settles", a
   assert.equal(attempts.length, 1);
 });
 
+test("self-compaction suppresses the settled reminder at an idle boundary", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+  const compactCalls = [];
+  const compactContext = {
+    ...fixture.context,
+    isIdle: () => true,
+    compact: (options) => compactCalls.push(options),
+  };
+
+  await enableSettledNotifications(fixture);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  const result = await fixture.tools.get("mecha_context").execute("compact", { action: "compact" }, undefined, undefined, compactContext);
+  assert.equal(result.details.compactState, "deferred_until_agent_settled");
+
+  fixture.handlers.get("agent_settled")({}, compactContext);
+  assert.equal(compactCalls.length, 1);
+  assert.equal(attempts.length, 0);
+});
+
+test("deferred self-compaction suppresses reminders until its later idle settlement", async (t) => {
+  const attempts = [];
+  const fixture = settledNotificationFixture(t, {
+    recipient: "supervisor",
+    sendReply: async (message) => { attempts.push(message); return { id: "reply" }; },
+  });
+  const compactCalls = [];
+  let idle = false;
+  const compactContext = {
+    ...fixture.context,
+    isIdle: () => idle,
+    compact: (options) => compactCalls.push(options),
+  };
+
+  await enableSettledNotifications(fixture);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  await fixture.tools.get("mecha_context").execute("compact", { action: "compact" }, undefined, undefined, compactContext);
+
+  fixture.handlers.get("agent_settled")({}, compactContext);
+  assert.equal(compactCalls.length, 0);
+  assert.equal(attempts.length, 0);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  idle = true;
+  fixture.handlers.get("agent_settled")({}, compactContext);
+  assert.equal(compactCalls.length, 1);
+  assert.equal(attempts.length, 0);
+});
+
 test("settled notification stays disabled without a valid opt-in", async (t) => {
   const attempts = [];
   const fixture = settledNotificationFixture(t, {
