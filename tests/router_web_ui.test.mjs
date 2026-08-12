@@ -29,6 +29,19 @@ test("router web UI preserves plain multiline text in Markdown output", () => {
   assert.equal(renderMarkdown("first line\nsecond line"), "<p>first line<br>\nsecond line</p>\n");
 });
 
+test("router web UI keeps code formatting when the Markdown vendor is unavailable", () => {
+  const originalMarkdownIt = globalThis.markdownit;
+  globalThis.markdownit = undefined;
+  try {
+    const html = markdownToSafeHtml("Run `npm test`\n\n```sh\nnpm test\n```");
+    assert.match(html, /Run <code>npm test<\/code>/);
+    assert.match(html, /<pre><code>npm test<\/code><\/pre>/);
+    assert.doesNotMatch(html, /```/);
+  } finally {
+    globalThis.markdownit = originalMarkdownIt;
+  }
+});
+
 test("router web UI rejects unsafe Markdown HTML, URLs, and images", () => {
   const html = renderMarkdown(`<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n[relative](/local)\n[protocol](//example.com)\n[ftp](ftp://example.com/file)\n![track](https://example.com/pixel.png)`);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
