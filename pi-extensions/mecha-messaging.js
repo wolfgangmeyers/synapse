@@ -342,6 +342,7 @@ function childSessionId(event) {
 const SETTLED_NOTIFICATION_COOLDOWN_MS = 120_000;
 const ACTIVITY_HEARTBEAT_INTERVAL_MS = 5_000;
 const ACTIVITY_REFRESH_MIN_MS = 10_000;
+const EVENT_TRACKED_MISSING_LIMIT_MS = 60_000;
 const MAX_ACTIVITY_SUBAGENTS = 999;
 const MAX_TERMINAL_SUBAGENT_TOMBSTONES = 2048;
 
@@ -1109,8 +1110,16 @@ export function createMechaMessagingExtension(pi, {
       changed = true;
     }
     for (const [id, metadata] of runningSubagents.entries()) {
-      if (metadata?.serviceTracked === true && metadata?.eventTracked !== true && !serviceIds.has(id)) {
+      if (!serviceIds.has(id) && metadata?.serviceTracked === true && metadata?.eventTracked !== true) {
         runningSubagents.delete(id);
+        changed = true;
+      } else if (!serviceIds.has(id) && metadata?.eventTracked === true
+        && nowMs - metadata.lastSeenMs >= EVENT_TRACKED_MISSING_LIMIT_MS) {
+        // Lifecycle events can arrive before the native service publishes a record. Keep that
+        // child through ordinary service-list lag, then age it out if the service still cannot
+        // find it (for example, after Escape killed the child without a terminal event).
+        runningSubagents.delete(id);
+        settledNotifications.onChildDisposed(id);
         changed = true;
       }
     }
@@ -1578,6 +1587,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("session_compact", (_event, context) => { if (!children.has(context.sessionManager.getSessionId())) { notifiedCompactionPercent = 0; resumeMailboxAfterCompaction(context); } });
   pi.on("agent_settled", (_event, context) => {
     if (!children.has(context.sessionManager.getSessionId())) stopActivityHeartbeat({ settle: true });
+    if (pendingSelfCompaction !== undefined) settledNotificationPending = false;
     runPendingSelfCompaction(context);
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationEnabled || !settledNotificationPending) return;
 

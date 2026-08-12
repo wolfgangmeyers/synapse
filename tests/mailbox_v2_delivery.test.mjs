@@ -904,6 +904,51 @@ test("heartbeat reconciliation clears service-only subagents when the service dr
   ]);
 });
 
+test("event-tracked subagents age out after the native service misses them", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  globalThis[serviceSymbol] = { listAgents: () => [] };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const intervals = [];
+  let now = 0;
+  let scheduler;
+  const fixture = settledNotificationFixture(t, {
+    createSettledScheduler: () => {
+      scheduler = createSettledNotificationScheduler();
+      return scheduler;
+    },
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.childEvents.get("subagents:started")({
+    id: "escaped-child",
+    type: "general-purpose",
+    description: "Child interrupted by Escape",
+  });
+  assert.equal(fixture.activity.at(-1).subagentCount, 1);
+
+  now = 5_000;
+  intervals[0].callback();
+  assert.equal(fixture.activity.at(-1).subagentCount, 1, "ordinary service-list lag dropped a live child");
+
+  now = 60_001;
+  intervals[0].callback();
+  assert.equal(fixture.activity.at(-1).subagentCount, 0, "missing child stayed visible forever");
+  assert.equal(scheduler.activeChildCount(), 0, "aged-out child still blocked settled notifications");
+});
+
 test("lifecycle terminal events prevent stale native service resurrection until ID reuse", async (t) => {
   const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
   const previousService = globalThis[serviceSymbol];
