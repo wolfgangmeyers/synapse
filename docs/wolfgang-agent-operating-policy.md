@@ -644,6 +644,12 @@ Where an existing heuristic is close but too weak, strengthen it in place instea
 
 What this produced on 2026-08-07, from 52 findings across six human reviews: only 3 were defects in shipping code. 15 were missing tests, 13 were output rendered for a human that is wrong on a degraded path, 11 were structure, 10 were prose asserting things the code does not do. The output cluster had no focus area at all. If a review's findings cluster somewhere the skill does not look, that is a missing focus area and not a missing rule.
 
+### Clear `mecha-review` dirty state
+
+Dirty tracked files in `mecha-review` are not a standing reason to avoid the repo. In that repo, they usually mean a worker finished review-skill, persona, or heuristic work and left it unmerged or unpushed.
+
+The supervisor owns clearing that state: inspect the diff, get enough review to trust it, then commit, merge, and push it. If something truly blocks that, route the exact blocker. Do not leave the files sitting, work around the repo, or treat the dirty state as a permanent scope hazard.
+
 ### Ask for a reviewer, and take the PR out of draft
 
 He asked for this on 2026-08-07 after two PRs sat green for hours with nobody looking. Two separate mistakes caused it:
