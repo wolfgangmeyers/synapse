@@ -1432,8 +1432,8 @@ export function createMechaMessagingExtension(pi, {
           threshold,
           tool_name: toolName,
         },
-      }, { deliverAs: "followUp", triggerTurn: true });
-      // Follow-up delivery is best-effort and must not turn the observed tool invocation into a failure.
+      }, { deliverAs: "steer", triggerTurn: true });
+      // Steer delivery is best-effort and must not turn the observed tool invocation into a failure.
       Promise.resolve(sent).catch(() => {});
     },
   });
