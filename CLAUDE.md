@@ -57,6 +57,7 @@ could affect files, external communication, or destructive operations.
 | `roger-report-implementation` | Create RogerEMR fixed reports with evidence-backed source parity, Sol planning, correct permissions/stacking, screen-export agreement, isolated synthetic demos, and report-specific review gates. |
 | `supervisor` | Wolfgang's operations hub for routing tasks, managing workers, and tracking persistent state. Top-level session mode — do not invoke as a sub-skill. |
 | `supervisor-review` | Supervisor readiness interrogation and quality gate before accepting worker done, blocked, parked, commit/push, draft PR, or review-ready state transitions. |
+| `supervisor-sweep` | Craft and maintain the supervisor general sweep reminder so active work, open-PR feedback, CI, and merge-conflict checks are captured every time. |
 | `test-coverage` | Run language-agnostic code coverage analysis and identify gaps with concrete test suggestions across supported project toolchains. |
 | `unramble` | Compress verbose Claude output into concise Wolfgang voice. Use when Claude sends wall-of-text output that needs condensation before forwarding to a human. |
 | `voice` | Generate a voice profile from writing samples so an LLM can reproduce how someone speaks and writes. Source-agnostic: works with Facebook exports, chat logs, email archives, plain text, or any writing samples. |
