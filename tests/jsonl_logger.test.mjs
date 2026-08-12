@@ -18,14 +18,23 @@ test("JSONL logger persists declared mailbox events and rejects body-bearing fie
     message_id: "message", from: "sender", to: "receiver", agent_id: "receiver", state: "queued", created: true,
   }), true);
   assert.equal(logger.log("message_enqueued", {
+    message_id: "duplicate", from: "sender", to: "receiver", agent_id: "receiver", state: "queued", created: false, deduped: true,
+  }), true);
+  assert.equal(logger.log("message_enqueued", {
     message_id: "bad", from: "sender", to: "receiver", agent_id: "receiver", state: "queued", created: true, body: "private",
   }), false);
 
   const records = (await readFile(logPath, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.deepEqual(records, [{
-    timestamp: "2030-01-01T00:00:00.000Z", event: "message_enqueued", message_id: "message",
-    from: "sender", to: "receiver", agent_id: "receiver", state: "queued", created: true,
-  }]);
+  assert.deepEqual(records, [
+    {
+      timestamp: "2030-01-01T00:00:00.000Z", event: "message_enqueued", message_id: "message",
+      from: "sender", to: "receiver", agent_id: "receiver", state: "queued", created: true,
+    },
+    {
+      timestamp: "2030-01-01T00:00:00.000Z", event: "message_enqueued", message_id: "duplicate",
+      from: "sender", to: "receiver", agent_id: "receiver", state: "queued", created: false, deduped: true,
+    },
+  ]);
 });
 
 test("JSONL logger rotates at the size limit and keeps on-disk usage bounded", async (t) => {

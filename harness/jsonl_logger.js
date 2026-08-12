@@ -50,7 +50,7 @@ const NUMBER_FIELDS = new Set([
   "server_job_success_count",
   "server_job_failure_count",
 ]);
-const BOOLEAN_FIELDS = new Set(["created", "recovered", "released", "terminal"]);
+const BOOLEAN_FIELDS = new Set(["created", "deduped", "recovered", "released", "terminal"]);
 const EVENT_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const EVENT_SCHEMAS = Object.freeze({
   schema_migration: schema(["migration_id"]),
@@ -71,7 +71,7 @@ const EVENT_SCHEMAS = Object.freeze({
   agent_disconnected: schema(["agent_id", "instance_id", "lease_id", "released"]),
   agent_registration_rejected: schema(["agent_id", "instance_id", "error_code"]),
   agent_lease_renewed: schema(["agent_id", "instance_id", "lease_id"]),
-  message_enqueued: schema(["message_id", "from", "to", "agent_id", "state", "created"]),
+  message_enqueued: schema(["message_id", "from", "to", "agent_id", "state", "created"], ["deduped"]),
   delivery_offered: schema(["message_id", "agent_id", "attempt", "lease_id", "delivery_expires_at"]),
   delivery_injection_requested: schema(["message_id", "agent_id", "attempt", "lease_id"]),
   delivery_acknowledged: schema(["message_id", "agent_id", "attempt", "lease_id"]),

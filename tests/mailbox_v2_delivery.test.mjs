@@ -2434,7 +2434,257 @@ test("same instance reconnect registration replaces the old live socket without 
   }
 });
 
+<<<<<<< HEAD
 test("router batches roughly ten mixed-sender idle notifications into one queued delivery", async () => {
+=======
+test("unchanged live duplicate messages are suppressed until settlement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-live-dedupe-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const base = envelope("dedupe-1", {
+    from: "supervisor",
+    to: "busy-worker",
+    subject: "Still parked",
+    body: "Unchanged reminder while the worker is busy.",
+  });
+  const identity = {
+    agentId: "busy-worker",
+    instanceId: "busy-instance",
+    leaseId: "busy-lease",
+  };
+  try {
+    const first = repository.enqueue(base);
+    assert.equal(first.created, true);
+    const queuedDuplicate = repository.enqueue({ ...base, id: "dedupe-queued" });
+    assert.equal(queuedDuplicate.created, false);
+    assert.equal(queuedDuplicate.deduped, true);
+    assert.equal(queuedDuplicate.message.id, "dedupe-1");
+    assert.deepEqual(repository.queuedFor("busy-worker").map(({ id }) => id), ["dedupe-1"]);
+
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    const delivery = repository.claimNextMessage(identity);
+    assert.equal(delivery.message.id, "dedupe-1");
+    const leasedDuplicate = repository.enqueue({ ...base, id: "dedupe-leased" });
+    assert.equal(leasedDuplicate.deduped, true);
+    assert.equal(leasedDuplicate.message.state, "leased");
+
+    repository.recordInjectionRequested({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+    });
+    const injectionDuplicate = repository.enqueue({ ...base, id: "dedupe-injection" });
+    assert.equal(injectionDuplicate.deduped, true);
+    assert.equal(injectionDuplicate.message.state, "injection_requested");
+
+    repository.acknowledgeDelivery({
+      ...identity,
+      messageId: delivery.message.id,
+      attemptNumber: delivery.attempt_number,
+    });
+    const afterAck = repository.enqueue({ ...base, id: "dedupe-after-ack" });
+    assert.equal(afterAck.created, true);
+    assert.equal(afterAck.message.id, "dedupe-after-ack");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("changed duplicate evidence still enqueues separately", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-dedupe-evidence-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const base = envelope("evidence-1", {
+    from: "supervisor",
+    to: "busy-worker",
+    subject: "Status",
+    body: "Still waiting.",
+  });
+  try {
+    repository.enqueue(base);
+    assert.equal(repository.enqueue({ ...base, id: "evidence-body", body: "New blocker found." }).created, true);
+    assert.equal(repository.enqueue({ ...base, id: "evidence-subject", subject: "Blocked" }).created, true);
+    assert.deepEqual(repository.queuedFor("busy-worker").map(({ id }) => id), [
+      "evidence-1",
+      "evidence-body",
+      "evidence-subject",
+    ]);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("sentinel metadata participates in live duplicate matching", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-sentinel-dedupe-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const base = envelope("sentinel-dedupe-1", {
+    from: "supervisor",
+    to: "busy-worker",
+    body: "Launch this native task.",
+    sentinel: { model: "gpt-5.5" },
+  });
+  try {
+    assert.equal(repository.enqueue(base).created, true);
+    const duplicate = repository.enqueue({ ...base, id: "sentinel-dedupe-2" });
+    assert.equal(duplicate.deduped, true);
+    assert.equal(duplicate.message.id, "sentinel-dedupe-1");
+
+    const changedSentinel = repository.enqueue({
+      ...base,
+      id: "sentinel-dedupe-3",
+      sentinel: { model: "gpt-5.6-terra" },
+    });
+    assert.equal(changedSentinel.created, true);
+    assert.deepEqual(repository.queuedFor("busy-worker").map(({ id }) => id), [
+      "sentinel-dedupe-1",
+      "sentinel-dedupe-3",
+    ]);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("deduped conversation sends record their own conversation message", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-conversation-dedupe-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const base = envelope("conversation-dedupe-1", {
+    from: "shared-user",
+    to: "peer",
+    body: "Same visible text.",
+  });
+  try {
+    assert.equal(repository.enqueue(base, { conversation: { body: "Same visible text.", attachments: [] } }).created, true);
+    const duplicate = repository.enqueue({ ...base, id: "conversation-dedupe-2" }, {
+      conversation: { body: "Same visible text.", attachments: [] },
+    });
+    assert.equal(duplicate.deduped, true);
+    assert.equal(duplicate.conversation_created, true);
+    assert.equal(duplicate.conversation_message.id, "conversation-dedupe-2");
+    assert.deepEqual(repository.queuedFor("peer").map(({ id }) => id), ["conversation-dedupe-1"]);
+    assert.deepEqual(repository.conversationHistory({ owner: "shared-user", peer: "peer" }).map(({ id }) => id), [
+      "conversation-dedupe-1",
+      "conversation-dedupe-2",
+    ]);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("duplicate recurring reminders link to one live mailbox message", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-recurring-dedupe-"));
+  let now = Date.parse("2026-07-13T00:00:00.000Z");
+  const repository = openMessageRepository({
+    databasePath: join(directory, "router.sqlite"),
+    clock: () => new Date(now),
+  });
+  const identity = {
+    agentId: "busy-worker",
+    instanceId: "busy-instance",
+    leaseId: "busy-lease",
+  };
+  try {
+    const router = createAgentRouter({ repository, clock: () => new Date(now), timeoutSweepIntervalMs: 60_000 });
+    repository.acquireAgentLease({ ...identity, leaseDurationMs: 60_000 });
+    for (const id of ["recurring-a", "recurring-b"]) {
+      repository.createReminder({
+        id,
+        target: identity.agentId,
+        creator: "tester",
+        subject: "Busy worker reminder",
+        body: "Same recurring reminder text.",
+        created_at: new Date(now).toISOString(),
+        next_due_at: new Date(now).toISOString(),
+        interval_ms: 15 * 60 * 1000,
+      });
+    }
+
+    const fired = router.sweepDueReminders();
+    assert.equal(fired.length, 2);
+    assert.deepEqual(repository.queuedFor(identity.agentId).map(({ id }) => id), ["reminder-recurring-a-0"]);
+    assert.equal(repository.reminderFor("recurring-a").linked_message_id, "reminder-recurring-a-0");
+    assert.equal(repository.reminderFor("recurring-b").linked_message_id, "reminder-recurring-a-0");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router emits deduped enqueue events for suppressed messages", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-dedupe-events-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const events = [];
+  const router = createAgentRouter({ repository, eventLogger: (event, fields) => events.push({ event, ...fields }) });
+  const base = envelope("event-dedupe-1", {
+    from: "supervisor",
+    to: "busy-worker",
+    body: "Same body.",
+  });
+  try {
+    router.enqueueMessage(base);
+    router.enqueueMessage({ ...base, id: "event-dedupe-2" });
+    assert.deepEqual(events.filter(({ event }) => event === "message_enqueued"), [
+      {
+        event: "message_enqueued",
+        message_id: "event-dedupe-1",
+        to: "busy-worker",
+        agent_id: "busy-worker",
+        state: "queued",
+        created: true,
+      },
+      {
+        event: "message_enqueued",
+        message_id: "event-dedupe-1",
+        to: "busy-worker",
+        agent_id: "busy-worker",
+        state: "queued",
+        created: false,
+        deduped: true,
+      },
+    ]);
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("duplicate one-shot reminders link to one live mailbox message", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-reminder-dedupe-"));
+  let now = Date.parse("2026-07-13T00:00:00.000Z");
+  const repository = openMessageRepository({
+    databasePath: join(directory, "router.sqlite"),
+    clock: () => new Date(now),
+  });
+  try {
+    const router = createAgentRouter({ repository, clock: () => new Date(now), timeoutSweepIntervalMs: 60_000 });
+    for (const id of ["duplicate-a", "duplicate-b"]) {
+      repository.createReminder({
+        id,
+        target: "busy-worker",
+        creator: "tester",
+        subject: "Busy worker reminder",
+        body: "Same reminder text.",
+        created_at: new Date(now).toISOString(),
+        next_due_at: new Date(now + 1_000).toISOString(),
+        interval_ms: null,
+      });
+    }
+
+    now += 1_000;
+    const fired = router.sweepDueReminders();
+    assert.equal(fired.length, 2);
+    assert.deepEqual(repository.queuedFor("busy-worker").map(({ id }) => id), ["reminder-duplicate-a-0"]);
+    assert.equal(repository.reminderFor("duplicate-a").linked_message_id, "reminder-duplicate-a-0");
+    assert.equal(repository.reminderFor("duplicate-b").linked_message_id, "reminder-duplicate-a-0");
+  } finally {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router batches roughly ten mixed-sender idle notifications into one delivery pull", async () => {
+>>>>>>> 37e107d (Suppress duplicate live mailbox deliveries)
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
   try {
