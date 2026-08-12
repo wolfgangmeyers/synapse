@@ -1997,7 +1997,6 @@ function enqueueReminderMessage(database, reminder, now, limits) {
   if (!result.created && !result.batched && !result.deduped) {
     throw new IdempotencyConflictError(result.message.id);
   }
-  }
   const messageIncarnationId = result.message.id === candidate.id
     ? result.message.message_incarnation_id
     : randomUUID();

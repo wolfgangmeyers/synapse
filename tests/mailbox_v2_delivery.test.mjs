@@ -2434,9 +2434,6 @@ test("same instance reconnect registration replaces the old live socket without 
   }
 });
 
-<<<<<<< HEAD
-test("router batches roughly ten mixed-sender idle notifications into one queued delivery", async () => {
-=======
 test("unchanged live duplicate messages are suppressed until settlement", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-live-dedupe-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
@@ -2500,9 +2497,9 @@ test("changed duplicate evidence still enqueues separately", async () => {
     body: "Still waiting.",
   });
   try {
-    repository.enqueue(base);
-    assert.equal(repository.enqueue({ ...base, id: "evidence-body", body: "New blocker found." }).created, true);
-    assert.equal(repository.enqueue({ ...base, id: "evidence-subject", subject: "Blocked" }).created, true);
+    repository.enqueue(base, { disableBatching: true });
+    assert.equal(repository.enqueue({ ...base, id: "evidence-body", body: "New blocker found." }, { disableBatching: true }).created, true);
+    assert.equal(repository.enqueue({ ...base, id: "evidence-subject", subject: "Blocked" }, { disableBatching: true }).created, true);
     assert.deepEqual(repository.queuedFor("busy-worker").map(({ id }) => id), [
       "evidence-1",
       "evidence-body",
@@ -2684,7 +2681,6 @@ test("duplicate one-shot reminders link to one live mailbox message", async () =
 });
 
 test("router batches roughly ten mixed-sender idle notifications into one delivery pull", async () => {
->>>>>>> 37e107d (Suppress duplicate live mailbox deliveries)
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-batch-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
   try {
