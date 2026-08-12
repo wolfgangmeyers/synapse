@@ -262,7 +262,7 @@ class MessageRepository {
         maxQueuedBytes: this.#maxQueuedBytes,
         maxBatchBodyChars: disableBatching ? 0 : this.#maxBatchBodyChars,
       });
-      if (result.created || result.batched) {
+      if (result.created || result.batched || result.deduped) {
         const messageIncarnationId = result.message.id === candidate.id
           ? result.message.message_incarnation_id
           : randomUUID();
@@ -1810,6 +1810,11 @@ function enqueueCandidate(
     return { created: false, message: existing };
   }
 
+  const duplicate = selectLiveDuplicateMessage(database, candidate);
+  if (duplicate !== undefined) {
+    return { created: false, deduped: true, message: duplicate };
+  }
+
   const usage = selectLiveQueueUsage(database, candidate.to);
   const batchTarget = selectBatchTarget(database, candidate, {
     maxBatchBodyChars,
@@ -1857,6 +1862,30 @@ function enqueueCandidate(
     created: true,
     message: selectMessage(database, candidate.id),
   };
+}
+
+function selectLiveDuplicateMessage(database, candidate) {
+  const row = database.prepare(`
+    SELECT id
+    FROM messages
+    WHERE id <> ?
+      AND sender = ?
+      AND recipient = ?
+      AND subject IS ?
+      AND body = ?
+      AND sentinel_json IS ?
+      AND state IN ('queued', 'leased', 'injection_requested')
+    ORDER BY enqueue_sequence ASC
+    LIMIT 1
+  `).get(
+    candidate.id,
+    candidate.from,
+    candidate.to,
+    candidate.subject,
+    candidate.body,
+    candidate.sentinel_json,
+  );
+  return row === undefined ? undefined : selectMessage(database, row.id);
 }
 
 export function validateReminder(reminder, { maxBodyBytes = DEFAULT_MAX_BODY_BYTES } = {}) {
@@ -1965,8 +1994,9 @@ function enqueueReminderMessage(database, reminder, now, limits) {
       maxBatchBodyChars: limits.maxBatchBodyChars,
     },
   );
-  if (!result.created && !result.batched) {
+  if (!result.created && !result.batched && !result.deduped) {
     throw new IdempotencyConflictError(result.message.id);
+  }
   }
   const messageIncarnationId = result.message.id === candidate.id
     ? result.message.message_incarnation_id

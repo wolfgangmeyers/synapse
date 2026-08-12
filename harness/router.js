@@ -1194,6 +1194,7 @@ export function createAgentRouter({
       agent_id: result.message.to,
       state: result.message.state,
       created: result.created,
+      ...(result.deduped === true ? { deduped: true } : {}),
     });
     if (result.conversation_created === true) {
       fanoutConversationMessage(result.conversation_message);
