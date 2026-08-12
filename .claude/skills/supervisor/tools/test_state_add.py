@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused state_add validation tests for managed Pi workers."""
+"""Focused state_add validation tests for managed workers."""
 
 import json
 import os
@@ -42,6 +42,38 @@ class StateAddTest(unittest.TestCase):
             self.assertEqual(task["agent"], "pi")
             self.assertEqual(task["session"], "pi-session-123")
 
+    def test_records_non_pi_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_file = pathlib.Path(tmpdir) / "state.json"
+            result = self._run(
+                state_file,
+                "--alias", "codex-worker",
+                "--type", "worker",
+                "--project", "/project",
+                "--description", "Codex worker",
+                "--agent", "codex",
+                "--session", "codex-session-123",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            task = json.loads(state_file.read_text(encoding="utf-8"))["tasks"][0]
+            self.assertEqual(task["agent"], "codex")
+            self.assertEqual(task["session"], "codex-session-123")
+
+    def test_rejects_session_without_agent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._run(
+                pathlib.Path(tmpdir) / "state.json",
+                "--alias", "missing-agent",
+                "--type", "worker",
+                "--project", "/project",
+                "--description", "Missing agent",
+                "--session", "session-123",
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--session requires --agent", result.stderr)
+
     def test_rejects_unknown_agent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             result = self._run(
@@ -55,21 +87,6 @@ class StateAddTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("invalid choice", result.stderr)
-
-    def test_rejects_session_for_legacy_agent(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = self._run(
-                pathlib.Path(tmpdir) / "state.json",
-                "--alias", "legacy-worker",
-                "--type", "worker",
-                "--project", "/project",
-                "--description", "Legacy worker",
-                "--agent", "codex",
-                "--session", "not-a-pi-session",
-            )
-
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("--session requires --agent pi", result.stderr)
 
 
 if __name__ == "__main__":

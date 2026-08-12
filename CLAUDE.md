@@ -11,7 +11,7 @@ A skill is a self-contained instruction set. Any agent (Pi, Claude Code, Codex, 
 Managed worker runtime is machine-local configuration. `worker_launch.py` reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}` and falls back to Pi when absent; explicit `--agent` overrides it. The file has a second reader
 with a deliberately different contract: `supervisor_start.py` refuses to start and exits 2 when the
 file is missing, rather than falling back, because a supervisor launched on a runtime this machine
-cannot run fails silently on its first model call. When runtime is Pi, preserve provider `anthropic` and model `claude-opus-5`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. Managed Pi workers use Pi's default configured extensions and add the Mailbox V2 extension explicitly; do not add `--no-extensions` unless Wolfgang asks for a bare-extension diagnostic session. Claude workers use the launcher-managed Mailbox sidecar for terminal delivery and reply through `mailbox_send.py`.
+cannot run fails silently on its first model call. When runtime is Pi, preserve provider `openai-codex` and model `gpt-5.5`. Set `MECHA_PI_MAILBOX_EXTENSION` to a validated local Mailbox V2 extension file and `MECHA_ROUTER_URL` to a loopback HTTP(S) base URL such as `http://127.0.0.1:8765`; the Pi extension derives its WebSocket endpoint internally. Managed Pi workers use Pi's default configured extensions and add the Mailbox V2 extension explicitly; do not add `--no-extensions` unless Wolfgang asks for a bare-extension diagnostic session. Claude workers use the launcher-managed Mailbox sidecar for terminal delivery and reply through `mailbox_send.py`.
 
 ## Maintenance
 
@@ -48,7 +48,7 @@ could affect files, external communication, or destructive operations.
 | `generate-supervisor-persona` | **Deprecated** — thin wrapper that redirects to `generate-persona` with `--use supervision --source chat-logs`. |
 | `install` | Set up or reinstall mecha-developer by symlinking personas, skills, and hooks to the home directory. One-time setup utility. |
 | `kb` | Manage the persistent markdown knowledge base at `~/.mecha-developer/kb/`. For persistent, reusable knowledge worth keeping across sessions. |
-| `mailbox` | Mecha-wolfgang async mailbox — delivery format, mandatory pre-read `state_update` blocks, hooks/cron. **Load with supervisor** so `[MAILBOX]` injections are handled correctly. Spec: `MAILBOX_REQUIREMENTS.md` at repo root. |
+| `mailbox` | Mecha-wolfgang async mailbox — Mailbox V2 router delivery formats and mandatory pre-read state-update rules. **Load with supervisor** so runtime-delivered mail is handled correctly. |
 | `pi-extension-maintenance` | Safely inspect, install, update, uninstall, and diagnose the copied Mailbox V2 Pi extension lifecycle without touching unrelated Pi configuration. |
 | `pr-watch` | Run and maintain the read-only polling GitHub PR watcher used as a lightweight substitute for the webhook PR review bot. |
 | `reminders` | Set one-shot reminders that fire via mailbox after a delay. Set, list, or delete reminders for any tmux window. |
@@ -62,7 +62,8 @@ could affect files, external communication, or destructive operations.
 | `voice` | Generate a voice profile from writing samples so an LLM can reproduce how someone speaks and writes. Source-agnostic: works with Facebook exports, chat logs, email archives, plain text, or any writing samples. |
 | `voice-review-builder` | Collect and distill Wolfgang's feedback on PR review comments to improve review voice and review quality. |
 | `watchdog` | LLM-based Watchdog momentum-nudge guidance. The separate Priority Handoff Monitor owns deterministic five-minute checks. Not for direct invocation. |
-| `worker` | Worker agent instructions — injected by the supervisor at launch. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Loaded automatically; do not invoke manually. |
+| `worker` | Worker agent instructions — provided by the supervisor when launching or resuming a managed worker. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Supervisors instruct workers to read it through the runtime's verified delivery path; do not invoke manually. |
+| `worker-launch` | Managed worker launch, resume, follow-up handoff, parking, shutdown, and Mailbox V2 coordination guidance for supervisors. |
 | `wolfgang-voice-review` | Private final gate for rewriting validated PR review findings into Wolfgang's review voice before posting. |
 | `workflows` | Manage and execute plain-English workflow templates. Load whenever a workflow is mentioned by name — even casually — before acting on it. |
 | `worktree` | Create, list, or remove git worktrees for isolated workstreams as sibling directories of the main repo. |

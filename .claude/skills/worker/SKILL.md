@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Worker agent instructions — injected by the supervisor when launching a Pi worker window. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Do NOT invoke manually in normal sessions — this skill is loaded automatically by the supervisor at worker launch time.
+description: Worker agent instructions — provided by the supervisor when launching or resuming a managed worker window. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Do NOT invoke manually in normal sessions — supervisors instruct workers to read this skill through the runtime's verified delivery path.
 ---
 
 # Worker Skill
@@ -9,7 +9,7 @@ You are a worker agent managed by a supervisor.
 
 ## Runtime
 
-Managed workers may run on the machine-local default runtime selected by the supervisor launcher. If you are a Pi worker, you run with provider `anthropic` and model `claude-opus-5`; do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed Pi launch uses Pi's default configured extensions and adds the Mailbox V2 extension explicitly for routing. Use `mecha_context` self-compaction only after a Pi context-threshold notification or a direct user/supervisor instruction.
+Managed workers may run on the machine-local default runtime selected by the supervisor launcher. If you are a Pi worker, you run with provider `openai-codex` and model `gpt-5.5`; do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed Pi launch uses Pi's default configured extensions and adds the Mailbox V2 extension explicitly for routing. Use `mecha_context` self-compaction only after a Pi context-threshold notification or a direct user/supervisor instruction.
 
 If you are a Claude worker, Mailbox V2 delivery reaches you through a sidecar that pastes sanitized messages into your terminal. This is terminal delivery, not Pi-equivalent session injection. Reply to the supervisor with `mailbox_send.py` exactly as described below; do not rely on scraped terminal output. `--notify-on-settled` and Pi compaction controls are Pi-only.
 
@@ -37,8 +37,7 @@ Hardcoding or inventing a sender identity breaks reply routing.
 
 **Never send a message to yourself** — `--to` must be `supervisor` or another worker's window name, never your own current tmux window name. Messaging yourself does nothing useful and wastes context.
 
-Delivery: the recipient sees your message after their next tool call (PostToolUse hook
-injects it as context), or within 30 seconds via cron if they're idle.
+Delivery: the Mailbox V2 router queues the message, and the recipient sees it through that runtime's verified delivery integration. Router acceptance is not proof the message was consumed; critical handoffs require a reply or other delivery evidence.
 
 ### When to send a mailbox message
 
@@ -180,7 +179,7 @@ Then wait idle. The supervisor will kill the window when ready.
 
 7. **Never commit TASK.md**: `TASK.md` is a temporary supervisor-written task file. It is not part of the project and must never be staged or committed. If it shows up in `git status`, leave it untracked. If the project doesn't already have it in `.gitignore`, add it.
 
-8. **Never prompt the user interactively**: You are a headless Pi worker. The supervisor communicates via mailbox, not the interactive UI. If a command is blocked (for example, an authorization guard), do NOT present a multiple-choice prompt or wait for interactive input. Instead, send mail to the supervisor describing what was blocked and wait:
+8. **Never prompt the user interactively**: You are a managed worker. The supervisor communicates through the runtime's verified delivery path, not the interactive UI. If a command is blocked (for example, an authorization guard), do NOT present a multiple-choice prompt or wait for interactive input. Instead, send mail to the supervisor describing what was blocked and wait:
    ```bash
    python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
      --to supervisor \

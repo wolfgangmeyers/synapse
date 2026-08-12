@@ -1,25 +1,42 @@
 ---
 name: mailbox
-description: Mecha-wolfgang async mailbox — delivery format, mandatory pre-read blocks, and tools. Load whenever you act as supervisor or handle worker mail; companion to the supervisor skill.
+description: Mecha-wolfgang async mailbox — Mailbox V2 router delivery formats, mandatory pre-read blocks, and tools. Load whenever you act as supervisor or handle worker mail; companion to the supervisor skill.
 ---
 
 # Mailbox Skill
 
-Mailbox V2 sends durable agent messages through the local router. Normal delivery needs no router environment variable: `python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to <agent> --body "<text>`. It defaults to the local HTTP router; an explicitly configured invalid router URL is rejected.
+Mailbox V2 sends durable agent messages through the local router. Normal sending needs no router environment variable:
+
+```bash
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to <agent> --body "<text>"
+```
+
+It defaults to the local HTTP router; an explicitly configured invalid router URL is rejected. Router acceptance means queued, not necessarily consumed by the recipient.
 
 ## Load ordering
 
-**If you are the supervisor**, load **`supervisor/SKILL.md` first, then this skill** (or read both before taking supervisor actions). The supervisor skill orchestrates workers and state; this skill defines **what counts as mail** and **how to process injected deliveries**.
+**If you are the supervisor**, load **`supervisor/SKILL.md` first, then this skill** (or read both before taking supervisor actions). The supervisor skill orchestrates workers and state; this skill defines **what counts as mail** and **how to process delivered messages**.
 
-## When `[MAILBOX]` appears in chat (system-delivered)
+## Delivery formats
 
-The same `[MAILBOX]` text the hook prints to stdout can appear **in this chat as injected context** when your environment bridges mailbox delivery (not only when a human pastes it). Treat it as a **real delivery**:
+Mailbox delivery format depends on the verified runtime integration:
 
-1. If the block includes **`*** MANDATORY — DO THIS BEFORE READING THE MESSAGE BELOW ***`**, run **`state_update_status.py <alias> "<one-line summary>"`** (or the exact command shown) **before** treating the message body as processed.
+- Pi workers use the managed Mailbox V2 extension.
+- Claude workers use the launcher-managed Mailbox sidecar.
+- Direct chat delivery may appear as a mailbox block in the conversation.
+- Bare Codex launched by `worker_launch.py` has no launcher-provided Mailbox delivery bridge.
+
+Do not assume a sent message reached a worker from router acceptance alone. For critical handoffs, verify receipt with a worker reply, runtime delivery evidence, or `worker_capture.py`.
+
+## When mailbox content appears in chat
+
+Treat any delivered mailbox content in chat as a real delivery, whether it appears as a `[MAILBOX]` block, a `Mailbox message from ...` block, or another verified runtime-delivered format.
+
+1. If the delivery includes a mandatory pre-read/state-update instruction, run the exact `state_update_status.py ...` command shown before treating the message body as processed.
 2. Then read the message body.
-3. Then act (reply, `worker_send`, park, etc.).
+3. Then act: reply, redirect, park, verify, or update state as needed.
 
-Skipping Step 1 when the mandatory block is present is a **protocol violation** — stale `last_checked` / wrong ordering vs. state.
+Skipping a mandatory pre-read update when one is present is a protocol violation because state and message handling are now out of order.
 
 ## Reply discipline: preserve the channel
 
@@ -39,19 +56,15 @@ Send mail when it changes what the recipient can do or needs to know: a blocker,
 
 If a supervisor or worker has already asked you to stay parked or continue, do not send periodic "still parked" or "still working" messages unless new evidence, a delay/blocker, or a requested checkpoint is due.
 
-## Canonical specification
+## Canonical implementation references
 
-Full requirements, JSON schema, hook behavior, and cron behavior:
-
-**`MAILBOX_REQUIREMENTS.md`** at the **mecha-developer repository root** (same repo that contains `.claude/skills/`).
+The checked-in Mailbox V2 behavior is implemented in the supervisor router/tools and exercised by the mailbox tests in this repository. Do not rely on an external standalone mailbox spec file unless it exists in the checkout you are reading.
 
 ## Tools (supervisor tools path)
 
 | Script | Purpose |
 |--------|---------|
-| `mailbox_send.py` | Post a message to another window’s mailbox |
-| `hooks/mailbox-deliver.py` | PreToolUse delivery (stdout → model; messages marked read) |
-| `mailbox_cron.py` | Idle tmux delivery (cron) |
+| `mailbox_send.py` | Post a message through the Mailbox V2 router |
 
 Installed layout: `~/.claude/skills/supervisor/tools/…` (or your mecha-developer checkout).
 

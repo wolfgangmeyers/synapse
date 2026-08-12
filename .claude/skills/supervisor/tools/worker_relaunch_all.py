@@ -5,7 +5,8 @@ Usage:
   python worker_relaunch_all.py [--dry-run]
 
 Reads supervisor state, kills existing worker windows, and relaunches them
-with each task's recorded runtime, Pi session semantics, and task descriptions.
+with each task's recorded runtime and session. For runtimes with verified
+Mailbox delivery, it also sends the task description as a recovery handoff.
 """
 
 import argparse
@@ -35,7 +36,7 @@ def main():
     state = load_state()
     tasks = state.get("tasks", [])
 
-    # Recovery is a managed Pi lifecycle operation. Never type recovery
+    # Recovery is a managed worker lifecycle operation. Never type recovery
     # instructions into a terminal, and never guess a resumable session.
     active_workers = [
         task for task in tasks
@@ -43,14 +44,14 @@ def main():
     ]
     skipped_workers = [
         task for task in active_workers
-        if task.get("agent") != "pi" or not task.get("session")
+        if not task.get("session")
     ]
     workers = [task for task in active_workers if task not in skipped_workers]
 
     for task in skipped_workers:
         print(
-            f"⚠️  {task.get('alias', '?')}: managed recovery requires a Pi worker "
-            "with a recorded session path or ID; leaving its window running"
+            f"⚠️  {task.get('alias', '?')}: managed recovery requires "
+            "a recorded session path or ID; leaving its window running"
         )
 
     if not workers:
@@ -120,7 +121,7 @@ def main():
 
         print(f"  Launching {window} in {work_dir}...")
 
-        agent = "pi"
+        agent = task.get("agent") or "pi"
         launch_cmd = [
             "python3",
             os.path.join(os.path.dirname(__file__), "worker_launch.py"),
@@ -128,8 +129,9 @@ def main():
             "--dir", work_dir,
             "--agent", agent,
         ]
-        if agent == "pi" and task.get("session"):
-            launch_cmd.extend(["--resume", task["session"]])
+        launch_cmd.extend(["--resume", task["session"]])
+        if agent == "pi":
+            launch_cmd.extend(["--notify-on-settled", "supervisor"])
 
         result = subprocess.run(launch_cmd, capture_output=True, text=True)
 
@@ -146,8 +148,8 @@ def main():
         desc = task.get("description", "Continue your work")
         summary = get_worker_summary(task)
 
-        task_text = f"""You are a Pi worker. Rules:
-1. Work directly in focused stages; do not use subagents.
+        task_text = f"""You are a managed {agent} worker. Rules:
+1. Read ~/.agents/skills/worker/SKILL.md and follow it, including its bounded subagent guidance.
 2. Maintain your todo list constantly.
 3. Reference ~/personas/wolfgang.md for decisions.
 
@@ -157,7 +159,13 @@ Current status: {summary}
 
 Continue where you left off based on git status and recent commits."""
 
-        # Mailbox V2 is the only coordination path after lifecycle recovery.
+        if agent in {"codex", "cursor"}:
+            print(f"    ! {agent} has no launcher-provided Mailbox delivery bridge; verify a separate delivery path before sending follow-up instructions")
+            print("    ! Check reminder coverage in state: supervisor_reminder_id and worker_self_reminder_ids where applicable")
+            continue
+
+        # Mailbox V2 is the coordination path after lifecycle recovery when the
+        # runtime has a verified delivery bridge.
         send_cmd = [
             "python3",
             os.path.join(os.path.dirname(__file__), "mailbox_send.py"),
@@ -171,6 +179,7 @@ Continue where you left off based on git status and recent commits."""
             print(f"    ✗ Mailbox delivery failed: {send_result.stderr.strip()}")
         else:
             print("    ✓ Sent Mailbox V2 instruction")
+        print("    ! Check reminder coverage in state: supervisor_reminder_id and worker_self_reminder_ids")
 
         time.sleep(1)
 
