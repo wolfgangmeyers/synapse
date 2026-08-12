@@ -4,10 +4,12 @@
 
 - Worktree: `/Users/wolfgang/code/mecha-developer/.worktrees/router-batching-main-integration`
 - Branch: `codex/router-batching-main-integration` tracking `origin/main`
-- Integration base: `origin/main` at `d85109dedb68403cced37a63d68807902fbdcc0c`
+- Integration base before landing: `origin/main` at `d85109dedb68403cced37a63d68807902fbdcc0c`
 - Batching source: `origin/codex/router-delivery-batching` at `326141d2a8a68d1bd92413dc7c1fe0e53394faaf`
-- The later duplicate-suppression branch commit is intentionally excluded because duplicate suppression is already on main.
-- No PR, push, or runtime change performed.
+- Integrated result: `origin/main` at `2813ab1863725e502f04b0152ed055e87cd1c1d8`
+- The later duplicate-suppression branch commit was intentionally excluded because duplicate suppression was already on main.
+- Landed under the main-only workflow by fast-forwarding `origin/main`; no PR was opened.
+- No runtime change was performed.
 
 ## Integration scope
 
@@ -47,7 +49,6 @@ Conflict-resolution notes:
   - The failing test is `compaction pauses activity without dropping mailbox resume`; this is the unrelated existing compaction timing assertion previously observed on main-integration checks, not a batching failure.
 - `git diff --check` passed. Output saved at `/tmp/router-batching-main-diff-check.txt`.
 
-## Next steps
+## Final state
 
-1. Supervisor review of the scoped integration diff and validation evidence.
-2. Do not commit, push, open a PR, or change runtime until authorized.
+Task-167 delivery-items batching is integrated on `origin/main` at `2813ab1863725e502f04b0152ed055e87cd1c1d8`. No PR handoff remains. Local runtime/update handling is tracked separately.
