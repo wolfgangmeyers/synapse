@@ -12,6 +12,7 @@ import {
   SCOPE_SEPARATOR,
   settlePendingMessages,
 } from "./state.js";
+import { renderMarkdownBody, textWithoutMarkdownImages } from "./markdown.js";
 
 localStorage.removeItem("mecha.web.messages");
 localStorage.removeItem("mecha.web.conversations");
@@ -276,7 +277,7 @@ function showArrivedMessageDialog(arrival) {
   const timestamp = arrival.createdAt || "";
   const parts = [arrival.from ? `From ${arrival.from}` : "", arrival.subject ? `Subject: ${arrival.subject}` : "", timestamp ? new Date(timestamp).toLocaleString() : ""].filter(Boolean);
   elements.arrivedDialogMeta.textContent = parts.join(" · ");
-  elements.arrivedDialogBody.textContent = arrival.body || "";
+  elements.arrivedDialogBody.replaceChildren(renderMarkdownBody(document, arrival.body || ""));
   elements.arrivedDialog.showModal();
 }
 
@@ -652,10 +653,8 @@ function renderMessage(message) {
   label.append(sender, timestamp);
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  const text = document.createElement("div");
-  text.textContent = message.body;
-  bubble.append(text);
-  const attachments = message.attachments || imageAttachmentsFromBody(message.body);
+  bubble.append(renderMarkdownBody(document, message.body || ""));
+  const attachments = message.attachments || imageAttachmentsFromBody(textWithoutMarkdownImages(message.body));
   if (attachments.length > 0) bubble.append(renderMessageImages(attachments));
   wrapper.append(label, bubble);
   return wrapper;
