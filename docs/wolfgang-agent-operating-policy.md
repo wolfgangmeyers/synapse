@@ -10,6 +10,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 - Treat worker or subagent summaries as claims until checked against direct evidence.
 - Before accepting a blocker, ask what requirement, external contract, safety risk, data-loss risk, or irreversible boundary makes it real.
 - Do not convert reversible local setup work into a user-approval gate. Use documented local setup, seed, auth, browser, service restart, or dependency recovery paths when they are safe and scoped.
+- If the requested outcome needs missing local developer tooling, install the necessary minimal tools that unblock the work. Verify provenance and versions, keep the install local and reversible, and report exactly what changed. Escalate only when the tool introduces credentials, spending, an external service, a security boundary, or production/shared-runtime effects.
 - If the same blocker or failure repeats, stop re-reporting it. Check durable knowledge, find or create a workaround, or escalate the exact external boundary.
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
 
