@@ -585,6 +585,7 @@ function settledNotificationFixture(t, {
   clearIntervalImpl,
   nowImpl,
   subagentsService,
+  isIdle,
   immediateScheduler = true,
 } = {}) {
   isolateCompactionEnvironment(t);
@@ -605,6 +606,7 @@ function settledNotificationFixture(t, {
   const context = {
     sessionManager: { getSessionId: () => "parent-session" },
     ui: { notify: (...args) => notifications.push(args), setStatus() {} },
+    ...(isIdle !== undefined ? { isIdle } : {}),
   };
   const client = {
     connect: () => Promise.resolve(),
@@ -696,6 +698,89 @@ test("extension refreshes unchanged activity less often than the heartbeat tick"
     { state: "active", subagentCount: 0 },
     { state: "active", subagentCount: 0 },
     { state: "settled", subagentCount: 0 },
+  ]);
+});
+
+test("heartbeat recomputes a stale active parent as settled from Pi context", async (t) => {
+  const intervals = [];
+  let now = 0;
+  let idle = false;
+  const fixture = settledNotificationFixture(t, {
+    isIdle: () => idle,
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  idle = true;
+  now += 5_000;
+  intervals[0].callback();
+
+  assert.equal(intervals[0].cleared, true);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "settled", subagentCount: 0 },
+  ]);
+});
+
+test("heartbeat recomputes a stale settled parent as active from Pi context", async (t) => {
+  const intervals = [];
+  let now = 0;
+  let idle = true;
+  const fixture = settledNotificationFixture(t, {
+    isIdle: () => idle,
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.childEvents.get("subagents:started")({ id: "child-one" });
+  idle = false;
+  now += 5_000;
+  intervals[0].callback();
+
+  assert.equal(intervals[0].cleared, false);
+  assert.deepEqual(fixture.activity, [
+    { state: "settled", subagentCount: 1 },
+    { state: "active", subagentCount: 1 },
+  ]);
+});
+
+test("agent_settled does not stop heartbeats while Pi context is still active", async (t) => {
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    isIdle: () => false,
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  now += 10_000;
+  intervals[0].callback();
+
+  assert.equal(intervals[0].cleared, false);
+  assert.deepEqual(fixture.activity, [
+    { state: "active", subagentCount: 0 },
+    { state: "active", subagentCount: 0 },
   ]);
 });
 
@@ -1067,11 +1152,13 @@ test("extension reconciles late-published native subagent service on heartbeat",
 
 test("compaction pauses activity without dropping mailbox resume", async (t) => {
   const calls = [];
-  const fixture = settledNotificationFixture(t);
+  let idle = false;
+  const fixture = settledNotificationFixture(t, { isIdle: () => idle });
   fixture.client.pause = () => calls.push("pause");
   fixture.client.resume = () => { calls.push("resume"); return Promise.resolve(); };
 
   fixture.handlers.get("agent_start")({}, fixture.context);
+  idle = true;
   await fixture.handlers.get("session_before_compact")({ signal: AbortSignal.timeout(100), preparation: {} }, fixture.context);
   fixture.handlers.get("agent_settled")({}, fixture.context);
   assert.deepEqual(fixture.activity, [
