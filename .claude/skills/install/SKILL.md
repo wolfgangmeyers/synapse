@@ -315,9 +315,10 @@ rm -f "$TARGET.rollback" "$SETTINGS.mecha-messaging.rollback"
 ```
 
 Global registration is for bare Pi only. New supervisor and worker processes
-remain explicitly launched with `--no-extensions --extension "$TARGET"`; they
-do not rely on global extension discovery. If an existing bare Pi process needs
-the update, reload it after the final check.
+are explicitly launched with the managed mailbox extension path; they preserve
+Pi's default configured extensions and add this extension rather than using
+`--no-extensions`. If an existing bare Pi process needs the update, reload it
+after the final check.
 
 ### 8. Symlink Hooks
 
@@ -327,18 +328,15 @@ Symlink hook scripts from the skills directory into `~/.claude/hooks/`:
 ```bash
 mkdir -p ~/.claude/hooks
 
-# Mailbox delivery hook (PreToolUse — all tools)
-HOOK_SRC="$(pwd)/.claude/skills/supervisor/tools/hooks/mailbox-deliver.py"
+# Retired Mailbox hook: Mailbox V2 delivery now comes from the runtime's
+# verified integration (Pi extension, Claude sidecar, or another bridge). Remove
+# only a symlink at the legacy path; preserve non-symlink files for manual review.
 HOOK_LINK="$HOME/.claude/hooks/mailbox-deliver.py"
-
 if [ -L "$HOOK_LINK" ]; then
-  ln -sf "$HOOK_SRC" "$HOOK_LINK"
-  echo "updated: $HOOK_LINK -> $HOOK_SRC"
+  unlink "$HOOK_LINK"
+  echo "removed legacy mailbox hook symlink: $HOOK_LINK"
 elif [ -e "$HOOK_LINK" ]; then
-  echo "skipped: $HOOK_LINK already exists (not a symlink)"
-else
-  ln -s "$HOOK_SRC" "$HOOK_LINK"
-  echo "linked: $HOOK_LINK -> $HOOK_SRC"
+  echo "skipped non-symlink legacy mailbox hook: $HOOK_LINK"
 fi
 
 # Activity hook (all activity events — drives the router UI's working dot and subagent badge)
@@ -370,7 +368,7 @@ else
 fi
 ```
 
-Then verify `~/.claude/settings.json` has the PostToolUse mailbox delivery hook registered and prompt suggestions disabled. Use Python to safely merge these into the existing file rather than overwriting it:
+Then verify `~/.claude/settings.json` has prompt suggestions disabled and current non-mailbox hooks registered. Use Python to safely merge these into the existing file rather than overwriting it:
 
 ```python
 import json, os
@@ -384,28 +382,21 @@ if os.path.exists(settings_path):
 # Disable prompt suggestions (they confuse the watchdog LLM)
 settings["promptSuggestionEnabled"] = False
 
-# Ensure PostToolUse hook for mailbox delivery exists
 post_hooks = settings.setdefault("hooks", {}).setdefault("PostToolUse", [])
-mailbox_hook_entry = {
-    "matcher": "",
-    "hooks": [{"type": "command", "command": "~/.claude/hooks/mailbox-deliver.py"}]
-}
-# Check if already registered (match on command path)
-already_registered = any(
-    any(h.get("command", "").endswith("mailbox-deliver.py") for h in entry.get("hooks", []))
-    for entry in post_hooks
-)
-if not already_registered:
-    post_hooks.append(mailbox_hook_entry)
-    print("added: PostToolUse mailbox delivery hook")
-else:
-    print("skipped: PostToolUse mailbox delivery hook already registered")
+# Remove legacy mailbox hook registrations. Mailbox V2 delivery is runtime-owned,
+# not a global Claude hook installed here.
+removed_mailbox = 0
+updated_post_hooks = []
+for entry in post_hooks:
+    hooks = entry.get("hooks", [])
+    kept = [h for h in hooks if not h.get("command", "").endswith("mailbox-deliver.py")]
+    removed_mailbox += len(hooks) - len(kept)
+    if kept or not hooks:
+        updated_post_hooks.append({**entry, "hooks": kept} if len(kept) != len(hooks) else entry)
+settings["hooks"]["PostToolUse"] = updated_post_hooks
+print(f"removed legacy mailbox hook registrations: {removed_mailbox}")
+post_hooks = settings["hooks"]["PostToolUse"]
 
-# NOTE: hooks are read when a Claude session STARTS. Every session already running when this
-# installs will show nothing, including the ones you are watching while you install it. That is
-# not a fault and there is nothing to debug: launch a new worker, or restart an existing one, and
-# it appears. This has already sent one person looking for a bug that was not there.
-#
 # Activity hooks: one entry per event, all running the same script with the event name.
 #
 # The dedupe matches on the script name appearing ANYWHERE in the command, not on the command
@@ -500,7 +491,7 @@ The monitor appends to `$HOME/.mecha-developer/priority-handoff-monitor.log` and
 
 ### 10. Set Up Other Crontab Jobs
 
-Add cron jobs for mailbox idle delivery, inbound mail polling, standing-order refresh, and memory monitoring:
+Add cron jobs for standing-order refresh and memory monitoring, and remove retired mailbox/reminder producers when present:
 
 ```bash
 TOOLS="$(pwd)/.claude/skills/supervisor/tools"
@@ -514,20 +505,11 @@ else
   echo "skipped: crontab PATH already set"
 fi
 
-# Mailbox idle delivery — runs every 10 seconds (6 staggered per-minute entries)
-if ! crontab -l 2>/dev/null | grep -q "mailbox_cron.py"; then
-  CRON_CMD="/usr/bin/python3 $TOOLS/mailbox_cron.py >> ~/.mecha-developer/mailbox-cron.log 2>&1"
-  (crontab -l 2>/dev/null; \
-    echo "* * * * * $CRON_CMD"; \
-    echo "* * * * * sleep 10; $CRON_CMD"; \
-    echo "* * * * * sleep 20; $CRON_CMD"; \
-    echo "* * * * * sleep 30; $CRON_CMD"; \
-    echo "* * * * * sleep 40; $CRON_CMD"; \
-    echo "* * * * * sleep 50; $CRON_CMD" \
-  ) | crontab -
-  echo "added: mailbox idle delivery cron job (runs every 10 seconds)"
-else
-  echo "skipped: mailbox cron job already exists"
+# Remove legacy mailbox idle delivery cron entries. Mailbox V2 delivery is owned
+# by each verified runtime integration, not a global tmux cron producer.
+if crontab -l 2>/dev/null | grep -q "mailbox_cron.py"; then
+  crontab -l 2>/dev/null | grep -v "mailbox_cron.py" | crontab -
+  echo "removed legacy mailbox idle delivery cron job"
 fi
 
 # Standing-orders refresh — posts current supervisor standing orders via mailbox every 2 hours.
@@ -603,7 +585,6 @@ fi
 ```
 
 The cron jobs:
-- **mailbox_cron.py**: Runs every 10 seconds (6 staggered entries). Checks all agent mailboxes for unread messages older than 30 seconds and delivers to tmux windows.
 - **standing_orders_cron.py**: Runs every 2 hours. Reads current supervisor standing orders and posts them to the supervisor mailbox from the `standing-orders-cron` system sender.
 - **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
 - **Priority Handoff Monitor**: Runs every five minutes. It reads supervisor state and durable Mailbox router reminders, reports actionable terminal-priority and handoff faults, and bounds `~/.mecha-developer/priority-handoff-monitor.log` to 1 MiB. It does not create a reminder. `--remove-schedule` removes only its marked cron entry.
@@ -643,7 +624,7 @@ fi
 
 echo ""
 echo "=== Crontab ==="
-crontab -l 2>/dev/null | grep "mailbox_cron.py" || echo "no mailbox cron job"
+crontab -l 2>/dev/null | grep "mailbox_cron.py" && echo "WARN: retired mailbox cron job remains" || echo "no retired mailbox cron job"
 crontab -l 2>/dev/null | grep "standing_orders_cron.py" || echo "no standing-orders refresh cron job"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
 crontab -l 2>/dev/null | grep "mecha-priority-handoff-monitor" || echo "no Priority Handoff Monitor cron job"

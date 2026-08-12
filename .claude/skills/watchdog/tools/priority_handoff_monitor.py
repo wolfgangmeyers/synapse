@@ -421,8 +421,8 @@ def recovery_tmux_command(evidence: dict, work_dir: str = "/Users/wolfgang/code/
     router_url = router_base()
     pi_command = " ".join([
         "pi",
-        "--provider", "anthropic",
-        "--model", "claude-opus-5",
+        "--provider", "openai-codex",
+        "--model", "gpt-5.5",
         "--name", SUPERVISOR_WINDOW,
         "--extension", shlex.quote(extension),
         "--approve", shlex.quote(prompt),
@@ -430,7 +430,7 @@ def recovery_tmux_command(evidence: dict, work_dir: str = "/Users/wolfgang/code/
     shell_command = (
         f"cd {shlex.quote(work_dir)} && unset CLAUDECODE "
         f"&& export MECHA_ROUTER_URL={shlex.quote(router_url)} "
-        "&& export MECHA_PI_MODEL_KEY=anthropic/claude-opus-5 "
+        "&& export MECHA_PI_MODEL_KEY=openai-codex/gpt-5.5 "
         f"&& {pi_command}"
     )
     return shell_command

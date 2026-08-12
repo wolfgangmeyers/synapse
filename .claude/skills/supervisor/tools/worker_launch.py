@@ -7,8 +7,9 @@ Usage:
 When --agent is omitted, the runtime comes from the machine-local worker runtime config and falls back to Pi.
 
 Creates a tmux window, starts the agent in the specified directory,
-and waits for it to initialize. Deliver all instructions with mailbox_send.py
-after verifying the agent registered with Mailbox V2.
+and waits for it to initialize. Deliver instructions with mailbox_send.py only
+for runtimes with verified Mailbox V2 delivery; bare Codex/Cursor need a
+separate verified bridge or another proven context path.
 """
 
 import argparse
@@ -657,7 +658,7 @@ def main():
             parts.extend(["-a", "never", "-s", "danger-full-access"])
         if args.resume:
             parts.extend(["resume", args.resume])
-        agent_cmd = " ".join(parts)
+        agent_cmd = _quote_command(parts)
     elif args.agent == "cursor":
         # Cursor agent: interactive TUI mode.
         token = get_cursor_auth_token()
@@ -669,14 +670,15 @@ def main():
         _cursor_pretrust_workspace(work_dir)
 
         cursor_bin = os.path.expanduser("~/.local/bin/cursor-agent")
-        parts = [f"export CURSOR_AUTH_TOKEN={token}"]
+        parts = [f"export CURSOR_AUTH_TOKEN={shlex.quote(token)}"]
 
-        # TUI mode: interactive session, stays alive for Mailbox V2 messages.
+        # TUI mode: interactive session; worker_launch.py does not provide a
+        # Mailbox V2 delivery bridge for Cursor.
         agent_parts = [cursor_bin, "--yolo", "--model", CURSOR_MODEL]
         if args.resume:
             agent_parts.extend(["--resume", args.resume])
 
-        parts.append(" ".join(agent_parts))
+        parts.append(_quote_command(agent_parts))
         agent_cmd = " && ".join(parts)
     else:
         # Default: Claude Code, and only Claude Code. Both --agent and the machine-local
@@ -798,15 +800,20 @@ def main():
     else:
         print("1. Verify the worker is running, then inspect its status if needed:")
     print(f"   python3 worker_capture.py --window {args.window}")
-    print("2. Deliver instructions through Mailbox V2:")
-    print("   python3 mailbox_send.py --from supervisor \\")
-    print(f"     --to {args.window} --body 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
+    if args.agent in {"pi", "claude"}:
+        print("2. Deliver instructions through the verified Mailbox V2 path:")
+        print("   python3 mailbox_send.py --from supervisor \\")
+        print(f"     --to {args.window} --body 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
+    else:
+        print("2. This runtime has no launcher-provided Mailbox V2 delivery bridge; use only a verified delivery bridge or a relaunch context proven to reach the session.")
     print("3. Record the task in supervisor state:")
     if args.agent == "pi":
         print(
             f"   python3 state_add.py --alias <alias> --type worker --agent pi "
             f"--session {pi_session_id(work_dir, args.window)} ..."
         )
+    elif args.resume:
+        print(f"   python3 state_add.py --alias <alias> --type worker --agent {args.agent} --session {args.resume} ...")
     else:
         print(f"   python3 state_add.py --alias <alias> --type worker --agent {args.agent} ...")
     print()

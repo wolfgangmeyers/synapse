@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused relaunch tests for Mailbox V2 Pi recovery."""
+"""Focused relaunch tests for managed worker recovery."""
 
 import contextlib
 import io
@@ -12,9 +12,6 @@ import worker_relaunch_all
 
 class WorkerRelaunchTest(unittest.TestCase):
     def _run(self, task, sidecar_clean=True):
-        # kill_window is patched because it now sweeps the mailbox sidecar (and would
-        # otherwise reach real tmux and real processes). self.killed records the windows
-        # it was asked to end.
         self.killed = []
 
         def kill_window(window):
@@ -37,7 +34,6 @@ class WorkerRelaunchTest(unittest.TestCase):
             try:
                 worker_relaunch_all.main()
             finally:
-                # Set even when main() exits non-zero, so the abort path can assert on it.
                 self.stderr = stderr.getvalue()
         return [call.args[0] for call in run.call_args_list]
 
@@ -47,7 +43,7 @@ class WorkerRelaunchTest(unittest.TestCase):
                 return command
         self.fail(f"no command containing {needle!r} in {commands}")
 
-    def test_pi_relaunch_passes_recorded_session_and_uses_mailbox_v2(self):
+    def test_pi_relaunch_passes_recorded_session_settled_notification_and_mailbox(self):
         commands = self._run(
             {
                 "state": "active",
@@ -65,12 +61,10 @@ class WorkerRelaunchTest(unittest.TestCase):
         self.assertEqual(self.killed, ["pi-worker"])
         self.assertEqual(launch[launch.index("--agent") + 1], "pi")
         self.assertEqual(launch[launch.index("--resume") + 1], "pi-session-123")
-        self.assertIn("mailbox_send.py", mailbox[1])
-        self.assertEqual(mailbox[mailbox.index("--from") + 1], "supervisor")
+        self.assertEqual(launch[launch.index("--notify-on-settled") + 1], "supervisor")
         self.assertEqual(mailbox[mailbox.index("--to") + 1], "pi-worker")
-        self.assertNotIn("worker_send.py", " ".join(mailbox))
 
-    def test_pi_relaunch_without_session_leaves_window_running(self):
+    def test_relaunch_without_session_leaves_window_running(self):
         commands = self._run(
             {
                 "state": "active",
@@ -83,23 +77,63 @@ class WorkerRelaunchTest(unittest.TestCase):
         )
         self.assertEqual(commands, [])
 
-    def test_legacy_relaunch_requires_managed_pi_lifecycle(self):
+    def test_non_pi_relaunch_uses_recorded_runtime_and_session_without_settled_notification(self):
         commands = self._run(
             {
                 "state": "active",
                 "type": "worker",
-                "window": "legacy-worker",
-                "alias": "legacy-worker",
+                "window": "claude-worker",
+                "alias": "claude-worker",
                 "project": "/project",
-                "agent": "codex",
+                "agent": "claude",
+                "session": "claude-session-123",
             }
         )
-        self.assertEqual(commands, [])
+
+        launch = self.command_with(commands, "worker_launch.py")
+        mailbox = self.command_with(commands, "mailbox_send.py")
+        self.assertEqual(launch[launch.index("--agent") + 1], "claude")
+        self.assertEqual(launch[launch.index("--resume") + 1], "claude-session-123")
+        self.assertNotIn("--notify-on-settled", launch)
+        self.assertEqual(mailbox[mailbox.index("--to") + 1], "claude-worker")
+
+    def test_codex_relaunch_skips_mailbox_followup_without_verified_bridge(self):
+        commands = self._run(
+            {
+                "state": "active",
+                "type": "worker",
+                "window": "codex-worker",
+                "alias": "codex-worker",
+                "project": "/project",
+                "agent": "codex",
+                "session": "codex-session-123",
+            }
+        )
+
+        launch = self.command_with(commands, "worker_launch.py")
+        self.assertEqual(launch[launch.index("--agent") + 1], "codex")
+        self.assertEqual(launch[launch.index("--resume") + 1], "codex-session-123")
+        self.assertFalse(any("mailbox_send.py" in command for command in commands for command in [" ".join(map(str, command))]))
+
+    def test_cursor_relaunch_skips_mailbox_followup_without_verified_bridge(self):
+        commands = self._run(
+            {
+                "state": "active",
+                "type": "worker",
+                "window": "cursor-worker",
+                "alias": "cursor-worker",
+                "project": "/project",
+                "agent": "cursor",
+                "session": "cursor-session-123",
+            }
+        )
+
+        launch = self.command_with(commands, "worker_launch.py")
+        self.assertEqual(launch[launch.index("--agent") + 1], "cursor")
+        self.assertEqual(launch[launch.index("--resume") + 1], "cursor-session-123")
+        self.assertFalse(any("mailbox_send.py" in command for command in commands for command in [" ".join(map(str, command))]))
 
     def test_relaunch_aborts_when_a_sidecar_survives_its_window(self):
-        # Relaunching reuses the same window name. A surviving sidecar would keep that
-        # agent ID registered with the router while a different agent owns the window,
-        # so mail for the live agent lands in the old sidecar. Refuse to relaunch.
         with self.assertRaises(SystemExit) as raised:
             self._run(
                 {

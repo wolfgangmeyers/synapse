@@ -44,7 +44,7 @@ def main():
     parser.add_argument(
         "--session",
         default=None,
-        help="Pi session path or ID for a resumable Pi worker",
+        help="Runtime session path or ID for a resumable managed worker",
     )
     parser.add_argument("--remote-host", default=None, dest="remote_host",
                         help="Remote host ID for remote-worker tasks")
@@ -58,8 +58,8 @@ def main():
     args = parser.parse_args()
 
     # Validate agent/session consistency before changing state.
-    if args.session and args.agent != "pi":
-        parser.error("--session requires --agent pi")
+    if args.session and not args.agent:
+        parser.error("--session requires --agent")
 
     # Validate type/remote-host consistency
     if args.type == "remote-worker" and not args.remote_host:
