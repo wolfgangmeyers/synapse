@@ -454,10 +454,22 @@ export function routeMailboxEnvelope(envelope, inject) {
   inject(envelope);
 }
 
-function isMailboxSessionEntry(entry, messageId) {
-  return entry?.type === "custom_message"
-    && entry.customType === MAILBOX_MESSAGE_TYPE
-    && entry.details?.message_id === messageId;
+function sameDeliveryItem(left, right) {
+  return left?.messageId === right?.messageId
+    && left?.messageIncarnationId === right?.messageIncarnationId
+    && left?.attemptNumber === right?.attemptNumber
+    && left?.deliveryExpiresAt === right?.deliveryExpiresAt;
+}
+
+function isMailboxSessionEntry(entry, messageId, deliveryItems = undefined) {
+  if (entry?.type !== "custom_message"
+    || entry.customType !== MAILBOX_MESSAGE_TYPE
+    || entry.details?.message_id !== messageId) return false;
+  if (!Array.isArray(deliveryItems) || deliveryItems.length === 0) return true;
+  const persistedItems = entry.details?.delivery_items;
+  return Array.isArray(persistedItems)
+    && persistedItems.length === deliveryItems.length
+    && deliveryItems.every((item, index) => sameDeliveryItem(persistedItems[index], item));
 }
 
 
@@ -469,17 +481,20 @@ function readPersistedSessionEntries(sessionFile, readSessionFile) {
 }
 
 export function mailboxSessionDeliveryState(sessionManager, messageId, {
+  deliveryItems = undefined,
   readSessionFile = readFileSync,
   onPersistenceError = () => {},
 } = {}) {
   const branch = sessionManager.getBranch();
-  if (!branch.some((entry) => isMailboxSessionEntry(entry, messageId))) return "absent";
+  const hasBranchMessage = branch.some((entry) => isMailboxSessionEntry(entry, messageId));
+  if (!hasBranchMessage) return "absent";
+  if (!branch.some((entry) => isMailboxSessionEntry(entry, messageId, deliveryItems))) return "history_unverified";
   if (!sessionManager.isPersisted()) return "history_unverified";
   const sessionFile = sessionManager.getSessionFile();
   if (typeof sessionFile !== "string" || sessionFile.length === 0) return "history_unverified";
   try {
     return readPersistedSessionEntries(sessionFile, readSessionFile)
-      .some((entry) => isMailboxSessionEntry(entry, messageId))
+      .some((entry) => isMailboxSessionEntry(entry, messageId, deliveryItems))
       ? "durable"
       : "history_unverified";
   } catch (error) {
@@ -488,7 +503,7 @@ export function mailboxSessionDeliveryState(sessionManager, messageId, {
   }
 }
 
-function mailboxCustomMessage(message) {
+function mailboxCustomMessage(message, delivery = undefined) {
   const subject = message.subject === undefined ? "" : `\nSubject: ${message.subject}`;
   return {
     customType: MAILBOX_MESSAGE_TYPE,
@@ -496,6 +511,7 @@ function mailboxCustomMessage(message) {
     display: true,
     details: {
       message_id: message.id,
+      ...(Array.isArray(delivery?.items) && delivery.items.length > 0 ? { delivery_items: delivery.items } : {}),
       from: message.from,
       to: message.to,
       ...(message.subject === undefined ? {} : { subject: message.subject }),
@@ -665,8 +681,9 @@ export function createPiMailboxDeliveryCoordinator({
     context.ui?.setStatus("mecha-mailbox", "mailbox: waiting for durable session checkpoint");
   }
 
-  function sessionDeliveryState(context, messageId) {
+  function sessionDeliveryState(context, messageId, deliveryItems = undefined) {
     return mailboxSessionDeliveryState(context.sessionManager, messageId, {
+      deliveryItems,
       readSessionFile,
       onPersistenceError: (error) => {
         if (reportedPersistenceErrors.has(messageId)) return;
@@ -677,7 +694,7 @@ export function createPiMailboxDeliveryCoordinator({
   }
 
   function confirmExistingDelivery(delivery, context) {
-    const state = sessionDeliveryState(context, delivery.messageId);
+    const state = sessionDeliveryState(context, delivery.messageId, delivery.items);
     if (state !== "durable") {
       persistenceUnavailable(context);
       return false;
@@ -704,7 +721,7 @@ export function createPiMailboxDeliveryCoordinator({
     if (!active || context.sessionManager.getSessionId() !== sessionId) return;
     const latest = pending.get(messageId);
     if (latest === undefined) return;
-    const state = sessionDeliveryState(context, messageId);
+    const state = sessionDeliveryState(context, messageId, latest.delivery.items);
     if (state === "durable") {
       clearCheckpointTimer(latest);
       pending.delete(messageId);
@@ -734,9 +751,9 @@ export function createPiMailboxDeliveryCoordinator({
     announcedArrivals.add(message.id);
   }
 
-  function injectMailboxMessage(message) {
+  function injectMailboxMessage(message, delivery) {
     routeMailboxEnvelope(message, (envelope) => {
-      pi.sendMessage(mailboxCustomMessage(envelope), { deliverAs: "steer", triggerTurn: true });
+      pi.sendMessage(mailboxCustomMessage(envelope, delivery), { deliverAs: "steer", triggerTurn: true });
     });
   }
 
@@ -787,7 +804,7 @@ export function createPiMailboxDeliveryCoordinator({
     if (!active) return undefined;
     if (message.sentinel !== undefined) return onSentinelEnvelope(message, delivery);
     const currentContext = sessionContext;
-    const state = sessionDeliveryState(currentContext, message.id);
+    const state = sessionDeliveryState(currentContext, message.id, delivery.items);
     if (state === "durable") {
       confirmExistingDelivery(delivery, currentContext);
       return;
@@ -798,7 +815,7 @@ export function createPiMailboxDeliveryCoordinator({
       existing.delivery = delivery;
       if (shouldReinjectPending(existing, delivery, state)) {
         try {
-          injectMailboxMessage(message);
+          injectMailboxMessage(message, delivery);
           existing.lastInjectedAt = now();
           existing.lastInjectedAttemptNumber = delivery.attemptNumber;
         } catch {
@@ -824,7 +841,7 @@ export function createPiMailboxDeliveryCoordinator({
       lastInjectedAttemptNumber: delivery.attemptNumber,
     });
     try {
-      injectMailboxMessage(message);
+      injectMailboxMessage(message, delivery);
     } catch {
       pending.delete(message.id);
       try {

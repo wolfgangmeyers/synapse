@@ -405,6 +405,7 @@ export function createAgentRouter({
           clientType: candidate.client_type,
           ackConfirmation: candidate.ack_confirmation,
           conversationSync: candidate.conversation_sync,
+          deliveryReceipts: candidate.delivery_receipts,
           connectedAt: lease.acquired_at,
           deliveryPaused: observableAgentActivity(candidate.agent_id) === "compacting",
         };
@@ -539,6 +540,9 @@ export function createAgentRouter({
         leaseId: frame.lease_id,
         messageId: frame.message_id,
         attemptNumber: frame.attempt_number,
+        ...(frame.delivery_items === undefined ? {} : { deliveryItems: frame.delivery_items }),
+        allowBatchWithoutDeliveryItems: frame.delivery_items === undefined
+          && session.deliveryReceipts !== "delivery_items_v1",
       };
       try {
         if (frame.type === "injection_requested") {
@@ -631,6 +635,7 @@ export function createAgentRouter({
           attempt: delivery.attempt_number,
           lease_id: currentSession.leaseId,
           delivery_expires_at: delivery.delivery_expires_at,
+          item_count: delivery.items?.length ?? 1,
         });
         // ponytail: legacy V1 clients never negotiated correlated delivery confirmation.
         sendFrame(currentSocket, generateFrameId, {
@@ -641,6 +646,7 @@ export function createAgentRouter({
             : {}),
           attempt_number: delivery.attempt_number,
           delivery_expires_at: delivery.delivery_expires_at,
+          ...((delivery.items?.length ?? 1) > 1 ? { delivery_items: delivery.items } : {}),
         }, currentSession.ackConfirmation === "correlated_v1");
       } catch (error) {
         if (error instanceof LeaseNotActiveError) {

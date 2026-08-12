@@ -42,6 +42,7 @@
         "kind": { "$ref": "#/$defs/messageSourceKind" }
       }
     },
+    "deliveryReceiptMode": { "type": "string", "const": "delivery_items_v1" },
     "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "attachmentId": { "type": "string", "minLength": 1, "maxLength": 192, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
@@ -109,6 +110,22 @@
         }
       }
     },
+    "deliveryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "message_incarnation_id", "attempt_number", "delivery_expires_at"],
+      "properties": {
+        "message_id": { "$ref": "#/$defs/messageId" },
+        "message_incarnation_id": { "$ref": "#/$defs/messageIncarnationId" },
+        "attempt_number": { "$ref": "#/$defs/attemptNumber" },
+        "delivery_expires_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
+    "deliveryItems": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/deliveryItem" }
+    },
     "registerFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -128,7 +145,8 @@
         "agent_role": { "$ref": "#/$defs/agentRole" },
         "client_type": { "$ref": "#/$defs/clientType" },
         "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" },
-        "conversation_sync": { "$ref": "#/$defs/conversationSyncMode" }
+        "conversation_sync": { "$ref": "#/$defs/conversationSyncMode" },
+        "delivery_receipts": { "$ref": "#/$defs/deliveryReceiptMode" }
       }
     },
     "leaseRenewFrame": {
@@ -261,7 +279,8 @@
         },
         "attempt_number": {
           "$ref": "#/$defs/attemptNumber"
-        }
+        },
+        "delivery_items": { "$ref": "#/$defs/deliveryItems" }
       }
     },
     "ackFrame": {
@@ -301,7 +320,8 @@
         },
         "attempt_number": {
           "$ref": "#/$defs/attemptNumber"
-        }
+        },
+        "delivery_items": { "$ref": "#/$defs/deliveryItems" }
       }
     },
     "nackFrame": {
@@ -343,6 +363,7 @@
         "attempt_number": {
           "$ref": "#/$defs/attemptNumber"
         },
+        "delivery_items": { "$ref": "#/$defs/deliveryItems" },
         "reason": {
           "$ref": "#/$defs/failureReason"
         }
@@ -499,7 +520,8 @@
         "message": { "$ref": "#/$defs/envelope" },
         "message_incarnation_id": { "$ref": "#/$defs/messageIncarnationId" },
         "attempt_number": { "$ref": "#/$defs/attemptNumber" },
-        "delivery_expires_at": { "$ref": "#/$defs/utcMillis" }
+        "delivery_expires_at": { "$ref": "#/$defs/utcMillis" },
+        "delivery_items": { "$ref": "#/$defs/deliveryItems" }
       }
     },
     "attachmentReference": {

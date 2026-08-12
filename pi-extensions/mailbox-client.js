@@ -243,6 +243,14 @@ export function createMailboxClient({
       lease_id: leaseId,
       message_id: delivery.messageId,
       attempt_number: delivery.attemptNumber,
+      ...(delivery.items === undefined || delivery.items.length <= 1 ? {} : {
+        delivery_items: delivery.items.map((item) => ({
+          message_id: item.messageId,
+          message_incarnation_id: item.messageIncarnationId,
+          attempt_number: item.attemptNumber,
+          delivery_expires_at: item.deliveryExpiresAt,
+        })),
+      }),
       ...(type === "nack" ? { reason } : {}),
     });
   }
@@ -338,7 +346,24 @@ export function createMailboxClient({
       }
       return;
     }
-    const delivery = { messageId: frame.message.id, attemptNumber: frame.attempt_number };
+    const items = Array.isArray(frame.delivery_items)
+      ? frame.delivery_items.map((item) => ({
+        messageId: item.message_id,
+        messageIncarnationId: item.message_incarnation_id,
+        attemptNumber: item.attempt_number,
+        deliveryExpiresAt: item.delivery_expires_at,
+      }))
+      : [{
+        messageId: frame.message.id,
+        messageIncarnationId: frame.message_incarnation_id,
+        attemptNumber: frame.attempt_number,
+        deliveryExpiresAt: frame.delivery_expires_at,
+      }];
+    const delivery = {
+      messageId: frame.message.id,
+      attemptNumber: frame.attempt_number,
+      items,
+    };
     try {
       await onEnvelope(frame.message, delivery);
     } catch (error) {
@@ -368,7 +393,7 @@ export function createMailboxClient({
       if (socket !== currentSocket || stopped) return;
       opened = true;
       try {
-        send({ type: "register", agent_id: agentId, instance_id: instanceId });
+        send({ type: "register", agent_id: agentId, instance_id: instanceId, delivery_receipts: "delivery_items_v1" });
       } catch (error) {
         disconnected(currentSocket, error);
         closeSocket(currentSocket);

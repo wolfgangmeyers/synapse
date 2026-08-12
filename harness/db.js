@@ -92,6 +92,10 @@ const migrations = Object.freeze([
     id: "015_conversation_source",
     sql: readFileSync(new URL("./migrations/015_conversation_source.sql", import.meta.url), "utf8"),
   },
+  {
+    id: "016_delivery_batches",
+    sql: readFileSync(new URL("./migrations/016_delivery_batches.sql", import.meta.url), "utf8"),
+  },
 ]);
 
 export class IdempotencyConflictError extends Error {
@@ -243,17 +247,16 @@ class MessageRepository {
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const existingConversation = selectLatestConversationMessage(this.#database, candidate.id);
       if (existingConversation !== undefined) {
-        const deliveryMessage = selectMessage(this.#database, existingConversation.delivery_message_id);
-        if (deliveryMessage !== undefined) {
-          if (!sameConversationCandidate(existingConversation, conversationCandidate)) {
-            throw new IdempotencyConflictError(candidate.id);
-          }
-          return {
-            created: false,
-            message: deliveryMessage,
-            conversation_message: toConversationMessage(existingConversation),
-          };
+        if (!sameConversationCandidate(existingConversation, conversationCandidate)) {
+          throw new IdempotencyConflictError(candidate.id);
         }
+        const deliveryMessage = selectMessage(this.#database, existingConversation.delivery_message_id)
+          ?? messageFromConversationCandidate(candidate, existingConversation);
+        return {
+          created: false,
+          message: deliveryMessage,
+          conversation_message: toConversationMessage(existingConversation),
+        };
       }
       const result = enqueueCandidate(this.#database, candidate, {
         firstSeenAt: clockTimestamp(this.#clock),
@@ -857,54 +860,59 @@ class MessageRepository {
 
     return immediateTransaction(this.#database, this.#databasePath, () => {
       requireActiveAgentLease(this.#database, { agentId, instanceId, leaseId }, now);
-      if (selectInFlightDelivery(this.#database, agentId) !== undefined) return undefined;
+      const activeDelivery = selectActiveDeliveryBatch(this.#database, agentId, leaseId);
+      if (activeDelivery !== undefined) return activeDelivery;
 
-      coalesceQueuedDeliveryBatch(this.#database, agentId, now, {
+      const rows = selectQueuedDeliveryRows(this.#database, agentId, now, {
         maxBatchBodyChars: this.#maxBatchBodyChars,
         maxBodyBytes: this.#maxBodyBytes,
-        maxQueuedBytes: this.#maxQueuedBytes,
       });
-      const message = selectOldestQueuedMessage(this.#database, agentId, now);
-      if (message === undefined) return undefined;
-      if (!MESSAGE_INCARNATION_ID.test(message.message_incarnation_id ?? "")) {
+      if (rows.length === 0) return undefined;
+      const batchId = randomUUID();
+      const items = [];
+      for (const row of rows) {
+        if (!MESSAGE_INCARNATION_ID.test(row.message_incarnation_id ?? "")) {
+          const incarnationId = randomUUID();
+          this.#database.prepare(`
+            UPDATE messages
+            SET message_incarnation_id = ?
+            WHERE id = ? AND state = 'queued'
+          `).run(incarnationId, row.id);
+          row.message_incarnation_id = incarnationId;
+        }
+        const attemptNumber = nextAttemptNumber(this.#database, row.id);
         this.#database.prepare(`
           UPDATE messages
-          SET message_incarnation_id = ?
+          SET state = 'leased', claimed_at = COALESCE(claimed_at, ?), retry_batch_id = NULL
           WHERE id = ? AND state = 'queued'
-        `).run(randomUUID(), message.id);
+        `).run(now, row.id);
+        this.#database.prepare(`
+          INSERT INTO delivery_attempts (
+            message_id,
+            attempt_number,
+            lease_id,
+            owner_lease_id,
+            state,
+            created_at,
+            updated_at,
+            delivery_expires_at,
+            delivery_batch_id
+          ) VALUES (?, ?, ?, ?, 'leased', ?, ?, ?, ?)
+        `).run(
+          row.id,
+          attemptNumber,
+          leaseId,
+          leaseId,
+          now,
+          now,
+          deliveryExpiresAt,
+          batchId,
+        );
+        items.push(deliveryItem(row, attemptNumber, deliveryExpiresAt));
       }
-      const attemptNumber = nextAttemptNumber(this.#database, message.id);
-      this.#database.prepare(`
-        UPDATE messages
-        SET state = 'leased', claimed_at = COALESCE(claimed_at, ?)
-        WHERE id = ? AND state = 'queued'
-      `).run(now, message.id);
-      this.#database.prepare(`
-        INSERT INTO delivery_attempts (
-          message_id,
-          attempt_number,
-          lease_id,
-          owner_lease_id,
-          state,
-          created_at,
-          updated_at,
-          delivery_expires_at
-        ) VALUES (?, ?, ?, ?, 'leased', ?, ?, ?)
-      `).run(
-        message.id,
-        attemptNumber,
-        leaseId,
-        leaseId,
-        now,
-        now,
-        deliveryExpiresAt,
-      );
 
-      return {
-        message: selectMessage(this.#database, message.id),
-        attempt_number: attemptNumber,
-        delivery_expires_at: deliveryExpiresAt,
-      };
+      return deliveryFromRows(this.#database, rows, items, deliveryExpiresAt);
+
     });
   }
 
@@ -914,6 +922,8 @@ class MessageRepository {
     leaseId,
     messageId,
     attemptNumber,
+    deliveryItems,
+    allowBatchWithoutDeliveryItems = false,
     maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
   }) {
     validateDeliveryReceipt({ agentId, instanceId, leaseId, messageId, attemptNumber });
@@ -922,31 +932,33 @@ class MessageRepository {
 
     const result = immediateTransaction(this.#database, this.#databasePath, () => {
       requireActiveAgentLease(this.#database, { agentId, instanceId, leaseId }, now);
-      const delivery = requireActiveDelivery(
+      const deliveries = requireActiveDeliveryBatch(
         this.#database,
-        { agentId, leaseId, messageId, attemptNumber },
+        { agentId, leaseId, messageId, attemptNumber, deliveryItems, allowBatchWithoutDeliveryItems },
       );
-      if (expireDeliveryAtDeadline(this.#database, delivery, now, maxDeliveryAttempts)) {
+      if (expireDeliveryBatchAtDeadline(this.#database, deliveries, now, maxDeliveryAttempts)) {
         return { timed_out: true };
       }
-      if (delivery.attempt_state === "injection_requested") {
-        return { message: selectMessage(this.#database, messageId), attempt_number: attemptNumber };
+      if (deliveries.every((delivery) => delivery.attempt_state === "injection_requested")) {
+        return { message: selectMessage(this.#database, messageId), attempt_number: attemptNumber, items: deliveryItemsForDeliveries(deliveries) };
       }
-      if (delivery.attempt_state !== "leased" || delivery.message_state !== "leased") {
+      if (!deliveries.every((delivery) => delivery.attempt_state === "leased" && delivery.message_state === "leased")) {
         throw new DeliveryNotActiveError(messageId, attemptNumber);
       }
 
-      this.#database.prepare(`
-        UPDATE delivery_attempts
-        SET state = 'injection_requested', updated_at = ?
-        WHERE message_id = ? AND attempt_number = ? AND state = 'leased'
-      `).run(now, messageId, attemptNumber);
-      this.#database.prepare(`
-        UPDATE messages
-        SET state = 'injection_requested'
-        WHERE id = ? AND state = 'leased'
-      `).run(messageId);
-      return { message: selectMessage(this.#database, messageId), attempt_number: attemptNumber };
+      for (const delivery of deliveries) {
+        this.#database.prepare(`
+          UPDATE delivery_attempts
+          SET state = 'injection_requested', updated_at = ?
+          WHERE message_id = ? AND attempt_number = ? AND state = 'leased'
+        `).run(now, delivery.message_id, delivery.attempt_number);
+        this.#database.prepare(`
+          UPDATE messages
+          SET state = 'injection_requested'
+          WHERE id = ? AND state = 'leased'
+        `).run(delivery.message_id);
+      }
+      return { message: selectMessage(this.#database, messageId), attempt_number: attemptNumber, items: deliveryItemsForDeliveries(deliveries) };
     });
     if (result.timed_out) throw new DeliveryNotActiveError(messageId, attemptNumber);
     return result;
@@ -958,6 +970,8 @@ class MessageRepository {
     leaseId,
     messageId,
     attemptNumber,
+    deliveryItems,
+    allowBatchWithoutDeliveryItems = false,
     maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
   }) {
     validateDeliveryReceipt({ agentId, instanceId, leaseId, messageId, attemptNumber });
@@ -966,27 +980,29 @@ class MessageRepository {
 
     const result = immediateTransaction(this.#database, this.#databasePath, () => {
       requireActiveAgentLease(this.#database, { agentId, instanceId, leaseId }, now);
-      const delivery = requireActiveDelivery(
+      const deliveries = requireActiveDeliveryBatch(
         this.#database,
-        { agentId, leaseId, messageId, attemptNumber },
+        { agentId, leaseId, messageId, attemptNumber, deliveryItems, allowBatchWithoutDeliveryItems },
       );
-      if (expireDeliveryAtDeadline(this.#database, delivery, now, maxDeliveryAttempts)) {
+      if (expireDeliveryBatchAtDeadline(this.#database, deliveries, now, maxDeliveryAttempts)) {
         return { timed_out: true };
       }
-      if (delivery.attempt_state !== "injection_requested"
-        || delivery.message_state !== "injection_requested") {
+      if (!deliveries.every((delivery) => delivery.attempt_state === "injection_requested"
+        && delivery.message_state === "injection_requested")) {
         throw new DeliveryNotActiveError(messageId, attemptNumber);
       }
-      this.#database.prepare(`
-        UPDATE messages
-        SET state = 'acknowledged'
-        WHERE id = ?
-      `).run(messageId);
-      completeLinkedReminder(this.#database, messageId);
-      this.#database.prepare("DELETE FROM messages WHERE id = ?").run(messageId);
+      for (const delivery of deliveries) {
+        this.#database.prepare(`
+          UPDATE messages
+          SET state = 'acknowledged'
+          WHERE id = ?
+        `).run(delivery.message_id);
+        completeLinkedReminder(this.#database, delivery.message_id);
+        this.#database.prepare("DELETE FROM messages WHERE id = ?").run(delivery.message_id);
+      }
       return {
         message_id: messageId,
-        message_incarnation_id: delivery.message_incarnation_id,
+        message_incarnation_id: deliveries[0].message_incarnation_id,
       };
     });
     if (result.timed_out) throw new DeliveryNotActiveError(messageId, attemptNumber);
@@ -999,6 +1015,8 @@ class MessageRepository {
     leaseId,
     messageId,
     attemptNumber,
+    deliveryItems,
+    allowBatchWithoutDeliveryItems = false,
     reason,
     maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
   }) {
@@ -1009,22 +1027,23 @@ class MessageRepository {
 
     const result = immediateTransaction(this.#database, this.#databasePath, () => {
       requireActiveAgentLease(this.#database, { agentId, instanceId, leaseId }, now);
-      const delivery = requireActiveDelivery(
+      const deliveries = requireActiveDeliveryBatch(
         this.#database,
-        { agentId, leaseId, messageId, attemptNumber },
+        { agentId, leaseId, messageId, attemptNumber, deliveryItems, allowBatchWithoutDeliveryItems },
       );
-      if (expireDeliveryAtDeadline(this.#database, delivery, now, maxDeliveryAttempts)) {
+      if (expireDeliveryBatchAtDeadline(this.#database, deliveries, now, maxDeliveryAttempts)) {
         return { timed_out: true };
       }
-      if (!(["leased", "injection_requested"].includes(delivery.attempt_state)
+      if (!deliveries.every((delivery) => ["leased", "injection_requested"].includes(delivery.attempt_state)
         && ["leased", "injection_requested"].includes(delivery.message_state))) {
         throw new DeliveryNotActiveError(messageId, attemptNumber);
       }
-      return failDeliveryAttempt(
+      const outcomes = deliveries.map((delivery) => failDeliveryAttempt(
         this.#database,
         delivery,
-        { attemptState: "nacked", reason, now, maxDeliveryAttempts },
-      );
+        { attemptState: "nacked", reason, now, maxDeliveryAttempts, retryBatchId: delivery.delivery_batch_id },
+      ));
+      return combineFailureOutcomes(messageId, outcomes);
     });
     if (result.timed_out) throw new DeliveryNotActiveError(messageId, attemptNumber);
     return result;
@@ -1042,6 +1061,7 @@ class MessageRepository {
           messages.state AS message_state,
           delivery_attempts.attempt_number,
           delivery_attempts.owner_lease_id,
+          delivery_attempts.delivery_batch_id,
           delivery_attempts.state AS attempt_state
         FROM delivery_attempts
         JOIN messages ON messages.id = delivery_attempts.message_id
@@ -1059,6 +1079,7 @@ class MessageRepository {
             reason: "delivery_timeout",
             now,
             maxDeliveryAttempts,
+            retryBatchId: delivery.delivery_batch_id,
           },
         ),
         agent_id: delivery.agent_id,
@@ -1501,138 +1522,125 @@ function batchedBody(target, candidate) {
   return `${existing}${BATCH_SEPARATOR}${batchContent(candidate)}`;
 }
 
-function selectBatchTarget(database, candidate, { maxBatchBodyChars, maxBodyBytes, maxQueuedBytes, queuedBytes }) {
-  if (maxBatchBodyChars === 0 || candidate.sentinel !== undefined) return undefined;
-  const lastSentinel = database.prepare(`
-    SELECT COALESCE(MAX(enqueue_sequence), 0) AS enqueue_sequence
-    FROM messages
-    WHERE recipient = ?
-      AND state = 'queued'
-      AND sentinel_json IS NOT NULL
-  `).get(candidate.to);
-  const rows = database.prepare(`
+
+function selectActiveDeliveryBatch(database, recipient, leaseId) {
+  const active = database.prepare(`
     SELECT
-      id,
-      sender AS "from",
-      subject,
-      body
+      messages.enqueue_sequence,
+      messages.id,
+      messages.sender AS "from",
+      messages.recipient AS "to",
+      messages.subject,
+      messages.body,
+      messages.created_at,
+      messages.expires_at,
+      messages.message_incarnation_id,
+      messages.state,
+      messages.sentinel_json,
+      delivery_attempts.attempt_number,
+      delivery_attempts.delivery_expires_at,
+      delivery_attempts.delivery_batch_id,
+      delivery_attempts.owner_lease_id
     FROM messages
-    WHERE recipient = ?
-      AND state = 'queued'
-      AND sentinel_json IS NULL
-      AND enqueue_sequence > ?
-    ORDER BY enqueue_sequence DESC
-  `).all(candidate.to, lastSentinel.enqueue_sequence);
-  return rows.find((row) => {
-    if (batchItemCount(row) >= DEFAULT_MAX_BATCH_MESSAGES) return false;
-    const body = batchedBody(row, candidate);
-    const previousBytes = Buffer.byteLength(row.body, "utf8");
-    const nextBytes = Buffer.byteLength(body, "utf8");
-    return body.length <= maxBatchBodyChars
-      && nextBytes <= maxBodyBytes
-      && queuedBytes + nextBytes - previousBytes <= maxQueuedBytes;
-  });
+    JOIN delivery_attempts ON delivery_attempts.message_id = messages.id
+    WHERE messages.recipient = ?
+      AND messages.state IN ('leased', 'injection_requested')
+      AND delivery_attempts.state IN ('leased', 'injection_requested')
+    ORDER BY messages.enqueue_sequence ASC
+  `).all(recipient);
+  if (active.length === 0) return undefined;
+  const batchId = active[0].delivery_batch_id;
+  const rows = batchId === null
+    ? [active[0]]
+    : active.filter((row) => row.delivery_batch_id === batchId);
+  if (rows.some((row) => row.owner_lease_id !== leaseId)) {
+    if (batchId === null) {
+      database.prepare(`
+        UPDATE delivery_attempts
+        SET lease_id = ?, owner_lease_id = ?
+        WHERE message_id = ?
+          AND state IN ('leased', 'injection_requested')
+      `).run(leaseId, leaseId, rows[0].id);
+    } else {
+      database.prepare(`
+        UPDATE delivery_attempts
+        SET lease_id = ?, owner_lease_id = ?
+        WHERE delivery_batch_id = ?
+          AND state IN ('leased', 'injection_requested')
+      `).run(leaseId, leaseId, batchId);
+    }
+    for (const row of rows) row.owner_lease_id = leaseId;
+  }
+  const items = rows.map((row) => deliveryItem(row, row.attempt_number, row.delivery_expires_at));
+  return deliveryFromRows(database, rows, items, items[0].delivery_expires_at);
 }
 
-function coalesceQueuedDeliveryBatch(database, recipient, now, { maxBatchBodyChars, maxBodyBytes, maxQueuedBytes }) {
-  if (maxBatchBodyChars === 0) return;
-  const deliverableRows = database.prepare(`
+function selectQueuedDeliveryRows(database, recipient, now, { maxBatchBodyChars, maxBodyBytes }) {
+  const rows = database.prepare(`
     SELECT
+      enqueue_sequence,
       id,
       sender AS "from",
       recipient AS "to",
       subject,
       body,
       created_at,
+      expires_at,
+      message_incarnation_id,
+      state,
       sentinel_json,
-      source_kind
+      source_kind,
+      retry_batch_id
     FROM messages
     WHERE recipient = ?
       AND state = 'queued'
       AND (claimed_at IS NOT NULL OR expires_at > ?)
     ORDER BY enqueue_sequence ASC
   `).all(recipient, now);
-  if (deliverableRows.length < 2 || deliverableRows[0].sentinel_json !== null) return;
-
-  const mergeRows = [];
-  for (const row of deliverableRows) {
+  if (rows.length === 0) return [];
+  const first = rows[0];
+  if (first.sentinel_json !== null) return [first];
+  const selected = [];
+  const retryBatchId = first.retry_batch_id;
+  let body = first.body;
+  for (const row of rows) {
     if (row.sentinel_json !== null) break;
-    mergeRows.push(row);
-  }
-  if (mergeRows.length < 2) return;
-
-  let body = mergeRows[0].body;
-  let queuedBytes = selectLiveQueueUsage(database, recipient).queued_bytes;
-  const mergedIds = [];
-  let batchItemTotal = batchItemCount(mergeRows[0]);
-  for (const row of mergeRows.slice(1)) {
-    const rowItemCount = batchItemCount(row);
-    if (batchItemTotal + rowItemCount > DEFAULT_MAX_BATCH_MESSAGES) break;
-    const candidate = { from: row.from, subject: row.subject, body: row.body };
-    const nextBody = batchedBody({ ...mergeRows[0], body }, candidate);
-    const previousBodyBytes = Buffer.byteLength(body, "utf8");
-    const nextBodyBytes = Buffer.byteLength(nextBody, "utf8");
-    const nextQueuedBytes = queuedBytes + nextBodyBytes - previousBodyBytes - envelopeByteLength(row);
-    if (nextBody.length > maxBatchBodyChars || nextBodyBytes > maxBodyBytes || nextQueuedBytes > maxQueuedBytes) break;
+    if (retryBatchId !== null && row.retry_batch_id !== retryBatchId) continue;
+    if (retryBatchId === null && row.retry_batch_id !== null) break;
+    if (selected.length === 0) {
+      selected.push(row);
+      continue;
+    }
+    const nextBody = batchedBody({ ...selected[0], body }, row);
+    if (nextBody.length > maxBatchBodyChars || Buffer.byteLength(nextBody, "utf8") > maxBodyBytes) break;
     body = nextBody;
-    queuedBytes = nextQueuedBytes;
-    batchItemTotal += rowItemCount;
-    mergedIds.push(row.id);
+    selected.push(row);
   }
-  if (mergedIds.length === 0) return;
-
-  const survivorId = mergeRows[0].id;
-  preserveMergedDeliveryAttemptFloor(database, survivorId, mergedIds, now);
-  database.prepare(`
-    UPDATE messages
-    SET body = ?
-    WHERE id = ? AND state = 'queued'
-  `).run(body, survivorId);
-  const placeholders = mergedIds.map(() => "?").join(", ");
-  database.prepare(`
-    UPDATE reminders
-    SET linked_message_id = ?
-    WHERE linked_message_id IN (${placeholders})
-  `).run(survivorId, ...mergedIds);
-  database.prepare(`
-    UPDATE conversation_messages
-    SET delivery_message_id = ?
-    WHERE delivery_message_id IN (${placeholders})
-  `).run(survivorId, ...mergedIds);
-  database.prepare(`
-    DELETE FROM messages
-    WHERE id IN (${placeholders}) AND state = 'queued'
-  `).run(...mergedIds);
+  return selected;
 }
 
-function preserveMergedDeliveryAttemptFloor(database, survivorId, mergedIds, now) {
-  if (mergedIds.length === 0) return;
-  const placeholders = mergedIds.map(() => "?").join(", ");
-  const survivorAttempt = database.prepare(`
-    SELECT COALESCE(MAX(attempt_number), 0) AS attempt_number
-    FROM delivery_attempts
-    WHERE message_id = ?
-  `).get(survivorId).attempt_number;
-  const mergedAttempt = database.prepare(`
-    SELECT COALESCE(MAX(attempt_number), 0) AS attempt_number
-    FROM delivery_attempts
-    WHERE message_id IN (${placeholders})
-  `).get(...mergedIds).attempt_number;
-  for (let attemptNumber = survivorAttempt + 1; attemptNumber <= mergedAttempt; attemptNumber += 1) {
-    database.prepare(`
-      INSERT INTO delivery_attempts (
-        message_id,
-        attempt_number,
-        lease_id,
-        owner_lease_id,
-        state,
-        created_at,
-        updated_at,
-        delivery_expires_at,
-        failure_reason
-      ) VALUES (?, ?, NULL, '', 'timed_out', ?, ?, ?, 'coalesced_delivery_batch')
-    `).run(survivorId, attemptNumber, now, now, now);
+function deliveryItem(row, attemptNumber, deliveryExpiresAt) {
+  return {
+    message_id: row.id,
+    message_incarnation_id: row.message_incarnation_id,
+    attempt_number: attemptNumber,
+    delivery_expires_at: deliveryExpiresAt,
+  };
+}
+
+function deliveryFromRows(database, rows, items, deliveryExpiresAt) {
+  const first = selectMessage(database, rows[0].id) ?? toMessage(rows[0]);
+  let body = first.body;
+  if (rows.length > 1 && first.sentinel === undefined) {
+    body = rows.slice(1).reduce((current, row) => batchedBody({ ...rows[0], body: current }, row), first.body);
   }
+  const message = rows.length > 1 ? { ...first, body } : first;
+  return {
+    message,
+    attempt_number: items[0].attempt_number,
+    delivery_expires_at: deliveryExpiresAt,
+    items,
+  };
 }
 
 function prepareEnvelope(envelope) {
@@ -1647,6 +1655,21 @@ function prepareEnvelope(envelope) {
     sentinel: envelope.sentinel,
     sentinel_json: envelope.sentinel === undefined ? null : JSON.stringify(envelope.sentinel),
     source: normalizeMessageSource(envelope.source),
+  };
+}
+
+function messageFromConversationCandidate(candidate, conversationRow) {
+  return {
+    id: candidate.id,
+    from: candidate.from,
+    to: candidate.to,
+    ...(candidate.subject === null ? {} : { subject: candidate.subject }),
+    body: candidate.body,
+    created_at: candidate.created_at,
+    expires_at: oneHourAfter(candidate.created_at),
+    message_incarnation_id: conversationRow.message_incarnation_id,
+    state: "acknowledged",
+    ...(candidate.sentinel === undefined ? {} : { sentinel: candidate.sentinel }),
   };
 }
 
@@ -1816,21 +1839,6 @@ function enqueueCandidate(
   }
 
   const usage = selectLiveQueueUsage(database, candidate.to);
-  const batchTarget = selectBatchTarget(database, candidate, {
-    maxBatchBodyChars,
-    maxBodyBytes,
-    maxQueuedBytes,
-    queuedBytes: usage.queued_bytes,
-  });
-  if (batchTarget !== undefined) {
-    database.prepare(`
-      UPDATE messages
-      SET body = ?
-      WHERE id = ? AND state = 'queued'
-    `).run(batchedBody(batchTarget, candidate), batchTarget.id);
-    return { created: false, batched: true, message: selectMessage(database, batchTarget.id) };
-  }
-
   const candidateBytes = envelopeByteLength(candidate);
   if (usage.message_count >= maxQueuedMessages
     || usage.queued_bytes + candidateBytes > maxQueuedBytes) {
@@ -2457,6 +2465,7 @@ function requireActiveDelivery(database, { agentId, leaseId, messageId, attemptN
       delivery_attempts.attempt_number,
       delivery_attempts.owner_lease_id,
       delivery_attempts.delivery_expires_at,
+      delivery_attempts.delivery_batch_id,
       delivery_attempts.state AS attempt_state
     FROM delivery_attempts
     JOIN messages ON messages.id = delivery_attempts.message_id
@@ -2472,6 +2481,82 @@ function requireActiveDelivery(database, { agentId, leaseId, messageId, attemptN
   return delivery;
 }
 
+function requireActiveDeliveryBatch(database, { agentId, leaseId, messageId, attemptNumber, deliveryItems, allowBatchWithoutDeliveryItems = false }) {
+  const first = requireActiveDelivery(database, { agentId, leaseId, messageId, attemptNumber });
+  const rows = database.prepare(`
+    SELECT
+      messages.id AS message_id,
+      messages.recipient AS agent_id,
+      messages.state AS message_state,
+      messages.message_incarnation_id,
+      delivery_attempts.attempt_number,
+      delivery_attempts.owner_lease_id,
+      delivery_attempts.delivery_expires_at,
+      delivery_attempts.delivery_batch_id,
+      delivery_attempts.state AS attempt_state
+    FROM delivery_attempts
+    JOIN messages ON messages.id = delivery_attempts.message_id
+    WHERE messages.recipient = ?
+      AND messages.state IN ('leased', 'injection_requested')
+      AND delivery_attempts.state IN ('leased', 'injection_requested')
+      AND (
+        (delivery_attempts.delivery_batch_id IS NOT NULL AND delivery_attempts.delivery_batch_id = ?)
+        OR (delivery_attempts.delivery_batch_id IS NULL AND delivery_attempts.message_id = ?)
+      )
+    ORDER BY messages.enqueue_sequence ASC
+  `).all(first.agent_id, first.delivery_batch_id, first.message_id);
+  if (rows.length === 0 || rows.some((row) => row.owner_lease_id !== leaseId)) {
+    throw new DeliveryNotActiveError(messageId, attemptNumber);
+  }
+  const expected = deliveryItemsForDeliveries(rows);
+  if (messageId !== expected[0].message_id || attemptNumber !== expected[0].attempt_number) {
+    throw new DeliveryNotActiveError(messageId, attemptNumber);
+  }
+  if ((rows.length > 1 && !allowBatchWithoutDeliveryItems) || deliveryItems !== undefined) {
+    if (!sameDeliveryItems(deliveryItems, expected)) {
+      throw new DeliveryNotActiveError(messageId, attemptNumber);
+    }
+  }
+  return rows;
+}
+
+function deliveryItemsForDeliveries(deliveries) {
+  return deliveries.map((delivery) => ({
+    message_id: delivery.message_id,
+    message_incarnation_id: delivery.message_incarnation_id,
+    attempt_number: delivery.attempt_number,
+    delivery_expires_at: delivery.delivery_expires_at,
+  }));
+}
+
+function sameDeliveryItems(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  return actual.every((item, index) => {
+    const wanted = expected[index];
+    return item.message_id === wanted.message_id
+      && item.message_incarnation_id === wanted.message_incarnation_id
+      && item.attempt_number === wanted.attempt_number
+      && item.delivery_expires_at === wanted.delivery_expires_at;
+  });
+}
+
+function expireDeliveryBatchAtDeadline(database, deliveries, now, maxDeliveryAttempts) {
+  let expired = false;
+  for (const delivery of deliveries) {
+    expired = expireDeliveryAtDeadline(database, delivery, now, maxDeliveryAttempts) || expired;
+  }
+  return expired;
+}
+
+function combineFailureOutcomes(messageId, outcomes) {
+  const recurring = outcomes.flatMap((outcome) => outcome.recurring_reminder_rearmed ?? []);
+  return {
+    message_id: messageId,
+    state: outcomes.some((outcome) => outcome.state === "dead_letter") ? "dead_letter" : "queued",
+    ...(recurring.length === 0 ? {} : { recurring_reminder_rearmed: recurring }),
+  };
+}
+
 function expireDeliveryAtDeadline(database, delivery, now, maxDeliveryAttempts) {
   if (delivery.delivery_expires_at > now) return false;
   failDeliveryAttempt(
@@ -2482,6 +2567,7 @@ function expireDeliveryAtDeadline(database, delivery, now, maxDeliveryAttempts) 
       reason: "delivery_timeout",
       now,
       maxDeliveryAttempts,
+      retryBatchId: delivery.delivery_batch_id,
     },
   );
   return true;
@@ -2490,7 +2576,7 @@ function expireDeliveryAtDeadline(database, delivery, now, maxDeliveryAttempts) 
 function failDeliveryAttempt(
   database,
   delivery,
-  { attemptState, reason, now, maxDeliveryAttempts },
+  { attemptState, reason, now, maxDeliveryAttempts, retryBatchId },
 ) {
   database.prepare(`
     UPDATE delivery_attempts
@@ -2502,9 +2588,9 @@ function failDeliveryAttempt(
   const state = delivery.attempt_number >= maxDeliveryAttempts ? "dead_letter" : "queued";
   database.prepare(`
     UPDATE messages
-    SET state = ?
+    SET state = ?, retry_batch_id = ?
     WHERE id = ? AND state = ?
-  `).run(state, delivery.message_id, delivery.message_state);
+  `).run(state, state === "queued" ? retryBatchId : null, delivery.message_id, delivery.message_state);
   let recurringReminderRearmed;
   if (state === "dead_letter") {
     recurringReminderRearmed = rearmRecurringRemindersAfterDeadLetter(database, delivery.message_id, now);
