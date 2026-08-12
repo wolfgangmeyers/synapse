@@ -801,9 +801,12 @@ def main():
         print("1. Verify the worker is running, then inspect its status if needed:")
     print(f"   python3 worker_capture.py --window {args.window}")
     if args.agent in {"pi", "claude"}:
-        print("2. Deliver instructions through the verified Mailbox V2 path:")
+        print("2. Before sending instructions, read ~/.agents/skills/worker-launch/SKILL.md.")
+        print("   Deliver instructions through the verified Mailbox V2 path and explicitly tell the worker")
+        print("   to use bounded background subagents for focused exploration, implementation slices,")
+        print("   validation/log triage, and robot-review where useful:")
         print("   python3 mailbox_send.py --from supervisor \\")
-        print(f"     --to {args.window} --body 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions.'")
+        print(f"     --to {args.window} --body 'Read ~/.agents/skills/worker/SKILL.md first, then read TASK.md for your instructions. Use bounded background subagents proactively for focused exploration, implementation slices, validation/log triage, and robot-review where useful; keep them bounded and retain final judgment.'")
     else:
         print("2. This runtime has no launcher-provided Mailbox V2 delivery bridge; use only a verified delivery bridge or a relaunch context proven to reach the session.")
     print("3. Record the task in supervisor state:")
