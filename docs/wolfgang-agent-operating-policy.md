@@ -13,6 +13,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 - If the requested outcome needs missing local developer tooling, install the necessary minimal tools that unblock the work. Verify provenance and versions, keep the install local and reversible, and report exactly what changed. Escalate only when the tool introduces credentials, spending, an external service, a security boundary, or production/shared-runtime effects.
 - If the same blocker or failure repeats, stop re-reporting it. Check durable knowledge, find or create a workaround, or escalate the exact external boundary.
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
+- Do not invent a Wolfgang-approval gate for ordinary scoped git work. The supervisor owns reversible conflict resolution, commits, pushes, and rebases needed to advance an authorized task. Preserve unrelated changes, verify scope and ancestry, and use a separate workspace when that protects dirty work; stop only for a genuinely destructive or external boundary such as force-pushing, deleting someone else's work, changing PR state, or a new product/security/legal decision.
 
 ### One worker per ticket
 
