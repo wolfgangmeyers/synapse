@@ -953,6 +953,7 @@ export function createMechaMessagingExtension(pi, {
   let settledNotificationPending = false;
   let activityHeartbeatTimer;
   let activityHeartbeatActive = false;
+  let parentActivityContext;
   let lastActivitySent;
   const runningSubagents = new Map();
   const terminalSubagentTombstones = new Map();
@@ -1126,7 +1127,27 @@ export function createMechaMessagingExtension(pi, {
     return changed;
   }
 
+  function rememberParentActivityContext(context) {
+    if (context !== undefined) parentActivityContext = context;
+  }
+
+  function parentActivityStateFromPiContext() {
+    // Precedence is deliberate: compaction masks ordinary work, Pi's live idle
+    // bit wins when available, and the latch is only the older-context fallback.
+    if (mailboxPausedForCompaction) return "compacting";
+    if (typeof parentActivityContext?.isIdle === "function") {
+      return parentActivityContext.isIdle() ? "settled" : "active";
+    }
+    return undefined;
+  }
+
+  function parentActivityStateFromContext() {
+    return parentActivityStateFromPiContext() ?? (activityHeartbeatActive ? "active" : "settled");
+  }
+
   function sendActivityState(state, { force = false, reconcile = true } = {}) {
+    // Compaction owns the visible state until its lifecycle resumes or cancels;
+    // ordinary settled/active frames must not clear that pause early.
     if (mailboxPausedForCompaction && state !== "compacting") return;
     const nowMs = nowImpl();
     const reconciled = reconcile ? reconcileNativeSubagentService() : false;
@@ -1154,8 +1175,9 @@ export function createMechaMessagingExtension(pi, {
   function ensureActivityHeartbeatTimer() {
     if (activityHeartbeatTimer !== undefined) return;
     activityHeartbeatTimer = setIntervalImpl(() => {
-      sendActivityState(activityHeartbeatActive ? "active" : "settled");
-      if (!activityHeartbeatActive && runningSubagents.size === 0) stopActivityHeartbeat();
+      const state = parentActivityStateFromContext();
+      sendActivityState(state);
+      if (state === "settled" && runningSubagents.size === 0) stopActivityHeartbeat();
     }, ACTIVITY_HEARTBEAT_INTERVAL_MS);
     activityHeartbeatTimer?.unref?.();
   }
@@ -1167,9 +1189,20 @@ export function createMechaMessagingExtension(pi, {
     }
   }
 
-  function stopActivityHeartbeat({ settle = false } = {}) {
-    if (activityHeartbeatActive && settle) sendActivityState("settled", { force: true });
+  function stopActivityHeartbeat({ settle = false, context } = {}) {
+    rememberParentActivityContext(context);
+    if (settle && parentActivityStateFromPiContext() === "active") {
+      // A settled event can race a queued retry or continuation. If Pi still
+      // reports active, keep polling instead of publishing a stale stop.
+      activityHeartbeatActive = true;
+      ensureActivityHeartbeatTimer();
+      return;
+    }
+    const wasActive = activityHeartbeatActive;
     activityHeartbeatActive = false;
+    if (wasActive && settle && !mailboxPausedForCompaction) {
+      sendActivityState(parentActivityStateFromContext(), { force: true });
+    }
     if (runningSubagents.size > 0) return;
     clearActivityHeartbeatTimer();
   }
@@ -1181,14 +1214,16 @@ export function createMechaMessagingExtension(pi, {
     clearActivityHeartbeatTimer();
   }
 
-  function startActivityHeartbeat() {
+  function startActivityHeartbeat(context) {
+    rememberParentActivityContext(context);
     activityHeartbeatActive = true;
-    sendActivityState("active", { force: true });
+    sendActivityState(parentActivityStateFromContext(), { force: true });
     ensureActivityHeartbeatTimer();
   }
 
-  function refreshActivityState() {
-    sendActivityState(activityHeartbeatActive ? "active" : "settled", { force: true });
+  function refreshActivityState(context) {
+    rememberParentActivityContext(context);
+    sendActivityState(parentActivityStateFromContext(), { force: true });
     if (runningSubagents.size > 0) ensureActivityHeartbeatTimer();
     else if (!activityHeartbeatActive) stopActivityHeartbeat();
   }
@@ -1204,6 +1239,7 @@ export function createMechaMessagingExtension(pi, {
 
   function pauseMailboxForCompaction(context) {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined || mailboxPausedForCompaction) return;
+    rememberParentActivityContext(context);
     mailboxPausedForCompaction = true;
     clearRunningSubagentsForBoundary();
     sendActivityState("compacting", { force: true, reconcile: false });
@@ -1212,6 +1248,7 @@ export function createMechaMessagingExtension(pi, {
 
   function resumeMailboxAfterCompaction(context) {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined || !mailboxPausedForCompaction) return;
+    rememberParentActivityContext(context);
     mailboxPausedForCompaction = false;
     reconcileNativeSubagentService();
     refreshActivityState();
@@ -1576,7 +1613,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_start", (_event, context) => {
     if (children.has(context.sessionManager.getSessionId())) return;
-    startActivityHeartbeat();
+    startActivityHeartbeat(context);
     if (settledNotificationEnabled && settledNotificationRecipient !== undefined) {
       settledNotificationPending = true;
       settledNotifications.onParentActivity();
@@ -1586,7 +1623,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("agent_settled", (_event, context) => { monitorContextThreshold(context); });
   pi.on("session_compact", (_event, context) => { if (!children.has(context.sessionManager.getSessionId())) { notifiedCompactionPercent = 0; resumeMailboxAfterCompaction(context); } });
   pi.on("agent_settled", (_event, context) => {
-    if (!children.has(context.sessionManager.getSessionId())) stopActivityHeartbeat({ settle: true });
+    if (!children.has(context.sessionManager.getSessionId())) stopActivityHeartbeat({ settle: true, context });
     if (pendingSelfCompaction !== undefined) settledNotificationPending = false;
     runPendingSelfCompaction(context);
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationEnabled || !settledNotificationPending) return;
@@ -1630,6 +1667,7 @@ export function createMechaMessagingExtension(pi, {
     try {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
+      rememberParentActivityContext(context);
       settledNotificationPending = false;
       settledNotificationAgentId = agentId;
       pi.registerCommand("mecha-parent-message", {
@@ -1714,7 +1752,9 @@ export function createMechaMessagingExtension(pi, {
       childReplyClients.delete(sessionId);
       return;
     }
+    rememberParentActivityContext(context);
     clearRunningSubagentsForBoundary();
+    parentActivityContext = undefined;
     settledNotificationPending = false;
     settledNotificationAgentId = undefined;
     pendingSelfCompaction = undefined;
