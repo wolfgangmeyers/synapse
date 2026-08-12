@@ -147,7 +147,7 @@ test("migration 013 upgrades schema 012 without disturbing queued data", async (
     }
     repository = openMessageRepository({ databasePath });
     assert.equal(repository.messageFor("before-conversations").body, "queued");
-    assert.equal(repository.migrationIds().at(-1), "015_conversation_source");
+    assert.equal(repository.migrationIds().at(-1), "016_delivery_batches");
     repository.enqueue({ id: "after-conversations", from: "sender", to: "peer", body: "recorded", created_at: at(1, 1) });
     assert.equal(repository.conversationHistory({ owner: "peer", peer: "sender" })[0].id, "after-conversations");
   } finally {
@@ -491,7 +491,7 @@ test("router keeps compacting sessions registered but gates delivery offers unti
   }
 });
 
-test("a synced sender preserves batching for a legacy recipient while receiving its canonical response", async () => {
+test("a synced sender preserves delivery batching for a legacy recipient while receiving its canonical response", async () => {
   const app = await fixture({}, { maxBatchBodyChars: 4_096 });
   let sender;
   try {
@@ -505,9 +505,8 @@ test("a synced sender preserves batching for a legacy recipient while receiving 
       body: "second",
       created_at: at(1, 1),
     });
-    assert.equal(second.response.status, 200);
-    assert.equal(second.body.message.batched, true);
-    assert.equal(second.body.message.id, "legacy-first");
+    assert.equal(second.response.status, 201);
+    assert.equal(second.body.message.id, "legacy-second");
     assert.equal(second.body.conversation_message.id, "legacy-second");
     assert.equal((await live).message.body, "second");
     const retry = await postMessage(app.httpUrl, {
@@ -519,8 +518,11 @@ test("a synced sender preserves batching for a legacy recipient while receiving 
     });
     assert.equal(retry.response.status, 200);
     assert.equal(retry.body.conversation_message.id, "legacy-second");
-    assert.equal(app.repository.queuedFor("legacy-peer").length, 1);
-    assert.equal(app.repository.queuedFor("legacy-peer")[0].body.match(/second/g)?.length, 1);
+    assert.equal(app.repository.queuedFor("legacy-peer").length, 2);
+    app.repository.acquireAgentLease({ agentId: "legacy-peer", instanceId: "legacy-instance", leaseId: "legacy-lease", leaseDurationMs: 60_000 });
+    const delivery = app.repository.claimNextMessage({ agentId: "legacy-peer", instanceId: "legacy-instance", leaseId: "legacy-lease" });
+    assert.deepEqual(delivery.items.map(({ message_id: id }) => id), ["legacy-first", "legacy-second"]);
+    assert.equal(delivery.message.body.match(/second/g)?.length, 1);
     assert.equal(app.repository.conversationHistory({ owner: "shared-user", peer: "legacy-peer" }).filter(({ id }) => id === "legacy-second").length, 1);
   } finally {
     sender?.socket.terminate();
@@ -566,17 +568,21 @@ test("rapid posts to a connected idle recipient coalesce before the first delive
     assert.equal(delivered[0].message.id, "burst-0");
     assert.match(delivered[0].message.body, /^Mailbox message batch\n\n/);
     assert.equal((delivered[0].message.body.match(/\n\n---\n\n/g) ?? []).length, 9);
+    assert.deepEqual(delivered[0].delivery_items.map(({ message_id: id }) => id), bodies.map((_, index) => `burst-${index}`));
     for (const body of bodies) assert.match(delivered[0].message.body, new RegExp(`\\n${body}\\n`));
     assert.equal(app.repository.conversationHistory({ owner: "web-ui-sender", peer: "burst-recipient" }).length, 10);
     const database = new DatabaseSync(join(app.directory, "router.sqlite"), { readOnly: true });
     try {
-      const deliveryGroups = database.prepare(`
-        SELECT delivery_message_id, COUNT(*) AS item_count
+      const deliveryRows = database.prepare(`
+        SELECT message_id, delivery_message_id
         FROM conversation_messages
         WHERE sender = 'web-ui-sender' AND recipient = 'burst-recipient'
-        GROUP BY delivery_message_id
+        ORDER BY message_id
       `).all().map((row) => ({ ...row }));
-      assert.deepEqual(deliveryGroups, [{ delivery_message_id: "burst-0", item_count: 10 }]);
+      assert.deepEqual(deliveryRows, bodies.map((_, index) => ({
+        message_id: `burst-${index}`,
+        delivery_message_id: `burst-${index}`,
+      })));
     } finally {
       database.close();
     }

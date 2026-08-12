@@ -106,6 +106,75 @@ test("correlated delivery frames require a valid router-generated incarnation", 
   assert.throws(() => validateServerFrame({ ...frame, message_incarnation_id: "not-a-uuid" }));
 });
 
+const deliveryItems = [
+  {
+    message_id: "message-1",
+    message_incarnation_id: "11111111-1111-4111-8111-111111111111",
+    attempt_number: 1,
+    delivery_expires_at: "2030-01-01T00:00:30.000Z",
+  },
+  {
+    message_id: "message-2",
+    message_incarnation_id: "22222222-2222-4222-8222-222222222222",
+    attempt_number: 2,
+    delivery_expires_at: "2030-01-01T00:00:30.000Z",
+  },
+];
+
+function baseDeliveryClientFrame(type, extra = {}) {
+  return {
+    version: "v1",
+    frame_id: `${type}-frame`,
+    type,
+    agent_id: "receiver",
+    instance_id: "instance",
+    lease_id: "lease",
+    message_id: "message-1",
+    attempt_number: 1,
+    ...extra,
+  };
+}
+
+test("delivery_items validate on delivery, injection, ACK, and NACK frames", () => {
+  assert.doesNotThrow(() => validateServerFrame({
+    version: "v1",
+    frame_id: "delivery-frame",
+    type: "message",
+    message: { id: "message-1", from: "sender", to: "receiver", body: "opaque", created_at: "2030-01-01T00:00:00.000Z" },
+    message_incarnation_id: "11111111-1111-4111-8111-111111111111",
+    attempt_number: 1,
+    delivery_expires_at: "2030-01-01T00:00:30.000Z",
+    delivery_items: deliveryItems,
+  }));
+  assert.doesNotThrow(() => validateClientFrame(baseDeliveryClientFrame("injection_requested", { delivery_items: deliveryItems })));
+  assert.doesNotThrow(() => validateClientFrame(baseDeliveryClientFrame("ack", { delivery_items: deliveryItems })));
+  assert.doesNotThrow(() => validateClientFrame(baseDeliveryClientFrame("nack", { delivery_items: deliveryItems, reason: "injection_failed" })));
+});
+
+test("malformed delivery_items are rejected on delivery receipts and messages", () => {
+  const malformedItems = [
+    { ...deliveryItems[0], attempt_number: 0 },
+  ];
+  assert.throws(() => validateServerFrame({
+    version: "v1",
+    frame_id: "delivery-frame",
+    type: "message",
+    message: { id: "message-1", from: "sender", to: "receiver", body: "opaque", created_at: "2030-01-01T00:00:00.000Z" },
+    message_incarnation_id: "11111111-1111-4111-8111-111111111111",
+    attempt_number: 1,
+    delivery_expires_at: "2030-01-01T00:00:30.000Z",
+    delivery_items: malformedItems,
+  }));
+  assert.throws(() => validateClientFrame(baseDeliveryClientFrame("ack", { delivery_items: [] })));
+  assert.throws(() => validateClientFrame(baseDeliveryClientFrame("nack", {
+    reason: "injection_failed",
+    delivery_items: [{ ...deliveryItems[0], message_incarnation_id: "not-a-uuid" }],
+  })));
+  assert.throws(() => validateClientFrame(baseDeliveryClientFrame("injection_requested", {
+    delivery_items: [{ ...deliveryItems[0], delivery_expires_at: "2030-01-01T00:00:30Z" }],
+  })));
+});
+
 test("conversation sync is additive to registration and has a canonical server event", () => {
   assert.doesNotThrow(() => validateClientFrame({
     version: "v1",
@@ -114,6 +183,7 @@ test("conversation sync is additive to registration and has a canonical server e
     agent_id: "shared-user",
     instance_id: "web-one",
     conversation_sync: "v1",
+    delivery_receipts: "delivery_items_v1",
   }));
   assert.doesNotThrow(() => validateServerFrame({
     version: "v1",

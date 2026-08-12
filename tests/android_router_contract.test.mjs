@@ -223,14 +223,19 @@ test("negotiated ACK sends one correlated settlement confirmation", async () => 
 
 test("legacy ACK does not receive correlated settlement confirmation", async () => {
   const directory = await mkdtemp(join(tmpdir(), "android-router-legacy-ack-"));
-  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), maxBatchBodyChars: 4_096 });
   const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
   let socket;
   let frameId = 0;
-  const nextFrame = () => new Promise((resolve, reject) => {
-    socket.once("message", (payload) => resolve(JSON.parse(payload.toString("utf8"))));
-    socket.once("error", reject);
-  });
+  const frames = [];
+  const waitForFrame = async (predicate) => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const frame = frames.find(predicate);
+      if (frame !== undefined) return frame;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("timed out waiting for frame");
+  };
   const send = (frame) => socket.send(JSON.stringify({ version: "v1", frame_id: `legacy-${++frameId}`, ...frame }));
   try {
     socket = new WebSocket(await router.listen());
@@ -238,13 +243,7 @@ test("legacy ACK does not receive correlated settlement confirmation", async () 
       socket.once("open", resolve);
       socket.once("error", reject);
     });
-    const registered = nextFrame();
-    send({ type: "register", agent_id: "legacy-worker", instance_id: "legacy-instance" });
-    const lease = await registered;
-    assert.equal(lease.agent_role, "agent");
-    assert.equal(lease.ack_confirmation, undefined);
-
-    const delivery = nextFrame();
+    socket.on("message", (payload) => frames.push(JSON.parse(payload.toString("utf8"))));
     router.enqueueMessage({
       id: "legacy-ack-message",
       from: "sender",
@@ -252,11 +251,28 @@ test("legacy ACK does not receive correlated settlement confirmation", async () 
       body: "body",
       created_at: "2026-07-15T06:00:00.000Z",
     });
-    const offered = await delivery;
+    router.enqueueMessage({
+      id: "legacy-ack-message-2",
+      from: "sender",
+      to: "legacy-worker",
+      body: "second body",
+      created_at: "2026-07-15T06:00:01.000Z",
+    });
+
+    send({ type: "register", agent_id: "legacy-worker", instance_id: "legacy-instance" });
+    const lease = await waitForFrame((frame) => frame.type === "registered");
+    assert.equal(lease.agent_role, "agent");
+    assert.equal(lease.ack_confirmation, undefined);
+
+    const offered = await waitForFrame((frame) => frame.type === "message");
+    assert.equal(offered.message.id, "legacy-ack-message");
+    assert.equal(offered.delivery_items.length, 2);
+    assert.match(offered.message.body, /second body/);
     send({ type: "injection_requested", agent_id: "legacy-worker", instance_id: "legacy-instance", lease_id: lease.lease_id, message_id: offered.message.id, attempt_number: offered.attempt_number });
     send({ type: "ack", agent_id: "legacy-worker", instance_id: "legacy-instance", lease_id: lease.lease_id, message_id: offered.message.id, attempt_number: offered.attempt_number });
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(repository.messageFor(offered.message.id), undefined);
+    assert.equal(repository.messageFor("legacy-ack-message-2"), undefined);
   } finally {
     socket?.terminate();
     await router.close();

@@ -37,9 +37,9 @@ The broken `mecha_reload` tool and `/mecha-reload-runtime` command are retired. 
 
 ## Mailbox V2 batching and backpressure
 
-Mailbox V2 keeps each recipient's active mailbox bounded. By default, at most 15 live messages (`queued`, `leased`, or `injection_requested`) are allowed per recipient; when the cap is reached and a new send cannot be batched, the router rejects the send with `queue_full`, and `mailbox_send.py` exits non-zero with instructions to back off and wait for the mailbox to clear.
+Mailbox V2 keeps each recipient's active mailbox bounded. By default, at most 15 live messages (`queued`, `leased`, or `injection_requested`) are allowed per recipient; when the cap is reached, the router rejects the send with `queue_full`, and `mailbox_send.py` exits non-zero with instructions to back off and wait for the mailbox to clear.
 
-Small non-sentinel messages to the same recipient are batched while they are still queued, even when senders or subjects differ. The combined body includes per-message sender, subject, and reply hints so the recipient can respond to the right agent. The combined body is capped by `maxBatchBodyChars` (default `4096` characters), configurable in `openMessageRepository({ maxBatchBodyChars })` or with `tools/run_router.mjs --max-batch-chars <chars>` / `MECHA_MAILBOX_MAX_BATCH_CHARS`. Set the value to `0` to disable batching.
+Small non-sentinel messages to the same recipient stay as separate queued rows, then the router combines the currently deliverable rows that fit the delivery limits into one batch when the recipient pulls. Batches can include different senders or subjects, and the combined body includes per-message sender, subject, and reply hints so the recipient can respond to the right agent. Delivery batching is capped by both `maxBatchBodyChars` (default `4096` characters) and the mailbox body byte limit (`maxBodyBytes`); `maxBatchBodyChars` is configurable in `openMessageRepository({ maxBatchBodyChars })` or with `tools/run_router.mjs --max-batch-chars <chars>` / `MECHA_MAILBOX_MAX_BATCH_CHARS`. Set `maxBatchBodyChars` to `0` to disable delivery batching.
 
 ## Shared conversation history
 
