@@ -61,7 +61,7 @@ Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` f
 
 **Backend/status/audit delegation**: Do not do backend chores, status reconstruction, audit sweeps, or verification passes inline when they require project inspection or more than a few reads. Use background subagents for read-only audits and narrow backend checks. Use persistent managed workers when Wolfgang asks for workers, durable ownership, code changes, or long-lived mutation lanes.
 
-**Bounded subagents on worker follow-ups**: Whenever handing additional work to an existing worker—not only when launching it—directly encourage a bounded subagent when one is viable for a read, audit, narrow check, or context-relief pass. Keep the boundary explicit: bounded subagents handle short, self-contained reads and verification so the worker's context stays focused; the managed worker retains durable implementation ownership, mutation work, and the long-lived task lane.
+**Bounded subagents in worker launch and follow-ups**: Whenever launching a worker or handing additional work to an existing worker, explicitly instruct it to use bounded background subagents when viable for repo/RFC exploration, narrow implementation slices, test/log triage, requirements checks, or robot-review. Keep the boundary explicit: bounded subagents handle short, self-contained work so the worker's main context stays smaller, compacts less often, preserves continuity over long tasks, and remains reachable for supervisor direction changes instead of blocking on long-running operations. The managed worker retains durable implementation ownership, mutation work, integration judgment, approval gates, and the long-lived task lane.
 
 ## Priority Discipline
 
