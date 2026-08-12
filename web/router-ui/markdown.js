@@ -59,9 +59,20 @@ function markdownRenderer() {
   return defaultRenderer;
 }
 
+function escapePlainText(value) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/\n/g, "<br>");
+}
+
 export function markdownToSafeHtml(body, MarkdownIt) {
-  const renderer = MarkdownIt ? createMarkdownRenderer(MarkdownIt) : markdownRenderer();
-  return renderer.render(String(body ?? ""));
+  if (MarkdownIt) return createMarkdownRenderer(MarkdownIt).render(String(body ?? ""));
+  if (typeof globalThis.markdownit !== "function") return escapePlainText(String(body ?? ""));
+  return markdownRenderer().render(String(body ?? ""));
 }
 
 export function renderMarkdownBody(document, body) {
