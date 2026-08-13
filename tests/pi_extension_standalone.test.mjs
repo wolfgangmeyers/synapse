@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { once } from "node:events";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import test from "node:test";
 
-import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 import {
   createInlineToolPolicy,
@@ -629,22 +635,163 @@ test("native child allowance requests do not change parent allowance state", asy
   }
 });
 
-test("copied Pi extension loads without repository dependencies", async () => {
+test("copied Pi extension executes installed operational actions without repository dependencies", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-extension-"));
-  try {
-    const extensionDirectory = join(directory, "pi-extensions");
-    await mkdir(extensionDirectory);
-    const extension = join(extensionDirectory, "mecha-messaging.js");
-    await copyFile(new URL("../pi-extensions/mecha-messaging.js", import.meta.url), extension);
-    await copyFile(new URL("../pi-extensions/mailbox-client.js", import.meta.url), join(extensionDirectory, "mailbox-client.js"));
-    for (const name of ["recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js", "memory-capture.js"]) {
-      await copyFile(new URL(`../pi-extensions/${name}`, import.meta.url), join(extensionDirectory, name));
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push([request.method, request.url]);
+    response.setHeader("content-type", "application/json");
+    if (request.method === "POST" && request.url === "/v1/messages") {
+      response.statusCode = 201;
+      response.end(JSON.stringify({ message: { id: "standalone-message", state: "queued" } }));
+      return;
     }
+    if (request.method === "GET" && request.url === "/v1/reminders") {
+      response.end(JSON.stringify({ reminders: [] }));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/reminders") {
+      response.statusCode = 201;
+      response.end(JSON.stringify({ reminder: { id: "standalone-reminder", state: "active" } }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/health") {
+      response.end(JSON.stringify({ healthy: true }));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/messages/standalone-message/retry") {
+      response.end(JSON.stringify({ message: { id: "standalone-message", state: "queued" } }));
+      return;
+    }
+    if (request.method === "DELETE" && request.url === "/v1/messages/standalone-message") {
+      response.statusCode = 204;
+      response.end();
+      return;
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: { message: "not found" } }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    await execFileAsync(
+      "python3",
+      [fileURLToPath(new URL("../.claude/skills/supervisor/tools/install_pi_extension.py", import.meta.url))],
+      { env: { ...process.env, HOME: directory } },
+    );
+    const extensionDirectory = join(directory, ".mecha-developer", "extensions");
+    const extension = join(extensionDirectory, "mecha-messaging.js");
+    const installedSupervisorTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+    await import(pathToFileURL(join(installedSupervisorTools, "claude_sidecar.mjs")).href);
+    await execFileAsync("python3", [
+      "-c",
+      [
+        "import _cluster, _sidecar, _state, _tmux",
+        "import git_task_status, mailbox_send, pr_status, state_add, state_priority",
+        "import state_query, state_update_field, state_update_status, state_verification_handoff",
+        "import worker_list",
+      ].join("; "),
+    ], {
+      cwd: installedSupervisorTools,
+      env: { ...process.env, HOME: directory, PYTHONDONTWRITEBYTECODE: "1" },
+    });
+
+    const fakeBin = join(directory, "bin");
+    await mkdir(fakeBin);
+    const tmux = join(fakeBin, "tmux");
+    await writeFile(tmux, "#!/bin/sh\nif [ \"$1\" = \"display-message\" ]; then printf 'standalone-worker\\n'; exit 0; fi\nexit 1\n");
+    await chmod(tmux, 0o755);
+    const gh = join(fakeBin, "gh");
+    await writeFile(gh, "#!/bin/sh\nif [ \"$1 $2\" = \"pr view\" ]; then printf '%s\\n' '{\"number\":42,\"url\":\"https://example.test/pull/42\",\"title\":\"Standalone\",\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feature\",\"headRefOid\":\"abcdef123456\",\"baseRefName\":\"main\",\"mergeStateStatus\":\"CLEAN\",\"reviewDecision\":\"\"}'; else printf '%s\\n' '[{\"name\":\"tests\",\"state\":\"SUCCESS\"}]'; fi\n");
+    await chmod(gh, 0o755);
+
+    const repository = join(directory, "repository");
+    await mkdir(repository);
+    await execFileAsync("git", ["-C", repository, "init", "--quiet"]);
+    const statePath = join(directory, "supervisor-state.json");
+    await writeFile(statePath, JSON.stringify({
+      next_task_id: 2,
+      standing_orders: [],
+      tasks: [{ id: 1, alias: "git-task", state: "active", type: "worker", project: "standalone", worktree: repository, description: "Git fixture" }],
+    }));
+    const address = server.address();
+    const environment = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      MECHA_AGENT_ID: "standalone-supervisor",
+      MECHA_ROUTER_URL: `http://127.0.0.1:${address.port}`,
+      MECHA_STATE_FILE: statePath,
+      TMUX: "standalone",
+      TMUX_PANE: "%1",
+    };
+
     const module = await import(pathToFileURL(extension).href);
+    const tools = new Map();
+    const pi = {
+      events: { on() {} },
+      on() {},
+      registerCommand() {},
+      registerTool(tool) { tools.set(tool.name, tool); },
+      sendMessage() {},
+    };
+    module.createMechaMessagingExtension(pi, {
+      resolveCurrentAgentId: () => "worker",
+      createClient: () => ({ connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {} }),
+      createSettledScheduler: () => ({ onParentActivity() {}, onParentSettled() {}, onChildStarted() {}, onChildDisposed() {}, dispose() {} }),
+      operationalTools: { environment },
+    });
+    const execute = (name, input) => tools.get(name).execute("standalone-call", input);
+    const executedToolNames = new Set();
+    for (const [name, input] of [
+      ["mecha_state", { action: "create", alias: "state-task", type: "worker", project: "standalone", description: "State fixture" }],
+      ["mecha_state", { action: "query", task: "state-task" }],
+      ["mecha_priority", { action: "create", priorityId: "standalone-priority", name: "Standalone priority", taskIds: [1] }],
+      ["mecha_verification_handoff", { action: "record", task: "git-task", reminderId: "standalone-reminder", successor: "standalone-worker" }],
+      ["mecha_worker", { action: "list" }],
+      ["mecha_worker", { action: "send", worker: "recipient", message: "Standalone mailbox fixture" }],
+      ["mecha_pr", { action: "status", pullRequest: 42 }],
+      ["mecha_git", { action: "status", task: "git-task" }],
+      ["mecha_reminder", { action: "list" }],
+      ["mecha_reminder", { action: "create", target: "supervisor", message: "Standalone reminder fixture", delayMinutes: 5 }],
+      ["mecha_router", { action: "health" }],
+      ["mecha_router", { action: "retry", messageId: "standalone-message" }],
+      ["mecha_router", { action: "dismiss", messageId: "standalone-message" }],
+    ]) {
+      const result = await execute(name, input);
+      executedToolNames.add(name);
+      assert.equal(result.isError, undefined, `${name}: ${result.content[0].text}`);
+      assert.deepEqual(Object.keys(result).sort(), ["content", "details"]);
+      assert.ok(Array.isArray(result.content));
+      assert.equal(result.content[0].type, "text");
+      assert.equal(typeof result.content[0].text, "string");
+      assert.equal(typeof result.details, "object");
+      assert.notEqual(result.details, null);
+      assert.equal(Array.isArray(result.details), false);
+    }
+    assert.deepEqual([...executedToolNames], [
+      "mecha_state",
+      "mecha_priority",
+      "mecha_verification_handoff",
+      "mecha_worker",
+      "mecha_pr",
+      "mecha_git",
+      "mecha_reminder",
+      "mecha_router",
+    ]);
+    assert.deepEqual(requests, [
+      ["POST", "/v1/messages"],
+      ["GET", "/v1/reminders"],
+      ["POST", "/v1/reminders"],
+      ["GET", "/v1/health"],
+      ["POST", "/v1/messages/standalone-message/retry"],
+      ["DELETE", "/v1/messages/standalone-message"],
+    ]);
     const client = module.createMailboxClient({ agentId: "worker", onEnvelope: () => {} });
     assert.match(client.instanceId, /^[A-Za-z0-9]{21}$/);
     client.close();
   } finally {
+    server.close();
+    await once(server, "close");
     await rm(directory, { recursive: true, force: true });
   }
 });

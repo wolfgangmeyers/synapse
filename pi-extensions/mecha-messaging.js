@@ -7,6 +7,7 @@ import { createRecallController } from "./recall-controller.js";
 import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
 import { runRecallEvaluator as evaluateRecall, validateRecallChoice as validateChoice } from "./recall-evaluator.js";
 import { createMemoryCaptureLifecycle } from "./memory-capture.js";
+import { registerOperationalTools } from "./operational-tools.js";
 export { createRecallState } from "./recall-state.js";
 export { createRecallController } from "./recall-controller.js";
 export { createRecallPipeline } from "./recall-pipeline.js";
@@ -1017,7 +1018,9 @@ export function createMechaMessagingExtension(pi, {
   clearIntervalImpl = clearInterval,
   nowImpl = Date.now,
   subagentsService = globalThis[PI_SUBAGENTS_SERVICE],
+  operationalTools = {},
 } = {}) {
+  registerOperationalTools(pi, operationalTools);
   let client;
   let coordinator;
   let mailboxPausedForCompaction = false;
