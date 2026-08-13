@@ -113,6 +113,24 @@ Do not write the review process, the findings list, or a narrative of the PR. No
 
 **Fix the KB entries the review proved wrong.** A stale entry is worse than a missing one, because the next session trusts it. If a PR changed behavior the KB describes, update that line in the same pass, and say what changed and when instead of quietly overwriting it.
 
+### All PR reviews follow the review-pr skill workflow
+
+Every GitHub PR review must use the `review-pr` skill. No shortcuts, no general-purpose subagents, no manual reads that skip the workflow.
+
+The skill workflow is mandatory:
+1. Checkout + snapshot state (head SHA, draft status, checks, existing reviews)
+2. Scope contract + file ledger (every changed file classified)
+3. `/pr-context` for context gathering
+4. `/pr-summary` for overview
+5. Focus split ledger (explicit include/remove per area, mandatory)
+6. Parallel `/robot-review` batches per focus area
+7. `/pr-validate` to filter findings
+8. Interactive console review (one finding at a time)
+9. Stage/rewrite/skip decisions tracked in conversation
+10. Post only after explicit instruction + head SHA verification
+
+Skipping this workflow defeats the purpose of having the skill. The skill exists because a properly-structured review catches things a general-purpose agent misses.
+
 ### Harvest a plan's rejected alternatives before the plan file is deleted
 
 Code comments carry the mechanics and never the rejections. A worker on 2026-08-08 checked its own output: every mechanism was commented, and not one rejected alternative from its plan appeared anywhere in the code. Deleting the plan destroys the only record of what was considered and why it lost, which is exactly what someone needs when they go to reverse the decision. The PR body carries what changed, not what was declined. Move the rejections into the KB first.
