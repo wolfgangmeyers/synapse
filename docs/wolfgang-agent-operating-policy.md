@@ -125,7 +125,7 @@ The skill workflow is mandatory:
 5. Focus split ledger (explicit include/remove per area, mandatory)
 6. Parallel `/robot-review` batches per focus area
 7. `/pr-validate` to filter findings
-8. Interactive console review (one finding at a time)
+8. Interactive console review (one finding at a time) — only when Wolfgang explicitly asks for it
 9. Stage/rewrite/skip decisions tracked in conversation
 10. Post only after explicit instruction + head SHA verification
 
