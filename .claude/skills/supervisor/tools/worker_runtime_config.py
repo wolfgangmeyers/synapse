@@ -36,6 +36,40 @@ def worker_runtime_config_path(environment: Mapping[str, str] | None = None) -> 
     )
 
 
+def _load_config(
+    *, environment: Mapping[str, str] | None = None, path: str | None = None
+) -> tuple[dict, str] | tuple[None, str]:
+    environment = os.environ if environment is None else environment
+    config_path = (
+        os.path.abspath(os.path.expanduser(path))
+        if path
+        else worker_runtime_config_path(environment)
+    )
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return None, config_path
+    except json.JSONDecodeError as error:
+        raise WorkerRuntimeConfigError(
+            f"worker runtime config is not valid JSON: {config_path}"
+        ) from error
+
+    if not isinstance(payload, dict):
+        raise WorkerRuntimeConfigError(
+            f"worker runtime config must be a JSON object: {config_path}"
+        )
+    return payload, config_path
+
+
+def _validate_cursor_model(value: object, *, source: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WorkerRuntimeConfigError(
+            f"{source} cursor_model must be a non-empty string"
+        )
+    return value.strip()
+
+
 def load_default_agent_runtime(
     *,
     environment: Mapping[str, str] | None = None,
@@ -47,27 +81,26 @@ def load_default_agent_runtime(
     launcher's pinned provider/model. Explicit ``worker_launch.py --agent`` still
     overrides this value.
     """
-    environment = os.environ if environment is None else environment
-    config_path = os.path.abspath(os.path.expanduser(path)) if path else worker_runtime_config_path(environment)
-    try:
-        with open(config_path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except FileNotFoundError:
+    payload, config_path = _load_config(environment=environment, path=path)
+    if payload is None:
         return DEFAULT_AGENT_RUNTIME
-    except json.JSONDecodeError as error:
-        raise WorkerRuntimeConfigError(
-            f"worker runtime config is not valid JSON: {config_path}"
-        ) from error
-
-    if not isinstance(payload, dict):
-        raise WorkerRuntimeConfigError(
-            f"worker runtime config must be a JSON object: {config_path}"
-        )
     if "default_agent" not in payload:
         raise WorkerRuntimeConfigError(
             f"worker runtime config must define default_agent: {config_path}"
         )
     return _validate_runtime(payload["default_agent"], source=config_path)
+
+
+def load_cursor_model(
+    *,
+    environment: Mapping[str, str] | None = None,
+    path: str | None = None,
+) -> str | None:
+    """Return the optional Cursor model, or None when it is not configured."""
+    payload, config_path = _load_config(environment=environment, path=path)
+    if payload is None or "cursor_model" not in payload:
+        return None
+    return _validate_cursor_model(payload["cursor_model"], source=config_path)
 
 
 def resolve_agent_runtime(
