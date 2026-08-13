@@ -540,7 +540,7 @@ On tone: write like a person talking, not a system reporting. Say "the web UI is
 
 ## Delegation and roles
 
-- Use GPT-5.6 Sol as the default model for managed workers and subagents. It is cheaper than GPT-5.5 and smarter. Use GPT-5.5 for planning and specification work. Use GLM-5 for PR reviews. Keep the supervisor on GPT-5.5 unless Wolfgang requests another model.
+- Use GPT-5.6 Terra for ordinary managed workers and subagents. Use GPT-5.6 Luna for PR review workers and their subagents. Use another model, including GLM, only when the task explicitly requires it.
 - Use persistent workers for durable implementation lanes and runtime ownership. Use background subagents for bounded read-only audits, repo inspection, verification, and parallel checks that would bloat the main context.
 - Workers should also use their own background subagents when available for bounded research, planning checks, implementation slices, test triage, validation, and review. Keep the main worker thread focused on orchestration, integration decisions, and concise handoffs rather than accumulating all investigation and test output inline.
 - Top-level agents run subagents in the background unless there is a specific reason to block for the result. Never block the session waiting on a subagent. Start it, then poll, so Wolfgang can always reach you mid-task. Use the launcher’s configured runtime and explicitly set the required model when its default would be wrong. Confirm that the subagent actually started and returned evidence before relying on it; an immediate empty result is a failed delegation, not a completed check.

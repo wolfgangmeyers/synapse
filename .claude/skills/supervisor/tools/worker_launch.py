@@ -42,7 +42,7 @@ from worker_runtime_config import (
 
 
 PI_PROVIDER = "openai-codex"
-PI_MODEL = "gpt-5.6-sol"
+PI_MODEL = "gpt-5.6-terra"
 # Pi's own model catalog, kept up to date by Pi itself as providers and models are added or
 # removed. This launcher used to hardcode PI_PROVIDER for every --model override, which broke
 # the day a worker asked for a model hosted under a different provider (amazon-bedrock's
@@ -132,7 +132,7 @@ def resolve_pi_provider(model, models_store_path=None):
     raising:
 
     - model is None, meaning the caller took no --model override at all. This keeps the
-      pinned openai-codex/gpt-5.6-sol default.
+      pinned openai-codex/gpt-5.6-terra default.
     - model was given but the store is missing, unparsable, or simply does not list that id
       (a typo, or a model newer than the cached store). Pi itself will reject an unknown
       model id with a clearer error than this launcher could give, so failing the launch here
@@ -550,7 +550,7 @@ def main():
         default=None,
         metavar="MODEL",
         help=(
-            "Pi-only model override for this worker launch. Defaults to gpt-5.6-sol on provider "
+            "Pi-only model override for this worker launch. Defaults to gpt-5.6-terra on provider "
             "openai-codex; an explicit override's provider is looked up in "
             "~/.pi/agent/models-store.json, falling back to openai-codex if the model is not "
             "listed there."
