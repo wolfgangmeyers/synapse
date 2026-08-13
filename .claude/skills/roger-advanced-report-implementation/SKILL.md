@@ -30,7 +30,7 @@ Use `roger-report-implementation` instead when the product contract is a dedicat
    - **permission and gate audit:** backend feature gate, dataset/column grants, route/sidebar visibility, saved-definition authorization;
    - **independent specification/plan review:** omissions, alternatives, and requirement-to-plan coverage before implementation; and
    - **validation review:** current diff against the approved contract, focused tests, performance posture, and local browser behavior.
-4. Use OpenAI Codex GPT-5.6 Sol for repo-local architecture, lineage, permission, validation, and implementation subagents unless Wolfgang requests another model. Use GPT-5.5 for specification and planning work. A GPT-5.5/browser research pass is also required when Kinnser/WellSky, a credentialed source report, or another external parity source must be inspected. Never treat external research as necessary for facts already authoritative in the repository.
+4. Use OpenAI Codex GPT-5.6 Terra for repo-local architecture, lineage, permission, validation, implementation, specification, and planning subagents. Use another model only when the task explicitly requires it. Never treat external research as necessary for facts already authoritative in the repository.
 5. Before implementation, obtain the canonical dev-loop specification approval and independent plan sign-off. Before readiness, run actual focused coverage, implementation review, validation with a different reviewer persona, and a fresh follow-up review as the dev-loop requires.
 
 ## Reconstruct the current reporting path

@@ -10,7 +10,7 @@ Use this skill for the report-specific parts of creating a RogerEMR report. It s
 ## Required process and model gates
 
 1. Load the `workflows` skill, retrieve the canonical `dev-loop` workflow with `get_workflow.py dev-loop`, and follow it as the procedural source of truth. Do not paste or recreate the workflow in a worker handoff.
-2. Use managed Pi workers/subagents on OpenAI Codex GPT-5.6 Sol for report implementation and repo-local research unless Wolfgang explicitly requests another model. Use GPT-5.5 for the authoritative specification and implementation plan. Also require a GPT-5.5 research pass when the report needs Kinnser/WellSky/browser access, credentialed source-report parity, or other external evidence Sol cannot inspect directly. Complete the evidence-gathering pass before creating the final specification and plan from the researched report contract, source evidence, comparable code, field lineage, stack/base recommendation, and known open questions. For a complex report, run a separate independent pass over the specification and plan for omissions, unsupported assumptions, and spec-to-plan coverage before the normal plan-review gate.
+2. Use managed Pi workers and subagents on OpenAI Codex GPT-5.6 Terra. Use another model only when the task explicitly requires it. Complete the evidence-gathering pass before creating the final specification and plan from the researched report contract, source evidence, comparable code, field lineage, stack/base recommendation, and known open questions. For a complex report, run a separate independent pass over the specification and plan for omissions, unsupported assumptions, and spec-to-plan coverage before the normal plan-review gate.
 3. “Worker” means a persistent tmux/Pi worker. If Wolfgang asks for a worker, do not substitute a native subagent. Use background subagents only for bounded lanes that do not need durable ownership.
 4. Load the RogerEMR repository `AGENTS.md` and `TESTING_GUIDANCE.md`, plus any domain skill triggered by the report. Before final readiness, load and follow `roger-report-review` as the report-specific independent review gate.
 
@@ -29,7 +29,7 @@ The dev-loop specification must make the report contract explicit before plannin
 - shared synthetic reporting scenarios needed for tests, local demo, and cross-report comparison; and
 - alternatives and deliberate parity exceptions.
 
-Start with Linear, accepted specs/decisions, current repository code, comparable fixed reports, generated API conventions, and relevant KB entries. Treat old report specs as evidence, not current policy: explicitly reconcile stale permissions, bases, and unmerged assumptions. Do not hand the work to Sol for the final specification or implementation plan until this research is complete enough to state the report contract and the remaining unknowns; otherwise the Sol output is only a preliminary scaffold and must be revisited after research.
+Start with Linear, accepted specs/decisions, current repository code, comparable fixed reports, generated API conventions, and relevant KB entries. Treat old report specs as evidence, not current policy: explicitly reconcile stale permissions, bases, and unmerged assumptions. Do not create the final specification or implementation plan until this research is complete enough to state the report contract and the remaining unknowns; otherwise the output is only a preliminary scaffold and must be revisited after research.
 
 ### WellSky/Kinnser parity
 

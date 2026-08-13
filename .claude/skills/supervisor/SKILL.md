@@ -31,7 +31,7 @@ This applies to direct questions, corrections, status requests, instructions, an
 
 Managed worker runtime is machine-local configuration, not a repo default. `worker_launch.py` reads `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) for `{"default_agent":"pi|claude|codex|cursor"}`; when the file is absent, the default remains Pi. An explicit `worker_launch.py --agent ...` always overrides the machine default. Record the actual runtime in state.
 
-For Pi workers, preserve the pinned runtime: `--provider openai-codex --model gpt-5.6-sol`. Pi settled notifications are opt-in. Launchers may configure a recipient with `--notify-on-settled supervisor`, but the Pi process starts with settled notifications disabled; ask that worker to call `mecha_settled_notifications` action `enable`, `disable`, or `status` when you actually want idle notices. Do not enable them for long-lived service windows such as supervisor, watchdog, pr-watch, or an equivalent service unless Wolfgang explicitly asks. A settled notification means the worker is idle, not that its task is complete: inspect the evidence, then drive its next work, reconcile/close it, or record the exact external block. Launch with `worker_launch.py --agent pi` when Pi is required and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with the default configured Pi extensions; the launcher adds the managed Mailbox V2 extension explicitly so mailbox routing is present. Do not add `--no-extensions` to managed worker launches unless Wolfgang explicitly asks for a bare-extension diagnostic session. `MECHA_PI_MAILBOX_EXTENSION` overrides the validated Mailbox path. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
+For ordinary Pi workers, preserve the pinned runtime: `--provider openai-codex --model gpt-5.6-terra`. PR review workers and their subagents use `gpt-5.6-luna`. Pi settled notifications are opt-in. Launchers may configure a recipient with `--notify-on-settled supervisor`, but the Pi process starts with settled notifications disabled; ask that worker to call `mecha_settled_notifications` action `enable`, `disable`, or `status` when you actually want idle notices. Do not enable them for long-lived service windows such as supervisor, watchdog, pr-watch, or an equivalent service unless Wolfgang explicitly asks. A settled notification means the worker is idle, not that its task is complete: inspect the evidence, then drive its next work, reconcile/close it, or record the exact external block. Launch with `worker_launch.py --agent pi` when Pi is required and record `agent: pi` in state. Record a known Pi session path or ID as `session` (`state_add.py --session ...`) before a restart is needed; Pi crash recovery refuses to guess. Pi starts with the default configured Pi extensions; the launcher adds the managed Mailbox V2 extension explicitly so mailbox routing is present. Do not add `--no-extensions` to managed worker launches unless Wolfgang explicitly asks for a bare-extension diagnostic session. `MECHA_PI_MAILBOX_EXTENSION` overrides the validated Mailbox path. The launcher maps supplied `--resume <session-id-or-path>` to Pi's supported `--session` flag.
 
 For Claude workers, the launcher starts Claude Code plus a Mailbox V2 sidecar registered as the worker's normal agent ID. The sidecar delivers router messages by sanitized terminal paste into the Claude tmux pane and ACKs only after tmux submission succeeds; Claude replies through `mailbox_send.py`. This is terminal delivery, not Pi-equivalent session injection, and `--notify-on-settled` remains Pi-only.
 
@@ -522,7 +522,7 @@ Then launch the worker in the worktree:
 
 ```bash
 WINDOW_NAME="<descriptive-name>"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "$WORKTREE_PATH" --skip-permissions --agent pi --notify-on-settled supervisor
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "$WORKTREE_PATH" --skip-permissions --agent pi --model gpt-5.6-luna --notify-on-settled supervisor
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
@@ -556,7 +556,7 @@ If the reviews run in parallel, create one detached worktree per PR and launch e
 
 ```bash
 WINDOW_NAME="pr-reviews"
-python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions --agent pi --notify-on-settled supervisor
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions --agent pi --model gpt-5.6-luna --notify-on-settled supervisor
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
