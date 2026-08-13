@@ -7,15 +7,15 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
-  createInlineToolNudgeTracker,
+  createInlineToolPolicy,
   createMechaMessagingExtension,
-  INLINE_TOOL_NUDGE_MESSAGE,
-  INLINE_TOOL_NUDGE_MESSAGE_TYPE,
+  INLINE_TOOL_ALLOWANCE_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging.js";
 
 function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-session", header = {} } = {}) {
   const handlers = new Map();
   const childHandlers = new Map();
+  const tools = new Map();
   const context = {
     sessionManager: { getSessionId: () => sessionId, getHeader: () => header },
     ui: { notify() {}, setStatus() {} },
@@ -29,7 +29,7 @@ function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-se
       handlers.set(type, bucket);
     },
     registerCommand() {},
-    registerTool() {},
+    registerTool(tool) { tools.set(tool.name, tool); },
     sendMessage,
     exec: async () => ({ code: 0, stderr: "" }),
   };
@@ -44,285 +44,178 @@ function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-se
       dispose() {},
     }),
   });
-  return { childHandlers, context, handlers };
+  return { childHandlers, context, handlers, tools };
 }
 
 async function emitToolCalls(fixture, toolNames, context = fixture.context) {
+  const results = [];
   for (const toolName of toolNames) {
     for (const handler of fixture.handlers.get("tool_call") ?? []) {
-      await handler({ toolName }, context);
+      results.push(await handler({ toolName }, context));
     }
   }
+  return results;
 }
 
-const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+function assertBlocked(result) {
+  assert.equal(result?.block, true);
+  assert.equal(typeof result?.reason, "string");
+}
 
-test("inline tool nudge tracker rejects invalid configuration", () => {
-  assert.throws(() => createInlineToolNudgeTracker({ actionLimit: -1 }), /actionLimit/);
-  assert.throws(() => createInlineToolNudgeTracker({ actionLimit: 1.5 }), /actionLimit/);
-  assert.throws(() => createInlineToolNudgeTracker({ actionLimit: Number.MAX_SAFE_INTEGER + 1 }), /actionLimit/);
-  assert.throws(() => createInlineToolNudgeTracker({ readThreshold: 0 }), /readThreshold/);
-  assert.throws(() => createInlineToolNudgeTracker({ readThreshold: 1.5 }), /readThreshold/);
-  assert.throws(() => createInlineToolNudgeTracker({ readThreshold: Number.MAX_SAFE_INTEGER + 1 }), /readThreshold/);
-  assert.throws(() => createInlineToolNudgeTracker({ notify: "nope" }), /notify/);
+test("inline tool policy validates temporary allowance requests", () => {
+  const policy = createInlineToolPolicy();
+  assert.throws(() => policy.grant("", 1), /toolName/);
+  assert.throws(() => policy.grant("edit", 0), /usageCount/);
+  assert.throws(() => policy.grant("edit", 1.5), /usageCount/);
+  assert.throws(() => policy.grant("edit", 6), /usageCount/);
 });
 
-test("inline tool nudge tracker supports custom threshold boundaries", () => {
-  const notices = [];
-  const tracker = createInlineToolNudgeTracker({
-    actionLimit: 0,
-    readThreshold: 2,
-    notify: (notice) => notices.push(notice),
-  });
-
-  tracker.record("bash");
-  assert.deepEqual(notices.map(({ kind, count, threshold }) => ({ kind, count, threshold })), [
-    { kind: "action", count: 1, threshold: 0 },
-  ]);
-
-  tracker.record("read");
-  assert.equal(notices.length, 1);
-  tracker.record("read");
-  assert.deepEqual(notices.map(({ kind, count, threshold }) => ({ kind, count, threshold })), [
-    { kind: "action", count: 1, threshold: 0 },
-    { kind: "read", count: 2, threshold: 2 },
-  ]);
-});
-
-test("inline action tools nudge on the fifth mixed shell/edit/write call and reset", () => {
-  const notices = [];
-  const tracker = createInlineToolNudgeTracker({ notify: (notice) => notices.push(notice) });
-
-  for (const toolName of ["bash", "edit", "write", "bash"]) assert.equal(tracker.record(toolName), undefined);
-  assert.equal(notices.length, 0);
-
-  const notice = tracker.record("edit");
-  assert.equal(notices.length, 1);
-  assert.deepEqual(notice, notices[0]);
-  assert.deepEqual(notices[0], {
-    kind: "action",
-    count: 5,
-    threshold: 4,
-    toolName: "edit",
-    message: INLINE_TOOL_NUDGE_MESSAGE,
-  });
-
-  for (const toolName of ["write", "bash", "edit", "write"]) tracker.record(toolName);
-  assert.equal(notices.length, 1);
-  tracker.record("bash");
-  assert.equal(notices.length, 2);
-});
-
-test("inline reads use the separate eighth-read threshold and reset", () => {
-  const notices = [];
-  const tracker = createInlineToolNudgeTracker({ notify: (notice) => notices.push(notice) });
-
-  for (let index = 0; index < 7; index += 1) assert.equal(tracker.record("read"), undefined);
-  assert.equal(notices.length, 0);
-
-  const notice = tracker.record("read");
-  assert.equal(notices.length, 1);
-  assert.deepEqual(notice, notices[0]);
-  assert.deepEqual(notices[0], {
-    kind: "read",
-    count: 8,
-    threshold: 8,
-    toolName: "read",
-    message: INLINE_TOOL_NUDGE_MESSAGE,
-  });
-
-  for (let index = 0; index < 7; index += 1) tracker.record("read");
-  assert.equal(notices.length, 1);
-  tracker.record("read");
-  assert.equal(notices.length, 2);
-});
-
-test("inline read and action counters reset each other", () => {
-  const notices = [];
-  const tracker = createInlineToolNudgeTracker({ notify: (notice) => notices.push(notice) });
-
-  for (const toolName of ["bash", "edit", "write", "bash", "read", "edit"]) tracker.record(toolName);
-  assert.equal(notices.length, 0);
-
-  for (let index = 0; index < 7; index += 1) tracker.record("read");
-  tracker.record("bash");
-  for (let index = 0; index < 7; index += 1) tracker.record("read");
-  assert.equal(notices.length, 0);
-
-  tracker.record("read");
-  assert.equal(notices.length, 1);
-  assert.equal(notices[0].kind, "read");
-});
-
-test("agent start resets inline counters", () => {
-  const notices = [];
-  const tracker = createInlineToolNudgeTracker({ notify: (notice) => notices.push(notice) });
-
-  for (const toolName of ["bash", "edit", "write", "bash"]) tracker.record(toolName);
-  tracker.reset();
-  tracker.record("edit");
-
-  assert.equal(notices.length, 0);
-});
-
-test("control-plane and unknown tools clear inline counters without nudging", () => {
-  for (const controlTool of ["mecha_context", "mecha_parent_message", "mecha_recall", "mecha_settled_notifications", "unknown_tool"]) {
-    const notices = [];
-    const tracker = createInlineToolNudgeTracker({ notify: (notice) => notices.push(notice) });
-    for (const toolName of ["bash", "edit", "write", "bash", controlTool, "edit"]) tracker.record(toolName);
-    assert.equal(notices.length, 0, controlTool);
-  }
-});
-
-test("inline tool nudge uses the canned binding message", () => {
-  assert.equal(
-    INLINE_TOOL_NUDGE_MESSAGE,
-    "System noticed this worker is doing work inline. Reminder: using subagents when possible is mandatory to avoid tying up the main thread and bloating context.",
-  );
-  assert.match(INLINE_TOOL_NUDGE_MESSAGE, /noticed this worker is doing work inline/);
-  assert.match(INLINE_TOOL_NUDGE_MESSAGE, /using subagents when possible is mandatory/);
-  assert.match(INLINE_TOOL_NUDGE_MESSAGE, /tying up the main thread/);
-  assert.match(INLINE_TOOL_NUDGE_MESSAGE, /bloating context/);
-});
-
-test("agent_start resets integrated inline tool counters", async () => {
+test("top-level reads are always allowed without nudges or state changes", async () => {
   const sent = [];
   const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
-
-  await emitToolCalls(fixture, ["bash", "edit", "write", "bash"]);
-  for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
-  await emitToolCalls(fixture, ["edit"]);
+  const results = await emitToolCalls(fixture, Array.from({ length: 20 }, () => "read"));
 
   assert.equal(sent.length, 0);
+  assert.deepEqual(results, Array.from({ length: 20 }, () => undefined));
+
+  const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 1 });
+  await emitToolCalls(fixture, Array.from({ length: 20 }, () => "read"));
+  assert.deepEqual(await emitToolCalls(fixture, ["edit"]), [undefined]);
+  const [blocked] = await emitToolCalls(fixture, ["edit"]);
+  assertBlocked(blocked);
 });
 
-test("top-level tool calls send inline work nudge as a steer", async () => {
-  const sent = [];
-  const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
-  for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, fixture.context);
+test("write-ish top-level tools are blocked by default with mandatory-subagent guidance", async () => {
+  const fixture = createMessagingFixture();
+  const results = await emitToolCalls(fixture, ["bash", "edit", "write"]);
 
-  await emitToolCalls(fixture, ["bash", "edit", "write", "bash", "edit"]);
-
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0][0].customType, INLINE_TOOL_NUDGE_MESSAGE_TYPE);
-  assert.equal(sent[0][0].content, INLINE_TOOL_NUDGE_MESSAGE);
-  assert.equal(sent[0][0].display, true);
-  assert.deepEqual(sent[0][0].details, {
-    kind: "action",
-    count: 5,
-    threshold: 4,
-    tool_name: "edit",
-  });
-  assert.deepEqual(sent[0][1], { deliverAs: "steer", triggerTurn: true });
+  assert.equal(results.length, 3);
+  for (const result of results) {
+    assert.equal(result.block, true);
+    assert.match(result.reason, /subagents are mandatory/i);
+    assert.match(result.reason, new RegExp(INLINE_TOOL_ALLOWANCE_TOOL_NAME));
+    assert.match(result.reason, /genuinely necessary/);
+    assert.match(result.reason, /exceptional path/);
+    assert.match(result.reason, /not the normal workaround/);
+  }
 });
 
-test("top-level read calls send inline work nudge as a steer", async () => {
-  const sent = [];
-  const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
+test("allowance tool is registered with a five-usage maximum and exceptional wording", async () => {
+  const fixture = createMessagingFixture();
+  const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
 
-  await emitToolCalls(fixture, Array.from({ length: 8 }, () => "read"));
+  assert.ok(allowanceTool);
+  assert.equal(allowanceTool.parameters.properties.toolName.type, "string");
+  assert.equal(allowanceTool.parameters.properties.usageCount.maximum, 5);
+  assert.match(allowanceTool.description, /exception/i);
+  assert.match(allowanceTool.description, /subagents remain mandatory|mandatory by default/i);
 
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0][0].customType, INLINE_TOOL_NUDGE_MESSAGE_TYPE);
-  assert.equal(sent[0][0].content, INLINE_TOOL_NUDGE_MESSAGE);
-  assert.deepEqual(sent[0][0].details, {
-    kind: "read",
-    count: 8,
-    threshold: 8,
-    tool_name: "read",
-  });
-  assert.deepEqual(sent[0][1], { deliverAs: "steer", triggerTurn: true });
+  const result = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 5 });
+  assert.equal(result.details.usageCount, 5);
+  assert.match(result.content[0].text, /exception/i);
+  assert.match(result.content[0].text, /subagents remain mandatory|mandatory by default/i);
+
+  assert.deepEqual(
+    await emitToolCalls(fixture, Array.from({ length: 5 }, () => "edit")),
+    Array.from({ length: 5 }, () => undefined),
+  );
+  const [blocked] = await emitToolCalls(fixture, ["edit"]);
+  assertBlocked(blocked);
+
+  const rejected = await allowanceTool.execute("call-2", { toolName: "edit", usageCount: 6 });
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content[0].text, /usageCount/);
 });
 
-test("inline nudge send failures do not block tool execution and still reset", async () => {
-  let attempts = 0;
-  const fixture = createMessagingFixture({ sendMessage: () => { attempts += 1; throw new Error("send failed"); } });
+test("allowance credits spend down only on matching top-level calls", async () => {
+  const fixture = createMessagingFixture();
+  const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 2 });
 
-  await assert.doesNotReject(() => emitToolCalls(fixture, ["bash", "bash", "bash", "bash", "bash"]));
-  assert.equal(attempts, 1);
-
-  await assert.doesNotReject(() => emitToolCalls(fixture, ["edit", "edit", "edit", "edit"]));
-  assert.equal(attempts, 1);
-  await assert.doesNotReject(() => emitToolCalls(fixture, ["edit"]));
-  assert.equal(attempts, 2);
+  for (const blockedTool of await emitToolCalls(fixture, ["bash", "write"])) assertBlocked(blockedTool);
+  assert.deepEqual(await emitToolCalls(fixture, ["edit", "edit"]), [undefined, undefined]);
+  const [blockedEdit] = await emitToolCalls(fixture, ["edit"]);
+  assertBlocked(blockedEdit);
 });
 
-test("inline nudge async send failures do not block tool execution", async () => {
-  let attempts = 0;
-  const fixture = createMessagingFixture({ sendMessage: () => { attempts += 1; return Promise.reject(new Error("send failed")); } });
+test("allowance credits reset at agent start", async () => {
+  const fixture = createMessagingFixture();
+  const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 1 });
+  for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
 
-  await assert.doesNotReject(() => emitToolCalls(fixture, ["bash", "bash", "bash", "bash", "bash"]));
-  await nextTurn();
-  assert.equal(attempts, 1);
-
-  await assert.doesNotReject(() => emitToolCalls(fixture, ["edit", "edit", "edit", "edit", "edit"]));
-  await nextTurn();
-  assert.equal(attempts, 2);
+  const [result] = await emitToolCalls(fixture, ["edit"]);
+  assert.equal(result.block, true);
 });
 
-test("forked sessions with parentSession headers still receive inline nudges", async () => {
-  const sent = [];
-  const fixture = createMessagingFixture({
-    sendMessage: (...args) => sent.push(args),
-    header: { parentSession: "/tmp/parent-session.jsonl" },
-  });
+test("control-plane and unknown tools remain allowed", async () => {
+  const fixture = createMessagingFixture();
+  const results = await emitToolCalls(fixture, [
+    "mecha_context",
+    "mecha_parent_message",
+    "mecha_recall",
+    "mecha_settled_notifications",
+    INLINE_TOOL_ALLOWANCE_TOOL_NAME,
+    "unknown_tool",
+  ]);
 
-  await emitToolCalls(fixture, ["bash", "edit", "write", "bash", "edit"]);
-
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0][0].details.kind, "action");
+  assert.deepEqual(results, Array.from({ length: 6 }, () => undefined));
 });
 
-test("child agent_start does not reset parent inline counters", async () => {
-  const sent = [];
-  const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
+test("forked sessions with parentSession headers are still guarded as top-level sessions", async () => {
+  const fixture = createMessagingFixture({ header: { parentSession: "/tmp/parent-session.jsonl" } });
+  const [result] = await emitToolCalls(fixture, ["bash"]);
+
+  assert.equal(result.block, true);
+});
+
+test("native child sessions bypass the inline tool guard", async () => {
+  const fixture = createMessagingFixture();
   fixture.childHandlers.get("subagents:child:session-created")({ sessionId: "child-session" });
   try {
     const childContext = {
       sessionManager: { getSessionId: () => "child-session", getHeader: () => ({}) },
       ui: { notify() {}, setStatus() {} },
     };
-
-    await emitToolCalls(fixture, ["bash", "edit", "write", "bash"]);
-    for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, childContext);
-    await emitToolCalls(fixture, ["edit"]);
-
-    assert.equal(sent.length, 1);
+    assert.deepEqual(await emitToolCalls(fixture, ["bash", "edit", "write"], childContext), [undefined, undefined, undefined]);
   } finally {
     fixture.childHandlers.get("subagents:child:disposed")({ sessionId: "child-session" });
   }
 });
 
-test("child sessions do not receive inline tool nudges", async () => {
-  const sent = [];
-  const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
+test("native child calls do not spend parent allowance credits", async () => {
+  const fixture = createMessagingFixture();
+  const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
+  await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 1 });
   fixture.childHandlers.get("subagents:child:session-created")({ sessionId: "child-session" });
   try {
     const childContext = {
       sessionManager: { getSessionId: () => "child-session", getHeader: () => ({}) },
       ui: { notify() {}, setStatus() {} },
     };
-    await emitToolCalls(fixture, ["bash", "edit", "write", "bash", "edit"], childContext);
-    assert.equal(sent.length, 0);
+    await emitToolCalls(fixture, ["edit"], childContext);
+    assert.deepEqual(await emitToolCalls(fixture, ["edit"]), [undefined]);
+    const [blocked] = await emitToolCalls(fixture, ["edit"]);
+    assertBlocked(blocked);
   } finally {
     fixture.childHandlers.get("subagents:child:disposed")({ sessionId: "child-session" });
   }
 });
 
-test("child tool calls do not advance parent counters", async () => {
-  const sent = [];
-  const fixture = createMessagingFixture({ sendMessage: (...args) => sent.push(args) });
+test("native child allowance requests do not change parent allowance state", async () => {
+  const fixture = createMessagingFixture();
+  const allowanceTool = fixture.tools.get(INLINE_TOOL_ALLOWANCE_TOOL_NAME);
   fixture.childHandlers.get("subagents:child:session-created")({ sessionId: "child-session" });
   try {
     const childContext = {
       sessionManager: { getSessionId: () => "child-session", getHeader: () => ({}) },
       ui: { notify() {}, setStatus() {} },
     };
-
-    await emitToolCalls(fixture, ["bash", "edit", "write", "bash"], childContext);
-    await emitToolCalls(fixture, ["edit"], fixture.context);
-
-    assert.equal(sent.length, 0);
+    const result = await allowanceTool.execute("call-1", { toolName: "edit", usageCount: 1 }, undefined, undefined, childContext);
+    assert.match(result.content[0].text, /exempt/i);
+    const [blocked] = await emitToolCalls(fixture, ["edit"]);
+    assertBlocked(blocked);
   } finally {
     fixture.childHandlers.get("subagents:child:disposed")({ sessionId: "child-session" });
   }

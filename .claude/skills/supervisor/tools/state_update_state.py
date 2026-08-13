@@ -6,7 +6,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _state import locked_state, find_task, now_timestamp
+from _state import bump_task_state_revision, find_task, locked_state, now_timestamp
 
 
 def parse_identifier(raw):
@@ -58,6 +58,7 @@ def main():
             sys.exit(1)
 
         ts = now_timestamp()
+        old_state = task.get("state", "active")
 
         if args.state == "completed":
             task["completed"] = ts
@@ -76,6 +77,8 @@ def main():
             task["reason"] = None
 
         task["state"] = args.state
+        if old_state != args.state:
+            bump_task_state_revision(task)
 
         task_id = task.get("id", "?")
         alias = task.get("alias", "unknown")

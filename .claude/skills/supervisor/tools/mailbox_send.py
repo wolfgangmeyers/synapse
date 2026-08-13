@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from _state import STATE_FILE, claim_task_notice, find_task_by_mailbox, locked_state
 from _tmux import current_agent_id
 
 
@@ -162,6 +163,30 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def report_delivery_failure(recipient: str, message: str) -> int:
+    """Report one delivery failure per worker state without hiding the attempt.
+
+    The router call has already happened before this helper runs. A duplicate
+    failure therefore remains a failed command (so callers can react), but its
+    repeated durable notice is suppressed until the supervisor state changes.
+    If state is unavailable or the recipient is not a tracked worker, preserve
+    the existing fail-loud behavior rather than silently losing diagnostics.
+    """
+    should_report = True
+    if os.path.isfile(STATE_FILE):
+        try:
+            with locked_state() as state:
+                task = find_task_by_mailbox(state, recipient)
+                if task is not None:
+                    kind = "blocked_worker" if task.get("blocked") else "delivery_failure"
+                    should_report = claim_task_notice(task, kind)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            should_report = True
+    if should_report:
+        return fail(message, 1)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if "@" in args.to:
@@ -183,26 +208,35 @@ def main(argv: list[str] | None = None) -> int:
     if args.subject is not None:
         envelope["subject"] = args.subject
 
+    retry_prefix = ""
     try:
         status, response = post_json(endpoint, envelope)
     except ValueError as error:
-        return fail(f"Router response invalid: {error}", 1)
+        return report_delivery_failure(args.to, f"Router response invalid: {error}")
     except URLError as error:
         if not connection_refused(error) or not is_loopback_router(args.router_url):
-            return fail(f"Router unavailable: {error.reason}", 1)
+            return report_delivery_failure(args.to, f"Router unavailable: {error.reason}")
         kickstart_error = kickstart_once()
-        if kickstart_error is not None:
-            print(f"Router kickstart failed ({kickstart_error}); retrying once.", file=sys.stderr)
+        retry_prefix = (
+            f"Router kickstart failed ({kickstart_error}); retrying once.\n"
+            if kickstart_error is not None else ""
+        )
         try:
             status, response = post_json(endpoint, envelope)
         except ValueError as retry_error:
-            return fail(f"Router response invalid after one kickstart retry: {retry_error}", 1)
+            return report_delivery_failure(
+                args.to, f"{retry_prefix}Router response invalid after one kickstart retry: {retry_error}"
+            )
         except URLError as retry_error:
-            return fail(f"Router unavailable after one kickstart retry: {retry_error.reason}", 1)
+            return report_delivery_failure(
+                args.to, f"{retry_prefix}Router unavailable after one kickstart retry: {retry_error.reason}"
+            )
 
     if status not in {200, 201}:
         error = response.get("error", {})
-        return fail(rejection_message(error if isinstance(error, dict) else {}), 1)
+        return report_delivery_failure(
+            args.to, f"{retry_prefix}{rejection_message(error if isinstance(error, dict) else {})}"
+        )
     message = response.get("message")
     # A dedupe can return the existing delivery ID while conversation_message records the submitted envelope ID.
     # Validate the returned delivery record, but do not require those IDs to match.
@@ -211,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             or MESSAGE_ID_PATTERN.fullmatch(message["id"]) is None
             or not isinstance(message.get("state"), str)
             or message["state"] not in MESSAGE_STATES):
-        return fail("Router returned an invalid acceptance response.", 1)
+        return report_delivery_failure(args.to, "Router returned an invalid acceptance response.")
     print(f"Message {message['id']} accepted: {message['state']}")
     return 0
 

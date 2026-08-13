@@ -31,7 +31,8 @@ def main():
         text=True,
     )
     if result.returncode != 0:
-        print(f"Error: Mailbox V2 delivery failed: {result.stderr.strip()}", file=sys.stderr)
+        if result.stderr.strip():
+            print(f"Error: Mailbox V2 delivery failed: {result.stderr.strip()}", file=sys.stderr)
         return result.returncode
 
     print(f"Requested context compaction from '{args.window}' through Mailbox V2.")

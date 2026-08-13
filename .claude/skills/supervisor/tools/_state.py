@@ -285,6 +285,18 @@ def find_task_by_window(state, window):
     return None
 
 
+def find_task_by_mailbox(state, mailbox):
+    """Find the task owning a mailbox, including terminal worker states.
+
+    Failed delivery notices still need to deduplicate after a worker becomes
+    terminal; the ordinary window query intentionally excludes those tasks.
+    """
+    for task in reversed(state.get("tasks", [])):
+        if task.get("window") == mailbox or task.get("alias") == mailbox:
+            return task
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Timestamp helper
 # ---------------------------------------------------------------------------
@@ -293,6 +305,55 @@ def find_task_by_window(state, window):
 def now_timestamp():
     """Return the current UTC time as ``"YYYY-MM-DD HH:MM"``."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def task_state_key(task):
+    """Return the durable worker-state identity used for notice deduplication.
+
+    Timestamps are intentionally excluded: repeated observations of one blocked
+    worker must remain one notice, while a state-tool transition increments the
+    revision and permits a later recurrence to notify again.
+    """
+    return json.dumps(
+        {
+            "state": task.get("state", "active"),
+            "blocked": bool(task.get("blocked")),
+            "blocked_reason": task.get("blocked_reason") if task.get("blocked") else None,
+            "state_revision": task.get("state_revision", 0),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def claim_task_notice(task, kind):
+    """Claim one notice *kind* for the task's current effective state.
+
+    The marker is kept per task and per notice kind, so storage stays bounded
+    without weakening the state-change reset behavior. Returns ``True`` only
+    for the first notice in a state; callers still perform the underlying
+    operation when it returns ``False`` and suppress only duplicate noise.
+    """
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("notice kind must be a non-empty string")
+    notices = task.get("notification_dedup")
+    if not isinstance(notices, dict):
+        notices = {}
+        task["notification_dedup"] = notices
+    state_key = task_state_key(task)
+    if notices.get(kind) == state_key:
+        return False
+    notices[kind] = state_key
+    return True
+
+
+def bump_task_state_revision(task):
+    """Advance the task's durable state revision after an effective transition."""
+    revision = task.get("state_revision", 0)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        revision = 0
+    task["state_revision"] = revision + 1
+    return task["state_revision"]
 
 
 def parse_last_checked(ts_str):

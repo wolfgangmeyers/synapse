@@ -17,7 +17,6 @@ const DEFAULT_PENDING_REINJECTION_DELAY_MS = 5_000;
 const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
 const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
 const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
-export const INLINE_TOOL_NUDGE_MESSAGE_TYPE = "mecha-inline-tool-nudge";
 const COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY";
 const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
 const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
@@ -29,11 +28,9 @@ const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
 
 const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
-export const INLINE_TOOL_NUDGE_MESSAGE = "System noticed this worker is doing work inline. Reminder: using subagents when possible is mandatory to avoid tying up the main thread and bloating context.";
+export const INLINE_TOOL_ALLOWANCE_TOOL_NAME = "mecha_request_inline_tool_allowance";
 const INLINE_ACTION_TOOL_NAMES = new Set(["bash", "edit", "write"]);
-const INLINE_READ_TOOL_NAME = "read";
-const DEFAULT_INLINE_ACTION_TOOL_LIMIT = 4;
-const DEFAULT_INLINE_READ_TOOL_THRESHOLD = 8;
+const INLINE_TOOL_BLOCK_REASON = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround.";
 
 const SMALL_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 40, guidance: "consider compacting at a reasonable stopping point to keep future calls cheaper" }),
@@ -246,60 +243,44 @@ export function compactionNotificationMessage({ level, usage }) {
   return `Pi context threshold reached: ${tokenText}. Guidance at ${level.percent}%: ${guidance}. ${CONTEXT_THRESHOLD_SUFFIX}`;
 }
 
-export function inlineToolNudgeMessage() {
-  return INLINE_TOOL_NUDGE_MESSAGE;
+function normalizeInlineToolName(toolName) {
+  if (typeof toolName !== "string" || toolName.trim().length === 0) throw new TypeError("toolName must be a non-empty string");
+  return toolName.trim();
 }
 
-export function createInlineToolNudgeTracker({
-  actionLimit = DEFAULT_INLINE_ACTION_TOOL_LIMIT,
-  readThreshold = DEFAULT_INLINE_READ_TOOL_THRESHOLD,
-  notify = () => {},
-} = {}) {
-  if (!Number.isSafeInteger(actionLimit) || actionLimit < 0) throw new TypeError("actionLimit must be a non-negative safe integer");
-  if (!Number.isSafeInteger(readThreshold) || readThreshold <= 0) throw new TypeError("readThreshold must be a positive safe integer");
-  if (typeof notify !== "function") throw new TypeError("notify must be a function");
-  let actionCount = 0;
-  let readCount = 0;
-
-  function sendNotice(kind, count, threshold, toolName) {
-    const notice = { kind, count, threshold, toolName, message: inlineToolNudgeMessage() };
-    // The nudge is best-effort guidance; a broken notification path must not block the tool call it is warning about.
-    try { notify(notice); } catch {}
-    return notice;
+function validateInlineAllowanceCount(usageCount) {
+  if (!Number.isSafeInteger(usageCount) || usageCount < 1 || usageCount > 5) {
+    throw new TypeError("usageCount must be an integer from 1 through 5");
   }
+}
 
+export function inlineToolBlockReason() {
+  return INLINE_TOOL_BLOCK_REASON;
+}
+
+export function createInlineToolPolicy() {
+  const credits = new Map();
   return {
     reset() {
-      actionCount = 0;
-      readCount = 0;
+      credits.clear();
     },
-    record(toolName) {
-      if (INLINE_ACTION_TOOL_NAMES.has(toolName)) {
-        actionCount += 1;
-        // Action and read streaks are separate budgets; switching tool classes starts a new streak.
-        readCount = 0;
-        if (actionCount > actionLimit) {
-          const notice = sendNotice("action", actionCount, actionLimit, toolName);
-          actionCount = 0;
-          return notice;
-        }
+    grant(toolName, usageCount) {
+      const normalizedToolName = normalizeInlineToolName(toolName);
+      validateInlineAllowanceCount(usageCount);
+      const remaining = (credits.get(normalizedToolName) ?? 0) + usageCount;
+      credits.set(normalizedToolName, remaining);
+      return { toolName: normalizedToolName, usageCount, remaining };
+    },
+    evaluate(toolName) {
+      if (!INLINE_ACTION_TOOL_NAMES.has(toolName)) return undefined;
+      // Credits are per-tool and temporary: matching top-level calls spend them, exhausted entries are removed, and agent_start resets the state.
+      const remaining = credits.get(toolName) ?? 0;
+      if (remaining > 0) {
+        if (remaining === 1) credits.delete(toolName);
+        else credits.set(toolName, remaining - 1);
         return undefined;
       }
-      if (toolName === INLINE_READ_TOOL_NAME) {
-        readCount += 1;
-        // Reads have their own higher threshold, so an intervening read ends any action-tool streak.
-        actionCount = 0;
-        if (readCount >= readThreshold) {
-          const notice = sendNotice("read", readCount, readThreshold, toolName);
-          readCount = 0;
-          return notice;
-        }
-        return undefined;
-      }
-      // Mailbox/control-plane or unknown tools break the inline-work streak instead of contributing to it.
-      actionCount = 0;
-      readCount = 0;
-      return undefined;
+      return { block: true, reason: inlineToolBlockReason() };
     },
   };
 }
@@ -1420,23 +1401,7 @@ export function createMechaMessagingExtension(pi, {
   const children = childSessionIds();
   const settledNotifications = createSettledScheduler();
   const childReplyClients = new Map();
-  const inlineToolNudges = createInlineToolNudgeTracker({
-    notify: ({ kind, count, threshold, toolName, message }) => {
-      const sent = pi.sendMessage({
-        customType: INLINE_TOOL_NUDGE_MESSAGE_TYPE,
-        content: message,
-        display: true,
-        details: {
-          kind,
-          count,
-          threshold,
-          tool_name: toolName,
-        },
-      }, { deliverAs: "steer", triggerTurn: true });
-      // Steer delivery is best-effort and must not turn the observed tool invocation into a failure.
-      Promise.resolve(sent).catch(() => {});
-    },
-  });
+  const inlineToolPolicy = createInlineToolPolicy();
 
   pi.registerTool({
     name: "mecha_parent_message",
@@ -1459,6 +1424,34 @@ export function createMechaMessagingExtension(pi, {
         return { content: [{ type: "text", text: "Parent message accepted." }], details: { message_id: sent.id } };
       } catch {
         return { content: [{ type: "text", text: "Parent message was not accepted." }], isError: true };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: INLINE_TOOL_ALLOWANCE_TOOL_NAME,
+    label: "Request inline tool allowance",
+    description: "Request a temporary exception for genuinely necessary inline use of a named tool. This is an exception to the rule; subagents remain mandatory by default.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["toolName", "usageCount"],
+      properties: {
+        toolName: { type: "string", minLength: 1, maxLength: 64, description: "Exact tool name to allow temporarily." },
+        usageCount: { type: "integer", minimum: 1, maximum: 5, description: "Number of temporary uses to grant, from 1 through 5." },
+      },
+    },
+    async execute(_toolCallId, input, _signal, _onUpdate, toolContext) {
+      try {
+        // Children already bypass the guard; keeping their requests out of this state prevents a child from granting parent-session credits.
+        if (children.has(toolContext?.sessionManager?.getSessionId?.())) {
+          return { content: [{ type: "text", text: "Native subagents are exempt from the inline tool guard; no parent allowance was changed." }] };
+        }
+        const grant = inlineToolPolicy.grant(input?.toolName, input?.usageCount);
+        const text = `Granted ${grant.usageCount} temporary inline use(s) for ${grant.toolName}. This allowance is an exception to the rule; subagents remain mandatory by default.`;
+        return { content: [{ type: "text", text }], details: grant };
+      } catch (error) {
+        return { content: [{ type: "text", text: error.message }], details: {}, isError: true };
       }
     },
   });
@@ -1627,8 +1620,7 @@ export function createMechaMessagingExtension(pi, {
     // Suppress only native subagent children recorded by lifecycle events. Do not use the generic
     // parentSession header here: ordinary /fork and /clone sessions carry it but are still top-level agents.
     if (children.has(context?.sessionManager?.getSessionId?.())) return undefined;
-    inlineToolNudges.record(_event?.toolName);
-    return undefined;
+    return inlineToolPolicy.evaluate(_event?.toolName);
   });
 
   pi.on("session_before_compact", async (event, context) => {
@@ -1702,7 +1694,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_start", (_event, context) => {
     if (children.has(context.sessionManager.getSessionId())) return;
-    inlineToolNudges.reset();
+    inlineToolPolicy.reset();
     startActivityHeartbeat(context);
     if (settledNotificationEnabled && settledNotificationRecipient !== undefined) {
       settledNotificationPending = true;
