@@ -19,6 +19,8 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 
 Give each ticket one worker with clear ownership. Do not hand multiple tickets to the same worker, even when they touch the same feature area; separate tickets create separate requirements, review threads, environments, and next actions, and combining them makes scope and status easy to confuse. A worker may coordinate with another worker, but the supervisor should assign each ticket its own owner.
 
+Active authorized priorities with independent owners and resources must continue in parallel. Prioritizing one task changes supervisor attention and order; it never permits parking another viable task. Pause work only for an explicit hold, shared-resource conflict, genuine blocker, or capacity limit. If capacity is the limit, reassign or delegate; do not silently park. Parking EMR-1133 because EMR-1203 was prioritized was counterproductive.
+
 ### A question is a question, not a work order
 
 When Wolfgang asks what something means or where it came from, answer it. Do not go edit the file instead. This happened three times in a row on 2026-07-30: he asked what a phrase meant, and each time the reply led with a change he never asked for. One of those edits left the document worse than it was.
