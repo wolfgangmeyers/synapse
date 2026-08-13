@@ -218,6 +218,10 @@ class ConfigurationError(ValueError):
 class StartupError(RuntimeError):
     """A startup step could not be verified. Exit code 1."""
 
+    def __init__(self, message, *, report=True):
+        super().__init__(message)
+        self.report = report
+
 
 # --------------------------------------------------------------------------------------
 # Configuration
@@ -874,11 +878,15 @@ def send_startup_message(window, router_url, *, run=subprocess.run):
     if result.returncode != 0:
         # Not necessarily a rejection: mailbox_send.py exits non-zero for an unreachable
         # router, a missing sender identity and a missing script file too. Name the exit
-        # code and the command instead of asserting a cause.
+        # code and the command instead of asserting a cause. Its empty output means the
+        # sender already suppressed a duplicate durable notice; keep the failure status
+        # without printing a second copy here.
+        detail = (result.stderr or result.stdout or '').strip()
         raise StartupError(
             f"could not send a message to '{window}'. mailbox_send.py exited "
-            f"{result.returncode}: {(result.stderr or result.stdout or '').strip()}\n"
-            f"The command was: {shlex.join(command)}"
+            f"{result.returncode}: {detail}\n"
+            f"The command was: {shlex.join(command)}",
+            report=bool(detail),
         )
     return parse_accepted_message_id(result.stdout)
 
@@ -1144,7 +1152,8 @@ def main(argv=None):
         print(f"Error: {error}", file=sys.stderr)
         return 2
     except StartupError as error:
-        print(f"Error: {error}", file=sys.stderr)
+        if error.report:
+            print(f"Error: {error}", file=sys.stderr)
         return 1
     except (OSError, subprocess.SubprocessError) as error:
         print(f"Error: supervisor startup failed: {error}", file=sys.stderr)

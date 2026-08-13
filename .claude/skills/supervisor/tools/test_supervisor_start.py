@@ -937,6 +937,25 @@ class DeliveryTest(unittest.TestCase):
         self.assertIn("queue_full", message)
         self.assertIn("exited 2", message)
         self.assertIn("mailbox_send.py", message)
+        self.assertTrue(caught.exception.report)
+
+    def test_a_duplicate_suppressed_send_stays_failed_without_another_notice(self):
+        responses = iter([
+            SimpleNamespace(returncode=1, stdout="", stderr="Router unavailable: refused"),
+            SimpleNamespace(returncode=1, stdout="", stderr=""),
+        ])
+
+        def run(command, capture_output, text, check):
+            return next(responses)
+
+        with self.assertRaises(supervisor_start.StartupError) as first:
+            supervisor_start.send_startup_message(PROBE_WINDOW, PROBE_ROUTER, run=run)
+        with self.assertRaises(supervisor_start.StartupError) as duplicate:
+            supervisor_start.send_startup_message(PROBE_WINDOW, PROBE_ROUTER, run=run)
+
+        self.assertTrue(first.exception.report)
+        self.assertFalse(duplicate.exception.report)
+        self.assertNotIn("Router unavailable: refused", str(duplicate.exception))
 
 
 class DiagnosticTest(unittest.TestCase):
@@ -1163,6 +1182,29 @@ class RunStartupTest(unittest.TestCase):
 
 
 class MainExitCodeTest(unittest.TestCase):
+    def test_main_returns_one_without_repeating_a_suppressed_duplicate_notice(self):
+        responses = iter([
+            SimpleNamespace(returncode=1, stdout="", stderr="Router unavailable: refused"),
+            SimpleNamespace(returncode=1, stdout="", stderr=""),
+        ])
+
+        def fake_run(*args, **kwargs):
+            return next(responses)
+
+        def run_startup(_args):
+            return supervisor_start.send_startup_message(PROBE_WINDOW, PROBE_ROUTER, run=fake_run)
+
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(supervisor_start, "RUN_LOCK_PATH", os.path.join(tmpdir, "run.lock")), \
+                    patch.object(supervisor_start, "run_startup", side_effect=run_startup), \
+                    contextlib.redirect_stderr(stderr):
+                self.assertEqual(supervisor_start.main(["--dir", tmpdir]), 1)
+                first_notice = stderr.getvalue()
+                self.assertEqual(supervisor_start.main(["--dir", tmpdir]), 1)
+        self.assertIn("Router unavailable: refused", first_notice)
+        self.assertEqual(stderr.getvalue(), first_notice)
+
     def test_a_configuration_error_is_exit_two(self):
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as tmpdir:

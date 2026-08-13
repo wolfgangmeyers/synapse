@@ -100,6 +100,7 @@ def main():
     print()
     print("Relaunching workers...")
     time.sleep(2)
+    failed = False
 
     # Relaunch each worker
     for task in workers:
@@ -112,11 +113,13 @@ def main():
         work_dir = worktree if worktree else project
         if not work_dir:
             print(f"  ✗ Skipping {alias}: no worktree or project path")
+            failed = True
             continue
 
         work_dir = os.path.expanduser(work_dir)
         if not os.path.isdir(work_dir):
             print(f"  ✗ Skipping {alias}: directory not found: {work_dir}")
+            failed = True
             continue
 
         print(f"  Launching {window} in {work_dir}...")
@@ -136,7 +139,12 @@ def main():
         result = subprocess.run(launch_cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
-            print(f"    ✗ Failed to launch: {result.stderr.strip()}")
+            failed = True
+            detail = result.stderr.strip()
+            print(
+                f"    ✗ Failed to launch (exit {result.returncode})"
+                + (f": {detail}" if detail else "; details suppressed")
+            )
             continue
 
         print(f"    ✓ Launched")
@@ -176,7 +184,12 @@ Continue where you left off based on git status and recent commits."""
         send_result = subprocess.run(send_cmd, capture_output=True, text=True)
 
         if send_result.returncode != 0:
-            print(f"    ✗ Mailbox delivery failed: {send_result.stderr.strip()}")
+            failed = True
+            detail = send_result.stderr.strip()
+            print(
+                f"    ✗ Mailbox delivery failed (exit {send_result.returncode})"
+                + (f": {detail}" if detail else "; details suppressed")
+            )
         else:
             print("    ✓ Sent Mailbox V2 instruction")
         print("    ! Check reminder coverage in state: supervisor_reminder_id and worker_self_reminder_ids")
@@ -184,11 +197,15 @@ Continue where you left off based on git status and recent commits."""
         time.sleep(1)
 
     print()
+    if failed:
+        print(f"! Relaunch completed with failures for one or more of {len(workers)} worker(s).")
+        return 1
     print(f"✓ Relaunched {len(workers)} worker(s)")
     print()
     print("Verify workers started:")
     print("  python3 worker_list.py")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

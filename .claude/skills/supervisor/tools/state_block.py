@@ -11,7 +11,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _state import locked_state, find_task, now_timestamp
+from _state import bump_task_state_revision, find_task, locked_state, now_timestamp
 
 
 def main():
@@ -40,17 +40,28 @@ def main():
             sys.exit(1)
 
         if args.block:
-            task["blocked"] = now_timestamp()
-            task["blocked_reason"] = args.block
-            task["last_checked"] = now_timestamp()
-            msg = f"Blocked task-{task['id']} ({task['alias']}): {args.block}"
+            # Do not refresh the timestamp or revision for an identical block: repeated
+            # monitoring observations are one durable state, not new worker notices.
+            already_blocked = bool(task.get("blocked")) and task.get("blocked_reason") == args.block
+            if already_blocked:
+                msg = None
+            else:
+                task["blocked"] = now_timestamp()
+                task["blocked_reason"] = args.block
+                task["last_checked"] = now_timestamp()
+                bump_task_state_revision(task)
+                msg = f"Blocked task-{task['id']} ({task['alias']}): {args.block}"
         else:
-            task["blocked"] = None
-            task["blocked_reason"] = None
-            task["last_checked"] = now_timestamp()
+            was_blocked = bool(task.get("blocked")) or task.get("blocked_reason") is not None
+            if was_blocked:
+                task["blocked"] = None
+                task["blocked_reason"] = None
+                task["last_checked"] = now_timestamp()
+                bump_task_state_revision(task)
             msg = f"Unblocked task-{task['id']} ({task['alias']})"
 
-    print(msg)
+    if msg is not None:
+        print(msg)
 
 
 if __name__ == "__main__":
