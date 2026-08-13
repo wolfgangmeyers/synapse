@@ -1,130 +1,169 @@
-# WebUI Markdown Rendering Plan
+# Native Subagent Activity Parity Plan
 
-## Requirements source
+## Approval gate
 
-SPEC.md is approved. Supervisor added these explicit requirements after approval:
+Supervisor approval is required before implementation. After approval, load the `workflows` skill and fetch the canonical workflow with `get_workflow.py dev-loop` before Phase 1.
 
-- Use a small browser Markdown dependency, not ReactMarkdown.
-- Keep raw HTML as text.
-- Allow only `http`, `https`, and `mailto` links.
-- Reject executable URL schemes.
-- Test paragraphs, lists, links, fenced code, plain multiline text, unsafe HTML, and unsafe URLs.
-- Keep arrival-dialog behavior explicit.
-- Preserve attachments.
-- Do not touch router batching or mailbox protocol.
+## Scope contract
 
-## Chosen implementation
+Implement the approved `SPEC.md` behavior on top of current `e753457`:
 
-Use `markdown-it` as the single Markdown dependency.
+- Hand-port only the protections from `6b5da28` that match `SPEC.md`.
+- Do not cherry-pick `6b5da28` wholesale.
+- Preserve unrelated inline-tool allowance changes already present in `e753457`.
+- Keep the Pi native subagent manager as the source of truth for parent activity.
+- Keep router and web production code as transport and presentation unless tests prove a direct SPEC violation there.
 
-Why this dependency:
+## Expected files
 
-- It works in a no-build browser app through its distributed browser module.
-- It supports common Markdown, including fenced code blocks, without adding a React or bundler dependency.
-- It can keep raw HTML disabled, which makes HTML input render as text.
-- It exposes `validateLink`, so the WebUI can enforce `http`, `https`, and `mailto` only.
+Planning files already dirty and preserved:
 
-## File changes
+- `SPEC.md`
+- `PLAN.md`
 
-### `package.json` and `package-lock.json`
+Expected implementation files after plan approval:
 
-- Add `markdown-it` as a normal dependency.
-- Run `npm install` so the lockfile records the exact package and transitive dependencies.
-- Avoid unrelated dependency updates.
+- `tests/mailbox_v2_delivery.test.mjs`
+- `pi-extensions/mecha-messaging.js`
+- `tests/router_web_ui.test.mjs`
 
-### `tools/router_web_ui.mjs`
+Expected unchanged files:
 
-- Add a narrowly scoped static route for `/vendor/markdown-it.js`.
-- Serve only the installed `node_modules/markdown-it/dist/markdown-it.js` file.
-- Do not expose a general `node_modules` file server.
-- Keep existing WebSocket, router polling, message send, batching, and protocol handling unchanged.
+- `package.json`
+- `package-lock.json`
+- `tests/pi_extension_standalone.test.mjs`
+- `tools/router_web_ui.mjs`
+- `web/router-ui/app.js`
+- `web/router-ui/state.js`
+- `web/router-ui/markdown.js`
+- router production files
+- mailbox delivery, lease, reminder, batching, persistence, and SQLite code
 
-### `web/router-ui/index.html`
+Do not recreate `web/router-ui/subagents.js`; it is deleted in the current branch.
 
-- Load the Markdown browser bundle from `/vendor/markdown-it.js` before the existing no-build module script for `/app.js`.
-- Keep the existing no-build module script for `/app.js`.
+If a red test proves a SPEC violation in an expected-unchanged file, stop and update this plan with the evidence before changing that file.
 
-### `web/router-ui/markdown.js`
+## Non-goals
 
-Add a small renderer module:
+- No router production changes without direct evidence.
+- No web production changes without direct evidence.
+- No package or lockfile changes.
+- No mailbox delivery, lease, reminder, batching, message persistence, or SQLite behavior changes.
+- No markdown-rendering work.
+- No web UI helper extraction or restoration.
+- No install, commit, push, PR, or branch action.
+- No audit-finding cleanup. `npm ci` reported two high-severity audit findings; they are not part of this task unless they block validation.
 
-- Read `MarkdownIt` from the browser bundle's `globalThis.markdownit`; tests pass the package import directly.
-- Create one configured parser with:
-  - `html: false` so raw HTML is escaped and displayed as text;
-  - `linkify: false` so only explicit Markdown links become anchors;
-  - `breaks: true` so plain multiline text keeps visible line breaks.
-- Add one URL helper used by the parser and tests. It allows only absolute `http:`, `https:`, and `mailto:` URLs, and rejects relative URLs, protocol-relative URLs, malformed URLs, `javascript:`, `data:`, and any other scheme.
-- Disable Markdown image rendering so `![alt](url)` remains text-like content and never creates an `<img>` or external image request from agent text. Existing mailbox image attachments remain the only image path.
-- Expose `renderMarkdownBody(document, body)`:
-  - returns a `.markdown-body` element;
-  - parses the string body into safe HTML;
-  - assigns the parser output to a detached container;
-  - normalizes allowed anchors with `target="_blank"` and `rel="noopener noreferrer"`.
-- No app code should pass unsanitized user content directly into `innerHTML`; the only `innerHTML` use for message bodies will be inside this helper after Markdown parsing with raw HTML disabled, image rendering disabled, and link validation enforced.
+## Phase 1: red tests
 
-### `web/router-ui/app.js`
+Contract: tests first. Each new failure must name SPEC behavior, not `6b5da28` internals.
 
-- Import `renderMarkdownBody`.
-- Replace the current message body `textContent` node in `renderMessage(message)` with `renderMarkdownBody(document, message.body || "")`.
-- Keep attachments below the rendered body exactly as they are now.
-- Update the arrival dialog to use the same renderer by replacing its body children with `renderMarkdownBody(document, arrival.body || "")`. This makes the dialog match conversation bubbles and avoids two rendering rules for agent output.
+Extension tests in `tests/mailbox_v2_delivery.test.mjs`:
 
-### `web/router-ui/styles.css`
+1. Parent-bound native service wins when a child session replaces `globalThis[Symbol.for("@gotgenes/pi-subagents:service")]`.
+2. Polling discovers a native subagent start missed by lifecycle events while the parent is settled.
+3. Polling discovers a native subagent finish missed by lifecycle events while the parent is settled.
+4. Polling continues while the parent is active or waiting for native subagent results.
+5. Terminal native statuses, including `steered`, stop contributing to the running count.
+6. Native service read failures do not stop polling; diagnostics stay bounded.
+7. Existing event-tracked subagent summaries and TTL refresh behavior keep working.
+8. Existing inline-tool allowance coverage stays in this file; do not move that regression guard only to `tests/pi_extension_standalone.test.mjs`.
 
-- Move the whitespace behavior from `.bubble` to Markdown body content where needed.
-- Add scoped `.markdown-body` styles for paragraphs, lists, anchors, inline code, and fenced code blocks.
-- Keep spacing compact so single-line plain text still looks like today.
-- Ensure long URLs and words wrap inside bubbles and the arrival dialog.
+Existing assertion contract updates in `tests/mailbox_v2_delivery.test.mjs`:
 
-### `tests/router_web_ui.test.mjs`
+1. Find the current settled-parent heartbeat assertions that expect the activity heartbeat timer to clear on settled.
+2. Flip them intentionally: settled alone must not clear the heartbeat when native subagent polling may still need to repair missed lifecycle events.
+3. Keep shutdown/disconnect cleanup assertions strict so this is a SPEC contract change, not a broad timer-cleanup weakening.
 
-Add focused tests for the rendering boundary:
+Router/web tests in `tests/router_web_ui.test.mjs`:
 
-- Import `markdownToSafeHtml` or equivalent pure helper from `web/router-ui/markdown.js`.
-- Assert paragraphs produce paragraph tags.
-- Assert unordered or ordered lists produce list tags and items.
-- Assert Markdown links render as anchors for `http`, `https`, and `mailto`.
-- Assert fenced code renders as a pre/code block and escapes code content.
-- Assert plain multiline text keeps visible line breaks.
-- Assert raw HTML input renders escaped text and does not create a real tag.
-- Assert `javascript:`, `data:`, relative URLs, protocol-relative URLs, malformed URLs, and other disallowed schemes do not become anchors.
-- Assert Markdown image syntax does not create an `<img>` and does not trigger the attachment renderer.
-- Assert the WebUI server serves `/vendor/markdown-it.js` with JavaScript content.
-- Update any existing static assertions that currently expect `textContent` for arrival bodies.
+1. Use the existing live-browser fixture: `startRouterWebUi` plus `waitForEvent`.
+2. Do not import, recreate, or test through deleted `web/router-ui/subagents.js`.
+3. Do not refactor or helper-extract `web/router-ui/app.js`.
+4. Send activity frames containing `subagent_count` and `subagents`, then treat `/v1/agents` and live `agent_activity` checks as contract proofs.
+5. Inspect the rendered `.agent-row` DOM for badge/count behavior, including clearing after a later zero-count frame.
+6. Exclude the candidate commit's `matchesActiveScope` scope-filter test; scope filtering is out of scope for this plan.
 
-## Validation plan
+Regression guard:
 
-1. Run the targeted WebUI/router tests:
+- `tests/pi_extension_standalone.test.mjs` should stay unchanged but must run to protect standalone behavior; inline-tool allowance assertions inside `tests/mailbox_v2_delivery.test.mjs` must also be preserved.
 
-   ```sh
-   node --test tests/router_web_ui.test.mjs
-   ```
+## Phase 2: narrow extension implementation
 
-2. Run the full repository test script if targeted tests pass:
+Contract: make Phase 1 pass with the smallest extension-side change.
 
-   ```sh
-   npm test
-   ```
+Steps:
 
-3. Run a syntax check through the existing `npm test` check script coverage for changed JavaScript files. If needed, also run direct `node --check` on changed Node-served files.
+1. Prefer the captured parent subagent service for activity reconciliation. Fall back to the global service only when no captured service exists.
+2. Call `ensureActivityHeartbeatTimer()` after coordinator creation so polling starts even if lifecycle events were missed.
+3. Call `ensureActivityHeartbeatTimer()` after compaction resume refresh so polling resumes after session restoration.
+4. Keep the activity heartbeat available after parent settled events so polling can repair missed native lifecycle events.
+5. Keep the heartbeat alive while the parent is active or waiting for native subagent results.
+6. Treat `steered` as terminal alongside the existing terminal statuses.
+7. Preserve event-tracked summaries, missing-record handling, and TTL refresh behavior.
+8. Keep native-service read diagnostics in the catch path bounded so repeated failures do not create unbounded logs or state.
+9. Keep timer cleanup on shutdown/disconnect paths.
+10. Add comments only for the parent-bound service, polling contract, and bounded diagnostic behavior where the code would otherwise look surprising.
 
-4. Run coverage using Node's built-in coverage output for the targeted WebUI test path unless the repo has a stronger existing coverage command:
+Expected changed file:
 
-   ```sh
-   rm -rf /tmp/webui-markdown-coverage
-   NODE_V8_COVERAGE=/tmp/webui-markdown-coverage node --test tests/router_web_ui.test.mjs
-   ```
+- `pi-extensions/mecha-messaging.js`
 
-5. For user-visible behavior, start a separate WebUI process from this worktree on a separate port after tests:
+## Phase 3: router/web contract proof
 
-   ```sh
-   npm run router-web-ui -- --port 0
-   ```
+Contract: prove router and web remain pass-through layers.
 
-   Do not touch the existing WebUI runtime/window. If the separate runtime or browser validation genuinely fails for local-environment reasons, report the failure and use the strongest automated renderer/server tests available.
+Steps:
 
-## Review plan
+1. Send activity frames containing `subagent_count` and `subagents` through existing live-browser fixtures.
+2. Assert `/v1/agents` contains the received values as a contract proof.
+3. Assert live `agent_activity` events contain the received values as a contract proof.
+4. Inspect rendered `.agent-row` DOM and assert badges follow received activity and clear on zero.
+5. Leave router and web production code unchanged unless these tests expose a real SPEC mismatch.
 
-Run robot-review on this plan with one reviewer covering plan completeness, plan consistency, plan architecture, requirements, security, and scope. Validate any findings with a different persona through pr-validate rules. Iterate until the plan reviewer signs off before implementation.
+Expected changed file:
 
-Implementation review later will include at least requirements, security, test-coverage, scope, and diff-reading focus areas, with pr-validate on findings and a fresh follow-up review after fixes.
+- `tests/router_web_ui.test.mjs`
+
+## Phase 4: validation
+
+Run from `/Users/wolfgang/code/mecha-developer-subagent-ui-agent-mismatch`:
+
+```sh
+node --test tests/mailbox_v2_delivery.test.mjs tests/router_web_ui.test.mjs tests/pi_extension_standalone.test.mjs
+npm test
+npm run check
+rm -rf /tmp/native-subagent-activity-coverage
+NODE_V8_COVERAGE=/tmp/native-subagent-activity-coverage node --test tests/mailbox_v2_delivery.test.mjs tests/router_web_ui.test.mjs tests/pi_extension_standalone.test.mjs
+```
+
+Coverage contract:
+
+- Confirm the new extension branches and router/web received-activity assertions executed.
+- If Node's coverage output is too raw for percentages, inspect the generated JSON enough to verify the new branches ran.
+
+Runtime correlation contract:
+
+1. Start a separate bounded Pi parent session from this worktree.
+2. Launch one native subagent that stays running long enough to observe.
+3. Save `/v1/agents` snapshots while it runs and after it finishes.
+4. Save a live `agent_activity` frame log covering start and finish.
+5. Save browser evidence from the rendered UI, either DOM capture of the `.agent-row` badge state or a screenshot.
+6. Compare terminal native state, `/v1/agents`, live web activity, and browser badge behavior.
+7. Record whether counts and summaries converge after start and finish.
+
+Use a separate local runtime if live validation needs a router. Do not disturb the primary checkout or existing global router unless the supervisor separately approves it.
+
+## Phase 5: review
+
+Contract: review the final local diff, then validate findings before acting.
+
+Steps:
+
+1. Run robot-review on the final diff with these focuses: requirements, timer/lifecycle correctness, router/web scope, inline-tool regression risk, and test coverage.
+2. Run pr-validate on raw findings.
+3. Fix only validated in-scope findings.
+4. Re-run targeted tests after fixes.
+5. Re-run `npm test` and `npm run check` after any production-code change.
+6. Record whether a KB update is needed. If the implementation preserves or changes a reusable Mailbox V2 operating lesson, update the KB before final handoff.
+7. Leave the worktree uncommitted and unpushed unless separately instructed.
