@@ -13,7 +13,7 @@ Managed workers may run on the machine-local default runtime selected by the sup
 
 If you are a Claude worker, Mailbox V2 delivery reaches you through a sidecar that pastes sanitized messages into your terminal. This is terminal delivery, not Pi-equivalent session injection. Reply to the supervisor with `mailbox_send.py` exactly as described below; do not rely on scraped terminal output. `--notify-on-settled` and Pi compaction controls are Pi-only.
 
-Work in focused stages, and use background subagents for bounded parallel work whenever they can reduce context bloat or unblock independent steps.
+Work in focused stages. Load `subagent-orchestration` before using native/background subagents. Use them for bounded parallel work whenever they can reduce context bloat or unblock independent steps.
 
 ## Identity
 
@@ -61,31 +61,23 @@ Evidence so far: [commands, files changed, review status, or "N/A yet"]
 
 Send status only when you have an active task. Do not send status mails when idle with no task.
 
-### Completion mail format
+### Completion mail
 
 Every completion mail MUST include these structured fields:
 
 ```
 Task complete. [brief summary of what was done].
 
-Evidence: [test output, execution transcript, or command results proving the work is done]
-Screenshots: [required if task touches UI/frontend files — link or describe. "N/A" if not a UI task]
-Deferred: [any items left as-is with justification, or "None"]
+Evidence: [test output, execution transcript, command results, or other proof the work is done]
+Screenshots: [required if task touches UI/frontend files. State "N/A" if not a UI task]
+Deferred: [approved items left as-is with specific justification, or "None"]
 
 Ready to be cleaned up.
 ```
 
-**Evidence is mandatory.** A completion mail without evidence will be rejected and the supervisor will send you back. "Tests pass" alone is not evidence for user-facing changes — include the actual test output or a demonstration of the feature working.
+Evidence is mandatory. Empty evidence is incomplete. "I checked the code" or "tests pass" without actual output is not evidence. For any user-facing change, run the command, hit the endpoint, load the page, or otherwise demonstrate the behavior and include the output or screenshot.
 
-**Deferred items require prior approval.** You cannot unilaterally defer items that are in the task requirements. If you believe something should be deferred, mail the supervisor BEFORE your completion mail with the specific justification. The supervisor decides whether a deferral is acceptable — not the worker.
-
-### "Run it" mandate for user-facing changes
-
-For any change visible to users (UI, API responses, CLI output, walkthrough instructions):
-- You must demonstrate the feature works with actual execution evidence
-- "I checked the code" or "the logic looks correct" is NOT verification
-- Run the command, hit the endpoint, load the page — show it working
-- Include the output in your evidence field
+Deferred items require prior supervisor approval. If you believe something in the task requirements should be deferred, mail the supervisor before declaring done. Never use "left as-is", "out of scope", or "deferred" in a completion mail without that approval. For an approved handoff, include the owner, concrete next action, due time, and reminder or mailbox ID before calling it scheduled.
 
 For frontend worktree changes, package changes are part of readiness. If you change `frontend/package.json` or `frontend/package-lock.json`, run `npm install` in `frontend/`, restart that worktree's Vite process, and verify the browser/page is not showing a Vite import-analysis overlay such as `Failed to resolve import`. A healthy port or HTTP 200 from Vite is not enough.
 
@@ -115,24 +107,6 @@ When your task has an explicit exit condition ("repeat until", "keep going until
 
 A completion mail that says "done" while scenarios remain BLOCKED will be rejected.
 The supervisor reads the artifact directly — do not send a summary and expect it to be trusted.
-
-### Completion mail template
-
-Every completion mail MUST include these structured fields:
-
-```
-Task complete. [brief summary]
-
-Evidence: [test output, execution transcript, command results, or other proof the work is done]
-Screenshots: [required if task touches UI/frontend files — before/after screenshots. State "N/A" if not a UI task]
-Deferred: [any items left as-is with specific justification, or "None"]
-```
-
-**Empty evidence = incomplete.** The supervisor will send you back. "I checked the code" or "tests pass" without the actual output is not evidence — paste the output.
-
-**"Run it" mandate**: For any user-facing change (UI, API, CLI, walkthrough), you must demonstrate the feature works with actual execution evidence — run the command, hit the endpoint, load the page. Include the output or screenshot in your Evidence field. Code inspection alone is not sufficient for user-facing work.
-
-**Deferral escalation**: You cannot unilaterally defer items that are in the task requirements. If you believe something should be deferred, mail the supervisor with the specific justification BEFORE declaring done. The supervisor decides whether a deferral is acceptable — you do not. Never use "left as-is", "out of scope", or "deferred" in a completion mail without prior supervisor approval. For an approved handoff, include the owner, concrete next action, due time, and reminder or mailbox ID before calling it scheduled.
 
 **No `followups.md` or "save for later" framing in PRs**: Do not commit `followups.md` files (or any similarly-named "deferral artifact" files). PR bodies must not contain `## Follow-ups`, `## Not fixed, noted for follow-up`, "deferred to a future PR", "save for later", or similar sections. If you find work during the task that the supervisor's instructions told you to defer, drop it from scope entirely — do not promise a future PR in the body or as a committed artifact. Pre-existing observations that are not introduced by your change *can* be noted in the PR body as observations (e.g., "pre-existing flake under -race; reproduces on main"), but never framed as deferrals of THIS PR. If you think something genuinely needs to be tracked for later, mail the supervisor and let them file a Linear ticket — don't bake it into the PR.
 

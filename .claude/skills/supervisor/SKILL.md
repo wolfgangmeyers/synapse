@@ -61,7 +61,7 @@ Use `tools/sentinel_dispatch.py --to <target> --prompt <text> --model <model>` f
 
 **Backend/status/audit delegation**: Do not do backend chores, status reconstruction, audit sweeps, or verification passes inline when they require project inspection or more than a few reads. Use background subagents for read-only audits and narrow backend checks. Use persistent managed workers when Wolfgang asks for workers, durable ownership, code changes, or long-lived mutation lanes.
 
-**Bounded subagents in worker launch and follow-ups**: Whenever launching a worker or handing additional work to an existing worker, explicitly instruct it to use bounded background subagents when viable for repo/RFC exploration, narrow implementation slices, test/log triage, requirements checks, or robot-review. Keep the boundary explicit: bounded subagents handle short, self-contained work so the worker's main context stays smaller, compacts less often, preserves continuity over long tasks, and remains reachable for supervisor direction changes instead of blocking on long-running operations. The managed worker retains durable implementation ownership, mutation work, integration judgment, approval gates, and the long-lived task lane.
+**Bounded subagents in worker launch and follow-ups**: Whenever launching a worker or handing additional work to an existing worker, explicitly instruct it to load `subagent-orchestration` before using native/background subagents. Use them when viable for repo/RFC exploration, narrow implementation slices, test/log triage, requirements checks, or robot-review. Keep the boundary explicit: bounded subagents handle short, self-contained work so the worker's main context stays smaller, compacts less often, preserves continuity over long tasks, and remains reachable for supervisor direction changes instead of blocking on long-running operations. The managed worker retains durable implementation ownership, mutation work, integration judgment, approval gates, and the long-lived task lane.
 
 ## Priority Discipline
 
@@ -101,7 +101,7 @@ Update procedure:
 
 Status, audit, and verification work is not automatically “direct.” If it involves backend state, repo archaeology, logs, CI, PR state, or cross-file inspection, delegate the read-only check to a background subagent unless it is truly trivial.
 
-**Use subagents for bounded supervisor-side parallelism, not long-running implementation work**: Native Task subagents are appropriate for short, bounded supervisor-side reads, audits, or launch orchestration. Do not use native subagents for long-running project implementation/test-hardening streams when managed workers are expected or when active subagents would interfere with compaction. Long-running implementation work should run in managed workers launched through `worker_launch.py` and instructed through a verified delivery path. Fan out independent workstreams as separate managed workers when they need durable ownership. **Never simulate a subagent by launching `pi`, `claude`, `codex`, or another agent binary through `nohup`, shell backgrounding (`&`), tmux, or a redirected shell command.**
+**Use subagents for bounded supervisor-side parallelism, not long-running implementation work**: Load `subagent-orchestration` before delegating to native/background subagents. Native Task subagents are appropriate for short, bounded supervisor-side reads, audits, or verification steps. Managed worker launch and lifecycle stay under the worker-launch guidance below. Do not use native subagents for long-running project implementation/test-hardening streams when managed workers are expected or when active subagents would interfere with compaction. Long-running implementation work should run in managed workers launched through `worker_launch.py` and instructed through a verified delivery path. Fan out independent workstreams as separate managed workers when they need durable ownership. **Never simulate a subagent by launching `pi`, `claude`, `codex`, or another agent binary through `nohup`, shell backgrounding (`&`), tmux, or a redirected shell command.**
 
 **Worker launch is always a background subagent**: The full launch sequence (fetch, worktree, state_add, worker_launch, wait, send instructions, verify) is always delegated to a background subagent — never inline.
 
@@ -737,45 +737,15 @@ Use these summaries to decide whether to intervene, report to the user, or leave
 
 Check workers when the human asks. Use subagent monitoring (above) to get summaries without polluting your context. This is the default — do NOT start an active loop unless the user explicitly requests it.
 
-### Active Mode (Monitoring Loop)
+### Active Mode (Continuous Monitoring)
 
-**Use when the user explicitly requests continuous monitoring** (e.g., "monitor them", "watch the workers", "keep an eye on X").
+Use when Wolfgang explicitly asks for continuous monitoring, such as "monitor them", "watch the workers", or "keep an eye on X".
 
-**Pattern: Sleep → Check → Report → Sleep**
+Do not hold the supervisor turn open. Do not run synchronous `sleep` polling. Set a reminder, start a background subagent, or use a monitor script that runs outside the supervisor turn. The check must name the workstream, the expected next evidence, and the condition that stops the monitor.
 
-Use the Bash tool to sleep, then check status with tools (worker_capture, subagents, etc.), report findings to the user, then sleep again. Continue until something needs user attention or the user says to stop.
+For worker status checks, prefer a background subagent when the check needs project inspection or more than a few reads. For delayed checks, set a reminder that re-arms only while the work still needs attention. For local automated monitoring, use a bounded script or service and make sure it reports back through mailbox or a reminder.
 
-```bash
-# Sleep between checks (1-5 minutes typical, longer if requested)
-sleep 300  # 5 minutes
-
-# Then check status
-python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window <window> --tail 30
-
-# Or dispatch subagent for structured summary
-# <use Task tool to get worker status>
-
-# Report to user what's happening
-# Then sleep again and repeat
-```
-
-**Sleep duration:**
-- Default: 1-5 minutes between checks
-- Can be longer if user requests (e.g., "check every 10 minutes")
-- Can be shorter for urgent monitoring (e.g., "check every minute")
-
-**When to stop:**
-- Worker needs intervention
-- Worker is stuck/errored
-- Worker signals completion
-- User says to stop monitoring
-
-**Example monitoring loop:**
-1. `sleep 300` (5 minutes)
-2. Check worker status via tmux capture or subagent
-3. Report: "Worker X is still running tests, no issues detected"
-4. `sleep 300` again
-5. Repeat until intervention needed or task complete
+Stop monitoring when the worker needs intervention, is stuck or errored, signals completion, or Wolfgang says to stop.
 
 ## Responding to Watchdog Alerts
 
