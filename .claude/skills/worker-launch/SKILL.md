@@ -9,8 +9,10 @@ Use this skill from the supervisor when a task needs a durable managed worker or
 
 ## Non-negotiables
 
+When a Pi worker needs to send a message, call `mecha_mailbox_send({ recipient, body, subject? })`; the result includes the accepted message ID and state. The native tool is send-only and cannot execute shell commands. Keep the script examples below for launcher-side fallback sends.
+
 - Launch and restore workers only through `~/.claude/skills/supervisor/tools/worker_launch.py`.
-- Coordinate through Mailbox V2 with `mailbox_send.py` only for runtimes with a verified delivery integration. Bare Codex and Cursor launched by `worker_launch.py` do not have launcher-provided Mailbox delivery; use Pi/Claude or install and verify a separate bridge. Do not type into worker terminals or tmux panes.
+- Coordinate through Mailbox V2. In Pi sessions with the Mailbox extension, use the native top-level `mecha_mailbox_send` tool first. Use `mailbox_send.py` as the fallback for Claude sidecars, bare Codex, older Pi sessions, or supervisor tooling that must run outside the model session. Bare Codex and Cursor launched by `worker_launch.py` do not have launcher-provided Mailbox delivery; use Pi/Claude or install and verify a separate bridge. Do not type into worker terminals or tmux panes.
 - Use `worker_park.py`, `worker_shutdown.py`, and `worker_kill.py` for lifecycle actions. Do not send ad hoc park/exit text.
 - Keep `TASK.md` task-specific. Generic worker behavior belongs in `worker/SKILL.md`, not in each task.
 - Read worker state before acting. Use the recorded `worktree`, `branch`, `window`, `agent`, and `session`; do not infer them from memory.
@@ -85,7 +87,6 @@ Do not use placeholder or generic reminder messages. Mail me both IDs from the c
 EOF
 )
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "$WORKER_NAME" \
   --body "$BODY"
 
@@ -257,7 +258,6 @@ python3 ~/.claude/skills/supervisor/tools/state_update_field.py <alias> supervis
 
 # Only when the recorded runtime has verified Mailbox delivery:
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "$WORKER_NAME" \
   --body "You are resuming work on <task/PR>. Branch: <branch>. Worktree: <worktree-path>. Next action: <specific next action>. Reply by mail with evidence or blockers."
 
@@ -286,7 +286,6 @@ python3 ~/.claude/skills/supervisor/tools/state_update_field.py <alias> supervis
 
 # Only when the recovered runtime has verified Mailbox delivery:
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "<window-from-state>" \
   --body "Recovered your worker session for <task/PR>. Read ~/.agents/skills/worker/SKILL.md, continue from the current task state, recreate/report your two self-reminders if needed, and reply by mail with the next concrete artifact evidence."
 python3 ~/.claude/skills/supervisor/tools/worker_send_requirements.py --alias <alias>
@@ -305,7 +304,6 @@ Additive work:
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "$WORKER_NAME" \
   --body "After completing the current task, also do: <additional work>. Reply by mail when done."
 ```
@@ -314,7 +312,6 @@ Correction:
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "$WORKER_NAME" \
   --body "Stop. <specific correction>. Reply by mail with the new plan or result."
 ```
@@ -325,7 +322,6 @@ New task for an idle worker:
 python3 ~/.claude/skills/supervisor/tools/worker_capture.py --window "$WORKER_NAME" --tail 10
 # write task-specific TASK.md in the project/worktree if useful
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "$WORKER_NAME" \
   --body "New task in TASK.md. Read it and execute it. Reply by mail when done."
 ```
@@ -339,7 +335,6 @@ Only compact at natural phase boundaries: the worker is idle, the previous phase
 ```bash
 python3 ~/.claude/skills/supervisor/tools/worker_compact.py --window "$WORKER_NAME"
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "$WORKER_NAME" \
   --body "Phase <N> is done. Next: <description and needed carried-forward context>. Reply by mail when resumed."
 ```
@@ -477,7 +472,6 @@ Mail me both IDs from the command output lines (Reminder <id> is scheduled ...).
 EOF
 )
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-  --from supervisor \
   --to "$WORKER_NAME" \
   --body "$BODY"
 
@@ -490,7 +484,8 @@ Do not create a new PR branch for fixes meant to update an existing PR.
 ## Tool quick reference
 
 - `worker_launch.py`: start or restore a managed worker.
-- `mailbox_send.py`: send task instructions, redirects, questions, auth, and handoffs.
+- `mecha_mailbox_send`: primary Pi tool for task instructions, redirects, questions, auth, and handoffs.
+- `mailbox_send.py`: fallback/launcher-side sender for runtimes without the native Pi tool.
 - `worker_capture.py`: inspect current terminal output for launch verification and status checks.
 - `worker_park.py`: park a worker through the managed checklist.
 - `worker_shutdown.py --verified`: graceful final shutdown after verified completion.

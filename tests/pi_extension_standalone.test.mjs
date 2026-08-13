@@ -11,8 +11,9 @@ import {
   createMechaMessagingExtension,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging.js";
+import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
 
-function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-session", header = {}, contextUsage, nowImpl = Date.now } = {}) {
+function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-session", header = {}, contextUsage, nowImpl = Date.now, client: configuredClient, createClient } = {}) {
   const handlers = new Map();
   const childHandlers = new Map();
   const tools = new Map();
@@ -47,17 +48,18 @@ function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-se
   };
   createMechaMessagingExtension(pi, {
     resolveCurrentAgentId: () => "worker",
-    createClient: (options) => {
-      const client = {
+    createClient: createClient ?? ((options) => {
+      const client = configuredClient ?? {
         connect: async () => {},
         close() {},
         sendReceipt() {},
         sendActivity() {},
+        sendReply: async ({ to, body, subject }) => ({ id: "message-1", state: "queued", to, body, subject }),
         onEnvelope: options.onEnvelope,
       };
       mailboxClients.push(client);
       return client;
-    },
+    }),
     nowImpl,
     createSettledScheduler: () => ({
       onParentActivity() {},
@@ -353,6 +355,206 @@ test("session-scoped allowance reset preserves mailbox delivery after agent star
   assert.ok(mailboxMessage);
   assert.match(mailboxMessage[0].content, /preserve this/);
   assert.deepEqual(mailboxMessage[1], { deliverAs: "steer", triggerTurn: true });
+});
+
+async function sessionStart(fixture, context = fixture.context) {
+  for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, context);
+}
+
+test("mecha_mailbox_send is registered with the recipient, body, and subject schema", () => {
+  const fixture = createMessagingFixture();
+  const tool = fixture.tools.get("mecha_mailbox_send");
+
+  assert.ok(tool);
+  assert.equal(tool.parameters.type, "object");
+  assert.equal(tool.parameters.additionalProperties, false);
+  assert.deepEqual(tool.parameters.required, ["recipient", "body"]);
+  assert.equal(tool.parameters.properties.recipient.type, "string");
+  assert.equal(tool.parameters.properties.body.type, "string");
+  assert.equal(tool.parameters.properties.subject.type, "string");
+});
+
+test("mecha_mailbox_send validates input before using the Mailbox client", async () => {
+  const calls = [];
+  const fixture = createMessagingFixture({
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async (message) => { calls.push(message); return { id: "message-1", state: "queued" }; },
+    },
+  });
+  await sessionStart(fixture);
+  const tool = fixture.tools.get("mecha_mailbox_send");
+
+  for (const [input, expected] of [
+    [{ recipient: "", body: "hello" }, /recipient is required/],
+    [{ recipient: "worker@example.com", body: "hello" }, /identity is invalid/],
+    [{ recipient: "worker", body: "" }, /message body is required/],
+    [{ recipient: "worker", body: 42 }, /message body is required/],
+    [{ recipient: "worker", body: "hello", subject: 42 }, /subject must be a string/],
+  ]) {
+    const result = await tool.execute("call-1", input, undefined, undefined, fixture.context);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, expected);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("mecha_mailbox_send sends through the active client and returns acceptance evidence", async () => {
+  const calls = [];
+  const fixture = createMessagingFixture({
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async (message) => { calls.push(message); return { id: "message-1", state: "acknowledged" }; },
+    },
+  });
+  await sessionStart(fixture);
+  const result = await fixture.tools.get("mecha_mailbox_send").execute(
+    "call-1",
+    { recipient: "worker", body: "hello", subject: "Subject" },
+    undefined,
+    undefined,
+    fixture.context,
+  );
+
+  assert.match(result.content[0].text, /Mailbox message accepted \(message-1, acknowledged\)/);
+  assert.deepEqual(result.details, { message_id: "message-1", state: "acknowledged" });
+  assert.deepEqual(calls, [{ to: "worker", body: "hello", subject: "Subject" }]);
+});
+
+test("mecha_mailbox_send reaches the real Mailbox V2 HTTP client path", async () => {
+  const requests = [];
+  let client;
+  const socket = {
+    readyState: 1,
+    addEventListener(type, handler) { if (type === "open") queueMicrotask(handler); },
+    send() {},
+    close() {},
+  };
+  const fixture = createMessagingFixture({
+    createClient: (options) => {
+      client = createMailboxClient({
+        ...options,
+        routerUrl: "http://127.0.0.1:8765",
+        webSocketFactory: () => socket,
+        generateId: () => "request-id",
+        fetchImpl: async (url, request) => {
+          requests.push({ url, request });
+          return {
+            ok: true,
+            status: 201,
+            json: async () => ({ message: { id: "router-message", state: "leased" } }),
+          };
+        },
+      });
+      return client;
+    },
+  });
+
+  await sessionStart(fixture);
+  const result = await fixture.tools.get("mecha_mailbox_send").execute("call-1", { recipient: "worker", body: "hello" }, undefined, undefined, fixture.context);
+  assert.deepEqual(result.details, { message_id: "router-message", state: "leased" });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "http://127.0.0.1:8765/v1/messages");
+  const envelope = JSON.parse(requests[0].request.body);
+  assert.deepEqual({ ...envelope, created_at: undefined }, {
+    id: "request-id",
+    from: "worker",
+    to: "worker",
+    subject: "Pi mailbox reply",
+    body: "hello",
+    created_at: undefined,
+    source: { kind: "agent" },
+  });
+  client.close();
+});
+
+test("mecha_mailbox_send uses an initialized child client and never falls back to the parent", async () => {
+  const calls = [];
+  const parentClient = {
+    connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+    sendReply: async () => { calls.push("parent"); return { id: "parent", state: "queued" }; },
+  };
+  const childClient = {
+    connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+    sendReply: async () => { calls.push("child"); return { id: "child", state: "queued" }; },
+  };
+  let createCount = 0;
+  const fixture = createMessagingFixture({ createClient: () => createCount++ === 0 ? parentClient : childClient });
+  await sessionStart(fixture);
+  fixture.childHandlers.get("subagents:child:session-created")({ sessionId: "child-session" });
+  const childContext = fixture.createContext("child-session");
+  await sessionStart(fixture, childContext);
+
+  const result = await fixture.tools.get("mecha_mailbox_send").execute("call-1", { recipient: "worker", body: "from child" }, undefined, undefined, childContext);
+  assert.equal(result.details.message_id, "child");
+  assert.deepEqual(calls, ["child"]);
+});
+
+test("mecha_mailbox_send rejects a disposed native child without touching either client", async () => {
+  const calls = [];
+  const parentClient = {
+    connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+    sendReply: async () => { calls.push("parent"); return { id: "parent", state: "queued" }; },
+  };
+  const childClient = {
+    connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+    sendReply: async () => { calls.push("child"); return { id: "child", state: "queued" }; },
+  };
+  let createCount = 0;
+  const fixture = createMessagingFixture({ createClient: () => createCount++ === 0 ? parentClient : childClient });
+  await sessionStart(fixture);
+  fixture.childHandlers.get("subagents:child:session-created")({ sessionId: "child-session" });
+  const childContext = fixture.createContext("child-session");
+  await sessionStart(fixture, childContext);
+  fixture.childHandlers.get("subagents:child:disposed")({ sessionId: "child-session" });
+
+  const result = await fixture.tools.get("mecha_mailbox_send").execute("call-1", { recipient: "worker", body: "from disposed child" }, undefined, undefined, childContext);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /native child/i);
+  assert.deepEqual(calls, []);
+});
+
+test("disposed child shutdown skips parent capture cleanup", async () => {
+  let capturePolicyFetches = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/v1/memory/policy")) capturePolicyFetches += 1;
+    return {
+      ok: true,
+      json: async () => ({ recall: { capture: { router_timeout_ms: 5_000 } } }),
+    };
+  };
+  try {
+    const parentClient = {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async () => ({ id: "parent", state: "queued" }),
+    };
+    const childClient = {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async () => ({ id: "child", state: "queued" }),
+    };
+    let createCount = 0;
+    const fixture = createMessagingFixture({ createClient: () => createCount++ === 0 ? parentClient : childClient });
+    await sessionStart(fixture);
+    fixture.childHandlers.get("subagents:child:session-created")({ sessionId: "child-session" });
+    const childContext = fixture.createContext("child-session");
+    await sessionStart(fixture, childContext);
+    fixture.childHandlers.get("subagents:child:disposed")({ sessionId: "child-session" });
+
+    for (const handler of fixture.handlers.get("session_shutdown") ?? []) await handler({}, childContext);
+
+    assert.equal(capturePolicyFetches, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("mecha_parent_message remains child-only", async () => {
+  const fixture = createMessagingFixture();
+  await sessionStart(fixture);
+  const result = await fixture.tools.get("mecha_parent_message").execute("call-1", { message: "from parent" }, undefined, undefined, fixture.context);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /unavailable/i);
 });
 
 test("control-plane and unknown tools remain allowed", async () => {

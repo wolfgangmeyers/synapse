@@ -23,7 +23,7 @@ A non-trivial reply is any user-facing response that communicates a result, deci
 
 ## Mailbox Replies Are Mandatory
 
-When Wolfgang contacts the supervisor by mailbox, reply by mailbox to that same sender identity. Do not leave the substantive response only in the terminal, Cursor chat, console, or final answer; those channels do not answer the web UI. Use `mailbox_send.py` before considering the request answered.
+When Wolfgang contacts the supervisor by mailbox, reply by mailbox to that same sender identity. Do not leave the substantive response only in the terminal, Cursor chat, console, or final answer; those channels do not answer the web UI. In Pi, use `mecha_mailbox_send`; use `mailbox_send.py` when the native tool is unavailable.
 
 This applies to direct questions, corrections, status requests, instructions, and follow-ups from `wolfgang` or `wolfgang-web`. Worker settled/idle notifications remain the exception: treat them as signals, inspect only when the worker was expected to be active, and do not acknowledge them. Do not extend that exception to worker findings, status reports, blockers, completion reports, or any Wolfgang message; those require mailbox handling and usually a same-channel reply.
 
@@ -174,13 +174,13 @@ Never relaunch a no-window task merely because its stale state says `active`. Ne
 
 For every worker expected to run longer than five minutes, require reminder coverage only while the reminders still drive active work. A worker self-reminder should create momentum or provide evidence; it should be deleted when the worker is parked, the PR is green and waiting only on human review, or the remaining blocker needs a human/environment decision. Keep the supervisor's own 30-minute monitoring recurrence as the backstop for active delivery, and use the general sweep for parked/review-gated PRs when that preserves the same safety check. One-shot reminders are for genuinely one-off external events. Subagents notify on completion, but their downstream effects (deploys, CI, external reviews) do not.
 
-**Use Provided Tools**: ALWAYS use Python scripts in `~/.claude/skills/supervisor/tools/` for worker management and state. Deliver worker instructions through `mailbox_send.py` only when the runtime has verified delivery; never use terminal or tmux input. If an agent is unregistered or not running, restore it through the managed worker lifecycle/`worker_launch.py`, not terminal typing. Never manipulate `supervisor-state.json` directly.
+**Use Provided Tools**: ALWAYS use Python scripts in `~/.claude/skills/supervisor/tools/` for worker management and state. In a Pi session, deliver worker instructions through `mecha_mailbox_send`; use `mailbox_send.py` as the fallback for runtimes without the native tool. Never use terminal or tmux input. If an agent is unregistered or not running, restore it through the managed worker lifecycle/`worker_launch.py`, not terminal typing. Never manipulate `supervisor-state.json` directly.
 
 **Authorization Protocol**: Auth messages grant workers commit/push permission. Every observed failure mode is covered:
 
 1. **Authorization is the supervisor's autonomous decision.** After independently verifying output (tests pass, code reviewed, requirements met), send `git authorized` through the worker's verified delivery path immediately. Don't ask the user — verification IS the gate. But don't rubber-stamp: use Wolfgang's judgment. If work is wrong/incomplete/risky, send the worker back. The judgment call is yours.
 
-2. **Send through `mailbox_send.py` only when that worker has verified Mailbox delivery** — never TASK.md and never mixed with other instructions. Use the worker's registered agent ID as `--to`; delivery acceptance is not evidence that authorization was consumed. For a runtime without verified Mailbox delivery, do not authorize until a proven delivery path exists.
+2. **Send through the native `mecha_mailbox_send` tool in Pi, or `mailbox_send.py` for runtimes without it, only when that worker has verified Mailbox delivery** — never TASK.md and never mixed with other instructions. Use the worker's registered agent ID as `recipient`/`--to`; delivery acceptance is not evidence that authorization was consumed. For a runtime without verified Mailbox delivery, do not authorize until a proven delivery path exists.
 
 3. **Never pre-authorize** — auth only after independently verifying output. Violations:
    - NEVER put `git authorized` or `gh authorized` in TASK.md
@@ -193,7 +193,7 @@ For every worker expected to run longer than five minutes, require reminder cove
 
 5. **Name the target branch** for audit clarity (e.g., `"git authorized for feature/login-fix"`). Advisory only — the hook matches `git authorized` as a substring regardless of annotation.
 
-6. **Never type auth strings in the supervisor's own session.** Send them only as a dedicated `mailbox_send.py --body` value.
+6. **Never type auth strings in the supervisor's own session.** Send them only as a dedicated `mecha_mailbox_send` call in Pi, or a dedicated `mailbox_send.py --body` fallback call.
 
 7. **The supervisor never commits directly.** If you need git auth in your own session, you're doing inline work — delegate to a worker instead.
 
@@ -325,9 +325,9 @@ When all reviewers sign off with only Suggestions/Nits, **commit and push withou
 
 **Regression tests mandatory for all fixes.** Every bug fix ships with a test that would fail if the bug were reintroduced. After any session with multiple bug fixes, require a dedicated test coverage pass before closing — worker enumerates each fix, runs coverage, identifies behavioral gaps, implements the missing regression tests. "Covered" ≠ "tested": assert on behavior, not just execution. Applies across all languages and codebases.
 
-**Mailbox V2 coordination**: For runtimes with verified Mailbox delivery, send instructions, redirects, questions, authorizations, and recovery follow-ups with `mailbox_send.py --from supervisor --to <agent-id> --body <text>`. Do not type terminal/menu input. A missing Mailbox V2 registration or stopped agent is a lifecycle fault: restore it through `worker_launch.py` with its recorded runtime and session, then retry Mailbox V2 delivery only after that runtime's delivery bridge is verified.
+**Mailbox V2 coordination**: In a Pi supervisor session with the Mailbox extension, use the native top-level `mecha_mailbox_send` tool for instructions, redirects, questions, authorizations, and recovery follow-ups. It sends through the existing Mailbox V2 HTTP client and returns the accepted message ID/state without bash or script credits. Use `mailbox_send.py --to <agent-id> --body <text>` when the native tool is unavailable (Claude sidecars, bare Codex, or older Pi sessions); it infers the sender from the current tmux window unless that fallback runtime explicitly requires `--from`. Do not type terminal/menu input. A missing Mailbox V2 registration or stopped agent is a lifecycle fault: restore it through `worker_launch.py` with its recorded runtime and session, then retry delivery only after that runtime's bridge is verified.
 
-Key tools: `worker_launch.py` (managed worker lifecycle), `mailbox_send.py` (all coordination), `worker_capture.py` (diagnostics), `worker_kill.py` (kill window and mailbox sidecar, no state/worktree effect), `worker_shutdown.py` (graceful shutdown).
+Key tools: `mecha_mailbox_send` (primary Pi tool), `worker_launch.py` (managed worker lifecycle), `mailbox_send.py` (fallback sender), `worker_capture.py` (diagnostics), `worker_kill.py` (kill window and mailbox sidecar, no state/worktree effect), `worker_shutdown.py` (graceful shutdown).
 
 ### Compact helper toolbox
 
@@ -523,7 +523,7 @@ Then launch the worker in the worktree:
 ```bash
 WINDOW_NAME="<descriptive-name>"
 python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "$WORKTREE_PATH" --skip-permissions --agent pi --notify-on-settled supervisor
-python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
 ```bash
@@ -557,13 +557,13 @@ If the reviews run in parallel, create one detached worktree per PR and launch e
 ```bash
 WINDOW_NAME="pr-reviews"
 python3 ~/.claude/skills/supervisor/tools/worker_launch.py --window "$WINDOW_NAME" --dir "<project-path>" --skip-permissions --agent pi --notify-on-settled supervisor
-python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to "$WINDOW_NAME" --body "Read ~/code/mecha-review/.claude/skills/review-pr/SKILL.md fully, then execute that workflow for https://github.com/org/repo/pull/123. Reply by mail when done."
 ```
 
 To add more PRs to the queue, just send an additive message:
 
 ```bash
-python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WINDOW_NAME" --body "After finishing, also review: <URL1>, <URL2>"
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to "$WINDOW_NAME" --body "After finishing, also review: <URL1>, <URL2>"
 ```
 
 **For long instructions**, write the full task-specific detail to `TASK.md` in the worktree when it improves reviewability, then send a Mailbox V2 pointer. Mailbox V2 remains the coordination path for both pointers and follow-ups.
@@ -595,7 +595,7 @@ Handle inline. No tmux window. If the task is worth tracking (e.g., a status rep
 
 ```bash
 # Worker has added instrumentation
-python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WORKER_NAME" --body "Commit the instrumentation and push. Signal when ready for manual testing."
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to "$WORKER_NAME" --body "Commit the instrumentation and push. Signal when ready for manual testing."
 ```
 
 Then to user:
@@ -784,7 +784,7 @@ When a watchdog alert arrives in the mailbox:
 2. For each captured window, decide:
    - **Worker answered a question / ready for next step** → send the next instruction or approval. Do NOT park.
    - **Worker completed its task and is idle** → park with context ("PR created, awaiting review").
-   - **Worker is genuinely stuck** → redirect through `mailbox_send.py`.
+   - **Worker is genuinely stuck** → redirect through the verified mailbox path, using `mecha_mailbox_send` in Pi and `mailbox_send.py` as the fallback.
    - **False positive** (auto-suggestion, already parked) → no action.
 3. **If the capture is ambiguous, ask the worker — and tell it to reply by mail.** A 30-line tail may not show enough context. If you can't tell whether the worker is done, waiting for direction, or mid-task, send a short question: `"What's your current status? Are you waiting on me for something? Reply by mail."` The worker has full context about its own state — use it before making a park/redirect decision. Always include "Reply by mail" (or equivalent) in any question sent to a worker, otherwise it will respond in the terminal where you won't see it without another capture.
 4. The parking rules in "Parking a Worker to Wait" still apply: default is do not park. Only park when the worker is waiting for external intervention or the task is fully done. A worker that asked a question and got no answer is waiting on *you*, not on an external event — answer it.
@@ -957,7 +957,7 @@ python3 ~/.claude/skills/supervisor/tools/state_update_state.py <task-id-or-alia
 
 ```bash
 # Example: After intervening with a worker
-python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to com-61 --body "Reply to the PR comment explaining the test coverage"
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to com-61 --body "Reply to the PR comment explaining the test coverage"
 
 # Immediately update supervisor state
 python3 ~/.claude/skills/supervisor/tools/state_update_status.py com-61 "Told worker to reply to PR comment explaining test coverage"
@@ -1034,7 +1034,7 @@ When compacting a worker's context, re-send requirements so they survive compact
 python3 ~/.claude/skills/supervisor/tools/worker_compact.py --window "$WORKER_NAME"
 # Wait for the worker's Mailbox V2 acknowledgement before continuing.
 python3 ~/.claude/skills/supervisor/tools/worker_send_requirements.py --alias my-task
-python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to "$WORKER_NAME" --body "Phase 1 is done. Next: <phase 2 description>"
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to "$WORKER_NAME" --body "Phase 1 is done. Next: <phase 2 description>"
 ```
 
 #### Requirements and Robot Reviews
@@ -1149,7 +1149,7 @@ gh api repos/<OWNER/REPO>/pulls/<NUMBER>/comments
 
 ## Mailbox (Async Agent Coordination)
 
-Workers and the supervisor can send async messages through the Mailbox V2 router. Delivery depends on the launched runtime's verified integration: Pi uses the managed Mailbox V2 extension, Claude uses the launcher-managed sidecar, and bare Codex has no launcher-provided Mailbox delivery bridge. Do not assume a queued message reached a runtime until that runtime's delivery path is verified.
+Workers and the supervisor can send async messages through the Mailbox V2 router. Pi sessions should use the native top-level `mecha_mailbox_send` tool; `mailbox_send.py` remains the fallback for runtimes without that tool. Delivery depends on the launched runtime's verified integration: Pi uses the managed Mailbox V2 extension, Claude uses the launcher-managed sidecar, and bare Codex has no launcher-provided Mailbox delivery bridge. Do not assume a queued message reached a runtime until that runtime's delivery path is verified.
 
 This complements (does not replace) the escalation system. Use mailbox for:
 - Sending context or updates to a worker while it's busy
@@ -1158,8 +1158,13 @@ This complements (does not replace) the escalation system. Use mailbox for:
 
 ### Sending a message
 
-`--from` defaults to the current tmux pane's window name automatically.
-Never pass `--from` explicitly — let it default to your real window identity.
+Use `mecha_mailbox_send` when this is a Pi session with the Mailbox extension:
+
+```text
+mecha_mailbox_send({ recipient: "<window-name>", body: "Your message here", subject: "Optional subject" })
+```
+
+The tool returns the accepted message ID and state. Use the script when the native tool is unavailable:
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
@@ -1167,6 +1172,8 @@ python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
   --body "Your message here" \
   [--subject "Optional subject"]
 ```
+
+For script sends, `--from` defaults to the current tmux pane's window name. Never pass it explicitly unless a fallback runtime requires an explicit sender.
 
 Examples:
 ```bash

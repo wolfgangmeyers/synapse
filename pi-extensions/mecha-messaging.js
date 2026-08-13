@@ -1472,6 +1472,14 @@ export function createMechaMessagingExtension(pi, {
   const childReplyClients = new Map();
   const inlineToolPolicy = createInlineToolPolicy({ now: nowImpl });
 
+  function mailboxClientForSession(context) {
+    const sessionId = context?.sessionManager?.getSessionId?.();
+    // Keep a disposed child identifiable until its shutdown cleanup; otherwise a late child send would use the parent client.
+    return children.has(sessionId) || childReplyClients.has(sessionId)
+      ? childReplyClients.get(sessionId)
+      : client;
+  }
+
   pi.registerTool({
     name: "mecha_parent_message",
     label: "Message parent",
@@ -1493,6 +1501,48 @@ export function createMechaMessagingExtension(pi, {
         return { content: [{ type: "text", text: "Parent message accepted." }], details: { message_id: sent.id } };
       } catch {
         return { content: [{ type: "text", text: "Parent message was not accepted." }], isError: true };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "mecha_mailbox_send",
+    label: "Send Mailbox message",
+    description: "Send an ordinary Mailbox V2 message to another local agent.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["recipient", "body"],
+      properties: {
+        recipient: { type: "string", minLength: 1 },
+        body: { type: "string", minLength: 1 },
+        subject: { type: "string" },
+      },
+    },
+    async execute(_toolCallId, input, _signal, _onUpdate, toolContext) {
+      try {
+        const recipient = input?.recipient;
+        const body = input?.body;
+        const subject = input?.subject;
+        if (typeof recipient !== "string" || recipient.length === 0) throw new Error("a mailbox recipient is required");
+        assertAgentId(recipient);
+        if (typeof body !== "string" || body.length === 0) throw new Error("a message body is required");
+        if (subject !== undefined && typeof subject !== "string") throw new Error("a mailbox subject must be a string");
+
+        const sessionId = toolContext?.sessionManager?.getSessionId?.();
+        const mailboxClient = mailboxClientForSession(toolContext);
+        // Native children must use only their initialized client; falling back to the parent would send under the wrong identity.
+        if (mailboxClient === undefined) {
+          if (children.has(sessionId) || childReplyClients.has(sessionId)) throw new Error("Mailbox v2 is not initialized for this native child session");
+          throw startupError ?? new Error("Mailbox v2 is not initialized");
+        }
+        const sent = await mailboxClient.sendReply({ to: recipient, body, ...(subject === undefined ? {} : { subject }) });
+        return {
+          content: [{ type: "text", text: `Mailbox message accepted (${sent.id}, ${sent.state}).` }],
+          details: { message_id: sent.id, state: sent.state },
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: error.message }], isError: true };
       }
     },
   });
@@ -1682,7 +1732,12 @@ export function createMechaMessagingExtension(pi, {
   });
   pi.events.on("subagents:child:disposed", (event) => {
     const sessionId = childSessionId(event);
-    if (sessionId !== undefined) children.delete(sessionId);
+    if (sessionId !== undefined) {
+      children.delete(sessionId);
+      childReplyClients.delete(sessionId);
+      // The tombstone keeps late child tool calls from falling back to the parent client.
+      childReplyClients.set(sessionId, undefined);
+    }
   });
 
   pi.on("tool_call", (_event, context) => {
@@ -1797,7 +1852,11 @@ export function createMechaMessagingExtension(pi, {
       }
     });
   });
-  pi.on("session_shutdown", async (_event, context) => { if (children.has(context.sessionManager.getSessionId())) return; recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch {} finally { controller.abort(); clearTimeout(timer); } });
+  pi.on("session_shutdown", async (_event, context) => {
+    // A disposed child stays in childReplyClients as a tombstone until this cleanup; do not run parent capture cleanup with its context.
+    if (children.has(context.sessionManager.getSessionId()) || childReplyClients.has(context.sessionManager.getSessionId())) return;
+    recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch {} finally { controller.abort(); clearTimeout(timer); }
+  });
 
   pi.on("session_start", (_event, context) => {
     const sessionId = context.sessionManager.getSessionId();
@@ -1900,7 +1959,7 @@ export function createMechaMessagingExtension(pi, {
 
   pi.on("session_shutdown", (_event, context) => {
     const sessionId = context.sessionManager.getSessionId();
-    if (children.has(sessionId)) {
+    if (children.has(sessionId) || childReplyClients.has(sessionId)) {
       childReplyClients.delete(sessionId);
       return;
     }

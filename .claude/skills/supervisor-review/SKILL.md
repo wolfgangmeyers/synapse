@@ -54,7 +54,7 @@ A readiness report that lacks data proof, coverage/test detail, browser/live pro
 
 Every gated worker must go through a Mailbox V2 instruction/results loop before the supervisor accepts readiness. Do this even when the supervisor's preliminary checks and the three independent subagents are clean; a clean preliminary pass changes the message content, not the requirement to get a worker result by mailbox.
 
-Send the worker a Mailbox V2 instruction with exact next steps or the final evidence ledger to provide. Use `/Users/wolfgang/code/mecha-developer/.claude/skills/supervisor/tools/mailbox_send.py --from supervisor --to <agent-id> --body <text>`. Do not type into the worker terminal.
+Send the worker a Mailbox V2 instruction with exact next steps or the final evidence ledger to provide. In a Pi supervisor session, use the native `mecha_mailbox_send` tool. Use `/Users/wolfgang/code/mecha-developer/.claude/skills/supervisor/tools/mailbox_send.py --to <agent-id> --body <text>` as the fallback when the native tool is unavailable. The fallback infers the sender from the current tmux window; add `--from` only when that runtime explicitly requires it. Do not type into the worker terminal.
 
 The message must include:
 
