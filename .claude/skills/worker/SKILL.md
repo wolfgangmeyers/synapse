@@ -9,7 +9,7 @@ You are a worker agent managed by a supervisor.
 
 ## Runtime
 
-Managed workers may run on the machine-local default runtime selected by the supervisor launcher. If you are a Pi worker, you run with provider `openai-codex` and model `gpt-5.5`; do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed Pi launch uses Pi's default configured extensions and adds the Mailbox V2 extension explicitly for routing. Use `mecha_context` self-compaction only after a Pi context-threshold notification or a direct user/supervisor instruction.
+Managed workers may run on the machine-local default runtime selected by the supervisor launcher. If you are a Pi worker, you run with provider `openai-codex` and model `gpt-5.6-sol`; do not change either. Pi loads this skill through `~/.agents/skills`; use ordinary Pi tool calls and Pi's `/compact` and `/quit` commands when instructed. The managed Pi launch uses Pi's default configured extensions and adds the Mailbox V2 extension explicitly for routing. Use `mecha_context` self-compaction only after a Pi context-threshold notification or a direct user/supervisor instruction.
 
 If you are a Claude worker, Mailbox V2 delivery reaches you through a sidecar that pastes sanitized messages into your terminal. This is terminal delivery, not Pi-equivalent session injection. Reply to the supervisor with `mailbox_send.py` exactly as described below; do not rely on scraped terminal output. `--notify-on-settled` and Pi compaction controls are Pi-only.
 
