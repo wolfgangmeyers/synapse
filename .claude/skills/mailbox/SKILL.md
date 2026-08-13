@@ -5,13 +5,15 @@ description: Mecha-wolfgang async mailbox — Mailbox V2 router delivery formats
 
 # Mailbox Skill
 
-Mailbox V2 sends durable agent messages through the local router. Normal sending needs no router environment variable:
+Mailbox V2 sends durable agent messages through the local router. In a Pi session with the Mailbox extension, use the native top-level `mecha_mailbox_send` tool first. It accepts `recipient`, `body`, and an optional `subject`, and returns the accepted message ID and state. It sends through the extension's existing Mailbox V2 HTTP client and does not run shell commands.
+
+Use the script only when the native tool is unavailable (for example, Claude sidecars, bare Codex, or older Pi sessions):
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py --to <agent> --body "<text>"
 ```
 
-It defaults to the local HTTP router; an explicitly configured invalid router URL is rejected. Router acceptance means queued, not necessarily consumed by the recipient.
+The script defaults to the local HTTP router; an explicitly configured invalid router URL is rejected. It prints the accepted message ID and actual router state. Router acceptance does not prove the recipient consumed the message.
 
 ## Load ordering
 
@@ -64,7 +66,8 @@ The checked-in Mailbox V2 behavior is implemented in the supervisor router/tools
 
 | Script | Purpose |
 |--------|---------|
-| `mailbox_send.py` | Post a message through the Mailbox V2 router |
+| `mecha_mailbox_send` | Primary Pi top-level tool for posting a message through the Mailbox V2 router |
+| `mailbox_send.py` | Fallback sender for runtimes without the native Pi tool |
 
 Installed layout: `~/.claude/skills/supervisor/tools/…` (or your mecha-developer checkout).
 

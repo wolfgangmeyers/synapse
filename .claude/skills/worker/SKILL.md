@@ -23,8 +23,16 @@ Your current tmux pane's window name is your agent ID. Use it when you need to i
 
 ## Mailbox
 
-Workers communicate with the supervisor via mailbox — for questions, blockers, status
+Workers communicate with the supervisor via Mailbox V2 — for questions, blockers, status
 updates, and completion notifications.
+
+In a Pi session with the Mailbox extension, use the native top-level tool first:
+
+```text
+mecha_mailbox_send({ recipient: "supervisor", body: "Your message here" })
+```
+
+It returns the accepted message ID and state without using bash or script credits. Use the script when the native tool is unavailable (Claude sidecars, bare Codex, or older Pi sessions):
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
@@ -32,7 +40,7 @@ python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
   --body "Your message here"
 ```
 
-**Never pass `--from`** — it defaults to your current tmux window name automatically.
+**Never pass `--from`** to the fallback script — it defaults to your current tmux window name automatically.
 Hardcoding or inventing a sender identity breaks reply routing.
 
 **Never send a message to yourself** — `--to` must be `supervisor` or another worker's window name, never your own current tmux window name. Messaging yourself does nothing useful and wastes context.
@@ -113,7 +121,13 @@ The supervisor reads the artifact directly — do not send a summary and expect 
 ### Worker lifecycle — never manage your own shutdown
 
 **Workers cannot and must not try to kill themselves or their tmux window.**
-Only the supervisor manages worker lifecycle. When you are done:
+Only the supervisor manages worker lifecycle. When you are done, use the native tool first in Pi:
+
+```text
+mecha_mailbox_send({ recipient: "supervisor", body: "Task complete. [brief summary of what was done]. Ready to be cleaned up." })
+```
+
+Use the fallback script only when the native tool is unavailable:
 
 ```bash
 python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
@@ -164,12 +178,11 @@ Then wait idle. The supervisor will kill the window when ready.
 
 7. **Never commit TASK.md**: `TASK.md` is a temporary supervisor-written task file. It is not part of the project and must never be staged or committed. If it shows up in `git status`, leave it untracked. If the project doesn't already have it in `.gitignore`, add it.
 
-8. **Never prompt the user interactively**: You are a managed worker. The supervisor communicates through the runtime's verified delivery path, not the interactive UI. If a command is blocked (for example, an authorization guard), do NOT present a multiple-choice prompt or wait for interactive input. Instead, send mail to the supervisor describing what was blocked and wait:
-   ```bash
-   python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
-     --to supervisor \
-     --body "Blocked by hook: <describe the command and what auth is needed>"
+8. **Never prompt the user interactively**: You are a managed worker. The supervisor communicates through the runtime's verified delivery path, not the interactive UI. If a command is blocked (for example, an authorization guard), do NOT present a multiple-choice prompt or wait for interactive input. Instead, send mail to the supervisor describing what was blocked and wait. In Pi, use the native tool:
+   ```text
+   mecha_mailbox_send({ recipient: "supervisor", body: "Blocked by hook: <describe the command and what auth is needed>" })
    ```
+   Use the fallback `mailbox_send.py` command only when the native tool is unavailable.
 
 9. **Persona is loaded in the Identity section above** — do not re-read unless compacted. The persona is your reasoning framework, not a reference document.
 

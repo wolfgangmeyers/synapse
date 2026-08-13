@@ -24,9 +24,9 @@ When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
 
 ## Supervisor Mailbox And Compaction
 
-Use the Mailbox V2 router sender for supervisor replies:
+In a Pi supervisor session with the Mailbox V2 extension, use the native top-level `mecha_mailbox_send` tool for supervisor replies. It returns the accepted message ID and state through the existing router client. Use the Mailbox V2 router sender below as the fallback for runtimes without the native tool or launcher-side sends:
 `/home/ubuntu/code/mecha-developer/.claude/skills/supervisor/tools/mailbox_send.py`.
-Successful sends print `Message <id> accepted: queued`. Do not use stale
+Successful fallback sends print the accepted message ID and actual router state. Do not use stale
 `mecha-wolfgang` mailbox sender copies; they write legacy disk mailbox files that
 the active router does not deliver.
 
