@@ -24,6 +24,7 @@ const MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES = 128 * 1024;
 const MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES = 64 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES = 256 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_KEEP_BYTES = 128 * 1024;
+const NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
 
@@ -1069,6 +1070,7 @@ export function createMechaMessagingExtension(pi, {
   let activityHeartbeatActive = false;
   let parentActivityContext;
   let lastActivitySent;
+  let lastNativeSubagentReadDiagnosticMs;
   const runningSubagents = new Map();
   const terminalSubagentTombstones = new Map();
   let settledNotificationRecipient;
@@ -1105,7 +1107,9 @@ export function createMechaMessagingExtension(pi, {
     return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description;
   }
 
-  function nativeSubagentRecords(service = globalThis[PI_SUBAGENTS_SERVICE] ?? subagentsService) {
+  function nativeSubagentRecords(service = subagentsService ?? globalThis[PI_SUBAGENTS_SERVICE]) {
+    // Prefer the parent-bound service captured at extension creation. Native child sessions can
+    // replace the global service symbol, and polling the child's copy would publish the wrong badge.
     try {
       const source = typeof service?.listAgents === "function"
         ? service.listAgents()
@@ -1114,6 +1118,15 @@ export function createMechaMessagingExtension(pi, {
           : service?.running ?? service?.runs ?? service?.subagents;
       return Array.isArray(source) ? source : undefined;
     } catch {
+      const nowMs = nowImpl();
+      if (lastNativeSubagentReadDiagnosticMs === undefined || nowMs - lastNativeSubagentReadDiagnosticMs >= NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS) {
+        lastNativeSubagentReadDiagnosticMs = nowMs;
+        try {
+          parentActivityContext?.ui?.notify?.("Native subagent service read failed; polling will retry.", "error");
+        } catch {
+          // A UI notification is only an operational signal; a broken UI must not stop polling retries.
+        }
+      }
       return undefined;
     }
   }
@@ -1129,7 +1142,7 @@ export function createMechaMessagingExtension(pi, {
   function isTerminalNativeSubagentRecord(record) {
     return [
       "completed", "complete", "done", "finished", "failed", "failure", "error", "errored",
-      "canceled", "cancelled", "aborted", "terminated", "stopped",
+      "canceled", "cancelled", "aborted", "terminated", "stopped", "steered",
     ].includes(nativeSubagentStatus(record));
   }
 
@@ -1267,13 +1280,14 @@ export function createMechaMessagingExtension(pi, {
     const reconciled = reconcile ? reconcileNativeSubagentService() : false;
     const subagents = publicSubagentSummaries();
     const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
-    if (lastActivitySent !== undefined
+    const unchanged = lastActivitySent !== undefined
       && lastActivitySent.state === state
       && lastActivitySent.subagentCount === subagentCount
-      && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents)
-      && !force
-      && !reconciled
-      && nowMs - lastActivitySent.sentAtMs < ACTIVITY_REFRESH_MIN_MS) {
+      && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents);
+    // Settled with no subagents is terminal until reconciliation changes it; unlike
+    // active work and settled subagents, it does not need a TTL refresh frame.
+    if (unchanged && state === "settled" && subagentCount === 0 && !force && !reconciled) return false;
+    if (unchanged && !force && !reconciled && nowMs - lastActivitySent.sentAtMs < ACTIVITY_REFRESH_MIN_MS) {
       return false;
     }
     try {
@@ -1288,10 +1302,10 @@ export function createMechaMessagingExtension(pi, {
 
   function ensureActivityHeartbeatTimer() {
     if (activityHeartbeatTimer !== undefined) return;
+    // Keep polling after the parent settles so missed native lifecycle events can be repaired.
     activityHeartbeatTimer = setIntervalImpl(() => {
       const state = parentActivityStateFromContext();
       sendActivityState(state);
-      if (state === "settled" && runningSubagents.size === 0) stopActivityHeartbeat();
     }, ACTIVITY_HEARTBEAT_INTERVAL_MS);
     activityHeartbeatTimer?.unref?.();
   }
@@ -1317,8 +1331,8 @@ export function createMechaMessagingExtension(pi, {
     if (wasActive && settle && !mailboxPausedForCompaction) {
       sendActivityState(parentActivityStateFromContext(), { force: true });
     }
-    if (runningSubagents.size > 0) return;
-    clearActivityHeartbeatTimer();
+    // Keep polling while the parent is settled or waiting for native subagent results; the
+    // native service remains the source of truth when lifecycle events are missed.
   }
 
   function clearRunningSubagentsForBoundary() {
@@ -1366,6 +1380,7 @@ export function createMechaMessagingExtension(pi, {
     mailboxPausedForCompaction = false;
     reconcileNativeSubagentService();
     refreshActivityState();
+    ensureActivityHeartbeatTimer();
     context.ui?.setStatus("mecha-mailbox", "mailbox: connected");
   }
 
@@ -1948,6 +1963,7 @@ export function createMechaMessagingExtension(pi, {
       // Child sessions inherit extensions and can replace the package's global
       // service symbol. Bind scheduled work to this resident parent service.
       coordinator = createMailboxCoordinator(context, mailboxClient);
+      ensureActivityHeartbeatTimer();
       void mailboxClient.connect().catch((error) => {
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${error.message}`, "error");
       });

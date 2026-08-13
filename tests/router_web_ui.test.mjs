@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -428,6 +429,162 @@ test("router web UI serves the app and relays live router messages", async () =>
   }
 });
 
+test("router web UI passes received subagent activity through /v1/agents and live frames and clears on zero", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "activity-peer", sockets);
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    const browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+
+    const summaries = [{ id: "child-a", type: "general-purpose", description: "First running subagent" }];
+    const activityEvent = waitForEvent(browser, (event) => event.type === "agent_activity" && event.agent === "activity-peer" && event.subagentCount === 1);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "activity-peer-with-subagents",
+      type: "activity",
+      agent_id: "activity-peer",
+      instance_id: "activity-peer-instance",
+      lease_id: peer.registered.lease_id,
+      activity_state: "active",
+      subagent_count: 1,
+      subagents: summaries,
+    }));
+    const activity = await activityEvent;
+    assert.equal(activity.activityState, "active");
+    assert.equal(activity.subagentCount, 1);
+    assert.deepEqual(activity.subagents, summaries);
+
+    const agentsAfterUpdate = await routerAgents(router.httpUrl);
+    const peerSnapshot = agentsAfterUpdate.find((agent) => agent.agent_id === "activity-peer");
+    assert.ok(peerSnapshot, "activity-peer missing from /v1/agents after activity");
+    assert.equal(peerSnapshot.activity_state, "active");
+    assert.equal(peerSnapshot.subagent_count, 1);
+    assert.deepEqual(peerSnapshot.subagents, summaries);
+
+    const clearedEvent = waitForEvent(browser, (event) => event.type === "agent_activity" && event.agent === "activity-peer" && event.subagentCount === 0);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "activity-peer-zero",
+      type: "activity",
+      agent_id: "activity-peer",
+      instance_id: "activity-peer-instance",
+      lease_id: peer.registered.lease_id,
+      activity_state: "settled",
+      subagent_count: 0,
+      subagents: [],
+    }));
+    const cleared = await clearedEvent;
+    assert.equal(cleared.activityState, "idle");
+    assert.equal(cleared.subagentCount, 0);
+    assert.deepEqual(cleared.subagents, []);
+
+    await waitFor(async () => {
+      const agents = await routerAgents(router.httpUrl);
+      const peerAgent = agents.find((agent) => agent.agent_id === "activity-peer");
+      return peerAgent !== undefined && peerAgent.subagent_count === 0;
+    });
+    const agentsAfterClear = await routerAgents(router.httpUrl);
+    const peerCleared = agentsAfterClear.find((agent) => agent.agent_id === "activity-peer");
+    assert.ok(peerCleared);
+    assert.equal(peerCleared.subagent_count, 0);
+    assert.deepEqual(peerCleared.subagents, []);
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router web app renders the agent-row subagent badge from received activity without a second source of truth", async (t) => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  let domBrowser;
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "dom-activity-peer", sockets);
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    const browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+    try {
+      domBrowser = await startElectronDomBrowser(ui.httpUrl);
+    } catch (error) {
+      if (error.code === "ELECTRON_UNAVAILABLE") {
+        t.skip(`Electron cannot launch in this test environment: ${error.message}`);
+        return;
+      }
+      throw error;
+    }
+
+    browser.send(JSON.stringify({ type: "refresh_agents" }));
+    await waitForEvent(browser, (event) => event.type === "agents" && event.agents.some((agent) => agent.agent_id === "dom-activity-peer"));
+
+    const summaries = [{ id: "child-a", type: "general-purpose", description: "First running subagent" }];
+    const activityEvent = waitForEvent(browser, (event) => event.type === "agent_activity" && event.agent === "dom-activity-peer" && event.subagentCount === 1);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-activity-peer-with-subagents",
+      type: "activity",
+      agent_id: "dom-activity-peer",
+      instance_id: "dom-activity-peer-instance",
+      lease_id: peer.registered.lease_id,
+      activity_state: "active",
+      subagent_count: 1,
+      subagents: summaries,
+    }));
+    await activityEvent;
+
+    const row = await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const candidate = [...document.querySelectorAll(".agent-row")].find((element) => element.textContent.includes("Dom Activity Peer"));
+        if (candidate?.classList.contains("has-subagents")) return { className: candidate.className, innerHTML: candidate.innerHTML };
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const candidate = [...document.querySelectorAll(".agent-row")].find((element) => element.textContent.includes("Dom Activity Peer"));
+      return candidate ? { className: candidate.className, innerHTML: candidate.innerHTML } : null;
+    })()`);
+    assert.ok(row, "activity peer row was not rendered");
+    assert.match(row.className, /has-subagents/);
+    assert.match(row.innerHTML, /1 subagent/);
+    assert.match(row.innerHTML, /subagent-indicator/);
+
+    const clearedActivityEvent = waitForEvent(browser, (event) => event.type === "agent_activity" && event.agent === "dom-activity-peer" && event.subagentCount === 0);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-activity-peer-without-subagents",
+      type: "activity",
+      agent_id: "dom-activity-peer",
+      instance_id: "dom-activity-peer-instance",
+      lease_id: peer.registered.lease_id,
+      activity_state: "active",
+      subagent_count: 0,
+      subagents: [],
+    }));
+    await clearedActivityEvent;
+
+    const clearedRow = await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const candidate = [...document.querySelectorAll(".agent-row")].find((element) => element.textContent.includes("Dom Activity Peer"));
+        if (candidate && !candidate.classList.contains("has-subagents")) return { className: candidate.className, innerHTML: candidate.innerHTML };
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const candidate = [...document.querySelectorAll(".agent-row")].find((element) => element.textContent.includes("Dom Activity Peer"));
+      return candidate ? { className: candidate.className, innerHTML: candidate.innerHTML } : null;
+    })()`);
+    assert.ok(clearedRow, "activity peer row was not rendered after clearing subagents");
+    assert.doesNotMatch(clearedRow.className, /has-subagents/);
+    assert.doesNotMatch(clearedRow.innerHTML, /subagent-indicator/);
+    assert.doesNotMatch(clearedRow.innerHTML, /1 subagent/);
+  } finally {
+    await domBrowser?.close();
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
 test("two web sessions with one username receive live fanout and reconnect history", async () => {
   const router = await startTestRouter();
   const sockets = [];
@@ -829,6 +986,99 @@ function onceClose(socket) {
     if (socket.readyState === WebSocket.CLOSED) resolve();
     else socket.once("close", resolve);
   });
+}
+
+async function startElectronDomBrowser(url) {
+  const electronPath = join(process.cwd(), "node_modules/.bin/electron");
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "router-web-ui-electron-"));
+  const scriptPath = join(temporaryDirectory, "browser.cjs");
+  const script = `const { app, BrowserWindow } = require("electron");
+const readline = require("node:readline");
+let window;
+app.whenReady().then(async () => {
+  window = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      sandbox: true,
+      partition: "router-ui-test-" + Date.now() + "-" + Math.random(),
+    },
+  });
+  window.webContents.session.webRequest.onBeforeRequest({ urls: ["https://cdnjs.cloudflare.com/*"] }, (_details, callback) => callback({ cancel: true }));
+  await window.loadURL(process.env.MECHA_TEST_UI_URL);
+  process.stdout.write("READY\\n");
+  const input = readline.createInterface({ input: process.stdin });
+  input.on("line", async (line) => {
+    try {
+      const request = JSON.parse(line);
+      const result = await window.webContents.executeJavaScript(request.script);
+      process.stdout.write(JSON.stringify({ ok: true, result }) + "\\n");
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ ok: false, error: error.message }) + "\\n");
+    }
+  });
+}).catch((error) => { process.stderr.write(error.stack + "\\n"); app.quit(); });`;
+  await writeFile(scriptPath, script);
+  const child = spawn(electronPath, ["--no-sandbox", scriptPath], {
+    env: { ...process.env, MECHA_TEST_UI_URL: url },
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
+  });
+  let output = "";
+  let settled = false;
+  const lines = [];
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+    let newline;
+    while ((newline = output.indexOf("\\n")) !== -1) {
+      lines.push(output.slice(0, newline));
+      output = output.slice(newline + 1);
+    }
+  });
+  const readLine = (timeoutMs = 5_000) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error("timed out waiting for Electron")); }, timeoutMs);
+    const check = () => {
+      if (lines.length > 0) { const line = lines.shift(); cleanup(); resolve(line); }
+      else if (child.exitCode !== null) { cleanup(); reject(new Error(`Electron exited with code ${child.exitCode}`)); }
+      else setTimeout(check, 10);
+    };
+    const cleanup = () => clearTimeout(timer);
+    check();
+  });
+  const cleanupTemporaryDirectory = () => rm(temporaryDirectory, { recursive: true, force: true });
+  try {
+    await readLine(15_000);
+  } catch (error) {
+    terminateElectron(child);
+    await cleanupTemporaryDirectory();
+    const unavailable = new Error(error.message);
+    unavailable.code = "ELECTRON_UNAVAILABLE";
+    throw unavailable;
+  }
+  settled = true;
+  return {
+    async evaluate(scriptToEvaluate) {
+      child.stdin.write(`${JSON.stringify({ script: scriptToEvaluate })}\\n`);
+      const response = JSON.parse(await readLine());
+      if (!response.ok) throw new Error(response.error);
+      return response.result;
+    },
+    async close() {
+      if (!settled) return;
+      settled = false;
+      child.stdin.end();
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { terminateElectron(child); resolve(); }, 1_000);
+        child.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+      await cleanupTemporaryDirectory();
+    },
+  };
+}
+
+function terminateElectron(child) {
+  try { process.kill(-child.pid); } catch { child.kill(); }
 }
 
 function waitForEvent(socket, predicate, timeoutMs = 1000) {

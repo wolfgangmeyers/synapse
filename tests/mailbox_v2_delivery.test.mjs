@@ -693,7 +693,9 @@ test("extension refreshes unchanged activity less often than the heartbeat tick"
   fixture.handlers.get("agent_settled")({}, fixture.context);
   intervals[0].callback();
 
-  assert.equal(intervals[0].cleared, true);
+  // Settled alone must not clear the heartbeat: polling may still need to
+  // repair native lifecycle events the parent never observed.
+  assert.equal(intervals[0].cleared, false);
   assert.deepEqual(fixture.activity, [
     { state: "active", subagentCount: 0 },
     { state: "active", subagentCount: 0 },
@@ -722,7 +724,9 @@ test("heartbeat recomputes a stale active parent as settled from Pi context", as
   now += 5_000;
   intervals[0].callback();
 
-  assert.equal(intervals[0].cleared, true);
+  // Settled alone must not clear the heartbeat even when Pi context confirms
+  // idle: polling may still need to repair missed native lifecycle events.
+  assert.equal(intervals[0].cleared, false);
   assert.deepEqual(fixture.activity, [
     { state: "active", subagentCount: 0 },
     { state: "settled", subagentCount: 0 },
@@ -795,7 +799,7 @@ test("extension excludes child sessions from activity reporting", async (t) => {
   assert.deepEqual(fixture.activity, []);
 });
 
-test("extension sends settled and stops active heartbeats when parent settles without subagents", async (t) => {
+test("extension sends settled and keeps active heartbeats when parent settles without subagents", async (t) => {
   const intervals = [];
   let now = 0;
   const fixture = settledNotificationFixture(t, {
@@ -816,7 +820,9 @@ test("extension sends settled and stops active heartbeats when parent settles wi
   now += 10_000;
   intervals[0].callback();
 
-  assert.equal(intervals[0].cleared, true);
+  // Settled alone must not clear the heartbeat: polling may still need to
+  // repair missed native lifecycle events even with no known children.
+  assert.equal(intervals[0].cleared, false);
   assert.deepEqual(fixture.activity, [
     { state: "active", subagentCount: 0 },
     { state: "settled", subagentCount: 0 },
@@ -879,7 +885,9 @@ test("extension keeps subagent count TTL fresh without sending every heartbeat t
   fixture.childEvents.get("subagents:completed")({ id: "child-one" });
   intervals[0].callback();
 
-  assert.equal(intervals[0].cleared, true);
+  // A terminal lifecycle event drops the child, but settled alone must not
+  // clear the heartbeat: polling may still need to repair other missed events.
+  assert.equal(intervals[0].cleared, false);
   assert.deepEqual(fixture.activity, [
     { state: "settled", subagentCount: 1 },
     { state: "settled", subagentCount: 1 },
@@ -906,7 +914,9 @@ test("extension keeps long-running native subagent counts until a terminal event
   intervals[0].callback();
   fixture.childEvents.get("subagents:completed")({ id: "child-one" });
 
-  assert.equal(intervals[0].cleared, true);
+  // A terminal lifecycle event drops the child, but settled alone must not
+  // clear the heartbeat: polling may still need to repair other missed events.
+  assert.equal(intervals[0].cleared, false);
   assert.deepEqual(fixture.activity, [
     { state: "settled", subagentCount: 1 },
     { state: "settled", subagentCount: 1 },
@@ -1148,6 +1158,278 @@ test("extension reconciles late-published native subagent service on heartbeat",
     ] },
     { state: "settled", subagentCount: 1, subagents: [{ id: "child-queued", type: "general-purpose", description: "Queued child" }] },
   ]);
+});
+
+function heartbeatIntervalFixture(t, { subagentsService, isIdle } = {}) {
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    subagentsService,
+    isIdle,
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+  return { fixture, intervals, advance(ms) { now += ms; }, get now() { return now; } };
+}
+
+test("parent-bound native service wins when a child session replaces the global service", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  delete globalThis[serviceSymbol];
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const parentService = {
+    listAgents: () => [{
+      id: "parent-child",
+      type: "general-purpose",
+      description: "Reported by the captured parent service",
+      status: "running",
+    }],
+  };
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t, { subagentsService: parentService });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  // A child session that loads after the parent replaces the process-global
+  // service handle with its own. The parent's activity must still reflect the
+  // parent-bound captured service, not the child's replacement.
+  globalThis[serviceSymbol] = {
+    listAgents: () => [{
+      id: "child-session-replacement",
+      type: "general-purpose",
+      description: "Reported by the child's global replacement",
+      status: "running",
+    }],
+  };
+
+  advance(5_000);
+  intervals[0].callback();
+
+  assert.deepEqual(fixture.activity.at(-1), {
+    state: "active",
+    subagentCount: 1,
+    subagents: [{ id: "parent-child", type: "general-purpose", description: "Reported by the captured parent service" }],
+  });
+});
+
+test("polling discovers a native subagent start missed by lifecycle events while the parent is settled", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  let serviceRecords = [];
+  globalThis[serviceSymbol] = { listAgents: () => serviceRecords };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  // No lifecycle event fired; the native manager started a child that the
+  // parent never observed. Polling while settled must repair that gap.
+  serviceRecords = [{
+    id: "missed-start-child",
+    type: "general-purpose",
+    description: "Started without a lifecycle event",
+    status: "running",
+  }];
+
+  advance(5_000);
+  intervals[0].callback();
+
+  assert.deepEqual(fixture.activity.at(-1), {
+    state: "settled",
+    subagentCount: 1,
+    subagents: [{ id: "missed-start-child", type: "general-purpose", description: "Started without a lifecycle event" }],
+  });
+});
+
+test("polling discovers a native subagent finish missed by lifecycle events while the parent is settled", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  let serviceRecords = [{
+    id: "missed-finish-child",
+    type: "general-purpose",
+    description: "Finished without a lifecycle event",
+    status: "running",
+  }];
+  globalThis[serviceSymbol] = { listAgents: () => serviceRecords };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
+
+  fixture.childEvents.get("subagents:started")({
+    id: "missed-finish-child",
+    type: "general-purpose",
+    description: "Finished without a lifecycle event",
+  });
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  fixture.handlers.get("agent_settled")({}, fixture.context);
+  // The native manager finished the child without emitting a terminal
+  // lifecycle event. Polling while settled must converge the count to zero.
+  serviceRecords = [{
+    id: "missed-finish-child",
+    type: "general-purpose",
+    description: "Finished without a lifecycle event",
+    status: "completed",
+  }];
+
+  advance(5_000);
+  intervals[0].callback();
+
+  assert.equal(fixture.activity.at(-1).state, "settled");
+  assert.equal(fixture.activity.at(-1).subagentCount, 0);
+});
+
+test("polling continues while the parent is active or waiting for native subagent results", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  let serviceRecords = [];
+  globalThis[serviceSymbol] = { listAgents: () => serviceRecords };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  // The parent is active and waiting on a native subagent result. Polling
+  // must keep running so a late-published service record is discovered.
+  advance(5_000);
+  intervals[0].callback();
+  assert.equal(intervals[0].cleared, false, "heartbeat stopped while the parent was still active");
+
+  serviceRecords = [{
+    id: "late-active-child",
+    type: "general-purpose",
+    description: "Published while the parent was active",
+    status: "running",
+  }];
+  advance(5_000);
+  intervals[0].callback();
+
+  assert.deepEqual(fixture.activity.at(-1), {
+    state: "active",
+    subagentCount: 1,
+    subagents: [{ id: "late-active-child", type: "general-purpose", description: "Published while the parent was active" }],
+  });
+  assert.equal(intervals[0].cleared, false);
+});
+
+test("terminal native statuses including steered stop contributing to the running count", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  let serviceRecords = [];
+  globalThis[serviceSymbol] = { listAgents: () => serviceRecords };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
+
+  fixture.childEvents.get("subagents:started")({
+    id: "steered-child",
+    type: "general-purpose",
+    description: "Steered away mid-run",
+  });
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  // The native manager reports the child as `steered`, a terminal status the
+  // parent never observed via a lifecycle event. Reconciliation must remove it
+  // from the running count just like completed/failed/error.
+  serviceRecords = [{
+    id: "steered-child",
+    type: "general-purpose",
+    description: "Steered away mid-run",
+    status: "steered",
+  }];
+
+  advance(5_000);
+  intervals[0].callback();
+
+  assert.equal(fixture.activity.at(-1).state, "active");
+  assert.equal(fixture.activity.at(-1).subagentCount, 0);
+});
+
+test("native service read failures do not stop polling and keep diagnostics bounded", async (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  let readCount = 0;
+  let failureCount = 0;
+  let elapsed = 0;
+  globalThis[serviceSymbol] = {
+    listAgents() {
+      readCount += 1;
+      if ([5_000, 10_000, 15_000, 55_000, 65_000].includes(elapsed)) {
+        failureCount += 1;
+        throw new Error(`service read failure ${readCount}`);
+      }
+      return [{
+        id: "recovered-child",
+        type: "general-purpose",
+        description: "Recovered after transient service failures",
+        status: "running",
+      }];
+    },
+  };
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  for (let tick = 0; tick < 3; tick += 1) {
+    elapsed += 5_000;
+    advance(5_000);
+    intervals[0].callback();
+  }
+  // The heartbeat must still be alive after repeated read failures so the
+  // next successful read can repair the activity state.
+  assert.equal(intervals[0].cleared, false, "heartbeat stopped after transient service read failures");
+  assert.equal(failureCount, 3);
+  assert.deepEqual(fixture.notifications, [["Native subagent service read failed; polling will retry.", "error"]]);
+
+  // A failure just before the 60-second diagnostic window must remain rate-limited.
+  elapsed += 40_000;
+  advance(40_000);
+  intervals[0].callback();
+  assert.equal(failureCount, 4);
+  assert.deepEqual(fixture.notifications, [["Native subagent service read failed; polling will retry.", "error"]]);
+
+  // Once the window has elapsed, the next failed read gets a new diagnostic.
+  elapsed += 10_000;
+  advance(10_000);
+  intervals[0].callback();
+  assert.equal(failureCount, 5);
+  assert.deepEqual(fixture.notifications, [
+    ["Native subagent service read failed; polling will retry.", "error"],
+    ["Native subagent service read failed; polling will retry.", "error"],
+  ]);
+
+  elapsed += 5_000;
+  advance(5_000);
+  intervals[0].callback();
+
+  assert.deepEqual(fixture.activity.at(-1), {
+    state: "active",
+    subagentCount: 1,
+    subagents: [{ id: "recovered-child", type: "general-purpose", description: "Recovered after transient service failures" }],
+  });
 });
 
 test("compaction pauses activity without dropping mailbox resume", async (t) => {
