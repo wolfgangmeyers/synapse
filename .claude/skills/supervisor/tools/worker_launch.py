@@ -2,7 +2,7 @@
 """Launch a new worker in a tmux window.
 
 Usage:
-  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--model MODEL] [--reasoning-effort low|medium|high|xhigh] [--notify-on-settled MAILBOX_RECIPIENT]
+  python worker_launch.py --window WINDOW --dir DIR [--resume SESSION_ID] [--skip-permissions] [--agent pi|codex|claude|cursor] [--model MODEL] [--cursor-model MODEL] [--reasoning-effort low|medium|high|xhigh] [--notify-on-settled MAILBOX_RECIPIENT]
 
 When --agent is omitted, the runtime comes from the machine-local worker runtime config and falls back to Pi.
 
@@ -34,7 +34,11 @@ TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, TOOLS_DIR)
 from _sidecar import SIDECAR_SCRIPT_PATH as CLAUDE_SIDECAR_SCRIPT, sidecar_argv
 from _tmux import AGENT_ID, ensure_session, new_window, send_text, send_enter, window_exists
-from worker_runtime_config import WorkerRuntimeConfigError, resolve_agent_runtime
+from worker_runtime_config import (
+    WorkerRuntimeConfigError,
+    load_cursor_model,
+    resolve_agent_runtime,
+)
 
 
 PI_PROVIDER = "openai-codex"
@@ -47,7 +51,8 @@ PI_MODEL = "gpt-5.5"
 # because that provider was never the one hosting the requested model. resolve_pi_provider()
 # below looks the model up here instead of assuming it.
 PI_MODELS_STORE_PATH = os.path.expanduser("~/.pi/agent/models-store.json")
-CURSOR_MODEL = "gpt-5.5"
+CURSOR_MODEL = "glm-5.2"
+CURSOR_MODEL_ENV = "MECHA_CURSOR_MODEL"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
@@ -99,6 +104,22 @@ def resolve_pi_router_url():
             f"{PI_ROUTER_URL_ENV} must be a loopback HTTP(S) base URL without a path"
         )
     return configured_url.rstrip("/")
+
+
+def resolve_cursor_model(cli_model, *, environment=None):
+    """Resolve Cursor's model without widening Pi's --model option."""
+    environment = os.environ if environment is None else environment
+    if cli_model is not None:
+        model = cli_model.strip()
+        if not model:
+            raise ValueError("--cursor-model must not be empty")
+        return model
+    if CURSOR_MODEL_ENV in environment:
+        model = environment[CURSOR_MODEL_ENV].strip()
+        if not model:
+            raise ValueError(f"{CURSOR_MODEL_ENV} must not be empty")
+        return model
+    return load_cursor_model(environment=environment) or CURSOR_MODEL
 
 
 def resolve_pi_provider(model, models_store_path=None):
@@ -536,6 +557,12 @@ def main():
         ),
     )
     parser.add_argument(
+        "--cursor-model",
+        default=None,
+        metavar="MODEL",
+        help=f"Cursor-only model override for this worker launch. Defaults to {CURSOR_MODEL}.",
+    )
+    parser.add_argument(
         "--reasoning-effort",
         choices=["low", "medium", "high", "xhigh"],
         default=None,
@@ -581,6 +608,13 @@ def main():
             sys.exit(1)
     pi_model = args.model or PI_MODEL
     pi_provider = resolve_pi_provider(args.model)
+    cursor_model = None
+    if args.agent == "cursor":
+        try:
+            cursor_model = resolve_cursor_model(args.cursor_model)
+        except ValueError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
     try:
         compaction_policy = validate_compaction_policy(args.compaction_policy)
     except ValueError as error:
@@ -674,7 +708,7 @@ def main():
 
         # TUI mode: interactive session; worker_launch.py does not provide a
         # Mailbox V2 delivery bridge for Cursor.
-        agent_parts = [cursor_bin, "--yolo", "--model", CURSOR_MODEL]
+        agent_parts = [cursor_bin, "--yolo", "--model", cursor_model]
         if args.resume:
             agent_parts.extend(["--resume", args.resume])
 

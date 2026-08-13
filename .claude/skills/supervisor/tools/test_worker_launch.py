@@ -290,15 +290,114 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertNotIn("claude_sidecar.mjs", commands[0])
 
-    def test_cursor_launch_uses_pinned_gpt_5_5_model(self):
+    def test_cursor_model_flag_overrides_environment_and_config(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "cursor", "cursor_model": "config-model"}), encoding="utf-8")
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"), \
+             patch.dict(os.environ, {
+                 "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+                 worker_launch.CURSOR_MODEL_ENV: "env-model",
+             }, clear=False):
+            commands, _ = self._run_main(
+                "cursor-worker", "--cursor-model", "flag-model", agent="cursor"
+            )
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--model") + 1], "flag-model")
+
+    def test_cursor_model_environment_overrides_config(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "cursor", "cursor_model": "config-model"}), encoding="utf-8")
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"), \
+             patch.dict(os.environ, {
+                 "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+                 worker_launch.CURSOR_MODEL_ENV: "env-model",
+             }, clear=False):
+            commands, _ = self._run_main("cursor-worker", agent="cursor")
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--model") + 1], "env-model")
+
+    def test_cursor_model_config_overrides_fallback(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "cursor", "cursor_model": "config-model"}), encoding="utf-8")
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"), \
+             patch.dict(os.environ, {"MECHA_WORKER_RUNTIME_CONFIG": str(config)}, clear=False):
+            commands, _ = self._run_main("cursor-worker", agent="cursor")
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--model") + 1], "config-model")
+
+    def test_cursor_model_falls_back_to_glm_5_2(self):
         with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"):
             commands, output = self._run_main("cursor-worker", agent="cursor")
 
         command = shlex.split(commands[0])
         self.assertTrue(any(part.endswith("/cursor-agent") for part in command), command)
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertEqual(command[command.index("--model") + 1], "glm-5.2")
         self.assertNotIn("--notify-on-settled", command)
         self.assertIn("Worker (cursor) launched", output)
+
+    def test_blank_cursor_model_flag_errors_before_launch(self):
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"), \
+             self.assertRaises(SystemExit) as raised:
+            self._run_main("cursor-worker", "--cursor-model", " ", agent="cursor")
+
+        self.assertEqual(raised.exception.code, 1)
+
+    def test_blank_cursor_model_environment_errors_before_launch(self):
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"), \
+             patch.dict(os.environ, {worker_launch.CURSOR_MODEL_ENV: " "}, clear=False), \
+             self.assertRaises(SystemExit) as raised:
+            self._run_main("cursor-worker", agent="cursor")
+
+        self.assertEqual(raised.exception.code, 1)
+
+    def test_blank_cursor_model_config_errors_before_launch(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "cursor", "cursor_model": " "}), encoding="utf-8")
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"), \
+             patch.dict(os.environ, {"MECHA_WORKER_RUNTIME_CONFIG": str(config)}, clear=False), \
+             self.assertRaises(SystemExit) as raised:
+            self._run_main("cursor-worker", agent="cursor")
+
+        self.assertEqual(raised.exception.code, 1)
+
+    def test_non_string_cursor_model_config_errors_before_launch(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "cursor", "cursor_model": 42}), encoding="utf-8")
+        with patch.object(worker_launch, "get_cursor_auth_token", return_value="token"), \
+             patch.dict(os.environ, {"MECHA_WORKER_RUNTIME_CONFIG": str(config)}, clear=False), \
+             self.assertRaises(SystemExit) as raised:
+            self._run_main("cursor-worker", agent="cursor")
+
+        self.assertEqual(raised.exception.code, 1)
+
+    def test_cursor_config_is_ignored_for_non_cursor_runtimes(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "claude", "cursor_model": 42}), encoding="utf-8")
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("claude-worker", agent=None)
+
+        self.assertIn("claude_sidecar.mjs", commands[0])
+
+    def test_cursor_model_override_does_not_widen_pi_model_flag(self):
+        argv = [
+            "worker_launch.py", "--window", "cursor-worker", "--dir", self.tmpdir.name,
+            "--agent", "cursor", "--model", "gpt-5.6",
+        ]
+        with patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("--model is only supported for Pi", stderr.getvalue())
+        window_exists.assert_not_called()
 
     def test_invalid_machine_default_runtime_fails_before_launch(self):
         config = self.tmp_path / "worker-runtime.json"
