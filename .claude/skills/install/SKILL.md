@@ -491,7 +491,7 @@ The monitor appends to `$HOME/.mecha-developer/priority-handoff-monitor.log` and
 
 ### 10. Set Up Other Crontab Jobs
 
-Add cron jobs for standing-order refresh and memory monitoring, and remove retired mailbox/reminder producers when present:
+Add the memory-monitor cron job and remove retired mailbox/standing-orders/reminder producers when present:
 
 ```bash
 TOOLS="$(pwd)/.claude/skills/supervisor/tools"
@@ -512,12 +512,12 @@ if crontab -l 2>/dev/null | grep -q "mailbox_cron.py"; then
   echo "removed legacy mailbox idle delivery cron job"
 fi
 
-# Standing-orders refresh — posts current supervisor standing orders via mailbox every 2 hours.
-if ! crontab -l 2>/dev/null | grep -q "standing_orders_cron.py"; then
-  (crontab -l 2>/dev/null; echo "0 */2 * * * /usr/bin/python3 $TOOLS/standing_orders_cron.py >> ~/.mecha-developer/standing-orders-cron.log 2>&1") | crontab -
-  echo "added: standing-orders refresh cron job (runs every 2 hours)"
-else
-  echo "skipped: standing-orders refresh cron job already exists"
+# Standing-orders cron refresh is retired. Mailbox V2 router-based delivery
+# owns supervisor inbox messages now, so the standing_orders_cron.py producer
+# is obsolete. Remove any leftover entry instead of installing one.
+if crontab -l 2>/dev/null | grep -q "standing_orders_cron.py"; then
+  crontab -l 2>/dev/null | grep -v "standing_orders_cron.py" | crontab -
+  echo "removed: retired standing-orders refresh cron job (Mailbox V2 router owns delivery)"
 fi
 
 # Memory monitor — runs every 5 minutes
@@ -585,7 +585,6 @@ fi
 ```
 
 The cron jobs:
-- **standing_orders_cron.py**: Runs every 2 hours. Reads current supervisor standing orders and posts them to the supervisor mailbox from the `standing-orders-cron` system sender.
 - **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
 - **Priority Handoff Monitor**: Runs every five minutes. It reads supervisor state and durable Mailbox router reminders, reports actionable terminal-priority and handoff faults, and bounds `~/.mecha-developer/priority-handoff-monitor.log` to 1 MiB. It does not create a reminder. `--remove-schedule` removes only its marked cron entry.
 - **Mailbox V2 router**: Persists and schedules durable reminders; no reminder cron job or reminder JSON file is used.
@@ -625,7 +624,7 @@ fi
 echo ""
 echo "=== Crontab ==="
 crontab -l 2>/dev/null | grep "mailbox_cron.py" && echo "WARN: retired mailbox cron job remains" || echo "no retired mailbox cron job"
-crontab -l 2>/dev/null | grep "standing_orders_cron.py" || echo "no standing-orders refresh cron job"
+crontab -l 2>/dev/null | grep "standing_orders_cron.py" && echo "WARN: retired standing-orders cron job remains" || echo "no retired standing-orders cron job (router owns delivery)"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
 crontab -l 2>/dev/null | grep "mecha-priority-handoff-monitor" || echo "no Priority Handoff Monitor cron job"
 crontab -l 2>/dev/null | grep "reminders/tools/reminder_cron.py" && echo "WARN: retired reminder cron job remains" || echo "Mailbox V2 router owns reminder scheduling"
