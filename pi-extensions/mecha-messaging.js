@@ -30,6 +30,8 @@ const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
 const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
 export const INLINE_TOOL_ALLOWANCE_TOOL_NAME = "mecha_request_inline_tool_allowance";
 const INLINE_ACTION_TOOL_NAMES = new Set(["bash", "edit", "write"]);
+const INLINE_TOOL_POOL_CAPACITY = 5;
+const INLINE_TOOL_REPLENISHMENT_INTERVAL_MS = 60_000;
 const INLINE_TOOL_BLOCK_REASON = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround.";
 
 const SMALL_CONTEXT_LEVELS = Object.freeze([
@@ -245,7 +247,14 @@ export function compactionNotificationMessage({ level, usage }) {
 
 function normalizeInlineToolName(toolName) {
   if (typeof toolName !== "string" || toolName.trim().length === 0) throw new TypeError("toolName must be a non-empty string");
-  return toolName.trim();
+  const trimmedToolName = toolName.trim();
+  const normalizedToolName = trimmedToolName.startsWith("functions.")
+    ? trimmedToolName.slice("functions.".length)
+    : trimmedToolName;
+  if (!INLINE_ACTION_TOOL_NAMES.has(normalizedToolName)) {
+    throw new TypeError(`unsupported inline tool name: ${trimmedToolName}; expected bash, edit, or write`);
+  }
+  return normalizedToolName;
 }
 
 function validateInlineAllowanceCount(usageCount) {
@@ -258,26 +267,86 @@ export function inlineToolBlockReason() {
   return INLINE_TOOL_BLOCK_REASON;
 }
 
-export function createInlineToolPolicy() {
+export function createInlineToolPolicy({ now = Date.now } = {}) {
+  if (typeof now !== "function") throw new TypeError("now must be a function");
+
   const credits = new Map();
+  let poolRemainingMs = INLINE_TOOL_POOL_CAPACITY * INLINE_TOOL_REPLENISHMENT_INTERVAL_MS;
+  let poolUpdatedAt = now();
+
+  function replenishPool() {
+    const currentTime = now();
+    const elapsedMs = Math.max(0, currentTime - poolUpdatedAt);
+    poolRemainingMs = Math.min(
+      INLINE_TOOL_POOL_CAPACITY * INLINE_TOOL_REPLENISHMENT_INTERVAL_MS,
+      poolRemainingMs + elapsedMs,
+    );
+    poolUpdatedAt = currentTime;
+  }
+
+  function allowanceDetails({ toolName, usageCount, grantedCount, remaining, availableWholeCredits, remainingPool }) {
+    return {
+      toolName,
+      usageCount,
+      grantedCount,
+      remaining,
+      availableWholeCredits,
+      remainingPool,
+    };
+  }
+
   return {
     reset() {
       credits.clear();
+      poolRemainingMs = INLINE_TOOL_POOL_CAPACITY * INLINE_TOOL_REPLENISHMENT_INTERVAL_MS;
+      poolUpdatedAt = now();
     },
     grant(toolName, usageCount) {
       const normalizedToolName = normalizeInlineToolName(toolName);
       validateInlineAllowanceCount(usageCount);
-      const remaining = (credits.get(normalizedToolName) ?? 0) + usageCount;
+      replenishPool();
+      const availableWholeCredits = Math.floor(poolRemainingMs / INLINE_TOOL_REPLENISHMENT_INTERVAL_MS);
+      const remainingPool = poolRemainingMs / INLINE_TOOL_REPLENISHMENT_INTERVAL_MS;
+      if (availableWholeCredits < usageCount) {
+        const exhaustedText = availableWholeCredits === 0 && poolRemainingMs === 0 ? " The pool is exhausted." : "";
+        const error = new Error(`Insufficient inline tool credits: requested ${usageCount} credit(s), but only ${availableWholeCredits} whole credit(s) are available (pool currently holds ${remainingPool} credit(s)).${exhaustedText} No credits were granted. Credits replenish at 1 credit per minute up to a maximum of 5 credits.`);
+        error.details = allowanceDetails({
+          toolName: normalizedToolName,
+          usageCount,
+          grantedCount: 0,
+          remaining: credits.get(normalizedToolName) ?? 0,
+          availableWholeCredits,
+          remainingPool,
+        });
+        throw error;
+      }
+
+      const grantedCount = usageCount;
+      poolRemainingMs -= grantedCount * INLINE_TOOL_REPLENISHMENT_INTERVAL_MS;
+      const remaining = (credits.get(normalizedToolName) ?? 0) + grantedCount;
       credits.set(normalizedToolName, remaining);
-      return { toolName: normalizedToolName, usageCount, remaining };
+      return allowanceDetails({
+        toolName: normalizedToolName,
+        usageCount,
+        grantedCount,
+        remaining,
+        availableWholeCredits,
+        remainingPool: poolRemainingMs / INLINE_TOOL_REPLENISHMENT_INTERVAL_MS,
+      });
     },
     evaluate(toolName) {
-      if (!INLINE_ACTION_TOOL_NAMES.has(toolName)) return undefined;
-      // Credits are per-tool and temporary: matching top-level calls spend them, exhausted entries are removed, and agent_start resets the state.
-      const remaining = credits.get(toolName) ?? 0;
+      let normalizedToolName;
+      try {
+        normalizedToolName = normalizeInlineToolName(toolName);
+      } catch {
+        // Tools outside the inline write allowance are handled by their own policies.
+        return undefined;
+      }
+      // Credits are per-tool and temporary: matching top-level calls spend them, and exhausted entries are removed. The parent session resets this state at session_start.
+      const remaining = credits.get(normalizedToolName) ?? 0;
       if (remaining > 0) {
-        if (remaining === 1) credits.delete(toolName);
-        else credits.set(toolName, remaining - 1);
+        if (remaining === 1) credits.delete(normalizedToolName);
+        else credits.set(normalizedToolName, remaining - 1);
         return undefined;
       }
       return { block: true, reason: inlineToolBlockReason() };
@@ -1401,7 +1470,7 @@ export function createMechaMessagingExtension(pi, {
   const children = childSessionIds();
   const settledNotifications = createSettledScheduler();
   const childReplyClients = new Map();
-  const inlineToolPolicy = createInlineToolPolicy();
+  const inlineToolPolicy = createInlineToolPolicy({ now: nowImpl });
 
   pi.registerTool({
     name: "mecha_parent_message",
@@ -1437,7 +1506,7 @@ export function createMechaMessagingExtension(pi, {
       additionalProperties: false,
       required: ["toolName", "usageCount"],
       properties: {
-        toolName: { type: "string", minLength: 1, maxLength: 64, description: "Exact tool name to allow temporarily." },
+        toolName: { type: "string", minLength: 1, maxLength: 64, description: "Canonical tool name (bash, edit, or write), or its functions.* alias." },
         usageCount: { type: "integer", minimum: 1, maximum: 5, description: "Number of temporary uses to grant, from 1 through 5." },
       },
     },
@@ -1448,10 +1517,10 @@ export function createMechaMessagingExtension(pi, {
           return { content: [{ type: "text", text: "Native subagents are exempt from the inline tool guard; no parent allowance was changed." }] };
         }
         const grant = inlineToolPolicy.grant(input?.toolName, input?.usageCount);
-        const text = `Granted ${grant.usageCount} temporary inline use(s) for ${grant.toolName}. This allowance is an exception to the rule; subagents remain mandatory by default.`;
+        const text = `Granted ${grant.grantedCount} temporary inline use(s) for ${grant.toolName}. This allowance is an exception to the rule; subagents remain mandatory by default.`;
         return { content: [{ type: "text", text }], details: grant };
       } catch (error) {
-        return { content: [{ type: "text", text: error.message }], details: {}, isError: true };
+        return { content: [{ type: "text", text: error.message }], details: error.details ?? {}, isError: true };
       }
     },
   });
@@ -1694,7 +1763,6 @@ export function createMechaMessagingExtension(pi, {
   pi.on("message_start", async (_event, context) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_start", (_event, context) => {
     if (children.has(context.sessionManager.getSessionId())) return;
-    inlineToolPolicy.reset();
     startActivityHeartbeat(context);
     if (settledNotificationEnabled && settledNotificationRecipient !== undefined) {
       settledNotificationPending = true;
@@ -1746,6 +1814,8 @@ export function createMechaMessagingExtension(pi, {
       }
       return;
     }
+    // Keep allowance state across agent runs; a parent session owns one pool for its lifetime.
+    inlineToolPolicy.reset();
     try {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
