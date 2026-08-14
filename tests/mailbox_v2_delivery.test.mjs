@@ -361,22 +361,21 @@ async function enableLifecycleSocket(socket, registration, { afterVersion } = {}
   return snapshot;
 }
 
-test("router exposes lifecycle status records through existing agents path", async (t) => {
+test("router preserves lifecycle labels and status through the existing agents path", async (t) => {
   const { routerUrl } = await lifecycleRouter(t);
   const producer = await connectLifecycleSocket(t, routerUrl, { agentId: "status-parent", instanceId: "status-instance" });
-  const pong = lifecycleRouterFrame(producer.socket, "pong");
-  producer.socket.send(JSON.stringify({
-    version: "v1", frame_id: "status-activity", type: "activity",
-    agent_id: "status-parent", instance_id: "status-instance", lease_id: producer.registration.lease_id,
-    activity_state: "active", subagent_count: 1,
-    subagents: [{ id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" }],
-  }));
-  producer.socket.send(JSON.stringify({ version: "v1", frame_id: "status-barrier", type: "ping" }));
-  await pong;
+  await enableLifecycleSocket(producer.socket, producer.registration);
+  const acknowledged = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  producer.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "soak-sleeper", agentId: "status-parent", instanceId: "status-instance",
+    leaseId: producer.registration.lease_id, sequence: 1, eventId: "soak-sleeper",
+    children: [{ id: "soak-child", type: "general-purpose", description: "Soak sleeper 1 2m", status: "running" }],
+  })));
+  assert.equal((await acknowledged).disposition, "applied");
 
   const agents = await (await fetch(routerUrl.replace("ws://", "http://"))).json();
   assert.deepEqual(agents.agents.find((agent) => agent.agent_id === "status-parent").subagents, [
-    { id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" },
+    { id: "soak-child", type: "general-purpose", description: "Soak sleeper 1 2m", status: "running" },
   ]);
 });
 
@@ -1348,7 +1347,7 @@ test("extension reports running native subagent counts in activity", async (t) =
   ]);
 });
 
-test("extension produces privacy-safe lifecycle events, snapshots, and terminal-first tombstones", async (t) => {
+test("extension preserves native lifecycle labels and status in lifecycle events and snapshots", async (t) => {
   const intervals = [];
   let now = 0;
   const fixture = settledNotificationFixture(t, {
@@ -1365,23 +1364,27 @@ test("extension produces privacy-safe lifecycle events, snapshots, and terminal-
   fixture.childEvents.get("subagents:started")({
     id: "queued-child",
     type: "general-purpose",
-    description: "Read this private patient note before reporting back.",
+    description: "Soak sleeper 1 2m",
+    status: "queued",
   });
-  fixture.childEvents.get("subagents:completed")({ id: "terminal-first-child" });
+  fixture.childEvents.get("subagents:completed")({
+    id: "terminal-first-child",
+    description: "Soak sleeper 2 2.5m",
+    status: "completed",
+  });
   now += 5_000;
   intervals[0].callback();
 
   const started = fixture.lifecycle.find((entry) => entry.type === "event" && entry.lifecycleEvent === "started");
   const terminal = fixture.lifecycle.find((entry) => entry.type === "event" && entry.lifecycleEvent === "terminal");
-  assert.deepEqual(started.subagent, { id: "queued-child", type: "general-purpose", description: "Native subagent" });
-  assert.deepEqual(terminal.subagent, { id: "terminal-first-child", description: "Native subagent" });
+  assert.deepEqual(started.subagent, { id: "queued-child", type: "general-purpose", description: "Soak sleeper 1 2m", status: "queued" });
+  assert.deepEqual(terminal.subagent, { id: "terminal-first-child", description: "Soak sleeper 2 2.5m", status: "completed" });
   assert.equal(terminal.terminalReason, "completed");
   assert.ok(fixture.lifecycle.filter((entry) => entry.type === "snapshot").length >= 2);
-  assert.ok(fixture.lifecycle.every((entry) => JSON.stringify(entry).includes("private patient note") === false));
   assert.equal(fixture.activity.at(-1).subagentCount, 1, "queued native child must remain visible as running");
 });
 
-test("extension publishes every native terminal classification as a privacy-safe lifecycle tombstone", async (t) => {
+test("extension preserves labels for every native terminal lifecycle classification", async (t) => {
   const fixture = settledNotificationFixture(t);
   const terminals = [
     ["subagents:completed", "completed"], ["subagents:failed", "failed"],
@@ -1392,15 +1395,14 @@ test("extension publishes every native terminal classification as a privacy-safe
 
   for (const [index, [eventName, terminalReason]] of terminals.entries()) {
     const id = `terminal-${index}`;
-    fixture.childEvents.get("subagents:started")({ id, description: "Prompt text must never become a lifecycle label" });
-    fixture.childEvents.get(eventName)({ id, description: "Native failure details must never become a lifecycle label" });
+    fixture.childEvents.get("subagents:started")({ id, description: `Soak sleeper ${index}`, status: "running" });
+    fixture.childEvents.get(eventName)({ id, description: `Soak sleeper ${index}`, status: terminalReason });
     const terminal = fixture.lifecycle.filter((entry) => entry.type === "event" && entry.lifecycleEvent === "terminal").at(-1);
-    assert.deepEqual(terminal.subagent, { id, description: "Native subagent" });
+    assert.deepEqual(terminal.subagent, { id, description: `Soak sleeper ${index}`, status: "running" });
     assert.equal(terminal.terminalReason, terminalReason);
   }
   assert.equal(fixture.activity.at(-1).subagentCount, 0);
-  assert.equal(JSON.stringify(fixture.lifecycle).includes("Prompt text"), false);
-  assert.equal(JSON.stringify(fixture.lifecycle).includes("failure details"), false);
+  assert.equal(JSON.stringify(fixture.lifecycle).includes("Soak sleeper 0"), true);
 });
 
 test("extension ignores no-op native subagent lifecycle events", async (t) => {
@@ -2915,10 +2917,11 @@ test("lifecycle client negotiates capability, dual-sends legacy activity, and re
   client.sendActivity("active", { subagentCount: 1, subagents: [{ id: "child-1", description: "Legacy visible label" }] });
   const eventId = client.sendLifecycleEvent({
     lifecycleEvent: "started",
-    subagent: { id: "child-1", type: "general-purpose", description: "Native subagent" },
-    snapshot: [{ id: "child-1", type: "general-purpose", description: "Native subagent" }],
+    subagent: { id: "child-1", type: "general-purpose", description: "Soak sleeper 1 2m", status: "running" },
+    snapshot: [{ id: "child-1", type: "general-purpose", description: "Soak sleeper 1 2m", status: "running" }],
   });
   const lifecycle = socket.sent.find((frame) => frame.event_id === eventId);
+  assert.deepEqual(lifecycle.subagent, { id: "child-1", type: "general-purpose", description: "Soak sleeper 1 2m", status: "running" });
   assert.deepEqual({
     type: lifecycle.type,
     agent: lifecycle.agent_id,

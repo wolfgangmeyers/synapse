@@ -24,6 +24,14 @@ const PRE_017_MIGRATIONS = [
   "015_conversation_source.sql", "016_delivery_batches.sql",
 ].map((file) => ({ id: file.slice(0, -4), sql: readFileSync(new URL(`../harness/migrations/${file}`, import.meta.url), "utf8") }));
 
+const PRE_018_MIGRATIONS = [
+  ...PRE_017_MIGRATIONS,
+  {
+    id: "017_subagent_lifecycle",
+    sql: readFileSync(new URL("../harness/migrations/017_subagent_lifecycle.sql", import.meta.url), "utf8"),
+  },
+];
+
 async function temporaryDatabase(t) {
   const directory = await mkdtemp(join(tmpdir(), "mecha-lifecycle-rollout-"));
   const databasePath = join(directory, "router.sqlite");
@@ -93,11 +101,11 @@ async function startRouterProcess(t, command, args, { cwd, env }) {
 }
 
 async function loadOldRouter(t) {
-  // Run the router source at HEAD, before 017 was added, against the migrated
-  // database. Keeping the temporary module beside harness/router.js preserves
-  // its real relative imports without changing the checked-out source.
+  // The durable lifecycle schema shipped in cf67888. Load its parent router
+  // source against the migrated database to keep the old-client check stable
+  // after later commits advance HEAD.
   const temporaryRouter = join(process.cwd(), "harness", `.old-router-${randomUUID()}.mjs`);
-  await writeFile(temporaryRouter, execFileSync("git", ["show", "HEAD:harness/router.js"], { encoding: "utf8" }));
+  await writeFile(temporaryRouter, execFileSync("git", ["show", "cf67888^:harness/router.js"], { encoding: "utf8" }));
   t.after(() => rm(temporaryRouter, { force: true }));
   return import(`${pathToFileURL(temporaryRouter).href}?test=${randomUUID()}`);
 }
@@ -161,6 +169,59 @@ test("fails v2 closed when migration 017 is missing", async (t) => {
     agent_id: "legacy-parent", instance_id: "legacy-instance", lease_id: registration.lease_id,
   }));
   assert.equal((await error).code, "migration_017_required");
+});
+
+test("forward migration backfills lifecycle status without changing existing labels", async (t) => {
+  const { databasePath } = await temporaryDatabase(t);
+  const oldRepository = openMessageRepository({ databasePath, migrations: PRE_018_MIGRATIONS });
+  oldRepository.close();
+
+  const oldDatabase = new DatabaseSync(databasePath);
+  const timestamp = "2030-01-01T00:00:00.000Z";
+  const description = "Soak sleeper 1 2m";
+  oldDatabase.prepare(`
+    INSERT INTO subagent_lifecycle_state (
+      parent_agent_id, subagent_id, instance_id, parent_session_id, producer_epoch,
+      type, description, state, started_at, updated_at, terminal_at, terminal_reason, router_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, NULL, NULL, 1)
+  `).run("existing-parent", "soak-sleeper-1", "existing-instance", "existing-session", "11111111-1111-4111-8111-111111111111", "general-purpose", description, timestamp, timestamp);
+  oldDatabase.prepare(`
+    INSERT INTO subagent_lifecycle_events (
+      parent_agent_id, instance_id, parent_session_id, producer_epoch, subagent_id,
+      event_id, client_sequence, event_kind, state, type, description, terminal_reason, payload_hash, received_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 1000, 'snapshot', 'running', ?, ?, NULL, ?, ?)
+  `).run("existing-parent", "existing-instance", "existing-session", "11111111-1111-4111-8111-111111111111", "soak-sleeper-1", "existing-event", "general-purpose", description, "existing-hash", timestamp);
+  oldDatabase.close();
+
+  const repository = openMessageRepository({ databasePath });
+  assert.ok(repository.migrationIds().includes("018_subagent_lifecycle_status"));
+  const replay = repository.replaySubagentLifecycle({ afterVersion: 0 });
+  const snapshot = repository.subagentLifecycleSnapshot({ parentAgentId: "existing-parent" });
+  assert.deepEqual(replay.updates, [{
+    router_version: 1,
+    parent_agent_id: "existing-parent",
+    subagent_id: "soak-sleeper-1",
+    state: "running",
+    type: "general-purpose",
+    description,
+    status: "running",
+  }]);
+  assert.deepEqual(snapshot.agents[0].subagents, [{
+    id: "soak-sleeper-1", type: "general-purpose", description, status: "running",
+  }]);
+  repository.close();
+
+  const migrated = new DatabaseSync(databasePath);
+  assert.equal(migrated.prepare(`
+    SELECT status FROM subagent_lifecycle_state WHERE parent_agent_id = 'existing-parent'
+  `).get().status, "running");
+  assert.equal(migrated.prepare(`
+    SELECT status FROM subagent_lifecycle_events WHERE parent_agent_id = 'existing-parent'
+  `).get().status, "running");
+  assert.throws(() => migrated.prepare(`
+    UPDATE subagent_lifecycle_state SET status = 'invalid' WHERE parent_agent_id = 'existing-parent'
+  `).run(), /CHECK constraint failed/);
+  migrated.close();
 });
 
 async function writePre017RouterEntrypoint(directory, port, databasePath) {

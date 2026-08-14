@@ -1119,13 +1119,22 @@ export function createMechaMessagingExtension(pi, {
       .map(({ id, type, description, status }) => ({ id, ...(type !== undefined ? { type } : {}), description, ...(status !== undefined ? { status } : {}) }));
   }
 
-  // Native descriptions may contain task text. Lifecycle replication only needs a stable label,
-  // while legacy activity keeps its existing local UI payload during the rollout.
   function lifecycleSubagentSummary(metadata) {
     const id = typeof metadata?.id === "string" ? metadata.id.trim().slice(0, 128) : "";
     if (id.length === 0) return undefined;
     const type = typeof metadata?.type === "string" ? metadata.type.trim().slice(0, 64) : "";
-    return { id, ...(type.length > 0 ? { type } : {}), description: "Native subagent" };
+    const description = typeof metadata?.description === "string" ? metadata.description.trim().slice(0, 512) : "";
+    const status = ["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(metadata?.status)
+      ? metadata.status
+      : undefined;
+    return {
+      id,
+      ...(type.length > 0 ? { type } : {}),
+      // Native callers supply this short label specifically for observers. Keep a
+      // stable fallback only for older event shapes that did not carry one.
+      description: description.length > 0 ? description : "Native subagent",
+      ...(status === undefined ? {} : { status }),
+    };
   }
 
   function lifecycleSubagentSummaries() {
