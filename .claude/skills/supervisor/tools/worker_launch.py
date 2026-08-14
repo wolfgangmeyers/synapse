@@ -37,6 +37,7 @@ from _tmux import AGENT_ID, ensure_session, new_window, send_text, send_enter, w
 from worker_runtime_config import (
     WorkerRuntimeConfigError,
     load_cursor_model,
+    load_pi_model,
     resolve_agent_runtime,
 )
 
@@ -606,8 +607,16 @@ def main():
         if not args.model:
             print("Error: --model must not be empty", file=sys.stderr)
             sys.exit(1)
-    pi_model = args.model or PI_MODEL
-    pi_provider = resolve_pi_provider(args.model)
+    pi_model = None
+    pi_provider = None
+    if args.agent == "pi":
+        try:
+            configured_pi_model = load_pi_model()
+        except WorkerRuntimeConfigError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
+        pi_model = args.model or configured_pi_model or PI_MODEL
+        pi_provider = resolve_pi_provider(pi_model)
     cursor_model = None
     if args.agent == "cursor":
         try:

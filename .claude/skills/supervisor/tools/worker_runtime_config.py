@@ -62,12 +62,20 @@ def _load_config(
     return payload, config_path
 
 
-def _validate_cursor_model(value: object, *, source: str) -> str:
+def _validate_model(value: object, *, source: str, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise WorkerRuntimeConfigError(
-            f"{source} cursor_model must be a non-empty string"
+            f"{source} {key} must be a non-empty string"
         )
     return value.strip()
+
+
+def _validate_cursor_model(value: object, *, source: str) -> str:
+    return _validate_model(value, source=source, key="cursor_model")
+
+
+def _validate_pi_model(value: object, *, source: str) -> str:
+    return _validate_model(value, source=source, key="pi_model")
 
 
 def load_default_agent_runtime(
@@ -101,6 +109,18 @@ def load_cursor_model(
     if payload is None or "cursor_model" not in payload:
         return None
     return _validate_cursor_model(payload["cursor_model"], source=config_path)
+
+
+def load_pi_model(
+    *,
+    environment: Mapping[str, str] | None = None,
+    path: str | None = None,
+) -> str | None:
+    """Return the optional machine-local Pi model, or None when it is not configured."""
+    payload, config_path = _load_config(environment=environment, path=path)
+    if payload is None or "pi_model" not in payload:
+        return None
+    return _validate_pi_model(payload["pi_model"], source=config_path)
 
 
 def resolve_agent_runtime(

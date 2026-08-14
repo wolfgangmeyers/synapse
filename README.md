@@ -18,10 +18,10 @@ This repo is the home for non-review developer workflow skills.
 `worker_launch.py` uses a machine-local default runtime from `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) with this shape:
 
 ```json
-{"default_agent":"pi"}
+{"default_agent":"pi", "pi_model":"gpt-5.6-terra"}
 ```
 
-Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Ordinary managed Pi workers and subagents use provider `openai-codex` and model `gpt-5.6-terra`; PR-review workers and their subagents use `gpt-5.6-luna`. Another model requires an explicit task requirement. Claude workers are launched with a Mailbox V2 sidecar that registers as the normal worker agent ID and pastes sanitized mailbox messages into the Claude tmux pane; phase 1 does not scrape Claude replies, so Claude workers reply with `mailbox_send.py`.
+Allowed `default_agent` values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Ordinary managed Pi workers and subagents use provider `openai-codex` and model `gpt-5.6-terra` unless this machine sets optional `pi_model`; explicit `--model` wins, then `pi_model`, then `gpt-5.6-terra`. PR-review workers and their subagents use `gpt-5.6-luna`. Another model requires an explicit task requirement; this is not generalized provider config. Claude workers are launched with a Mailbox V2 sidecar that registers as the normal worker agent ID and pastes sanitized mailbox messages into the Claude tmux pane; phase 1 does not scrape Claude replies, so Claude workers reply with `mailbox_send.py`.
 
 ## Pi context thresholds and self-compaction
 

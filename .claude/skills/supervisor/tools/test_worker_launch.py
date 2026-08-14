@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 
 import worker_capture
 import worker_launch
+import worker_runtime_config
 
 
 class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
@@ -72,6 +73,107 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
         self.assertIn(f"--session {session_id}", output)
+
+    def test_pi_model_config_updates_command_and_exported_model_key(self):
+        extension = self._pi_mailbox_extension()
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "pi", "pi_model": "gpt-5.6-sol"}), encoding="utf-8")
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", agent=None)
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
+        self.assertIn(
+            f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-sol",
+            commands[0],
+        )
+
+    def test_explicit_pi_model_overrides_config_model(self):
+        extension = self._pi_mailbox_extension()
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "pi", "pi_model": "config-model"}), encoding="utf-8")
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", "--model", "flag-model", agent="pi")
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--model") + 1], "flag-model")
+        self.assertIn(
+            f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/flag-model",
+            commands[0],
+        )
+
+    def test_pi_model_config_is_catalog_mapped_for_provider(self):
+        extension = self._pi_mailbox_extension()
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "pi", "pi_model": "zai.glm-5"}), encoding="utf-8")
+        store = self._write_models_store({
+            "openai-codex": ["gpt-5.5"],
+            "amazon-bedrock": ["zai.glm-5"],
+        })
+        with patch.object(worker_launch, "PI_MODELS_STORE_PATH", str(store)), \
+             patch.dict(os.environ, {
+                 "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+                 worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+                 worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+             }, clear=False):
+            commands, _ = self._run_main("pi-worker", agent=None)
+
+        command = shlex.split(commands[0])
+        self.assertEqual(command[command.index("--provider") + 1], "amazon-bedrock")
+        self.assertEqual(command[command.index("--model") + 1], "zai.glm-5")
+        self.assertIn(
+            f"export {worker_launch.PI_MODEL_KEY_ENV}=amazon-bedrock/zai.glm-5",
+            commands[0],
+        )
+
+    def test_blank_pi_model_config_errors_before_launch(self):
+        extension = self._pi_mailbox_extension()
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "pi", "pi_model": " "}), encoding="utf-8")
+        argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name]
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=True), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("pi_model must be a non-empty string", stderr.getvalue())
+        window_exists.assert_not_called()
+
+    def test_non_string_pi_model_config_errors_before_launch(self):
+        extension = self._pi_mailbox_extension()
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "pi", "pi_model": 42}), encoding="utf-8")
+        argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name]
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=True), \
+             patch.object(worker_launch.sys, "argv", argv), \
+             patch.object(worker_launch, "window_exists") as window_exists, \
+             contextlib.redirect_stderr(stderr := io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            worker_launch.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("pi_model must be a non-empty string", stderr.getvalue())
+        window_exists.assert_not_called()
 
     def test_explicit_pi_model_updates_command_and_exported_model_key(self):
         extension = self._pi_mailbox_extension()
@@ -290,6 +392,30 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
         self.assertNotIn("claude_sidecar.mjs", commands[0])
 
+    def test_load_pi_model_returns_configured_model(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "pi", "pi_model": " gpt-5.6-sol "}), encoding="utf-8")
+
+        self.assertEqual(
+            worker_runtime_config.load_pi_model(path=str(config)),
+            "gpt-5.6-sol",
+        )
+
+    def test_load_pi_model_returns_none_when_absent(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "pi"}), encoding="utf-8")
+
+        self.assertIsNone(worker_runtime_config.load_pi_model(path=str(config)))
+
+    def test_load_pi_model_rejects_blank_and_non_string_values(self):
+        for value in (" ", 42):
+            with self.subTest(value=value):
+                config = self.tmp_path / f"worker-runtime-{type(value).__name__}.json"
+                config.write_text(json.dumps({"default_agent": "pi", "pi_model": value}), encoding="utf-8")
+
+                with self.assertRaises(worker_runtime_config.WorkerRuntimeConfigError):
+                    worker_runtime_config.load_pi_model(path=str(config))
+
     def test_cursor_model_flag_overrides_environment_and_config(self):
         config = self.tmp_path / "worker-runtime.json"
         config.write_text(json.dumps({"default_agent": "cursor", "cursor_model": "config-model"}), encoding="utf-8")
@@ -383,6 +509,18 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             commands, _ = self._run_main("claude-worker", agent=None)
 
         self.assertIn("claude_sidecar.mjs", commands[0])
+
+    def test_pi_model_config_is_ignored_for_non_pi_runtimes(self):
+        config = self.tmp_path / "worker-runtime.json"
+        config.write_text(json.dumps({"default_agent": "claude", "pi_model": 42}), encoding="utf-8")
+        with patch.dict(os.environ, {
+            "MECHA_WORKER_RUNTIME_CONFIG": str(config),
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("claude-worker", agent=None)
+
+        self.assertIn("claude_sidecar.mjs", commands[0])
+        self.assertNotIn("--model", commands[0])
 
     def test_cursor_model_override_does_not_widen_pi_model_flag(self):
         argv = [
