@@ -1022,6 +1022,7 @@ function settledNotificationFixture(t, {
   clearIntervalImpl,
   nowImpl,
   subagentsService,
+  getSubagentsService,
   isIdle,
   immediateScheduler = true,
 } = {}) {
@@ -1069,12 +1070,19 @@ function settledNotificationFixture(t, {
   };
   const extensionOptions = {
     resolveCurrentAgentId: () => "worker",
-    createClient: () => client,
+    createClient: (options) => {
+      client.onEnvelope = options.onEnvelope;
+      return client;
+    },
     setTimeoutImpl,
     setIntervalImpl,
     clearIntervalImpl,
     nowImpl,
-    subagentsService,
+    getSubagentsService: getSubagentsService ?? ((ownerSessionId) => (
+      ownerSessionId === "parent-session"
+        ? subagentsService ?? globalThis[Symbol.for("@gotgenes/pi-subagents:service")]
+        : undefined
+    )),
   };
   if (createSettledScheduler !== undefined) extensionOptions.createSettledScheduler = createSettledScheduler;
   else if (immediateScheduler) extensionOptions.createSettledScheduler = immediateSettledScheduler;
@@ -1721,11 +1729,12 @@ test("extension reconciles late-published native subagent service on heartbeat",
   ]);
 });
 
-function heartbeatIntervalFixture(t, { subagentsService, isIdle } = {}) {
+function heartbeatIntervalFixture(t, { subagentsService, getSubagentsService, isIdle } = {}) {
   const intervals = [];
   let now = 0;
   const fixture = settledNotificationFixture(t, {
     subagentsService,
+    getSubagentsService,
     isIdle,
     nowImpl: () => now,
     setIntervalImpl: (callback, delay) => {
@@ -1781,39 +1790,57 @@ test("parent-bound native service wins when a child session replaces the global 
   });
 });
 
-test("late parent lifecycle binding survives a child global service replacement", (t) => {
-  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
-  const previousService = globalThis[serviceSymbol];
-  delete globalThis[serviceSymbol];
-  t.after(() => {
-    if (previousService === undefined) delete globalThis[serviceSymbol];
-    else globalThis[serviceSymbol] = previousService;
-  });
-
+test("owner-scoped lookup keeps the parent service when a child is also registered", (t) => {
   const parentService = {
     getLifecycleSnapshots: () => [{
       id: "parent-child", type: "general-purpose", description: "Parent service child", status: "running",
     }],
-    subscribeLifecycle: () => () => {},
   };
-  const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
-  // The extension started before pi-subagents published. Its first parent turn sees the service.
-  globalThis[serviceSymbol] = parentService;
-  fixture.handlers.get("agent_start")({}, fixture.context);
-  // A native child session publishes its own empty service under the shared symbol.
-  globalThis[serviceSymbol] = {
-    getLifecycleSnapshots: () => [],
-    subscribeLifecycle: () => () => {},
-  };
+  const childService = { getLifecycleSnapshots: () => [] };
+  const lookups = [];
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t, {
+    getSubagentsService(ownerSessionId) {
+      lookups.push(ownerSessionId);
+      return ownerSessionId === "parent-session" ? parentService : childService;
+    },
+  });
 
+  fixture.handlers.get("agent_start")({}, fixture.context);
   advance(5_000);
   intervals[0].callback();
 
+  assert.ok(lookups.length >= 2);
+  assert.deepEqual([...new Set(lookups)], ["parent-session"]);
   assert.deepEqual(fixture.activity.at(-1), {
     state: "active",
     subagentCount: 1,
     subagents: [{ id: "parent-child", type: "general-purpose", description: "Parent service child", status: "running" }],
   });
+});
+
+test("Sentinel delivery looks up the native service by its parent session ID", async (t) => {
+  const calls = [];
+  const parentService = { spawn: (...args) => { calls.push(args); return "parent-child"; } };
+  const childService = { spawn: () => "child-service" };
+  const lookups = [];
+  const fixture = settledNotificationFixture(t, {
+    getSubagentsService(ownerSessionId) {
+      lookups.push(ownerSessionId);
+      return ownerSessionId === "parent-session" ? parentService : childService;
+    },
+  });
+
+  await fixture.client.onEnvelope({
+    id: "owner-scoped-sentinel",
+    to: "worker",
+    body: "scheduled work",
+    sentinel: { model: "gpt-5.6-sol" },
+  }, { messageId: "owner-scoped-sentinel", attemptNumber: 1 });
+
+  assert.deepEqual(lookups, ["parent-session"]);
+  assert.deepEqual(calls, [["general-purpose", "scheduled work", {
+    description: "Scheduled Sentinel work", model: "gpt-5.6-sol", inheritContext: true,
+  }]]);
 });
 
 test("polling discovers a native subagent start missed by lifecycle events while the parent is settled", async (t) => {

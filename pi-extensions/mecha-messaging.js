@@ -27,7 +27,15 @@ const ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES = 256 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_KEEP_BYTES = 128 * 1024;
 const NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
-const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
+
+const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
+
+function getOwnerSubagentsService(ownerSessionId) {
+  const services = globalThis[PI_SUBAGENTS_SERVICE_REGISTRY]?.services;
+  return typeof ownerSessionId === "string" && typeof services?.get === "function"
+    ? services.get(ownerSessionId)
+    : undefined;
+}
 
 const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
 export const INLINE_TOOL_ALLOWANCE_TOOL_NAME = "mecha_request_inline_tool_allowance";
@@ -730,7 +738,8 @@ export function quarantineOrphanToolResults(messages) {
     : { messages: sanitized, orphaned };
 }
 
-export async function spawnNativeSentinel(message, service = globalThis[PI_SUBAGENTS_SERVICE]) {
+export async function spawnNativeSentinel(message, resolveService) {
+  const service = await resolveService?.();
   if (service === undefined || typeof service.spawn !== "function") {
     throw new Error("Pi native subagent service is unavailable");
   }
@@ -741,8 +750,8 @@ export async function spawnNativeSentinel(message, service = globalThis[PI_SUBAG
   });
 }
 
-export function captureNativeSentinelSpawner(service = globalThis[PI_SUBAGENTS_SERVICE]) {
-  return (message) => spawnNativeSentinel(message, service);
+export function captureNativeSentinelSpawner(resolveService) {
+  return (message) => spawnNativeSentinel(message, resolveService);
 }
 
 export function createPiMailboxDeliveryCoordinator({
@@ -1015,10 +1024,11 @@ export function createMechaMessagingExtension(pi, {
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
   nowImpl = Date.now,
-  subagentsService = globalThis[PI_SUBAGENTS_SERVICE],
+  getSubagentsService = getOwnerSubagentsService,
   operationalTools = {},
 } = {}) {
   registerOperationalTools(pi, operationalTools);
+  const currentSubagentsServiceAccessor = getSubagentsService;
   let client;
   let coordinator;
   let mailboxPausedForCompaction = false;
@@ -1072,10 +1082,10 @@ export function createMechaMessagingExtension(pi, {
   let parentActivityContext;
   let lastActivitySent;
   let lastNativeSubagentReadDiagnosticMs;
-  // The parent extension may load before pi-subagents publishes its service. Pin the first
-  // service it sees on the parent session so a child session cannot replace the process-global
-  // symbol and make the parent's lifecycle projection appear empty.
-  let parentSubagentService = subagentsService;
+  function nativeSubagentService(ownerSessionId = parentActivityContext?.sessionManager?.getSessionId?.()) {
+    return typeof ownerSessionId === "string" ? currentSubagentsServiceAccessor?.(ownerSessionId) : undefined;
+  }
+
   const runningSubagents = new Map();
   const terminalSubagentTombstones = new Map();
   let settledNotificationRecipient;
@@ -1142,15 +1152,6 @@ export function createMechaMessagingExtension(pi, {
 
   function sameSubagentMetadata(left, right) {
     return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description && left.status === right.status;
-  }
-
-  function nativeSubagentService() {
-    // A global service can arrive after this extension loads. Capture that first parent service
-    // instead of following a native child session that later replaces the shared symbol.
-    if (parentSubagentService !== undefined) return parentSubagentService;
-    const service = globalThis[PI_SUBAGENTS_SERVICE];
-    if (service !== undefined) parentSubagentService = service;
-    return service;
   }
 
   function lifecycleSnapshotSubagentService(service = nativeSubagentService()) {
@@ -1488,7 +1489,7 @@ export function createMechaMessagingExtension(pi, {
       pi,
       sessionContext: context,
       client: mailboxClient,
-      spawnSubagent: captureNativeSentinelSpawner(),
+      spawnSubagent: captureNativeSentinelSpawner(() => nativeSubagentService(context.sessionManager.getSessionId())),
     });
   }
 
@@ -2100,8 +2101,6 @@ export function createMechaMessagingExtension(pi, {
         log: () => {},
       });
       client = mailboxClient;
-      // Child sessions inherit extensions and can replace the package's global
-      // service symbol. Polling pins the first parent service it sees.
       coordinator = createMailboxCoordinator(context, mailboxClient);
       ensureActivityHeartbeatTimer();
       void mailboxClient.connect().catch((error) => {

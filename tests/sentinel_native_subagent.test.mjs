@@ -22,27 +22,19 @@ test("child Mailbox senders are transient and distinct from the target parent", 
   assert.notEqual(transientChildAgentId("child-session", () => "first"), transientChildAgentId("child-session", () => "second"));
 });
 
-test("native Sentinel adapter uses the documented target Pi service channel without a reduced profile", async () => {
-  const serviceKey = Symbol.for("@gotgenes/pi-subagents:service");
-  const previous = globalThis[serviceKey];
+test("native Sentinel adapter uses the owner-scoped Pi service accessor without a reduced profile", async () => {
   const calls = [];
-  globalThis[serviceKey] = { spawn: (...args) => { calls.push(args); return "native-child"; } };
-  try {
-    const id = await spawnNativeSentinel(sentinelMessage);
-    assert.equal(id, "native-child");
-    assert.deepEqual(calls, [["general-purpose", "private scheduled prompt", {
-      description: "Scheduled Sentinel work", model: "caller-selected-model", inheritContext: true,
-    }]]);
-  } finally {
-    if (previous === undefined) delete globalThis[serviceKey];
-    else globalThis[serviceKey] = previous;
-  }
+  const service = { spawn: (...args) => { calls.push(args); return "native-child"; } };
+  const id = await spawnNativeSentinel(sentinelMessage, () => service);
+  assert.equal(id, "native-child");
+  assert.deepEqual(calls, [["general-purpose", "private scheduled prompt", {
+    description: "Scheduled Sentinel work", model: "caller-selected-model", inheritContext: true,
+  }]]);
 });
 
-test("captured parent service retains later scheduled children after child service replacement", async () => {
-  const serviceKey = Symbol.for("@gotgenes/pi-subagents:service");
-  const previous = globalThis[serviceKey];
+test("owner-scoped Sentinel lookup stays on the parent when a child service is registered", async () => {
   const parentRecords = [];
+  const services = new Map();
   const parentService = {
     spawn: () => {
       const id = `parent-child-${parentRecords.length + 1}`;
@@ -51,22 +43,17 @@ test("captured parent service retains later scheduled children after child servi
     },
     getRecord: (id) => parentRecords.find((record) => record.id === id),
   };
-  globalThis[serviceKey] = parentService;
-  try {
-    const spawn = captureNativeSentinelSpawner();
-    globalThis[serviceKey] = { spawn: () => "child-service-record" };
-    const first = await spawn({ ...sentinelMessage, id: "first" });
-    delete globalThis[serviceKey];
-    const second = await spawn({ ...sentinelMessage, id: "second" });
-    assert.deepEqual([first, second], ["parent-child-1", "parent-child-2"]);
-    assert.deepEqual(parentRecords, [
-      { id: "parent-child-1", status: "completed" },
-      { id: "parent-child-2", status: "completed" },
-    ]);
-  } finally {
-    if (previous === undefined) delete globalThis[serviceKey];
-    else globalThis[serviceKey] = previous;
-  }
+  services.set("parent-session", parentService);
+  const spawn = captureNativeSentinelSpawner(() => services.get("parent-session"));
+  services.set("child-session", { spawn: () => "child-service-record" });
+  const first = await spawn({ ...sentinelMessage, id: "first" });
+  services.delete("child-session");
+  const second = await spawn({ ...sentinelMessage, id: "second" });
+  assert.deepEqual([first, second], ["parent-child-1", "parent-child-2"]);
+  assert.deepEqual(parentRecords, [
+    { id: "parent-child-1", status: "completed" },
+    { id: "parent-child-2", status: "completed" },
+  ]);
 });
 
 test("target delivery hands off once, records body-free status, and uses ordinary acknowledgement", async () => {
