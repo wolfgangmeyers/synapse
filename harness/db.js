@@ -100,6 +100,10 @@ const migrations = Object.freeze([
     id: "017_subagent_lifecycle",
     sql: readFileSync(new URL("./migrations/017_subagent_lifecycle.sql", import.meta.url), "utf8"),
   },
+  {
+    id: "018_subagent_lifecycle_status",
+    sql: readFileSync(new URL("./migrations/018_subagent_lifecycle_status.sql", import.meta.url), "utf8"),
+  },
 ]);
 
 export class IdempotencyConflictError extends Error {
@@ -1379,7 +1383,7 @@ class MessageRepository {
       return { mode: "snapshot", ...readLifecycleSnapshot(this.#database) };
     }
     const updates = this.#database.prepare(`
-      SELECT router_version, parent_agent_id, subagent_id, state, type, description, terminal_reason
+      SELECT router_version, parent_agent_id, subagent_id, state, type, description, status, terminal_reason
       FROM subagent_lifecycle_events
       WHERE router_version > ?
       ORDER BY router_version ASC
@@ -1390,6 +1394,7 @@ class MessageRepository {
       state: row.state,
       ...(row.type === null ? {} : { type: row.type }),
       ...(row.description === null ? {} : { description: row.description }),
+      ...(row.status === null ? {} : { status: row.status }),
       ...(row.terminal_reason === null ? {} : { terminal_reason: row.terminal_reason }),
     }));
     return { mode: "replay", router_version: latest, updates };
@@ -1514,7 +1519,20 @@ function lifecycleChild(child) {
   assertLifecycleText(child.id, "subagent.id", 128);
   const type = child.type === undefined ? undefined : lifecycleOptionalText(child.type, "subagent.type", 64);
   const description = child.description === undefined ? undefined : lifecycleOptionalText(child.description, "subagent.description", 512);
-  return { id: child.id.trim(), ...(type === undefined ? {} : { type }), ...(description === undefined ? {} : { description }) };
+  const status = child.status === undefined ? undefined : lifecycleSubagentStatus(child.status);
+  return {
+    id: child.id.trim(),
+    ...(type === undefined ? {} : { type }),
+    ...(description === undefined ? {} : { description }),
+    ...(status === undefined ? {} : { status }),
+  };
+}
+
+function lifecycleSubagentStatus(value) {
+  if (!["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(value)) {
+    throw new TypeError("subagent.status is invalid");
+  }
+  return value;
 }
 
 function lifecycleOptionalText(value, name, limit) {
@@ -1562,7 +1580,8 @@ function applyLifecycleCandidate(database, candidate, { allowLeaseRebind, snapsh
       const prior = byId.get(child.id);
       if (prior?.state === "terminal" && prior.producer_epoch === candidate.epoch) continue;
       if (prior?.state === "running" && prior.producer_epoch === candidate.epoch
-        && prior.type === (child.type ?? null) && prior.description === (child.description ?? null)) continue;
+        && prior.type === (child.type ?? null) && prior.description === (child.description ?? null)
+        && prior.status === (child.status ?? null)) continue;
       transitions.push({ child, state: "running", kind: "snapshot" });
     }
     for (const row of existing) {
@@ -1575,7 +1594,8 @@ function applyLifecycleCandidate(database, candidate, { allowLeaseRebind, snapsh
     if (!(prior?.state === "terminal" && prior.producer_epoch === candidate.epoch)
       && !(prior?.state === "running" && candidate.eventKind === "started"
         && prior.producer_epoch === candidate.epoch && prior.type === (candidate.subagent.type ?? null)
-        && prior.description === (candidate.subagent.description ?? null))) {
+        && prior.description === (candidate.subagent.description ?? null)
+        && prior.status === (candidate.subagent.status ?? null))) {
       transitions.push({ child: candidate.subagent, state: candidate.eventKind === "started" ? "running" : "terminal", reason: candidate.terminalReason, kind: candidate.eventKind });
     }
   }
@@ -1673,28 +1693,28 @@ function writeLifecycleTransition(database, producer, transition, now, eventId, 
   const insert = database.prepare(`
     INSERT INTO subagent_lifecycle_events (
       parent_agent_id, instance_id, parent_session_id, producer_epoch, subagent_id,
-      event_id, client_sequence, event_kind, state, type, description, terminal_reason, payload_hash, received_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      event_id, client_sequence, event_kind, state, type, description, status, terminal_reason, payload_hash, received_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     producer.parentAgentId, producer.instanceId, producer.parentSessionId, producer.epoch, transition.child.id,
     eventId, producer.sequence * 1000 + transitionIndex, transition.kind, state, metadata.type ?? null, metadata.description ?? null,
-    transition.reason ?? null, producer.payloadHash, now,
+    metadata.status ?? null, transition.reason ?? null, producer.payloadHash, now,
   );
   const version = Number(insert.lastInsertRowid);
   database.prepare(`
     INSERT INTO subagent_lifecycle_state (
       parent_agent_id, subagent_id, instance_id, parent_session_id, producer_epoch,
-      type, description, state, started_at, updated_at, terminal_at, terminal_reason, router_version
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      type, description, status, state, started_at, updated_at, terminal_at, terminal_reason, router_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (parent_agent_id, subagent_id) DO UPDATE SET
       instance_id = excluded.instance_id, parent_session_id = excluded.parent_session_id,
-      producer_epoch = excluded.producer_epoch, type = excluded.type, description = excluded.description,
+      producer_epoch = excluded.producer_epoch, type = excluded.type, description = excluded.description, status = excluded.status,
       state = excluded.state, started_at = CASE WHEN excluded.state = 'running' THEN excluded.started_at ELSE subagent_lifecycle_state.started_at END,
       updated_at = excluded.updated_at, terminal_at = excluded.terminal_at,
       terminal_reason = excluded.terminal_reason, router_version = excluded.router_version
   `).run(
     producer.parentAgentId, transition.child.id, producer.instanceId, producer.parentSessionId, producer.epoch,
-    metadata.type ?? null, metadata.description ?? null, state, state === "running" ? now : null, now,
+    metadata.type ?? null, metadata.description ?? null, metadata.status ?? null, state, state === "running" ? now : null, now,
     state === "terminal" ? now : null, transition.reason ?? null, version,
   );
   return version;
@@ -1751,7 +1771,7 @@ function lifecycleVersion(database) {
 
 function readLifecycleSnapshot(database, parentAgentId = undefined) {
   const rows = database.prepare(`
-    SELECT parent_agent_id, subagent_id, type, description, router_version
+    SELECT parent_agent_id, subagent_id, type, description, status, router_version
     FROM subagent_lifecycle_state
     WHERE state = 'running' ${parentAgentId === undefined ? "" : "AND parent_agent_id = ?"}
     ORDER BY parent_agent_id ASC, subagent_id ASC
@@ -1760,7 +1780,12 @@ function readLifecycleSnapshot(database, parentAgentId = undefined) {
   for (const row of rows) {
     const agent = agents.get(row.parent_agent_id) ?? { agent_id: row.parent_agent_id, subagent_version: row.router_version, subagent_count: 0, subagents: [] };
     agent.subagent_version = Math.max(agent.subagent_version, row.router_version);
-    agent.subagents.push({ id: row.subagent_id, ...(row.type === null ? {} : { type: row.type }), ...(row.description === null ? {} : { description: row.description }) });
+    agent.subagents.push({
+      id: row.subagent_id,
+      ...(row.type === null ? {} : { type: row.type }),
+      ...(row.description === null ? {} : { description: row.description }),
+      ...(row.status === null ? {} : { status: row.status }),
+    });
     agent.subagent_count = agent.subagents.length;
     agents.set(row.parent_agent_id, agent);
   }

@@ -379,7 +379,8 @@
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "type": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "description": { "type": "string", "minLength": 1, "maxLength": 512 }
+        "description": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "status": { "type": "string", "enum": ["queued", "running", "completed", "steered", "aborted", "stopped", "error"] }
       }
     },
     "lifecycleChildren": { "type": "array", "maxItems": 999, "items": { "$ref": "#/$defs/lifecycleChild" } },

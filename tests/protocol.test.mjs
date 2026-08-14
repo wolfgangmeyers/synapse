@@ -17,10 +17,11 @@ test("enforces lifecycle metadata limits without logging source text", () => {
     version: "v1", frame_id: "lifecycle-snapshot", type: "subagent_lifecycle_snapshot",
     agent_id: "parent", instance_id: "instance", parent_session_id: "session", lease_id: "lease",
     producer_epoch: "11111111-1111-4111-8111-111111111111", client_sequence: 1, event_id: "event",
-    subagents: [{ id: "child", type: "audit", description: "safe label" }],
+    subagents: [{ id: "child", type: "audit", description: "safe label", status: "running" }],
   };
   assert.doesNotThrow(() => validateClientFrame(frame));
   assert.throws(() => validateClientFrame({ ...frame, subagents: [{ id: "child", description: "x".repeat(513) }] }), ProtocolValidationError);
+  assert.throws(() => validateClientFrame({ ...frame, subagents: [{ id: "child", description: "safe label", status: "unknown" }] }), ProtocolValidationError);
   assert.throws(() => validateClientFrame({ ...frame, producer_epoch: "not-a-uuid" }), ProtocolValidationError);
   assert.doesNotThrow(() => validateServerFrame({
     version: "v1", frame_id: "lifecycle-ack", type: "subagent_lifecycle_acknowledged",
