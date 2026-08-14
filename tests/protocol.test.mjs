@@ -50,7 +50,8 @@ test("activity frames carry lease-scoped worker state", () => {
   };
   assert.equal(validateClientFrame(active), active);
   assert.equal(validateClientFrame({ ...active, subagent_count: 2 }).subagent_count, 2);
-  assert.deepEqual(validateClientFrame({ ...active, subagents: [{ id: "subagent-one", type: "audit", description: "checking the diff" }] }).subagents, [{ id: "subagent-one", type: "audit", description: "checking the diff" }]);
+  assert.deepEqual(validateClientFrame({ ...active, subagents: [{ id: "subagent-one", type: "audit", description: "checking the diff", status: "queued" }] }).subagents, [{ id: "subagent-one", type: "audit", description: "checking the diff", status: "queued" }]);
+  assert.throws(() => validateClientFrame({ ...active, subagents: [{ id: "subagent-one", description: "checking the diff", status: "unknown" }] }), ProtocolValidationError);
   assert.equal(validateClientFrame({ ...active, activity_state: "settled" }).activity_state, "settled");
   assert.equal(validateClientFrame({ ...active, activity_state: "compacting" }).activity_state, "compacting");
   assert.throws(() => validateClientFrame({ ...active, subagent_count: -1 }), ProtocolValidationError);
@@ -68,7 +69,8 @@ test("activity frames carry lease-scoped worker state", () => {
   };
   assert.equal(validateServerFrame(event), event);
   assert.equal(validateServerFrame({ ...event, subagent_count: 3 }).subagent_count, 3);
-  assert.deepEqual(validateServerFrame({ ...event, subagents: [{ id: "subagent-one", description: "checking the diff" }] }).subagents, [{ id: "subagent-one", description: "checking the diff" }]);
+  assert.deepEqual(validateServerFrame({ ...event, subagents: [{ id: "subagent-one", description: "checking the diff", status: "running" }] }).subagents, [{ id: "subagent-one", description: "checking the diff", status: "running" }]);
+  assert.throws(() => validateServerFrame({ ...event, subagents: [{ id: "subagent-one", description: "checking the diff", status: "unknown" }] }), ProtocolValidationError);
   assert.equal(validateServerFrame({ ...event, activity_state: "idle" }).activity_state, "idle");
   assert.equal(validateServerFrame({ ...event, activity_state: "compacting" }).activity_state, "compacting");
   assert.throws(() => validateServerFrame({ ...event, subagent_count: -1 }), ProtocolValidationError);

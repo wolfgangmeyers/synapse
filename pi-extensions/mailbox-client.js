@@ -25,6 +25,7 @@ const LIFECYCLE_JOURNAL_MAX_ITEMS = 256;
 const LIFECYCLE_JOURNAL_MAX_BYTES = 262_144;
 const LIFECYCLE_JOURNAL_MAX_ITEM_BYTES = 65_536;
 const LIFECYCLE_JOURNAL_MAX_AGE_MS = 10 * 60_000;
+const SUBAGENT_STATUSES = new Set(["queued", "running", "completed", "steered", "aborted", "stopped", "error"]);
 const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
 
 // This pattern is narrower than the protocol's agentId on purpose, and the difference is a dot.
@@ -105,7 +106,9 @@ function normalizeSubagentSummary(summary) {
   const description = typeof summary.description === "string" ? summary.description.trim().slice(0, 512) : "";
   if (id.length === 0 || description.length === 0) return undefined;
   const type = typeof summary.type === "string" ? summary.type.trim().slice(0, 64) : "";
-  return type.length > 0 ? { id, type, description } : { id, description };
+  const status = typeof summary.status === "string" ? summary.status : undefined;
+  const normalized = { id, ...(type.length > 0 ? { type } : {}), description };
+  return status !== undefined && SUBAGENT_STATUSES.has(status) ? { ...normalized, status } : normalized;
 }
 
 function normalizeSubagents(subagents) {

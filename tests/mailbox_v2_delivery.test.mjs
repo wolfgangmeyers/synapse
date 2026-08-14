@@ -361,6 +361,25 @@ async function enableLifecycleSocket(socket, registration, { afterVersion } = {}
   return snapshot;
 }
 
+test("router exposes lifecycle status records through existing agents path", async (t) => {
+  const { routerUrl } = await lifecycleRouter(t);
+  const producer = await connectLifecycleSocket(t, routerUrl, { agentId: "status-parent", instanceId: "status-instance" });
+  const pong = lifecycleRouterFrame(producer.socket, "pong");
+  producer.socket.send(JSON.stringify({
+    version: "v1", frame_id: "status-activity", type: "activity",
+    agent_id: "status-parent", instance_id: "status-instance", lease_id: producer.registration.lease_id,
+    activity_state: "active", subagent_count: 1,
+    subagents: [{ id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" }],
+  }));
+  producer.socket.send(JSON.stringify({ version: "v1", frame_id: "status-barrier", type: "ping" }));
+  await pong;
+
+  const agents = await (await fetch(routerUrl.replace("ws://", "http://"))).json();
+  assert.deepEqual(agents.agents.find((agent) => agent.agent_id === "status-parent").subagents, [
+    { id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" },
+  ]);
+});
+
 test("router fences an old socket and accepts a complete authenticated replacement snapshot", async (t) => {
   let now = Date.parse("2030-01-01T00:00:00.000Z");
   const { repository, routerUrl } = await lifecycleRouter(t, { clock: () => new Date(now) });
@@ -1089,6 +1108,67 @@ test("extension reports top-level agent activity and settled transitions", async
     { state: "active", subagentCount: 0 },
     { state: "settled", subagentCount: 0 },
   ]);
+});
+
+test("extension forwards the bounded Pi lifecycle projection and drops terminal records", async (t) => {
+  const listeners = new Set();
+  const completed = Object.freeze({ id: "queued-child", type: "general-purpose", description: "Queued work", status: "completed" });
+  let snapshots = Object.freeze([
+    Object.freeze({ id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" }),
+    Object.freeze({ id: "running-child", type: "general-purpose", description: "Running work", status: "running" }),
+  ]);
+  const records = new Map([[completed.id, { ...completed, result: "kept result" }]]);
+  let unsubscribed = 0;
+  const service = {
+    getLifecycleSnapshots: () => snapshots,
+    subscribeLifecycle(listener) {
+      listeners.add(listener);
+      return () => { unsubscribed += 1; listeners.delete(listener); };
+    },
+    getRecord: (id) => records.get(id),
+  };
+  const fixture = settledNotificationFixture(t, { subagentsService: service });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  assert.deepEqual(fixture.activity.at(-1), {
+    state: "active",
+    subagentCount: 2,
+    subagents: [
+      { id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" },
+      { id: "running-child", type: "general-purpose", description: "Running work", status: "running" },
+    ],
+  });
+
+  snapshots = Object.freeze([snapshots[1]]);
+  for (const listener of listeners) listener(completed);
+  assert.deepEqual(fixture.activity.at(-1), {
+    state: "active",
+    subagentCount: 1,
+    subagents: [{ id: "running-child", type: "general-purpose", description: "Running work", status: "running" }],
+  });
+  assert.equal(service.getRecord(completed.id).result, "kept result");
+
+  fixture.handlers.get("session_shutdown")({}, fixture.context);
+  assert.equal(unsubscribed, 1);
+});
+
+test("extension bounds an invalid oversized lifecycle projection to 100 records", (t) => {
+  const snapshots = Object.freeze(Array.from({ length: 101 }, (_, index) => Object.freeze({
+    id: `child-${String(index).padStart(3, "0")}`,
+    type: "general-purpose",
+    description: `Child ${index}`,
+    status: "queued",
+  })));
+  const fixture = settledNotificationFixture(t, {
+    subagentsService: {
+      getLifecycleSnapshots: () => snapshots,
+      subscribeLifecycle: () => () => {},
+    },
+  });
+
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  assert.equal(fixture.activity.at(-1).subagentCount, 100);
+  assert.equal(fixture.activity.at(-1).subagents.length, 100);
 });
 
 test("extension refreshes unchanged activity less often than the heartbeat tick", async (t) => {
@@ -3047,13 +3127,16 @@ test("client sends activity frames with its registered lease identity", async ()
     }),
   }));
   await connected;
-  client.sendActivity("active", { subagentCount: 2 });
+  client.sendActivity("active", {
+    subagentCount: 2,
+    subagents: [{ id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" }],
+  });
   client.sendActivity("settled");
 
-  assert.deepEqual(socket.sent.map(({ type, agent_id, instance_id, lease_id, activity_state, subagent_count }) => ({ type, agent_id, instance_id, lease_id, activity_state, subagent_count })), [
-    { type: "register", agent_id: "worker", instance_id: client.instanceId, lease_id: undefined, activity_state: undefined, subagent_count: undefined },
-    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "active", subagent_count: 2 },
-    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "settled", subagent_count: 0 },
+  assert.deepEqual(socket.sent.map(({ type, agent_id, instance_id, lease_id, activity_state, subagent_count, subagents }) => ({ type, agent_id, instance_id, lease_id, activity_state, subagent_count, subagents })), [
+    { type: "register", agent_id: "worker", instance_id: client.instanceId, lease_id: undefined, activity_state: undefined, subagent_count: undefined, subagents: undefined },
+    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "active", subagent_count: 2, subagents: [{ id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" }] },
+    { type: "activity", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1", activity_state: "settled", subagent_count: 0, subagents: [] },
   ]);
   client.close();
 });

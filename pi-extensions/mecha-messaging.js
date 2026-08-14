@@ -459,8 +459,13 @@ const SETTLED_NOTIFICATION_COOLDOWN_MS = 120_000;
 const ACTIVITY_HEARTBEAT_INTERVAL_MS = 5_000;
 const ACTIVITY_REFRESH_MIN_MS = 10_000;
 const EVENT_TRACKED_MISSING_LIMIT_MS = 60_000;
-const MAX_ACTIVITY_SUBAGENTS = 999;
+// pi-subagents intentionally exposes at most 100 live records. Keep the Mailbox
+// projection at the same bound so an extension cannot turn activity into an
+// unbounded cross-extension data path.
+const MAX_ACTIVITY_SUBAGENTS = 100;
 const MAX_TERMINAL_SUBAGENT_TOMBSTONES = 2048;
+const LIVE_SUBAGENT_STATUSES = new Set(["queued", "running"]);
+const TERMINAL_SUBAGENT_STATUSES = new Set(["completed", "steered", "aborted", "stopped", "error"]);
 
 // Managed workers use background subagents, whose native started and terminal
 // events share a run ID. Foreground runs lack a matching terminal ID, so they
@@ -1074,6 +1079,8 @@ export function createMechaMessagingExtension(pi, {
   let parentActivityContext;
   let lastActivitySent;
   let lastNativeSubagentReadDiagnosticMs;
+  let lifecycleSubscription;
+  let lifecycleSubscriptionService;
   const runningSubagents = new Map();
   const terminalSubagentTombstones = new Map();
   let settledNotificationRecipient;
@@ -1089,10 +1096,12 @@ export function createMechaMessagingExtension(pi, {
     if (id.length === 0) return undefined;
     const description = typeof event?.description === "string" ? event.description.trim().slice(0, 512) : "";
     const type = typeof event?.type === "string" ? event.type.trim().slice(0, 64) : "";
+    const status = typeof event?.status === "string" ? event.status.toLowerCase() : undefined;
     return {
       id,
       ...(type.length > 0 ? { type } : {}),
       ...(description.length > 0 ? { description } : {}),
+      ...(status === undefined ? {} : { status }),
       startedAtMs,
       lastSeenMs: startedAtMs,
     };
@@ -1103,7 +1112,7 @@ export function createMechaMessagingExtension(pi, {
       .filter(({ description }) => typeof description === "string" && description.length > 0)
       .sort((left, right) => left.startedAtMs - right.startedAtMs || left.id.localeCompare(right.id))
       .slice(0, MAX_ACTIVITY_SUBAGENTS)
-      .map(({ id, type, description }) => ({ id, ...(type !== undefined ? { type } : {}), description }));
+      .map(({ id, type, description, status }) => ({ id, ...(type !== undefined ? { type } : {}), description, ...(status !== undefined ? { status } : {}) }));
   }
 
   // Native descriptions may contain task text. Lifecycle replication only needs a stable label,
@@ -1143,29 +1152,47 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function sameSubagentMetadata(left, right) {
-    return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description;
+    return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description && left.status === right.status;
   }
 
-  function nativeSubagentRecords(service = subagentsService ?? globalThis[PI_SUBAGENTS_SERVICE]) {
+  function nativeSubagentService() {
     // Prefer the parent-bound service captured at extension creation. Native child sessions can
     // replace the global service symbol, and polling the child's copy would publish the wrong badge.
+    return subagentsService ?? globalThis[PI_SUBAGENTS_SERVICE];
+  }
+
+  function lifecycleSubagentService(service = nativeSubagentService()) {
+    return typeof service?.getLifecycleSnapshots === "function"
+      && typeof service?.subscribeLifecycle === "function"
+      ? service
+      : undefined;
+  }
+
+  function reportNativeSubagentReadFailure() {
+    const nowMs = nowImpl();
+    if (lastNativeSubagentReadDiagnosticMs !== undefined && nowMs - lastNativeSubagentReadDiagnosticMs < NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS) return;
+    lastNativeSubagentReadDiagnosticMs = nowMs;
     try {
-      const source = typeof service?.listAgents === "function"
-        ? service.listAgents()
-        : typeof service?.getRunning === "function"
-          ? service.getRunning()
-          : service?.running ?? service?.runs ?? service?.subagents;
+      parentActivityContext?.ui?.notify?.("Native subagent service read failed; polling will retry.", "error");
+    } catch {
+      // A UI notification is only an operational signal; a broken UI must not stop polling retries.
+    }
+  }
+
+  function nativeSubagentRecords(service = nativeSubagentService()) {
+    try {
+      // The lifecycle projection is the producer's public, redacted source of truth. listAgents()
+      // retains terminal result records, so it is only the compatibility fallback for older Pi.
+      const source = typeof service?.getLifecycleSnapshots === "function"
+        ? service.getLifecycleSnapshots()
+        : typeof service?.listAgents === "function"
+          ? service.listAgents()
+          : typeof service?.getRunning === "function"
+            ? service.getRunning()
+            : service?.running ?? service?.runs ?? service?.subagents;
       return Array.isArray(source) ? source : undefined;
     } catch {
-      const nowMs = nowImpl();
-      if (lastNativeSubagentReadDiagnosticMs === undefined || nowMs - lastNativeSubagentReadDiagnosticMs >= NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS) {
-        lastNativeSubagentReadDiagnosticMs = nowMs;
-        try {
-          parentActivityContext?.ui?.notify?.("Native subagent service read failed; polling will retry.", "error");
-        } catch {
-          // A UI notification is only an operational signal; a broken UI must not stop polling retries.
-        }
-      }
+      reportNativeSubagentReadFailure();
       return undefined;
     }
   }
@@ -1175,14 +1202,20 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function isActiveNativeSubagentRecord(record) {
-    return [undefined, "running", "queued", "active"].includes(nativeSubagentStatus(record));
+    const status = nativeSubagentStatus(record);
+    return lifecycleSubagentService() !== undefined
+      ? LIVE_SUBAGENT_STATUSES.has(status)
+      : [undefined, "running", "queued", "active"].includes(status);
   }
 
   function isTerminalNativeSubagentRecord(record) {
-    return [
-      "completed", "complete", "done", "finished", "failed", "failure", "error", "errored",
-      "canceled", "cancelled", "aborted", "terminated", "stopped", "steered",
-    ].includes(nativeSubagentStatus(record));
+    const status = nativeSubagentStatus(record);
+    return lifecycleSubagentService() !== undefined
+      ? TERMINAL_SUBAGENT_STATUSES.has(status)
+      : [
+        "completed", "complete", "done", "finished", "failed", "failure", "error", "errored",
+        "canceled", "cancelled", "aborted", "terminated", "stopped", "steered",
+      ].includes(status);
   }
 
   function nativeSubagentExplicitStartedAtMs(record) {
@@ -1229,6 +1262,7 @@ export function createMechaMessagingExtension(pi, {
         id: existing.id,
         type: existing.type ?? metadata.type,
         description: existing.description ?? metadata.description,
+        status: metadata.status ?? existing.status,
         eventTracked: true,
         serviceTracked: true,
         startedAtMs: existing.startedAtMs ?? metadata.startedAtMs,
@@ -1245,16 +1279,22 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function reconcileNativeSubagentService() {
-    const source = nativeSubagentRecords();
+    const service = nativeSubagentService();
+    const lifecycleService = lifecycleSubagentService(service);
+    const source = nativeSubagentRecords(service);
     if (!Array.isArray(source)) return false;
     const nowMs = nowImpl();
     const serviceIds = new Set();
     let changed = false;
     // The service list can lag behind lifecycle events, so event-tracked children
     // stay visible until a terminal status or lifecycle event removes them.
-    for (const record of source) {
+    for (const record of lifecycleService === undefined ? source : source.slice(0, MAX_ACTIVITY_SUBAGENTS)) {
       const metadata = normalizeSubagentMetadata(record, nativeSubagentStartedAtMs(record, nowMs));
       if (metadata === undefined) continue;
+      // Older service shapes are still supported as a compatibility fallback. Their statuses
+      // were never part of the Mailbox activity contract, so only the typed lifecycle API
+      // publishes status-bearing records.
+      if (lifecycleService === undefined) delete metadata.status;
       serviceIds.add(metadata.id);
       if (isTerminalNativeSubagentRecord(record)) {
         const terminalFirst = !terminalSubagentTombstones.has(metadata.id);
@@ -1283,7 +1323,14 @@ export function createMechaMessagingExtension(pi, {
       changed = true;
     }
     for (const [id, metadata] of runningSubagents.entries()) {
-      if (!serviceIds.has(id) && metadata?.serviceTracked === true && metadata?.eventTracked !== true) {
+      if (!serviceIds.has(id) && lifecycleService !== undefined) {
+        // getLifecycleSnapshots() is Pi's live projection. Terminal records are published to
+        // subscribers before removal, while result records remain available from getRecord().
+        if (runningSubagents.delete(id)) {
+          settledNotifications.onChildDisposed(id);
+          changed = true;
+        }
+      } else if (!serviceIds.has(id) && metadata?.serviceTracked === true && metadata?.eventTracked !== true) {
         runningSubagents.delete(id);
         changed = true;
       } else if (!serviceIds.has(id) && metadata?.eventTracked === true
@@ -1297,6 +1344,56 @@ export function createMechaMessagingExtension(pi, {
       }
     }
     return changed;
+  }
+
+  function applyLifecycleSubagentSnapshot(record) {
+    const status = nativeSubagentStatus(record);
+    const metadata = normalizeSubagentMetadata(record);
+    if (metadata === undefined || (!LIVE_SUBAGENT_STATUSES.has(status) && !TERMINAL_SUBAGENT_STATUSES.has(status))) return false;
+    if (TERMINAL_SUBAGENT_STATUSES.has(status)) {
+      const changed = rememberTerminalSubagent(metadata.id);
+      settledNotifications.onChildDisposed(metadata.id);
+      return changed;
+    }
+    clearTerminalSubagentTombstone(metadata.id);
+    const existing = runningSubagents.get(metadata.id);
+    if (existing === undefined && runningSubagents.size >= MAX_ACTIVITY_SUBAGENTS) {
+      const oldestId = runningSubagents.keys().next().value;
+      if (oldestId !== undefined) {
+        runningSubagents.delete(oldestId);
+        settledNotifications.onChildDisposed(oldestId);
+      }
+    }
+    const next = {
+      ...metadata,
+      eventTracked: true,
+      serviceTracked: true,
+      startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs,
+      status,
+    };
+    if (sameSubagentMetadata(existing, next)) return false;
+    runningSubagents.set(metadata.id, next);
+    settledNotifications.onChildStarted(metadata.id);
+    return true;
+  }
+
+  function bindLifecycleSubagentService() {
+    const service = lifecycleSubagentService();
+    if (service === undefined || lifecycleSubscriptionService === service) return;
+    lifecycleSubscription?.();
+    lifecycleSubscription = undefined;
+    lifecycleSubscriptionService = service;
+    // Snapshot first, then subscribe. A heartbeat repair remains in place for the small
+    // interval between those two calls, and Pi is authoritative whenever either is read.
+    reconcileNativeSubagentService();
+    try {
+      lifecycleSubscription = service.subscribeLifecycle((record) => {
+        if (applyLifecycleSubagentSnapshot(record)) refreshActivityState();
+      });
+    } catch {
+      lifecycleSubscriptionService = undefined;
+      reportNativeSubagentReadFailure();
+    }
   }
 
   function rememberParentActivityContext(context) {
@@ -1322,6 +1419,7 @@ export function createMechaMessagingExtension(pi, {
     // ordinary settled/active frames must not clear that pause early.
     if (mailboxPausedForCompaction && state !== "compacting") return;
     const nowMs = nowImpl();
+    bindLifecycleSubagentService();
     const reconciled = reconcile ? reconcileNativeSubagentService() : false;
     const subagents = publicSubagentSummaries();
     const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
@@ -1660,6 +1758,10 @@ export function createMechaMessagingExtension(pi, {
   });
 
   pi.events.on("subagents:started", (event) => {
+    if (lifecycleSubagentService() !== undefined) {
+      settledNotifications.onChildStarted(event?.id);
+      return;
+    }
     const metadata = normalizeSubagentMetadata(event);
     clearTerminalSubagentTombstone(metadata?.id);
     const existing = metadata === undefined ? undefined : runningSubagents.get(metadata.id);
@@ -1679,6 +1781,10 @@ export function createMechaMessagingExtension(pi, {
     }
   });
   function publishTerminalLifecycleEvent(event, terminalReason) {
+    if (lifecycleSubagentService() !== undefined) {
+      settledNotifications.onChildDisposed(event?.id);
+      return;
+    }
     const id = event?.id;
     const terminalFirst = typeof id === "string" && id.length > 0 && !terminalSubagentTombstones.has(id);
     const metadata = runningSubagents.get(id) ?? normalizeSubagentMetadata(event) ?? { id };
@@ -2031,6 +2137,7 @@ export function createMechaMessagingExtension(pi, {
       // Child sessions inherit extensions and can replace the package's global
       // service symbol. Bind scheduled work to this resident parent service.
       coordinator = createMailboxCoordinator(context, mailboxClient);
+      bindLifecycleSubagentService();
       ensureActivityHeartbeatTimer();
       void mailboxClient.connect().catch((error) => {
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${error.message}`, "error");
@@ -2055,6 +2162,9 @@ export function createMechaMessagingExtension(pi, {
     pendingSelfCompaction = undefined;
     mailboxPausedForCompaction = false;
     settledNotifications.dispose();
+    lifecycleSubscription?.();
+    lifecycleSubscription = undefined;
+    lifecycleSubscriptionService = undefined;
     coordinator?.close();
     coordinator = undefined;
     client?.close();

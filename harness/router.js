@@ -1164,14 +1164,15 @@ export function createAgentRouter({
       const description = typeof summary.description === "string" ? summary.description.trim().slice(0, 512) : "";
       if (id.length === 0 || description.length === 0) return undefined;
       const type = typeof summary.type === "string" ? summary.type.trim().slice(0, 64) : "";
-      return type.length > 0 ? { id, type, description } : { id, description };
+      const status = ["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(summary.status) ? summary.status : undefined;
+      return { id, ...(type.length > 0 ? { type } : {}), description, ...(status === undefined ? {} : { status }) };
     }).filter(Boolean).slice(0, Math.min(999, Math.max(0, subagentCount || 999)));
   }
 
   function sameSubagents(left = [], right = []) {
     return left.length === right.length && left.every((summary, index) => {
       const other = right[index];
-      return other !== undefined && summary.id === other.id && summary.type === other.type && summary.description === other.description;
+      return other !== undefined && summary.id === other.id && summary.type === other.type && summary.description === other.description && summary.status === other.status;
     });
   }
 
