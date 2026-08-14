@@ -1778,39 +1778,80 @@ test("parent-bound native service wins when a child session replaces the global 
   });
 });
 
-test("late parent lifecycle binding survives a child global service replacement", (t) => {
+test("heartbeat follows the owner service replacement and preserves live lifecycle children", async (t) => {
   const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
   const previousService = globalThis[serviceSymbol];
-  delete globalThis[serviceSymbol];
   t.after(() => {
     if (previousService === undefined) delete globalThis[serviceSymbol];
     else globalThis[serviceSymbol] = previousService;
   });
 
-  const parentService = {
-    getLifecycleSnapshots: () => [{
-      id: "parent-child", type: "general-purpose", description: "Parent service child", status: "running",
-    }],
-    subscribeLifecycle: () => () => {},
+  const children = Array.from({ length: 7 }, (_, index) => ({
+    id: `soak-child-${index + 1}`,
+    type: "general-purpose",
+    description: `Soak sleeper ${index + 1}`,
+    status: "running",
+  }));
+  const staleListeners = new Set();
+  const ownerListeners = new Set();
+  const staleService = {
+    getLifecycleSnapshots: () => children,
+    subscribeLifecycle(listener) {
+      staleListeners.add(listener);
+      return () => staleListeners.delete(listener);
+    },
   };
+  const ownerService = {
+    getLifecycleSnapshots: () => [
+      ...children.slice(0, 3).map((child) => ({ ...child, status: "completed" })),
+      ...children.slice(3),
+    ],
+    subscribeLifecycle(listener) {
+      ownerListeners.add(listener);
+      return () => ownerListeners.delete(listener);
+    },
+  };
+  globalThis[serviceSymbol] = staleService;
   const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
-  // The extension started before pi-subagents published. Its first parent turn sees the service.
-  globalThis[serviceSymbol] = parentService;
-  fixture.handlers.get("agent_start")({}, fixture.context);
-  // A native child session publishes its own empty service under the shared symbol.
-  globalThis[serviceSymbol] = {
-    getLifecycleSnapshots: () => [],
-    subscribeLifecycle: () => () => {},
-  };
 
-  advance(5_000);
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  const initialSnapshot = fixture.lifecycle.filter((entry) => entry.type === "snapshot").at(-1);
+  assert.deepEqual(initialSnapshot?.subagents.map(({ id }) => id), children.map(({ id }) => id));
+
+  // Pi's Agents panel reads the manager that replaced this global service. The
+  // next authoritative snapshot must use that same manager, not the first one
+  // the Mailbox extension saw.
+  globalThis[serviceSymbol] = ownerService;
+  advance(15_000);
   intervals[0].callback();
 
+  const terminalEvents = fixture.lifecycle.filter((entry) => entry.type === "event" && entry.lifecycleEvent === "terminal");
+  const repairSnapshot = fixture.lifecycle.filter((entry) => entry.type === "snapshot").at(-1);
+  assert.equal(staleListeners.size, 0);
+  assert.equal(ownerListeners.size, 1);
+  assert.deepEqual(terminalEvents.map(({ subagent }) => subagent.id), children.slice(0, 3).map(({ id }) => id));
+  assert.deepEqual(repairSnapshot?.subagents.map(({ id }) => id), children.slice(3).map(({ id }) => id));
   assert.deepEqual(fixture.activity.at(-1), {
     state: "active",
-    subagentCount: 1,
-    subagents: [{ id: "parent-child", type: "general-purpose", description: "Parent service child", status: "running" }],
+    subagentCount: 4,
+    subagents: children.slice(3),
   });
+
+  const { repository } = await lifecycleRepository(t);
+  assert.equal(repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "seven-running", initialSnapshot.subagents)).disposition, "applied");
+  for (const [index, event] of terminalEvents.entries()) {
+    assert.equal(repository.applySubagentLifecycleEvent({
+      ...lifecycleEvent(index + 2, `completed-${index + 1}`, "terminal"),
+      subagent: event.subagent,
+      terminal_reason: event.terminalReason,
+    }).disposition, "applied");
+  }
+  assert.equal(repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(5, "four-still-running", repairSnapshot.subagents)).disposition, "accepted_noop");
+  assert.deepEqual(
+    repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagents.map(({ id }) => id),
+    children.slice(3).map(({ id }) => id),
+  );
+  assert.doesNotMatch(JSON.stringify(repository.replaySubagentLifecycle({ afterVersion: 0 })), /snapshot_omitted/);
 });
 
 test("polling discovers a native subagent start missed by lifecycle events while the parent is settled", async (t) => {
