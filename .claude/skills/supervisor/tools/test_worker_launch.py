@@ -66,7 +66,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
         self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-terra", commands[0])
-        self.assertIn(str(extension), command)
+        self.assertNotIn("--extension", command)
         self.assertNotIn("--no-extensions", command)
         session_id = command[command.index("--session-id") + 1]
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
@@ -431,7 +431,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         ensure_session.assert_not_called()
         new_window.assert_not_called()
 
-    def test_managed_pi_command_uses_default_extensions_with_explicit_mailbox(self):
+    def test_managed_pi_command_uses_installed_default_extensions(self):
         extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
@@ -445,7 +445,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
             for index, part in enumerate(command)
             if part == "--extension"
         ]
-        self.assertEqual(extensions, [str(extension)])
+        self.assertEqual(extensions, [])
         self.assertNotIn("--no-extensions", command)
 
     def test_main_maps_resume_to_pi_session(self):
@@ -646,18 +646,14 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn(sidecar, command)
         self.assertNotIn(str(symlinked_tools / "claude_sidecar.mjs"), launched["command"])
 
-    def test_main_refuses_pi_global_extension_discovery(self):
-        argv = ["worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name]
-        stderr = io.StringIO()
-        with patch.object(worker_launch.sys, "argv", argv), \
-             patch.dict(os.environ, {worker_launch.PI_MAILBOX_EXTENSION_ENV: ""}, clear=False), \
-             patch.object(worker_launch, "window_exists", return_value=False), \
-             contextlib.redirect_stderr(stderr), \
-             self.assertRaises(SystemExit) as raised:
-            worker_launch.main()
+    def test_pi_launch_ignores_explicit_extension_configuration(self):
+        with patch.dict(os.environ, {
+            worker_launch.PI_MAILBOX_EXTENSION_ENV: "",
+            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
+        }, clear=False):
+            commands, _ = self._run_main("pi-worker", agent="pi")
 
-        self.assertEqual(raised.exception.code, 1)
-        self.assertIn(worker_launch.PI_MAILBOX_EXTENSION_ENV, stderr.getvalue())
+        self.assertNotIn("--extension", shlex.split(commands[0]))
 
     def _pi_mailbox_extension(self):
         extension = self.tmp_path / "mecha-messaging.js"
