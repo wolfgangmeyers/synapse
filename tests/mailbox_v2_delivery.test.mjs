@@ -1776,6 +1776,41 @@ test("parent-bound native service wins when a child session replaces the global 
   });
 });
 
+test("late parent lifecycle binding survives a child global service replacement", (t) => {
+  const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
+  const previousService = globalThis[serviceSymbol];
+  delete globalThis[serviceSymbol];
+  t.after(() => {
+    if (previousService === undefined) delete globalThis[serviceSymbol];
+    else globalThis[serviceSymbol] = previousService;
+  });
+
+  const parentService = {
+    getLifecycleSnapshots: () => [{
+      id: "parent-child", type: "general-purpose", description: "Parent service child", status: "running",
+    }],
+    subscribeLifecycle: () => () => {},
+  };
+  const { fixture, intervals, advance } = heartbeatIntervalFixture(t);
+  // The extension started before pi-subagents published. Its first parent turn sees the service.
+  globalThis[serviceSymbol] = parentService;
+  fixture.handlers.get("agent_start")({}, fixture.context);
+  // A native child session publishes its own empty service under the shared symbol.
+  globalThis[serviceSymbol] = {
+    getLifecycleSnapshots: () => [],
+    subscribeLifecycle: () => () => {},
+  };
+
+  advance(5_000);
+  intervals[0].callback();
+
+  assert.deepEqual(fixture.activity.at(-1), {
+    state: "active",
+    subagentCount: 1,
+    subagents: [{ id: "parent-child", type: "general-purpose", description: "Parent service child", status: "running" }],
+  });
+});
+
 test("polling discovers a native subagent start missed by lifecycle events while the parent is settled", async (t) => {
   const serviceSymbol = Symbol.for("@gotgenes/pi-subagents:service");
   const previousService = globalThis[serviceSymbol];
