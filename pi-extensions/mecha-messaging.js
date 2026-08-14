@@ -1022,7 +1022,7 @@ export function createMechaMessagingExtension(pi, {
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
   nowImpl = Date.now,
-  subagentsService,
+  subagentsService = globalThis[PI_SUBAGENTS_SERVICE],
   operationalTools = {},
 } = {}) {
   registerOperationalTools(pi, operationalTools);
@@ -1081,6 +1081,10 @@ export function createMechaMessagingExtension(pi, {
   let lastNativeSubagentReadDiagnosticMs;
   let lifecycleSubscription;
   let lifecycleSubscriptionService;
+  // The parent extension may load before pi-subagents publishes its service. Pin the first
+  // service it sees on the parent session so a child session cannot replace the process-global
+  // symbol and make the parent's lifecycle projection appear empty.
+  let parentSubagentService = subagentsService;
   const runningSubagents = new Map();
   const terminalSubagentTombstones = new Map();
   let settledNotificationRecipient;
@@ -1165,10 +1169,12 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function nativeSubagentService() {
-    // Pi's Agents panel reads its current manager. Follow the current published
-    // service too: a stale first service can otherwise publish an authoritative
-    // empty snapshot while that manager still has live children.
-    return subagentsService ?? globalThis[PI_SUBAGENTS_SERVICE];
+    // A global service can arrive after this extension loads. Capture that first parent service
+    // instead of following a native child session that later replaces the shared symbol.
+    if (parentSubagentService !== undefined) return parentSubagentService;
+    const service = globalThis[PI_SUBAGENTS_SERVICE];
+    if (service !== undefined) parentSubagentService = service;
+    return service;
   }
 
   function lifecycleSubagentService(service = nativeSubagentService()) {
