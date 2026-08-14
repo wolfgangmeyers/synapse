@@ -11,6 +11,8 @@ export const OPERATIONAL_TRUNCATION_MARKER = "\n[output truncated]";
 const MAX_RUNNER_BUFFER = 64 * 1024;
 const ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$";
 const ID = new RegExp(ID_PATTERN);
+const WORKER_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$";
+const WORKER_ID = new RegExp(WORKER_ID_PATTERN);
 const TASK_FIELDS = new Set([
   "branch",
   "window",
@@ -48,6 +50,7 @@ const SCRIPT_PATHS = Object.freeze({
   priority: join(SUPERVISOR_TOOLS, "state_priority.py"),
   verificationHandoff: join(SUPERVISOR_TOOLS, "state_verification_handoff.py"),
   workerList: join(SUPERVISOR_TOOLS, "worker_list.py"),
+  workerLifecycle: join(SUPERVISOR_TOOLS, "worker_lifecycle.py"),
   workerSend: join(SUPERVISOR_TOOLS, "mailbox_send.py"),
   prStatus: join(SUPERVISOR_TOOLS, "pr_status.py"),
   gitStatus: join(SUPERVISOR_TOOLS, "git_task_status.py"),
@@ -103,6 +106,12 @@ function text(value, name, maximum = MAX_TEXT) {
 function id(value, name = "identifier") {
   const normalized = text(value, name, 120);
   if (!ID.test(normalized)) throw new OperationalInputError(`${name} contains unsupported characters`);
+  return normalized;
+}
+
+function workerId(value, name = "worker alias") {
+  const normalized = text(value, name, 120);
+  if (!WORKER_ID.test(normalized)) throw new OperationalInputError(`${name} contains unsupported characters`);
   return normalized;
 }
 
@@ -406,6 +415,7 @@ export function createOperationalToolDefinitions({
   }
 
   const task = { type: "string", minLength: 1, maxLength: 120, pattern: ID_PATTERN };
+  const workerAlias = { type: "string", minLength: 1, maxLength: 120, pattern: WORKER_ID_PATTERN };
   const shortText = { type: "string", minLength: 1, maxLength: MAX_TEXT };
   const subject = { type: "string", minLength: 1, maxLength: 200 };
   const priorityStatus = { type: "string", enum: ["active", "blocked", "completed", "deferred", "cancelled"] };
@@ -566,14 +576,21 @@ export function createOperationalToolDefinitions({
 
     descriptor("mecha_worker", "Managed worker", [
       variant("list"),
+      variant("launch", { alias: workerAlias }, ["alias"]),
+      variant("cleanup", { alias: workerAlias }, ["alias"]),
       variant("send", { worker: task, message: shortText, subject }, ["worker", "message"]),
     ], async (input) => {
       const definitions = {
         list: { properties: {}, required: [] },
+        launch: { properties: { alias: true }, required: ["alias"] },
+        cleanup: { properties: { alias: true }, required: ["alias"] },
         send: { properties: { worker: true, message: true, subject: true }, required: ["worker", "message"] },
       };
       validateAction(input, definitions);
       if (input.action === "list") return success(await runScript(SCRIPT_PATHS.workerList));
+      if (input.action === "launch" || input.action === "cleanup") {
+        return success(await runScript(SCRIPT_PATHS.workerLifecycle, [input.action, "--alias", workerId(input.alias, "alias")]));
+      }
       const args = ["--to", id(input.worker, "worker"), "--body", text(input.message, "message")];
       if (input.subject !== undefined) args.push("--subject", text(input.subject, "subject", 200));
       return success(await runScript(SCRIPT_PATHS.workerSend, args));

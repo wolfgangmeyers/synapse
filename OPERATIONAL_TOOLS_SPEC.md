@@ -10,7 +10,7 @@ Pi exposes the common supervisor operations as grouped native tools. Each call n
 - `mecha_priority`: create or update a priority and change its status.
 - `mecha_verification_handoff`: record a verification handoff.
 - `mecha_reminder`: list, create, and delete reminders.
-- `mecha_worker`: list workers and send a worker a message.
+- `mecha_worker`: list workers, launch or clean up a state-recorded managed worker by alias, and send a worker a message. `send` is messaging-only; it does not create, restart, or recover a worker.
 - `mecha_pr`: read status for numeric pull request identifiers.
 - `mecha_git`: read git status for supervisor tasks.
 - `mecha_router`: read router health and retry or dismiss a known message.
@@ -21,7 +21,7 @@ Every tool uses action-specific closed JSON Schema variants. The extension also 
 
 Scripts come from a fixed filename allowlist. Callers cannot provide a command, script, repository, working directory, or filesystem path. Argument builders produce argument arrays and never invoke a shell. Pull request operations accept numeric identifiers. Git operations accept supervisor task identifiers.
 
-Worker shutdown is not exposed. `worker_shutdown.py --verified` accepts a caller assertion, not independently established review evidence, so a native caller could self-certify the destructive action.
+Worker lifecycle actions accept an alias only. The lifecycle adapter requires one exact active worker task in supervisor state. Launch uses the alias as the worker identity and takes its worktree, runtime, and optional resume session from that record. It also checks any prior recorded worker identity before launching. It refuses ambiguous aliases, invalid or missing state, missing worktrees or runtimes, and an alias or recorded identity that is already active. Cleanup passes only the task's recorded window to `worker_kill.py`, which kills that tmux window and sweeps its mailbox sidecar. Cleanup updates the recorded window only after that script succeeds. It keeps the task active and leaves its worktree, branch, runtime, session, databases, and other stored task data unchanged. Neither lifecycle action exposes `worker_shutdown.py` or accepts a caller assertion about review or task completion.
 
 The runner and router adapters are injected for testing. The default runner resolves allowlisted installed scripts, calls Python with `execFile`, applies a timeout and buffer limit, and returns bounded output. Successful and failed stdout and stderr are normalized and redacted. Credential fields and values are removed without changing ordinary identifiers. Router health goes through the injected router adapter. Every result has text content and object details, and responses are capped at 16,384 characters plus a short truncation marker.
 
@@ -29,4 +29,4 @@ The installer copies the extension, approved Python scripts, their local Python 
 
 ## Acceptance criteria
 
-`createMechaMessagingExtension` registers all eight tools once and accepts injected adapters through one options object. Tests prove closed schemas, runtime rejection, fixed script selection, safe argument arrays, adapter isolation, typed bounded results, credential redaction, ordinary identifier preservation, explicit bundle closure, rollback, clean-target imports, and installed execution through all eight tools.
+`createMechaMessagingExtension` registers all eight tools once and accepts injected adapters through one options object. Tests prove closed schemas, runtime rejection, fixed script selection, safe argument arrays, adapter isolation, typed bounded results, credential redaction, ordinary identifier preservation, state-resolved worker lifecycle behavior, explicit bundle closure, rollback, clean-target imports, and installed execution through all eight tools.
