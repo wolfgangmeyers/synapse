@@ -255,18 +255,19 @@ test("keeps queued native children visible as running", async (t) => {
   assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 0);
 });
 
-test("repairs missed native lifecycle events with a heartbeat snapshot", async (t) => {
+test("repairs a missed lifecycle update with the next heartbeat snapshot", async (t) => {
   const { repository } = await lifecycleRepository(t);
-  // Neither native transition is delivered. Complete snapshots still create
-  // then authoritatively omit the child, which is the router's repair path.
   assert.equal(repository.applySubagentLifecycleSnapshot(
-    lifecycleSnapshot(1, "heartbeat-running", [{ id: "repaired-child", description: "Repaired child" }]),
+    lifecycleSnapshot(1, "stale-heartbeat", [{ id: "stale-child", description: "Stale child" }]),
   ).disposition, "applied");
-  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 1);
+  // The native transition was missed. A later complete heartbeat must replace,
+  // not merge with, the old active projection.
   assert.equal(repository.applySubagentLifecycleSnapshot(
-    lifecycleSnapshot(2, "heartbeat-finished", []),
+    lifecycleSnapshot(2, "repair-heartbeat", [{ id: "repaired-child", description: "Repaired child", status: "running" }]),
   ).disposition, "applied");
-  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 0);
+  assert.deepEqual(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagents, [
+    { id: "repaired-child", description: "Repaired child", status: "running" },
+  ]);
 });
 
 test("keeps lifecycle snapshots active while a settled parent has a child", async (t) => {
@@ -1109,46 +1110,50 @@ test("extension reports top-level agent activity and settled transitions", async
   ]);
 });
 
-test("extension forwards the bounded Pi lifecycle projection and drops terminal records", async (t) => {
-  const listeners = new Set();
-  const completed = Object.freeze({ id: "queued-child", type: "general-purpose", description: "Queued work", status: "completed" });
-  let snapshots = Object.freeze([
-    Object.freeze({ id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" }),
-    Object.freeze({ id: "running-child", type: "general-purpose", description: "Running work", status: "running" }),
-  ]);
-  const records = new Map([[completed.id, { ...completed, result: "kept result" }]]);
-  let unsubscribed = 0;
+test("native lifecycle visibility polls full sanitized snapshots every two seconds", (t) => {
+  const intervals = [];
+  let subscribeCalls = 0;
+  const completed = Object.freeze({ id: "child", type: "general-purpose", description: "Completed child", status: "completed", result: "kept result" });
+  let snapshots = Object.freeze([]);
   const service = {
     getLifecycleSnapshots: () => snapshots,
-    subscribeLifecycle(listener) {
-      listeners.add(listener);
-      return () => { unsubscribed += 1; listeners.delete(listener); };
-    },
-    getRecord: (id) => records.get(id),
+    subscribeLifecycle() { subscribeCalls += 1; return () => {}; },
+    getRecord: (id) => id === completed.id ? completed : undefined,
   };
-  const fixture = settledNotificationFixture(t, { subagentsService: service });
+  const fixture = settledNotificationFixture(t, {
+    subagentsService: service,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { callback, delay, cleared: false, unref() {} };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
 
   fixture.handlers.get("agent_start")({}, fixture.context);
-  assert.deepEqual(fixture.activity.at(-1), {
-    state: "active",
-    subagentCount: 2,
-    subagents: [
-      { id: "queued-child", type: "general-purpose", description: "Queued work", status: "queued" },
-      { id: "running-child", type: "general-purpose", description: "Running work", status: "running" },
-    ],
-  });
+  fixture.childEvents.get("subagents:started")({ id: "child" });
+  fixture.childEvents.get("subagents:completed")({ id: "child" });
+  assert.deepEqual(fixture.lifecycle, []);
+  assert.equal(subscribeCalls, 0);
+  assert.equal(intervals[0].delay, 2_000);
 
-  snapshots = Object.freeze([snapshots[1]]);
-  for (const listener of listeners) listener(completed);
-  assert.deepEqual(fixture.activity.at(-1), {
-    state: "active",
-    subagentCount: 1,
-    subagents: [{ id: "running-child", type: "general-purpose", description: "Running work", status: "running" }],
+  snapshots = Object.freeze([Object.freeze({
+    id: "child", type: "general-purpose", description: "Safe child", status: "running",
+    prompt: "private prompt", output: "private output", result: "private result", error: "private error", startedAt: 1,
+  })]);
+  intervals[0].callback();
+  assert.deepEqual(fixture.lifecycle.at(-1), {
+    type: "snapshot",
+    subagents: [{ id: "child", type: "general-purpose", description: "Safe child", status: "running" }],
   });
+  assert.deepEqual(Object.keys(fixture.lifecycle.at(-1).subagents[0]), ["id", "type", "description", "status"]);
+
+  snapshots = Object.freeze([]);
+  fixture.childEvents.get("subagents:completed")({ id: "child" });
+  assert.equal(fixture.lifecycle.length, 1, "terminal events must not publish lifecycle frames");
+  intervals[0].callback();
+  assert.deepEqual(fixture.lifecycle.at(-1), { type: "snapshot", subagents: [] });
   assert.equal(service.getRecord(completed.id).result, "kept result");
-
-  fixture.handlers.get("session_shutdown")({}, fixture.context);
-  assert.equal(unsubscribed, 1);
 });
 
 test("extension bounds an invalid oversized lifecycle projection to 100 records", (t) => {
@@ -1158,14 +1163,18 @@ test("extension bounds an invalid oversized lifecycle projection to 100 records"
     description: `Child ${index}`,
     status: "queued",
   })));
+  const intervals = [];
   const fixture = settledNotificationFixture(t, {
-    subagentsService: {
-      getLifecycleSnapshots: () => snapshots,
-      subscribeLifecycle: () => () => {},
+    subagentsService: { getLifecycleSnapshots: () => snapshots },
+    setIntervalImpl: (callback) => {
+      const timer = { callback, unref() {} };
+      intervals.push(timer);
+      return timer;
     },
   });
 
   fixture.handlers.get("agent_start")({}, fixture.context);
+  intervals[0].callback();
   assert.equal(fixture.activity.at(-1).subagentCount, 100);
   assert.equal(fixture.activity.at(-1).subagents.length, 100);
 });
@@ -1185,7 +1194,7 @@ test("extension refreshes unchanged activity less often than the heartbeat tick"
   });
 
   fixture.handlers.get("agent_start")({}, fixture.context);
-  assert.equal(intervals[0].delay, 5_000);
+  assert.equal(intervals[0].delay, 2_000);
   now += 5_000;
   intervals[0].callback();
   now += 5_000;
@@ -1347,7 +1356,7 @@ test("extension reports running native subagent counts in activity", async (t) =
   ]);
 });
 
-test("extension preserves native lifecycle labels and status in lifecycle events and snapshots", async (t) => {
+test("native start and terminal events do not publish lifecycle frames", async (t) => {
   const intervals = [];
   let now = 0;
   const fixture = settledNotificationFixture(t, {
@@ -1375,16 +1384,11 @@ test("extension preserves native lifecycle labels and status in lifecycle events
   now += 5_000;
   intervals[0].callback();
 
-  const started = fixture.lifecycle.find((entry) => entry.type === "event" && entry.lifecycleEvent === "started");
-  const terminal = fixture.lifecycle.find((entry) => entry.type === "event" && entry.lifecycleEvent === "terminal");
-  assert.deepEqual(started.subagent, { id: "queued-child", type: "general-purpose", description: "Soak sleeper 1 2m", status: "queued" });
-  assert.deepEqual(terminal.subagent, { id: "terminal-first-child", description: "Soak sleeper 2 2.5m", status: "completed" });
-  assert.equal(terminal.terminalReason, "completed");
-  assert.ok(fixture.lifecycle.filter((entry) => entry.type === "snapshot").length >= 2);
+  assert.deepEqual(fixture.lifecycle, []);
   assert.equal(fixture.activity.at(-1).subagentCount, 1, "queued native child must remain visible as running");
 });
 
-test("extension preserves labels for every native terminal lifecycle classification", async (t) => {
+test("native terminal events keep local activity but publish no lifecycle frames", async (t) => {
   const fixture = settledNotificationFixture(t);
   const terminals = [
     ["subagents:completed", "completed"], ["subagents:failed", "failed"],
@@ -1397,12 +1401,10 @@ test("extension preserves labels for every native terminal lifecycle classificat
     const id = `terminal-${index}`;
     fixture.childEvents.get("subagents:started")({ id, description: `Soak sleeper ${index}`, status: "running" });
     fixture.childEvents.get(eventName)({ id, description: `Soak sleeper ${index}`, status: terminalReason });
-    const terminal = fixture.lifecycle.filter((entry) => entry.type === "event" && entry.lifecycleEvent === "terminal").at(-1);
-    assert.deepEqual(terminal.subagent, { id, description: `Soak sleeper ${index}`, status: "running" });
-    assert.equal(terminal.terminalReason, terminalReason);
+    assert.equal(fixture.lifecycle.length, 0);
   }
   assert.equal(fixture.activity.at(-1).subagentCount, 0);
-  assert.equal(JSON.stringify(fixture.lifecycle).includes("Soak sleeper 0"), true);
+  assert.deepEqual(fixture.lifecycle, []);
 });
 
 test("extension ignores no-op native subagent lifecycle events", async (t) => {
@@ -1435,7 +1437,7 @@ test("extension keeps subagent count TTL fresh without sending every heartbeat t
   });
 
   fixture.childEvents.get("subagents:started")({ id: "child-one" });
-  assert.equal(intervals[0].delay, 5_000);
+  assert.equal(intervals[0].delay, 2_000);
   now += 5_000;
   intervals[0].callback();
   now += 5_000;
