@@ -1098,7 +1098,7 @@ Use only for genuine escalation: ambiguity, scope change, security, task complet
 5. Treat draft-by-default as a creation rule for new agent-opened PRs. If live state says an existing PR is ready for review, assume a human made it ready. Do not move it back to draft because an older task note says "keep draft" or because draft is the agent default. Report unexpected draft/ready mismatches unless Wolfgang explicitly instructed the mutation after the observed ready action.
 6. When a dependency PR merges, immediately clear the dependent task blocker and re-check downstream work. A merged SDK/support PR should trigger the cookbook/demo update path in the same pass.
 
-**⛔ MANDATORY GATE — Check inline review comments before authorizing a merge.** `mergeStateStatus=CLEAN` and `reviewDecision=APPROVED` only mean required checks pass — they do NOT mean reviewer feedback was addressed. Before every merge authorization, run `gh api repos/<org>/<repo>/pulls/<N>/comments` and verify each inline comment was either resolved in a commit, explicitly deferred (linked to a new ticket), or answered. Greptile/Bugbot post inline; human reviewers often do too. Missing this step = merging unaddressed feedback.
+**⛔ MANDATORY GATE — Check review conversations before authorizing a merge.** `mergeStateStatus=CLEAN` and `reviewDecision=APPROVED` do not prove reviewer feedback was addressed. Use the GraphQL `reviewThreads` check below; REST pull comments cannot prove thread membership or resolution state. Verify every reviewer-authored finding or question has a concise final disposition reply with evidence. Accepted and fixed, rejected, stale or outdated, and no-change dispositions all require a reply. Verify the reply predates resolution. A conversation may remain open only for a fix that has not landed or a pending human, product, or security decision, with the exact reason posted. Fetch an exact comment body through REST only for the specific target comment when its content is needed. Missing this step means merging unaddressed feedback.
 
 ## Autonomous PR Review Policy
 
@@ -1106,7 +1106,7 @@ Use only for genuine escalation: ambiguity, scope change, security, task complet
 
 Do not post a review on PRs authored or opened by Wolfgang, or on PRs produced by the same agent, worker, or lane. Skip them or route them to an independent reviewer.
 
-This authorization covers the complete review delivery: `APPROVE`, `COMMENT`, or `REQUEST_CHANGES`, the aggregate review body, validated inline findings, and concise thread replies needed to close feedback after a worker's verified fix. Use Wolfgang's review voice gate before posting. Re-review after a head change. The sole exception is a merge: merge authorization remains explicit and separate.
+This authorization covers the complete review delivery: `APPROVE`, `COMMENT`, or `REQUEST_CHANGES`, the aggregate review body, validated inline findings, and concise replies needed to close review conversations after a verified fix or disposition. Before resolving a conversation, give every reviewer-authored finding or question a disposition. One final reply may cover several findings in the same conversation. The disposition reply and later agent-authored replies do not require replies of their own. Reply first, then resolve. Never silently resolve a conversation. Use Wolfgang's review voice gate before posting. Re-fetch the exact head, validate the disposition, and confirm required CI before replying or resolving. The sole exception is a merge: merge authorization remains explicit and separate.
 
 **Rules:**
 1. PR-watch is intake, not a human-approval queue. A stale review worker or previous report never suppresses a review of a changed current head.
@@ -1123,29 +1123,45 @@ This authorization covers the complete review delivery: `APPROVE`, `COMMENT`, or
 
 ## Gathering PR Feedback
 
-When checking for external review feedback on a PR, you MUST use the correct GitHub APIs. There are two distinct types of comments and both must be fetched:
+When checking for external review feedback on a PR, fetch top-level comments and structural review conversation state. Fetch an inline comment body only when its specific content is needed.
 
 **1. Top-level PR comments** (general discussion):
 ```bash
 gh pr view <NUMBER> --repo <OWNER/REPO> --comments --json comments
 ```
 
-**2. Inline review comments** (attached to specific lines in the diff):
+**2. Review conversation membership and resolution state:**
 ```bash
-gh api repos/<OWNER/REPO>/pulls/<NUMBER>/comments
+gh api graphql --paginate \
+  -F owner=<OWNER> -F repo=<REPO> -F number=<NUMBER> \
+  -f query='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{id isResolved isOutdated comments(first:100){nodes{id databaseId viewerDidAuthor createdAt replyTo{id}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}'
 ```
 
-**CRITICAL**: `gh pr view --comments` does NOT return inline review comments. Most code review tools (Greptile, GitHub reviewers) post inline comments. If you only check top-level comments, you will miss most feedback. Always fetch both.
+If a thread's comments connection has `hasNextPage:true`, fetch all of its structural comment records:
+```bash
+gh api graphql --paginate -F threadId=<THREAD_NODE_ID> \
+  -f query='query($threadId:ID!,$endCursor:String){node(id:$threadId){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{id databaseId viewerDidAuthor createdAt replyTo{id}} pageInfo{hasNextPage endCursor}}}}}'
+```
+
+`replyTo.id` identifies replies; a null `replyTo` marks the initiating comment. `viewerDidAuthor` distinguishes our replies without returning author identity. Before resolving, verify each reviewer finding or question is covered by our later disposition comment and `isResolved:false`. Resolve only then. Fetch the thread again and verify `isResolved:true`. GitHub's current `PullRequestReviewThread` schema has no `resolvedAt`, so the pre-resolution and post-resolution `isResolved` reads are the order evidence.
+
+**3. Exact body for one targeted inline comment, only when needed:**
+```bash
+gh api repos/<OWNER>/<REPO>/pulls/comments/<COMMENT_DATABASE_ID> \
+  --jq '{id, body}'
+```
+
+The REST lookup does not prove thread membership or resolution order. Use the GraphQL thread and comment IDs to select the target first. `gh pr view --comments` also omits inline review comments, so top-level comments alone are insufficient.
 
 **Procedure for gathering and acting on PR feedback:**
-1. Fetch both comment types using the commands above
-2. Deduplicate — reviewers may re-post comments on new commits for issues already addressed
-3. Separate new/unaddressed items from already-fixed items by comparing against recent commits
+1. Fetch top-level comments and structural review conversation state using the commands above
+2. Use thread/comment IDs and timestamps to deduplicate and identify the specific comments that need content inspection
+3. Fetch exact bodies only for those target comments, then separate new/unaddressed items from already-fixed items by comparing against recent commits
 4. Validate each new item with a subagent (read the actual file, check if the issue exists)
 5. Report invalid items to the user so they can flag them on the PR
 6. Write validated items into a TASK.md for the worker to address
 7. Instruct the worker to run robot-review + pr-validate (both skills, run via subagents — not commands) after fixes, then commit and push
-8. **Voice replies are mandatory.** Instruct the worker to draft a reply for each addressed review thread, in Wolfgang's voice (via the voice skill at `~/.claude/skills/voice/SKILL.md` and the persona at `/home/wolfgang/personas/wolfgang-voice.md`), short and specific to each change — see the "Replying to review feedback" standing practice in `worker/SKILL.md`. The worker reports the drafted replies back; per the PR Comment Policy above, the supervisor presents them for user approval before anything is posted.
+8. **Final disposition replies are mandatory.** Instruct the worker to prepare one concise final reply for every review conversation. It must cover every reviewer-authored finding or question in the initiating and follow-up comments, including accepted and fixed, rejected, stale or outdated, and no-change dispositions, with evidence for each. Agent-authored disposition and follow-up replies do not create another reply requirement. Run every reply through `wolfgang-voice-review`. Verify the exact PR head, disposition, and required CI, then use the GraphQL pre/post check above to prove the reply preceded resolution. Never silently resolve a conversation. Follow the "Replying to review feedback" standing practice in `worker/SKILL.md` and the applicable posting authorization above.
 
 ## Mailbox (Async Agent Coordination)
 

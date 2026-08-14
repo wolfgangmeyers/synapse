@@ -151,7 +151,7 @@ Then wait idle. The supervisor will kill the window when ready.
 
 2. **Maintain your todo list**: Track what you're doing. Update constantly.
 
-3. **Escalate uncertainty**: When facing novel decisions or genuine uncertainty, work on other non-blocked todos first. Once you've exhausted all other work, stop and clearly state what you're uncertain about, what the options are, and what the tradeoffs are. Do not wait for authorization for ordinary in-scope reversible work or local prerequisites; proceed. Escalate only a genuine external, irreversible, security, legal, credential, or materially ambiguous requirement decision.
+3. **Escalate uncertainty without stopping progress**: When facing novel decisions or genuine uncertainty, work on other non-blocked todos first. Once you've exhausted all other work, state precisely what is uncertain, the options, and their tradeoffs. Do not wait for authorization for ordinary in-scope reversible work or local prerequisites; proceed. A gate on commit, push, review/PR state, deploy, IAM/ruleset change, or deletion applies only to that operation—not to implementing, testing, and reviewing the accepted scoped work that leads up to it. Never interpret a delivery gate as an instruction to park unless the supervisor explicitly says to hold implementation or a real external, irreversible, security, legal, credential, or materially ambiguous requirement decision blocks it.
 
 4. **When something doesn't work, check assumptions before trying alternatives**: If an approach fails once, trying five more variations of the same approach is a rabbit hole. The root cause is usually an upstream assumption that's wrong — not the specific tactic. After two failed attempts at the same goal, stop and verify:
    - Is the target actually what you think it is? (Element in DOM? File exists? API returning what you expect?)
@@ -330,14 +330,17 @@ This ensures your fixes update the existing PR rather than creating a new branch
 
 ### Replying to review feedback (standing practice)
 
-When you address PR review feedback (inline review comments, Greptile/Bugbot findings, or a human reviewer's notes), you must **reply on each review thread** explaining what you changed — not just push a fix silently. Each reply is short, direct, and specific to that thread's change ("Done — moved the nil check ahead of the deref" / "Good catch, switched to the shared helper" / "Not changing this: it's pre-existing and out of scope, filed ABC-123").
+Before resolving any PR review conversation, give every reviewer-authored finding or question a final disposition with evidence. Cover accepted and fixed findings, rejected findings, stale or outdated findings, and cases where no change was needed. One concise final reply per conversation is enough when it covers every independent finding or question in the initiating and follow-up reviewer comments. The disposition reply and later agent-authored replies do not require replies of their own. Reply first, then resolve. Never silently resolve a conversation.
+
+Do not add separate acknowledgments or repeated status replies. Keep the reply direct and specific ("Done. Moved the nil check ahead of the dereference." / "No change here. This path already uses the shared helper in `abc123`." / "This was against the previous head. The current code no longer calls this function.").
 
 Generate the reply text in Wolfgang's voice:
 1. Read the **voice skill** at `~/.claude/skills/voice/SKILL.md` and follow it.
 2. Use the voice persona at `/home/wolfgang/personas/wolfgang-voice.md` as the source of his tone and phrasing.
-3. Keep it short and specific to the actual change — no filler, no restating the reviewer's point back at them.
+3. Run the final text through `wolfgang-voice-review` before posting.
+4. Keep it short and specific to the disposition and evidence. Do not restate the reviewer's point.
 
-**Post validated technical replies yourself.** PR-watch-routed review work has standing supervisor authorization for formal review delivery and concise technical thread closure. Run the required voice gate, reply only after the relevant fix or disposition is validated, and report what was posted. Do not wait for a separate user authorization. This does not authorize merges or unrelated social discussion.
+**Post validated technical replies yourself.** PR-watch-routed review work has standing supervisor authorization for formal review delivery and concise technical conversation closure. Reply only after checking the exact PR head, validating the fix or disposition, and confirming required CI. Leave the conversation open when the fix has not landed or a human, product, or security decision is still needed, and reply with that exact reason. This does not authorize merges or unrelated social discussion.
 
 ### Finding the Source Branch
 If the source branch name isn't obvious:

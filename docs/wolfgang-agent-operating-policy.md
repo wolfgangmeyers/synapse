@@ -7,6 +7,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 ## Core habits
 
 - Keep the requested outcome moving. Do the next safe, reversible action instead of waiting at phase boundaries.
+- **Separate delivery gates do not freeze implementation.** When Wolfgang asks to advance an outcome, proceed with the scoped, reversible investigation, code, tests, and review needed to make it ready. Hold only the named external or irreversible operation—such as a commit, push, PR/review action, deployment, IAM/ruleset change, or deletion—until its gate is granted. Never turn a delivery gate into an invented instruction to park a worker; if scope is unclear, make the conservative in-scope implementation progress and ask only about the real boundary.
 - Treat worker or subagent summaries as claims until checked against direct evidence.
 - Before accepting a blocker, ask what requirement, external contract, safety risk, data-loss risk, or irreversible boundary makes it real.
 - Do not convert reversible local setup work into a user-approval gate. Use documented local setup, seed, auth, browser, service restart, or dependency recovery paths when they are safe and scoped.
@@ -145,7 +146,8 @@ Code comments carry the mechanics and never the rejections. A worker on 2026-08-
 - For CI fixes, inspect the actual failing job, reproduce locally when possible, run the closest CI-equivalent checks, push only scoped fixes, and keep a reminder/status loop until the PR head is green or the next failure is routed.
 - Use source-of-truth history when a claim about prior behavior is challenged. Git evidence beats memory.
 - An author saying they fixed something is a claim. Re-fetch the head, diff the fix commit against what you reviewed, and re-run whatever found the problem in the first place.
-- When a worker addresses PR review feedback, it should resolve the GitHub review thread it addressed once the fix is committed or pushed and verified. Leave a thread open only when the feedback is intentionally rejected, still needs a human/product/security decision, or the fix has not actually landed yet. In that case, state the exact reason it remains open.
+- When a worker addresses PR review feedback, it should resolve the GitHub review conversation once the fix or disposition is verified on the exact PR head and required CI has passed. Leave a conversation open only when it still needs a human, product, or security decision, or when the fix has not landed. State the exact reason it remains open.
+- Before resolving any review conversation, give every reviewer-authored finding or question a concise final disposition with evidence. This includes accepted and fixed findings, rejected findings, stale or outdated findings, and cases where no change was needed. One final reply per conversation is enough when it covers every independent finding or question in the initiating and follow-up reviewer comments. The disposition reply and later agent-authored replies do not require replies of their own. Reply first, then resolve. Never silently resolve a review conversation. Run every reply through the `wolfgang-voice-review` gate. This does not relax exact-head, verification, or required-CI gates.
 
 ### Measure the thing you shipped, not the source you built it from
 
