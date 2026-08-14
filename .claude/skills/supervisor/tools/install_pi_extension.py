@@ -29,9 +29,18 @@ OPERATIONAL_TOOL_SCRIPTS = (
     "state_update_field.py",
     "state_update_status.py",
     "state_verification_handoff.py",
+    "worker_kill.py",
+    "worker_launch.py",
+    "worker_lifecycle.py",
     "worker_list.py",
 )
-OPERATIONAL_TOOL_MODULES = ("_cluster.py", "_sidecar.py", "_state.py", "_tmux.py")
+OPERATIONAL_TOOL_MODULES = (
+    "_cluster.py",
+    "_sidecar.py",
+    "_state.py",
+    "_tmux.py",
+    "worker_runtime_config.py",
+)
 SUPERVISOR_TOOL_JAVASCRIPT = ("claude_sidecar.mjs", "activity_tail.mjs", "activity_state.mjs")
 SIDECAR_HARNESS_MODULES = ("cli_entrypoint.js", "log_rotation.js")
 SIDECAR_EXTENSION_MODULES = ("mailbox-client.js",)
@@ -49,12 +58,16 @@ PYTHON_STANDARD_MODULES = frozenset({
     "pathlib",
     "re",
     "secrets",
+    "shlex",
     "signal",
+    "sqlite3",
     "subprocess",
     "sys",
+    "tempfile",
     "time",
     "typing",
     "urllib",
+    "uuid",
 })
 NODE_BUILTIN_MODULES = frozenset({
     "node:child_process",

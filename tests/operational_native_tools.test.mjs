@@ -88,6 +88,9 @@ test("uses action-specific closed schemas for every approved action", () => {
   const tools = registered({ runFile: async () => ({ stdout: "ok" }) });
   assertClosedActionSchemas(tools);
   assert.deepEqual(actionVariant(tools.get("mecha_state"), "create").required, ["action", "alias", "type", "project", "description"]);
+  assert.deepEqual(actionVariant(tools.get("mecha_worker"), "launch").required, ["action", "alias"]);
+  assert.deepEqual(actionVariant(tools.get("mecha_worker"), "cleanup").required, ["action", "alias"]);
+  assert.equal(actionVariant(tools.get("mecha_worker"), "launch").properties.alias.pattern, "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$");
   assert.deepEqual(actionVariant(tools.get("mecha_worker"), "send").required, ["action", "worker", "message"]);
   assert.deepEqual(actionVariant(tools.get("mecha_pr"), "status").properties.pullRequest, { type: "integer", minimum: 1 });
   assert.deepEqual(actionVariant(tools.get("mecha_git"), "status").required, ["action", "task"]);
@@ -101,7 +104,7 @@ test("matches the approved actions exactly", () => {
     mecha_priority: ["create", "update", "status"],
     mecha_verification_handoff: ["record"],
     mecha_reminder: ["list", "create", "delete"],
-    mecha_worker: ["list", "send"],
+    mecha_worker: ["list", "launch", "cleanup", "send"],
     mecha_pr: ["status"],
     mecha_git: ["status"],
     mecha_router: ["health", "retry", "dismiss"],
@@ -116,7 +119,9 @@ test("rejects unknown actions, missing fields, wrong types, and extras before ad
     fetchImpl: async (...args) => { requests.push(args); return { ok: true, status: 200, json: async () => ({}) }; },
   });
   for (const [name, input, expected] of [
-    ["mecha_worker", { action: "launch", task: "x" }, /unsupported action/],
+    ["mecha_worker", { action: "launch", task: "x" }, /unsupported field/],
+    ["mecha_worker", { action: "launch" }, /alias is required/],
+    ["mecha_worker", { action: "launch", alias: "bad.worker" }, /alias contains unsupported characters/],
     ["mecha_worker", { action: "send", worker: "x" }, /message is required/],
     ["mecha_worker", { action: "shutdown", worker: "x", verified: true }, /unsupported action/],
     ["mecha_pr", { action: "status", pullRequest: "12" }, /pullRequest must be an integer/],
@@ -148,6 +153,8 @@ test("selects exact fixed script paths and passes safe argument arrays", async (
     ["mecha_priority", { action: "create", priorityId: "p1", name: "Ship", taskIds: [3] }],
     ["mecha_verification_handoff", { action: "record", task: "task-1", reminderId: "r1", successor: "worker-1" }],
     ["mecha_worker", { action: "list" }],
+    ["mecha_worker", { action: "launch", alias: "worker-1" }],
+    ["mecha_worker", { action: "cleanup", alias: "worker-1" }],
     ["mecha_worker", { action: "send", worker: "worker-1", message: "Check this" }],
     ["mecha_pr", { action: "status", pullRequest: 42 }],
     ["mecha_git", { action: "status", task: "task-1" }],
@@ -159,15 +166,17 @@ test("selects exact fixed script paths and passes safe argument arrays", async (
   const expectedDirectory = join(process.cwd(), "pi-extensions", ".claude", "skills", "supervisor", "tools");
   assert.deepEqual(runner.calls.map(({ args }) => args[0]), [
     "state_query.py", "state_add.py", "state_update_status.py", "state_priority.py",
-    "state_verification_handoff.py", "worker_list.py", "mailbox_send.py",
-    "pr_status.py", "git_task_status.py",
+    "state_verification_handoff.py", "worker_list.py", "worker_lifecycle.py",
+    "worker_lifecycle.py", "mailbox_send.py", "pr_status.py", "git_task_status.py",
   ].map((name) => join(expectedDirectory, name)));
   assert.equal(runner.calls[0].file, "python3");
   assert.deepEqual(runner.calls[0].args, [join(expectedDirectory, "state_query.py"), "--alias", "task-1"]);
   assert.equal(runner.calls[0].options.env, process.env);
-  assert.deepEqual(runner.calls[6].args.slice(1), ["--to", "worker-1", "--body", "Check this"]);
-  assert.deepEqual(runner.calls[7].args.slice(1), ["42", "--json"]);
-  assert.deepEqual(runner.calls[8].args.slice(1), ["--task", "task-1", "--json"]);
+  assert.deepEqual(runner.calls[6].args.slice(1), ["launch", "--alias", "worker-1"]);
+  assert.deepEqual(runner.calls[7].args.slice(1), ["cleanup", "--alias", "worker-1"]);
+  assert.deepEqual(runner.calls[8].args.slice(1), ["--to", "worker-1", "--body", "Check this"]);
+  assert.deepEqual(runner.calls[9].args.slice(1), ["42", "--json"]);
+  assert.deepEqual(runner.calls[10].args.slice(1), ["--task", "task-1", "--json"]);
 });
 
 test("injects runFile and fetchImpl through createMechaMessagingExtension", async () => {
@@ -405,6 +414,8 @@ test("rejects arbitrary paths, repositories, working directories, and commands",
   const tools = registered({ runFile: runner.runFile });
   for (const [name, input] of [
     ["mecha_worker", { action: "send", worker: "x", message: "hello", directory: "/tmp" }],
+    ["mecha_worker", { action: "launch", alias: "x", directory: "/tmp" }],
+    ["mecha_worker", { action: "cleanup", alias: "x", command: "tmux kill-server" }],
     ["mecha_pr", { action: "status", pullRequest: 3, repo: "evil/repo" }],
     ["mecha_git", { action: "status", task: "x", cwd: "/tmp" }],
     ["mecha_router", { action: "health", script: "curl" }],

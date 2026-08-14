@@ -49,6 +49,14 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.paths.start()
         self.addCleanup(self.paths.stop)
 
+    def test_declares_the_state_resolved_worker_lifecycle_bundle(self):
+        self.assertTrue({
+            "worker_lifecycle.py",
+            "worker_launch.py",
+            "worker_kill.py",
+        }.issubset(install_pi_extension.OPERATIONAL_TOOL_SCRIPTS))
+        self.assertIn("worker_runtime_config.py", install_pi_extension.OPERATIONAL_TOOL_MODULES)
+
     def test_installs_extension_artifacts_and_deduplicates_their_registrations(self):
         stale = self.temp_path / "other" / "mecha-messaging.js"
         stale.parent.mkdir()
