@@ -53,8 +53,9 @@ PI_MODEL = "gpt-5.6-terra"
 PI_MODELS_STORE_PATH = os.path.expanduser("~/.pi/agent/models-store.json")
 CURSOR_MODEL = "glm-5.2"
 CURSOR_MODEL_ENV = "MECHA_CURSOR_MODEL"
+# Retained only for compatibility with callers that still export it. Pi extension
+# selection comes from Pi's installed defaults, not this launcher's command line.
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
-PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
 DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 PI_NOTIFY_ON_SETTLED_ENV = "MECHA_PI_NOTIFY_ON_SETTLED"
@@ -212,22 +213,6 @@ def validate_compaction_policy(policy):
             raise ValueError("compaction policy tier maxContextTokens must be a positive integer or null")
         _validate_compaction_levels(tier.get("levels"))
     return policy
-
-
-def resolve_pi_mailbox_extension():
-    """Return the explicit, validated Mailbox V2 extension path for Pi."""
-    extension_path = (
-        os.environ[PI_MAILBOX_EXTENSION_ENV]
-        if PI_MAILBOX_EXTENSION_ENV in os.environ
-        else PI_MAILBOX_EXTENSION_PATH
-    )
-    if not os.path.isfile(extension_path):
-        raise ValueError(
-            f"{PI_MAILBOX_EXTENSION_ENV} must name a validated extension file. "
-            f"Install the canonical Pi extension first: "
-            f"python3 {os.path.join(TOOLS_DIR, 'install_pi_extension.py')}"
-        )
-    return extension_path
 
 
 def get_cursor_auth_token():
@@ -627,12 +612,9 @@ def main():
     # The Claude trust key is resolved separately inside _claude_pretrust_workspace(),
     # because Claude Code looks a project up by its resolved physical path.
     work_dir = os.path.abspath(os.path.expanduser(args.dir))
-    pi_mailbox_extension = None
     mailbox_router_url = None
     if args.agent in {"pi", "claude"}:
         try:
-            if args.agent == "pi":
-                pi_mailbox_extension = resolve_pi_mailbox_extension()
             mailbox_router_url = resolve_pi_router_url()
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
@@ -667,11 +649,8 @@ def main():
             "--name",
             args.window,
         ]
-        # Use Pi's default configured extensions and add the managed-worker
-        # Mailbox V2 extension explicitly so mailbox routing is always present.
-        parts.extend([
-            "--extension", pi_mailbox_extension,
-        ])
+        # Pi loads its installed default extensions. The launcher must not override
+        # that configured set with explicit extension arguments.
         # Pi has no permission mode. --approve makes the trusted project resources
         # available without a startup prompt, matching the existing launcher default.
         if args.skip_permissions:
