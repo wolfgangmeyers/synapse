@@ -923,9 +923,10 @@ test("default compaction policy uses context-size fallback and model-specific ov
   assert.equal(millionTokenTier.levels.find((level) => level.mandatory).percent, 45);
   assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 49, contextWindow: 1_000_000 }, 40).mandatory, true);
   const solTier = tierFor(DEFAULT_COMPACTION_POLICY, 272_000, { provider: "openai-codex", id: "gpt-5.6-sol", name: "Sol" });
-  assert.equal(solTier.matchedModelKey, "openai-codex/gpt-5.6-sol");
-  assert.deepEqual(solTier.levels.map((level) => level.percent), [15, 25, 35, 45]);
-  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 36, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, 25).percent, 35);
+  assert.equal(solTier.matchedModelKey, undefined);
+  assert.deepEqual(solTier.levels.map((level) => level.percent), [40, 50, 60, 70, 80, 90]);
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 36, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, 25), undefined);
+  assert.equal(thresholdFor(DEFAULT_COMPACTION_POLICY, { percent: 41, contextWindow: 272_000, model: { provider: "openai-codex", id: "gpt-5.6-sol" } }).percent, 40);
 
   const configured = compactionPolicyFromEnvironment({ MECHA_PI_COMPACTION_POLICY: JSON.stringify({
     levels: [40, 90],
