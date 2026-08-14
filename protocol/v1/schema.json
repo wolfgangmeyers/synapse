@@ -369,6 +369,67 @@
         }
       }
     },
+    "lifecycleEpoch": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-fA-F-]{36}$" },
+    "lifecycleSequence": { "type": "integer", "minimum": 1 },
+    "lifecycleChild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "lifecycleChildren": { "type": "array", "maxItems": 999, "items": { "$ref": "#/$defs/lifecycleChild" } },
+    "lifecycleProducerFields": {
+      "type": "object",
+      "required": ["agent_id", "instance_id", "parent_session_id", "lease_id", "producer_epoch", "client_sequence", "event_id"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "parent_session_id": { "$ref": "#/$defs/frameId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "producer_epoch": { "$ref": "#/$defs/lifecycleEpoch" },
+        "client_sequence": { "$ref": "#/$defs/lifecycleSequence" },
+        "event_id": { "$ref": "#/$defs/frameId" }
+      }
+    },
+    "subagentSyncEnableFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_sync_enable" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "after_version": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "subagentLifecycleSnapshotFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "parent_session_id", "lease_id", "producer_epoch", "client_sequence", "event_id", "subagents"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_lifecycle_snapshot" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "parent_session_id": { "$ref": "#/$defs/frameId" }, "lease_id": { "$ref": "#/$defs/leaseId" }, "producer_epoch": { "$ref": "#/$defs/lifecycleEpoch" }, "client_sequence": { "$ref": "#/$defs/lifecycleSequence" }, "event_id": { "$ref": "#/$defs/frameId" }, "subagents": { "$ref": "#/$defs/lifecycleChildren" }
+      }
+    },
+    "subagentLifecycleEventFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "parent_session_id", "lease_id", "producer_epoch", "client_sequence", "event_id", "lifecycle_event", "subagent"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_lifecycle_event" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "parent_session_id": { "$ref": "#/$defs/frameId" }, "lease_id": { "$ref": "#/$defs/leaseId" }, "producer_epoch": { "$ref": "#/$defs/lifecycleEpoch" }, "client_sequence": { "$ref": "#/$defs/lifecycleSequence" }, "event_id": { "$ref": "#/$defs/frameId" },
+        "lifecycle_event": { "enum": ["started", "terminal"] }, "subagent": { "$ref": "#/$defs/lifecycleChild" }, "terminal_reason": { "$ref": "#/$defs/failureReason" }
+      },
+      "allOf": [{ "if": { "properties": { "lifecycle_event": { "const": "terminal" } } }, "then": { "required": ["terminal_reason"] } }]
+    },
+    "subagentResyncFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "after_version"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_state_resync" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" }, "after_version": { "type": "integer", "minimum": 0 }
+      }
+    },
     "clientFrame": {
       "oneOf": [
         {
@@ -394,7 +455,11 @@
         },
         {
           "$ref": "#/$defs/pingFrame"
-        }
+        },
+        { "$ref": "#/$defs/subagentSyncEnableFrame" },
+        { "$ref": "#/$defs/subagentLifecycleSnapshotFrame" },
+        { "$ref": "#/$defs/subagentLifecycleEventFrame" },
+        { "$ref": "#/$defs/subagentResyncFrame" }
       ]
     },
     "registeredFrame": {
@@ -620,6 +685,38 @@
         "attempt_number": { "$ref": "#/$defs/attemptNumber" }
       }
     },
+    "subagentStateAgent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agent_id", "subagent_version", "subagent_count", "subagents"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/agentId" }, "subagent_version": { "type": "integer", "minimum": 0 }, "subagent_count": { "$ref": "#/$defs/subagentCount" }, "subagents": { "$ref": "#/$defs/lifecycleChildren" }
+      }
+    },
+    "subagentStateSnapshotFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "router_version", "agents"],
+      "properties": { "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_state_snapshot" }, "router_version": { "type": "integer", "minimum": 0 }, "agents": { "type": "array", "items": { "$ref": "#/$defs/subagentStateAgent" } } }
+    },
+    "subagentStateUpdateFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "router_version", "agent"],
+      "properties": { "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_state_update" }, "router_version": { "type": "integer", "minimum": 0 }, "agent": { "$ref": "#/$defs/subagentStateAgent" } }
+    },
+    "subagentStateReplayFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "router_version", "updates"],
+      "properties": { "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_state_replay" }, "router_version": { "type": "integer", "minimum": 0 }, "updates": { "type": "array", "items": { "$ref": "#/$defs/subagentStateAgent" } } }
+    },
+    "subagentLifecycleAcknowledgedFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "request_id", "event_id", "client_sequence", "producer_epoch", "agent_id", "instance_id", "parent_session_id", "lease_id", "disposition", "router_version"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "subagent_lifecycle_acknowledged" }, "request_id": { "$ref": "#/$defs/frameId" },
+        "event_id": { "$ref": "#/$defs/frameId" }, "client_sequence": { "$ref": "#/$defs/lifecycleSequence" }, "producer_epoch": { "$ref": "#/$defs/lifecycleEpoch" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "parent_session_id": { "$ref": "#/$defs/frameId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "disposition": { "enum": ["applied", "accepted_noop", "duplicate", "stale", "conflict"] }, "router_version": { "type": "integer", "minimum": 0 }, "applied_version": { "type": "integer", "minimum": 0 }
+      }
+    },
     "serverFrame": {
       "oneOf": [
         { "$ref": "#/$defs/registeredFrame" },
@@ -630,7 +727,11 @@
         { "$ref": "#/$defs/conversationMessageFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" },
         { "$ref": "#/$defs/agentActivityFrame" },
-        { "$ref": "#/$defs/messageArrivalServerFrame" }
+        { "$ref": "#/$defs/messageArrivalServerFrame" },
+        { "$ref": "#/$defs/subagentStateSnapshotFrame" },
+        { "$ref": "#/$defs/subagentStateUpdateFrame" },
+        { "$ref": "#/$defs/subagentStateReplayFrame" },
+        { "$ref": "#/$defs/subagentLifecycleAcknowledgedFrame" }
       ]
     },
     "sentinelDescriptor": {

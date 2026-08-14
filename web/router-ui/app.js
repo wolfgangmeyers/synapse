@@ -11,6 +11,8 @@ import {
   replacePendingMessage,
   SCOPE_SEPARATOR,
   settlePendingMessages,
+  applyLifecycleSnapshot,
+  upsertLifecycleAgent,
 } from "./state.js";
 import { renderMarkdownBody, textWithoutMarkdownImages } from "./markdown.js";
 
@@ -52,6 +54,7 @@ const state = {
   historyRequests: new Map(),
   draftPeers: new Set(),
   expandedSubagents: new Set(),
+  lastLifecycleSnapshotVersion: 0,
   renderedMessageCounts: {},
   renderedMessageSignatures: {},
   renderedLastMessageKeys: {},
@@ -190,7 +193,22 @@ async function handleEvent(event) {
   if (event.type === "agents") {
     state.agents = event.agents
       .filter((agent) => agent.agent_id !== state.agentId)
-      .map((agent) => mergeKnownSubagentSummaries(agent));
+      .map((agent) => mergeAgentSnapshot(agent));
+    if (Number.isSafeInteger(event.activitySnapshotVersion)) state.lastLifecycleSnapshotVersion = Math.max(state.lastLifecycleSnapshotVersion, event.activitySnapshotVersion);
+    renderAgents();
+    renderConversation();
+    return;
+  }
+  if (event.type === "subagent_state_snapshot") {
+    applyLifecycleSnapshotEvent(event);
+    return;
+  }
+  if (event.type === "subagent_state_update") {
+    applyLifecycleUpdateEvent(event.agent, event.routerVersion);
+    return;
+  }
+  if (event.type === "subagent_state_replay") {
+    for (const agent of event.updates || []) applyLifecycleUpdateEvent(agent, event.routerVersion, { render: false });
     renderAgents();
     renderConversation();
     return;
@@ -287,6 +305,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
   state.agents = [];
   state.expandedSubagents.clear();
+  state.lastLifecycleSnapshotVersion = 0;
   state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
   state.messages = await loadMessages(routerUrl, state.agentId);
   state.historyRequests = new Map();
@@ -492,7 +511,7 @@ function selectPeer(peer) {
 
 function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = []) {
   if (!peer || peer === state.agentId) return;
-  const current = state.agents.find((agent) => agent.agent_id === peer);
+  const current = state.agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
   const incomingSummaries = normalizeSubagents(subagents);
   const incomingCount = Number.isSafeInteger(subagentCount) ? subagentCount : 0;
   const currentSummaries = normalizeSubagents(current?.subagents);
@@ -500,9 +519,16 @@ function updateAgentActivity(peer, activityState, subagentCount = 0, subagents =
     ? incomingSummaries
     : (incomingCount > 0 && currentSummaries.length === incomingCount ? currentSummaries : []);
   const normalizedCount = Math.max(summaries.length, incomingCount);
-  if (normalizedCount === 0) state.expandedSubagents.delete(peer);
-  if (current?.activity_state === activityState && (current.subagent_count ?? 0) === normalizedCount && sameSubagents(current.subagents, summaries)) return;
-  state.agents = state.agents.map((agent) => agent.agent_id === peer ? { ...agent, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries } : agent);
+  const hasDurableLifecycle = Number.isSafeInteger(current.subagent_version);
+  if (!hasDurableLifecycle && normalizedCount === 0) state.expandedSubagents.delete(peer);
+  if (current.activity_state === activityState && hasDurableLifecycle) return;
+  if (current.activity_state === activityState && (current.subagent_count ?? 0) === normalizedCount && sameSubagents(current.subagents, summaries)) return;
+  const next = hasDurableLifecycle
+    ? { ...current, activity_state: activityState }
+    : { ...current, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries };
+  state.agents = state.agents.some((agent) => agent.agent_id === peer)
+    ? state.agents.map((agent) => agent.agent_id === peer ? next : agent)
+    : [...state.agents, next];
   renderAgents();
   renderConversation();
 }
@@ -1089,11 +1115,37 @@ function updateSubagentTooltips() {
     for (const description of descriptions) description.removeAttribute("title");
   }
 }
-function mergeKnownSubagentSummaries(agent) {
+function applyLifecycleSnapshotEvent(event) {
+  const result = applyLifecycleSnapshot(state.agents, event.agents, event.routerVersion, state.lastLifecycleSnapshotVersion);
+  state.agents = result.agents;
+  state.lastLifecycleSnapshotVersion = result.lastSnapshotVersion;
+  for (const agent of state.agents) if ((agent.subagent_count ?? 0) === 0) state.expandedSubagents.delete(agent.agent_id);
+  renderAgents();
+  renderConversation();
+}
+
+function applyLifecycleUpdateEvent(agent, routerVersion, { render = true } = {}) {
+  if (!agent?.agent_id || agent.agent_id === state.agentId || !Number.isSafeInteger(routerVersion)) return;
+  state.agents = upsertLifecycleAgent(state.agents, { ...agent, subagent_version: agent.subagent_version ?? routerVersion });
+  state.lastLifecycleSnapshotVersion = Math.max(state.lastLifecycleSnapshotVersion, routerVersion);
+  const next = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
+  if ((next?.subagent_count ?? 0) === 0) state.expandedSubagents.delete(agent.agent_id);
+  if (render) { renderAgents(); renderConversation(); }
+}
+
+function mergeAgentSnapshot(agent) {
+  const current = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
+  if (Number.isSafeInteger(current?.subagent_version)
+    && (!Number.isSafeInteger(agent.subagent_version)
+      || agent.subagent_version < current.subagent_version
+      || (agent.subagent_version === current.subagent_version
+        && ((agent.subagent_count ?? 0) !== (current.subagent_count ?? 0)
+          || !sameSubagents(agent.subagents, current.subagents))))) {
+    return { ...agent, subagent_version: current.subagent_version, subagent_count: current.subagent_count, subagents: current.subagents };
+  }
   const incomingSummaries = normalizeSubagents(agent.subagents);
   const incomingCount = Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0;
   if (incomingSummaries.length > 0 || incomingCount === 0) return { ...agent, subagents: incomingSummaries };
-  const current = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
   const currentSummaries = normalizeSubagents(current?.subagents);
   return currentSummaries.length === incomingCount ? { ...agent, subagents: currentSummaries } : { ...agent, subagents: [] };
 }

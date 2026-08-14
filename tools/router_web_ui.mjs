@@ -143,6 +143,8 @@ function createBrowserClient(browser, { defaultRouter }) {
   let refreshTimer;
   let renewTimer;
   let connectionGeneration = 0;
+  let lifecycleEnabled = false;
+  let lifecycleVersion = 0;
   const pendingDeliveries = new Map();
   let configured = {
     routerUrl: normalizeRouterUrl(defaultRouter),
@@ -164,7 +166,7 @@ function createBrowserClient(browser, { defaultRouter }) {
       const response = await fetch(new URL("/v1/agents", routerUrl));
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.code ?? `HTTP ${response.status}`);
-      sendBrowser({ type: "agents", agents: body.agents ?? [], generatedAt: body.generated_at, agentId, routerUrl });
+      sendBrowser({ type: "agents", agents: body.agents ?? [], generatedAt: body.generated_at, activitySnapshotVersion: body.activity_snapshot_version, agentId, routerUrl });
     } catch (error) {
       sendBrowser({ type: "agents_error", message: error.message, agentId, routerUrl });
     }
@@ -175,6 +177,7 @@ function createBrowserClient(browser, { defaultRouter }) {
     clearInterval(refreshTimer);
     clearInterval(renewTimer);
     configured = { ...configured, instanceId: randomUUID(), leaseId: "" };
+    lifecycleEnabled = false;
     const generation = ++connectionGeneration;
     routerSocket?.close(1000, "reconnecting");
     const wsUrl = routerWsUrl(configured.routerUrl);
@@ -208,6 +211,7 @@ function createBrowserClient(browser, { defaultRouter }) {
         clearInterval(renewTimer);
         renewTimer = setInterval(() => renewLease(), 10_000);
         refreshAgents();
+        void enableLifecycleSync(generation);
         clearInterval(refreshTimer);
         refreshTimer = setInterval(refreshAgents, AGENT_REFRESH_INTERVAL_MS);
         return;
@@ -236,6 +240,21 @@ function createBrowserClient(browser, { defaultRouter }) {
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
         });
+        return;
+      }
+      if (frame.type === "subagent_state_snapshot") {
+        lifecycleVersion = Math.max(lifecycleVersion, frame.router_version ?? 0);
+        sendBrowser({ type: "subagent_state_snapshot", routerVersion: frame.router_version ?? 0, agents: frame.agents ?? [], agentId: configured.agentId, routerUrl: configured.routerUrl });
+        return;
+      }
+      if (frame.type === "subagent_state_update") {
+        lifecycleVersion = Math.max(lifecycleVersion, frame.router_version ?? 0);
+        sendBrowser({ type: "subagent_state_update", routerVersion: frame.router_version ?? 0, agent: frame.agent, agentId: configured.agentId, routerUrl: configured.routerUrl });
+        return;
+      }
+      if (frame.type === "subagent_state_replay") {
+        lifecycleVersion = Math.max(lifecycleVersion, frame.router_version ?? 0);
+        sendBrowser({ type: "subagent_state_replay", routerVersion: frame.router_version ?? 0, updates: frame.updates ?? [], agentId: configured.agentId, routerUrl: configured.routerUrl });
         return;
       }
       if (frame.type === "message_arrival") {
@@ -286,6 +305,22 @@ function createBrowserClient(browser, { defaultRouter }) {
       if (generation !== connectionGeneration) return;
       setStatus("reconnecting", "Router unavailable; retrying…");
     });
+  };
+
+  const enableLifecycleSync = async (generation) => {
+    try {
+      const response = await fetch(new URL("/v1/capabilities", configured.routerUrl));
+      const capabilities = await response.json().catch(() => ({}));
+      if (generation !== connectionGeneration || routerSocket?.readyState !== WebSocket.OPEN || configured.leaseId === "" || capabilities.subagent_lifecycle_v2 !== true) return;
+      lifecycleEnabled = true;
+      routerSocket.send(JSON.stringify({
+        version: "v1", frame_id: `subagent-enable-${randomUUID()}`, type: "subagent_sync_enable",
+        agent_id: configured.agentId, instance_id: configured.instanceId, lease_id: configured.leaseId,
+        ...(lifecycleVersion > 0 ? { after_version: lifecycleVersion } : {}),
+      }));
+    } catch {
+      // A 404 or an unavailable old router keeps the legacy refresh path alive.
+    }
   };
 
   const renewLease = () => {
