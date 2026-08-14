@@ -456,7 +456,9 @@ function childSessionId(event) {
 }
 
 const SETTLED_NOTIFICATION_COOLDOWN_MS = 120_000;
-const ACTIVITY_HEARTBEAT_INTERVAL_MS = 5_000;
+// Native lifecycle visibility is intentionally polling-only. This cadence bounds how
+// long the web UI can show a stale child without relying on Pi event delivery.
+const ACTIVITY_HEARTBEAT_INTERVAL_MS = 2_000;
 const ACTIVITY_REFRESH_MIN_MS = 10_000;
 const EVENT_TRACKED_MISSING_LIMIT_MS = 60_000;
 // pi-subagents intentionally exposes at most 100 live records. Keep the Mailbox
@@ -1079,8 +1081,6 @@ export function createMechaMessagingExtension(pi, {
   let parentActivityContext;
   let lastActivitySent;
   let lastNativeSubagentReadDiagnosticMs;
-  let lifecycleSubscription;
-  let lifecycleSubscriptionService;
   // The parent extension may load before pi-subagents publishes its service. Pin the first
   // service it sees on the parent session so a child session cannot replace the process-global
   // symbol and make the parent's lifecycle projection appear empty.
@@ -1145,23 +1145,8 @@ export function createMechaMessagingExtension(pi, {
       .filter(Boolean);
   }
 
-  function publishLifecycleSnapshot() {
-    try { client?.sendLifecycleSnapshot?.(lifecycleSubagentSummaries()); } catch { /* legacy delivery stays available */ }
-  }
-
-  function publishLifecycleEvent(lifecycleEvent, metadata, terminalReason) {
-    const subagent = lifecycleSubagentSummary(metadata);
-    if (subagent === undefined) return;
-    try {
-      client?.sendLifecycleEvent?.({
-        lifecycleEvent,
-        subagent,
-        ...(lifecycleEvent === "terminal" ? { terminalReason } : {}),
-        snapshot: lifecycleSubagentSummaries(),
-      });
-    } catch {
-      // Lifecycle replication is optional until the router advertises it.
-    }
+  function publishLifecycleSnapshot(subagents) {
+    try { client?.sendLifecycleSnapshot?.(subagents); } catch { /* lifecycle polling retries on the next tick */ }
   }
 
   function sameSubagentMetadata(left, right) {
@@ -1177,11 +1162,8 @@ export function createMechaMessagingExtension(pi, {
     return service;
   }
 
-  function lifecycleSubagentService(service = nativeSubagentService()) {
-    return typeof service?.getLifecycleSnapshots === "function"
-      && typeof service?.subscribeLifecycle === "function"
-      ? service
-      : undefined;
+  function lifecycleSnapshotSubagentService(service = nativeSubagentService()) {
+    return typeof service?.getLifecycleSnapshots === "function" ? service : undefined;
   }
 
   function reportNativeSubagentReadFailure() {
@@ -1217,16 +1199,16 @@ export function createMechaMessagingExtension(pi, {
     return typeof record?.status === "string" ? record.status.toLowerCase() : record?.status;
   }
 
-  function isActiveNativeSubagentRecord(record) {
+  function isActiveNativeSubagentRecord(record, service = nativeSubagentService()) {
     const status = nativeSubagentStatus(record);
-    return lifecycleSubagentService() !== undefined
+    return lifecycleSnapshotSubagentService(service) !== undefined
       ? LIVE_SUBAGENT_STATUSES.has(status)
       : [undefined, "running", "queued", "active"].includes(status);
   }
 
-  function isTerminalNativeSubagentRecord(record) {
+  function isTerminalNativeSubagentRecord(record, service = nativeSubagentService()) {
     const status = nativeSubagentStatus(record);
-    return lifecycleSubagentService() !== undefined
+    return lifecycleSnapshotSubagentService(service) !== undefined
       ? TERMINAL_SUBAGENT_STATUSES.has(status)
       : [
         "completed", "complete", "done", "finished", "failed", "failure", "error", "errored",
@@ -1294,36 +1276,78 @@ export function createMechaMessagingExtension(pi, {
     };
   }
 
+  function lifecycleSnapshotSummary(record) {
+    const id = typeof record?.id === "string" ? record.id.trim().slice(0, 128) : "";
+    if (id.length === 0) return undefined;
+    const type = typeof record?.type === "string" ? record.type.trim().slice(0, 64) : "";
+    const description = typeof record?.description === "string" ? record.description.trim().slice(0, 512) : "";
+    const status = nativeSubagentStatus(record);
+    if (!LIVE_SUBAGENT_STATUSES.has(status)) return undefined;
+    // Construct this object instead of spreading native records. Snapshot payloads must
+    // never expose prompts, output, result, error details, or internal timestamps.
+    return {
+      id,
+      type: type.length > 0 ? type : "general-purpose",
+      description: description.length > 0 ? description : "Native subagent",
+      status,
+    };
+  }
+
+  function replaceNativeLifecycleSnapshot(snapshot, nowMs) {
+    const next = new Map();
+    for (const record of snapshot) {
+      const existing = runningSubagents.get(record.id);
+      next.set(record.id, {
+        ...record,
+        eventTracked: false,
+        serviceTracked: true,
+        startedAtMs: existing?.startedAtMs ?? nowMs,
+        lastSeenMs: nowMs,
+      });
+    }
+    let changed = next.size !== runningSubagents.size;
+    for (const [id, metadata] of next) {
+      if (!sameSubagentMetadata(runningSubagents.get(id), metadata)) changed = true;
+    }
+    for (const id of runningSubagents.keys()) {
+      if (!next.has(id)) settledNotifications.onChildDisposed(id);
+    }
+    for (const id of next.keys()) {
+      if (!runningSubagents.has(id)) settledNotifications.onChildStarted(id);
+    }
+    runningSubagents.clear();
+    for (const [id, metadata] of next) runningSubagents.set(id, metadata);
+    return changed;
+  }
+
   function reconcileNativeSubagentService() {
     const service = nativeSubagentService();
-    const lifecycleService = lifecycleSubagentService(service);
+    const lifecycleSnapshotService = lifecycleSnapshotSubagentService(service);
     const source = nativeSubagentRecords(service);
-    if (!Array.isArray(source)) return false;
+    if (!Array.isArray(source)) return { changed: false };
     const nowMs = nowImpl();
+    if (lifecycleSnapshotService !== undefined) {
+      const snapshot = source
+        .map(lifecycleSnapshotSummary)
+        .filter(Boolean)
+        .slice(0, MAX_ACTIVITY_SUBAGENTS);
+      return { changed: replaceNativeLifecycleSnapshot(snapshot, nowMs), snapshot };
+    }
+
     const serviceIds = new Set();
     let changed = false;
-    // The service list can lag behind lifecycle events, so event-tracked children
-    // stay visible until a terminal status or lifecycle event removes them.
-    for (const record of lifecycleService === undefined ? source : source.slice(0, MAX_ACTIVITY_SUBAGENTS)) {
+    for (const record of source) {
       const metadata = normalizeSubagentMetadata(record, nativeSubagentStartedAtMs(record, nowMs));
       if (metadata === undefined) continue;
-      // Older service shapes are still supported as a compatibility fallback. Their statuses
-      // were never part of the Mailbox activity contract, so only the typed lifecycle API
-      // publishes status-bearing records.
-      if (lifecycleService === undefined) delete metadata.status;
+      // Older service shapes did not expose a typed lifecycle contract.
+      if (lifecycleSnapshotService === undefined) delete metadata.status;
       serviceIds.add(metadata.id);
-      if (isTerminalNativeSubagentRecord(record)) {
-        const terminalFirst = !terminalSubagentTombstones.has(metadata.id);
-        const prior = runningSubagents.get(metadata.id) ?? metadata;
+      if (isTerminalNativeSubagentRecord(record, service)) {
         if (rememberTerminalSubagent(metadata.id, nowMs)) changed = true;
-        if (terminalFirst) {
-          publishLifecycleEvent("terminal", prior, nativeSubagentStatus(record) ?? "completed");
-          if (!changed) publishLifecycleSnapshot();
-        }
         settledNotifications.onChildDisposed(metadata.id);
         continue;
       }
-      if (!isActiveNativeSubagentRecord(record)) continue;
+      if (!isActiveNativeSubagentRecord(record, service)) continue;
       if (isTerminalTombstonedNativeRecord(metadata.id, record)) {
         if (runningSubagents.delete(metadata.id)) changed = true;
         continue;
@@ -1339,77 +1363,25 @@ export function createMechaMessagingExtension(pi, {
       changed = true;
     }
     for (const [id, metadata] of runningSubagents.entries()) {
-      if (!serviceIds.has(id) && lifecycleService !== undefined) {
-        // getLifecycleSnapshots() is Pi's live projection. Terminal records are published to
-        // subscribers before removal, while result records remain available from getRecord().
-        if (runningSubagents.delete(id)) {
-          settledNotifications.onChildDisposed(id);
-          changed = true;
-        }
-      } else if (!serviceIds.has(id) && metadata?.serviceTracked === true && metadata?.eventTracked !== true) {
+      if (!serviceIds.has(id) && metadata?.serviceTracked === true && metadata?.eventTracked !== true) {
         runningSubagents.delete(id);
         changed = true;
       } else if (!serviceIds.has(id) && metadata?.eventTracked === true
         && nowMs - metadata.lastSeenMs >= EVENT_TRACKED_MISSING_LIMIT_MS) {
-        // Lifecycle events can arrive before the native service publishes a record. Keep that
-        // child through ordinary service-list lag, then age it out if the service still cannot
-        // find it (for example, after Escape killed the child without a terminal event).
         runningSubagents.delete(id);
         settledNotifications.onChildDisposed(id);
         changed = true;
       }
     }
+    return { changed };
+  }
+
+  function pollNativeLifecycleSnapshot() {
+    if (lifecycleSnapshotSubagentService() === undefined) return false;
+    const { changed, snapshot } = reconcileNativeSubagentService();
+    if (snapshot === undefined) return false;
+    publishLifecycleSnapshot(snapshot);
     return changed;
-  }
-
-  function applyLifecycleSubagentSnapshot(record) {
-    const status = nativeSubagentStatus(record);
-    const metadata = normalizeSubagentMetadata(record);
-    if (metadata === undefined || (!LIVE_SUBAGENT_STATUSES.has(status) && !TERMINAL_SUBAGENT_STATUSES.has(status))) return false;
-    if (TERMINAL_SUBAGENT_STATUSES.has(status)) {
-      const changed = rememberTerminalSubagent(metadata.id);
-      settledNotifications.onChildDisposed(metadata.id);
-      return changed;
-    }
-    clearTerminalSubagentTombstone(metadata.id);
-    const existing = runningSubagents.get(metadata.id);
-    if (existing === undefined && runningSubagents.size >= MAX_ACTIVITY_SUBAGENTS) {
-      const oldestId = runningSubagents.keys().next().value;
-      if (oldestId !== undefined) {
-        runningSubagents.delete(oldestId);
-        settledNotifications.onChildDisposed(oldestId);
-      }
-    }
-    const next = {
-      ...metadata,
-      eventTracked: true,
-      serviceTracked: true,
-      startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs,
-      status,
-    };
-    if (sameSubagentMetadata(existing, next)) return false;
-    runningSubagents.set(metadata.id, next);
-    settledNotifications.onChildStarted(metadata.id);
-    return true;
-  }
-
-  function bindLifecycleSubagentService() {
-    const service = lifecycleSubagentService();
-    if (service === undefined || lifecycleSubscriptionService === service) return;
-    lifecycleSubscription?.();
-    lifecycleSubscription = undefined;
-    lifecycleSubscriptionService = service;
-    // Snapshot first, then subscribe. A heartbeat repair remains in place for the small
-    // interval between those two calls, and Pi is authoritative whenever either is read.
-    reconcileNativeSubagentService();
-    try {
-      lifecycleSubscription = service.subscribeLifecycle((record) => {
-        if (applyLifecycleSubagentSnapshot(record)) refreshActivityState();
-      });
-    } catch {
-      lifecycleSubscriptionService = undefined;
-      reportNativeSubagentReadFailure();
-    }
   }
 
   function rememberParentActivityContext(context) {
@@ -1435,12 +1407,14 @@ export function createMechaMessagingExtension(pi, {
     // ordinary settled/active frames must not clear that pause early.
     if (mailboxPausedForCompaction && state !== "compacting") return;
     const nowMs = nowImpl();
-    bindLifecycleSubagentService();
-    const reconciled = reconcile ? reconcileNativeSubagentService() : false;
+    // Native lifecycle state changes only in the timer-driven snapshot poll. Activity
+    // events must not produce lifecycle frames or read the native lifecycle projection.
+    const reconciliation = reconcile && lifecycleSnapshotSubagentService() === undefined
+      ? reconcileNativeSubagentService()
+      : undefined;
+    const reconciled = reconciliation?.changed === true;
     const subagents = publicSubagentSummaries();
     const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
-    // Every activity path, including quiet heartbeats, carries a complete v2 repair point.
-    publishLifecycleSnapshot();
     const unchanged = lastActivitySent !== undefined
       && lastActivitySent.state === state
       && lastActivitySent.subagentCount === subagentCount
@@ -1463,10 +1437,11 @@ export function createMechaMessagingExtension(pi, {
 
   function ensureActivityHeartbeatTimer() {
     if (activityHeartbeatTimer !== undefined) return;
-    // Keep polling after the parent settles so missed native lifecycle events can be repaired.
+    // Keep polling after the parent settles so lifecycle snapshots repair missed changes.
     activityHeartbeatTimer = setIntervalImpl(() => {
-      const state = parentActivityStateFromContext();
-      sendActivityState(state);
+      // This is the only path that reads and publishes the native lifecycle projection.
+      pollNativeLifecycleSnapshot();
+      sendActivityState(parentActivityStateFromContext());
     }, ACTIVITY_HEARTBEAT_INTERVAL_MS);
     activityHeartbeatTimer?.unref?.();
   }
@@ -1539,7 +1514,6 @@ export function createMechaMessagingExtension(pi, {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined || !mailboxPausedForCompaction) return;
     rememberParentActivityContext(context);
     mailboxPausedForCompaction = false;
-    reconcileNativeSubagentService();
     refreshActivityState();
     ensureActivityHeartbeatTimer();
     context.ui?.setStatus("mecha-mailbox", "mailbox: connected");
@@ -1774,7 +1748,9 @@ export function createMechaMessagingExtension(pi, {
   });
 
   pi.events.on("subagents:started", (event) => {
-    if (lifecycleSubagentService() !== undefined) {
+    // Native lifecycle visibility is timer-driven. Keep this hook only for settled
+    // notifications, which do not publish router lifecycle state.
+    if (lifecycleSnapshotSubagentService() !== undefined) {
       settledNotifications.onChildStarted(event?.id);
       return;
     }
@@ -1791,40 +1767,25 @@ export function createMechaMessagingExtension(pi, {
     if (changed) runningSubagents.set(metadata.id, tracked);
     else if (existing !== undefined) existing.eventTracked = true;
     settledNotifications.onChildStarted(metadata?.id ?? event?.id);
-    if (changed) {
-      publishLifecycleEvent("started", tracked);
-      refreshActivityState();
-    }
+    if (changed) refreshActivityState();
   });
-  function publishTerminalLifecycleEvent(event, terminalReason) {
-    if (lifecycleSubagentService() !== undefined) {
+  function publishTerminalLifecycleEvent(event) {
+    if (lifecycleSnapshotSubagentService() !== undefined) {
       settledNotifications.onChildDisposed(event?.id);
       return;
     }
     const id = event?.id;
-    const terminalFirst = typeof id === "string" && id.length > 0 && !terminalSubagentTombstones.has(id);
-    const metadata = runningSubagents.get(id) ?? normalizeSubagentMetadata(event) ?? { id };
     const changed = rememberTerminalSubagent(id);
-    if (terminalFirst) {
-      publishLifecycleEvent("terminal", metadata, terminalReason);
-      if (!changed) publishLifecycleSnapshot();
-    }
     settledNotifications.onChildDisposed(id);
     if (changed) refreshActivityState();
   }
   // Pi versions expose different terminal event names. Treat each as terminal so a queued
   // child cannot remain visible after a cancellation, steering action, or native shutdown.
-  for (const [eventName, terminalReason] of [
-    ["subagents:completed", "completed"],
-    ["subagents:failed", "failed"],
-    ["subagents:canceled", "canceled"],
-    ["subagents:cancelled", "canceled"],
-    ["subagents:aborted", "aborted"],
-    ["subagents:terminated", "terminated"],
-    ["subagents:stopped", "stopped"],
-    ["subagents:steered", "steered"],
+  for (const eventName of [
+    "subagents:completed", "subagents:failed", "subagents:canceled", "subagents:cancelled",
+    "subagents:aborted", "subagents:terminated", "subagents:stopped", "subagents:steered",
   ]) {
-    pi.events.on(eventName, (event) => publishTerminalLifecycleEvent(event, terminalReason));
+    pi.events.on(eventName, (event) => publishTerminalLifecycleEvent(event));
   }
 
   function settledNotificationStatus() {
@@ -2118,9 +2079,7 @@ export function createMechaMessagingExtension(pi, {
         agentId,
         parentSessionId: sessionId,
         onEnvelope: (message, delivery) => { if (!mailboxPausedForCompaction) coordinator?.onEnvelope(message, delivery); },
-        onLifecycleReady: () => {
-          if (client === mailboxClient) publishLifecycleSnapshot();
-        },
+        onLifecycleReady: () => {},
         kickstart: async () => {
           if (typeof process.getuid !== "function") return;
           const result = await pi.exec(
@@ -2151,9 +2110,8 @@ export function createMechaMessagingExtension(pi, {
       });
       client = mailboxClient;
       // Child sessions inherit extensions and can replace the package's global
-      // service symbol. Bind scheduled work to this resident parent service.
+      // service symbol. Polling pins the first parent service it sees.
       coordinator = createMailboxCoordinator(context, mailboxClient);
-      bindLifecycleSubagentService();
       ensureActivityHeartbeatTimer();
       void mailboxClient.connect().catch((error) => {
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${error.message}`, "error");
@@ -2178,9 +2136,6 @@ export function createMechaMessagingExtension(pi, {
     pendingSelfCompaction = undefined;
     mailboxPausedForCompaction = false;
     settledNotifications.dispose();
-    lifecycleSubscription?.();
-    lifecycleSubscription = undefined;
-    lifecycleSubscriptionService = undefined;
     coordinator?.close();
     coordinator = undefined;
     client?.close();
