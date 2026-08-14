@@ -167,6 +167,7 @@ export function createMailboxClient({
   now = Date.now,
   onLifecycleReady = () => {},
   onLifecycleDiagnostic = () => {},
+  onLifecycleTrace = () => {},
 } = {}) {
   assertIdentity(agentId);
   if (typeof onEnvelope !== "function") throw new TypeError("onEnvelope is required");
@@ -179,7 +180,7 @@ export function createMailboxClient({
   if (typeof random !== "function") throw new TypeError("random must be a function");
   if (!Number.isSafeInteger(capabilityTimeoutMs) || capabilityTimeoutMs <= 0) throw new TypeError("capabilityTimeoutMs must be a positive safe integer");
   if (typeof now !== "function") throw new TypeError("now must be a function");
-  if (typeof onLifecycleReady !== "function" || typeof onLifecycleDiagnostic !== "function") throw new TypeError("lifecycle callbacks must be functions");
+  if (typeof onLifecycleReady !== "function" || typeof onLifecycleDiagnostic !== "function" || typeof onLifecycleTrace !== "function") throw new TypeError("lifecycle callbacks must be functions");
   if (typeof parentSessionId !== "string" || parentSessionId.length === 0 || typeof producerEpoch !== "string" || !/^[0-9a-fA-F-]{36}$/.test(producerEpoch)) throw new TypeError("valid lifecycle identity is required");
   validateReconnectOptions(reconnectInitialDelayMs, reconnectMaxDelayMs);
   routerHttpUrl(routerUrl);
@@ -220,7 +221,30 @@ export function createMailboxClient({
     return frameId;
   }
 
+  function lifecycleTrace(event, fields = {}) {
+    try {
+      onLifecycleTrace({ event, agent_id: agentId, instance_id: instanceId, parent_session_id: parentSessionId, ...fields });
+    } catch {
+      // Trace collection cannot alter lifecycle delivery.
+    }
+  }
+
+  function lifecycleFrameTrace(frame, phase) {
+    return {
+      phase,
+      frame_type: frame.type,
+      event_id: frame.event_id,
+      client_sequence: frame.client_sequence,
+      snapshot_count: Array.isArray(frame.subagents) ? frame.subagents.length : undefined,
+      subagent_count: frame.subagent === undefined ? undefined : 1,
+      subagents: frame.subagents ?? (frame.subagent === undefined ? undefined : [frame.subagent]),
+      pending: lifecycleJournal.size,
+      bytes: serializedLifecycleBytes(frame),
+    };
+  }
+
   function lifecycleDiagnostic(reason) {
+    lifecycleTrace("client_lifecycle_diagnostic", { reason, pending: lifecycleJournal.size, bytes: journalBytes() });
     try { onLifecycleDiagnostic({ reason, pending: lifecycleJournal.size }); } catch { /* diagnostics cannot alter lifecycle delivery */ }
   }
 
@@ -241,6 +265,7 @@ export function createMailboxClient({
   }
 
   function failLifecycleClosed() {
+    lifecycleTrace("client_lifecycle_closed", { reason: "journal_oversize", pending: lifecycleJournal.size, bytes: journalBytes() });
     lifecycleJournal.clear();
     lifecycleReady = false;
     lifecycleConnectionDisabled = true;
@@ -262,6 +287,7 @@ export function createMailboxClient({
     }
     lifecycleJournal.clear();
     lifecycleJournal.set(frame.event_id, { frame, bytes, enqueuedAt: now() });
+    lifecycleTrace("client_lifecycle_journal_replaced", { ...lifecycleFrameTrace(frame, reason), pending: lifecycleJournal.size, bytes });
     lifecycleDiagnostic(reason);
     return frame;
   }
@@ -286,6 +312,7 @@ export function createMailboxClient({
       return makeReplacementSnapshot("journal_collapsed", snapshot);
     }
     lifecycleJournal.set(frame.event_id, { frame, bytes, enqueuedAt: now() });
+    lifecycleTrace("client_lifecycle_journaled", { ...lifecycleFrameTrace(frame, "queued"), pending: lifecycleJournal.size, bytes });
     return frame;
   }
 
@@ -319,12 +346,27 @@ export function createMailboxClient({
       ? entries.sort((left, right) => left.frame.client_sequence - right.frame.client_sequence)
       : [repair, ...entries.filter((item) => item !== repair)
         .sort((left, right) => left.frame.client_sequence - right.frame.client_sequence)];
-    for (const item of pending) socket.send(JSON.stringify(item.frame));
+    for (const item of pending) {
+      lifecycleTrace("client_lifecycle_publish_attempt", lifecycleFrameTrace(item.frame, "flush"));
+      try {
+        socket.send(JSON.stringify(item.frame));
+        lifecycleTrace("client_lifecycle_published", lifecycleFrameTrace(item.frame, "flush"));
+      } catch (error) {
+        lifecycleTrace("client_lifecycle_publish_error", { ...lifecycleFrameTrace(item.frame, "flush"), error_name: error?.name ?? "Error" });
+        throw error;
+      }
+    }
   }
 
   function lifecycleSnapshot(subagents) {
     lifecycleSnapshotChildren = normalizeSubagents(subagents);
-    if (!lifecycleCanJournal()) return undefined;
+    if (!lifecycleCanJournal()) {
+      lifecycleTrace("client_lifecycle_publish_deferred", {
+        frame_type: "subagent_lifecycle_snapshot", snapshot_count: lifecycleSnapshotChildren.length,
+        subagents: lifecycleSnapshotChildren, ready: lifecycleReady, available: lifecycleSupported,
+      });
+      return undefined;
+    }
     const frame = journalLifecycle(lifecycleSnapshotFields(), lifecycleSnapshotChildren);
     if (frame !== undefined) flushLifecycleJournal();
     return frame?.event_id;
@@ -336,7 +378,13 @@ export function createMailboxClient({
     if (child === undefined) throw new TypeError("a safe lifecycle child is required");
     if (!Array.isArray(snapshot)) throw new TypeError("a complete lifecycle snapshot is required");
     lifecycleSnapshotChildren = normalizeSubagents(snapshot);
-    if (!lifecycleCanJournal()) return undefined;
+    if (!lifecycleCanJournal()) {
+      lifecycleTrace("client_lifecycle_publish_deferred", {
+        frame_type: "subagent_lifecycle_event", snapshot_count: lifecycleSnapshotChildren.length,
+        subagent_count: 1, subagents: [child], ready: lifecycleReady, available: lifecycleSupported,
+      });
+      return undefined;
+    }
     const frame = journalLifecycle({
       type: "subagent_lifecycle_event", agent_id: agentId, instance_id: instanceId,
       parent_session_id: parentSessionId, lease_id: leaseId, producer_epoch: producerEpoch,
@@ -449,6 +497,7 @@ export function createMailboxClient({
     const jitter = Math.max(0, Math.min(1, Number(random()) || 0));
     const delay = Math.max(1, Math.floor(cap * (0.5 + (jitter / 2))));
     reconnectAttempt += 1;
+    lifecycleTrace("client_lifecycle_reconnect_scheduled", { attempt: reconnectAttempt, phase: kickstartRouter ? "kickstart" : "socket" });
     report("reconnecting");
     reconnectTimer = setTimeoutImpl(() => {
       reconnectTimer = undefined;
@@ -465,6 +514,7 @@ export function createMailboxClient({
     lifecycleSupported = false;
     lifecycleReady = false;
     lifecycleConnectionDisabled = false;
+    lifecycleTrace("client_lifecycle_disconnected", { connected: false, error_name: error?.name, phase: kickstartRouter ? "kickstart" : "socket" });
     if (stopped) return;
     report("disconnected", error);
     if (paused) return;
@@ -483,16 +533,20 @@ export function createMailboxClient({
   }
 
   async function discoverLifecycle(currentSocket) {
+    lifecycleTrace("client_lifecycle_capability_lookup", { phase: "started" });
     try {
       const response = await fetchImpl(`${routerHttpUrl(routerUrl)}/v1/capabilities`, { signal: AbortSignal.timeout(capabilityTimeoutMs) });
       const capabilities = response.ok ? await response.json() : undefined;
       if (socket !== currentSocket || stopped) return;
       lifecycleSupported = capabilities?.subagent_lifecycle_v2 === true;
+      lifecycleTrace("client_lifecycle_capability_result", { available: lifecycleSupported, ready: response.ok });
       if (!lifecycleSupported) return;
       lifecycleConnectionDisabled = false;
+      lifecycleTrace("client_lifecycle_sync_enable_attempt", { router_version: lifecycleRouterVersion });
       send({ type: "subagent_sync_enable", agent_id: agentId, instance_id: instanceId, lease_id: leaseId,
         ...(lifecycleRouterVersion > 0 ? { after_version: lifecycleRouterVersion } : {}) });
-    } catch {
+    } catch (error) {
+      lifecycleTrace("client_lifecycle_capability_error", { error_name: error?.name ?? "Error" });
       // 404/timeouts are the old-router fallback. Do not log payloads or source text.
       if (socket === currentSocket && !stopped) lifecycleSupported = false;
     }
@@ -501,6 +555,7 @@ export function createMailboxClient({
   async function receive(frame) {
     if (frame.type === "registered" && frame.agent_id === agentId && frame.instance_id === instanceId) {
       leaseId = frame.lease_id;
+      lifecycleTrace("client_lifecycle_registered", { connected: true, pending: lifecycleJournal.size });
       rebindLifecycleJournalLease();
       reconnectAttempt = 0;
       log(`MECHA_V2_FRAME registered agent=${agentId} lease=${leaseId}`);
@@ -524,12 +579,14 @@ export function createMailboxClient({
     }
     if (frame.type === "subagent_state_snapshot" || frame.type === "subagent_state_replay") {
       lifecycleRouterVersion = Math.max(lifecycleRouterVersion, frame.router_version ?? 0);
+      lifecycleTrace("client_lifecycle_router_snapshot", { frame_type: frame.type, router_version: lifecycleRouterVersion });
       if (lifecycleSupported && !lifecycleConnectionDisabled) {
         const reconnect = lifecycleJournal.size > 0;
         lifecycleReady = true;
         // This current assertion is first after every enablement/reconnect. It fences a
         // replacement lease before any older retry can be replayed.
         lifecycleSnapshot(lifecycleSnapshotChildren);
+        lifecycleTrace("client_lifecycle_ready", { router_version: lifecycleRouterVersion, reconnect, pending: lifecycleJournal.size });
         try { onLifecycleReady({ routerVersion: lifecycleRouterVersion, reconnect }); } catch { /* local reporting cannot break mailbox delivery */ }
         flushLifecycleJournal();
       }
@@ -544,10 +601,14 @@ export function createMailboxClient({
         || frame.agent_id !== agentId
         || frame.instance_id !== instanceId
         || frame.parent_session_id !== parentSessionId
-        || frame.lease_id !== pending.frame.lease_id) return;
+        || frame.lease_id !== pending.frame.lease_id) {
+        lifecycleTrace("client_lifecycle_ack_ignored", { event_id: frame.event_id, router_version: frame.router_version ?? 0 });
+        return;
+      }
       // The router sends this correlated acknowledgment only after its transaction commits.
       lifecycleRouterVersion = Math.max(lifecycleRouterVersion, frame.router_version ?? 0);
       lifecycleJournal.delete(pending.frame.event_id);
+      lifecycleTrace("client_lifecycle_acknowledged", { event_id: frame.event_id, client_sequence: frame.client_sequence, router_version: lifecycleRouterVersion, pending: lifecycleJournal.size });
       return;
     }
     if (frame.type !== "message") {
@@ -658,7 +719,11 @@ export function createMailboxClient({
     sendLifecycleSnapshot: lifecycleSnapshot,
     sendLifecycleEvent: lifecycleEvent,
     requestLifecycleResync() {
-      if (!lifecycleSupported || !lifecycleReady || leaseId === undefined) return false;
+      if (!lifecycleSupported || !lifecycleReady || leaseId === undefined) {
+        lifecycleTrace("client_lifecycle_resync_deferred", { available: lifecycleSupported, ready: lifecycleReady, router_version: lifecycleRouterVersion });
+        return false;
+      }
+      lifecycleTrace("client_lifecycle_resync_attempt", { router_version: lifecycleRouterVersion });
       send({ type: "subagent_state_resync", agent_id: agentId, instance_id: instanceId, lease_id: leaseId, after_version: lifecycleRouterVersion });
       return true;
     },
