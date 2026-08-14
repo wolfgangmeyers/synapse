@@ -26,6 +26,7 @@ import {
 import { registeredServerJobs, serverJobEnvelope } from "./server_jobs.js";
 import { createNanoId } from "./id.js";
 import { RECALL_POLICY, MemoryCatalogError } from "./memory-catalog.js";
+import { createNativeSubagentTrace, summarizeNativeSubagents } from "./native_subagent_trace.js";
 import {
   ABSOLUTE_MAX_BODY_BYTES,
   DEFAULT_MAX_BODY_BYTES,
@@ -115,6 +116,7 @@ export function createAgentRouter({
   onReminderError = defaultReminderError,
   onServerJobError = defaultServerJobError,
   memoryCatalog,
+  nativeSubagentTrace = createNativeSubagentTrace(),
 } = {}) {
   if (repository === undefined
     || typeof repository.enqueue !== "function"
@@ -185,6 +187,9 @@ export function createAgentRouter({
   if (typeof onOfferError !== "function") throw new TypeError("onOfferError must be a function");
   if (typeof onReminderError !== "function") throw new TypeError("onReminderError must be a function");
   if (typeof onServerJobError !== "function") throw new TypeError("onServerJobError must be a function");
+  if (nativeSubagentTrace === undefined || typeof nativeSubagentTrace.record !== "function") {
+    throw new TypeError("nativeSubagentTrace must provide record");
+  }
   if (!LOOPBACK_HOSTS.has(host)) {
     throw new TypeError("host must be 127.0.0.1 or ::1");
   }
@@ -204,6 +209,22 @@ export function createAgentRouter({
   const lifecycleV2Available = typeof repository.migrationIds === "function"
     && repository.migrationIds().includes("017_subagent_lifecycle")
     && ["applySubagentLifecycleEvent", "applySubagentLifecycleSnapshot", "subagentLifecycleSnapshot", "replaySubagentLifecycle", "pruneSubagentLifecycle", "subagentLifecycleProducerFor"].every((method) => typeof repository[method] === "function");
+  const traceLifecycle = (event, fields = {}) => nativeSubagentTrace.record(event, fields);
+  const lifecycleTraceFields = (frame) => ({
+    frame_type: frame?.type,
+    agent_id: frame?.agent_id,
+    instance_id: frame?.instance_id,
+    parent_session_id: frame?.parent_session_id,
+    event_id: frame?.event_id,
+    client_sequence: frame?.client_sequence,
+    snapshot_count: Array.isArray(frame?.subagents) ? frame.subagents.length : undefined,
+    subagent_count: frame?.subagent === undefined ? undefined : 1,
+    subagents: summarizeNativeSubagents(frame?.subagents ?? (frame?.subagent === undefined ? undefined : [frame.subagent])),
+  });
+  const isLifecycleFrameType = (type) => [
+    "subagent_sync_enable", "subagent_state_resync", "subagent_lifecycle_snapshot", "subagent_lifecycle_event",
+  ].includes(type);
+  traceLifecycle("router_lifecycle_initialized", { available: lifecycleV2Available });
   let timeoutSweepTimer;
   let mechaDeveloperUpdateReminderTimer;
   // When the last lifecycle_sweep_completed was written, for any reason.
@@ -237,9 +258,12 @@ export function createAgentRouter({
       // A close event still releases a registered lease.
     });
     socket.on("message", (payload, isBinary) => {
+      let parsed;
       try {
         if (isBinary) throw new ProtocolValidationError();
-        const frame = validateClientFrame(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload)));
+        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+        const frame = validateClientFrame(parsed);
+        if (isLifecycleFrameType(frame.type)) traceLifecycle("router_lifecycle_validated", lifecycleTraceFields(frame));
         if (frame.type === "register") {
           if (session !== undefined) {
             sendError(socket, generateFrameId, "already_registered", frame.frame_id);
@@ -281,6 +305,12 @@ export function createAgentRouter({
           request_id: frame.frame_id,
         });
       } catch (error) {
+        if (isLifecycleFrameType(parsed?.type)) {
+          traceLifecycle("router_lifecycle_validation_error", {
+            frame_type: parsed.type,
+            error_name: error?.name ?? "Error",
+          });
+        }
         if (error instanceof ProtocolValidationError || error instanceof SyntaxError || error instanceof TypeError) {
           emit("router_error", { error_code: "invalid_frame" });
           sendError(socket, generateFrameId, "invalid_frame");
@@ -506,11 +536,14 @@ export function createAgentRouter({
     }
 
     function enableSubagentSync(currentSocket, frame) {
+      traceLifecycle("router_lifecycle_sync_enable_received", lifecycleTraceFields(frame));
       if (!lifecycleV2Available) {
+        traceLifecycle("router_lifecycle_sync_enable_rejected", { ...lifecycleTraceFields(frame), reason: "migration_017_required" });
         sendError(currentSocket, generateFrameId, "migration_017_required", frame.frame_id);
         return;
       }
       if (!matchesSessionLease(frame)) {
+        traceLifecycle("router_lifecycle_sync_enable_rejected", { ...lifecycleTraceFields(frame), reason: "lease_not_active" });
         sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
         closeSocket(currentSocket, 4003, "lease not active");
         return;
@@ -518,6 +551,10 @@ export function createAgentRouter({
       session.lifecycleEnabled = true;
       if (frame.after_version !== undefined && frame.after_version > 0) {
         const replay = repository.replaySubagentLifecycle({ afterVersion: frame.after_version });
+        traceLifecycle("router_lifecycle_sync_replay", {
+          ...lifecycleTraceFields(frame), state: replay.mode, router_version: replay.router_version,
+          snapshot_count: replay.updates?.length ?? replay.agents?.length ?? 0,
+        });
         if (replay.mode === "replay") {
           sendFrame(currentSocket, generateFrameId, {
             type: "subagent_state_replay",
@@ -531,16 +568,23 @@ export function createAgentRouter({
     }
 
     function resyncSubagentState(currentSocket, frame) {
+      traceLifecycle("router_lifecycle_resync_received", lifecycleTraceFields(frame));
       if (!lifecycleV2Available) {
+        traceLifecycle("router_lifecycle_resync_rejected", { ...lifecycleTraceFields(frame), reason: "migration_017_required" });
         sendError(currentSocket, generateFrameId, "migration_017_required", frame.frame_id);
         return;
       }
       if (!matchesSessionLease(frame)) {
+        traceLifecycle("router_lifecycle_resync_rejected", { ...lifecycleTraceFields(frame), reason: "lease_not_active" });
         sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
         closeSocket(currentSocket, 4003, "lease not active");
         return;
       }
       const replay = repository.replaySubagentLifecycle({ afterVersion: frame.after_version });
+      traceLifecycle("router_lifecycle_resync_replay", {
+        ...lifecycleTraceFields(frame), state: replay.mode, router_version: replay.router_version,
+        snapshot_count: replay.updates?.length ?? replay.agents?.length ?? 0,
+      });
       if (replay.mode === "replay") {
         sendFrame(currentSocket, generateFrameId, {
           type: "subagent_state_replay",
@@ -551,19 +595,32 @@ export function createAgentRouter({
     }
 
     function receiveSubagentLifecycle(currentSocket, frame) {
+      traceLifecycle("router_lifecycle_received", lifecycleTraceFields(frame));
       if (!lifecycleV2Available) {
+        traceLifecycle("router_lifecycle_rejected", { ...lifecycleTraceFields(frame), reason: "migration_017_required" });
         sendError(currentSocket, generateFrameId, "migration_017_required", frame.frame_id);
         return;
       }
       if (!matchesSessionLease(frame)) {
         if (session !== undefined) session.suppressActivityClearOnClose = true;
+        traceLifecycle("router_lifecycle_rejected", { ...lifecycleTraceFields(frame), reason: "lease_not_active" });
         sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
         closeSocket(currentSocket, 4003, "lease not active");
         return;
       }
-      const result = frame.type === "subagent_lifecycle_snapshot"
-        ? repository.applySubagentLifecycleSnapshot(frame, { allowLeaseRebind: true })
-        : repository.applySubagentLifecycleEvent(frame);
+      let result;
+      try {
+        traceLifecycle("router_lifecycle_persist_attempt", lifecycleTraceFields(frame));
+        result = frame.type === "subagent_lifecycle_snapshot"
+          ? repository.applySubagentLifecycleSnapshot(frame, { allowLeaseRebind: true })
+          : repository.applySubagentLifecycleEvent(frame);
+      } catch (error) {
+        traceLifecycle("router_lifecycle_persist_error", { ...lifecycleTraceFields(frame), error_name: error?.name ?? "Error" });
+        throw error;
+      }
+      traceLifecycle("router_lifecycle_persisted", {
+        ...lifecycleTraceFields(frame), disposition: result.disposition, router_version: result.router_version,
+      });
       // The repository transaction completed before the acknowledgement is sent.
       sendFrame(currentSocket, generateFrameId, {
         type: "subagent_lifecycle_acknowledged",
@@ -579,7 +636,13 @@ export function createAgentRouter({
         router_version: result.router_version,
         ...(result.applied_version === undefined ? {} : { applied_version: result.applied_version }),
       });
-      if (result.disposition === "applied") broadcastLifecycleUpdate(lifecycleAgentSnapshot(frame.agent_id, result.router_version), result.router_version);
+      traceLifecycle("router_lifecycle_acknowledged", {
+        ...lifecycleTraceFields(frame), disposition: result.disposition, router_version: result.router_version,
+      });
+      if (result.disposition === "applied") {
+        const agent = lifecycleAgentSnapshot(frame.agent_id, result.router_version);
+        broadcastLifecycleUpdate(agent, result.router_version);
+      }
     }
 
     function matchesSessionLease(frame) {
@@ -839,9 +902,15 @@ export function createAgentRouter({
     const reminders = sweepDueReminders(reminderOutcomes);
     const serverJobs = sweepDueServerJobs(serverJobOutcomes);
     const conversations = sweepConversationHistory();
-    const lifecycle = lifecycleV2Available
-      ? repository.pruneSubagentLifecycle()
-      : { expiredRunning: 0, tombstones: 0, ledger: 0, producers: 0, updates: [] };
+    let lifecycle;
+    try {
+      lifecycle = lifecycleV2Available
+        ? repository.pruneSubagentLifecycle()
+        : { expiredRunning: 0, tombstones: 0, ledger: 0, producers: 0, updates: [] };
+    } catch (error) {
+      traceLifecycle("router_lifecycle_heartbeat_error", { error_name: error?.name ?? "Error" });
+      throw error;
+    }
     // pruneSubagentLifecycle returns only after its transaction commits. Publish
     // retention terminals afterward, just as producer transitions are published.
     for (const update of lifecycle.updates) {
@@ -851,6 +920,12 @@ export function createAgentRouter({
       );
     }
     sweepExpiredAgentActivity();
+    traceLifecycle("router_lifecycle_heartbeat", {
+      available: lifecycleV2Available,
+      subagent_count: lifecycle.expiredRunning,
+      snapshot_count: lifecycle.updates.length,
+      heartbeat_interval_ms: timeoutSweepIntervalMs,
+    });
     const sweepCounts = {
       stale_agent_count: staleAgents.length,
       expired_message_count: expired.length,
@@ -1178,6 +1253,11 @@ export function createAgentRouter({
 
   function sendLifecycleSnapshot(socket) {
     const snapshot = repository.subagentLifecycleSnapshot();
+    traceLifecycle("router_lifecycle_snapshot_projected", {
+      router_version: snapshot.router_version,
+      snapshot_count: snapshot.agents.length,
+      subagent_count: snapshot.agents.reduce((count, agent) => count + (agent.subagent_count ?? 0), 0),
+    });
     sendFrame(socket, generateFrameId, {
       type: "subagent_state_snapshot",
       router_version: snapshot.router_version,
@@ -1188,13 +1268,21 @@ export function createAgentRouter({
   function lifecycleAgentSnapshot(agentId, version = undefined) {
     const snapshot = repository.subagentLifecycleSnapshot({ parentAgentId: agentId });
     const agent = snapshot.agents[0] ?? { agent_id: agentId, subagent_version: snapshot.router_version, subagent_count: 0, subagents: [] };
+    traceLifecycle("router_lifecycle_projection_read", {
+      agent_id: agentId,
+      router_version: version ?? snapshot.router_version,
+      subagent_count: agent.subagent_count,
+      subagents: summarizeNativeSubagents(agent.subagents),
+    });
     return { ...agent, ...(version === undefined ? {} : { subagent_version: version }) };
   }
 
   function broadcastLifecycleUpdate(agent, routerVersion) {
+    let recipientCount = 0;
     for (const recipient of conversationSessions.values()) {
       for (const candidate of recipient.values()) {
         if (candidate.lifecycleEnabled !== true) continue;
+        recipientCount += 1;
         sendFrame(candidate.socket, generateFrameId, {
           type: "subagent_state_update",
           router_version: routerVersion,
@@ -1202,6 +1290,13 @@ export function createAgentRouter({
         });
       }
     }
+    traceLifecycle("router_lifecycle_projected", {
+      agent_id: agent.agent_id,
+      router_version: routerVersion,
+      recipient_count: recipientCount,
+      subagent_count: agent.subagent_count,
+      subagents: summarizeNativeSubagents(agent.subagents),
+    });
   }
 
   function broadcastAgentActivity(agentId, activityState, subagentCount = 0, subagents = [], generatedAt = new Date(currentTimeMs(clock)).toISOString()) {

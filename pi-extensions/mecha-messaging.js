@@ -1,7 +1,8 @@
 import { createMailboxClient, createNanoId, assertAgentId, routerHttpUrl } from "./mailbox-client.js";
 export { createMailboxClient } from "./mailbox-client.js";
 import { execFile, execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { createRecallState } from "./recall-state.js";
 import { createRecallController } from "./recall-controller.js";
 import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
@@ -393,6 +394,78 @@ export function appendMemoryCaptureDiagnostic(event, { path = memoryCaptureDiagn
     records: Number.isFinite(event?.records) ? event.records : undefined,
   };
   appendBoundedJsonl(record, { path, maxBytes, keepBytes });
+}
+
+const NATIVE_SUBAGENT_TRACE_PATH_ENV = "MECHA_PI_NATIVE_SUBAGENT_TRACE_PATH";
+const NATIVE_SUBAGENT_TRACE_MAX_BYTES = 512 * 1024;
+const NATIVE_SUBAGENT_TRACE_STRING_FIELDS = new Set([
+  "agent_id", "instance_id", "parent_session_id", "session_id", "subagent_id", "event_id",
+  "status", "reason", "error_code", "error_name", "source", "frame_type", "disposition", "state", "phase",
+]);
+const NATIVE_SUBAGENT_TRACE_NUMBER_FIELDS = new Set([
+  "client_sequence", "router_version", "subagent_count", "snapshot_count", "pending", "bytes", "description_length",
+  "recipient_count", "attempt", "heartbeat_interval_ms",
+]);
+const NATIVE_SUBAGENT_TRACE_BOOLEAN_FIELDS = new Set([
+  "available", "registry_available", "lifecycle_service", "connected", "ready", "reconnect", "published",
+]);
+
+export function summarizeNativeSubagents(subagents) {
+  if (!Array.isArray(subagents)) return [];
+  return subagents.slice(0, 999).flatMap((subagent) => {
+    const id = typeof subagent?.id === "string" ? subagent.id.trim().slice(0, 128) : "";
+    if (id.length === 0) return [];
+    const type = typeof subagent.type === "string" ? subagent.type.trim().slice(0, 64) : "";
+    const status = typeof subagent.status === "string" ? subagent.status.trim().slice(0, 64) : "";
+    const descriptionLength = typeof subagent.description === "string" ? subagent.description.length : 0;
+    return [{ id, ...(type.length > 0 ? { type } : {}), ...(status.length > 0 ? { status } : {}), description_length: descriptionLength }];
+  });
+}
+
+export function createNativeSubagentTrace({
+  environment = process.env,
+  path = typeof environment?.[NATIVE_SUBAGENT_TRACE_PATH_ENV] === "string" && environment[NATIVE_SUBAGENT_TRACE_PATH_ENV].trim().length > 0
+    ? environment[NATIVE_SUBAGENT_TRACE_PATH_ENV].trim()
+    : undefined,
+  maxBytes = NATIVE_SUBAGENT_TRACE_MAX_BYTES,
+  now = () => new Date(),
+} = {}) {
+  if (path === undefined) return { enabled: false, record: () => false };
+  if (typeof path !== "string" || path.length === 0) throw new TypeError("native subagent trace path is invalid");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("native subagent trace maxBytes must be a positive safe integer");
+  if (typeof now !== "function") throw new TypeError("native subagent trace clock must be a function");
+  return {
+    enabled: true,
+    record(event, fields = {}) {
+      try {
+        if (typeof event !== "string" || !/^[a-z][a-z0-9_.-]{0,80}$/.test(event)) throw new TypeError("native subagent trace event is invalid");
+        if (fields === null || typeof fields !== "object" || Array.isArray(fields)) throw new TypeError("native subagent trace fields are invalid");
+        const timestamp = now();
+        if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) throw new TypeError("native subagent trace clock is invalid");
+        const record = { timestamp: timestamp.toISOString(), event };
+        for (const [key, value] of Object.entries(fields)) {
+          if (NATIVE_SUBAGENT_TRACE_STRING_FIELDS.has(key) && typeof value === "string") record[key] = value.slice(0, 128);
+          else if (NATIVE_SUBAGENT_TRACE_NUMBER_FIELDS.has(key) && Number.isSafeInteger(value) && value >= 0) record[key] = value;
+          else if (NATIVE_SUBAGENT_TRACE_BOOLEAN_FIELDS.has(key) && typeof value === "boolean") record[key] = value;
+          else if (key === "subagents") record.subagents = summarizeNativeSubagents(value);
+        }
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        try {
+          if (statSync(path).size >= maxBytes) {
+            rmSync(`${path}.1`, { force: true });
+            renameSync(path, `${path}.1`);
+          }
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+        appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+        return true;
+      } catch {
+        // Diagnostics cannot change extension behavior or reveal failure details.
+        return false;
+      }
+    },
+  };
 }
 
 function orphanToolResultDiagnosticsPath(environment = process.env) {
@@ -1025,9 +1098,17 @@ export function createMechaMessagingExtension(pi, {
   clearIntervalImpl = clearInterval,
   nowImpl = Date.now,
   getSubagentsService = getOwnerSubagentsService,
+  nativeSubagentTrace = createNativeSubagentTrace(),
   operationalTools = {},
 } = {}) {
   registerOperationalTools(pi, operationalTools);
+  if (nativeSubagentTrace === undefined || typeof nativeSubagentTrace.record !== "function") {
+    throw new TypeError("nativeSubagentTrace must provide record");
+  }
+  const traceNativeSubagent = (event, fields = {}) => nativeSubagentTrace.record(event, fields);
+  traceNativeSubagent("extension_initialized", {
+    registry_available: typeof globalThis[PI_SUBAGENTS_SERVICE_REGISTRY]?.services?.get === "function",
+  });
   const currentSubagentsServiceAccessor = getSubagentsService;
   let client;
   let coordinator;
@@ -1083,7 +1164,24 @@ export function createMechaMessagingExtension(pi, {
   let lastActivitySent;
   let lastNativeSubagentReadDiagnosticMs;
   function nativeSubagentService(ownerSessionId = parentActivityContext?.sessionManager?.getSessionId?.()) {
-    return typeof ownerSessionId === "string" ? currentSubagentsServiceAccessor?.(ownerSessionId) : undefined;
+    const available = typeof ownerSessionId === "string";
+    let service;
+    try {
+      service = available ? currentSubagentsServiceAccessor?.(ownerSessionId) : undefined;
+      traceNativeSubagent("extension_service_lookup", {
+        ...(available ? { parent_session_id: ownerSessionId } : {}),
+        available: service !== undefined,
+        registry_available: typeof globalThis[PI_SUBAGENTS_SERVICE_REGISTRY]?.services?.get === "function",
+        lifecycle_service: typeof service?.getLifecycleSnapshots === "function",
+      });
+      return service;
+    } catch (error) {
+      traceNativeSubagent("extension_service_lookup_error", {
+        ...(available ? { parent_session_id: ownerSessionId } : {}),
+        error_name: error?.name ?? "Error",
+      });
+      return undefined;
+    }
   }
 
   const runningSubagents = new Map();
@@ -1147,7 +1245,23 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function publishLifecycleSnapshot(subagents) {
-    try { client?.sendLifecycleSnapshot?.(subagents); } catch { /* lifecycle polling retries on the next tick */ }
+    const summary = summarizeNativeSubagents(subagents);
+    try {
+      const eventId = client?.sendLifecycleSnapshot?.(subagents);
+      traceNativeSubagent("extension_snapshot_publish", {
+        published: typeof eventId === "string",
+        ...(typeof eventId === "string" ? { event_id: eventId } : {}),
+        snapshot_count: summary.length,
+        subagents: summary,
+      });
+    } catch (error) {
+      traceNativeSubagent("extension_snapshot_publish_error", {
+        snapshot_count: summary.length,
+        subagents: summary,
+        error_name: error?.name ?? "Error",
+      });
+      // lifecycle polling retries on the next tick
+    }
   }
 
   function sameSubagentMetadata(left, right) {
@@ -1158,7 +1272,8 @@ export function createMechaMessagingExtension(pi, {
     return typeof service?.getLifecycleSnapshots === "function" ? service : undefined;
   }
 
-  function reportNativeSubagentReadFailure() {
+  function reportNativeSubagentReadFailure(error) {
+    traceNativeSubagent("extension_snapshot_read_error", { error_name: error?.name ?? "Error" });
     const nowMs = nowImpl();
     if (lastNativeSubagentReadDiagnosticMs !== undefined && nowMs - lastNativeSubagentReadDiagnosticMs < NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS) return;
     lastNativeSubagentReadDiagnosticMs = nowMs;
@@ -1180,9 +1295,16 @@ export function createMechaMessagingExtension(pi, {
           : typeof service?.getRunning === "function"
             ? service.getRunning()
             : service?.running ?? service?.runs ?? service?.subagents;
-      return Array.isArray(source) ? source : undefined;
-    } catch {
-      reportNativeSubagentReadFailure();
+      const records = Array.isArray(source) ? source : undefined;
+      traceNativeSubagent("extension_snapshot_read", {
+        source: typeof service?.getLifecycleSnapshots === "function" ? "lifecycle_snapshot" : typeof service?.listAgents === "function" ? "list_agents" : typeof service?.getRunning === "function" ? "get_running" : "property",
+        available: records !== undefined,
+        snapshot_count: records?.length ?? 0,
+        subagents: summarizeNativeSubagents(records),
+      });
+      return records;
+    } catch (error) {
+      reportNativeSubagentReadFailure(error);
       return undefined;
     }
   }
@@ -1369,9 +1491,18 @@ export function createMechaMessagingExtension(pi, {
   }
 
   function pollNativeLifecycleSnapshot() {
-    if (lifecycleSnapshotSubagentService() === undefined) return false;
+    if (lifecycleSnapshotSubagentService() === undefined) {
+      traceNativeSubagent("extension_snapshot_poll_skipped", { reason: "lifecycle_service_unavailable" });
+      return false;
+    }
     const { changed, snapshot } = reconcileNativeSubagentService();
-    if (snapshot === undefined) return false;
+    if (snapshot === undefined) {
+      traceNativeSubagent("extension_snapshot_poll_failed", { reason: "snapshot_unavailable" });
+      return false;
+    }
+    traceNativeSubagent("extension_snapshot_reconciled", {
+      state: changed ? "changed" : "unchanged", snapshot_count: snapshot.length, subagents: summarizeNativeSubagents(snapshot),
+    });
     publishLifecycleSnapshot(snapshot);
     return changed;
   }
@@ -1432,8 +1563,13 @@ export function createMechaMessagingExtension(pi, {
     // Keep polling after the parent settles so lifecycle snapshots repair missed changes.
     activityHeartbeatTimer = setIntervalImpl(() => {
       // This is the only path that reads and publishes the native lifecycle projection.
-      pollNativeLifecycleSnapshot();
-      sendActivityState(parentActivityStateFromContext());
+      const changed = pollNativeLifecycleSnapshot();
+      const state = parentActivityStateFromContext();
+      const activitySent = sendActivityState(state);
+      traceNativeSubagent("extension_lifecycle_heartbeat", {
+        state, subagent_count: runningSubagents.size, published: activitySent, available: changed,
+        heartbeat_interval_ms: ACTIVITY_HEARTBEAT_INTERVAL_MS,
+      });
     }, ACTIVITY_HEARTBEAT_INTERVAL_MS);
     activityHeartbeatTimer?.unref?.();
   }
@@ -1743,6 +1879,7 @@ export function createMechaMessagingExtension(pi, {
     // Native lifecycle visibility is timer-driven. Keep this hook only for settled
     // notifications, which do not publish router lifecycle state.
     if (lifecycleSnapshotSubagentService() !== undefined) {
+      traceNativeSubagent("extension_native_event_started", { subagent_id: event?.id, source: "event_snapshot_mode" });
       settledNotifications.onChildStarted(event?.id);
       return;
     }
@@ -1763,6 +1900,7 @@ export function createMechaMessagingExtension(pi, {
   });
   function publishTerminalLifecycleEvent(event) {
     if (lifecycleSnapshotSubagentService() !== undefined) {
+      traceNativeSubagent("extension_native_event_terminal", { subagent_id: event?.id, status: event?.status, source: "event_snapshot_mode" });
       settledNotifications.onChildDisposed(event?.id);
       return;
     }
@@ -1882,12 +2020,16 @@ export function createMechaMessagingExtension(pi, {
 
   pi.events.on("subagents:child:session-created", (event) => {
     const sessionId = childSessionId(event);
-    if (sessionId !== undefined) children.add(sessionId);
+    if (sessionId !== undefined) {
+      children.add(sessionId);
+      traceNativeSubagent("extension_child_session_created", { session_id: sessionId });
+    }
   });
   pi.events.on("subagents:child:disposed", (event) => {
     const sessionId = childSessionId(event);
     if (sessionId !== undefined) {
       children.delete(sessionId);
+      traceNativeSubagent("extension_child_session_disposed", { session_id: sessionId });
       childReplyClients.delete(sessionId);
       // The tombstone keeps late child tool calls from falling back to the parent client.
       childReplyClients.set(sessionId, undefined);
@@ -2071,7 +2213,10 @@ export function createMechaMessagingExtension(pi, {
         agentId,
         parentSessionId: sessionId,
         onEnvelope: (message, delivery) => { if (!mailboxPausedForCompaction) coordinator?.onEnvelope(message, delivery); },
-        onLifecycleReady: () => {},
+        onLifecycleReady: ({ routerVersion, reconnect }) => traceNativeSubagent("extension_client_lifecycle_ready", {
+          router_version: routerVersion, reconnect,
+        }),
+        onLifecycleTrace: ({ event, ...fields }) => traceNativeSubagent(event, fields),
         kickstart: async () => {
           if (typeof process.getuid !== "function") return;
           const result = await pi.exec(
