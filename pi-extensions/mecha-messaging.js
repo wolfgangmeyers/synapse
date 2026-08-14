@@ -56,13 +56,6 @@ const LARGE_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 40, guidance: "large-context calls are expensive; compact as soon as practical" }),
   Object.freeze({ percent: 45, guidance: "mandatory stop and compact before the session reaches 500k tokens", mandatory: true }),
 ]);
-const SOL_CONTEXT_LEVELS = Object.freeze([
-  Object.freeze({ percent: 15, guidance: "Sol context awareness; keep the session lean" }),
-  Object.freeze({ percent: 25, guidance: "Sol calls are expensive; plan to compact soon" }),
-  Object.freeze({ percent: 35, guidance: "strongly consider compacting this Sol session" }),
-  Object.freeze({ percent: 45, guidance: "mandatory stop and compact this Sol session", mandatory: true }),
-]);
-
 export const DEFAULT_COMPACTION_POLICY = Object.freeze({
   tiers: Object.freeze([
     Object.freeze({ maxContextTokens: 300_000, levels: SMALL_CONTEXT_LEVELS }),
@@ -70,8 +63,6 @@ export const DEFAULT_COMPACTION_POLICY = Object.freeze({
     Object.freeze({ maxContextTokens: null, levels: LARGE_CONTEXT_LEVELS }),
   ]),
   models: Object.freeze({
-    "openai-codex/gpt-5.6-sol": Object.freeze({ levels: SOL_CONTEXT_LEVELS }),
-    "gpt-5.6-sol": Object.freeze({ levels: SOL_CONTEXT_LEVELS }),
     "anthropic/claude-opus-5": Object.freeze({ levels: OPUS_CONTEXT_LEVELS }),
     "claude-opus-5": Object.freeze({ levels: OPUS_CONTEXT_LEVELS }),
   }),

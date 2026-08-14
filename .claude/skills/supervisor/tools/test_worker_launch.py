@@ -489,7 +489,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
 
     def test_pi_launch_exports_validated_compaction_policy(self):
         extension = self._pi_mailbox_extension()
-        policy = '{"postCompactionNotification":"resume after compact","levels":[40,50,90],"models":{"openai-codex/gpt-5.6-sol":{"levels":[20,30,{"percent":45,"mandatory":true}]}}}'
+        policy = '{"postCompactionNotification":"resume after compact","levels":[40,50,90],"models":{"openai-codex/custom-model":{"levels":[20,30,{"percent":45,"mandatory":true}]}}}'
         with patch.dict(os.environ, {
             worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
