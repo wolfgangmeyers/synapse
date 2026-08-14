@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { chmodSync, existsSync, readFileSync } from "node:fs";
 
@@ -95,6 +95,10 @@ const migrations = Object.freeze([
   {
     id: "016_delivery_batches",
     sql: readFileSync(new URL("./migrations/016_delivery_batches.sql", import.meta.url), "utf8"),
+  },
+  {
+    id: "017_subagent_lifecycle",
+    sql: readFileSync(new URL("./migrations/017_subagent_lifecycle.sql", import.meta.url), "utf8"),
   },
 ]);
 
@@ -1329,6 +1333,108 @@ class MessageRepository {
     `).all(jobKey).map((run) => ({ ...run }));
   }
 
+  applySubagentLifecycleEvent(frame, { allowLeaseRebind = false } = {}) {
+    return this.#applySubagentLifecycle(frame, { allowLeaseRebind, snapshot: false });
+  }
+
+  applySubagentLifecycleSnapshot(frame, { allowLeaseRebind = false } = {}) {
+    return this.#applySubagentLifecycle(frame, { allowLeaseRebind, snapshot: true });
+  }
+
+  #applySubagentLifecycle(frame, { allowLeaseRebind, snapshot }) {
+    const candidate = validateLifecycleCandidate(frame, { snapshot });
+    return immediateTransaction(this.#database, this.#databasePath, () => applyLifecycleCandidate(
+      this.#database,
+      candidate,
+      { allowLeaseRebind, snapshot, now: clockTimestamp(this.#clock) },
+    ));
+  }
+
+  subagentLifecycleSnapshot({ parentAgentId } = {}) {
+    if (parentAgentId !== undefined) assertLifecycleText(parentAgentId, "parentAgentId", 128);
+    return readLifecycleSnapshot(this.#database, parentAgentId);
+  }
+
+  subagentLifecycleProducerFor(parentAgentId) {
+    assertLifecycleText(parentAgentId, "parentAgentId", 128);
+    const row = selectLifecycleProducer(this.#database, parentAgentId);
+    return row === undefined ? undefined : {
+      parent_agent_id: row.parent_agent_id,
+      instance_id: row.instance_id,
+      parent_session_id: row.parent_session_id,
+      producer_epoch: row.producer_epoch,
+      lease_id: row.lease_id,
+      authority: row.authority,
+      highest_client_sequence: row.highest_client_sequence,
+      last_event_id: row.last_event_id,
+      last_snapshot_sequence: row.last_snapshot_sequence,
+    };
+  }
+
+  replaySubagentLifecycle({ afterVersion = 0 } = {}) {
+    if (!Number.isSafeInteger(afterVersion) || afterVersion < 0) throw new TypeError("afterVersion must be a non-negative safe integer");
+    const latest = lifecycleVersion(this.#database);
+    const oldest = this.#database.prepare("SELECT MIN(router_version) AS version FROM subagent_lifecycle_events").get().version;
+    if ((oldest !== null && afterVersion < oldest - 1) || (oldest === null && afterVersion < latest)) {
+      return { mode: "snapshot", ...readLifecycleSnapshot(this.#database) };
+    }
+    const updates = this.#database.prepare(`
+      SELECT router_version, parent_agent_id, subagent_id, state, type, description, terminal_reason
+      FROM subagent_lifecycle_events
+      WHERE router_version > ?
+      ORDER BY router_version ASC
+    `).all(afterVersion).map((row) => ({
+      router_version: row.router_version,
+      parent_agent_id: row.parent_agent_id,
+      subagent_id: row.subagent_id,
+      state: row.state,
+      ...(row.type === null ? {} : { type: row.type }),
+      ...(row.description === null ? {} : { description: row.description }),
+      ...(row.terminal_reason === null ? {} : { terminal_reason: row.terminal_reason }),
+    }));
+    return { mode: "replay", router_version: latest, updates };
+  }
+
+  pruneSubagentLifecycle() {
+    const now = clockTimestamp(this.#clock);
+    const terminalCutoff = new Date(new Date(now).getTime() - 24 * 60 * 60 * 1000).toISOString();
+    const ledgerCutoff = new Date(new Date(now).getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const producerCutoff = ledgerCutoff;
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      // A live lease owns a running child. Once its producer has been absent for
+      // seven days, turn every remaining child into a short-lived tombstone so a
+      // disconnected process cannot retain a visible child forever. This uses the
+      // normal transition writer: a UI reader must receive the same monotonic
+      // version it would receive for a producer-sent terminal event.
+      const expiredLifecycle = expireRunningLifecycleChildren(
+        this.#database,
+        { now, producerCutoff },
+      );
+      const expiredRunning = expiredLifecycle.count;
+      const tombstones = this.#database.prepare(`DELETE FROM subagent_lifecycle_state WHERE state = 'terminal' AND terminal_at <= ?`).run(terminalCutoff).changes;
+      const threshold = this.#database.prepare(`
+        SELECT router_version FROM subagent_lifecycle_events
+        ORDER BY router_version DESC LIMIT 1 OFFSET 99999
+      `).get()?.router_version;
+      const ledger = this.#database.prepare(`
+        DELETE FROM subagent_lifecycle_events
+        WHERE received_at <= ? OR (? IS NOT NULL AND router_version < ?)
+      `).run(ledgerCutoff, threshold ?? null, threshold ?? null).changes;
+      const producers = this.#database.prepare(`
+        DELETE FROM subagent_lifecycle_producers
+        WHERE last_seen_at <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM agent_leases lease
+            WHERE lease.agent_id = subagent_lifecycle_producers.parent_agent_id
+              AND lease.expires_at > ?
+          )
+          AND NOT EXISTS (SELECT 1 FROM subagent_lifecycle_state s WHERE s.parent_agent_id = subagent_lifecycle_producers.parent_agent_id)
+          AND NOT EXISTS (SELECT 1 FROM subagent_lifecycle_events e WHERE e.parent_agent_id = subagent_lifecycle_producers.parent_agent_id)
+      `).run(producerCutoff, now).changes;
+      return { expiredRunning, tombstones, ledger, producers, updates: expiredLifecycle.updates };
+    });
+  }
+
   migrationIds() {
     return this.#database.prepare(`
       SELECT id
@@ -1349,6 +1455,324 @@ class MessageRepository {
       busyTimeoutMs,
     };
   }
+}
+
+const LIFECYCLE_EPOCH = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LIFECYCLE_REASON = /^[a-z][a-z0-9_]{0,63}$/;
+
+function validateLifecycleCandidate(frame, { snapshot }) {
+  if (frame === null || typeof frame !== "object" || Array.isArray(frame)) throw new TypeError("lifecycle frame must be an object");
+  const parentAgentId = frame.agent_id;
+  assertLifecycleText(parentAgentId, "agent_id", 128);
+  assertLifecycleText(frame.instance_id, "instance_id", 128);
+  assertLifecycleText(frame.parent_session_id, "parent_session_id", 128);
+  assertLifecycleText(frame.lease_id, "lease_id", 128);
+  assertLifecycleText(frame.producer_epoch, "producer_epoch", 36);
+  if (!LIFECYCLE_EPOCH.test(frame.producer_epoch)) throw new TypeError("producer_epoch must be a UUID");
+  assertLifecycleText(frame.event_id, "event_id", 128);
+  if (!Number.isSafeInteger(frame.client_sequence) || frame.client_sequence < 1) throw new TypeError("client_sequence must be a positive safe integer");
+  if (snapshot) {
+    if (!Array.isArray(frame.subagents) || frame.subagents.length > 999) throw new TypeError("snapshot subagents must contain at most 999 items");
+    const children = frame.subagents.map((child) => lifecycleChild(child));
+    const ids = new Set(children.map((child) => child.id));
+    if (ids.size !== children.length) throw new TypeError("snapshot subagent IDs must be unique");
+    return lifecycleCandidate(frame, { subagents: children, eventKind: "snapshot" });
+  }
+  if (!['started', 'terminal'].includes(frame.lifecycle_event)) throw new TypeError("lifecycle_event must be started or terminal");
+  const child = lifecycleChild(frame.subagent);
+  if (frame.lifecycle_event === "terminal") {
+    if (typeof frame.terminal_reason !== "string" || !LIFECYCLE_REASON.test(frame.terminal_reason)) throw new TypeError("terminal_reason is invalid");
+  }
+  return lifecycleCandidate(frame, {
+    subagent: child,
+    eventKind: frame.lifecycle_event,
+    terminalReason: frame.lifecycle_event === "terminal" ? frame.terminal_reason : undefined,
+  });
+}
+
+function lifecycleCandidate(frame, extra) {
+  const candidate = {
+    parentAgentId: frame.agent_id,
+    instanceId: frame.instance_id,
+    parentSessionId: frame.parent_session_id,
+    leaseId: frame.lease_id,
+    epoch: frame.producer_epoch,
+    sequence: frame.client_sequence,
+    eventId: frame.event_id,
+    ...extra,
+  };
+  // A replacement socket must present a new lease, but a retry keeps its
+  // event identity and lifecycle payload. Lease ownership is fenced by the
+  // router before this repository method, so it is not part of idempotency.
+  const { leaseId: _leaseId, ...idempotencyCandidate } = candidate;
+  candidate.payloadHash = createHash("sha256").update(JSON.stringify(idempotencyCandidate)).digest("hex");
+  return candidate;
+}
+
+function lifecycleChild(child) {
+  if (child === null || typeof child !== "object" || Array.isArray(child)) throw new TypeError("subagent must be an object");
+  assertLifecycleText(child.id, "subagent.id", 128);
+  const type = child.type === undefined ? undefined : lifecycleOptionalText(child.type, "subagent.type", 64);
+  const description = child.description === undefined ? undefined : lifecycleOptionalText(child.description, "subagent.description", 512);
+  return { id: child.id.trim(), ...(type === undefined ? {} : { type }), ...(description === undefined ? {} : { description }) };
+}
+
+function lifecycleOptionalText(value, name, limit) {
+  assertLifecycleText(value, name, limit);
+  return value.trim();
+}
+
+function assertLifecycleText(value, name, maxBytes) {
+  if (typeof value !== "string" || value.trim() === "" || Buffer.byteLength(value, "utf8") > maxBytes) throw new TypeError(`${name} is invalid`);
+}
+
+function applyLifecycleCandidate(database, candidate, { allowLeaseRebind, snapshot, now }) {
+  const producer = selectLifecycleProducer(database, candidate.parentAgentId);
+  const identity = reconcileLifecycleProducer(producer, candidate, { allowLeaseRebind, snapshot });
+  if (identity.disposition !== undefined) return lifecycleNoMutation(database, candidate.parentAgentId, identity.disposition, now);
+
+  const priorEvent = database.prepare(`
+    SELECT router_version, payload_hash FROM subagent_lifecycle_events
+    WHERE parent_agent_id = ? AND producer_epoch = ? AND event_id = ?
+  `).get(candidate.parentAgentId, candidate.epoch, candidate.eventId);
+  if (priorEvent !== undefined) {
+    return lifecycleNoMutation(database, candidate.parentAgentId,
+      priorEvent.payload_hash === candidate.payloadHash ? "duplicate" : "conflict", now, priorEvent.router_version);
+  }
+  if (producer !== undefined && !identity.replacement) {
+    if (candidate.sequence < producer.highest_client_sequence) return lifecycleNoMutation(database, candidate.parentAgentId, "stale", now);
+    if (candidate.sequence === producer.highest_client_sequence) {
+      return lifecycleNoMutation(database, candidate.parentAgentId,
+        producer.last_event_id === candidate.eventId && producer.last_event_hash === candidate.payloadHash ? "duplicate" : "conflict", now);
+    }
+  }
+
+  const transitions = [];
+  if (identity.replacement) {
+    const oldRunning = database.prepare(`
+      SELECT * FROM subagent_lifecycle_state WHERE parent_agent_id = ? AND state = 'running' ORDER BY subagent_id ASC
+    `).all(candidate.parentAgentId);
+    for (const row of oldRunning) transitions.push({ child: { id: row.subagent_id }, state: "terminal", reason: "producer_replaced", kind: "snapshot" });
+  }
+  if (snapshot) {
+    const supplied = new Map(candidate.subagents.map((child) => [child.id, child]));
+    const existing = database.prepare(`SELECT * FROM subagent_lifecycle_state WHERE parent_agent_id = ? ORDER BY subagent_id ASC`).all(candidate.parentAgentId);
+    const byId = new Map(existing.map((row) => [row.subagent_id, row]));
+    for (const child of candidate.subagents) {
+      const prior = byId.get(child.id);
+      if (prior?.state === "terminal" && prior.producer_epoch === candidate.epoch) continue;
+      if (prior?.state === "running" && prior.producer_epoch === candidate.epoch
+        && prior.type === (child.type ?? null) && prior.description === (child.description ?? null)) continue;
+      transitions.push({ child, state: "running", kind: "snapshot" });
+    }
+    for (const row of existing) {
+      if (row.state === "running" && row.producer_epoch === candidate.epoch && !supplied.has(row.subagent_id)) {
+        transitions.push({ child: { id: row.subagent_id }, state: "terminal", reason: "snapshot_omitted", kind: "snapshot" });
+      }
+    }
+  } else {
+    const prior = database.prepare(`SELECT * FROM subagent_lifecycle_state WHERE parent_agent_id = ? AND subagent_id = ?`).get(candidate.parentAgentId, candidate.subagent.id);
+    if (!(prior?.state === "terminal" && prior.producer_epoch === candidate.epoch)
+      && !(prior?.state === "running" && candidate.eventKind === "started"
+        && prior.producer_epoch === candidate.epoch && prior.type === (candidate.subagent.type ?? null)
+        && prior.description === (candidate.subagent.description ?? null))) {
+      transitions.push({ child: candidate.subagent, state: candidate.eventKind === "started" ? "running" : "terminal", reason: candidate.terminalReason, kind: candidate.eventKind });
+    }
+  }
+
+  const nextProducer = { ...candidate, authority: "v2" };
+  let lastVersion = lifecycleVersion(database);
+  for (let index = 0; index < transitions.length; index += 1) {
+    lastVersion = writeLifecycleTransition(database, nextProducer, transitions[index], now,
+      index === 0 ? candidate.eventId : derivedLifecycleEventId(candidate.eventId, index), index);
+  }
+  upsertLifecycleProducer(database, nextProducer, now, {
+    lastSnapshotSequence: snapshot ? candidate.sequence : producer?.last_snapshot_sequence ?? 0,
+  });
+  if (transitions.length === 0) return lifecycleNoMutation(database, candidate.parentAgentId, "accepted_noop", now, lastVersion);
+  return {
+    disposition: "applied",
+    router_version: lastVersion,
+    snapshot: readLifecycleSnapshot(database, candidate.parentAgentId),
+  };
+}
+
+function expireRunningLifecycleChildren(database, { now, producerCutoff }) {
+  const rows = database.prepare(`
+    SELECT
+      state.parent_agent_id,
+      state.subagent_id,
+      producer.instance_id,
+      producer.parent_session_id,
+      producer.producer_epoch
+    FROM subagent_lifecycle_state state
+    JOIN subagent_lifecycle_producers producer ON producer.parent_agent_id = state.parent_agent_id
+    WHERE state.state = 'running'
+      AND producer.last_seen_at <= ?
+      AND NOT EXISTS (
+        SELECT 1
+        FROM agent_leases lease
+        WHERE lease.agent_id = producer.parent_agent_id
+          AND lease.expires_at > ?
+      )
+    ORDER BY state.parent_agent_id ASC, state.subagent_id ASC
+  `).all(producerCutoff, now);
+  const updates = new Map();
+  for (const row of rows) {
+    const sequence = nextRetentionLifecycleSequence(database, row.parent_agent_id, row.producer_epoch);
+    const eventId = createHash("sha256")
+      .update(`producer_expired:${row.parent_agent_id}:${row.subagent_id}:${now}`)
+      .digest("hex");
+    const version = writeLifecycleTransition(database, {
+      parentAgentId: row.parent_agent_id,
+      instanceId: row.instance_id,
+      parentSessionId: row.parent_session_id,
+      epoch: row.producer_epoch,
+      sequence,
+      payloadHash: createHash("sha256").update("producer_expired").digest("hex"),
+    }, {
+      child: { id: row.subagent_id },
+      state: "terminal",
+      reason: "producer_expired",
+      kind: "terminal",
+    }, now, eventId);
+    updates.set(row.parent_agent_id, version);
+  }
+  return {
+    count: rows.length,
+    updates: [...updates].map(([parentAgentId, routerVersion]) => ({ parentAgentId, routerVersion })),
+  };
+}
+
+function nextRetentionLifecycleSequence(database, parentAgentId, epoch) {
+  // Normal client transitions are stored as sequence * 1000 plus their snapshot
+  // index. Reserve the next sequence block for this router-owned terminal event.
+  const latest = database.prepare(`
+    SELECT MAX(client_sequence) AS sequence
+    FROM subagent_lifecycle_events
+    WHERE parent_agent_id = ? AND producer_epoch = ?
+  `).get(parentAgentId, epoch).sequence ?? 0;
+  return Math.floor(latest / 1000) + 1;
+}
+
+function reconcileLifecycleProducer(producer, candidate, { allowLeaseRebind, snapshot }) {
+  if (producer === undefined) return snapshot ? { replacement: false } : { disposition: "conflict" };
+  const sameIdentity = producer.instance_id === candidate.instanceId && producer.parent_session_id === candidate.parentSessionId;
+  if (producer.producer_epoch !== candidate.epoch) {
+    if (sameIdentity) return { disposition: "conflict" };
+    return snapshot ? { replacement: true } : { disposition: "conflict" };
+  }
+  if (!sameIdentity) return { disposition: "conflict" };
+  if (producer.lease_id !== candidate.leaseId && !(snapshot && allowLeaseRebind)) return { disposition: "stale" };
+  return { replacement: false };
+}
+
+function writeLifecycleTransition(database, producer, transition, now, eventId, transitionIndex = 0) {
+  const state = transition.state;
+  const metadata = state === "running" ? transition.child : {};
+  const insert = database.prepare(`
+    INSERT INTO subagent_lifecycle_events (
+      parent_agent_id, instance_id, parent_session_id, producer_epoch, subagent_id,
+      event_id, client_sequence, event_kind, state, type, description, terminal_reason, payload_hash, received_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    producer.parentAgentId, producer.instanceId, producer.parentSessionId, producer.epoch, transition.child.id,
+    eventId, producer.sequence * 1000 + transitionIndex, transition.kind, state, metadata.type ?? null, metadata.description ?? null,
+    transition.reason ?? null, producer.payloadHash, now,
+  );
+  const version = Number(insert.lastInsertRowid);
+  database.prepare(`
+    INSERT INTO subagent_lifecycle_state (
+      parent_agent_id, subagent_id, instance_id, parent_session_id, producer_epoch,
+      type, description, state, started_at, updated_at, terminal_at, terminal_reason, router_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (parent_agent_id, subagent_id) DO UPDATE SET
+      instance_id = excluded.instance_id, parent_session_id = excluded.parent_session_id,
+      producer_epoch = excluded.producer_epoch, type = excluded.type, description = excluded.description,
+      state = excluded.state, started_at = CASE WHEN excluded.state = 'running' THEN excluded.started_at ELSE subagent_lifecycle_state.started_at END,
+      updated_at = excluded.updated_at, terminal_at = excluded.terminal_at,
+      terminal_reason = excluded.terminal_reason, router_version = excluded.router_version
+  `).run(
+    producer.parentAgentId, transition.child.id, producer.instanceId, producer.parentSessionId, producer.epoch,
+    metadata.type ?? null, metadata.description ?? null, state, state === "running" ? now : null, now,
+    state === "terminal" ? now : null, transition.reason ?? null, version,
+  );
+  return version;
+}
+
+function upsertLifecycleProducer(database, producer, now, { lastSnapshotSequence }) {
+  database.prepare(`
+    INSERT INTO subagent_lifecycle_producers (
+      parent_agent_id, instance_id, parent_session_id, producer_epoch, lease_id,
+      highest_client_sequence, last_event_id, last_event_hash, last_snapshot_sequence,
+      authority, last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'v2', ?, ?, ?)
+    ON CONFLICT (parent_agent_id) DO UPDATE SET
+      instance_id = excluded.instance_id, parent_session_id = excluded.parent_session_id,
+      producer_epoch = excluded.producer_epoch, lease_id = excluded.lease_id,
+      highest_client_sequence = excluded.highest_client_sequence, last_event_id = excluded.last_event_id,
+      last_event_hash = excluded.last_event_hash, last_snapshot_sequence = excluded.last_snapshot_sequence,
+      authority = 'v2', last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at
+  `).run(
+    producer.parentAgentId, producer.instanceId, producer.parentSessionId, producer.epoch, producer.leaseId,
+    producer.sequence, producer.eventId, producer.payloadHash, lastSnapshotSequence, now, now, now,
+  );
+}
+
+function lifecycleNoMutation(database, parentAgentId, disposition, now, appliedVersion = undefined) {
+  incrementLifecycleDiagnostic(database, parentAgentId, disposition, now);
+  return {
+    disposition,
+    router_version: lifecycleVersion(database),
+    ...(appliedVersion === undefined ? {} : { applied_version: appliedVersion }),
+    snapshot: readLifecycleSnapshot(database, parentAgentId),
+  };
+}
+
+function incrementLifecycleDiagnostic(database, parentAgentId, reason, now) {
+  database.prepare(`
+    INSERT INTO subagent_lifecycle_diagnostics (parent_agent_id, reason_code, count, last_router_version, updated_at)
+    VALUES (?, ?, 1, ?, ?)
+    ON CONFLICT (parent_agent_id, reason_code) DO UPDATE SET
+      count = MIN(10000, subagent_lifecycle_diagnostics.count + 1),
+      last_router_version = excluded.last_router_version, updated_at = excluded.updated_at
+  `).run(parentAgentId, reason, lifecycleVersion(database), now);
+}
+
+function selectLifecycleProducer(database, parentAgentId) {
+  return database.prepare(`SELECT * FROM subagent_lifecycle_producers WHERE parent_agent_id = ?`).get(parentAgentId);
+}
+
+function lifecycleVersion(database) {
+  // AUTOINCREMENT keeps the committed lifecycle clock monotonic even after
+  // retained ledger rows are pruned. MAX(router_version) would rewind to zero.
+  return database.prepare("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'subagent_lifecycle_events'), 0) AS version").get().version;
+}
+
+function readLifecycleSnapshot(database, parentAgentId = undefined) {
+  const rows = database.prepare(`
+    SELECT parent_agent_id, subagent_id, type, description, router_version
+    FROM subagent_lifecycle_state
+    WHERE state = 'running' ${parentAgentId === undefined ? "" : "AND parent_agent_id = ?"}
+    ORDER BY parent_agent_id ASC, subagent_id ASC
+  `).all(...(parentAgentId === undefined ? [] : [parentAgentId]));
+  const agents = new Map();
+  for (const row of rows) {
+    const agent = agents.get(row.parent_agent_id) ?? { agent_id: row.parent_agent_id, subagent_version: row.router_version, subagent_count: 0, subagents: [] };
+    agent.subagent_version = Math.max(agent.subagent_version, row.router_version);
+    agent.subagents.push({ id: row.subagent_id, ...(row.type === null ? {} : { type: row.type }), ...(row.description === null ? {} : { description: row.description }) });
+    agent.subagent_count = agent.subagents.length;
+    agents.set(row.parent_agent_id, agent);
+  }
+  if (parentAgentId !== undefined && !agents.has(parentAgentId)) {
+    const version = database.prepare(`SELECT MAX(router_version) AS version FROM subagent_lifecycle_state WHERE parent_agent_id = ?`).get(parentAgentId).version ?? lifecycleVersion(database);
+    agents.set(parentAgentId, { agent_id: parentAgentId, subagent_version: version, subagent_count: 0, subagents: [] });
+  }
+  return { router_version: lifecycleVersion(database), agents: [...agents.values()] };
+}
+
+function derivedLifecycleEventId(eventId, index) {
+  return createHash("sha256").update(`${eventId}:${index}`).digest("hex").slice(0, 128);
 }
 
 function configureDatabase(database, busyTimeoutMs) {

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 const WebSocket = globalThis.WebSocket;
 
@@ -19,7 +19,12 @@ const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
 const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_REPLY_TIMEOUT_MS = 5_000;
+const DEFAULT_CAPABILITY_TIMEOUT_MS = 2_000;
 const MAX_SUBAGENTS = 999;
+const LIFECYCLE_JOURNAL_MAX_ITEMS = 256;
+const LIFECYCLE_JOURNAL_MAX_BYTES = 262_144;
+const LIFECYCLE_JOURNAL_MAX_ITEM_BYTES = 65_536;
+const LIFECYCLE_JOURNAL_MAX_AGE_MS = 10 * 60_000;
 const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
 
 // This pattern is narrower than the protocol's agentId on purpose, and the difference is a dot.
@@ -108,6 +113,11 @@ function normalizeSubagents(subagents) {
   return subagents.map(normalizeSubagentSummary).filter(Boolean).slice(0, MAX_SUBAGENTS);
 }
 
+function normalizeTerminalReason(reason) {
+  const normalized = typeof reason === "string" ? reason.trim().toLowerCase() : "";
+  return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : "completed";
+}
+
 function arrivalPreview(value) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (text.length <= MESSAGE_ARRIVAL_PREVIEW_CHARS) return text;
@@ -146,6 +156,14 @@ export function createMailboxClient({
   // Which id space this client belongs to. Presence-only clients pass assertPresenceAgentId, which
   // accepts exactly the ids assertAgentId rejects.
   assertIdentity = assertAgentId,
+  // Lifecycle identity is process-local. It intentionally survives socket/lease replacement,
+  // but a new extension process receives a fresh instance, session, and epoch.
+  parentSessionId = generateId(),
+  producerEpoch = randomUUID(),
+  capabilityTimeoutMs = DEFAULT_CAPABILITY_TIMEOUT_MS,
+  now = Date.now,
+  onLifecycleReady = () => {},
+  onLifecycleDiagnostic = () => {},
 } = {}) {
   assertIdentity(agentId);
   if (typeof onEnvelope !== "function") throw new TypeError("onEnvelope is required");
@@ -156,6 +174,10 @@ export function createMailboxClient({
     throw new TypeError("renewIntervalMs must be a positive safe integer");
   }
   if (typeof random !== "function") throw new TypeError("random must be a function");
+  if (!Number.isSafeInteger(capabilityTimeoutMs) || capabilityTimeoutMs <= 0) throw new TypeError("capabilityTimeoutMs must be a positive safe integer");
+  if (typeof now !== "function") throw new TypeError("now must be a function");
+  if (typeof onLifecycleReady !== "function" || typeof onLifecycleDiagnostic !== "function") throw new TypeError("lifecycle callbacks must be functions");
+  if (typeof parentSessionId !== "string" || parentSessionId.length === 0 || typeof producerEpoch !== "string" || !/^[0-9a-fA-F-]{36}$/.test(producerEpoch)) throw new TypeError("valid lifecycle identity is required");
   validateReconnectOptions(reconnectInitialDelayMs, reconnectMaxDelayMs);
   routerHttpUrl(routerUrl);
 
@@ -170,6 +192,15 @@ export function createMailboxClient({
   let initialConnection;
   let resolveInitialConnection;
   let rejectInitialConnection;
+  let lifecycleSupported = false;
+  let lifecycleReady = false;
+  let lifecycleConnectionDisabled = false;
+  let lifecycleSequence = 0;
+  let lifecycleRouterVersion = 0;
+  // The newest full assertion is retained separately from the retry journal. A reconnect must
+  // lead with it, because a replacement lease is fenced until the router accepts a snapshot.
+  let lifecycleSnapshotChildren = [];
+  const lifecycleJournal = new Map();
 
   function report(state, error) {
     try {
@@ -184,6 +215,133 @@ export function createMailboxClient({
     const frameId = generateId();
     socket.send(JSON.stringify({ version: "v1", frame_id: frameId, ...fields }));
     return frameId;
+  }
+
+  function lifecycleDiagnostic(reason) {
+    try { onLifecycleDiagnostic({ reason, pending: lifecycleJournal.size }); } catch { /* diagnostics cannot alter lifecycle delivery */ }
+  }
+
+  function canonicalLifecycleFrame(fields) {
+    return { version: "v1", frame_id: generateId(), ...fields };
+  }
+
+  function serializedLifecycleBytes(frame) {
+    return Buffer.byteLength(JSON.stringify(frame), "utf8");
+  }
+
+  function lifecycleSnapshotFields(subagents = lifecycleSnapshotChildren) {
+    return {
+      type: "subagent_lifecycle_snapshot", agent_id: agentId, instance_id: instanceId,
+      parent_session_id: parentSessionId, lease_id: leaseId, producer_epoch: producerEpoch,
+      client_sequence: ++lifecycleSequence, event_id: generateId(), subagents,
+    };
+  }
+
+  function failLifecycleClosed() {
+    lifecycleJournal.clear();
+    lifecycleReady = false;
+    lifecycleConnectionDisabled = true;
+    lifecycleDiagnostic("journal_oversize");
+  }
+
+  function journalBytes() {
+    let bytes = 0;
+    for (const item of lifecycleJournal.values()) bytes += item.bytes;
+    return bytes;
+  }
+
+  function makeReplacementSnapshot(reason, snapshot) {
+    const frame = canonicalLifecycleFrame(lifecycleSnapshotFields(snapshot));
+    const bytes = serializedLifecycleBytes(frame);
+    if (bytes > LIFECYCLE_JOURNAL_MAX_ITEM_BYTES || bytes > LIFECYCLE_JOURNAL_MAX_BYTES) {
+      failLifecycleClosed();
+      return undefined;
+    }
+    lifecycleJournal.clear();
+    lifecycleJournal.set(frame.event_id, { frame, bytes, enqueuedAt: now() });
+    lifecycleDiagnostic(reason);
+    return frame;
+  }
+
+  function lifecycleCanJournal() {
+    return lifecycleSupported && lifecycleReady && !lifecycleConnectionDisabled && leaseId !== undefined;
+  }
+
+  function journalLifecycle(fields, snapshot) {
+    if (!lifecycleCanJournal()) return undefined;
+    const frame = canonicalLifecycleFrame(fields);
+    const bytes = serializedLifecycleBytes(frame);
+    if (bytes > LIFECYCLE_JOURNAL_MAX_ITEM_BYTES) {
+      failLifecycleClosed();
+      return undefined;
+    }
+    const oldest = lifecycleJournal.values().next().value;
+    if (oldest !== undefined && now() - oldest.enqueuedAt >= LIFECYCLE_JOURNAL_MAX_AGE_MS) {
+      return makeReplacementSnapshot("journal_expired", snapshot);
+    }
+    if (lifecycleJournal.size >= LIFECYCLE_JOURNAL_MAX_ITEMS || journalBytes() + bytes > LIFECYCLE_JOURNAL_MAX_BYTES) {
+      return makeReplacementSnapshot("journal_collapsed", snapshot);
+    }
+    lifecycleJournal.set(frame.event_id, { frame, bytes, enqueuedAt: now() });
+    return frame;
+  }
+
+  function rebindLifecycleJournalLease() {
+    if (leaseId === undefined || lifecycleJournal.size === 0) return;
+    const rebound = [];
+    let totalBytes = 0;
+    for (const item of lifecycleJournal.values()) {
+      const frame = { ...item.frame, frame_id: generateId(), lease_id: leaseId };
+      const bytes = serializedLifecycleBytes(frame);
+      totalBytes += bytes;
+      if (bytes > LIFECYCLE_JOURNAL_MAX_ITEM_BYTES || totalBytes > LIFECYCLE_JOURNAL_MAX_BYTES) {
+        failLifecycleClosed();
+        return;
+      }
+      rebound.push([frame.event_id, { frame, bytes, enqueuedAt: item.enqueuedAt }]);
+    }
+    lifecycleJournal.clear();
+    for (const [eventId, item] of rebound) lifecycleJournal.set(eventId, item);
+  }
+
+  function flushLifecycleJournal() {
+    if (!socketOpen(socket) || !lifecycleReady || lifecycleConnectionDisabled) return;
+    const entries = [...lifecycleJournal.values()];
+    // A replacement lease must see the newest complete assertion first. Sending an older
+    // snapshot first could authoritatively omit a child that the producer already knows runs.
+    const repair = entries
+      .filter((item) => item.frame.type === "subagent_lifecycle_snapshot")
+      .sort((left, right) => right.frame.client_sequence - left.frame.client_sequence)[0];
+    const pending = repair === undefined
+      ? entries.sort((left, right) => left.frame.client_sequence - right.frame.client_sequence)
+      : [repair, ...entries.filter((item) => item !== repair)
+        .sort((left, right) => left.frame.client_sequence - right.frame.client_sequence)];
+    for (const item of pending) socket.send(JSON.stringify(item.frame));
+  }
+
+  function lifecycleSnapshot(subagents) {
+    lifecycleSnapshotChildren = normalizeSubagents(subagents);
+    if (!lifecycleCanJournal()) return undefined;
+    const frame = journalLifecycle(lifecycleSnapshotFields(), lifecycleSnapshotChildren);
+    if (frame !== undefined) flushLifecycleJournal();
+    return frame?.event_id;
+  }
+
+  function lifecycleEvent({ lifecycleEvent, subagent, terminalReason, snapshot }) {
+    if (!['started', 'terminal'].includes(lifecycleEvent) || subagent === undefined) throw new TypeError("a lifecycle event and child are required");
+    const child = normalizeSubagentSummary(subagent);
+    if (child === undefined) throw new TypeError("a safe lifecycle child is required");
+    if (!Array.isArray(snapshot)) throw new TypeError("a complete lifecycle snapshot is required");
+    lifecycleSnapshotChildren = normalizeSubagents(snapshot);
+    if (!lifecycleCanJournal()) return undefined;
+    const frame = journalLifecycle({
+      type: "subagent_lifecycle_event", agent_id: agentId, instance_id: instanceId,
+      parent_session_id: parentSessionId, lease_id: leaseId, producer_epoch: producerEpoch,
+      client_sequence: ++lifecycleSequence, event_id: generateId(), lifecycle_event: lifecycleEvent,
+      subagent: child, ...(lifecycleEvent === "terminal" ? { terminal_reason: normalizeTerminalReason(terminalReason) } : {}),
+    }, lifecycleSnapshotChildren);
+    if (frame !== undefined) flushLifecycleJournal();
+    return frame?.event_id;
   }
 
   function activity(activityState, { subagentCount = 0, subagents } = {}) {
@@ -301,6 +459,9 @@ export function createMailboxClient({
     renewTimer = undefined;
     socket = undefined;
     leaseId = undefined;
+    lifecycleSupported = false;
+    lifecycleReady = false;
+    lifecycleConnectionDisabled = false;
     if (stopped) return;
     report("disconnected", error);
     if (paused) return;
@@ -318,9 +479,26 @@ export function createMailboxClient({
     }
   }
 
+  async function discoverLifecycle(currentSocket) {
+    try {
+      const response = await fetchImpl(`${routerHttpUrl(routerUrl)}/v1/capabilities`, { signal: AbortSignal.timeout(capabilityTimeoutMs) });
+      const capabilities = response.ok ? await response.json() : undefined;
+      if (socket !== currentSocket || stopped) return;
+      lifecycleSupported = capabilities?.subagent_lifecycle_v2 === true;
+      if (!lifecycleSupported) return;
+      lifecycleConnectionDisabled = false;
+      send({ type: "subagent_sync_enable", agent_id: agentId, instance_id: instanceId, lease_id: leaseId,
+        ...(lifecycleRouterVersion > 0 ? { after_version: lifecycleRouterVersion } : {}) });
+    } catch {
+      // 404/timeouts are the old-router fallback. Do not log payloads or source text.
+      if (socket === currentSocket && !stopped) lifecycleSupported = false;
+    }
+  }
+
   async function receive(frame) {
     if (frame.type === "registered" && frame.agent_id === agentId && frame.instance_id === instanceId) {
       leaseId = frame.lease_id;
+      rebindLifecycleJournalLease();
       reconnectAttempt = 0;
       log(`MECHA_V2_FRAME registered agent=${agentId} lease=${leaseId}`);
       if (renewTimer === undefined) {
@@ -338,6 +516,35 @@ export function createMailboxClient({
         rejectInitialConnection = undefined;
       }
       report("connected");
+      void discoverLifecycle(socket);
+      return;
+    }
+    if (frame.type === "subagent_state_snapshot" || frame.type === "subagent_state_replay") {
+      lifecycleRouterVersion = Math.max(lifecycleRouterVersion, frame.router_version ?? 0);
+      if (lifecycleSupported && !lifecycleConnectionDisabled) {
+        const reconnect = lifecycleJournal.size > 0;
+        lifecycleReady = true;
+        // This current assertion is first after every enablement/reconnect. It fences a
+        // replacement lease before any older retry can be replayed.
+        lifecycleSnapshot(lifecycleSnapshotChildren);
+        try { onLifecycleReady({ routerVersion: lifecycleRouterVersion, reconnect }); } catch { /* local reporting cannot break mailbox delivery */ }
+        flushLifecycleJournal();
+      }
+      return;
+    }
+    if (frame.type === "subagent_lifecycle_acknowledged") {
+      const pending = [...lifecycleJournal.values()].find((item) => item.frame.frame_id === frame.request_id);
+      if (pending === undefined
+        || frame.event_id !== pending.frame.event_id
+        || frame.client_sequence !== pending.frame.client_sequence
+        || frame.producer_epoch !== pending.frame.producer_epoch
+        || frame.agent_id !== agentId
+        || frame.instance_id !== instanceId
+        || frame.parent_session_id !== parentSessionId
+        || frame.lease_id !== pending.frame.lease_id) return;
+      // The router sends this correlated acknowledgment only after its transaction commits.
+      lifecycleRouterVersion = Math.max(lifecycleRouterVersion, frame.router_version ?? 0);
+      lifecycleJournal.delete(pending.frame.event_id);
       return;
     }
     if (frame.type !== "message") {
@@ -431,6 +638,8 @@ export function createMailboxClient({
 
   return {
     instanceId,
+    parentSessionId,
+    producerEpoch,
     connect() {
       if (initialConnection === undefined) {
         initialConnection = new Promise((resolve, reject) => {
@@ -443,6 +652,14 @@ export function createMailboxClient({
     },
     sendReceipt: receipt,
     sendActivity: activity,
+    sendLifecycleSnapshot: lifecycleSnapshot,
+    sendLifecycleEvent: lifecycleEvent,
+    requestLifecycleResync() {
+      if (!lifecycleSupported || !lifecycleReady || leaseId === undefined) return false;
+      send({ type: "subagent_state_resync", agent_id: agentId, instance_id: instanceId, lease_id: leaseId, after_version: lifecycleRouterVersion });
+      return true;
+    },
+    lifecycleStatus() { return { supported: lifecycleSupported, ready: lifecycleReady, routerVersion: lifecycleRouterVersion, pending: lifecycleJournal.size, bytes: journalBytes() }; },
     sendMessageArrival: messageArrival,
     pause() {
       if (stopped || paused) return;

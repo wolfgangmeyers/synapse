@@ -12,9 +12,37 @@ import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { parseArguments, startRouterWebUi } from "../tools/router_web_ui.mjs";
 import { mergeMessages } from "../web/router-ui/history.js";
+import { applyLifecycleSnapshot, upsertLifecycleAgent } from "../web/router-ui/state.js";
 import { isAllowedMarkdownLink, markdownToSafeHtml, renderMarkdownBody, textWithoutMarkdownImages } from "../web/router-ui/markdown.js";
 
 const webAgentId = "web-test-client";
+
+const lifecycleAgent = (version, count = 1, description = "Safe child") => ({
+  agent_id: "lifecycle-parent", subagent_version: version, subagent_count: count,
+  subagents: count === 0 ? [] : [{ id: "child", description }],
+});
+
+test("upserts an unknown parent from a live lifecycle update", () => {
+  const agents = upsertLifecycleAgent([], lifecycleAgent(3));
+  assert.deepEqual(agents, [{ agent_id: "lifecycle-parent", activity_state: "idle", ...lifecycleAgent(3) }]);
+});
+
+test("ignores an older live lifecycle update", () => {
+  const newer = upsertLifecycleAgent([], lifecycleAgent(3));
+  assert.deepEqual(upsertLifecycleAgent(newer, lifecycleAgent(2, 0)), newer);
+});
+
+test("does not let an older snapshot erase newer live lifecycle state", () => {
+  const newer = upsertLifecycleAgent([], lifecycleAgent(4));
+  const result = applyLifecycleSnapshot(newer, [], 3, 0);
+  assert.deepEqual(result.agents, newer);
+});
+
+test("clears lifecycle badge state from a newer zero-count snapshot", () => {
+  const result = applyLifecycleSnapshot(upsertLifecycleAgent([], lifecycleAgent(3)), [lifecycleAgent(4, 0)], 4, 3);
+  assert.equal(result.agents[0].subagent_count, 0);
+  assert.deepEqual(result.agents[0].subagents, []);
+});
 
 const renderMarkdown = (body) => markdownToSafeHtml(body, MarkdownIt);
 
@@ -426,6 +454,71 @@ test("router web UI serves the app and relays live router messages", async () =>
     await router.close();
     repository.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router web UI removes an expired lifecycle child from a v2 update and reconnect snapshot", async () => {
+  let now = Date.parse("2030-01-01T00:00:00.000Z");
+  const router = await startTestRouter({
+    clock: () => new Date(now),
+    routerOptions: { leaseDurationMs: 8 * 24 * 60 * 60 * 1000 },
+  });
+  const sockets = [];
+  let ui;
+  try {
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    const reader = await connectBrowserWithLifecycleSnapshot(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+    assert.equal(reader.snapshot.routerVersion, 0);
+
+    const producer = await connectRouterAgent(router.wsUrl, "retention-ui-parent", sockets);
+    const runningUpdate = waitForEvent(reader.socket, (event) => event.type === "subagent_state_update" && event.agent.agent_id === "retention-ui-parent");
+    const runningAcknowledged = nextRouterFrame(producer.socket, (frame) => frame.type === "subagent_lifecycle_acknowledged");
+    producer.socket.send(JSON.stringify({
+      version: "v1", frame_id: "retention-ui-running", type: "subagent_lifecycle_snapshot",
+      agent_id: "retention-ui-parent", instance_id: "retention-ui-parent-instance",
+      parent_session_id: "retention-ui-parent-session", lease_id: producer.registered.lease_id,
+      producer_epoch: "66666666-6666-4666-8666-666666666666", client_sequence: 1,
+      event_id: "retention-ui-running", subagents: [{ id: "retention-ui-child", description: "Running child" }],
+    }));
+    const v1 = await runningAcknowledged;
+    assert.equal(v1.router_version, 1);
+    const renderedRunning = upsertLifecycleAgent([], (await runningUpdate).agent);
+    assert.equal(renderedRunning[0].subagent_count, 1);
+    assert.deepEqual(renderedRunning[0].subagents, [{ id: "retention-ui-child", description: "Running child" }]);
+    router.repository.releaseAgentLease({
+      agentId: "retention-ui-parent",
+      instanceId: "retention-ui-parent-instance",
+      leaseId: producer.registered.lease_id,
+    });
+
+    now += 7 * 24 * 60 * 60 * 1000;
+    const expiredUpdate = waitForEvent(reader.socket, (event) => event.type === "subagent_state_update"
+      && event.agent.agent_id === "retention-ui-parent" && event.agent.subagent_count === 0);
+    const sweep = router.router.sweepMessageLifecycles();
+    assert.equal(sweep.lifecycle.expiredRunning, 1);
+    const v2 = await expiredUpdate;
+    assert.equal(v2.routerVersion, 2);
+    const renderedExpired = upsertLifecycleAgent(renderedRunning, v2.agent);
+    assert.equal(renderedExpired[0].subagent_count, 0);
+    assert.deepEqual(renderedExpired[0].subagents, []);
+
+    reader.socket.close();
+    await onceClose(reader.socket);
+    const reconnected = await connectBrowserWithLifecycleSnapshot(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+    assert.equal(reconnected.snapshot.routerVersion, 2);
+    assert.deepEqual(reconnected.snapshot.agents, []);
+    const renderedReconnect = applyLifecycleSnapshot(
+      renderedExpired,
+      reconnected.snapshot.agents,
+      reconnected.snapshot.routerVersion,
+      v2.routerVersion,
+    );
+    assert.equal(renderedReconnect.agents[0].subagent_count, 0);
+    assert.deepEqual(renderedReconnect.agents[0].subagents, []);
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
   }
 });
 
@@ -930,13 +1023,14 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.doesNotMatch(server, /refreshTimer = setInterval\(refreshAgents, 60_000\)/);
 });
 
-async function startTestRouter() {
+async function startTestRouter({ clock = undefined, routerOptions = {} } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "router-web-ui-"));
-  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
-  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), ...(clock === undefined ? {} : { clock }) });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000, ...routerOptions, ...(clock === undefined ? {} : { clock }) });
   const wsUrl = await router.listen();
   return {
     directory,
+    repository,
     router,
     wsUrl,
     httpUrl: wsUrl.replace("ws://", "http://").replace("/v1/agents", ""),
@@ -957,6 +1051,17 @@ async function connectBrowser(uiHttpUrl, routerHttpUrl, agentId, sockets) {
   assert.equal(connected.routerUrl, routerHttpUrl);
   assert.equal(connected.agentId, agentId);
   return browser;
+}
+
+async function connectBrowserWithLifecycleSnapshot(uiHttpUrl, routerHttpUrl, agentId, sockets) {
+  const socket = new WebSocket(`${uiHttpUrl.replace("http://", "ws://")}/ui/events`);
+  sockets.push(socket);
+  await onceOpen(socket);
+  const connected = waitForEvent(socket, (event) => event.type === "status" && event.state === "connected", 2_000);
+  const snapshot = waitForEvent(socket, (event) => event.type === "subagent_state_snapshot", 2_000);
+  socket.send(JSON.stringify({ type: "connect", routerUrl: routerHttpUrl, agentId }));
+  assert.equal((await connected).agentId, agentId);
+  return { socket, snapshot: await snapshot };
 }
 
 async function connectRouterAgent(routerWsUrl, agentId, sockets) {

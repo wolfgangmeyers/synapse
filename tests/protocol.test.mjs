@@ -12,6 +12,25 @@ test("Sentinel descriptor accepts only caller-selected model metadata", () => {
   assert.throws(() => validateEnvelope({ ...base, sentinel: { model: "gpt-5.6-terra", receiver_policy: "no" } }));
 });
 
+test("enforces lifecycle metadata limits without logging source text", () => {
+  const frame = {
+    version: "v1", frame_id: "lifecycle-snapshot", type: "subagent_lifecycle_snapshot",
+    agent_id: "parent", instance_id: "instance", parent_session_id: "session", lease_id: "lease",
+    producer_epoch: "11111111-1111-4111-8111-111111111111", client_sequence: 1, event_id: "event",
+    subagents: [{ id: "child", type: "audit", description: "safe label" }],
+  };
+  assert.doesNotThrow(() => validateClientFrame(frame));
+  assert.throws(() => validateClientFrame({ ...frame, subagents: [{ id: "child", description: "x".repeat(513) }] }), ProtocolValidationError);
+  assert.throws(() => validateClientFrame({ ...frame, producer_epoch: "not-a-uuid" }), ProtocolValidationError);
+  assert.doesNotThrow(() => validateServerFrame({
+    version: "v1", frame_id: "lifecycle-ack", type: "subagent_lifecycle_acknowledged",
+    request_id: "lifecycle-snapshot", event_id: "event", client_sequence: 1,
+    producer_epoch: "11111111-1111-4111-8111-111111111111", agent_id: "parent",
+    instance_id: "instance", parent_session_id: "session", lease_id: "lease",
+    disposition: "accepted_noop", router_version: 4,
+  }));
+});
+
 test("the shared protocol rejects retired Sentinel lifecycle frames", () => {
   assert.throws(() => validateClientFrame({
     version: "v1", frame_id: "frame", type: "sentinel_claim", agent_id: "receiver",

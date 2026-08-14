@@ -68,3 +68,34 @@ export function replacePendingMessage(messages, localId, acceptedMessage) {
     [{ ...acceptedMessage, direction: "outgoing" }],
   );
 }
+
+// V2 lifecycle updates can arrive before the periodic agent list. Keep the
+// durable version with the row so an older refresh cannot erase live state.
+export function upsertLifecycleAgent(agents, incoming) {
+  if (!incoming?.agent_id || !Number.isSafeInteger(incoming.subagent_version) || incoming.subagent_version < 0) return agents;
+  const index = agents.findIndex((agent) => agent.agent_id === incoming.agent_id);
+  const current = index < 0 ? undefined : agents[index];
+  const currentVersion = current?.subagent_version ?? -1;
+  if (incoming.subagent_version < currentVersion) return agents;
+  const nextSubagents = Array.isArray(incoming.subagents) ? incoming.subagents : [];
+  const nextCount = Number.isSafeInteger(incoming.subagent_count) && incoming.subagent_count >= 0
+    ? incoming.subagent_count
+    : nextSubagents.length;
+  const normalized = { subagent_version: incoming.subagent_version, subagent_count: nextCount, subagents: nextCount === 0 ? [] : nextSubagents };
+  if (incoming.subagent_version === currentVersion && current
+    && (current.subagent_count !== normalized.subagent_count || JSON.stringify(current.subagents || []) !== JSON.stringify(normalized.subagents))) return agents;
+  const next = { ...(current ?? { agent_id: incoming.agent_id, activity_state: "idle" }), ...normalized };
+  return index < 0 ? [...agents, next] : agents.map((agent, candidate) => candidate === index ? next : agent);
+}
+
+export function applyLifecycleSnapshot(agents, snapshotAgents, snapshotVersion, lastSnapshotVersion = 0) {
+  if (!Number.isSafeInteger(snapshotVersion) || snapshotVersion < lastSnapshotVersion) return { agents, lastSnapshotVersion };
+  const received = new Map((Array.isArray(snapshotAgents) ? snapshotAgents : []).map((agent) => [agent.agent_id, agent]));
+  let next = agents;
+  for (const agent of received.values()) next = upsertLifecycleAgent(next, agent);
+  for (const agent of next) {
+    if (received.has(agent.agent_id) || agent.subagent_version === undefined || agent.subagent_version > snapshotVersion) continue;
+    next = upsertLifecycleAgent(next, { agent_id: agent.agent_id, subagent_version: snapshotVersion, subagent_count: 0, subagents: [] });
+  }
+  return { agents: next, lastSnapshotVersion: snapshotVersion };
+}

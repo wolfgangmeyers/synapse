@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -48,6 +48,423 @@ function envelope(id, overrides = {}) {
     ...overrides,
   };
 }
+
+async function lifecycleRepository(t, { clock = () => new Date("2030-01-01T00:00:00.000Z") } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-lifecycle-"));
+  const databasePath = join(directory, "router.sqlite");
+  const repository = openMessageRepository({ databasePath, clock });
+  t.after(() => { repository.close(); return rm(directory, { recursive: true, force: true }); });
+  return { repository, databasePath };
+}
+
+function lifecycleSnapshot(sequence, eventId, children = [{ id: "child", type: "general-purpose", description: "Safe child label" }], overrides = {}) {
+  return {
+    agent_id: "lifecycle-parent", instance_id: "lifecycle-instance", parent_session_id: "parent-session",
+    lease_id: "lifecycle-lease", producer_epoch: "11111111-1111-4111-8111-111111111111",
+    client_sequence: sequence, event_id: eventId, subagents: children, ...overrides,
+  };
+}
+
+function lifecycleEvent(sequence, eventId, lifecycleEventName, overrides = {}) {
+  return {
+    ...lifecycleSnapshot(sequence, eventId, [], overrides), lifecycle_event: lifecycleEventName,
+    subagent: { id: "child", type: "general-purpose", description: "Safe child label" },
+    ...(lifecycleEventName === "terminal" ? { terminal_reason: "completed" } : {}),
+  };
+}
+
+test("persists start and terminal lifecycle transitions", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  const started = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "snapshot-start"));
+  assert.equal(started.disposition, "applied");
+  assert.equal(started.snapshot.agents[0].subagent_count, 1);
+  const terminal = repository.applySubagentLifecycleEvent(lifecycleEvent(2, "terminal-child", "terminal"));
+  assert.equal(terminal.disposition, "applied");
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 0);
+});
+
+test("acknowledges duplicate lifecycle frames without a ledger row or version", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  const first = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "snapshot-duplicate"));
+  const duplicate = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "snapshot-duplicate"));
+  assert.equal(duplicate.disposition, "duplicate");
+  assert.equal(duplicate.router_version, first.router_version);
+});
+
+test("acknowledges a matching snapshot without a ledger row or version", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  const first = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "snapshot-original"));
+  const noop = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(2, "snapshot-noop"));
+  assert.equal(noop.disposition, "accepted_noop");
+  assert.equal(noop.router_version, first.router_version);
+  assert.deepEqual(repository.subagentLifecycleProducerFor("lifecycle-parent"), {
+    parent_agent_id: "lifecycle-parent",
+    instance_id: "lifecycle-instance",
+    parent_session_id: "parent-session",
+    producer_epoch: "11111111-1111-4111-8111-111111111111",
+    lease_id: "lifecycle-lease",
+    authority: "v2",
+    highest_client_sequence: 2,
+    last_event_id: "snapshot-noop",
+    last_snapshot_sequence: 2,
+  });
+  assert.equal(repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(2, "snapshot-noop", [])).disposition, "conflict");
+  assert.equal(repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "late-lower-sequence")).disposition, "stale");
+});
+
+test("acknowledges stale lower-sequence lifecycle frames without mutation", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  const first = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(2, "snapshot-current"));
+  const stale = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "snapshot-stale", []));
+  assert.equal(stale.disposition, "stale");
+  assert.equal(stale.router_version, first.router_version);
+});
+
+test("rejects conflicting lifecycle identity reuse without mutation", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  const first = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "snapshot-conflict"));
+  const conflict = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "snapshot-conflict", []));
+  assert.equal(conflict.disposition, "conflict");
+  assert.equal(conflict.router_version, first.router_version);
+});
+
+test("keeps terminal-first unknown-child tombstones terminal", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "empty", []));
+  assert.equal(repository.applySubagentLifecycleEvent(lifecycleEvent(2, "terminal-first", "terminal")).disposition, "applied");
+  assert.equal(repository.applySubagentLifecycleEvent(lifecycleEvent(3, "late-start", "started")).disposition, "accepted_noop");
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 0);
+});
+
+test("rejects a late start after a terminal tombstone", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "initial"));
+  repository.applySubagentLifecycleEvent(lifecycleEvent(2, "finished", "terminal"));
+  assert.equal(repository.applySubagentLifecycleEvent(lifecycleEvent(3, "late", "started")).disposition, "accepted_noop");
+});
+
+test("rebinds a same-instance epoch only through a fenced replacement snapshot", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "first", []));
+  const candidate = lifecycleSnapshot(2, "replacement", [], { lease_id: "replacement-lease" });
+  assert.equal(repository.applySubagentLifecycleSnapshot(candidate).disposition, "stale");
+  const rebound = repository.applySubagentLifecycleSnapshot(candidate, { allowLeaseRebind: true });
+  assert.equal(rebound.disposition, "accepted_noop");
+  assert.equal(repository.subagentLifecycleProducerFor("lifecycle-parent").lease_id, "replacement-lease");
+  assert.equal(repository.subagentLifecycleProducerFor("lifecycle-parent").highest_client_sequence, 2);
+  assert.equal(repository.subagentLifecycleProducerFor("lifecycle-parent").last_snapshot_sequence, 2);
+  assert.equal(repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "old-lease-lower", [])).disposition, "stale");
+});
+
+test("rejects a changed epoch for an existing producer identity", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "first"));
+  const result = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "changed-epoch", [], { producer_epoch: "22222222-2222-4222-8222-222222222222" }));
+  assert.equal(result.disposition, "conflict");
+});
+
+test("replaces a producer only from a new-instance first snapshot", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "first"));
+  const result = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "new-instance", [], {
+    instance_id: "new-instance", parent_session_id: "new-session", lease_id: "new-lease", producer_epoch: "22222222-2222-4222-8222-222222222222",
+  }));
+  assert.equal(result.disposition, "applied");
+  assert.equal(result.snapshot.agents[0].subagent_count, 0);
+});
+
+test("allows a reused child id only in a new-epoch replacement snapshot", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "first"));
+  const result = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "replacement", [{ id: "child", description: "New process child" }], {
+    instance_id: "new-instance", parent_session_id: "new-session", lease_id: "new-lease", producer_epoch: "22222222-2222-4222-8222-222222222222",
+  }));
+  assert.equal(result.snapshot.agents[0].subagent_count, 1);
+});
+
+test("restores durable lifecycle state after router restart", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-lifecycle-restart-"));
+  const databasePath = join(directory, "router.sqlite");
+  const firstRepository = openMessageRepository({ databasePath });
+  firstRepository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "restart"));
+  const firstRouter = createAgentRouter({ repository: firstRepository, timeoutSweepIntervalMs: 60_000 });
+  await firstRouter.listen();
+  await firstRouter.close();
+  firstRepository.close();
+
+  const secondRepository = openMessageRepository({ databasePath });
+  const secondRouter = createAgentRouter({ repository: secondRepository, timeoutSweepIntervalMs: 60_000 });
+  const routerUrl = await secondRouter.listen();
+  const reader = new WebSocket(routerUrl);
+  t.after(async () => {
+    reader.close();
+    await secondRouter.close();
+    secondRepository.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await new Promise((resolve, reject) => { reader.once("open", resolve); reader.once("error", reject); });
+  const registered = lifecycleRouterFrame(reader, "registered");
+  reader.send(JSON.stringify({ version: "v1", frame_id: "reader-register", type: "register", agent_id: "lifecycle-reader", instance_id: "reader-instance", conversation_sync: "v1" }));
+  const registration = await registered;
+  const restored = lifecycleRouterFrame(reader, "subagent_state_snapshot");
+  reader.send(JSON.stringify({ version: "v1", frame_id: "reader-enable", type: "subagent_sync_enable", agent_id: "lifecycle-reader", instance_id: "reader-instance", lease_id: registration.lease_id }));
+  assert.equal((await restored).agents[0].subagent_count, 1);
+});
+
+function lifecycleRouterFrame(socket, type) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => settle(reject, new Error(`timed out waiting for ${type}`)), 2_000);
+    const onMessage = (payload) => {
+      const frame = JSON.parse(payload.toString("utf8"));
+      if (frame.type === type) settle(resolve, frame);
+    };
+    const onError = (error) => settle(reject, error);
+    const settle = (callback, value) => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+      callback(value);
+    };
+    socket.on("message", onMessage);
+    socket.once("error", onError);
+  });
+}
+
+test("replays retained lifecycle transitions after a cursor", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  const start = repository.applySubagentLifecycleSnapshot(lifecycleSnapshot(1, "replay-start"));
+  repository.applySubagentLifecycleEvent(lifecycleEvent(2, "replay-end", "terminal"));
+  const replay = repository.replaySubagentLifecycle({ afterVersion: start.router_version });
+  assert.equal(replay.mode, "replay");
+  assert.equal(replay.updates.length, 1);
+});
+
+test("keeps queued native children visible as running", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  // Stage 1 only receives the safe, normalized lifecycle child. A queued
+  // native record therefore arrives as the same visible running child that a
+  // running native record will use once Stage 2 begins producing snapshots.
+  const queuedChild = { id: "queued-child", type: "general-purpose", description: "Queued child" };
+  assert.equal(repository.applySubagentLifecycleSnapshot(
+    lifecycleSnapshot(1, "queued-snapshot", [queuedChild]),
+  ).disposition, "applied");
+  assert.deepEqual(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagents, [queuedChild]);
+  assert.equal(repository.applySubagentLifecycleEvent({
+    ...lifecycleEvent(2, "queued-terminal", "terminal"), subagent: queuedChild,
+  }).disposition, "applied");
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 0);
+});
+
+test("repairs missed native lifecycle events with a heartbeat snapshot", async (t) => {
+  const { repository } = await lifecycleRepository(t);
+  // Neither native transition is delivered. Complete snapshots still create
+  // then authoritatively omit the child, which is the router's repair path.
+  assert.equal(repository.applySubagentLifecycleSnapshot(
+    lifecycleSnapshot(1, "heartbeat-running", [{ id: "repaired-child", description: "Repaired child" }]),
+  ).disposition, "applied");
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 1);
+  assert.equal(repository.applySubagentLifecycleSnapshot(
+    lifecycleSnapshot(2, "heartbeat-finished", []),
+  ).disposition, "applied");
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "lifecycle-parent" }).agents[0].subagent_count, 0);
+});
+
+test("keeps lifecycle snapshots active while a settled parent has a child", async (t) => {
+  const { repository, routerUrl } = await lifecycleRouter(t);
+  const producer = await connectLifecycleSocket(t, routerUrl, { agentId: "settled-parent", instanceId: "settled-instance" });
+  await enableLifecycleSocket(producer.socket, producer.registration);
+  const firstAck = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  producer.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "settled-start", agentId: "settled-parent", instanceId: "settled-instance",
+    leaseId: producer.registration.lease_id, sequence: 1, eventId: "settled-start",
+  })));
+  assert.equal((await firstAck).disposition, "applied");
+
+  const heartbeatAck = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  producer.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "settled-heartbeat", agentId: "settled-parent", instanceId: "settled-instance",
+    leaseId: producer.registration.lease_id, sequence: 2, eventId: "settled-heartbeat",
+  })));
+  assert.equal((await heartbeatAck).disposition, "accepted_noop");
+  const pong = lifecycleRouterFrame(producer.socket, "pong");
+  producer.socket.send(JSON.stringify({
+    version: "v1", frame_id: "settled-activity", type: "activity", agent_id: "settled-parent", instance_id: "settled-instance",
+    lease_id: producer.registration.lease_id, activity_state: "settled", subagent_count: 0,
+  }));
+  producer.socket.send(JSON.stringify({ version: "v1", frame_id: "settled-barrier", type: "ping" }));
+  await pong;
+  const agents = await (await fetch(routerUrl.replace("ws://", "http://"))).json();
+  assert.equal(agents.agents.find((agent) => agent.agent_id === "settled-parent").subagent_count, 1);
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "settled-parent" }).agents[0].subagent_count, 1);
+});
+
+test("retries journal entries across reconnect without a second transition", async (t) => {
+  const { repository, routerUrl } = await lifecycleRouter(t);
+  const first = await connectLifecycleSocket(t, routerUrl, { agentId: "retry-parent", instanceId: "retry-instance" });
+  await enableLifecycleSocket(first.socket, first.registration);
+  const acknowledged = lifecycleRouterFrame(first.socket, "subagent_lifecycle_acknowledged");
+  first.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "retry-first-frame", agentId: "retry-parent", instanceId: "retry-instance",
+    leaseId: first.registration.lease_id, sequence: 1, eventId: "retry-event",
+  })));
+  const initial = await acknowledged;
+  assert.equal(initial.disposition, "applied");
+  first.socket.close();
+  await once(first.socket, "close");
+
+  const replacement = await connectLifecycleSocket(t, routerUrl, { agentId: "retry-parent", instanceId: "retry-instance" });
+  await enableLifecycleSocket(replacement.socket, replacement.registration);
+  const retried = lifecycleRouterFrame(replacement.socket, "subagent_lifecycle_acknowledged");
+  replacement.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "retry-frame-after-reconnect", agentId: "retry-parent", instanceId: "retry-instance",
+    leaseId: replacement.registration.lease_id, sequence: 1, eventId: "retry-event",
+  })));
+  const retry = await retried;
+  assert.equal(retry.disposition, "duplicate");
+  assert.equal(retry.router_version, initial.router_version);
+  assert.equal(repository.replaySubagentLifecycle({ afterVersion: 0 }).updates.length, 1);
+});
+
+async function lifecycleRouter(t, { clock = () => new Date() } = {}) {
+  const { repository, databasePath } = await lifecycleRepository(t, { clock });
+  const router = createAgentRouter({ repository, clock, timeoutSweepIntervalMs: 60_000 });
+  const routerUrl = await router.listen();
+  t.after(() => router.close());
+  return { repository, databasePath, routerUrl };
+}
+
+async function connectLifecycleSocket(t, routerUrl, { agentId, instanceId }) {
+  const socket = new WebSocket(routerUrl);
+  t.after(() => socket.close());
+  await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+  const registered = lifecycleRouterFrame(socket, "registered");
+  socket.send(JSON.stringify({ version: "v1", frame_id: `register-${agentId}-${instanceId}`, type: "register", agent_id: agentId, instance_id: instanceId, conversation_sync: "v1" }));
+  return { socket, registration: await registered };
+}
+
+function lifecycleWireFrame({ type, frameId, agentId, instanceId, leaseId, sequence, eventId, epoch = "11111111-1111-4111-8111-111111111111", children = [{ id: "child", description: "Safe child" }] }) {
+  return {
+    version: "v1", frame_id: frameId, type, agent_id: agentId, instance_id: instanceId,
+    parent_session_id: "parent-session", lease_id: leaseId, producer_epoch: epoch,
+    client_sequence: sequence, event_id: eventId,
+    ...(type === "subagent_lifecycle_snapshot" ? { subagents: children } : {}),
+  };
+}
+
+async function enableLifecycleSocket(socket, registration, { afterVersion } = {}) {
+  const snapshot = lifecycleRouterFrame(socket, afterVersion === undefined ? "subagent_state_snapshot" : "subagent_state_replay");
+  socket.send(JSON.stringify({
+    version: "v1", frame_id: `enable-${registration.lease_id}`, type: "subagent_sync_enable",
+    agent_id: registration.agent_id, instance_id: registration.instance_id, lease_id: registration.lease_id,
+    ...(afterVersion === undefined ? {} : { after_version: afterVersion }),
+  }));
+  return snapshot;
+}
+
+test("router fences an old socket and accepts a complete authenticated replacement snapshot", async (t) => {
+  let now = Date.parse("2030-01-01T00:00:00.000Z");
+  const { repository, routerUrl } = await lifecycleRouter(t, { clock: () => new Date(now) });
+  const old = await connectLifecycleSocket(t, routerUrl, { agentId: "socket-parent", instanceId: "socket-instance" });
+  await enableLifecycleSocket(old.socket, old.registration);
+  const initialAck = lifecycleRouterFrame(old.socket, "subagent_lifecycle_acknowledged");
+  old.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "old-first", agentId: "socket-parent", instanceId: "socket-instance",
+    leaseId: old.registration.lease_id, sequence: 1, eventId: "old-first",
+  })));
+  assert.equal((await initialAck).disposition, "applied");
+
+  const oldClosed = once(old.socket, "close");
+  now += 31_000;
+  const replacement = await connectLifecycleSocket(t, routerUrl, { agentId: "socket-parent", instanceId: "socket-instance" });
+  await oldClosed;
+  await enableLifecycleSocket(replacement.socket, replacement.registration);
+  const replacementAck = lifecycleRouterFrame(replacement.socket, "subagent_lifecycle_acknowledged");
+  replacement.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "replacement-snapshot", agentId: "socket-parent", instanceId: "socket-instance",
+    leaseId: replacement.registration.lease_id, sequence: 2, eventId: "replacement-snapshot", children: [],
+  })));
+  assert.equal((await replacementAck).disposition, "applied");
+  assert.equal(repository.subagentLifecycleProducerFor("socket-parent").lease_id, replacement.registration.lease_id);
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "socket-parent" }).agents[0].subagent_count, 0);
+});
+
+test("router rejects a changed epoch on an authenticated socket", async (t) => {
+  const { repository, routerUrl } = await lifecycleRouter(t);
+  const producer = await connectLifecycleSocket(t, routerUrl, { agentId: "epoch-parent", instanceId: "epoch-instance" });
+  await enableLifecycleSocket(producer.socket, producer.registration);
+  const initialAck = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  producer.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "epoch-first", agentId: "epoch-parent", instanceId: "epoch-instance",
+    leaseId: producer.registration.lease_id, sequence: 1, eventId: "epoch-first",
+  })));
+  assert.equal((await initialAck).disposition, "applied");
+  const changedAck = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  producer.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "epoch-changed", agentId: "epoch-parent", instanceId: "epoch-instance",
+    leaseId: producer.registration.lease_id, sequence: 2, eventId: "epoch-changed",
+    epoch: "22222222-2222-4222-8222-222222222222", children: [],
+  })));
+  assert.equal((await changedAck).disposition, "conflict");
+  assert.equal(repository.subagentLifecycleSnapshot({ parentAgentId: "epoch-parent" }).agents[0].subagent_count, 1);
+});
+
+test("router sends lifecycle acknowledgment after commit and before the live update", async (t) => {
+  const { repository, routerUrl } = await lifecycleRouter(t);
+  const producer = await connectLifecycleSocket(t, routerUrl, { agentId: "ack-parent", instanceId: "ack-instance" });
+  await enableLifecycleSocket(producer.socket, producer.registration);
+  const received = [];
+  let stateAtAck;
+  producer.socket.on("message", (payload) => {
+    const frame = JSON.parse(payload.toString("utf8"));
+    if (frame.type === "subagent_lifecycle_acknowledged") {
+      stateAtAck = repository.subagentLifecycleSnapshot({ parentAgentId: "ack-parent" }).agents[0].subagent_count;
+    }
+    if (["subagent_lifecycle_acknowledged", "subagent_state_update"].includes(frame.type)) received.push(frame.type);
+  });
+  const acknowledged = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  const update = lifecycleRouterFrame(producer.socket, "subagent_state_update");
+  producer.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "ack-ordered", agentId: "ack-parent", instanceId: "ack-instance",
+    leaseId: producer.registration.lease_id, sequence: 1, eventId: "ack-ordered",
+  })));
+  await Promise.all([acknowledged, update]);
+  await waitFor(() => received.length >= 2);
+  assert.equal(stateAtAck, 1);
+  assert.deepEqual(received.slice(-2), ["subagent_lifecycle_acknowledged", "subagent_state_update"]);
+});
+
+test("router sends a durable snapshot then replay after a reader reconnects", async (t) => {
+  const { routerUrl } = await lifecycleRouter(t);
+  const producer = await connectLifecycleSocket(t, routerUrl, { agentId: "replay-parent", instanceId: "replay-instance" });
+  await enableLifecycleSocket(producer.socket, producer.registration);
+  const reader = await connectLifecycleSocket(t, routerUrl, { agentId: "replay-reader", instanceId: "reader-instance" });
+  const initialSnapshot = await enableLifecycleSocket(reader.socket, reader.registration);
+  assert.equal(initialSnapshot.router_version, 0);
+  const applied = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  const update = lifecycleRouterFrame(reader.socket, "subagent_state_update");
+  producer.socket.send(JSON.stringify(lifecycleWireFrame({
+    type: "subagent_lifecycle_snapshot", frameId: "replay-state", agentId: "replay-parent", instanceId: "replay-instance",
+    leaseId: producer.registration.lease_id, sequence: 1, eventId: "replay-state",
+  })));
+  const version = (await applied).router_version;
+  assert.equal((await update).router_version, version);
+  const terminalAck = lifecycleRouterFrame(producer.socket, "subagent_lifecycle_acknowledged");
+  const terminalUpdate = lifecycleRouterFrame(reader.socket, "subagent_state_update");
+  producer.socket.send(JSON.stringify({
+    ...lifecycleWireFrame({
+      type: "subagent_lifecycle_event", frameId: "replay-terminal", agentId: "replay-parent", instanceId: "replay-instance",
+      leaseId: producer.registration.lease_id, sequence: 2, eventId: "replay-terminal", children: [],
+    }), lifecycle_event: "terminal", subagent: { id: "child", description: "Safe child" }, terminal_reason: "completed",
+  }));
+  const terminalVersion = (await terminalAck).router_version;
+  assert.equal((await terminalUpdate).router_version, terminalVersion);
+  reader.socket.close();
+  await once(reader.socket, "close");
+  const reconnected = await connectLifecycleSocket(t, routerUrl, { agentId: "replay-reader", instanceId: "reader-instance" });
+  const replay = await enableLifecycleSocket(reconnected.socket, reconnected.registration, { afterVersion: version });
+  assert.equal(replay.router_version, terminalVersion);
+  assert.equal(replay.updates.length, 1);
+});
 
 function sessionEntry(messageId) {
   return {
@@ -603,6 +1020,7 @@ function settledNotificationFixture(t, {
   const notifications = [];
   const sent = [];
   const activity = [];
+  const lifecycle = [];
   const context = {
     sessionManager: { getSessionId: () => "parent-session" },
     ui: { notify: (...args) => notifications.push(args), setStatus() {} },
@@ -618,6 +1036,8 @@ function settledNotificationFixture(t, {
       subagentCount: options?.subagentCount ?? 0,
       ...(Array.isArray(options?.subagents) && options.subagents.length > 0 ? { subagents: options.subagents } : {}),
     }),
+    sendLifecycleSnapshot: (subagents) => lifecycle.push({ type: "snapshot", subagents }),
+    sendLifecycleEvent: (event) => lifecycle.push({ type: "event", ...event }),
   };
   const pi = {
     events: { on(type, handler) { childEvents.set(type, handler); } },
@@ -648,6 +1068,7 @@ function settledNotificationFixture(t, {
     notifications,
     sent,
     activity,
+    lifecycle,
     tools,
   };
 }
@@ -845,6 +1266,61 @@ test("extension reports running native subagent counts in activity", async (t) =
     { state: "active", subagentCount: 1 },
     { state: "active", subagentCount: 0 },
   ]);
+});
+
+test("extension produces privacy-safe lifecycle events, snapshots, and terminal-first tombstones", async (t) => {
+  const intervals = [];
+  let now = 0;
+  const fixture = settledNotificationFixture(t, {
+    nowImpl: () => now,
+    setIntervalImpl: (callback, delay) => {
+      const timer = { delay, cleared: false, unref() {} };
+      timer.callback = () => { if (!timer.cleared) callback(); };
+      intervals.push(timer);
+      return timer;
+    },
+    clearIntervalImpl: (timer) => { timer.cleared = true; },
+  });
+
+  fixture.childEvents.get("subagents:started")({
+    id: "queued-child",
+    type: "general-purpose",
+    description: "Read this private patient note before reporting back.",
+  });
+  fixture.childEvents.get("subagents:completed")({ id: "terminal-first-child" });
+  now += 5_000;
+  intervals[0].callback();
+
+  const started = fixture.lifecycle.find((entry) => entry.type === "event" && entry.lifecycleEvent === "started");
+  const terminal = fixture.lifecycle.find((entry) => entry.type === "event" && entry.lifecycleEvent === "terminal");
+  assert.deepEqual(started.subagent, { id: "queued-child", type: "general-purpose", description: "Native subagent" });
+  assert.deepEqual(terminal.subagent, { id: "terminal-first-child", description: "Native subagent" });
+  assert.equal(terminal.terminalReason, "completed");
+  assert.ok(fixture.lifecycle.filter((entry) => entry.type === "snapshot").length >= 2);
+  assert.ok(fixture.lifecycle.every((entry) => JSON.stringify(entry).includes("private patient note") === false));
+  assert.equal(fixture.activity.at(-1).subagentCount, 1, "queued native child must remain visible as running");
+});
+
+test("extension publishes every native terminal classification as a privacy-safe lifecycle tombstone", async (t) => {
+  const fixture = settledNotificationFixture(t);
+  const terminals = [
+    ["subagents:completed", "completed"], ["subagents:failed", "failed"],
+    ["subagents:canceled", "canceled"], ["subagents:cancelled", "canceled"],
+    ["subagents:aborted", "aborted"], ["subagents:terminated", "terminated"],
+    ["subagents:stopped", "stopped"], ["subagents:steered", "steered"],
+  ];
+
+  for (const [index, [eventName, terminalReason]] of terminals.entries()) {
+    const id = `terminal-${index}`;
+    fixture.childEvents.get("subagents:started")({ id, description: "Prompt text must never become a lifecycle label" });
+    fixture.childEvents.get(eventName)({ id, description: "Native failure details must never become a lifecycle label" });
+    const terminal = fixture.lifecycle.filter((entry) => entry.type === "event" && entry.lifecycleEvent === "terminal").at(-1);
+    assert.deepEqual(terminal.subagent, { id, description: "Native subagent" });
+    assert.equal(terminal.terminalReason, terminalReason);
+  }
+  assert.equal(fixture.activity.at(-1).subagentCount, 0);
+  assert.equal(JSON.stringify(fixture.lifecycle).includes("Prompt text"), false);
+  assert.equal(JSON.stringify(fixture.lifecycle).includes("failure details"), false);
 });
 
 test("extension ignores no-op native subagent lifecycle events", async (t) => {
@@ -2282,6 +2758,271 @@ test("stale pending replay reinjects when no session entry survived", async () =
   ]);
   coordinator.close();
   await session.close();
+});
+
+test("lifecycle client negotiates capability, dual-sends legacy activity, and removes only correlated post-commit acknowledgments", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+  socket.close = () => { socket.readyState = 3; };
+  const client = createMailboxClient({
+    agentId: "worker",
+    parentSessionId: "parent-session",
+    producerEpoch: "11111111-1111-4111-8111-111111111111",
+    onEnvelope: () => {},
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ subagent_lifecycle_v2: true }) }),
+    generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
+  });
+
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+  await nextTurn();
+  assert.equal(socket.sent.at(-1).type, "subagent_sync_enable");
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "subagent_state_snapshot", router_version: 7, agents: [] }) }));
+  await nextTurn();
+  const initialSnapshot = socket.sent.find((frame) => frame.type === "subagent_lifecycle_snapshot");
+  assert.ok(initialSnapshot, "enablement must begin lifecycle production with a complete snapshot");
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: initialSnapshot.frame_id, event_id: initialSnapshot.event_id,
+    client_sequence: initialSnapshot.client_sequence, producer_epoch: initialSnapshot.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: "parent-session", lease_id: "lease-1",
+    router_version: 7, disposition: "accepted_noop",
+  }) }));
+  await nextTurn();
+
+  client.sendActivity("active", { subagentCount: 1, subagents: [{ id: "child-1", description: "Legacy visible label" }] });
+  const eventId = client.sendLifecycleEvent({
+    lifecycleEvent: "started",
+    subagent: { id: "child-1", type: "general-purpose", description: "Native subagent" },
+    snapshot: [{ id: "child-1", type: "general-purpose", description: "Native subagent" }],
+  });
+  const lifecycle = socket.sent.find((frame) => frame.event_id === eventId);
+  assert.deepEqual({
+    type: lifecycle.type,
+    agent: lifecycle.agent_id,
+    instance: lifecycle.instance_id,
+    parentSession: lifecycle.parent_session_id,
+    lease: lifecycle.lease_id,
+    epoch: lifecycle.producer_epoch,
+    sequence: lifecycle.client_sequence,
+  }, {
+    type: "subagent_lifecycle_event", agent: "worker", instance: client.instanceId,
+    parentSession: "parent-session", lease: "lease-1", epoch: "11111111-1111-4111-8111-111111111111", sequence: 2,
+  });
+  assert.equal(socket.sent.some((frame) => frame.type === "activity"), true, "legacy activity remains enabled during rollout");
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: "other-request", router_version: 8,
+  }) }));
+  await nextTurn();
+  assert.equal(client.lifecycleStatus().pending, 1);
+  // A request-id collision or an ack observed before the matching committed event must not
+  // advance the replay cursor or drop a retry entry.
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: lifecycle.frame_id, event_id: "wrong-event",
+    client_sequence: lifecycle.client_sequence, producer_epoch: lifecycle.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: "parent-session", lease_id: "lease-1",
+    router_version: 99, disposition: "applied",
+  }) }));
+  await nextTurn();
+  const uncorrelatedAck = client.lifecycleStatus();
+  assert.equal(uncorrelatedAck.supported, true);
+  assert.equal(uncorrelatedAck.ready, true);
+  assert.equal(uncorrelatedAck.routerVersion, 7);
+  assert.equal(uncorrelatedAck.pending, 1);
+  assert.ok(uncorrelatedAck.bytes > 0);
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: lifecycle.frame_id, event_id: lifecycle.event_id,
+    client_sequence: lifecycle.client_sequence, producer_epoch: lifecycle.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: "parent-session", lease_id: "lease-1",
+    router_version: 9, disposition: "applied",
+  }) }));
+  await nextTurn();
+  assert.deepEqual(client.lifecycleStatus(), { supported: true, ready: true, routerVersion: 9, pending: 0, bytes: 0 });
+  client.close();
+});
+
+test("lifecycle retry repairs a replacement lease with stable event identity", async () => {
+  const sockets = [];
+  const reconnectTimers = [];
+  const client = createMailboxClient({
+    agentId: "worker",
+    parentSessionId: "parent-session",
+    producerEpoch: "22222222-2222-4222-8222-222222222222",
+    onEnvelope: () => {},
+    webSocketFactory: () => {
+      const socket = new EventTarget();
+      socket.readyState = 0;
+      socket.sent = [];
+      socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+      socket.close = () => { socket.readyState = 3; socket.dispatchEvent(new Event("close")); };
+      sockets.push(socket);
+      return socket;
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ subagent_lifecycle_v2: true }) }),
+    generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
+    reconnectInitialDelayMs: 2,
+    reconnectMaxDelayMs: 2,
+    random: () => 1,
+    setTimeoutImpl: (callback) => { const timer = { callback, cleared: false }; reconnectTimers.push(timer); return timer; },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+  });
+  const connectAndEnable = async (socket, lease) => {
+    socket.readyState = 1;
+    socket.dispatchEvent(new Event("open"));
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: lease }) }));
+    await nextTurn();
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "subagent_state_snapshot", router_version: 1, agents: [] }) }));
+    await nextTurn();
+  };
+
+  const connected = client.connect();
+  await connectAndEnable(sockets[0], "lease-1");
+  await connected;
+  const initialSnapshot = sockets[0].sent.find((frame) => frame.type === "subagent_lifecycle_snapshot");
+  sockets[0].dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: initialSnapshot.frame_id, event_id: initialSnapshot.event_id,
+    client_sequence: initialSnapshot.client_sequence, producer_epoch: initialSnapshot.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: "parent-session", lease_id: "lease-1", router_version: 1,
+  }) }));
+  await nextTurn();
+  const eventId = client.sendLifecycleEvent({ lifecycleEvent: "started", subagent: { id: "child-1", description: "Native subagent" }, snapshot: [{ id: "child-1", description: "Native subagent" }] });
+  const original = sockets[0].sent.find((frame) => frame.event_id === eventId);
+  sockets[0].close();
+  reconnectTimers[0].callback();
+  await connectAndEnable(sockets[1], "lease-2");
+
+  const repair = sockets[1].sent.find((frame) => frame.type === "subagent_lifecycle_snapshot");
+  const retried = sockets[1].sent.find((frame) => frame.event_id === eventId);
+  assert.ok(repair, "a replacement lease must receive a complete repair snapshot");
+  assert.deepEqual(repair.subagents, [{ id: "child-1", description: "Native subagent" }]);
+  assert.ok(sockets[1].sent.indexOf(repair) < sockets[1].sent.indexOf(retried), "the repair snapshot must precede older retries");
+  assert.equal(retried.lease_id, "lease-2");
+  assert.equal(retried.client_sequence, original.client_sequence);
+  assert.notEqual(retried.frame_id, original.frame_id);
+  sockets[1].dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: retried.frame_id, event_id: retried.event_id,
+    client_sequence: retried.client_sequence, producer_epoch: retried.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: "parent-session", lease_id: "lease-2",
+    router_version: 2, disposition: "stale",
+  }) }));
+  await nextTurn();
+  assert.equal(client.lifecycleStatus().pending, 1, "the repair snapshot remains unacknowledged");
+  sockets[1].dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: repair.frame_id, event_id: repair.event_id,
+    client_sequence: repair.client_sequence, producer_epoch: repair.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: "parent-session", lease_id: "lease-2",
+    router_version: 3, disposition: "applied",
+  }) }));
+  await nextTurn();
+  assert.equal(client.lifecycleStatus().pending, 0);
+  client.close();
+});
+
+test("lifecycle journal collapses at its item and age limits and fails closed for an oversized snapshot", async () => {
+  let now = 0;
+  const diagnostics = [];
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+  socket.close = () => { socket.readyState = 3; };
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ subagent_lifecycle_v2: true }) }),
+    now: () => now,
+    onLifecycleDiagnostic: (event) => diagnostics.push(event.reason),
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1" }) }));
+  await connected;
+  await nextTurn();
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "subagent_state_snapshot", router_version: 1, agents: [] }) }));
+  await nextTurn();
+  const initialSnapshot = socket.sent.find((frame) => frame.type === "subagent_lifecycle_snapshot");
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: initialSnapshot.frame_id, event_id: initialSnapshot.event_id,
+    client_sequence: initialSnapshot.client_sequence, producer_epoch: initialSnapshot.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: client.parentSessionId, lease_id: "lease-1", router_version: 1,
+  }) }));
+  await nextTurn();
+
+  for (let index = 0; index < 256; index += 1) {
+    client.sendLifecycleEvent({ lifecycleEvent: "terminal", subagent: { id: `child-${index}`, description: "Native subagent" }, snapshot: [] });
+  }
+  assert.equal(client.lifecycleStatus().pending, 256);
+  client.sendLifecycleEvent({ lifecycleEvent: "terminal", subagent: { id: "collapse-child", description: "Native subagent" }, snapshot: [] });
+  assert.equal(client.lifecycleStatus().pending, 1);
+  assert.ok(diagnostics.includes("journal_collapsed"));
+  const collapsedSnapshot = socket.sent.filter((frame) => frame.type === "subagent_lifecycle_snapshot").at(-1);
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "subagent_lifecycle_acknowledged", request_id: collapsedSnapshot.frame_id, event_id: collapsedSnapshot.event_id,
+    client_sequence: collapsedSnapshot.client_sequence, producer_epoch: collapsedSnapshot.producer_epoch,
+    agent_id: "worker", instance_id: client.instanceId, parent_session_id: client.parentSessionId, lease_id: "lease-1", router_version: 2,
+  }) }));
+  await nextTurn();
+
+  // UTF-8 accounting, not JavaScript string length, is what enforces the total journal cap.
+  let byteCollapseAt;
+  for (let index = 0; index < 256; index += 1) {
+    const pendingBefore = client.lifecycleStatus().pending;
+    client.sendLifecycleEvent({ lifecycleEvent: "terminal", subagent: { id: `utf8-${index}`, description: "€".repeat(512) }, snapshot: [] });
+    if (index > 0 && pendingBefore > 1 && client.lifecycleStatus().pending === 1) {
+      byteCollapseAt = index;
+      break;
+    }
+  }
+  assert.ok(byteCollapseAt < 255, "serialized UTF-8 bytes must collapse before the item cap");
+  assert.ok(client.lifecycleStatus().bytes <= 262_144);
+
+  now += 10 * 60_000;
+  client.sendLifecycleEvent({ lifecycleEvent: "started", subagent: { id: "expired-child", description: "Native subagent" }, snapshot: [] });
+  assert.equal(client.lifecycleStatus().pending, 1);
+  assert.ok(diagnostics.includes("journal_expired"));
+
+  const framesBeforeOversize = socket.sent.length;
+  client.sendLifecycleSnapshot(Array.from({ length: 999 }, (_, index) => ({ id: `large-${index}`, description: "x".repeat(512) })));
+  assert.equal(socket.sent.length, framesBeforeOversize, "an oversized snapshot must not be sent or truncated");
+  assert.deepEqual(client.lifecycleStatus(), { supported: true, ready: false, routerVersion: 2, pending: 0, bytes: 0 });
+  assert.ok(diagnostics.includes("journal_oversize"));
+  client.close();
+});
+
+test("lifecycle capability fallback remains legacy-only", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (frame) => socket.sent.push(JSON.parse(frame));
+  socket.close = () => { socket.readyState = 3; };
+  const client = createMailboxClient({
+    agentId: "worker", onEnvelope: () => {}, webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: false, json: async () => ({}) }),
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+  await nextTurn();
+
+  client.sendActivity("active", { subagentCount: 1, subagents: [{ id: "child-1", description: "Legacy label" }] });
+  assert.equal(client.sendLifecycleSnapshot([{ id: "child-1", description: "Native subagent" }]), undefined);
+  assert.equal(client.sendLifecycleEvent({ lifecycleEvent: "started", subagent: { id: "child-1", description: "Native subagent" }, snapshot: [{ id: "child-1", description: "Native subagent" }] }), undefined);
+  assert.deepEqual(socket.sent.map((frame) => frame.type), ["register", "activity"]);
+  assert.deepEqual(client.lifecycleStatus(), { supported: false, ready: false, routerVersion: 0, pending: 0, bytes: 0 });
+  client.close();
 });
 
 test("client sends activity frames with its registered lease identity", async () => {
