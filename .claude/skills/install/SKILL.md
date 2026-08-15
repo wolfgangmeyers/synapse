@@ -5,7 +5,7 @@ description: "Set up or reinstall mecha-developer by symlinking personas, skills
 
 # Install Skill
 
-Set up mecha-developer by symlinking personas and skills to the user's home directory, and by copying the Pi mailbox extension to its stable local path.
+Set up mecha-developer by symlinking personas and skills to the user's home directory, and by validating the Pi mailbox extension registered from this checkout. The extension must not be relocated, copied, symlinked, or restored as an installed artifact.
 
 ## Usage
 
@@ -19,7 +19,7 @@ Set up mecha-developer by symlinking personas and skills to the user's home dire
 2. **Symlinks personas** to `~/personas/` so they're accessible from any project
 3. **Symlinks skill folders** to `~/.claude/skills/` so they're available globally in Claude Code
 4. **Symlinks CLI scripts** (`ai`, `mecha-supervisor`) to `~/.local/bin/`
-5. **Copies and registers** the canonical Pi mailbox extension for bare Pi sessions
+5. **Validates** the canonical Pi mailbox extension registration for bare Pi sessions
 
 ## Process
 
@@ -266,59 +266,52 @@ fi
 
 ### Pi mailbox extension (bare Pi)
 
-Do this before launching Pi. It copies—not symlinks—the canonical extension to
-`~/.mecha-developer/extensions/mecha-messaging.js`, then registers that exact
-path once in `~/.pi/agent/settings.json`. The installer uses the
-`pi-extension-maintenance` transaction: it validates regular source/target
-files, stages the copy beside the target, retains rollback copies through
-verification, atomically rewrites settings, preserves unrelated settings and
-packages, and removes duplicate registrations only for the exact stable path.
-It never deletes a differently named or stale extension registration.
+The active extension stays at `$REPO_ROOT/pi-extensions/mecha-messaging.js` and
+Pi registers that repository source path. Do not copy, move, symlink, or restore
+the extension under `~/.mecha-developer` or another installed-artifact path.
+Keep the existing settings registration pointed at the source, and validate it
+before launching Pi:
 
 ```bash
 REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
 SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging.js"
-TARGET="$HOME/.mecha-developer/extensions/mecha-messaging.js"
 SETTINGS="$HOME/.pi/agent/settings.json"
-INSTALLER="$REPO_ROOT/.claude/skills/supervisor/tools/install_pi_extension.py"
 
-# Preflight: stop on any failure without mutating the installed artifact/settings.
-test -f "$SOURCE" && test ! -L "$SOURCE"
+if [ -f "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
+  python3 - "$SOURCE" "$SETTINGS" <<'PY'
+import json, pathlib, sys
+source, settings = map(pathlib.Path, sys.argv[1:])
+source = source.resolve()
+data = json.loads(settings.read_text())
+packages = data.get("packages", [])
+if not isinstance(packages, list):
+    raise SystemExit("Pi settings packages must be a list")
+registrations = []
+for package in packages:
+    if isinstance(package, str):
+        path = pathlib.Path(package)
+        if not path.is_absolute():
+            path = settings.parent / path
+        if path.resolve() == source:
+            registrations.append(package)
+if len(registrations) != 1:
+    raise SystemExit(f"expected exactly one Pi extension registration resolving to {source}, found {len(registrations)}")
+print(f"ok: one Pi extension registration resolves to {source}")
+PY
+else
+  echo "MISSING: checkout Pi extension source or Pi settings"
+  exit 1
+fi
+
 test -f "$REPO_ROOT/tests/pi_extension_silent.test.mjs"
 node --test "$REPO_ROOT/tests/pi_extension_silent.test.mjs"
 node --check "$SOURCE"
-(
-  cd "$REPO_ROOT/.claude/skills/supervisor/tools"
-  python3 -m unittest test_supervisor_start test_install_pi_extension
-)
-python3 "$INSTALLER"
-
-# Final status: target must be regular, byte-identical, and registered exactly once.
-python3 - "$SOURCE" "$TARGET" "$SETTINGS" <<'PY'
-import json, pathlib, sys
-source, target, settings = map(pathlib.Path, sys.argv[1:])
-data = json.loads(settings.read_text())
-packages = data.get("packages", [])
-if not target.is_file() or target.is_symlink() or source.read_bytes() != target.read_bytes():
-    raise SystemExit(f"invalid installed Pi extension: {target}")
-count = packages.count(str(target))
-if count != 1:
-    raise SystemExit(f"expected one stable Pi registration, found {count}")
-stale = [p for p in packages if isinstance(p, str) and p.endswith("/mecha-messaging.js") and p != str(target)]
-print(f"ok: {target}; target registrations: {count}; stale registrations retained: {len(stale)}")
-for path in stale:
-    print(f"stale (not removed): {path}")
-PY
-
-# Only after the final status check succeeds, discard transaction rollback copies.
-rm -f "$TARGET.rollback" "$SETTINGS.mecha-messaging.rollback"
 ```
 
 Global registration is for bare Pi only. New supervisor and worker processes
-are explicitly launched with the managed mailbox extension path; they preserve
-Pi's default configured extensions and add this extension rather than using
-`--no-extensions`. If an existing bare Pi process needs the update, reload it
-after the final check.
+preserve Pi's default configured extensions and add this source path rather than
+using `--no-extensions`. If an existing bare Pi process needs the updated
+source, reload it after the authorized source change.
 
 ### 8. Symlink Hooks
 
@@ -609,16 +602,13 @@ ls -la ~/.local/bin/ai ~/.local/bin/mecha-supervisor 2>/dev/null || echo "none"
 
 echo ""
 echo "=== Pi Extension ==="
-TARGET="$HOME/.mecha-developer/extensions/mecha-messaging.js"
+REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
+SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging.js"
 SETTINGS="$HOME/.pi/agent/settings.json"
-if [ -f "$TARGET" ] && [ ! -L "$TARGET" ] && [ -f "$SETTINGS" ]; then
-  python3 - "$TARGET" "$SETTINGS" <<'PY'
-import json, pathlib, sys
-target, settings = map(pathlib.Path, sys.argv[1:])
-print(f"target registrations: {json.loads(settings.read_text()).get('packages', []).count(str(target))}")
-PY
+if [ -f "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
+  echo "Pi source and settings are present; run the read-only registration check above."
 else
-  echo "MISSING: stable Pi extension or Pi settings"
+  echo "MISSING: checkout Pi extension source or Pi settings"
 fi
 
 echo ""

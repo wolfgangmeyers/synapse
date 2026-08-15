@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
@@ -293,7 +293,7 @@ test("uses the captured router command and verified backup for atomic lifecycle 
   restarted.close();
 });
 
-test("validates installed router and client rollout in an isolated home", async (t) => {
+test("validates router and checkout-source client rollout in an isolated home", async (t) => {
   const { databasePath, directory } = await temporaryDatabase(t);
   const home = join(directory, "home");
   const backupPath = join(directory, "router-before-017.sqlite");
@@ -334,16 +334,15 @@ test("validates installed router and client rollout in an isolated home", async 
   const updatedCapabilities = await (await fetch(new URL("/v1/capabilities", updated.httpUrl))).json();
   assert.equal(updatedCapabilities.subagent_lifecycle_v2, true);
 
-  execFileSync("python3", [join(process.cwd(), ".claude", "skills", "supervisor", "tools", "install_pi_extension.py")], {
-    cwd: process.cwd(), env: { ...process.env, HOME: home }, stdio: "pipe",
-  });
-  const installedRoot = join(home, ".mecha-developer", "extensions");
-  const installedExtension = join(installedRoot, "mecha-messaging.js");
-  const installedClient = join(installedRoot, "mailbox-client.js");
-  assert.deepEqual(readFileSync(installedExtension), readFileSync(join(process.cwd(), "pi-extensions", "mecha-messaging.js")));
-  assert.deepEqual(readFileSync(installedClient), readFileSync(join(process.cwd(), "pi-extensions", "mailbox-client.js")));
+  const registeredExtension = join(process.cwd(), "pi-extensions", "mecha-messaging.js");
+  const registeredClient = join(process.cwd(), "pi-extensions", "mailbox-client.js");
+  await mkdir(join(home, ".pi", "agent"), { recursive: true });
+  await writeFile(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ packages: [registeredExtension] }));
   const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
-  assert.deepEqual(settings.packages, [installedExtension]);
+  assert.deepEqual(settings.packages, [registeredExtension]);
+  assert.ok(readFileSync(registeredExtension).length > 0);
+  assert.ok(readFileSync(registeredClient).length > 0);
+  assert.equal(existsSync(join(home, ".mecha-developer", "extensions")), false);
   assert.deepEqual(capturedStart, {
     command: process.execPath,
     args: ["tools/run_router.mjs", "--database", databasePath, "--port", String(routerPort)],

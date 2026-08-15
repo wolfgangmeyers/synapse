@@ -140,6 +140,10 @@ Code comments carry the mechanics and never the rejections. A worker on 2026-08-
 
 ## Evidence and validation
 
+### Immutable evidence identity
+
+Key readiness evidence to the immutable base, target tree/head, stated requirements, and relevant external evidence. Record an immutable identifier for the target (a commit/tree hash, or a diff/tree hash for an uncommitted target) and the version or timestamp of relevant external evidence. Run one proportional readiness pass per key: material production changes receive all applicable review, requirements, coverage, security, and live-proof gates; docs-only or trivial changes receive only applicable checks. Reuse a completed pass for later commit, push, or readiness transitions while the key is unchanged. Rerun only after a material target change, new material review feedback, or new material evidence. Do not repeat same-target checks or hold an already-authorized push for completed review.
+
 - Verify claims with direct evidence: files, diffs, test output, logs, browser proof, API responses, screenshots, PR check state, or git history.
 - When the active model cannot read images, delegate image reading to a vision-capable model and use its description as the evidence input. Use GPT 5.5 when an OpenAI subscription is available. Ask for the concrete details needed for the task, not a generic caption.
 - For user-facing changes, run the behavior. Code inspection alone is not enough.
@@ -568,7 +572,7 @@ There is a canonical `dev-loop` workflow and it is the source of truth. Do not p
 
 Four phases: a spec the supervisor reviews, a plan reviewed by `robot-review` and iterated until every reviewer signs off, implementation by TDD, then coverage and review. `pr-validate` runs on each reviewer's output **using a different persona than produced the review**, which is the part most easily lost.
 
-**And it runs again after every round of fixes.** A fix is not verified by the person who wrote it saying so.
+**Re-review follows material evidence, not a ritual after every fix.** Keep the review target immutable: preserve the exact commit or diff under review, and never treat a changed target as covered by an earlier review. A behavior, contract, state, or test-evidence change requires focused independent re-review of the affected target; a wording-only or demonstrably non-material change needs only the checks it can affect. Scale the re-review to the evidence, but do not accept an author's assertion as verification.
 
 Wolfgang made this mandatory on 2026-08-07. The brief that prompted it carried the ticket, the environment traps, the verification rules and the voice rules, and left the loop out. Robot-review ran once, found nine things, and nobody re-ran it. The worker's own check afterward found two more that the nine fixes had missed. The human reviewer then found sixteen, and **eleven were missing tests**. That is exactly what `test-coverage` exists to find, and he had to write them out by hand.
 

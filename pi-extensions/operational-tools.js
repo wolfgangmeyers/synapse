@@ -1,10 +1,22 @@
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SUPERVISOR_TOOLS = join(HERE, ".claude", "skills", "supervisor", "tools");
+
+export function resolveSupervisorTools(extensionDirectory = HERE) {
+  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+  try {
+    if (statSync(adjacentTools).isDirectory()) return adjacentTools;
+  } catch {
+    // A missing or inaccessible bundled path is safe to ignore; use the checkout layout below.
+  }
+  return join(extensionDirectory, "..", ".claude", "skills", "supervisor", "tools");
+}
+
+const SUPERVISOR_TOOLS = resolveSupervisorTools();
 const MAX_TEXT = 4_000;
 export const MAX_OPERATIONAL_OUTPUT = 16_384;
 export const OPERATIONAL_TRUNCATION_MARKER = "\n[output truncated]";

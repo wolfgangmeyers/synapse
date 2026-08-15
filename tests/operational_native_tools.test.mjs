@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 import {
@@ -7,6 +9,7 @@ import {
   MAX_OPERATIONAL_OUTPUT,
   OPERATIONAL_TRUNCATION_MARKER,
   registerOperationalTools,
+  resolveSupervisorTools,
 } from "../pi-extensions/operational-tools.js";
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging.js";
 
@@ -139,6 +142,40 @@ test("rejects unknown actions, missing fields, wrong types, and extras before ad
   assert.equal(requests.length, 0);
 });
 
+test("prefers adjacent supervisor tools when both layouts exist", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const extensionDirectory = join(root, "pi-extensions");
+  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+  mkdirSync(adjacentTools, { recursive: true });
+  mkdirSync(join(root, ".claude", "skills", "supervisor", "tools"), { recursive: true });
+
+  assert.equal(resolveSupervisorTools(extensionDirectory), adjacentTools);
+});
+
+test("falls back to checkout-parent supervisor tools", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const extensionDirectory = join(root, "pi-extensions");
+  const checkoutTools = join(root, ".claude", "skills", "supervisor", "tools");
+  mkdirSync(checkoutTools, { recursive: true });
+
+  assert.equal(resolveSupervisorTools(extensionDirectory), checkoutTools);
+});
+
+test("falls back when the adjacent supervisor tools path is a regular file", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "operational-tools-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const extensionDirectory = join(root, "pi-extensions");
+  const adjacentTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
+  mkdirSync(join(extensionDirectory, ".claude", "skills", "supervisor"), { recursive: true });
+  writeFileSync(adjacentTools, "not a directory\n");
+  const checkoutTools = join(root, ".claude", "skills", "supervisor", "tools");
+  mkdirSync(checkoutTools, { recursive: true });
+
+  assert.equal(resolveSupervisorTools(extensionDirectory), checkoutTools);
+});
+
 test("selects exact fixed script paths and passes safe argument arrays", async () => {
   const runner = fakeRunner((file, args) => {
     const script = basename(args[0]);
@@ -163,7 +200,7 @@ test("selects exact fixed script paths and passes safe argument arrays", async (
     const result = await execute(tools.get(name), input);
     assert.equal(result.isError, undefined, `${name}: ${result.content[0].text}`);
   }
-  const expectedDirectory = join(process.cwd(), "pi-extensions", ".claude", "skills", "supervisor", "tools");
+  const expectedDirectory = join(process.cwd(), ".claude", "skills", "supervisor", "tools");
   assert.deepEqual(runner.calls.map(({ args }) => args[0]), [
     "state_query.py", "state_add.py", "state_update_status.py", "state_priority.py",
     "state_verification_handoff.py", "worker_list.py", "worker_lifecycle.py",

@@ -17,9 +17,10 @@ Launch the deterministic Pi service with the stable Mailbox V2 extension:
 
 ```bash
 # Run this in a tmux window named pr-watch.
+REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
 MECHA_ROUTER_URL=http://127.0.0.1:8765 \
 pi --provider openai-codex --model gpt-5.6-terra \
-  --extension "$HOME/.mecha-developer/extensions/mecha-messaging.js"
+  --extension "$REPO_ROOT/pi-extensions/mecha-messaging.js"
 ```
 
 ### Service startup contract

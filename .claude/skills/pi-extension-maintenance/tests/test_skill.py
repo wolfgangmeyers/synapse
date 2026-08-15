@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import subprocess
 import tempfile
@@ -6,112 +7,83 @@ import unittest
 
 
 SKILL = Path(__file__).parents[1] / "SKILL.md"
+INSTALL_SKILL = SKILL.parents[1] / "install" / "SKILL.md"
+VERIFIER_MARKER = 'python3 - "$SOURCE" "$SETTINGS" <<\'PY\'\n'
 
 
-def embedded_program(start, end):
-    section = SKILL.read_text().split(start, 1)[1].split(end, 1)[0]
-    return section.split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-
-
-def install_program():
-    return embedded_program("## Install or update", "## Uninstall")
-
-
-def uninstall_program():
-    return embedded_program("## Uninstall", "## Final verification")
-
-
-def run_with_settings_replace_failure(program, environment):
-    prelude = '''\nimport os\n_original_replace = os.replace\n_failed = False\ndef _fail_settings_replace(source, destination):\n    global _failed\n    if not _failed and os.fspath(destination) == os.environ["SETTINGS"]:\n        _failed = True\n        raise OSError("simulated settings replace failure")\n    return _original_replace(source, destination)\nos.replace = _fail_settings_replace\n'''
-    return subprocess.run(["python3", "-c", prelude + program], env={**os.environ, **environment}, capture_output=True, text=True)
+def embedded_program():
+    section = INSTALL_SKILL.read_text().split("### Pi mailbox extension (bare Pi)", 1)[1].split("### 8. Symlink Hooks", 1)[0]
+    return section.split(VERIFIER_MARKER, 1)[1].split("\nPY\n", 1)[0]
 
 
 class PiExtensionMaintenanceSkillTests(unittest.TestCase):
-    def setUp(self):
-        self.skill = SKILL.read_text()
-
-    def test_lifecycle_contract_is_explicit(self):
-        for text in (
-            "`TARGET` is the one stable installed artifact path",
-            "test ! -L \"$SOURCE\"",
-            "cmp -s \"$SOURCE\" \"$TARGET\"",
-            "os.replace",
-            "settings.name + \".mecha-messaging.rollback\"",
-            "MECHA_ROUTER_URL",
-            "pi --extension",
-            "`/reload`",
-            "console.log",
-            "Do not mutate anything until these pass",
+    def test_source_in_place_contract_and_headings_are_explicit(self):
+        skill = SKILL.read_text()
+        for heading in (
+            "## Status and registration check (read-only)",
+            "## Preflight",
+            "## Source updates",
+            "## Final verification",
         ):
-            with self.subTest(text=text):
-                self.assertIn(text, self.skill)
+            self.assertIn(heading, skill)
+        self.assertIn("REPO_ROOT/pi-extensions/mecha-messaging.js", skill)
+        self.assertIn("Do not copy, move, symlink, restore, or replace it", skill)
+        self.assertIn("registration for `~/.mecha-developer/extensions/mecha-messaging.js` is stale", skill)
+        self.assertNotIn("install_pi_extension.py", skill)
 
-    def test_install_preserves_unrelated_settings_and_packages(self):
+    def test_install_contains_one_registration_verifier_source(self):
+        documentation = INSTALL_SKILL.read_text()
+        self.assertEqual(documentation.count(VERIFIER_MARKER), 1)
+        self.assertIn("expected exactly one Pi extension registration", documentation)
+        self.assertIn("registration check above", documentation)
+
+    def run_verifier(self, source, settings):
+        return subprocess.run(
+            ["python3", "-c", embedded_program(), str(source), str(settings)],
+            env=os.environ.copy(), capture_output=True, text=True,
+        )
+
+    def test_registration_verifier_accepts_one_checkout_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "source.js"; source.write_text("export default {};\n")
-            target = root / "managed" / "mecha-messaging.js"
-            unrelated = root / "other" / "mecha-messaging.js"; unrelated.parent.mkdir(); unrelated.write_text("other")
+            source = root / "pi-extensions" / "mecha-messaging.js"
+            source.parent.mkdir()
+            source.write_text("export default {};\n")
             settings = root / "settings.json"
-            settings.write_text('{"theme":"dark","packages":["npm:other","%s","%s","%s"]}\n' % (unrelated, target, target))
-            result = subprocess.run(["python3", "-c", install_program()], env={**os.environ, "SOURCE": str(source), "TARGET": str(target), "SETTINGS": str(settings)}, capture_output=True, text=True)
+            settings.write_text(json.dumps({"packages": [str(source)]}))
+            result = self.run_verifier(source, settings)
             self.assertEqual(result.returncode, 0, result.stderr)
-            import json
-            data = json.loads(settings.read_text())
-            self.assertEqual(data["theme"], "dark")
-            self.assertEqual(data["packages"], ["npm:other", str(unrelated), str(target)])
-            self.assertEqual(data["packages"].count(str(target)), 1)
-            self.assertEqual(target.read_text(), source.read_text())
-            self.assertTrue(unrelated.exists())
 
-    def test_install_rejects_a_symlinked_canonical_source_without_mutation(self):
+    def test_registration_verifier_rejects_malformed_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); canonical = root / "canonical.js"; actual = root / "actual.js"; actual.write_text("new"); canonical.symlink_to(actual)
-            target = root / "managed" / "mecha-messaging.js"; target.parent.mkdir(); target.write_text("old")
-            settings = root / "settings.json"; original_settings = '{"packages":["npm:other"]}\n'; settings.write_text(original_settings)
-            result = subprocess.run(["python3", "-c", install_program()], env={**os.environ, "SOURCE": str(canonical), "TARGET": str(target), "SETTINGS": str(settings)}, capture_output=True, text=True)
+            root = Path(tmp)
+            source = root / "mecha-messaging.js"
+            source.write_text("export default {};\n")
+            settings = root / "settings.json"
+            settings.write_text("{malformed")
+            self.assertNotEqual(self.run_verifier(source, settings).returncode, 0)
+
+    def test_registration_verifier_rejects_missing_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "mecha-messaging.js"
+            source.write_text("export default {};\n")
+            settings = root / "settings.json"
+            settings.write_text(json.dumps({"packages": []}))
+            result = self.run_verifier(source, settings)
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(target.read_text(), "old")
-            self.assertEqual(settings.read_text(), original_settings)
+            self.assertIn("found 0", result.stderr)
 
-    def test_install_rolls_back_new_artifact_when_settings_replace_fails(self):
+    def test_registration_verifier_rejects_duplicate_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); source = root / "source.js"; source.write_text("new")
-            target = root / "managed" / "mecha-messaging.js"; settings = root / "settings.json"
-            original_settings = '{"theme":"dark","packages":["npm:other"]}\n'; settings.write_text(original_settings)
-            result = run_with_settings_replace_failure(install_program(), {"SOURCE": str(source), "TARGET": str(target), "SETTINGS": str(settings)})
+            root = Path(tmp)
+            source = root / "mecha-messaging.js"
+            source.write_text("export default {};\n")
+            settings = root / "settings.json"
+            settings.write_text(json.dumps({"packages": [str(source), str(source)]}))
+            result = self.run_verifier(source, settings)
             self.assertNotEqual(result.returncode, 0)
-            self.assertFalse(target.exists())
-            self.assertEqual(settings.read_text(), original_settings)
-
-    def test_uninstall_retains_artifact_and_settings_when_settings_replace_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); target = root / "managed" / "mecha-messaging.js"; target.parent.mkdir(); target.write_text("installed")
-            settings = root / "settings.json"; original_settings = '{"theme":"dark","packages":["npm:other","%s"]}\n' % target; settings.write_text(original_settings)
-            result = run_with_settings_replace_failure(uninstall_program(), {"TARGET": str(target), "SETTINGS": str(settings)})
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(target.read_text(), "installed")
-            self.assertEqual(settings.read_text(), original_settings)
-
-    def test_install_rejects_a_symlinked_target(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); source = root / "source.js"; source.write_text("new")
-            original = root / "original.js"; original.write_text("old")
-            target = root / "managed" / "mecha-messaging.js"; target.parent.mkdir(); target.symlink_to(original)
-            settings = root / "settings.json"; settings.write_text('{"packages": []}\n')
-            result = subprocess.run(["python3", "-c", install_program()], env={**os.environ, "SOURCE": str(source), "TARGET": str(target), "SETTINGS": str(settings)}, capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertTrue(target.is_symlink())
-            self.assertEqual(settings.read_text(), '{"packages": []}\n')
-
-    def test_install_initializes_missing_packages(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); source = root / "source.js"; source.write_text("export default {};\n")
-            target = root / "managed" / "mecha-messaging.js"; settings = root / "settings.json"; settings.write_text('{"theme":"dark"}\n')
-            result = subprocess.run(["python3", "-c", install_program()], env={**os.environ, "SOURCE": str(source), "TARGET": str(target), "SETTINGS": str(settings)}, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            import json
-            self.assertEqual(json.loads(settings.read_text())["packages"], [str(target)])
+            self.assertIn("found 2", result.stderr)
 
 
 if __name__ == "__main__":

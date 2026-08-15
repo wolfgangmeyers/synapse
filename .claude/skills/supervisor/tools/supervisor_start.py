@@ -79,6 +79,7 @@ from worker_runtime_config import (
 # the same way; this is the third copy of that path-building, so it copied the bug too.
 TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_DIR = os.path.expanduser("~/code/mecha-developer")
+PI_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(TOOLS_DIR))))
 
 SUPERVISOR_WINDOW = "supervisor"
 ROUTER_WINDOW = "mailbox-router"
@@ -108,7 +109,9 @@ RUN_LOCK_PATH = os.path.expanduser("~/.mecha-developer/supervisor-start.lock")
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.5"
 PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
-PI_MAILBOX_EXTENSION_PATH = os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js")
+# The registered extension is the source in this checkout. Never fall back to the
+# retired copied artifact under ~/.mecha-developer/extensions.
+PI_MAILBOX_EXTENSION_PATH = os.path.join(PI_REPO_ROOT, "pi-extensions", "mecha-messaging.js")
 PI_COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY"
 PI_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY"
 
@@ -406,17 +409,16 @@ def resolve_agent(explicit_agent, environment=None):
 
 
 def resolve_pi_mailbox_extension(environment=None):
-    """Return the explicit override or stable Mailbox V2 extension for Pi."""
+    """Return the explicit override or registered checkout extension for Pi."""
     environment = os.environ if environment is None else environment
     has_override = PI_MAILBOX_EXTENSION_ENV in environment
     configured_path = environment[PI_MAILBOX_EXTENSION_ENV] if has_override else PI_MAILBOX_EXTENSION_PATH
     extension_path = os.path.abspath(os.path.expanduser(configured_path))
     if not os.path.isfile(extension_path) or os.path.islink(extension_path):
-        source = PI_MAILBOX_EXTENSION_ENV if has_override else "stable Pi extension"
+        source = PI_MAILBOX_EXTENSION_ENV if has_override else "registered checkout source"
         raise ConfigurationError(
-            f"{source} must name a regular, non-symlink extension file: {extension_path}. "
-            f"Install the canonical Pi extension first: python3 "
-            f"{os.path.join(TOOLS_DIR, 'install_pi_extension.py')}"
+            f"{source} must name a regular, non-symlink checkout extension file: {extension_path}. "
+            "Register the checkout source before launching."
         )
     return extension_path
 
