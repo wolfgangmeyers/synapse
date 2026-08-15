@@ -46,6 +46,9 @@ RECOVERY_LOG = Path("~/.mecha-developer/supervisor-tool-call-recovery.log").expa
 RECOVERY_DEBOUNCE_SECONDS = 10 * 60
 TOOLS = Path(__file__).resolve().parent
 SUPERVISOR_TOOLS = TOOLS.parents[1] / "supervisor" / "tools"
+# Recovery must start Pi with the registered checkout source, not the retired
+# copied artifact under ~/.mecha-developer/extensions.
+PI_MAILBOX_EXTENSION_PATH = TOOLS.parents[3] / "pi-extensions" / "mecha-messaging.js"
 
 
 def actionable(level: str, owner: str, issue: str, action: str, resolved_when: str) -> str:
@@ -417,7 +420,7 @@ def recovery_handoff_prompt(evidence: dict) -> str:
 
 def recovery_tmux_command(evidence: dict, work_dir: str = "/Users/wolfgang/code/mecha-developer") -> str:
     prompt = recovery_handoff_prompt(evidence)
-    extension = os.environ.get("MECHA_PI_MAILBOX_EXTENSION", os.path.expanduser("~/.mecha-developer/extensions/mecha-messaging.js"))
+    extension = os.environ.get("MECHA_PI_MAILBOX_EXTENSION", str(PI_MAILBOX_EXTENSION_PATH))
     router_url = router_base()
     pi_command = " ".join([
         "pi",

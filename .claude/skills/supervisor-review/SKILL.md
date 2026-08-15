@@ -20,17 +20,19 @@ Do not accept readiness until the worker's claim has been checked against the ac
 
 Generic directions such as "be thorough" are not enough.
 
-## Triggered subagent checks for draft PR and review-ready gates
+## Proportional readiness pass
 
-At every draft PR, review-ready, commit/push, or final-readiness gate, activate this skill and launch all three bounded independent background subagents below. Do this every time the gate is reached, even when the worker's report is clean or an earlier pass looked equivalent. Do not substitute a worker report, supervisor inspection, prior pass, or "equivalent result" for any of these three independent checks.
+For each draft PR, review-ready, commit/push, or final-readiness gate, run one proportional readiness pass for the immutable evidence key: immutable base, target tree/head, stated requirements, and relevant external evidence. Record an immutable identifier for the target (a commit/tree hash, or a diff/tree hash for an uncommitted target) and the version or timestamp of relevant external evidence. Material production changes receive all applicable review, requirements-compliance, coverage, security, and live-proof checks in that pass. Docs-only or trivial changes receive only applicable checks. Reuse a completed pass for later commit, push, or readiness transitions when the key is unchanged. Rerun only after a material target change, new material review feedback, or new material evidence. Do not repeat same-target checks or hold an already-authorized push for already-completed review.
+
+For material targets, run all three bounded independent background subagents below where they apply. For docs-only or trivial targets, launch only applicable checks; do not substitute a worker report, supervisor inspection, prior pass, or "equivalent result" for an applicable check.
 
 1. **Overengineering and codebase consistency:** Enumerate every new identity, service, permission, deployment step, and configuration surface introduced by the change. For each one, cite the requirement or external contract that makes it necessary. Report the smallest viable design that preserves all requirements, and fail the gate when the implementation adds unsupported machinery. Also verify the implementation matches existing codebase patterns, feature flags, generated contracts, and naming conventions. Flag new flags, slugs, roles, or access-control categories unless Wolfgang explicitly approved them. For security- or IAM-sensitive changes, require an immutable reference to the approved spec or plan by content hash or version, with reapproval after any change. Require a principal -> role -> resource scope -> allowed operations matrix that marks create, drop, list, IAM, and DDL as allowed or denied. Require a requirement-to-artifact ledger. Removing a required workflow or acceptance artifact fails the gate. Identify every named acceptance check and verify direct evidence that it ran. Execute only non-mutating checks during this review. Stateful or mutating acceptance checks require an explicit separate execution gate and direct evidence from that gated run. Unit-test scripts alone do not satisfy named acceptance checks.
 2. **Documentation and comments:** Verify required docs, specs, migration comments, generated artifacts, and user-facing copy are present and accurate. Check that rationale is concise and useful. Reject noisy comments, overly verbose comments, comments that restate code, and prose that reads like a proof dump.
-3. **Final robot-review cleanliness:** Verify robot-review ran after every fix round on the updated head. Any round with Blocking or Should Address findings must be fixed and followed by another robot-review pass. The gate passes only when the final pass reports zero Blocking and zero Should Address. Require a final focus ledger: focus area -> reviewer/persona -> result/disposition. Any skipped focus area needs a concrete justification.
+3. **Final robot-review cleanliness:** Verify robot-review ran after each material target change, new material review feedback, or new material evidence on the updated head. Any resulting pass with Blocking or Should Address findings must be fixed and followed by another applicable robot-review pass. The gate passes only when the final pass reports zero Blocking and zero Should Address. Require a final focus ledger: focus area -> reviewer/persona -> result/disposition. Any skipped focus area needs a concrete justification.
 
 Keep each subagent bounded: give it the repository path, branch/head, base branch, task requirements, and the exact question above. It must inspect direct evidence and return pass/fail with file paths or commands that support its conclusion. It should not mutate files or runtime state.
 
-Collect all three subagent results before accepting readiness. If any result is missing, inconclusive, or contradicts the worker's report, send the worker back with the specific gap.
+Collect all applicable subagent results for the completed pass before accepting readiness. If any result is missing, inconclusive, or contradicts the worker's report, send the worker back with the specific gap.
 
 ## Supervisor interrogation checklist
 
@@ -52,7 +54,7 @@ A readiness report that lacks data proof, coverage/test detail, browser/live pro
 
 ## Worker mailbox loop
 
-Every gated worker must go through a Mailbox V2 instruction/results loop before the supervisor accepts readiness. Do this even when the supervisor's preliminary checks and the three independent subagents are clean; a clean preliminary pass changes the message content, not the requirement to get a worker result by mailbox.
+Every readiness pass must go through a Mailbox V2 instruction/results loop before the supervisor accepts readiness. Complete it once for each immutable evidence key, even when preliminary checks are clean. Reuse completed worker results for later transitions when the key is unchanged; do not require a fresh mailbox loop for a same-target transition.
 
 Send the worker a Mailbox V2 instruction with exact next steps or the final evidence ledger to provide. In a Pi supervisor session, use the native `mecha_mailbox_send` tool. Use `/Users/wolfgang/code/mecha-developer/.claude/skills/supervisor/tools/mailbox_send.py --to <agent-id> --body <text>` as the fallback when the native tool is unavailable. The fallback infers the sender from the current tmux window; add `--from` only when that runtime explicitly requires it. Do not type into the worker terminal.
 
@@ -68,12 +70,12 @@ Useful worker prompts:
 
 - `Before I can accept this as done, reply with an evidence ledger for requirements, changed-file scope, tests/coverage, data/browser proof, permissions, docs/KB, review findings, and blockers. Name paths, commands, URLs, seed counts, and skipped gates.`
 - `You said this is blocked. What requirement or external contract makes it hard, what KB/repo/current-code workaround did you check, and does it prevent the primary artifact?`
-- `Before I can accept review readiness, run robot-review after each fix round until the final pass has zero Blocking and zero Should Address. Reply with the final focus ledger: focus area -> reviewer/persona -> result/disposition. Run any missing relevant areas on the final head and justify any skipped areas.`
+- `Before I can accept review readiness, run robot-review after each material target change, new material review feedback, or new material evidence until the final applicable pass has zero Blocking and zero Should Address. Reply with the final focus ledger: focus area -> reviewer/persona -> result/disposition. Run any missing relevant areas on the final head and justify any skipped areas.`
 
 Receive the worker's results by mailbox. Then decide whether the answers are satisfactory. If they are still vague, stale, based only on summary, or missing direct evidence, repeat this gate and send the worker back with the concrete unresolved items.
 
 ## Acceptance decision
 
-Accept readiness only when the supervisor has collected the worker's mailbox results, all three required independent subagent results for draft PR/review-ready/commit-push/final-readiness gates, and direct evidence for the relevant checklist items.
+Accept readiness only when the supervisor has collected the worker's mailbox results, all applicable independent subagent results for the completed immutable-target pass, and direct evidence for the relevant checklist items.
 
 If the gate passes, proceed with the already-authorized next action: commit authorization, push authorization, draft PR creation, review-ready handoff, parking, blocker escalation, or completion state. If the gate fails, keep the task active and assign the next concrete action.

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import test from "node:test";
 
@@ -635,7 +636,7 @@ test("native child allowance requests do not change parent allowance state", asy
   }
 });
 
-test("copied Pi extension executes installed operational actions without repository dependencies", async () => {
+test("checkout-source Pi extension executes operational actions without installed artifact copies", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-extension-"));
   const requests = [];
   const server = createServer((request, response) => {
@@ -674,15 +675,9 @@ test("copied Pi extension executes installed operational actions without reposit
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   try {
-    await execFileAsync(
-      "python3",
-      [fileURLToPath(new URL("../.claude/skills/supervisor/tools/install_pi_extension.py", import.meta.url))],
-      { env: { ...process.env, HOME: directory } },
-    );
-    const extensionDirectory = join(directory, ".mecha-developer", "extensions");
-    const extension = join(extensionDirectory, "mecha-messaging.js");
-    const installedSupervisorTools = join(extensionDirectory, ".claude", "skills", "supervisor", "tools");
-    await import(pathToFileURL(join(installedSupervisorTools, "claude_sidecar.mjs")).href);
+    const extension = fileURLToPath(new URL("../pi-extensions/mecha-messaging.js", import.meta.url));
+    const checkoutSupervisorTools = fileURLToPath(new URL("../.claude/skills/supervisor/tools", import.meta.url));
+    await import(pathToFileURL(extension).href);
     await execFileAsync("python3", [
       "-c",
       [
@@ -692,7 +687,7 @@ test("copied Pi extension executes installed operational actions without reposit
         "import worker_list",
       ].join("; "),
     ], {
-      cwd: installedSupervisorTools,
+      cwd: checkoutSupervisorTools,
       env: { ...process.env, HOME: directory, PYTHONDONTWRITEBYTECODE: "1" },
     });
 
@@ -725,6 +720,7 @@ test("copied Pi extension executes installed operational actions without reposit
       TMUX_PANE: "%1",
     };
 
+    assert.equal(existsSync(join(directory, ".mecha-developer", "extensions")), false);
     const module = await import(pathToFileURL(extension).href);
     const tools = new Map();
     const pi = {
