@@ -20,6 +20,35 @@ Managed worker runtime is machine-local configuration. `worker_launch.py` reads 
 
 The Wolfgang-maintained Pi Subagents fork at `/Users/wolfgang/code/pi-packages` is a required dependency of the mecha-developer system whenever native Pi subagent lifecycle behavior is used.
 
+## Router Proxy
+
+`router-proxy/` is a Go reverse proxy for the Mailbox V2 router. The router itself binds loopback only (`127.0.0.1:8765` by default) and multiplexes HTTP REST plus WebSocket upgrades on `/v1/agents` over one port. The proxy does not reimplement any router routes; it transparently forwards every HTTP request and WebSocket frame to an upstream router over plain HTTP.
+
+Use it when another machine on the LAN, or a local process on a different port, needs the full router API surface without changing the upstream router bind address. Typical local test: upstream `127.0.0.1:8765`, listen `0.0.0.0:9876`, then point clients at `http://127.0.0.1:9876`.
+
+Build:
+
+```bash
+go build -o router-proxy ./router-proxy
+```
+
+Launch:
+
+```bash
+go run ./router-proxy \
+  --upstream-host 127.0.0.1 \
+  --upstream-port 8765 \
+  --listen-port 9876
+```
+
+Required flags: `--upstream-host`, `--upstream-port`, `--listen-port`. Optional `--listen-host` defaults to `0.0.0.0`. On success it prints:
+
+```
+MECHA_ROUTER_PROXY_READY listen=http://0.0.0.0:9876 upstream=http://127.0.0.1:8765
+```
+
+The proxy preserves upstream response headers and status codes, supports request bodies up to 6 MiB to match the router limit, and forwards WebSocket upgrades without injecting an `Origin` header. Pi extension clients still require a loopback hostname in `MECHA_ROUTER_URL`; use `127.0.0.1` when testing through a different local port. More detail and a parity test recipe live in `router-proxy/README.md`.
+
 ## Maintenance
 
 When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
