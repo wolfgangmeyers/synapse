@@ -73,7 +73,7 @@ While any priority is active or blocked, maintain exactly one local five-minute 
 
 ## Reminder Compliance
 
-The skill default is a 30-minute general sweep cadence. On each machine, `~/AGENTS.md` is the source of truth for the actual cadence; read it before creating or repairing the sweep reminder.
+The skill default is an exact two-hour general sweep cadence (7_200_000 ms). On each machine, `~/AGENTS.md` is the source of truth for the actual cadence; read it before creating or repairing the sweep reminder.
 
 Maintain exactly one scheduled recurring general sweep reminder at that machine cadence using the existing Mailbox reminder mechanism. Craft and repair that reminder with the `supervisor-sweep` skill so it preserves the active-work unblock checks and the open-PR feedback, CI, and merge-conflict checks. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
 
