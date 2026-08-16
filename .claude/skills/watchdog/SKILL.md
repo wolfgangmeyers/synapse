@@ -56,7 +56,9 @@ A tmux window sitting at a shell prompt counts as a dead supervisor even when cr
 
 ## Reminder Compliance
 
-Verify from current Mailbox reminder state that the watchdog health reminder exists at a 5–10 minute cadence and that the supervisor has exactly one scheduled recurring general sweep reminder at a 30 minute cadence. If either is missing, duplicated, failed, or stale, tell the supervisor to repair it using the existing Mailbox reminder mechanism. Every delivered reminder is a mandatory action: the recipient must perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant; nudge the supervisor to drive the named action and obtain the required evidence.
+The skill default is a 30-minute general sweep cadence. On each machine, `~/AGENTS.md` is the source of truth for the actual cadence; read it before nudging the supervisor to repair the sweep reminder.
+
+Verify from current Mailbox reminder state that the watchdog health reminder exists at a 5–10 minute cadence and that the supervisor has exactly one scheduled recurring general sweep reminder at that machine cadence. If either is missing, duplicated, failed, or stale, tell the supervisor to repair it using the existing Mailbox reminder mechanism. Every delivered reminder is a mandatory action: the recipient must perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant; nudge the supervisor to drive the named action and obtain the required evidence.
 
 Explicit user holds silence the nudge. Examples: "wait for my input before X", "don't proceed past here", "hold here", or equivalent direct instructions to pause.
 

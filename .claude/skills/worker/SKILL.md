@@ -216,13 +216,21 @@ The supervisor may send you detailed requirements for your task. These are the s
 
 Requirements may be updated mid-task. When you receive a message starting with "Your requirements have been updated", re-read the new requirements and adjust your work plan accordingly.
 
+## Mandatory start-here KB read
+
+Before planning or implementing a feature or bug, read:
+
+- `/Users/wolfgang/.mecha-developer/kb/start-here.md`
+
+Follow every always-read link on that page. Then read `/Users/wolfgang/.mecha-developer/kb/INDEX.md` and open every other topic that matches the ticket. This is the KB pre-check. Do it before design, SPEC, or implementation.
+
 ## Workflow
 
 This is the **default workflow**. Follow it unless you have sufficient, clear, and legitimate justification to deviate. Where you deviate, state the justification explicitly.
 
 ### Phase 1: Plan
 
-1. Receive task and requirements. Break into todos.
+1. Receive task and requirements. Read `start-here.md` and its always-read links first, then break into todos.
 2. **Consider alternatives before committing to an approach.** For non-trivial design decisions (architecture, data model, API shape, abstraction boundaries), generate 2-3 alternative approaches, briefly evaluate each against the requirements and constraints, then proceed with the strongest option — or hybridize the best elements. Don't default to the first idea that works. Document the chosen approach and why in the plan.
 3. Write a structured plan to a file (e.g., `PLAN.md` in the worktree root). Do **NOT** use plan mode — it causes workers to stall. Think through the approach and write it out: what changes, which files, key decisions.
 4. **robot-review is a SKILL, not a command.** You do not run `robot-review` as a binary or slash command. You read its `SKILL.md` (at `~/code/mecha-review/.claude/skills/robot-review/SKILL.md`, or `~/.agents/skills/robot-review/SKILL.md` for Codex) and spawn its persona reviewers as your own subagents — one reviewer subagent per focus area — giving each the plan file, the base branch to diff against, and the requirements (when provided). The focus areas and persona mappings below describe *which reviewers to spawn for which areas*; they are not CLI flags. The same applies to `pr-validate` (a skill run via a subagent) and `test-coverage` (a skill that runs `go test -coverprofile`).

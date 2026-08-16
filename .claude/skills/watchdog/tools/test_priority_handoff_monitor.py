@@ -385,11 +385,28 @@ class PriorityHandoffMonitorTests(unittest.TestCase):
 
 
     def test_default_sweep_cadence_bounds_are_thirty_minutes(self):
-        self.assertEqual(monitor.sweep_cadence_bounds(), (30 * 60 * 1_000, 30 * 60 * 1_000))
-        self.assertEqual(monitor.describe_cadence(30 * 60 * 1_000, 30 * 60 * 1_000), "30 minute")
+        thirty_minutes = 30 * 60 * 1_000
+        self.assertEqual(monitor.sweep_cadence_bounds(), (thirty_minutes, thirty_minutes))
+        self.assertEqual(monitor.describe_cadence(thirty_minutes, thirty_minutes), "30 minute")
 
-    def test_describe_cadence_for_a_single_value_window(self):
-        self.assertEqual(monitor.describe_cadence(30 * 60 * 1_000, 30 * 60 * 1_000), "30 minute")
+    def test_describe_cadence_supports_hours(self):
+        two_hours = 2 * 60 * 60 * 1_000
+        self.assertEqual(monitor.describe_cadence(two_hours, two_hours), "2 hour")
+
+    def test_general_sweep_failure_uses_actionable_cadence_wording(self):
+        state = self._clean_active_state()
+        ci = {"id": "ci", "target": "supervisor", "state": "scheduled"}
+        findings = monitor.priority_liveness_findings(state, [ci])
+        self.assertEqual(len(findings), 1)
+        self.assertIn("expected exactly one recurring 30 minute general sweep reminder, found 0", findings[0])
+        self.assertIn("action=repair the recurring supervisor general-sweep reminder through Mailbox", findings[0])
+        self.assertIn("resolved-when=exactly one scheduled recurring supervisor reminder at a 30 minute cadence names the general sweep", findings[0])
+
+        sweep = {"id": "sweep", "target": "supervisor", "state": "scheduled",
+                 "interval_ms": 30 * 60 * 1_000, "body": "General priority sweep"}
+        duplicate = {**sweep, "id": "sweep-duplicate"}
+        duplicate_findings = monitor.priority_liveness_findings(state, [sweep, duplicate])
+        self.assertTrue(any("general sweep reminder, found 2" in item for item in duplicate_findings))
 
     def test_invalid_sweep_cadence_env_overrides_fall_back_to_defaults(self):
         with mock.patch.dict(os.environ, {"MECHA_SWEEP_CADENCE_MIN_MS": "garbage", "MECHA_SWEEP_CADENCE_MAX_MS": "-5"}):
@@ -426,7 +443,7 @@ class PriorityHandoffMonitorTests(unittest.TestCase):
         sweep = {"id": "sweep", "target": "supervisor", "state": "scheduled",
                  "interval_ms": 5 * 60 * 1_000, "body": "General priority sweep"}
         ci = {"id": "ci", "target": "supervisor", "state": "scheduled"}
-        # 5-minute sweep is now too frequent by default.
+        # A 5-minute sweep is too frequent by default.
         self.assertTrue(any("general sweep reminder" in item for item in monitor.priority_liveness_findings(state, [sweep, ci])))
         # Lowering the floor back to 5 minutes accepts it.
         with mock.patch.dict(os.environ, {"MECHA_SWEEP_CADENCE_MIN_MS": str(5 * 60 * 1_000)}):
