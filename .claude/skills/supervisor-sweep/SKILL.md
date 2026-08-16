@@ -13,7 +13,9 @@ The general sweep makes sure active work keeps moving. It is not a status report
 
 ## Reminder cadence
 
-Maintain exactly one scheduled recurring general sweep reminder for the supervisor at a 30-minute cadence. Repair it if it is missing, duplicated, failed, or stale. Do not create task-specific reminders that duplicate the general sweep unless a specific active risk needs its own reminder.
+The skill default is a 30-minute general sweep cadence. On each machine, `~/AGENTS.md` is the source of truth for the actual cadence; read it before creating or repairing the sweep reminder.
+
+Maintain exactly one scheduled recurring general sweep reminder for the supervisor at that machine cadence. Repair it if it is missing, duplicated, failed, or stale. Do not create task-specific reminders that duplicate the general sweep unless a specific active risk needs its own reminder.
 
 ## Required reminder contents
 

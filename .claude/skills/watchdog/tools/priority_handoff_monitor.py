@@ -32,9 +32,10 @@ RETIREMENT_KEY = "priority_handoff_monitor_retirement"
 RETIREMENT_ID_KEY = "retired_legacy_watchdog_reminder_ids"
 MAX_RETIRED_LEGACY_REMINDERS = 100
 # Acceptable cadence for the recurring supervisor general-sweep reminder. The
-# default is a 30-minute sweep to keep normal supervisor operating cost down.
-# MECHA_SWEEP_CADENCE_* env vars can override the window for temporary local
-# operating modes. The "exactly one" requirement is independent of these bounds.
+# skill default is a 30-minute sweep. Each machine's ~/AGENTS.md is the source
+# of truth for the actual cadence; MECHA_SWEEP_CADENCE_* env vars align the
+# monitor with that machine policy. The "exactly one" requirement is independent
+# of these bounds.
 DEFAULT_SWEEP_CADENCE_MIN_MS = 30 * 60 * 1_000
 DEFAULT_SWEEP_CADENCE_MAX_MS = 30 * 60 * 1_000
 TERMINAL_STATES = {"failed", "dead_letter"}
@@ -140,10 +141,18 @@ def sweep_cadence_bounds() -> tuple[int, int]:
 
 
 def describe_cadence(min_ms: int, max_ms: int) -> str:
-    def minutes(ms: int) -> str:
-        return f"{ms // 60_000}" if ms % 60_000 == 0 else f"{ms / 60_000:g}"
-    low, high = minutes(min_ms), minutes(max_ms)
-    return f"{low} minute" if low == high else f"{low}-{high} minute"
+    def amount_and_unit(ms: int) -> tuple[str, str]:
+        if ms % 3_600_000 == 0:
+            return str(ms // 3_600_000), "hour"
+        return (f"{ms // 60_000}", "minute") if ms % 60_000 == 0 else (f"{ms / 60_000:g}", "minute")
+
+    low_amount, low_unit = amount_and_unit(min_ms)
+    high_amount, high_unit = amount_and_unit(max_ms)
+    if low_unit == high_unit:
+        if low_amount == high_amount:
+            return f"{low_amount} {low_unit}"
+        return f"{low_amount}-{high_amount} {low_unit}"
+    return f"{low_amount} {low_unit}-{high_amount} {high_unit}"
 
 
 def priority_liveness_findings(state: dict, reminders: list[dict]) -> list[str]:

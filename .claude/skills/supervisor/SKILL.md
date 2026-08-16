@@ -73,7 +73,9 @@ While any priority is active or blocked, maintain exactly one local five-minute 
 
 ## Reminder Compliance
 
-Maintain exactly one scheduled recurring general sweep reminder at a 30 minute cadence using the existing Mailbox reminder mechanism. Craft and repair that reminder with the `supervisor-sweep` skill so it preserves the active-work unblock checks and the open-PR feedback, CI, and merge-conflict checks. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
+The skill default is a 30-minute general sweep cadence. On each machine, `~/AGENTS.md` is the source of truth for the actual cadence; read it before creating or repairing the sweep reminder.
+
+Maintain exactly one scheduled recurring general sweep reminder at that machine cadence using the existing Mailbox reminder mechanism. Craft and repair that reminder with the `supervisor-sweep` skill so it preserves the active-work unblock checks and the open-PR feedback, CI, and merge-conflict checks. Repair it immediately if it is missing, duplicated, failed, or stale. A delivered reminder is a mandatory action: perform the named action and report action evidence or one exact block. An acknowledgement, generic status, canned reply, or “already on it” without that evidence is noncompliant.
 
 When a reminder asks the supervisor to take action and the work is viable to delegate, run that action in a background subagent by default. This is the preferred path for reminder-driven checks, audits, CI/status sweeps, and other bounded work because it preserves supervisor responsiveness and allows independent checks to run in parallel. Keep the action inline only when it is truly trivial, must use supervisor-only local state, or delegation would create more overhead than the work itself.
 
@@ -346,6 +348,16 @@ Async mail and watchdog reminders arrive through the verified runtime integratio
 
 **Read `~/.claude/skills/mailbox/SKILL.md` every activation** — right after persona and this file. It's the contract for mail format, tmux-window identity, and step ordering. Skipping it causes stale state.
 
+## Knowledge base
+
+On every activation, before assigning feature or bug work:
+
+1. Read `~/.mecha-developer/kb/INDEX.md`
+2. Read `~/.mecha-developer/kb/start-here.md` and follow its always-read links
+3. Lazy-load other topic files only when an index entry matches the current task
+
+Start Here is the required first topic for feature and bug work. INDEX alone is not enough. Point workers at `start-here.md`; do not paste the linked topics into the task.
+
 ## Memory (Codex supervisors only)
 
 Claude Code auto-injects persistent memory into every session; Codex does not. **If you are a Codex supervisor, read the memory indexes at startup, not only when you remember to search.**
@@ -353,10 +365,8 @@ Claude Code auto-injects persistent memory into every session; Codex does not. *
 Mandatory startup memory reads for Codex supervisors:
 
 1. Read the Claude-style memory index for the session's own working directory. Claude Code keys memory to the directory the session started in and stores it at `~/.claude/projects/<encoded-cwd>/memory/`, where `<encoded-cwd>` is that absolute path with every `/` replaced by `-`. So `/Users/wolfgang/code/mecha-developer` becomes `-Users-wolfgang-code-mecha-developer`. Derive it and list the directory with `ls ~/.claude/projects/$(pwd | sed 's|/|-|g')/memory/`, then read `MEMORY.md` there. Some projects have topic files and no `MEMORY.md`; in that case read the topic file names from the listing and open the ones that match the task.
-2. Read the KB discovery index: `~/.mecha-developer/kb/INDEX.md`
-3. Lazy-load topic files only when an index entry is relevant to the current task.
 
-These index files are intentionally descriptive and small enough to load eagerly. The KB skill is useful for explicit lookup, but it is not a substitute for the always-loaded index behavior Wolfgang expects. Skipping the indexes means the Codex supervisor runs blind to accumulated user feedback, project context, and references.
+These memory files are intentionally descriptive and small enough to load eagerly. Skipping them means the Codex supervisor runs blind to accumulated user feedback, project context, and references. KB reads are in the Knowledge base section above and apply to every supervisor runtime.
 
 Claude Code supervisors do not need the memory index read. The auto-memory system loads it for them.
 
@@ -367,7 +377,8 @@ On every activation, bootstrap situational awareness:
 ```bash
 # 0. Persona: ~/personas/wolfgang.md — full session identity (read the file, not just this comment).
 # 0b. Mailbox skill: ~/.claude/skills/mailbox/SKILL.md — see "Mailbox (companion)" above.
-# 0c. Codex memory indexes: ~/.claude/projects/$(pwd | sed 's|/|-|g')/memory/MEMORY.md and ~/.mecha-developer/kb/INDEX.md
+# 0c. KB: ~/.mecha-developer/kb/INDEX.md and ~/.mecha-developer/kb/start-here.md
+# 0d. Codex memory index: ~/.claude/projects/$(pwd | sed 's|/|-|g')/memory/MEMORY.md
 
 # 1. Load persistent state (shows blocked tasks at top if any exist)
 python3 ~/.claude/skills/supervisor/tools/state_read.py 2>/dev/null || echo "No supervisor state yet."

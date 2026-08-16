@@ -98,6 +98,8 @@ python3 ~/.claude/skills/supervisor/tools/worker_send_requirements.py --alias "$
 
 For production-service changes, explicitly instruct the worker to load the `workflows` skill and fetch `dev-loop` with `get_workflow.py dev-loop`. The canonical workflow is the source of truth. Do not paste a summary of it into the task.
 
+For feature or bug work, point Context at `~/.mecha-developer/kb/start-here.md`. The worker must read that page and its always-read links before planning. Do not paste those topics into the task.
+
 For non-production work, the fallback loop is: tests or checks first where meaningful, implement, run focused validation, run focused robot-review, address valid findings, then mail evidence.
 
 ## Runtime-specific launch notes
