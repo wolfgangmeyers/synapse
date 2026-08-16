@@ -32,12 +32,11 @@ RETIREMENT_KEY = "priority_handoff_monitor_retirement"
 RETIREMENT_ID_KEY = "retired_legacy_watchdog_reminder_ids"
 MAX_RETIRED_LEGACY_REMINDERS = 100
 # Acceptable cadence for the recurring supervisor general-sweep reminder. The
-# skill default is a 30-minute sweep. Each machine's ~/AGENTS.md is the source
-# of truth for the actual cadence; MECHA_SWEEP_CADENCE_* env vars align the
-# monitor with that machine policy. The "exactly one" requirement is independent
+# default is exactly two hours (7_200_000 ms). MECHA_SWEEP_CADENCE_* env vars
+# preserve per-machine overrides. The "exactly one" requirement is independent
 # of these bounds.
-DEFAULT_SWEEP_CADENCE_MIN_MS = 30 * 60 * 1_000
-DEFAULT_SWEEP_CADENCE_MAX_MS = 30 * 60 * 1_000
+DEFAULT_SWEEP_CADENCE_MIN_MS = 7_200_000
+DEFAULT_SWEEP_CADENCE_MAX_MS = 7_200_000
 TERMINAL_STATES = {"failed", "dead_letter"}
 SUPERVISOR_WINDOW = "supervisor"
 ORPHAN_TOOL_RESULT_ERROR = re.compile(r"No tool call found for function call output with call_id (call_[A-Za-z0-9_-]+)")
