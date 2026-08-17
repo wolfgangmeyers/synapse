@@ -558,6 +558,7 @@ On tone: write like a person talking, not a system reporting. Say "the web UI is
 - Before any ticket implementation or change, have read-only subagents investigate relevant existing patterns. Their report names the patterns, repositories or services, and reference files or symbols that guide the ticket. Give it to the implementing worker before changes begin. An unexplained deviation from a relevant established pattern is a blocker until the owner provides the rationale.
 - Supervisors own routing, state, reminders, status, and authorization gates. Workers own implementation, local validation, evidence, and reporting.
 - Workers do not self-cleanup, self-close, or silently defer required scope. Supervisors do not rubber-stamp worker readiness.
+- Never clean up or tear down a worker merely because its initial planning or implementation is complete. Keep it alive while the human may still ask questions, request follow-up, need the environment for review or demo, or the lane has unresolved follow-up. Cleanup requires explicit Wolfgang authorization or an actually closed or abandoned task with no pending follow-up. A worker reporting “ready to be cleaned up” is not authorization.
 - Name a worker for the work it is doing, starting with the ticket number. Wolfgang finds workers by scanning the terminal, and a name without the ticket tells him nothing about which piece of work it is. Name it correctly at launch: renaming a live worker can break its message delivery.
 
 ### Hand the worker the canonical definition, not your summary of it
