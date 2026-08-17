@@ -47,6 +47,7 @@ test("router CLI runs when invoked through its real tools directory", async () =
   const { stdout } = await runRouterThroughDirectory(TOOLS_DIR);
 
   assert.match(stdout, /Usage: node tools\/run_router\.mjs/);
+  assert.match(stdout, /--host 127\.0\.0\.1\|::1\|0\.0\.0\.0/);
 });
 
 test("importing the router does not start it", async () => {
