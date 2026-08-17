@@ -23,7 +23,7 @@ The Wolfgang-maintained Pi Subagents fork at `/Users/wolfgang/code/pi-packages` 
 ## Installing Wolfgang's Pi fork
 
 ```sh
-npm install -g --ignore-scripts 'git+https://github.com/wolfgangmeyers/pi.git#wolfgang/glm5-bedrock-converse-fix'
+npm install -g 'git+https://github.com/wolfgangmeyers/pi.git#wolfgang/glm5-bedrock-converse-fix'
 ```
 
 Prefix the command with `sudo` only when the global npm prefix is root-owned. It is not a macOS requirement. Omitting `#wolfgang/glm5-bedrock-converse-fix` follows the fork default `main`, which now includes the repair.
