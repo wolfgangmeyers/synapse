@@ -20,6 +20,14 @@ Managed worker runtime is machine-local configuration. `worker_launch.py` reads 
 
 The Wolfgang-maintained Pi Subagents fork at `/Users/wolfgang/code/pi-packages` is a required dependency of the mecha-developer system whenever native Pi subagent lifecycle behavior is used.
 
+## Installing Wolfgang's Pi fork
+
+```sh
+npm install -g --ignore-scripts 'git+https://github.com/wolfgangmeyers/pi.git#wolfgang/glm5-bedrock-converse-fix'
+```
+
+Prefix the command with `sudo` only when the global npm prefix is root-owned. It is not a macOS requirement. Omitting `#wolfgang/glm5-bedrock-converse-fix` follows the fork default `main`, which now includes the repair.
+
 ## Router Proxy
 
 `router-proxy/` is a Go reverse proxy for the Mailbox V2 router. The router itself binds loopback only (`127.0.0.1:8765` by default) and multiplexes HTTP REST plus WebSocket upgrades on `/v1/agents` over one port. The proxy does not reimplement any router routes; it transparently forwards every HTTP request and WebSocket frame to an upstream router over plain HTTP.
