@@ -64,7 +64,7 @@ const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_MECHA_DEVELOPER_UPDATE_REMINDER_INTERVAL_MS = 2 * 60 * 60 * 1000;
 const MECHA_DEVELOPER_REPO_PATH = "/Users/wolfgang/code/mecha-developer";
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
+const ALLOWED_HOSTS = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
 const CORS_HEADERS = Object.freeze({
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
@@ -190,8 +190,8 @@ export function createAgentRouter({
   if (nativeSubagentTrace === undefined || typeof nativeSubagentTrace.record !== "function") {
     throw new TypeError("nativeSubagentTrace must provide record");
   }
-  if (!LOOPBACK_HOSTS.has(host)) {
-    throw new TypeError("host must be 127.0.0.1 or ::1");
+  if (!ALLOWED_HOSTS.has(host)) {
+    throw new TypeError("host must be 127.0.0.1, ::1, or 0.0.0.0");
   }
 
   if (memoryCatalog !== undefined

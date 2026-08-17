@@ -11,7 +11,7 @@ import { openMemoryCatalog } from "../harness/memory-catalog.js";
 import { createJsonlLogger } from "../harness/jsonl_logger.js";
 import { createAgentRouter } from "../harness/router.js";
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
+const ALLOWED_HOSTS = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
 
 export function parseArguments(argv) {
   const options = {
@@ -37,8 +37,8 @@ export function parseArguments(argv) {
   if (typeof options.database !== "string" || options.database.length === 0) {
     throw new Error("--database is required");
   }
-  if (!LOOPBACK_HOSTS.has(options.host)) {
-    throw new Error("--host must be a loopback address (127.0.0.1 or ::1)");
+  if (!ALLOWED_HOSTS.has(options.host)) {
+    throw new Error("--host must be 127.0.0.1, ::1, or 0.0.0.0");
   }
   const port = Number(options.port);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
@@ -133,7 +133,7 @@ export async function startRouter({
 }
 
 function usage() {
-  return "Usage: node tools/run_router.mjs --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1] [--port 8765] [--max-batch-chars <chars>]";
+  return "Usage: node tools/run_router.mjs --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--max-batch-chars <chars>]";
 }
 
 async function main() {
