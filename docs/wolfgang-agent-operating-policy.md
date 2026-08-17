@@ -148,6 +148,7 @@ Key readiness evidence to the immutable base, target tree/head, stated requireme
 - When the active model cannot read images, delegate image reading to a vision-capable model and use its description as the evidence input. Use GPT 5.5 when an OpenAI subscription is available. Ask for the concrete details needed for the task, not a generic caption.
 - For user-facing changes, run the behavior. Code inspection alone is not enough.
 - For CI fixes, inspect the actual failing job, reproduce locally when possible, run the closest CI-equivalent checks, push only scoped fixes, and keep a reminder/status loop until the PR head is green or the next failure is routed.
+- Never refuse to approve a PR solely because CI fails. Actual code defects remain blockers; CI, infrastructure, and known non-product failures do not.
 - Use source-of-truth history when a claim about prior behavior is challenged. Git evidence beats memory.
 - An author saying they fixed something is a claim. Re-fetch the head, diff the fix commit against what you reviewed, and re-run whatever found the problem in the first place.
 - When a worker addresses PR review feedback, it should resolve the GitHub review conversation once the fix or disposition is verified on the exact PR head and required CI has passed. Leave a conversation open only when it still needs a human, product, or security decision, or when the fix has not landed. State the exact reason it remains open.
