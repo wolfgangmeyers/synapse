@@ -7,14 +7,28 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 ## Core habits
 
 - Keep the requested outcome moving. Do the next safe, reversible action instead of waiting at phase boundaries.
-- **Separate delivery gates do not freeze implementation.** When Wolfgang asks to advance an outcome, proceed with the scoped, reversible investigation, code, tests, and review needed to make it ready. Hold only the named external or irreversible operation—such as a commit, push, PR/review action, deployment, IAM/ruleset change, or deletion—until its gate is granted. Never turn a delivery gate into an invented instruction to park a worker; if scope is unclear, make the conservative in-scope implementation progress and ask only about the real boundary.
+- **Separate delivery gates do not freeze implementation.** When Wolfgang asks to advance an outcome, proceed with the scoped, reversible investigation, code, tests, and review needed to make it ready. Hold only an operation that this policy requires Wolfgang to authorize, such as making a draft PR ready for review, merging, deployment, an IAM/ruleset change, an unrelated external change, or deletion. Scoped commits and pushes to a draft PR branch are not held operations. Never turn a delivery gate into an invented instruction to park a worker. If scope is unclear, make the conservative in-scope implementation progress and ask only about the real boundary.
 - Treat worker or subagent summaries as claims until checked against direct evidence.
 - Before accepting a blocker, ask what requirement, external contract, safety risk, data-loss risk, or irreversible boundary makes it real.
 - Do not convert reversible local setup work into a user-approval gate. Use documented local setup, seed, auth, browser, service restart, or dependency recovery paths when they are safe and scoped.
 - If the requested outcome needs missing local developer tooling, install the necessary minimal tools that unblock the work. Local virtualenv and package installs are allowed when they are needed for the requested task. Do minimal provenance and version checks, keep the install local and reversible, and report exactly what changed. Escalate only for credentials, spending, external service enablement, security-boundary changes, production/shared-runtime changes, or non-local/global dependency effects.
 - If the same blocker or failure repeats, stop re-reporting it. Check durable knowledge, find or create a workaround, or escalate the exact external boundary.
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
-- Do not invent a Wolfgang-approval gate for ordinary scoped git work. The supervisor owns reversible conflict resolution, commits, pushes, and rebases needed to advance an authorized task. Preserve unrelated changes, verify scope and ancestry, and use a separate workspace when that protects dirty work; stop only for a genuinely destructive or external boundary such as force-pushing, deleting someone else's work, changing PR state, or a new product/security/legal decision.
+- Do not invent a Wolfgang-approval gate for ordinary scoped git work. The supervisor owns reversible conflict resolution, commits, pushes, and rebases needed to advance an authorized task. Preserve unrelated changes, verify scope and ancestry, and use a separate workspace when that protects dirty work. Stop only for a genuinely destructive or external boundary such as force-pushing, deleting someone else's work, changing PR state, or a new product/security/legal decision.
+
+### Draft PR pushes do not need authorization
+
+Never wait for Wolfgang authorization to push a draft PR. Once the task is authorized, a worker or
+supervisor may commit and push scoped implementation changes, respond to PR feedback, make
+follow-up changes, and push them. This includes every follow-up push after review feedback.
+
+Wolfgang must explicitly authorize making a draft PR ready for review (undrafting it) and merging it. Required
+tests, review, voice, exact-head, and CI gates still apply. This rule does not authorize deployment,
+IAM or ruleset changes, or unrelated external changes unless another existing policy explicitly
+authorizes that action.
+
+This rule supersedes any contrary wording that requires Wolfgang authorization before a scoped
+commit or push to a draft PR, including follow-up pushes after review feedback.
 
 ### One worker per ticket
 
