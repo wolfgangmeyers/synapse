@@ -627,6 +627,10 @@ See "Restore only what you mutated" above for putting the file back afterward.
 
 ## Code review
 
+### Scale review to the audience and risk
+
+Classify the surface as end-user, internal-only convenience, or production/control-plane. Internal-only test and polish gaps may be explicitly waived by Wolfgang; record the waiver in the review. Security, tenancy, privacy, data-integrity, destructive-behavior, and operational-safety findings remain blockers regardless of audience. Do not infer internal-only scope from a screenshot or label; verify it from the ticket, code, and owner. Apply this rule to follow-up reviews too.
+
 ### Do not review your own PRs
 
 Review authority needs an independent reviewer. Do not post a PR review on a PR Wolfgang authored or opened, or on a PR produced by your own agent, worker, or lane. Skip it, or route it to an independent review lane and say why.
