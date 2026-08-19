@@ -38,6 +38,27 @@ test("does not let an older snapshot erase newer live lifecycle state", () => {
   assert.deepEqual(result.agents, newer);
 });
 
+test("does not create a durable parent from a snapshot before the agent refresh", () => {
+  const result = applyLifecycleSnapshot([], [lifecycleAgent(3)], 3);
+  assert.deepEqual(result.agents, []);
+});
+
+test("keeps snapshot state for an agent already present in the connected list", () => {
+  const connected = [{ agent_id: "lifecycle-parent", activity_state: "active" }];
+  const result = applyLifecycleSnapshot(connected, [lifecycleAgent(3)], 3);
+  assert.deepEqual(result.agents, [{ ...connected[0], ...lifecycleAgent(3) }]);
+});
+
+test("a live lifecycle update still applies after the connected refresh", () => {
+  const beforeRefresh = applyLifecycleSnapshot([], [lifecycleAgent(3)], 3);
+  const connected = [{ agent_id: "lifecycle-parent", activity_state: "idle" }];
+  const afterUpdate = upsertLifecycleAgent(connected, lifecycleAgent(4, 2, "New child"));
+  assert.deepEqual(beforeRefresh.agents, []);
+  assert.equal(afterUpdate[0].subagent_version, 4);
+  assert.equal(afterUpdate[0].subagent_count, 2);
+  assert.deepEqual(afterUpdate[0].subagents, [{ id: "child", description: "New child" }]);
+});
+
 test("clears lifecycle badge state from a newer zero-count snapshot", () => {
   const result = applyLifecycleSnapshot(upsertLifecycleAgent([], lifecycleAgent(3)), [lifecycleAgent(4, 0)], 4, 3);
   assert.equal(result.agents[0].subagent_count, 0);
