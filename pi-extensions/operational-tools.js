@@ -351,12 +351,89 @@ function variant(action, properties = {}, required = []) {
   };
 }
 
+/** Flat action/object schema for pi-cursor-sdk MCP bridge exposure (oneOf is not forwarded). */
+export function flatActionParameters(variants) {
+  const actions = variants.map((entry) => entry.properties.action.const);
+  const properties = {
+    action: { type: "string", enum: actions, description: "Operational action name." },
+  };
+  for (const entry of variants) {
+    for (const [key, schema] of Object.entries(entry.properties)) {
+      if (key === "action" || properties[key] !== undefined) continue;
+      properties[key] = schema;
+    }
+  }
+  return { type: "object", additionalProperties: false, required: ["action"], properties };
+}
+
+const CURSOR_TOOL_METADATA = Object.freeze({
+  mecha_state: {
+    promptSnippet: "Query, create, or update supervisor task state",
+    promptGuidelines: [
+      "Use mecha_state with action query, create, or update for supervisor task records.",
+      "Call pi__mecha_state through the Cursor pi bridge; do not use replay or transcript tool names.",
+    ],
+  },
+  mecha_priority: {
+    promptSnippet: "Create, update, or change supervisor priority status",
+    promptGuidelines: [
+      "Use mecha_priority with action create, update, or status for priority records.",
+      "Call pi__mecha_priority through the Cursor pi bridge.",
+    ],
+  },
+  mecha_verification_handoff: {
+    promptSnippet: "Record a verification reminder handoff on a task",
+    promptGuidelines: [
+      "Use mecha_verification_handoff with action record after creating a one-shot verification reminder.",
+      "Call pi__mecha_verification_handoff through the Cursor pi bridge.",
+    ],
+  },
+  mecha_reminder: {
+    promptSnippet: "List, create, or delete Mailbox verification reminders",
+    promptGuidelines: [
+      "Use mecha_reminder with action list, create, or delete for supervisor reminders.",
+      "Call pi__mecha_reminder through the Cursor pi bridge.",
+    ],
+  },
+  mecha_worker: {
+    promptSnippet: "List managed workers or send a worker a mailbox message",
+    promptGuidelines: [
+      "Use mecha_worker with action list, launch, cleanup, or send for managed worker operations.",
+      "Call pi__mecha_worker through the Cursor pi bridge.",
+    ],
+  },
+  mecha_pr: {
+    promptSnippet: "Read GitHub pull request status by number",
+    promptGuidelines: [
+      "Use mecha_pr with action status and a numeric pullRequest id for read-only PR checks.",
+      "Call pi__mecha_pr through the Cursor pi bridge.",
+    ],
+  },
+  mecha_git: {
+    promptSnippet: "Read git status for a supervisor task worktree",
+    promptGuidelines: [
+      "Use mecha_git with action status and a supervisor task alias for read-only git status.",
+      "Call pi__mecha_git through the Cursor pi bridge.",
+    ],
+  },
+  mecha_router: {
+    promptSnippet: "Read router health or retry/dismiss a mailbox message",
+    promptGuidelines: [
+      "Use mecha_router with action health, retry, or dismiss for router operations.",
+      "Call pi__mecha_router through the Cursor pi bridge.",
+    ],
+  },
+});
+
 function descriptor(name, label, variants, handler) {
+  const cursor = CURSOR_TOOL_METADATA[name] ?? {};
   return {
     name,
     label,
-    description: `${label} through fixed, validated operational actions.`,
-    parameters: { oneOf: variants },
+    description: `${label} through fixed, validated operational actions. Call MCP name pi__${name} when using the Cursor pi bridge.`,
+    ...(cursor.promptSnippet ? { promptSnippet: cursor.promptSnippet } : {}),
+    ...(cursor.promptGuidelines ? { promptGuidelines: cursor.promptGuidelines } : {}),
+    parameters: flatActionParameters(variants),
     async execute(_toolCallId, input) {
       try {
         return await handler(object(input));

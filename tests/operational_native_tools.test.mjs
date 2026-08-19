@@ -35,18 +35,24 @@ async function execute(tool, input) {
 }
 
 function actionVariant(tool, action) {
-  return tool.parameters.oneOf.find((candidate) => candidate.properties.action.const === action);
+  assert.equal(tool.parameters.type, "object");
+  assert.ok(tool.parameters.properties.action.enum.includes(action), `${tool.name}:${action}`);
+  return { properties: tool.parameters.properties, required: ["action"] };
+}
+
+function assertCursorMetadata(tool) {
+  assert.ok(tool.promptSnippet, tool.name);
+  assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length > 0, tool.name);
+  for (const guideline of tool.promptGuidelines) assert.match(guideline, new RegExp(tool.name));
 }
 
 function assertClosedActionSchemas(tools) {
   for (const tool of tools.values()) {
-    assert.ok(Array.isArray(tool.parameters.oneOf), tool.name);
-    for (const candidate of tool.parameters.oneOf) {
-      assert.equal(candidate.type, "object", tool.name);
-      assert.equal(candidate.additionalProperties, false, tool.name);
-      assert.ok(candidate.required.includes("action"), tool.name);
-      assert.equal(typeof candidate.properties.action.const, "string", tool.name);
-    }
+    assert.equal(tool.parameters.type, "object", tool.name);
+    assert.equal(tool.parameters.additionalProperties, false, tool.name);
+    assert.deepEqual(tool.parameters.required, ["action"], tool.name);
+    assert.ok(Array.isArray(tool.parameters.properties.action.enum), tool.name);
+    assertCursorMetadata(tool);
   }
 }
 
@@ -87,21 +93,33 @@ test("registers exactly the eight approved tools once from the messaging extensi
   assert.equal(new Set(names).size, names.length);
 });
 
+test("registers Cursor metadata for every messaging control tool", () => {
+  const pi = messagingPi();
+  createMechaMessagingExtension(pi, messagingOptions({ runFile: async () => ({ stdout: "ok" }) }));
+  const tools = new Map(pi.tools.map((tool) => [tool.name, tool]));
+  for (const name of [
+    "mecha_mailbox_send", "mecha_parent_message", "mecha_request_inline_tool_allowance",
+    "mecha_recall", "mecha_settled_notifications", "mecha_context",
+  ]) {
+    const tool = tools.get(name);
+    assert.ok(tool, name);
+    assertCursorMetadata(tool);
+  }
+});
+
 test("uses action-specific closed schemas for every approved action", () => {
   const tools = registered({ runFile: async () => ({ stdout: "ok" }) });
   assertClosedActionSchemas(tools);
-  assert.deepEqual(actionVariant(tools.get("mecha_state"), "create").required, ["action", "alias", "type", "project", "description"]);
-  assert.deepEqual(actionVariant(tools.get("mecha_worker"), "launch").required, ["action", "alias"]);
-  assert.deepEqual(actionVariant(tools.get("mecha_worker"), "cleanup").required, ["action", "alias"]);
-  assert.equal(actionVariant(tools.get("mecha_worker"), "launch").properties.alias.pattern, "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$");
-  assert.deepEqual(actionVariant(tools.get("mecha_worker"), "send").required, ["action", "worker", "message"]);
-  assert.deepEqual(actionVariant(tools.get("mecha_pr"), "status").properties.pullRequest, { type: "integer", minimum: 1 });
-  assert.deepEqual(actionVariant(tools.get("mecha_git"), "status").required, ["action", "task"]);
+  assert.ok(tools.get("mecha_state").parameters.properties.alias);
+  assert.ok(tools.get("mecha_worker").parameters.properties.alias);
+  assert.deepEqual(tools.get("mecha_worker").parameters.properties.alias.pattern, "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$");
+  assert.deepEqual(tools.get("mecha_pr").parameters.properties.pullRequest, { type: "integer", minimum: 1 });
+  assert.ok(tools.get("mecha_git").parameters.properties.task);
 });
 
 test("matches the approved actions exactly", () => {
   const tools = registered({ runFile: async () => ({ stdout: "ok" }) });
-  const actions = Object.fromEntries([...tools].map(([name, tool]) => [name, tool.parameters.oneOf.map((candidate) => candidate.properties.action.const)]));
+  const actions = Object.fromEntries([...tools].map(([name, tool]) => [name, tool.parameters.properties.action.enum]));
   assert.deepEqual(actions, {
     mecha_state: ["query", "create", "update"],
     mecha_priority: ["create", "update", "status"],

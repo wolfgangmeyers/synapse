@@ -96,6 +96,8 @@ test("goal tool registers its action schema and shares state with /goal", async 
   const tool = current.tools.get("goal");
   assert.ok(tool);
   assert.ok(tool.promptSnippet);
+  assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length > 0);
+  for (const guideline of tool.promptGuidelines) assert.match(guideline, /goal/);
   assert.deepEqual(tool.parameters, {
     type: "object",
     additionalProperties: false,

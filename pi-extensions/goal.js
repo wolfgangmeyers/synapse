@@ -264,7 +264,11 @@ export function createGoalExtension(pi) {
     name: "goal",
     label: "Goal",
     description: "Set, inspect, or disable the active goal evaluator.",
-    promptSnippet: "Use goal to set or update a standing goal, inspect its status, or turn it off.",
+    promptSnippet: "Set, inspect, or disable the active goal evaluator.",
+    promptGuidelines: [
+      "Use goal with action set, status, or off for standing goal evaluation.",
+      "Call pi__goal through the Cursor pi bridge.",
+    ],
     parameters: GOAL_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!isCurrentSession(undefined, ctx)) {
