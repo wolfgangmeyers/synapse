@@ -231,7 +231,11 @@ async function handleEvent(event) {
     showMessageArrival(event);
     return;
   }
-  if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error" || event.type === "reminders_error") {
+  if (event.type === "reminders_error") {
+    elements.statusDetail.textContent = `Reminder refresh failed: ${event.message || "Unknown error"}`;
+    return;
+  }
+  if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error") {
     setStatus("error", event.message);
     return;
   }
