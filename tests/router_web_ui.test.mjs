@@ -885,9 +885,13 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(styles, /\.bubble-label \{ display: flex; align-items: baseline; gap: 8px;/);
   assert.match(app, /state\.reminders = Array\.isArray\(event\.reminders\) \? event\.reminders : \[\];/);
   assert.match(app, /reminder\.target === peer && \["scheduled", "due", "message_queued"\]\.includes\(reminder\.state\)/);
-  assert.match(app, /function reminderIndicatorMarkup\(reminders\)/);
+  assert.match(app, /function reminderIndicatorMarkup\(reminders, peerName\)/);
+  assert.match(app, /aria-haspopup="dialog" aria-controls="reminders-dialog"/);
+  assert.match(app, /class="agent-name-line">\$\{reminderIndicatorMarkup\(reminders, humanName\(peer\)\)\}/);
   assert.match(html, /<dialog id="reminders-dialog" class="message-dialog"/);
   assert.match(styles, /#reminders-dialog-body \{ max-height: min\(52vh, 520px\); overflow-y: auto;/);
+  assert.match(styles, /\.reminder-indicator \{[\s\S]*width: 24px;[\s\S]*height: 24px;[\s\S]*border-radius: 999px;/);
+  assert.match(styles, /\.agent-name-line \{ display: flex; align-items: center; gap: 8px;/);
   assert.match(app, /const MESSAGE_BOTTOM_THRESHOLD_PX = 80;/);
   assert.match(app, /elements\.messages\.addEventListener\("scroll", \(\) => \{ state\.followMessages = isMessagesNearBottom\(\); \}\)/);
   assert.match(app, /function scrollMessagesToBottom\(\)/);
