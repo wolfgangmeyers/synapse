@@ -306,7 +306,7 @@ export function createGoalExtension(pi) {
           ? `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`
           : outcome === "BLOCKED"
             ? "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed."
-            : "Goal check: COMPLETED. Contact the supervisor and report completion.";
+            : "Goal check: COMPLETED. Contact the supervisor and report completion. Disable future goal notifications with /goal off.";
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
           content: goalResultContent(wakeup, outcome, rationale),
