@@ -47,6 +47,7 @@ const state = {
   routerAliases: loadRouterAliases(),
   routerEditor: null,
   agents: [],
+  reminders: [],
   selectedPeer: "",
   agentFilter: "",
   images: [],
@@ -62,6 +63,7 @@ const state = {
   followMessages: true,
   arrivalsByAgent: new Map(),
   arrivalTimers: new Map(),
+  reminderDialogPeer: "",
 };
 
 const elements = {
@@ -98,6 +100,8 @@ const elements = {
   arrivedDialogSender: document.querySelector("#arrived-dialog-sender"),
   arrivedDialogMeta: document.querySelector("#arrived-dialog-meta"),
   arrivedDialogBody: document.querySelector("#arrived-dialog-body"),
+  remindersDialog: document.querySelector("#reminders-dialog"),
+  remindersDialogBody: document.querySelector("#reminders-dialog-body"),
 };
 
 const config = await fetch("/ui/config").then((response) => response.json()).catch(() => ({}));
@@ -190,6 +194,12 @@ async function handleEvent(event) {
     if (event.state === "connected") backfillSelectedConversation();
     return;
   }
+  if (event.type === "reminders") {
+    state.reminders = Array.isArray(event.reminders) ? event.reminders : [];
+    renderAgents();
+    if (elements.remindersDialog?.open && state.reminderDialogPeer) renderReminderDialog(state.reminderDialogPeer);
+    return;
+  }
   if (event.type === "agents") {
     state.agents = event.agents
       .filter((agent) => agent.agent_id !== state.agentId)
@@ -221,7 +231,7 @@ async function handleEvent(event) {
     showMessageArrival(event);
     return;
   }
-  if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error") {
+  if (event.type === "agents_error" || event.type === "command_error" || event.type === "history_error" || event.type === "reminders_error") {
     setStatus("error", event.message);
     return;
   }
@@ -304,6 +314,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
   state.agents = [];
+  state.reminders = [];
   state.expandedSubagents.clear();
   state.lastLifecycleSnapshotVersion = 0;
   state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
@@ -472,12 +483,14 @@ function renderAgents() {
     const canExpandSubagents = subagents.length > 0;
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
     const arrival = state.arrivalsByAgent.get(peer);
+    const reminders = state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
     const row = document.createElement("div");
     row.tabIndex = 0;
     row.setAttribute("role", "button");
+    row.dataset.agentId = peer;
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${arrival ? " has-arrival" : ""}${expanded ? " expanded" : ""}`;
     const badge = compacting ? compactingBadgeMarkup() : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
-    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${reminderIndicatorMarkup(reminders)}${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -486,6 +499,7 @@ function renderAgents() {
       }
     });
     attachSubagentToggle(row, peer, canExpandSubagents, renderAgents);
+    attachReminderActions(row, reminders);
     attachArrivalActions(row, arrival);
     return row;
   }));
@@ -1151,6 +1165,34 @@ function mergeAgentSnapshot(agent) {
 }
 function compactingBadgeMarkup(extraClass = "") {
   return `<span class="compacting-indicator${extraClass ? ` ${extraClass}` : ""}" aria-label="Agent is compacting"><span class="compacting-dot"></span><span>Compacting</span></span>`;
+}
+
+function reminderIndicatorMarkup(reminders) {
+  if (reminders.length === 0) return "";
+  return `<button class="reminder-indicator" type="button" aria-label="Show reminders for this agent" title="Show reminders"><i class="fa-solid fa-clock" aria-hidden="true"></i></button>`;
+}
+
+function attachReminderActions(root, reminders) {
+  if (reminders.length === 0) return;
+  const indicator = root.querySelector(".reminder-indicator");
+  if (!indicator) return;
+  indicator.addEventListener("click", (event) => {
+    event.stopPropagation();
+    state.reminderDialogPeer = root.querySelector("strong")?.textContent ? root.dataset.agentId : "";
+    renderReminderDialog(state.reminderDialogPeer, reminders);
+    elements.remindersDialog.showModal();
+  });
+}
+
+function renderReminderDialog(peer, fallback = []) {
+  const reminders = state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
+  const visible = reminders.length > 0 ? reminders : fallback;
+  elements.remindersDialogBody.replaceChildren(...visible.map((reminder) => {
+    const item = document.createElement("article");
+    item.className = "reminder-list-item";
+    item.innerHTML = `<strong>${escapeHtml(reminder.subject || "Reminder")}</strong><p>${escapeHtml(reminder.body)}</p><small>${escapeHtml(reminder.next_due_at || "")}</small>`;
+    return item;
+  }));
 }
 
 function arrivalIndicatorMarkup(arrival, extraClass = "") {

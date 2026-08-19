@@ -5,6 +5,8 @@ const DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const SCOPED_EVENT_TYPES = new Set([
   "agents",
   "agents_error",
+  "reminders",
+  "reminders_error",
   "message",
   "conversation_message",
   "agent_activity",

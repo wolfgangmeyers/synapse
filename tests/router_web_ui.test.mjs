@@ -862,6 +862,11 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /timestamp\.dateTime = message\.created_at \|\| message\.createdAt \|\| message\.recorded_at \|\| ""/);
   assert.match(app, /label\.append\(sender, timestamp\)/);
   assert.match(styles, /\.bubble-label \{ display: flex; align-items: baseline; gap: 8px;/);
+  assert.match(app, /state\.reminders = Array\.isArray\(event\.reminders\) \? event\.reminders : \[\];/);
+  assert.match(app, /reminder\.target === peer && \["scheduled", "due", "message_queued"\]\.includes\(reminder\.state\)/);
+  assert.match(app, /function reminderIndicatorMarkup\(reminders\)/);
+  assert.match(html, /<dialog id="reminders-dialog" class="message-dialog"/);
+  assert.match(styles, /#reminders-dialog-body \{ max-height: min\(52vh, 520px\); overflow-y: auto;/);
   assert.match(app, /const MESSAGE_BOTTOM_THRESHOLD_PX = 80;/);
   assert.match(app, /elements\.messages\.addEventListener\("scroll", \(\) => \{ state\.followMessages = isMessagesNearBottom\(\); \}\)/);
   assert.match(app, /function scrollMessagesToBottom\(\)/);
