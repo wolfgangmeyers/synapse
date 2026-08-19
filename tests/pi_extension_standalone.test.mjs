@@ -465,6 +465,44 @@ test("mecha_mailbox_send limits the initialized parent sender-target pair to thr
   assert.equal(afterWindow.isError, undefined);
 });
 
+test("mecha_mailbox_send rolls back the exact reservation when identical timestamps collide", async () => {
+  let firstReject;
+  let callCount = 0;
+  const fixture = createMessagingFixture({
+    nowImpl: () => 0,
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async () => {
+        callCount += 1;
+        if (callCount === 1) return new Promise((resolve, reject) => { firstReject = reject; });
+        if (callCount === 2) throw new Error("second send failed");
+        return { id: `message-${callCount}`, state: "acknowledged" };
+      },
+    },
+  });
+  await sessionStart(fixture);
+  const tool = fixture.tools.get("mecha_mailbox_send");
+
+  const first = tool.execute("call-first", { recipient: "worker", body: "first" }, undefined, undefined, fixture.context);
+  await Promise.resolve();
+  const second = await tool.execute("call-second", { recipient: "worker", body: "second" }, undefined, undefined, fixture.context);
+  assert.equal(second.isError, true);
+  assert.match(second.content[0].text, /second send failed/);
+
+  firstReject(new Error("first send failed"));
+  const firstResult = await first;
+  assert.equal(firstResult.isError, true);
+  assert.match(firstResult.content[0].text, /first send failed/);
+
+  for (let index = 0; index < 3; index += 1) {
+    const result = await tool.execute(`call-retry-${index}`, { recipient: "worker", body: `retry-${index}` }, undefined, undefined, fixture.context);
+    assert.equal(result.isError, undefined);
+  }
+  const denied = await tool.execute("call-denied", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /temporary.*rate limit/i);
+});
+
 test("mecha_mailbox_send releases a reservation when sendReply fails", async () => {
   let fail = true;
   const fixture = createMessagingFixture({

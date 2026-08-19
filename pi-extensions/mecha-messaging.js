@@ -1786,24 +1786,25 @@ export function createMechaMessagingExtension(pi, {
     const now = nowImpl();
     const key = `${sender ?? "unknown"}\u0000${recipient}`;
     const recent = (mailboxSendRateLimits.get(key) ?? []).filter(
-      (timestamp) => now - timestamp < MAILBOX_SEND_RATE_LIMIT_WINDOW_MS,
+      (reservation) => now - reservation.timestamp < MAILBOX_SEND_RATE_LIMIT_WINDOW_MS,
     );
     if (recent.length === 0) mailboxSendRateLimits.delete(key);
     else mailboxSendRateLimits.set(key, recent);
     if (recent.length >= MAILBOX_SEND_RATE_LIMIT_COUNT) {
       throw new Error("Temporary rate limit reached for this recipient. Stop sending and retry after 60 seconds, after the reset.");
     }
-    recent.push(now);
+    const reservation = { timestamp: now };
+    recent.push(reservation);
     mailboxSendRateLimits.set(key, recent);
-    return { key, timestamp: now };
+    return { key, reservation };
   }
 
-  function rollbackMailboxSend({ key, timestamp }) {
-    const timestamps = mailboxSendRateLimits.get(key);
-    if (timestamps === undefined) return;
-    const index = timestamps.indexOf(timestamp);
-    if (index >= 0) timestamps.splice(index, 1);
-    if (timestamps.length === 0) mailboxSendRateLimits.delete(key);
+  function rollbackMailboxSend({ key, reservation }) {
+    const reservations = mailboxSendRateLimits.get(key);
+    if (reservations === undefined) return;
+    const index = reservations.indexOf(reservation);
+    if (index >= 0) reservations.splice(index, 1);
+    if (reservations.length === 0) mailboxSendRateLimits.delete(key);
   }
 
   function mailboxSenderForSession(context) {
