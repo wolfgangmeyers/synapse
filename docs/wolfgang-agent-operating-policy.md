@@ -7,6 +7,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 ## Core habits
 
 - Keep the requested outcome moving. Do the next safe, reversible action instead of waiting at phase boundaries.
+- Later direct instructions from Wolfgang override earlier conflicting human instructions. Apply the current direction and update handoffs or policy files so the next worker receives it.
 - **Separate delivery gates do not freeze implementation.** When Wolfgang asks to advance an outcome, proceed with the scoped, reversible investigation, code, tests, and review needed to make it ready. Hold only an operation that this policy requires Wolfgang to authorize, such as making a draft PR ready for review, merging, deployment, an IAM/ruleset change, an unrelated external change, or deletion. Scoped commits and pushes to a draft PR branch are not held operations. Never turn a delivery gate into an invented instruction to park a worker. If scope is unclear, make the conservative in-scope implementation progress and ask only about the real boundary.
 - Treat worker or subagent summaries as claims until checked against direct evidence.
 - Before accepting a blocker, ask what requirement, external contract, safety risk, data-loss risk, or irreversible boundary makes it real.
