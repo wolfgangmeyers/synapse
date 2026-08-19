@@ -146,6 +146,34 @@ test("/goal commands persist branch-local state and support status/off", async (
   assert.equal(restored.sent.length, 0);
 });
 
+test("settled goal evaluation forwards bounded tool-result text without non-text content", async () => {
+  const calls = [];
+  const current = fixture({ complete: async (_model, request) => {
+    calls.push(request);
+    return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
+  } });
+  await setGoal(current, "use the search result");
+  current.branch.push({
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolName: "codex_search",
+      toolCallId: "search-call",
+      content: [
+        { type: "text", text: "Search found the requested recipe." },
+        { type: "image", data: "must stay redacted" },
+      ],
+    },
+  });
+
+  await settle(current);
+  await flushDeferred();
+  assert.equal(calls.length, 1);
+  const context = calls[0].messages[0].content[0].text;
+  assert.match(context, /toolResult: Search found the requested recipe\./);
+  assert.doesNotMatch(context, /must stay redacted|codex_search|search-call/);
+});
+
 test("settled goal evaluation uses bounded active context and exact steer wakeup options", async () => {
   const calls = [];
   const current = fixture({ complete: async (model, request, options) => {

@@ -40,7 +40,7 @@ function restoreState(ctx) {
 }
 
 function textFromMessage(message) {
-  if (!message || (message.role !== "user" && message.role !== "assistant")) return "";
+  if (!message || !["user", "assistant", "toolResult"].includes(message.role)) return "";
   if (typeof message.content === "string") return message.content;
   if (!Array.isArray(message.content)) return "";
   return message.content
