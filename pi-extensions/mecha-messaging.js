@@ -54,6 +54,50 @@ function getOwnerSubagentsService(ownerSessionId) {
 
 const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
 export const INLINE_TOOL_ALLOWANCE_TOOL_NAME = "mecha_request_inline_tool_allowance";
+const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
+  mecha_parent_message: {
+    promptSnippet: "Send a message from a native subagent to its parent",
+    promptGuidelines: [
+      "Use mecha_parent_message only in native subagent sessions to message the parent agent.",
+      "Call pi__mecha_parent_message through the Cursor pi bridge.",
+    ],
+  },
+  mecha_mailbox_send: {
+    promptSnippet: "Send a durable Mailbox V2 message to another local agent",
+    promptGuidelines: [
+      "Use mecha_mailbox_send for supervisor, worker, and service replies with recipient, body, and optional subject.",
+      "Call pi__mecha_mailbox_send through the Cursor pi bridge.",
+    ],
+  },
+  [INLINE_TOOL_ALLOWANCE_TOOL_NAME]: {
+    promptSnippet: "Request a temporary exception to the inline tool guard",
+    promptGuidelines: [
+      "Use mecha_request_inline_tool_allowance only for genuinely necessary top-level bash/edit/write work.",
+      "Call pi__mecha_request_inline_tool_allowance through the Cursor pi bridge.",
+    ],
+  },
+  mecha_recall: {
+    promptSnippet: "Enable, disable, or inspect process-local Markdown recall",
+    promptGuidelines: [
+      "Use mecha_recall with action enable, disable, or status for recall stores.",
+      "Call pi__mecha_recall through the Cursor pi bridge.",
+    ],
+  },
+  mecha_settled_notifications: {
+    promptSnippet: "Enable, disable, or inspect settled mailbox notifications",
+    promptGuidelines: [
+      "Use mecha_settled_notifications with action enable, disable, or status for worker settled notifications.",
+      "Call pi__mecha_settled_notifications through the Cursor pi bridge.",
+    ],
+  },
+  mecha_context: {
+    promptSnippet: "Inspect context-threshold policy or request Pi self-compaction",
+    promptGuidelines: [
+      "Use mecha_context with action status, set_policy, or compact for context-threshold and compaction control.",
+      "Call pi__mecha_context through the Cursor pi bridge.",
+    ],
+  },
+});
 const INLINE_ACTION_TOOL_NAMES = new Set(["bash", "edit", "write"]);
 const INLINE_TOOL_POOL_CAPACITY = 5;
 const INLINE_TOOL_REPLENISHMENT_INTERVAL_MS = 60_000;
@@ -1824,6 +1868,7 @@ export function createMechaMessagingExtension(pi, {
     name: "mecha_parent_message",
     label: "Message parent",
     description: "Child-only: send an ordinary Mailbox message to this native subagent's target parent.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA.mecha_parent_message,
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1849,6 +1894,7 @@ export function createMechaMessagingExtension(pi, {
     name: "mecha_mailbox_send",
     label: "Send Mailbox message",
     description: "Send an ordinary Mailbox V2 message to another local agent.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA.mecha_mailbox_send,
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1898,6 +1944,7 @@ export function createMechaMessagingExtension(pi, {
     name: INLINE_TOOL_ALLOWANCE_TOOL_NAME,
     label: "Request inline tool allowance",
     description: "Request a temporary exception for genuinely necessary inline use of a named tool. This is an exception to the rule; subagents remain mandatory by default.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA[INLINE_TOOL_ALLOWANCE_TOOL_NAME],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1926,6 +1973,7 @@ export function createMechaMessagingExtension(pi, {
     name: "mecha_recall",
     label: "Mecha Recall",
     description: "Enable, disable, or inspect process-local Markdown recall.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA.mecha_recall,
     parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
       action: { type: "string", enum: ["enable", "disable", "status"] },
       stores: { type: "array", items: { type: "string" } },
@@ -2001,6 +2049,7 @@ export function createMechaMessagingExtension(pi, {
     name: "mecha_settled_notifications",
     label: "Mecha Settled Notifications",
     description: "Enable, disable, or inspect this Pi process's managed-worker settled mailbox notifications.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA.mecha_settled_notifications,
     parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
       action: { type: "string", enum: ["enable", "disable", "status"] },
     } },
@@ -2028,6 +2077,7 @@ export function createMechaMessagingExtension(pi, {
     name: "mecha_context",
     label: "Mecha Context",
     description: "Inspect or configure Pi context-threshold notifications, or trigger self-compaction. Use action=compact only after a threshold notification or direct user instruction. postCompactionNotification is optional: include it while you are in the middle of an active task, review, or decision loop; omit it only when clearly idle/done and no details are needed. A default handoff note can be configured in the compaction policy, and a per-compact call can override it.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA.mecha_context,
     parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
       action: { type: "string", enum: ["status", "set_policy", "compact"], description: "status inspects usage/policy, set_policy changes thresholds/default handoff note, compact requests self-compaction." },
       policy: { oneOf: [
