@@ -94,7 +94,9 @@ export function applyLifecycleSnapshot(agents, snapshotAgents, snapshotVersion, 
   if (!Number.isSafeInteger(snapshotVersion) || snapshotVersion < lastSnapshotVersion) return { agents, lastSnapshotVersion };
   const received = new Map((Array.isArray(snapshotAgents) ? snapshotAgents : []).map((agent) => [agent.agent_id, agent]));
   let next = agents;
-  for (const agent of received.values()) next = upsertLifecycleAgent(next, agent);
+  for (const agent of received.values()) {
+    if (agents.some((connected) => connected.agent_id === agent.agent_id)) next = upsertLifecycleAgent(next, agent);
+  }
   for (const agent of next) {
     if (received.has(agent.agent_id) || agent.subagent_version === undefined || agent.subagent_version > snapshotVersion) continue;
     next = upsertLifecycleAgent(next, { agent_id: agent.agent_id, subagent_version: snapshotVersion, subagent_count: 0, subagents: [] });
