@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension from "../pi-extensions/goal.js";
+import goalExtension, { responseEvaluation } from "../pi-extensions/goal.js";
 
 const GOAL_ENTRY = "goal-state";
-const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
+const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 const MAX_CONTEXT_BYTES = 24_000;
 
-function fixture({ response = { content: [{ type: "text", text: "COMPLETED" }] }, complete, onSendMessage, sendMessage, sessionId } = {}) {
+function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }, complete, onSendMessage, sendMessage, sessionId } = {}) {
   const handlers = new Map();
   const commands = new Map();
   const tools = new Map();
@@ -57,6 +57,34 @@ async function flushDeferred() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function publishService(ownerSessionId, service) {
+  const previous = globalThis[PI_SUBAGENTS_SERVICE_REGISTRY];
+  const registry = previous ?? { services: new Map() };
+  registry.services.set(ownerSessionId, service);
+  globalThis[PI_SUBAGENTS_SERVICE_REGISTRY] = registry;
+  return () => {
+    registry.services.delete(ownerSessionId);
+    if (registry.services.size === 0 && previous === undefined) delete globalThis[PI_SUBAGENTS_SERVICE_REGISTRY];
+  };
+}
+
+test("evaluator parses only a strict verdict line and bounds the visible rationale", () => {
+  assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: Need a supervisor decision." }] }), {
+    outcome: "BLOCKED",
+    rationale: "Need a supervisor decision.",
+  });
+  assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: COMPLETED extra\nREASON: This must not change the outcome." }] }), {
+    outcome: "NOT_DONE",
+    rationale: "Invalid evaluator output.",
+  });
+  assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: one\nREASON: two" }] }), {
+    outcome: "NOT_DONE",
+    rationale: "Invalid evaluator output.",
+  });
+  assert.equal(responseEvaluation({ content: [{ type: "text", text: "REASON: Missing verdict" }] }).outcome, "NOT_DONE");
+  assert.equal(responseEvaluation({ content: [{ type: "text", text: `VERDICT: NOT_DONE\nREASON: ${"x".repeat(300)}` }] }).rationale, "Invalid evaluator output.");
+});
+
 test("goal tool registers its action schema and shares state with /goal", async () => {
   const current = fixture();
   const tool = current.tools.get("goal");
@@ -79,7 +107,7 @@ test("goal tool registers its action schema and shares state with /goal", async 
   assert.deepEqual(current.notices.at(-1), { message: "Goal enabled: ship the tool", type: "info" });
 
   const statusResult = await callGoalTool(current, { action: "status" });
-  assert.deepEqual(statusResult.details, { action: "status", enabled: true, goal: "ship the tool" });
+  assert.deepEqual(statusResult.details, { action: "status", enabled: true, goal: "ship the tool", evaluatorCalls: 0, lastOwnerGateState: "allowed" });
   const updateResult = await callGoalTool(current, { action: "set", goal: "ship the updated tool" });
   assert.deepEqual(updateResult.details, { action: "set", enabled: true, goal: "ship the updated tool" });
   const offResult = await callGoalTool(current, { action: "off" });
@@ -122,7 +150,7 @@ test("settled goal evaluation uses bounded active context and exact steer wakeup
   const calls = [];
   const current = fixture({ complete: async (model, request, options) => {
     calls.push({ model, request, options });
-    return { content: [{ type: "text", text: "COMPLETED" }] };
+    return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
   } });
   await setGoal(current, "finish the goal extension");
   current.branch.push({ type: "message", message: { role: "user", content: "x".repeat(MAX_CONTEXT_BYTES * 2) } });
@@ -134,11 +162,11 @@ test("settled goal evaluation uses bounded active context and exact steer wakeup
   assert.equal(calls[0].model, current.context.model);
   assert.ok(calls[0].options?.signal instanceof AbortSignal);
   const prompt = calls[0].request.systemPrompt;
-  assert.equal(prompt, "goal: finish the goal extension - is this completed? Answer with exactly BLOCKED, COMPLETED, or NOT_DONE");
+  assert.equal(prompt, "goal: finish the goal extension - return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>");
   assert.ok(Buffer.byteLength(prompt) <= 2_048 + MAX_CONTEXT_BYTES + 1_000);
   await flushDeferred();
   assert.deepEqual(current.sent, [{
-    message: { customType: "goal-result", content: "Goal check: COMPLETED. Contact the supervisor and report completion.", display: true, details: { goal: "finish the goal extension", outcome: "COMPLETED" } },
+    message: { customType: "goal-result", content: "Goal check: COMPLETED. Contact the supervisor and report completion.\nVERDICT: COMPLETED\nREASON: The goal is complete.", display: true, details: { goal: "finish the goal extension", outcome: "COMPLETED", rationale: "The goal is complete." } },
     options: { deliverAs: "steer", triggerTurn: true },
   }]);
 
@@ -154,7 +182,7 @@ test("NOT_DONE defers its continuation, skips exactly one injected settle, and e
   const current = fixture({
     complete: async () => {
       calls.push(true);
-      return { content: [{ type: "text", text: outcomes.shift() }] };
+      return { content: [{ type: "text", text: `VERDICT: ${outcomes.shift()}\nREASON: Evaluated current progress.` }] };
     },
     onSendMessage: () => {
       queueMicrotask(() => { injectedSettle = settle(current); });
@@ -167,7 +195,7 @@ test("NOT_DONE defers its continuation, skips exactly one injected settle, and e
   await flushDeferred();
   await flushDeferred();
   await injectedSettle;
-  assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.");
+  assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.\nVERDICT: NOT_DONE\nREASON: Evaluated current progress.");
   assert.equal(calls.length, 1, "the injected settle is skipped");
 
   await settle(current);
@@ -188,25 +216,25 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
     await settle(current);
     await flushDeferred();
     await flushDeferred();
-    assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.");
+    assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.\nVERDICT: NOT_DONE\nREASON: Invalid evaluator output.");
   }
 
   let reject = true;
-  const current = fixture({ complete: async () => { if (reject) throw new Error("provider unavailable"); return { content: [{ type: "text", text: "BLOCKED" }] }; } });
+  const current = fixture({ complete: async () => { if (reject) throw new Error("provider unavailable"); return { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: A supervisor decision is required." }] }; } });
   await setGoal(current, "make progress");
   await settle(current);
   await flushDeferred();
   await flushDeferred();
-  assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.");
+  assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.\nVERDICT: NOT_DONE\nREASON: Evaluator unavailable.");
 });
 
 test("BLOCKED wakeup tells the worker to contact the supervisor", async () => {
-  const current = fixture({ response: { content: [{ type: "text", text: "BLOCKED" }] } });
+  const current = fixture({ response: { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: A supervisor decision is required." }] } });
   await setGoal(current, "finish the goal extension");
   await settle(current);
   await flushDeferred();
   await flushDeferred();
-  assert.equal(current.sent[0].message.content, "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed.");
+  assert.equal(current.sent[0].message.content, "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed.\nVERDICT: BLOCKED\nREASON: A supervisor decision is required.");
 });
 
 test("sendMessage failure leaves the next normal settle available", async () => {
@@ -215,7 +243,7 @@ test("sendMessage failure leaves the next normal settle available", async () => 
   const current = fixture({
     complete: async () => {
       calls.push(true);
-      return { content: [{ type: "text", text: "NOT_DONE" }] };
+      return { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: More work remains." }] };
     },
     sendMessage: () => {
       if (fail) {
@@ -240,7 +268,7 @@ test("stale session settles cannot start an evaluation", async () => {
     sessionId: "owner-session",
     complete: async () => {
       calls.push(true);
-      return { content: [{ type: "text", text: "COMPLETED" }] };
+      return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
     },
   });
   await setGoal(current, "stay current");
@@ -263,41 +291,124 @@ test("missing optional subagent service does not break goal evaluation", async (
   assert.equal(current.sent.length, 1);
 });
 
-test("current queued or running subagents defer evaluation until the parent is idle", async () => {
-  const previousService = globalThis[PI_SUBAGENTS_SERVICE];
-  let childStatus = "queued";
-  const calls = [];
-  globalThis[PI_SUBAGENTS_SERVICE] = {
-    hasRunning: () => childStatus === "queued" || childStatus === "running",
+test("owner-published queued or running subagents defer evaluation until the parent is idle", async () => {
+  const ownerSessionId = "owner-session";
+  const foreignSessionId = "foreign-session";
+  const records = new Map();
+  const service = {
+    hasRunning: () => [...records.values()].some(({ status }) => status === "queued" || status === "running"),
   };
+  const cleanup = publishService(ownerSessionId, service);
+  const foreignCleanup = publishService(foreignSessionId, {
+    hasRunning: () => true,
+  });
+  try {
+    const calls = [];
+    const current = fixture({
+      sessionId: ownerSessionId,
+      complete: async () => {
+        calls.push(true);
+        return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
+      },
+    });
+    await current.handlers.get("session_start")({ sessionId: ownerSessionId }, current.context);
+    await setGoal(current, "wait for the child");
+
+    records.set("queued-child", { status: "queued" });
+    await settle(current);
+    await flushDeferred();
+    assert.equal(calls.length, 0, "the owner's queued child suppresses evaluation");
+
+    records.get("queued-child").status = "running";
+    await settle(current);
+    await flushDeferred();
+    assert.equal(calls.length, 0, "the owner's running child suppresses evaluation");
+
+    records.get("queued-child").status = "completed";
+    await settle(current);
+    await flushDeferred();
+    await flushDeferred();
+    assert.equal(calls.length, 1, "a later settle evaluates after the owner's child is complete");
+  } finally {
+    cleanup();
+    foreignCleanup();
+  }
+});
+
+test("the deferred gate rechecks the owner immediately before complete", async () => {
+  let checks = 0;
+  const calls = [];
+  const cleanup = publishService("owner-session", {
+    hasRunning: () => {
+      checks += 1;
+      return checks === 2;
+    },
+  });
   try {
     const current = fixture({
       sessionId: "owner-session",
       complete: async () => {
         calls.push(true);
-        return { content: [{ type: "text", text: "COMPLETED" }] };
+        return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: Must not run." }] };
       },
     });
     await current.handlers.get("session_start")({ sessionId: "owner-session" }, current.context);
-    await setGoal(current, "wait for the child");
-
+    await setGoal(current, "wait for the owner child");
     await settle(current);
     await flushDeferred();
-    assert.equal(calls.length, 0, "a queued current-session child suppresses evaluation");
-
-    childStatus = "running";
-    await settle(current);
-    await flushDeferred();
-    assert.equal(calls.length, 0, "a running current-session child suppresses evaluation");
-
-    childStatus = "idle";
-    await settle(current);
-    await flushDeferred();
-    await flushDeferred();
-    assert.equal(calls.length, 1, "the next normal settle evaluates after the child is idle");
+    assert.equal(checks, 2);
+    assert.equal(calls.length, 0);
+    assert.equal(current.sent.length, 0);
   } finally {
-    if (previousService === undefined) delete globalThis[PI_SUBAGENTS_SERVICE];
-    else globalThis[PI_SUBAGENTS_SERVICE] = previousService;
+    cleanup();
+  }
+});
+
+test("the wakeup macrotask rechecks owner activity after evaluation", async () => {
+  let active = false;
+  let firstEvaluation = true;
+  const cleanup = publishService("owner-session", { hasRunning: () => active });
+  try {
+    const current = fixture({
+      sessionId: "owner-session",
+      complete: async () => {
+        if (firstEvaluation) {
+          active = true;
+          firstEvaluation = false;
+        }
+        return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: Completed." }] };
+      },
+    });
+    await current.handlers.get("session_start")({ sessionId: "owner-session" }, current.context);
+    await setGoal(current, "wait for the owner child");
+    await settle(current);
+    await flushDeferred();
+    await flushDeferred();
+    assert.equal(current.sent.length, 0, "active owner work suppresses the wakeup");
+    const status = await callGoalTool(current, { action: "status" });
+    assert.deepEqual(status.details, { action: "status", enabled: true, goal: "wait for the owner child", evaluatorCalls: 1, lastOwnerGateState: "suppressed" });
+    active = false;
+    await settle(current);
+    await flushDeferred();
+    await flushDeferred();
+    assert.equal(current.sent.length, 1, "a later eligible settle resumes evaluation");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a foreign owner's active subagent does not suppress this owner's evaluator", async () => {
+  const cleanup = publishService("foreign-session", { hasRunning: () => true });
+  try {
+    const current = fixture({ sessionId: "owner-session" });
+    await current.handlers.get("session_start")({ sessionId: "owner-session" }, current.context);
+    await setGoal(current, "continue working");
+    await settle(current);
+    await flushDeferred();
+    await flushDeferred();
+    assert.equal(current.sent.length, 1);
+  } finally {
+    cleanup();
   }
 });
 
@@ -308,7 +419,7 @@ test("goal off cancels an in-flight evaluation and prevents stale injection", as
   const pending = settle(current);
   await flushDeferred();
   await current.commands.get("goal").handler("off", current.context);
-  resolve({ content: [{ type: "text", text: "COMPLETED" }] });
+  resolve({ content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] });
   await pending;
   assert.equal(current.sent.length, 0);
 });
