@@ -15,8 +15,10 @@ const GOAL_PARAMETERS = {
   },
 };
 
-const EVALUATOR_PROMPT = "goal: <goal description> - is this completed? Answer with exactly BLOCKED, COMPLETED, or NOT_DONE";
-const PI_SUBAGENTS_SERVICE = Symbol.for("@gotgenes/pi-subagents:service");
+const MAX_RATIONALE_CHARS = 240;
+const MAX_EVALUATOR_CALLS = 1_000_000;
+const EVALUATOR_PROMPT = "goal: <goal description> - return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>";
+const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 
 function normalizeGoal(value) {
   if (typeof value !== "string") return "";
@@ -69,15 +71,39 @@ function boundedActiveContext(ctx) {
   return messages;
 }
 
-function responseOutcome(response) {
-  const text = Array.isArray(response?.content)
-    ? response.content.filter((part) => part?.type === "text").map((part) => part.text).join("")
+function responseText(response) {
+  return Array.isArray(response?.content)
+    ? response.content
+      .filter((part) => part?.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("")
     : "";
-  const token = text.trim().match(/^(BLOCKED|COMPLETED|NOT_DONE)$/)?.[1];
-  return OUTCOMES.has(token) ? token : "NOT_DONE";
 }
 
-export { boundedActiveContext, responseOutcome };
+function responseEvaluation(response) {
+  const lines = responseText(response).split(/\r?\n/);
+  const verdict = lines.length === 2
+    ? lines[0].match(/^VERDICT: (BLOCKED|COMPLETED|NOT_DONE)$/)?.[1]
+    : undefined;
+  const rawReason = lines.length === 2 ? lines[1].match(/^REASON: (.*)$/)?.[1] : undefined;
+  if (!OUTCOMES.has(verdict) || !rawReason || rawReason.trim().length === 0 || rawReason.length > MAX_RATIONALE_CHARS) {
+    return { outcome: "NOT_DONE", rationale: "Invalid evaluator output." };
+  }
+  return {
+    outcome: verdict,
+    rationale: rawReason.trim().replace(/\s+/g, " "),
+  };
+}
+
+function goalResultContent(wakeup, outcome, rationale) {
+  return `${wakeup}\nVERDICT: ${outcome}\nREASON: ${rationale}`;
+}
+
+function responseOutcome(response) {
+  return responseEvaluation(response).outcome;
+}
+
+export { boundedActiveContext, responseEvaluation, responseOutcome };
 
 export function createGoalExtension(pi) {
   let sessionId = pi.getSessionId?.();
@@ -91,7 +117,8 @@ export function createGoalExtension(pi) {
   let skipNextSettle = false;
   let deferredEvaluation;
   let activeAbort;
-  let subagentsService;
+  let evaluatorCalls = 0;
+  let lastOwnerGateState = "allowed";
 
   const cancel = () => {
     generation += 1;
@@ -104,18 +131,31 @@ export function createGoalExtension(pi) {
 
   const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, { ...state });
   const notify = (ctx, message, level = "info") => ctx.ui?.notify?.(message, level);
-  const configureSubagents = () => {
-    // The package is optional. Its published Symbol is the runtime seam, so a
-    // plain Node test (or Pi without the package) does not need module resolution.
-    subagentsService = globalThis[PI_SUBAGENTS_SERVICE];
-  };
-  const hasActiveSubagent = () => {
-    if (typeof subagentsService?.hasRunning !== "function") return false;
-    try {
-      return subagentsService.hasRunning() === true;
-    } catch {
-      return false;
+  const statusDetails = (action) => ({
+    action,
+    ...state,
+    evaluatorCalls,
+    lastOwnerGateState,
+  });
+  const ownerActivityState = (ctx) => {
+    // pi-subagents publishes one service per owning session. Resolve it at
+    // settle time because its session_start handler may publish after this
+    // extension's handler, and never let another owner's children gate us.
+    const ownerSessionId = ctx?.sessionManager?.getSessionId?.() ?? sessionId;
+    const services = globalThis[PI_SUBAGENTS_SERVICE_REGISTRY]?.services;
+    const service = typeof ownerSessionId === "string" && typeof services?.get === "function"
+      ? services.get(ownerSessionId)
+      : undefined;
+    if (typeof service?.hasRunning !== "function") {
+      lastOwnerGateState = "allowed";
+      return lastOwnerGateState;
     }
+    try {
+      lastOwnerGateState = service.hasRunning() === true ? "suppressed" : "allowed";
+    } catch {
+      lastOwnerGateState = "allowed";
+    }
+    return lastOwnerGateState;
   };
   const applyAction = (action, rawGoal) => {
     if (!GOAL_ACTIONS.has(action)) {
@@ -125,6 +165,8 @@ export function createGoalExtension(pi) {
       const goal = normalizeGoal(rawGoal);
       if (!goal) return { ok: false, message: "A goal description is required for set." };
       cancel();
+      evaluatorCalls = 0;
+      lastOwnerGateState = "allowed";
       state = { enabled: true, goal };
       persist();
       return { ok: true, message: `Goal set: ${goal}`, details: { action, ...state } };
@@ -133,7 +175,7 @@ export function createGoalExtension(pi) {
       return {
         ok: true,
         message: state.enabled ? `Goal enabled: ${state.goal}` : "Goal off",
-        details: { action, ...state },
+        details: statusDetails(action),
       };
     }
     cancel();
@@ -147,6 +189,12 @@ export function createGoalExtension(pi) {
     setTimeout(() => {
       if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx) || !state.enabled || !state.goal) {
         if (runGeneration === generation && !controller.signal.aborted) skipNextSettle = false;
+        return;
+      }
+      // Re-check in the wakeup macrotask. The evaluator result is stale if an
+      // owner child was admitted after complete() returned.
+      if (ownerActivityState(ctx) === "suppressed") {
+        skipNextSettle = false;
         return;
       }
       try {
@@ -174,13 +222,11 @@ export function createGoalExtension(pi) {
     if (!isCurrentSession(event, ctx)) return;
     cancel();
     state = restoreState(ctx);
-    configureSubagents();
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
     if (!isCurrentSession(event, ctx)) return;
     cancel();
-    subagentsService = undefined;
   });
 
   pi.registerTool({
@@ -225,7 +271,7 @@ export function createGoalExtension(pi) {
       skipNextSettle = false;
       return;
     }
-    if (hasActiveSubagent() || deferredEvaluation !== undefined || activeAbort) return;
+    if (ownerActivityState(ctx) === "suppressed" || deferredEvaluation !== undefined || activeAbort) return;
     const runGeneration = generation;
     const goal = state.goal;
     // agent_settled can run inside Pi's turn bookkeeping. Defer the evaluator
@@ -233,41 +279,51 @@ export function createGoalExtension(pi) {
     // another evaluation scheduled by the same turn.
     deferredEvaluation = setTimeout(async () => {
       deferredEvaluation = undefined;
-      if (runGeneration !== generation || !isCurrentSession(event, ctx) || !state.enabled || state.goal !== goal || !ctx.model || hasActiveSubagent()) return;
+      if (runGeneration !== generation || !isCurrentSession(event, ctx) || !state.enabled || state.goal !== goal || !ctx.model) return;
       const controller = new AbortController();
       activeAbort = controller;
       try {
+        // The owner service is authoritative at this boundary. A child can be
+        // admitted after the settle event, so the earlier gate cannot protect
+        // the evaluator call.
+        if (ownerActivityState(ctx) === "suppressed") return;
+        evaluatorCalls = Math.min(evaluatorCalls + 1, MAX_EVALUATOR_CALLS);
         const response = await ctx.modelRegistry.complete(
           ctx.model,
           {
             systemPrompt: EVALUATOR_PROMPT.replace("<goal description>", goal),
             messages: [{
               role: "user",
-              content: [{ type: "text", text: `Goal: ${goal}\n\nActive conversation:\n${boundedActiveContext(ctx).map((message) => `${message.role}: ${message.content[0].text}`).join("\n\n")}\n\nReturn exactly one token: BLOCKED, COMPLETED, or NOT_DONE.` }],
+              content: [{ type: "text", text: `Goal: ${goal}\n\nActive conversation:\n${boundedActiveContext(ctx).map((message) => `${message.role}: ${message.content[0].text}`).join("\n\n")}\n\nReturn exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>.` }],
               timestamp: Date.now(),
             }],
           },
           { signal: controller.signal },
         );
         if (runGeneration !== generation || controller.signal.aborted) return;
-        const outcome = responseOutcome(response);
+        const { outcome, rationale } = responseEvaluation(response);
+        const wakeup = outcome === "NOT_DONE"
+          ? `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`
+          : outcome === "BLOCKED"
+            ? "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed."
+            : "Goal check: COMPLETED. Contact the supervisor and report completion.";
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
-          content: outcome === "NOT_DONE"
-            ? `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`
-            : outcome === "BLOCKED"
-              ? "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed."
-              : "Goal check: COMPLETED. Contact the supervisor and report completion.",
+          content: goalResultContent(wakeup, outcome, rationale),
           display: true,
-          details: { goal, outcome },
+          details: { goal, outcome, rationale },
         });
       } catch {
         if (runGeneration !== generation || controller.signal.aborted) return;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
-          content: `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`,
+          content: goalResultContent(
+            `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`,
+            "NOT_DONE",
+            "Evaluator unavailable.",
+          ),
           display: true,
-          details: { goal, outcome: "NOT_DONE" },
+          details: { goal, outcome: "NOT_DONE", rationale: "Evaluator unavailable." },
         });
       } finally {
         if (activeAbort === controller) activeAbort = undefined;
