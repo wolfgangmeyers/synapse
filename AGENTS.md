@@ -102,6 +102,10 @@ could affect files, external communication, or destructive operations.
 
 When Wolfgang directs an outcome be carried to completion or gives broad authorization, proceed through ordinary reversible implementation, validation, review, and local integration without asking again; stop only for an explicit hold or a genuine new external, irreversible, security, legal, or credential decision.
 
+### Authorization and handoff
+
+Wolfgang has authorized all ordinary scoped work in the current task. A concrete goal or `/goal set` is execution authorization. Do not ask for a second authorization or leave workers waiting. Immediately assign an owner, exact next action, base and branch, done conditions, and push limits. Only merge or undraft operations, deployment, IAM or ruleset changes, and genuinely irreversible, external, security, or legal actions remain separately gated.
+
 ## Production Code Workflow
 
 For any production-code implementation or change, the canonical `dev-loop` workflow is mandatory. The worker or implementing agent must load the `workflows` skill and fetch the source-of-truth workflow with `get_workflow.py dev-loop` before substantive implementation. Do not authorize production code, mark it complete, or open/advance a PR without dev-loop evidence for specification/plan, implementation, validation, coverage, and review.
