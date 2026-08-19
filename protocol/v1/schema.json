@@ -61,6 +61,14 @@
       }
     },
     "subagentSummaries": { "type": "array", "maxItems": 999, "items": { "$ref": "#/$defs/subagentSummary" } },
+    "goalProjection": {
+      "type": "object", "additionalProperties": false, "required": ["enabled", "goal"],
+      "properties": { "enabled": { "type": "boolean" }, "goal": { "type": "string", "maxLength": 4000 } },
+      "allOf": [
+        { "if": { "properties": { "enabled": { "const": true } } }, "then": { "properties": { "goal": { "minLength": 1 } } } },
+        { "if": { "properties": { "enabled": { "const": false } } }, "then": { "properties": { "goal": { "const": "" } } } }
+      ]
+    },
     "failureReason": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$" },
     "utcMillis": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
     "leaseIdentity": {
@@ -215,7 +223,8 @@
         "lease_id": { "$ref": "#/$defs/leaseId" },
         "activity_state": { "$ref": "#/$defs/clientActivityState" },
         "subagent_count": { "$ref": "#/$defs/subagentCount" },
-        "subagents": { "$ref": "#/$defs/subagentSummaries" }
+        "subagents": { "$ref": "#/$defs/subagentSummaries" },
+        "goal": { "$ref": "#/$defs/goalProjection" }
       }
     },
     "messageArrivalClientFrame": {
@@ -641,8 +650,10 @@
         "frame_id": { "$ref": "#/$defs/frameId" },
         "type": { "const": "agent_activity" },
         "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
         "activity_state": { "$ref": "#/$defs/observableActivityState" },
         "subagent_count": { "$ref": "#/$defs/subagentCount" },
+        "goal": { "$ref": "#/$defs/goalProjection" },
         "subagents": { "$ref": "#/$defs/subagentSummaries" },
         "generated_at": { "$ref": "#/$defs/utcMillis" }
       }

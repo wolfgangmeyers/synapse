@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension, { responseEvaluation } from "../pi-extensions/goal.js";
+import goalExtension, { GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT, responseEvaluation } from "../pi-extensions/goal.js";
 
 const GOAL_ENTRY = "goal-state";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
@@ -9,6 +9,8 @@ const MAX_CONTEXT_BYTES = 24_000;
 
 function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }, complete, onSendMessage, sendMessage, sessionId } = {}) {
   const handlers = new Map();
+  const eventHandlers = new Map();
+  const emittedEvents = [];
   const commands = new Map();
   const tools = new Map();
   const entries = [];
@@ -18,6 +20,10 @@ function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLE
   const pi = {
     getSessionId() { return sessionId; },
     on(name, handler) { handlers.set(name, handler); },
+    events: {
+      on(name, handler) { eventHandlers.set(name, handler); },
+      emit(name, data) { emittedEvents.push({ name, data }); },
+    },
     registerCommand(name, command) { commands.set(name, command); },
     registerTool(tool) { tools.set(tool.name, tool); },
     appendEntry(customType, data) { const entry = { type: "custom", customType, data }; entries.push(entry); branch.push(entry); },
@@ -38,7 +44,7 @@ function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLE
     ui: { notify(message, type) { notices.push({ message, type }); } },
   };
   goalExtension(pi);
-  return { branch, commands, context, entries, handlers, notices, sent, tools };
+  return { branch, commands, context, emittedEvents, entries, eventHandlers, handlers, notices, sent, tools };
 }
 
 async function setGoal(fixture, description) {
@@ -316,7 +322,7 @@ test("missing optional subagent service does not break goal evaluation", async (
   await settle(current);
   await flushDeferred();
   await flushDeferred();
-  assert.equal(current.sent.length, 1);
+  assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 1);
 });
 
 test("owner-published queued or running subagents defer evaluation until the parent is idle", async () => {
@@ -386,7 +392,7 @@ test("the deferred gate rechecks the owner immediately before complete", async (
     await flushDeferred();
     assert.equal(checks, 2);
     assert.equal(calls.length, 0);
-    assert.equal(current.sent.length, 0);
+    assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 0);
   } finally {
     cleanup();
   }
@@ -412,14 +418,14 @@ test("the wakeup macrotask rechecks owner activity after evaluation", async () =
     await settle(current);
     await flushDeferred();
     await flushDeferred();
-    assert.equal(current.sent.length, 0, "active owner work suppresses the wakeup");
+    assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 0, "active owner work suppresses the wakeup");
     const status = await callGoalTool(current, { action: "status" });
     assert.deepEqual(status.details, { action: "status", enabled: true, goal: "wait for the owner child", evaluatorCalls: 1, lastOwnerGateState: "suppressed" });
     active = false;
     await settle(current);
     await flushDeferred();
     await flushDeferred();
-    assert.equal(current.sent.length, 1, "a later eligible settle resumes evaluation");
+    assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 1, "a later eligible settle resumes evaluation");
   } finally {
     cleanup();
   }
@@ -434,7 +440,7 @@ test("a foreign owner's active subagent does not suppress this owner's evaluator
     await settle(current);
     await flushDeferred();
     await flushDeferred();
-    assert.equal(current.sent.length, 1);
+    assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 1);
   } finally {
     cleanup();
   }

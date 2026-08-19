@@ -27,6 +27,7 @@ const LIFECYCLE_JOURNAL_MAX_ITEM_BYTES = 65_536;
 const LIFECYCLE_JOURNAL_MAX_AGE_MS = 10 * 60_000;
 const SUBAGENT_STATUSES = new Set(["queued", "running", "completed", "steered", "aborted", "stopped", "error"]);
 const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
+const MAX_GOAL_CHARS = 4_000;
 
 // This pattern is narrower than the protocol's agentId on purpose, and the difference is a dot.
 // The protocol allows `A-Za-z0-9._-` (protocol/v1/schema.json, $defs.agentId); a tmux window name
@@ -98,6 +99,15 @@ function socketOpen(socket) {
 
 function connectionRefused(error) {
   return error?.code === "ECONNREFUSED" || error?.cause?.code === "ECONNREFUSED";
+}
+
+function normalizeGoalProjection(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
+    || value.goal.length > MAX_GOAL_CHARS) return undefined;
+  if (!value.enabled && value.goal !== "") return undefined;
+  if (value.enabled && value.goal.length === 0) return undefined;
+  return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
 }
 
 function normalizeSubagentSummary(summary) {
@@ -395,7 +405,7 @@ export function createMailboxClient({
     return frame?.event_id;
   }
 
-  function activity(activityState, { subagentCount = 0, subagents } = {}) {
+  function activity(activityState, { subagentCount = 0, subagents, goal } = {}) {
     if (!["active", "settled", "compacting"].includes(activityState)) {
       throw new TypeError("unsupported mailbox activity state");
     }
@@ -413,6 +423,7 @@ export function createMailboxClient({
       activity_state: activityState,
       subagent_count: clampedCount,
       ...(summaries.length > 0 || clampedCount === 0 ? { subagents: summaries } : {}),
+      ...(normalizeGoalProjection(goal) === undefined ? {} : { goal: normalizeGoalProjection(goal) }),
     });
   }
 
