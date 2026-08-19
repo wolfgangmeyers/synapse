@@ -428,7 +428,7 @@ test("mecha_mailbox_send sends through the active client and returns acceptance 
   assert.deepEqual(calls, [{ to: "worker", body: "hello", subject: "Subject" }]);
 });
 
-test("mecha_mailbox_send limits the initialized parent sender-target pair to three sends per rolling minute", async () => {
+test("mecha_mailbox_send limits the initialized parent sender-target pair to six sends per rolling minute", async () => {
   let now = 0;
   let sender = "worker";
   const calls = [];
@@ -445,23 +445,27 @@ test("mecha_mailbox_send limits the initialized parent sender-target pair to thr
   });
   await sessionStart(fixture);
   const tool = fixture.tools.get("mecha_mailbox_send");
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     const result = await tool.execute(`call-${index}`, { recipient: "worker", body: `hello-${index}` }, undefined, undefined, fixture.context);
     assert.equal(result.isError, undefined);
   }
-  const denied = await tool.execute("call-3", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
+  const denied = await tool.execute("call-6", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
   assert.equal(denied.isError, true);
   assert.match(denied.content[0].text, /temporary.*rate limit/i);
   assert.match(denied.content[0].text, /60 seconds/i);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 6);
+
+  now = 59_999;
+  const stillWithinWindow = await tool.execute("call-7", { recipient: "worker", body: "still blocked" }, undefined, undefined, fixture.context);
+  assert.equal(stillWithinWindow.isError, true);
 
   sender = "other-worker";
-  const stillDenied = await tool.execute("call-4", { recipient: "worker", body: "stable sender" }, undefined, undefined, fixture.context);
+  const stillDenied = await tool.execute("call-8", { recipient: "worker", body: "stable sender" }, undefined, undefined, fixture.context);
   assert.equal(stillDenied.isError, true);
-  const otherTarget = await tool.execute("call-5", { recipient: "other-worker", body: "isolated target" }, undefined, undefined, fixture.context);
+  const otherTarget = await tool.execute("call-9", { recipient: "other-worker", body: "isolated target" }, undefined, undefined, fixture.context);
   assert.equal(otherTarget.isError, undefined);
   now = 60_000;
-  const afterWindow = await tool.execute("call-6", { recipient: "worker", body: "window reset" }, undefined, undefined, fixture.context);
+  const afterWindow = await tool.execute("call-10", { recipient: "worker", body: "window reset" }, undefined, undefined, fixture.context);
   assert.equal(afterWindow.isError, undefined);
 });
 
@@ -494,7 +498,7 @@ test("mecha_mailbox_send rolls back the exact reservation when identical timesta
   assert.equal(firstResult.isError, true);
   assert.match(firstResult.content[0].text, /first send failed/);
 
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     const result = await tool.execute(`call-retry-${index}`, { recipient: "worker", body: `retry-${index}` }, undefined, undefined, fixture.context);
     assert.equal(result.isError, undefined);
   }
@@ -524,7 +528,7 @@ test("mecha_mailbox_send releases a reservation when sendReply fails", async () 
   assert.equal(failed.isError, true);
   assert.match(failed.content[0].text, /router unavailable/);
 
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     const result = await tool.execute(`call-${index}`, { recipient: "worker", body: `hello-${index}` }, undefined, undefined, fixture.context);
     assert.equal(result.isError, undefined);
   }
@@ -560,24 +564,24 @@ test("dev-only deterministic proof: mecha_mailbox_send rate limit uses the stabl
   await sessionStart(fixture);
   const tool = fixture.tools.get("mecha_mailbox_send");
 
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     const result = await tool.execute(`call-${index}`, { recipient: "target-b", body: `hello-${index}` }, undefined, undefined, fixture.context);
     assert.equal(result.isError, undefined);
   }
-  const denied = await tool.execute("call-3", { recipient: "target-b", body: "blocked" }, undefined, undefined, fixture.context);
+  const denied = await tool.execute("call-6", { recipient: "target-b", body: "blocked" }, undefined, undefined, fixture.context);
   assert.equal(denied.isError, true);
   assert.match(denied.content[0].text, /temporary.*rate limit/i);
 
-  const otherTarget = await tool.execute("call-4", { recipient: "target-c", body: "isolated target" }, undefined, undefined, fixture.context);
+  const otherTarget = await tool.execute("call-7", { recipient: "target-c", body: "isolated target" }, undefined, undefined, fixture.context);
   assert.equal(otherTarget.isError, undefined);
   sender = "sender-d";
-  const stillDenied = await tool.execute("call-5", { recipient: "target-b", body: "stable sender" }, undefined, undefined, fixture.context);
+  const stillDenied = await tool.execute("call-8", { recipient: "target-b", body: "stable sender" }, undefined, undefined, fixture.context);
   assert.equal(stillDenied.isError, true);
 
   now = 60_000;
-  const afterWindow = await tool.execute("call-6", { recipient: "target-b", body: "window reset" }, undefined, undefined, fixture.context);
+  const afterWindow = await tool.execute("call-9", { recipient: "target-b", body: "window reset" }, undefined, undefined, fixture.context);
   assert.equal(afterWindow.isError, undefined);
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 8);
   assert.equal(capturedAgentId, "sender-a");
   assert.ok(calls.every((envelope) => envelope.from === "sender-a"));
 });
@@ -597,16 +601,16 @@ test("mecha_mailbox_send quota resets for a new parent session", async () => {
   });
   await sessionStart(fixture);
   const tool = fixture.tools.get("mecha_mailbox_send");
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 6; index += 1) {
     await tool.execute(`call-${index}`, { recipient: "worker", body: `hello-${index}` }, undefined, undefined, fixture.context);
   }
-  const denied = await tool.execute("call-3", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
+  const denied = await tool.execute("call-6", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
   assert.equal(denied.isError, true);
 
   await sessionStart(fixture, fixture.createContext("new-parent-session"));
-  const granted = await tool.execute("call-4", { recipient: "worker", body: "new session" }, undefined, undefined, fixture.createContext("new-parent-session"));
+  const granted = await tool.execute("call-7", { recipient: "worker", body: "new session" }, undefined, undefined, fixture.createContext("new-parent-session"));
   assert.equal(granted.isError, undefined);
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 7);
 });
 
 test("mecha_mailbox_send reaches the real Mailbox V2 HTTP client path with the stable parent sender", async () => {
