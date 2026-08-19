@@ -194,7 +194,7 @@ test("settled goal evaluation uses bounded active context and exact steer wakeup
   assert.ok(Buffer.byteLength(prompt) <= 2_048 + MAX_CONTEXT_BYTES + 1_000);
   await flushDeferred();
   assert.deepEqual(current.sent, [{
-    message: { customType: "goal-result", content: "Goal check: COMPLETED. Contact the supervisor and report completion.\nVERDICT: COMPLETED\nREASON: The goal is complete.", display: true, details: { goal: "finish the goal extension", outcome: "COMPLETED", rationale: "The goal is complete." } },
+    message: { customType: "goal-result", content: "Goal check: COMPLETED. Contact the supervisor and report completion. Disable future goal notifications with /goal off.\nVERDICT: COMPLETED\nREASON: The goal is complete.", display: true, details: { goal: "finish the goal extension", outcome: "COMPLETED", rationale: "The goal is complete." } },
     options: { deliverAs: "steer", triggerTurn: true },
   }]);
 
