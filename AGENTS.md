@@ -80,7 +80,7 @@ This repository does not use pull requests or feature branches by default. Work 
 
 In the primary mecha-developer checkout, dirty tracked changes are not acceptable as resting state. If the work is done, commit it and push it. If it is not done, tie every dirty file to an active task with an owner and next action; never leave unexplained or dangling dirty files.
 
-Use a worktree only for larger or riskier mecha-developer changes or when isolation is genuinely useful. Dirty state is expected there only while that task is active. When the change is done, merge it into `main`, push it, and clean up the temporary branch/worktree. Use a PR or long-lived branch only when Wolfgang explicitly asks for one.
+Do not create `mecha-developer` worktrees unless Wolfgang explicitly instructs it. When explicitly authorized, use a worktree only for larger or riskier changes or when isolation is genuinely useful. Dirty state is expected there only while that task is active. When the change is done, merge it into `main`, push it, and clean up the temporary branch/worktree. Use a PR or long-lived branch only when Wolfgang explicitly asks for one.
 
 ## Data retention
 
