@@ -494,7 +494,7 @@ function renderAgents() {
     row.dataset.agentId = peer;
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${arrival ? " has-arrival" : ""}${expanded ? " expanded" : ""}`;
     const badge = compacting ? compactingBadgeMarkup() : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
-    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><strong>${escapeHtml(humanName(peer))}</strong>${reminderIndicatorMarkup(reminders)}${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><span class="agent-name-line">${reminderIndicatorMarkup(reminders, humanName(peer))}<strong>${escapeHtml(humanName(peer))}</strong></span>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -1171,9 +1171,10 @@ function compactingBadgeMarkup(extraClass = "") {
   return `<span class="compacting-indicator${extraClass ? ` ${extraClass}` : ""}" aria-label="Agent is compacting"><span class="compacting-dot"></span><span>Compacting</span></span>`;
 }
 
-function reminderIndicatorMarkup(reminders) {
+function reminderIndicatorMarkup(reminders, peerName) {
   if (reminders.length === 0) return "";
-  return `<button class="reminder-indicator" type="button" aria-label="Show reminders for this agent" title="Show reminders"><i class="fa-solid fa-clock" aria-hidden="true"></i></button>`;
+  const reminderLabel = `${reminders.length} active reminder${reminders.length === 1 ? "" : "s"} for ${peerName}`;
+  return `<button class="reminder-indicator" type="button" aria-haspopup="dialog" aria-controls="reminders-dialog" aria-label="Show ${escapeHtml(reminderLabel)}" title="Show reminders"><i class="fa-solid fa-clock" aria-hidden="true"></i></button>`;
 }
 
 function attachReminderActions(root, reminders) {

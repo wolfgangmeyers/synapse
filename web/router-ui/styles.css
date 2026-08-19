@@ -127,18 +127,25 @@ p:empty { display: none; }
 .reminder-indicator {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 5px;
-  padding: 3px 7px;
-  border: 1px solid rgba(96,165,250,0.38);
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 1px solid rgba(96,165,250,0.48);
   border-radius: 999px;
-  background: rgba(38,106,255,0.24);
+  background: rgba(38,106,255,0.34);
   color: #bfdbfe;
   font-size: 11px;
   font-weight: 800;
   line-height: 1;
 }
+.reminder-indicator:focus-visible { outline: 2px solid #bfdbfe; outline-offset: 2px; }
 .reminder-indicator i { color: #60a5fa; }
+.agent-name-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.agent-name-line strong { flex: 1 1 auto; }
 .reminder-list-item { padding: 12px 14px; border-radius: 16px; background: var(--canvas); }
 .reminder-list-item strong { display: block; }
 .reminder-list-item small { display: block; margin-top: 3px; }
