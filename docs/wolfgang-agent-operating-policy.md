@@ -31,6 +31,10 @@ authorizes that action.
 This rule supersedes any contrary wording that requires Wolfgang authorization before a scoped
 commit or push to a draft PR, including follow-up pushes after review feedback.
 
+### A concrete goal authorizes ordinary scoped work
+
+A concrete Wolfgang goal, including `/goal set`, authorizes execution of ordinary scoped work. Immediately hand off one owner, the exact next action, base and branch, done conditions, and push limits. Do not ask for second authorization or leave a worker waiting; if a worker says it is waiting for authorization, correct the handoff. Gate only operations that truly require approval, not preparatory implementation.
+
 ### One worker per ticket
 
 Give each ticket one worker with clear ownership. Do not hand multiple tickets to the same worker, even when they touch the same feature area; separate tickets create separate requirements, review threads, environments, and next actions, and combining them makes scope and status easy to confuse. A worker may coordinate with another worker, but the supervisor should assign each ticket its own owner.
