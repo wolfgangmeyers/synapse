@@ -499,6 +499,16 @@ Mandatory obligations that remain here:
 - Follow `worker-launch` for Codex launch/session/config details and the supervisor-owned review fallback when Codex subagents are unavailable.
 - Follow `worker-launch` for abandonment. Never remove a worker worktree until the PR is merged/closed, Wolfgang explicitly authorizes teardown, or the task is explicitly abandoned after dirty work classification.
 
+### Worker goals in normal handoffs
+
+- For a durable task with one clear outcome that needs sustained momentum across turns or handoffs, use a worker goal.
+- Set one task-level outcome, not a checklist or parallel set of goals.
+- Goals complement—not replace—task state, reminders, check-ins, and explicit handoff instructions.
+- Update the goal only if the objective changes; keep it enabled while the task is active.
+- Use `/goal off` only on explicit user direction, genuine accepted completion, or deliberate defer/stop.
+- The supervisor cannot directly invoke another Pi session's goal tool. Set the goal by delivering one clear, model-visible instruction through verified Mailbox requiring the worker to set it immediately; the worker sets it locally.
+- A goal-set wakeup supports momentum; it does not replace ordinary handoff and monitoring.
+
 ### Verification Standards
 
 Verify systems are working, not just implemented. For cron, background processes, monitoring, and worker-managed services, check the observable thing: scheduled entry plus recent logs, running process plus updating output, or monitor behavior against the condition it is supposed to detect.
