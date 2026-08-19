@@ -132,6 +132,19 @@
       <div id="reminders-dialog-body" class="reminders-dialog-body" tabindex="0"></div>
     </form>
   </dialog>
+
+  <dialog id="goal-dialog" class="message-dialog" aria-labelledby="goal-dialog-title">
+    <form method="dialog" class="dialog-shell">
+      <header>
+        <div>
+          <h2 id="goal-dialog-title">Goal</h2>
+          <p>Current goal for this agent.</p>
+        </div>
+        <button value="cancel" aria-label="Close goal"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div id="goal-dialog-body" class="goal-dialog-body" tabindex="0"></div>
+    </form>
+  </dialog>
   <script src="/vendor/markdown-it.js"></script>
   <script type="module" src="/app.js"></script>
 </body>

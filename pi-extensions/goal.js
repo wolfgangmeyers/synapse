@@ -1,5 +1,8 @@
 const GOAL_STATE_ENTRY = "goal-state";
 const GOAL_RESULT_TYPE = "goal-result";
+const GOAL_UPDATE_TYPE = "goal-update";
+export const GOAL_STATE_EVENT = "goal:state";
+export const GOAL_STATE_REQUEST_EVENT = "goal:state-request";
 const MAX_GOAL_CHARS = 4_000;
 const MAX_CONTEXT_MESSAGES = 32;
 const MAX_CONTEXT_CHARS = 24_000;
@@ -23,6 +26,12 @@ const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service
 function normalizeGoal(value) {
   if (typeof value !== "string") return "";
   return value.trim().slice(0, MAX_GOAL_CHARS);
+}
+
+function goalProjection(state) {
+  return state.enabled === true && state.goal.length > 0
+    ? { enabled: true, goal: state.goal }
+    : { enabled: false, goal: "" };
 }
 
 function restoreState(ctx) {
@@ -130,6 +139,22 @@ export function createGoalExtension(pi) {
   };
 
   const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, { ...state });
+  const publish = () => {
+    try { pi.events?.emit?.(GOAL_STATE_EVENT, goalProjection(state)); } catch { /* optional UI publication is best-effort */ }
+  };
+  const scheduleSelfWake = (goal) => {
+    if (typeof sessionId !== "string" || sessionId.length === 0) return;
+    setTimeout(() => {
+      try {
+        pi.sendMessage({
+          customType: GOAL_UPDATE_TYPE,
+          content: `Goal set: ${goal}. Begin working toward this goal.`,
+          display: true,
+          details: { enabled: true, goal },
+        }, { deliverAs: "steer", triggerTurn: true });
+      } catch { /* persistence remains authoritative when the session cannot wake */ }
+    }, 0);
+  };
   const notify = (ctx, message, level = "info") => ctx.ui?.notify?.(message, level);
   const statusDetails = (action) => ({
     action,
@@ -169,6 +194,8 @@ export function createGoalExtension(pi) {
       lastOwnerGateState = "allowed";
       state = { enabled: true, goal };
       persist();
+      publish();
+      scheduleSelfWake(goal);
       return { ok: true, message: `Goal set: ${goal}`, details: { action, ...state } };
     }
     if (action === "status") {
@@ -181,6 +208,7 @@ export function createGoalExtension(pi) {
     cancel();
     state = { ...state, enabled: false };
     persist();
+    publish();
     return { ok: true, message: "Goal off", details: { action, ...state } };
   };
   const scheduleInjection = (event, ctx, runGeneration, controller, message) => {
@@ -217,11 +245,14 @@ export function createGoalExtension(pi) {
     }, 0);
   };
 
+  pi.events?.on?.(GOAL_STATE_REQUEST_EVENT, () => publish());
+
   pi.on("session_start", async (event, ctx) => {
     if (sessionId === undefined) sessionId = event?.sessionId ?? ctx.sessionManager?.getSessionId?.();
     if (!isCurrentSession(event, ctx)) return;
     cancel();
     state = restoreState(ctx);
+    publish();
   });
 
   pi.on("session_shutdown", async (event, ctx) => {

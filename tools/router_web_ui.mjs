@@ -250,9 +250,11 @@ function createBrowserClient(browser, { defaultRouter }) {
         sendBrowser({
           type: "agent_activity",
           agent: frame.agent_id,
+          ...(frame.instance_id === undefined ? {} : { instanceId: frame.instance_id }),
           activityState: frame.activity_state,
           subagentCount: frame.subagent_count ?? 0,
           subagents: Array.isArray(frame.subagents) ? frame.subagents : [],
+          ...(frame.goal === undefined ? {} : { goal: frame.goal }),
           generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,

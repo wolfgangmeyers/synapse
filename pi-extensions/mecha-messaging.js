@@ -28,8 +28,20 @@ const ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES = 256 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_KEEP_BYTES = 128 * 1024;
 const NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
+const GOAL_STATE_EVENT = "goal:state";
+const GOAL_STATE_REQUEST_EVENT = "goal:state-request";
+const MAX_GOAL_CHARS = 4_000;
 
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
+
+function normalizeGoalProjection(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
+    || value.goal.length > MAX_GOAL_CHARS) return undefined;
+  if (!value.enabled && value.goal !== "") return undefined;
+  if (value.enabled && value.goal.length === 0) return undefined;
+  return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
+}
 
 function getOwnerSubagentsService(ownerSessionId) {
   const services = globalThis[PI_SUBAGENTS_SERVICE_REGISTRY]?.services;
@@ -1112,6 +1124,16 @@ export function createMechaMessagingExtension(pi, {
   const currentSubagentsServiceAccessor = getSubagentsService;
   let client;
   let coordinator;
+  let goalProjection;
+  let goalProjectionReceived = false;
+  const receiveGoalProjection = (value) => {
+    const normalized = normalizeGoalProjection(value);
+    if (normalized === undefined) return;
+    goalProjection = normalized;
+    goalProjectionReceived = true;
+  };
+  pi.events?.on?.(GOAL_STATE_EVENT, receiveGoalProjection);
+  try { pi.events?.emit?.(GOAL_STATE_REQUEST_EVENT); } catch { /* optional goal bridge is best-effort */ }
   let mailboxPausedForCompaction = false;
   let startupError;
   let activeWork = ""; let recallAbort; let recallProcess; let policyAbort; let policyReady; let capture;
@@ -1541,7 +1563,8 @@ export function createMechaMessagingExtension(pi, {
     const unchanged = lastActivitySent !== undefined
       && lastActivitySent.state === state
       && lastActivitySent.subagentCount === subagentCount
-      && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents);
+      && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents)
+      && JSON.stringify(lastActivitySent.goal) === JSON.stringify(goalProjectionReceived ? goalProjection : undefined);
     // Settled with no subagents is terminal until reconciliation changes it; unlike
     // active work and settled subagents, it does not need a TTL refresh frame.
     if (unchanged && state === "settled" && subagentCount === 0 && !force && !reconciled) return false;
@@ -1549,8 +1572,12 @@ export function createMechaMessagingExtension(pi, {
       return false;
     }
     try {
-      client?.sendActivity?.(state, { subagentCount, subagents });
-      lastActivitySent = { state, subagentCount, subagents, sentAtMs: nowMs };
+      client?.sendActivity?.(state, {
+        subagentCount,
+        subagents,
+        ...(goalProjectionReceived ? { goal: goalProjection } : {}),
+      });
+      lastActivitySent = { state, subagentCount, subagents, goal: goalProjectionReceived ? goalProjection : undefined, sentAtMs: nowMs };
       return true;
     } catch {
       // Activity is an ephemeral UI hint; mailbox delivery and reconnect behavior own real work.

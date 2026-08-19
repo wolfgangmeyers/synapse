@@ -204,6 +204,7 @@ export function createAgentRouter({
   const requestTimesBySender = new Map();
   const pendingDeliveryOffers = new Map();
   const activityByAgentId = new Map();
+  const goalByAgentId = new Map();
   // V2 is deliberately unavailable instead of silently becoming a second
   // process-local lifecycle store when a router starts against a pre-017 DB.
   const lifecycleV2Available = typeof repository.migrationIds === "function"
@@ -374,6 +375,10 @@ export function createAgentRouter({
         const lease = owner === undefined ? undefined : repository.leaseFor(frame.agent_id);
         if (owner !== undefined && lease !== undefined
           && Date.parse(lease.expires_at) > currentTimeMs(clock)) {
+          if (owner.instanceId !== frame.instance_id) {
+            activityByAgentId.delete(frame.agent_id);
+            goalByAgentId.delete(frame.agent_id);
+          }
           session = createSession(currentSocket, frame, lease, owner.deliveryInstanceId);
           subscribers.set(frame.instance_id, session);
           if (owner === reconnecting) sessions.set(frame.agent_id, session);
@@ -403,6 +408,10 @@ export function createAgentRouter({
           leaseDurationMs,
         });
         const replacement = sessions.get(frame.agent_id);
+        if (replacement !== undefined && replacement.instanceId !== frame.instance_id) {
+          activityByAgentId.delete(frame.agent_id);
+          goalByAgentId.delete(frame.agent_id);
+        }
         session = createSession(currentSocket, frame, lease, frame.instance_id);
         cancelPendingDeliveryOffer(frame.agent_id);
         sessions.set(frame.agent_id, session);
@@ -666,7 +675,7 @@ export function createAgentRouter({
       }
       // Keep publishing byte-compatible legacy activity during the rollout. The
       // connected-agent snapshot selects durable children once this producer is v2.
-      updateAgentActivity(session.agentId, frame.activity_state, frame.subagent_count ?? 0, frame.subagents);
+      updateAgentActivity(session.agentId, frame.activity_state, frame.subagent_count ?? 0, frame.subagents, frame.goal, session.instanceId);
     }
 
     function receiveMessageArrival(currentSocket, frame) {
@@ -1231,6 +1240,15 @@ export function createAgentRouter({
     return activity !== undefined && activity.expiresAtMs > nowMs ? activity.subagentCount : 0;
   }
 
+  function normalizeGoalProjection(value) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)
+      || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
+      || value.goal.length > 4_000) return undefined;
+    if (!value.enabled && value.goal !== "") return undefined;
+    if (value.enabled && value.goal.length === 0) return undefined;
+    return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
+  }
+
   function normalizeSubagents(subagents, subagentCount = 0) {
     if (!Array.isArray(subagents)) return [];
     return subagents.map((summary) => {
@@ -1299,15 +1317,17 @@ export function createAgentRouter({
     });
   }
 
-  function broadcastAgentActivity(agentId, activityState, subagentCount = 0, subagents = [], generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
+  function broadcastAgentActivity(agentId, activityState, subagentCount = 0, subagents = [], generatedAt = new Date(currentTimeMs(clock)).toISOString(), instanceId, goal) {
     for (const recipient of conversationSessions.values()) {
       for (const session of recipient.values()) {
         sendFrame(session.socket, generateFrameId, {
           type: "agent_activity",
           agent_id: agentId,
+          ...(instanceId === undefined ? {} : { instance_id: instanceId }),
           activity_state: activityState,
           subagent_count: subagentCount,
           subagents,
+          ...(goal === undefined ? {} : { goal }),
           generated_at: generatedAt,
         });
       }
@@ -1332,9 +1352,14 @@ export function createAgentRouter({
     }
   }
 
-  function updateAgentActivity(agentId, activityState, subagentCount = 0, subagents) {
+  function updateAgentActivity(agentId, activityState, subagentCount = 0, subagents, incomingGoal, instanceId) {
     const nowMs = currentTimeMs(clock);
     const generatedAt = new Date(nowMs).toISOString();
+    const currentGoal = goalByAgentId.get(agentId);
+    if (currentGoal !== undefined && instanceId !== undefined && currentGoal.instanceId !== instanceId) goalByAgentId.delete(agentId);
+    const normalizedGoal = incomingGoal === undefined ? undefined : normalizeGoalProjection(incomingGoal);
+    if (normalizedGoal !== undefined && instanceId !== undefined) goalByAgentId.set(agentId, { instanceId, goal: normalizedGoal });
+    const goal = goalByAgentId.get(agentId)?.goal;
     const previousState = observableAgentActivity(agentId, nowMs);
     const previousCount = observableSubagentCount(agentId, nowMs);
     const previousSubagents = observableSubagents(agentId, nowMs);
@@ -1343,16 +1368,20 @@ export function createAgentRouter({
     const nextState = activityState === "compacting" ? "compacting" : activityState === "active" ? "active" : "idle";
     const session = sessions.get(agentId);
     if (session !== undefined) session.deliveryPaused = nextState === "compacting";
+    const visibleCount = nextState === "compacting" ? 0 : nextCount;
+    const visibleSubagents = nextState === "compacting" ? [] : summaries;
+    const previousGoal = currentGoal?.goal;
     if (nextState === "active" || nextState === "compacting" || nextCount > 0) {
       activityByAgentId.set(agentId, {
         state: nextState,
+        instanceId,
         activeUntilMs: nextState === "active" ? nowMs + activityTtlMs : nowMs,
         expiresAtMs: nextState === "compacting" ? Number.POSITIVE_INFINITY : nowMs + activityTtlMs,
-        subagentCount: nextState === "compacting" ? 0 : nextCount,
-        subagents: nextState === "compacting" ? [] : summaries,
+        subagentCount: visibleCount,
+        subagents: visibleSubagents,
       });
-      if (previousState !== nextState || previousCount !== (nextState === "compacting" ? 0 : nextCount) || !sameSubagents(previousSubagents, nextState === "compacting" ? [] : summaries)) {
-        broadcastAgentActivity(agentId, nextState, nextState === "compacting" ? 0 : nextCount, nextState === "compacting" ? [] : summaries, generatedAt);
+      if (previousState !== nextState || previousCount !== visibleCount || !sameSubagents(previousSubagents, visibleSubagents) || JSON.stringify(previousGoal) !== JSON.stringify(goal)) {
+        broadcastAgentActivity(agentId, nextState, visibleCount, visibleSubagents, generatedAt, instanceId, goal);
       }
       if (previousState === "compacting" && nextState !== "compacting" && session !== undefined) {
         session.deliveryPaused = false;
@@ -1365,11 +1394,15 @@ export function createAgentRouter({
       session.deliveryPaused = false;
       offerQueuedMessages(agentId);
     }
-    if (previousState !== "idle" || previousCount !== 0 || previousSubagents.length > 0) broadcastAgentActivity(agentId, "idle", 0, [], generatedAt);
+    if (previousState !== "idle" || previousCount !== 0 || previousSubagents.length > 0 || JSON.stringify(previousGoal) !== JSON.stringify(goal)) {
+      broadcastAgentActivity(agentId, "idle", 0, [], generatedAt, instanceId, goal);
+    }
   }
 
   function clearAgentActivity(agentId) {
-    updateAgentActivity(agentId, "settled");
+    const instanceId = sessions.get(agentId)?.instanceId ?? goalByAgentId.get(agentId)?.instanceId;
+    updateAgentActivity(agentId, "settled", 0, undefined, { enabled: false, goal: "" }, instanceId);
+    goalByAgentId.delete(agentId);
   }
 
   function sweepExpiredAgentActivity() {
@@ -1383,7 +1416,7 @@ export function createAgentRouter({
         session.deliveryPaused = false;
         offerQueuedMessages(agentId);
       }
-      broadcastAgentActivity(agentId, "idle", 0, [], generatedAt);
+      broadcastAgentActivity(agentId, "idle", 0, [], generatedAt, activity.instanceId, goalByAgentId.get(agentId)?.instanceId === activity.instanceId ? goalByAgentId.get(agentId).goal : undefined);
     }
   }
 
@@ -1406,6 +1439,9 @@ export function createAgentRouter({
         activity_state: observableAgentActivity(session.agentId),
         subagent_count: lifecycle?.subagent_count ?? observableSubagentCount(session.agentId),
         subagents: lifecycle?.subagents ?? observableSubagents(session.agentId),
+        ...(goalByAgentId.get(session.agentId)?.instanceId === session.instanceId
+          ? { goal: goalByAgentId.get(session.agentId).goal }
+          : {}),
         ...(lifecycle === undefined ? {} : { subagent_version: lifecycle.subagent_version }),
       });
     }

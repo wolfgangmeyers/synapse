@@ -66,6 +66,8 @@ const state = {
   arrivalTimers: new Map(),
   reminderDialogPeer: "",
   reminderDialogTimer: null,
+  goalDialogPeer: "",
+  goalDialogReturnFocus: null,
 };
 
 const elements = {
@@ -104,6 +106,9 @@ const elements = {
   arrivedDialogBody: document.querySelector("#arrived-dialog-body"),
   remindersDialog: document.querySelector("#reminders-dialog"),
   remindersDialogBody: document.querySelector("#reminders-dialog-body"),
+  goalDialog: document.querySelector("#goal-dialog"),
+  goalDialogTitle: document.querySelector("#goal-dialog-title"),
+  goalDialogBody: document.querySelector("#goal-dialog-body"),
 };
 
 const config = await fetch("/ui/config").then((response) => response.json()).catch(() => ({}));
@@ -152,6 +157,14 @@ elements.messages.addEventListener("scroll", () => { state.followMessages = isMe
 elements.remindersDialog.addEventListener("close", () => {
   clearReminderDialogTimer();
   state.reminderDialogPeer = "";
+});
+elements.goalDialog.addEventListener("close", () => {
+  const peer = state.goalDialogPeer;
+  const returnFocus = state.goalDialogReturnFocus;
+  state.goalDialogPeer = "";
+  state.goalDialogReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
+  else [...document.querySelectorAll(".agent-row")].find((row) => row.dataset.agentId === peer)?.querySelector(".goal-indicator")?.focus();
 });
 elements.composer.addEventListener("dragover", (event) => {
   if (!hasImageFiles(event.dataTransfer?.items)) return;
@@ -213,6 +226,7 @@ async function handleEvent(event) {
     if (Number.isSafeInteger(event.activitySnapshotVersion)) state.lastLifecycleSnapshotVersion = Math.max(state.lastLifecycleSnapshotVersion, event.activitySnapshotVersion);
     renderAgents();
     renderConversation();
+    if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
     return;
   }
   if (event.type === "subagent_state_snapshot") {
@@ -230,7 +244,7 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "agent_activity") {
-    updateAgentActivity(event.agent, event.activityState, event.subagentCount, event.subagents);
+    updateAgentActivity(event.agent, event.activityState, event.subagentCount, event.subagents, event.goal, event.instanceId, Object.prototype.hasOwnProperty.call(event, "goal"));
     return;
   }
   if (event.type === "message_arrival") {
@@ -321,6 +335,7 @@ function showArrivedMessageDialog(arrival) {
 
 async function switchRouter(routerUrl, { connect = false } = {}) {
   closeReminderDialog();
+  closeGoalDialog();
   saveCurrentDraft();
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
@@ -495,13 +510,14 @@ function renderAgents() {
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
     const arrival = state.arrivalsByAgent.get(peer);
     const reminders = state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
+    const goal = normalizeGoalProjection(agent.goal);
     const row = document.createElement("div");
     row.tabIndex = 0;
     row.setAttribute("role", "button");
     row.dataset.agentId = peer;
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${arrival ? " has-arrival" : ""}${expanded ? " expanded" : ""}`;
     const badge = compacting ? compactingBadgeMarkup() : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
-    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><span class="agent-name-line">${reminderIndicatorMarkup(reminders, humanName(peer))}<strong>${escapeHtml(humanName(peer))}</strong></span>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><span class="agent-name-line">${reminderIndicatorMarkup(reminders, humanName(peer))}${goalIndicatorMarkup(goal, humanName(peer))}<strong>${escapeHtml(humanName(peer))}</strong></span>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -511,6 +527,7 @@ function renderAgents() {
     });
     attachSubagentToggle(row, peer, canExpandSubagents, renderAgents);
     attachReminderActions(row, reminders);
+    attachGoalActions(row, goal);
     attachArrivalActions(row, arrival);
     return row;
   }));
@@ -519,6 +536,7 @@ function renderAgents() {
 
 function selectPeer(peer) {
   closeReminderDialog();
+  closeGoalDialog();
   state.agentFilter = "";
   elements.agentFilter.value = "";
   if (peer === state.selectedPeer) {
@@ -535,28 +553,33 @@ function selectPeer(peer) {
   requestHistory(peer);
 }
 
-function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = []) {
+function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = [], incomingGoal, instanceId, goalProvided = incomingGoal !== undefined) {
   if (!peer || peer === state.agentId) return;
   const current = state.agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
+  const sameInstance = instanceId === undefined || current.instance_id === instanceId;
+  const base = sameInstance ? current : { agent_id: peer, activity_state: "idle", instance_id: instanceId };
   const incomingSummaries = normalizeSubagents(subagents);
   const incomingCount = Number.isSafeInteger(subagentCount) ? subagentCount : 0;
-  const currentSummaries = normalizeSubagents(current?.subagents);
+  const currentSummaries = normalizeSubagents(base?.subagents);
   const summaries = incomingSummaries.length > 0
     ? incomingSummaries
     : (incomingCount > 0 && currentSummaries.length === incomingCount ? currentSummaries : []);
+  const nextGoal = goalProvided ? normalizeGoalProjection(incomingGoal) : (sameInstance ? normalizeGoalProjection(base.goal) : undefined);
   const normalizedCount = Math.max(summaries.length, incomingCount);
-  const hasDurableLifecycle = Number.isSafeInteger(current.subagent_version);
+  const hasDurableLifecycle = Number.isSafeInteger(base.subagent_version);
   if (!hasDurableLifecycle && normalizedCount === 0) state.expandedSubagents.delete(peer);
-  if (current.activity_state === activityState && hasDurableLifecycle) return;
-  if (current.activity_state === activityState && (current.subagent_count ?? 0) === normalizedCount && sameSubagents(current.subagents, summaries)) return;
+  if (base.activity_state === activityState && hasDurableLifecycle && JSON.stringify(base.goal) === JSON.stringify(nextGoal)) return;
+  // sameSubagents(current.subagents, summaries)) return; is equivalent for the same-incarnation base below.
+  if (base.activity_state === activityState && (base.subagent_count ?? 0) === normalizedCount && sameSubagents(base.subagents, summaries) && JSON.stringify(base.goal) === JSON.stringify(nextGoal) && base.instance_id === instanceId) return;
   const next = hasDurableLifecycle
-    ? { ...current, activity_state: activityState }
-    : { ...current, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries };
+    ? { ...base, activity_state: activityState, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }) }
+    : { ...base, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }) };
   state.agents = state.agents.some((agent) => agent.agent_id === peer)
     ? state.agents.map((agent) => agent.agent_id === peer ? next : agent)
     : [...state.agents, next];
   renderAgents();
   renderConversation();
+  if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
 }
 
 function requestHistory(peer) {
@@ -1161,28 +1184,81 @@ function applyLifecycleUpdateEvent(agent, routerVersion, { render = true } = {})
 
 function mergeAgentSnapshot(agent) {
   const current = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
+  const normalizedGoal = normalizeGoalProjection(agent.goal);
+  const goalFields = normalizedGoal === undefined ? {} : { goal: normalizedGoal };
   if (Number.isSafeInteger(current?.subagent_version)
     && (!Number.isSafeInteger(agent.subagent_version)
       || agent.subagent_version < current.subagent_version
       || (agent.subagent_version === current.subagent_version
         && ((agent.subagent_count ?? 0) !== (current.subagent_count ?? 0)
           || !sameSubagents(agent.subagents, current.subagents))))) {
-    return { ...agent, subagent_version: current.subagent_version, subagent_count: current.subagent_count, subagents: current.subagents };
+    return { ...agent, ...goalFields, subagent_version: current.subagent_version, subagent_count: current.subagent_count, subagents: current.subagents };
   }
   const incomingSummaries = normalizeSubagents(agent.subagents);
   const incomingCount = Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0;
-  if (incomingSummaries.length > 0 || incomingCount === 0) return { ...agent, subagents: incomingSummaries };
+  if (incomingSummaries.length > 0 || incomingCount === 0) return { ...agent, ...goalFields, subagents: incomingSummaries };
   const currentSummaries = normalizeSubagents(current?.subagents);
-  return currentSummaries.length === incomingCount ? { ...agent, subagents: currentSummaries } : { ...agent, subagents: [] };
+  return currentSummaries.length === incomingCount ? { ...agent, ...goalFields, subagents: currentSummaries } : { ...agent, ...goalFields, subagents: [] };
 }
 function compactingBadgeMarkup(extraClass = "") {
   return `<span class="compacting-indicator${extraClass ? ` ${extraClass}` : ""}" aria-label="Agent is compacting"><span class="compacting-dot"></span><span>Compacting</span></span>`;
+}
+
+function normalizeGoalProjection(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
+    || value.goal.length > 4000) return undefined;
+  if (!value.enabled && value.goal !== "") return undefined;
+  if (value.enabled && value.goal.length === 0) return undefined;
+  return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
+}
+
+function goalIndicatorMarkup(goal, peerName) {
+  if (!goal?.enabled) return "";
+  return `<button class="goal-indicator" type="button" aria-haspopup="dialog" aria-controls="goal-dialog" aria-label="Show goal for ${escapeHtml(peerName)}" title="Show goal"><i class="fa-solid fa-flag" aria-hidden="true"></i></button>`;
 }
 
 function reminderIndicatorMarkup(reminders, peerName) {
   if (reminders.length === 0) return "";
   const reminderLabel = `${reminders.length} active reminder${reminders.length === 1 ? "" : "s"} for ${peerName}`;
   return `<button class="reminder-indicator" type="button" aria-haspopup="dialog" aria-controls="reminders-dialog" aria-label="Show ${escapeHtml(reminderLabel)}" title="Show reminders"><i class="fa-solid fa-clock" aria-hidden="true"></i></button>`;
+}
+
+function attachGoalActions(root, goal) {
+  if (!goal?.enabled) return;
+  const indicator = root.querySelector(".goal-indicator");
+  if (!indicator) return;
+  const openGoal = (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    state.goalDialogPeer = root.dataset.agentId;
+    state.goalDialogReturnFocus = indicator;
+    renderGoalDialog(state.goalDialogPeer);
+    elements.goalDialog.showModal();
+  };
+  indicator.addEventListener("click", openGoal);
+  indicator.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") openGoal(event);
+  });
+}
+
+function closeGoalDialog() {
+  state.goalDialogPeer = "";
+  if (elements.goalDialog?.open) elements.goalDialog.close();
+}
+
+function renderGoalDialog(peer) {
+  const agent = state.agents.find((candidate) => candidate.agent_id === peer);
+  const goal = normalizeGoalProjection(agent?.goal);
+  elements.goalDialogTitle.textContent = goal?.enabled ? `Goal for ${humanName(peer)}` : "Goal";
+  elements.goalDialogBody.replaceChildren();
+  if (!goal?.enabled) return;
+  const label = document.createElement("p");
+  label.textContent = "Current goal";
+  const text = document.createElement("p");
+  text.className = "goal-dialog-text";
+  text.textContent = goal.goal;
+  elements.goalDialogBody.append(label, text);
 }
 
 function attachReminderActions(root, reminders) {
