@@ -122,6 +122,26 @@ p:empty { display: none; }
   box-shadow: 0 24px 80px rgba(0,0,0,0.45);
 }
 .message-dialog::backdrop { background: rgba(5,7,12,0.68); }
+#reminders-dialog { width: min(680px, calc(100vw - 32px)); }
+#reminders-dialog-body { max-height: min(52vh, 520px); overflow-y: auto; word-break: break-word; }
+.reminder-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  padding: 3px 7px;
+  border: 1px solid rgba(96,165,250,0.38);
+  border-radius: 999px;
+  background: rgba(38,106,255,0.24);
+  color: #bfdbfe;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+.reminder-indicator i { color: #60a5fa; }
+.reminder-list-item { padding: 12px 14px; border-radius: 16px; background: var(--canvas); }
+.reminder-list-item strong { display: block; }
+.reminder-list-item small { display: block; margin-top: 3px; }
 .message-dialog-label { color: var(--yellow); font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; }
 .message-dialog-body { max-height: min(52vh, 520px); overflow: auto; word-break: break-word; padding: 16px; border-radius: 18px; background: var(--canvas); color: var(--text); }
 .dialog-shell { padding: 22px; }

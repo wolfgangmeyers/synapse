@@ -141,6 +141,7 @@ function createBrowserClient(browser, { defaultRouter }) {
   let routerSocket;
   let reconnectTimer;
   let refreshTimer;
+  let refreshGeneration = 0;
   let renewTimer;
   let connectionGeneration = 0;
   let lifecycleEnabled = false;
@@ -160,15 +161,31 @@ function createBrowserClient(browser, { defaultRouter }) {
   };
   const setStatus = (state, detail) => sendBrowser({ type: "status", state, detail, agentId: configured.agentId, routerUrl: configured.routerUrl });
   const refreshAgents = async () => {
+    const generation = ++refreshGeneration;
     const routerUrl = configured.routerUrl;
     const agentId = configured.agentId;
-    try {
-      const response = await fetch(new URL("/v1/agents", routerUrl));
+    const load = async (path) => {
+      const response = await fetch(new URL(path, routerUrl));
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.code ?? `HTTP ${response.status}`);
-      sendBrowser({ type: "agents", agents: body.agents ?? [], generatedAt: body.generated_at, activitySnapshotVersion: body.activity_snapshot_version, agentId, routerUrl });
-    } catch (error) {
-      sendBrowser({ type: "agents_error", message: error.message, agentId, routerUrl });
+      return body;
+    };
+    const [agentsResult, remindersResult] = await Promise.allSettled([
+      load("/v1/agents"),
+      load("/v1/reminders"),
+    ]);
+    if (generation !== refreshGeneration) return;
+    if (agentsResult.status === "fulfilled") {
+      const agentsBody = agentsResult.value;
+      sendBrowser({ type: "agents", agents: agentsBody.agents ?? [], generatedAt: agentsBody.generated_at, activitySnapshotVersion: agentsBody.activity_snapshot_version, agentId, routerUrl });
+    } else {
+      sendBrowser({ type: "agents_error", message: agentsResult.reason.message, agentId, routerUrl });
+    }
+    if (remindersResult.status === "fulfilled") {
+      const remindersBody = remindersResult.value;
+      sendBrowser({ type: "reminders", reminders: remindersBody.reminders ?? [], agentId, routerUrl });
+    } else {
+      sendBrowser({ type: "reminders_error", message: remindersResult.reason.message, agentId, routerUrl });
     }
   };
 
