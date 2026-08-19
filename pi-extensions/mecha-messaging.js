@@ -27,6 +27,8 @@ const MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES = 64 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES = 256 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_KEEP_BYTES = 128 * 1024;
 const NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS = 60_000;
+const MAILBOX_SEND_RATE_LIMIT_COUNT = 3;
+const MAILBOX_SEND_RATE_LIMIT_WINDOW_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const GOAL_STATE_EVENT = "goal:state";
 const GOAL_STATE_REQUEST_EVENT = "goal:state-request";
@@ -1775,7 +1777,39 @@ export function createMechaMessagingExtension(pi, {
   const children = childSessionIds();
   const settledNotifications = createSettledScheduler();
   const childReplyClients = new Map();
+  const childReplyClientAgentIds = new Map();
+  let parentAgentId;
   const inlineToolPolicy = createInlineToolPolicy({ now: nowImpl });
+  const mailboxSendRateLimits = new Map();
+
+  function reserveMailboxSend(sender, recipient) {
+    const now = nowImpl();
+    const key = `${sender ?? "unknown"}\u0000${recipient}`;
+    const recent = (mailboxSendRateLimits.get(key) ?? []).filter(
+      (timestamp) => now - timestamp < MAILBOX_SEND_RATE_LIMIT_WINDOW_MS,
+    );
+    if (recent.length === 0) mailboxSendRateLimits.delete(key);
+    else mailboxSendRateLimits.set(key, recent);
+    if (recent.length >= MAILBOX_SEND_RATE_LIMIT_COUNT) {
+      throw new Error("Temporary rate limit reached for this recipient. Stop sending and retry after 60 seconds, after the reset.");
+    }
+    recent.push(now);
+    mailboxSendRateLimits.set(key, recent);
+    return { key, timestamp: now };
+  }
+
+  function rollbackMailboxSend({ key, timestamp }) {
+    const timestamps = mailboxSendRateLimits.get(key);
+    if (timestamps === undefined) return;
+    const index = timestamps.indexOf(timestamp);
+    if (index >= 0) timestamps.splice(index, 1);
+    if (timestamps.length === 0) mailboxSendRateLimits.delete(key);
+  }
+
+  function mailboxSenderForSession(context) {
+    const sessionId = context?.sessionManager?.getSessionId?.();
+    return childReplyClientAgentIds.get(sessionId) ?? parentAgentId;
+  }
 
   function mailboxClientForSession(context) {
     const sessionId = context?.sessionManager?.getSessionId?.();
@@ -1841,7 +1875,14 @@ export function createMechaMessagingExtension(pi, {
           if (children.has(sessionId) || childReplyClients.has(sessionId)) throw new Error("Mailbox v2 is not initialized for this native child session");
           throw startupError ?? new Error("Mailbox v2 is not initialized");
         }
-        const sent = await mailboxClient.sendReply({ to: recipient, body, ...(subject === undefined ? {} : { subject }) });
+        const reservation = reserveMailboxSend(mailboxSenderForSession(toolContext), recipient);
+        let sent;
+        try {
+          sent = await mailboxClient.sendReply({ to: recipient, body, ...(subject === undefined ? {} : { subject }) });
+        } catch (error) {
+          rollbackMailboxSend(reservation);
+          throw error;
+        }
         return {
           content: [{ type: "text", text: `Mailbox message accepted (${sent.id}, ${sent.state}).` }],
           details: { message_id: sent.id, state: sent.state },
@@ -2058,6 +2099,7 @@ export function createMechaMessagingExtension(pi, {
       children.delete(sessionId);
       traceNativeSubagent("extension_child_session_disposed", { session_id: sessionId });
       childReplyClients.delete(sessionId);
+      childReplyClientAgentIds.delete(sessionId);
       // The tombstone keeps late child tool calls from falling back to the parent client.
       childReplyClients.set(sessionId, undefined);
     }
@@ -2178,6 +2220,7 @@ export function createMechaMessagingExtension(pi, {
   pi.on("session_shutdown", async (_event, context) => {
     // A disposed child stays in childReplyClients as a tombstone until this cleanup; do not run parent capture cleanup with its context.
     if (children.has(context.sessionManager.getSessionId()) || childReplyClients.has(context.sessionManager.getSessionId())) return;
+    mailboxSendRateLimits.clear();
     recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch {} finally { controller.abort(); clearTimeout(timer); }
   });
 
@@ -2187,20 +2230,25 @@ export function createMechaMessagingExtension(pi, {
       try {
         const parentAgentId = resolveCurrentAgentId();
         if (parentAgentId === undefined) return;
+        const childAgentId = transientChildAgentId(sessionId);
         childReplyClients.set(sessionId, createClient({
-          agentId: transientChildAgentId(sessionId),
+          agentId: childAgentId,
           onEnvelope: () => {},
         }));
+        childReplyClientAgentIds.set(sessionId, childAgentId);
       } catch {
         // A child without ordinary Mailbox send capability can still finish natively.
       }
       return;
     }
+    mailboxSendRateLimits.clear();
     // Keep allowance state across agent runs; a parent session owns one pool for its lifetime.
     inlineToolPolicy.reset();
+    mailboxSendRateLimits.clear();
     try {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
+      parentAgentId = agentId;
       rememberParentActivityContext(context);
       settledNotificationPending = false;
       settledNotificationAgentId = agentId;
@@ -2288,8 +2336,10 @@ export function createMechaMessagingExtension(pi, {
     const sessionId = context.sessionManager.getSessionId();
     if (children.has(sessionId) || childReplyClients.has(sessionId)) {
       childReplyClients.delete(sessionId);
+      childReplyClientAgentIds.delete(sessionId);
       return;
     }
+    mailboxSendRateLimits.clear();
     rememberParentActivityContext(context);
     clearRunningSubagentsForBoundary();
     parentActivityContext = undefined;

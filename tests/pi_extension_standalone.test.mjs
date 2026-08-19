@@ -20,7 +20,7 @@ import {
 } from "../pi-extensions/mecha-messaging.js";
 import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
 
-function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-session", header = {}, contextUsage, nowImpl = Date.now, client: configuredClient, createClient } = {}) {
+function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-session", header = {}, contextUsage, nowImpl = Date.now, client: configuredClient, createClient, resolveCurrentAgentId = () => "worker" } = {}) {
   const handlers = new Map();
   const childHandlers = new Map();
   const tools = new Map();
@@ -54,7 +54,7 @@ function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-se
     exec: async () => ({ code: 0, stderr: "" }),
   };
   createMechaMessagingExtension(pi, {
-    resolveCurrentAgentId: () => "worker",
+    resolveCurrentAgentId,
     createClient: createClient ?? ((options) => {
       const client = configuredClient ?? {
         connect: async () => {},
@@ -428,8 +428,152 @@ test("mecha_mailbox_send sends through the active client and returns acceptance 
   assert.deepEqual(calls, [{ to: "worker", body: "hello", subject: "Subject" }]);
 });
 
-test("mecha_mailbox_send reaches the real Mailbox V2 HTTP client path", async () => {
+test("mecha_mailbox_send limits the initialized parent sender-target pair to three sends per rolling minute", async () => {
+  let now = 0;
+  let sender = "worker";
+  const calls = [];
+  const fixture = createMessagingFixture({
+    nowImpl: () => now,
+    resolveCurrentAgentId: () => sender,
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async (message) => {
+        calls.push(message);
+        return { id: `message-${calls.length}`, state: "acknowledged" };
+      },
+    },
+  });
+  await sessionStart(fixture);
+  const tool = fixture.tools.get("mecha_mailbox_send");
+  for (let index = 0; index < 3; index += 1) {
+    const result = await tool.execute(`call-${index}`, { recipient: "worker", body: `hello-${index}` }, undefined, undefined, fixture.context);
+    assert.equal(result.isError, undefined);
+  }
+  const denied = await tool.execute("call-3", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /temporary.*rate limit/i);
+  assert.match(denied.content[0].text, /60 seconds/i);
+  assert.equal(calls.length, 3);
+
+  sender = "other-worker";
+  const stillDenied = await tool.execute("call-4", { recipient: "worker", body: "stable sender" }, undefined, undefined, fixture.context);
+  assert.equal(stillDenied.isError, true);
+  const otherTarget = await tool.execute("call-5", { recipient: "other-worker", body: "isolated target" }, undefined, undefined, fixture.context);
+  assert.equal(otherTarget.isError, undefined);
+  now = 60_000;
+  const afterWindow = await tool.execute("call-6", { recipient: "worker", body: "window reset" }, undefined, undefined, fixture.context);
+  assert.equal(afterWindow.isError, undefined);
+});
+
+test("mecha_mailbox_send releases a reservation when sendReply fails", async () => {
+  let fail = true;
+  const fixture = createMessagingFixture({
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async () => {
+        if (fail) {
+          fail = false;
+          throw new Error("router unavailable");
+        }
+        return { id: "message-1", state: "acknowledged" };
+      },
+    },
+  });
+  await sessionStart(fixture);
+  const tool = fixture.tools.get("mecha_mailbox_send");
+
+  const failed = await tool.execute("call-failed", { recipient: "worker", body: "retry me" }, undefined, undefined, fixture.context);
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0].text, /router unavailable/);
+
+  for (let index = 0; index < 3; index += 1) {
+    const result = await tool.execute(`call-${index}`, { recipient: "worker", body: `hello-${index}` }, undefined, undefined, fixture.context);
+    assert.equal(result.isError, undefined);
+  }
+  const denied = await tool.execute("call-denied", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /temporary.*rate limit/i);
+});
+
+test("dev-only deterministic proof: mecha_mailbox_send rate limit uses the stable parent sender", async () => {
+  assert.equal(
+    fileURLToPath(new URL("../pi-extensions/mecha-messaging.js", import.meta.url)),
+    "/home/ubuntu/code/mecha-developer-message-target-rate-limit/pi-extensions/mecha-messaging.js",
+  );
+
+  let now = 0;
+  let sender = "sender-a";
+  let capturedAgentId;
+  const calls = [];
+  const fixture = createMessagingFixture({
+    nowImpl: () => now,
+    resolveCurrentAgentId: () => sender,
+    createClient: (options) => {
+      capturedAgentId = options.agentId;
+      return {
+        connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+        sendReply: async ({ to, body }) => {
+          calls.push({ from: options.agentId, to, body });
+          return { id: `message-${calls.length}`, state: "acknowledged" };
+        },
+      };
+    },
+  });
+  await sessionStart(fixture);
+  const tool = fixture.tools.get("mecha_mailbox_send");
+
+  for (let index = 0; index < 3; index += 1) {
+    const result = await tool.execute(`call-${index}`, { recipient: "target-b", body: `hello-${index}` }, undefined, undefined, fixture.context);
+    assert.equal(result.isError, undefined);
+  }
+  const denied = await tool.execute("call-3", { recipient: "target-b", body: "blocked" }, undefined, undefined, fixture.context);
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /temporary.*rate limit/i);
+
+  const otherTarget = await tool.execute("call-4", { recipient: "target-c", body: "isolated target" }, undefined, undefined, fixture.context);
+  assert.equal(otherTarget.isError, undefined);
+  sender = "sender-d";
+  const stillDenied = await tool.execute("call-5", { recipient: "target-b", body: "stable sender" }, undefined, undefined, fixture.context);
+  assert.equal(stillDenied.isError, true);
+
+  now = 60_000;
+  const afterWindow = await tool.execute("call-6", { recipient: "target-b", body: "window reset" }, undefined, undefined, fixture.context);
+  assert.equal(afterWindow.isError, undefined);
+  assert.equal(calls.length, 5);
+  assert.equal(capturedAgentId, "sender-a");
+  assert.ok(calls.every((envelope) => envelope.from === "sender-a"));
+});
+
+test("mecha_mailbox_send quota resets for a new parent session", async () => {
+  let now = 0;
+  const calls = [];
+  const fixture = createMessagingFixture({
+    nowImpl: () => now,
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async (message) => {
+        calls.push(message);
+        return { id: `message-${calls.length}`, state: "acknowledged" };
+      },
+    },
+  });
+  await sessionStart(fixture);
+  const tool = fixture.tools.get("mecha_mailbox_send");
+  for (let index = 0; index < 3; index += 1) {
+    await tool.execute(`call-${index}`, { recipient: "worker", body: `hello-${index}` }, undefined, undefined, fixture.context);
+  }
+  const denied = await tool.execute("call-3", { recipient: "worker", body: "blocked" }, undefined, undefined, fixture.context);
+  assert.equal(denied.isError, true);
+
+  await sessionStart(fixture, fixture.createContext("new-parent-session"));
+  const granted = await tool.execute("call-4", { recipient: "worker", body: "new session" }, undefined, undefined, fixture.createContext("new-parent-session"));
+  assert.equal(granted.isError, undefined);
+  assert.equal(calls.length, 4);
+});
+
+test("mecha_mailbox_send reaches the real Mailbox V2 HTTP client path with the stable parent sender", async () => {
   const requests = [];
+  let sender = "stable-parent";
   let client;
   const socket = {
     readyState: 1,
@@ -438,6 +582,7 @@ test("mecha_mailbox_send reaches the real Mailbox V2 HTTP client path", async ()
     close() {},
   };
   const fixture = createMessagingFixture({
+    resolveCurrentAgentId: () => sender,
     createClient: (options) => {
       client = createMailboxClient({
         ...options,
@@ -458,6 +603,7 @@ test("mecha_mailbox_send reaches the real Mailbox V2 HTTP client path", async ()
   });
 
   await sessionStart(fixture);
+  sender = "changed-after-session-start";
   const result = await fixture.tools.get("mecha_mailbox_send").execute("call-1", { recipient: "worker", body: "hello" }, undefined, undefined, fixture.context);
   assert.deepEqual(result.details, { message_id: "router-message", state: "leased" });
   assert.equal(requests.length, 1);
@@ -465,7 +611,7 @@ test("mecha_mailbox_send reaches the real Mailbox V2 HTTP client path", async ()
   const envelope = JSON.parse(requests[0].request.body);
   assert.deepEqual({ ...envelope, created_at: undefined }, {
     id: "request-id",
-    from: "worker",
+    from: "stable-parent",
     to: "worker",
     subject: "Pi mailbox reply",
     body: "hello",
