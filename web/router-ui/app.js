@@ -15,6 +15,7 @@ import {
   upsertLifecycleAgent,
 } from "./state.js";
 import { renderMarkdownBody, textWithoutMarkdownImages } from "./markdown.js";
+import { formatReminderCountdown, reminderRecurrenceLabel } from "./reminders.js";
 
 localStorage.removeItem("mecha.web.messages");
 localStorage.removeItem("mecha.web.conversations");
@@ -64,6 +65,7 @@ const state = {
   arrivalsByAgent: new Map(),
   arrivalTimers: new Map(),
   reminderDialogPeer: "",
+  reminderDialogTimer: null,
 };
 
 const elements = {
@@ -147,6 +149,10 @@ elements.draft.addEventListener("input", () => { normalizeDraftEscapedNewlines()
 elements.attachImage.addEventListener("click", () => elements.imageInput.click());
 elements.imageInput.addEventListener("change", () => { void addImageFiles(elements.imageInput.files); elements.imageInput.value = ""; });
 elements.messages.addEventListener("scroll", () => { state.followMessages = isMessagesNearBottom(); });
+elements.remindersDialog.addEventListener("close", () => {
+  clearReminderDialogTimer();
+  state.reminderDialogPeer = "";
+});
 elements.composer.addEventListener("dragover", (event) => {
   if (!hasImageFiles(event.dataTransfer?.items)) return;
   event.preventDefault();
@@ -314,6 +320,7 @@ function showArrivedMessageDialog(arrival) {
 }
 
 async function switchRouter(routerUrl, { connect = false } = {}) {
+  closeReminderDialog();
   saveCurrentDraft();
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
@@ -511,6 +518,7 @@ function renderAgents() {
 }
 
 function selectPeer(peer) {
+  closeReminderDialog();
   state.agentFilter = "";
   elements.agentFilter.value = "";
   if (peer === state.selectedPeer) {
@@ -1181,21 +1189,49 @@ function attachReminderActions(root, reminders) {
   if (reminders.length === 0) return;
   const indicator = root.querySelector(".reminder-indicator");
   if (!indicator) return;
-  indicator.addEventListener("click", (event) => {
+  const openReminder = (event) => {
     event.stopPropagation();
     state.reminderDialogPeer = root.querySelector("strong")?.textContent ? root.dataset.agentId : "";
-    renderReminderDialog(state.reminderDialogPeer, reminders);
+    renderReminderDialog(state.reminderDialogPeer);
+    clearReminderDialogTimer();
     elements.remindersDialog.showModal();
+    const peer = state.reminderDialogPeer;
+    // Keep one timer tied to the open dialog; closing or changing scope clears it before state changes.
+    state.reminderDialogTimer = setInterval(() => {
+      if (!elements.remindersDialog.open || state.reminderDialogPeer !== peer) {
+        clearReminderDialogTimer();
+        return;
+      }
+      renderReminderDialog(peer);
+    }, 1000);
+  };
+  indicator.addEventListener("click", openReminder);
+  indicator.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    openReminder(event);
   });
 }
 
-function renderReminderDialog(peer, fallback = []) {
+function clearReminderDialogTimer() {
+  if (state.reminderDialogTimer === null) return;
+  clearInterval(state.reminderDialogTimer);
+  state.reminderDialogTimer = null;
+}
+
+function closeReminderDialog() {
+  clearReminderDialogTimer();
+  state.reminderDialogPeer = "";
+  if (elements.remindersDialog?.open) elements.remindersDialog.close();
+}
+
+function renderReminderDialog(peer) {
   const reminders = state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
-  const visible = reminders.length > 0 ? reminders : fallback;
-  elements.remindersDialogBody.replaceChildren(...visible.map((reminder) => {
+  elements.remindersDialogBody.replaceChildren(...reminders.map((reminder) => {
     const item = document.createElement("article");
     item.className = "reminder-list-item";
-    item.innerHTML = `<strong>${escapeHtml(reminder.subject || "Reminder")}</strong><p>${escapeHtml(reminder.body)}</p><small>${escapeHtml(reminder.next_due_at || "")}</small>`;
+    item.innerHTML = `<strong>${escapeHtml(reminder.subject || "Reminder")}</strong><p>${escapeHtml(reminder.body)}</p><small class="reminder-countdown">${escapeHtml(formatReminderCountdown(reminder.next_due_at))}</small><small class="reminder-recurrence">${escapeHtml(reminderRecurrenceLabel(reminder.interval_ms))}</small>`;
     return item;
   }));
 }
