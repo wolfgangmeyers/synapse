@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Import rendered Google Drive meeting notes through the local BCB bridge.
+"""Import Google Drive meeting notes through the local BCB bridge.
 
 The importer reads the already-open Shared with me tab, navigates that same tab
-one document at a time, and restores its exact Drive URL after every document.
-It deliberately does not create, close, move, or group browser tabs.
+one document at a time, triggers Docs File > Download > Plain text (.txt) for
+each candidate, reads the exported file from the local download directory, and
+restores its exact Drive URL after every document. It deliberately does not
+create, close, move, or group browser tabs.
 """
 from __future__ import annotations
 
@@ -17,10 +19,12 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from meeting_notes_store import Note, StoreError, import_note
+from meeting_notes_store import Note, StoreError, import_note, normalize_text
+from run_log import write_run_log
 
 
 DEFAULT_OUTPUT = Path.home() / ".mecha-developer" / "kb" / "meeting-notes"
@@ -107,45 +111,26 @@ DOC_READY_JS = r"""
 }))()
 """
 
-DOC_ENABLE_SCREEN_READER_JS = r"""
+DOC_TITLE_JS = r"""
 (() => {
-  const text = node => (node.innerText || node.textContent || '').trim();
-  const all = [...document.querySelectorAll('*')];
-  const support = all.find(node => /^Turn on screen reader support$/i.test(text(node)));
-  if (support) {
-    (support.closest('button, [role="button"], [role="menuitem"], a') || support).click();
-    return {clicked: true, kind: 'support'};
-  }
-  const accessibility = all.find(node => /^Accessibility$/i.test(text(node)));
-  if (accessibility) {
-    (accessibility.closest('button, [role="button"], [role="menuitem"], a') || accessibility).click();
-    return {clicked: true, kind: 'menu'};
-  }
-  return {clicked: false};
-})()
-"""
-
-DOC_EXTRACT_JS = r"""
-(() => {
-  // Docs can expose a status-only #docs-aria-speakable node after accessibility
-  // support is enabled. Return both rendered views so the caller can choose the
-  // one that contains anchored note content instead of trusting that selector.
-  const screenReader = document.querySelector('#docs-aria-speakable');
-  const body = document.body;
-  const bodyText = body?.innerText || body?.textContent || '';
-  const screenReaderText = screenReader?.innerText || screenReader?.textContent || '';
   const titleNode = document.querySelector('[aria-label="Document title"], input[name="title"]');
   const title = (titleNode?.value || titleNode?.getAttribute('aria-label') ||
     document.title.replace(/\s*-\s*Google Docs\s*$/, '')).trim();
-  return {
-    ok: Boolean(bodyText || screenReaderText),
-    error: bodyText || screenReaderText ? null : 'Docs body and screen-reader text were empty',
-    title,
-    body_text: bodyText,
-    screen_reader_text: screenReaderText,
-    url: location.href,
-  };
+  return {title, url: location.href};
 })()
+"""
+
+DOC_FETCH_EXPORT_JS = r"""
+((fileId) => {
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', '/document/d/' + fileId + '/export?format=txt', false);
+  xhr.send();
+  return {
+    ok: xhr.status >= 200 && xhr.status < 300,
+    status: xhr.status,
+    text: xhr.responseText || '',
+  };
+})
 """
 
 # These are Docs controls, status messages, and accessibility text. They are
@@ -232,6 +217,15 @@ def extract_note_text(title: str, body_text: str, screen_reader_text: str) -> st
     return ''
 
 
+def validate_export_text(text: str) -> str:
+    normalized = normalize_text(text)
+    if not normalized:
+        raise ImporterError("exported text was empty")
+    if len(normalized) < 20:
+        raise ImporterError("exported text was too short to be a meeting note")
+    return normalized
+
+
 class BcbClient:
     """Small stdlib-only client matching browser-console-bridge's contract."""
 
@@ -284,8 +278,14 @@ class BcbClient:
 
 
 class MeetingNoteImporter:
-    def __init__(self, bcb: BcbClient, *, limits: Limits, timeout: float,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+    def __init__(
+        self,
+        bcb: BcbClient,
+        *,
+        limits: Limits,
+        timeout: float,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.bcb = bcb
         self.limits = limits
         self.timeout = timeout
@@ -377,77 +377,81 @@ class MeetingNoteImporter:
         expected_prefix = f"https://docs.google.com/document/d/{candidate.file_id}/"
         if not isinstance(state, dict) or not str(state.get("url", "")).startswith(expected_prefix):
             raise ImporterError(f"Docs navigation for {candidate.file_id} did not reach its document UI")
-        # The observed Docs UI exposes note text only after this accessibility
-        # link is activated. A missing link is safe to ignore: some sessions
-        # already have screen-reader support enabled.
-        enable_result = self.bcb.execute(DOC_ENABLE_SCREEN_READER_JS, tab_id, self.timeout)
-        if isinstance(enable_result, dict) and enable_result.get("clicked"):
-            self.sleep(0.75)
-            # Accessibility is a menu item in some Docs layouts. The first
-            # click opens that menu; the second clicks the actual support link.
-            if enable_result.get("kind") == "menu":
-                self.bcb.execute(DOC_ENABLE_SCREEN_READER_JS, tab_id, self.timeout)
-                self.sleep(0.75)
-        result = self.bcb.execute(DOC_EXTRACT_JS, tab_id, self.timeout)
-        if not isinstance(result, dict):
-            raise ImporterError(f"could not extract rendered text for {candidate.file_id}: {result!r}")
-        title = result.get("title")
-        if not isinstance(title, str) or not title.strip():
-            title = candidate.title
-        body_text = result.get("body_text")
-        if not isinstance(body_text, str):
-            # Keep accepting the old fake/bridge result shape while callers
-            # transition to the two-view DOM result.
-            body_text = result.get("text") if isinstance(result.get("text"), str) else ""
-        screen_reader_text = result.get("screen_reader_text")
-        if not isinstance(screen_reader_text, str):
-            screen_reader_text = ""
-        text = extract_note_text(title, body_text, screen_reader_text)
-        if not text:
-            raise ImporterError(f"rendered text contained no plausible note content for {candidate.file_id}")
+        title_result = self.bcb.execute(DOC_TITLE_JS, tab_id, self.timeout)
+        title = candidate.title
+        if isinstance(title_result, dict):
+            observed = title_result.get("title")
+            if isinstance(observed, str) and observed.strip():
+                title = observed.strip()
+        fetch_code = f"({DOC_FETCH_EXPORT_JS})({json.dumps(candidate.file_id)});"
+        fetch_result = self.bcb.execute(fetch_code, tab_id, self.timeout)
+        if not isinstance(fetch_result, dict) or not fetch_result.get("ok"):
+            raise ImporterError(
+                f"plain-text export fetch failed for {candidate.file_id}: {fetch_result!r}"
+            )
+        raw_text = fetch_result.get("text")
+        if not isinstance(raw_text, str):
+            raise ImporterError(f"plain-text export returned non-text for {candidate.file_id}")
+        text = validate_export_text(raw_text)
         if len(text) > self.limits.max_chars:
             raise ImporterError(f"{candidate.file_id} exceeds max-chars={self.limits.max_chars}")
-        return Note(candidate.file_id, candidate.title, candidate.source_url, text)
+        return Note(candidate.file_id, title, candidate.source_url, text)
 
     def run(self, *, source_tab_id: int, output: Path, dry_run: bool) -> dict[str, int]:
-        self.bcb.health()
-        tabs = self.bcb.list_tabs()
-        source = self._tab(tabs, source_tab_id)
-        if source.get("url") != ORIGINAL_DRIVE_URL:
-            raise ImporterError(
-                f"source tab {source_tab_id} must be exactly {ORIGINAL_DRIVE_URL}"
-            )
-
-        # Discovery completes before the first Docs navigation so a changing
-        # Drive grid cannot add work after the bounded candidate set is chosen.
-        candidates = self.discover(source_tab_id)
+        started_at = datetime.now(timezone.utc)
         counts = {
             key: 0
             for key in ("imported", "updated", "skipped", "would-import", "would-update", "failed")
         }
-        total_chars = 0
-        for candidate in candidates:
-            try:
-                note = self.extract_one(source_tab_id, candidate)
-                total_chars += len(note.normalized_text)
-                if total_chars > self.limits.max_total_chars:
-                    raise ImporterError(
-                        f"run exceeds max-total-chars={self.limits.max_total_chars}"
-                    )
-                outcome = import_note(output, note, dry_run=dry_run)
-                counts[outcome] += 1
-            except (ImporterError, StoreError) as exc:
-                counts["failed"] += 1
-                print(f"failed {candidate.file_id}: {exc}", file=sys.stderr)
-            finally:
-                # The requested per-note close action is intentionally not
-                # implemented: it conflicts with the zero-new-tabs contract.
-                # Keep this caller-owned tab and restore its exact URL instead.
-                self._restore_drive(source_tab_id)
+        candidates: list[Candidate] = []
+        run_error: str | None = None
+        try:
+            self.bcb.health()
+            tabs = self.bcb.list_tabs()
+            source = self._tab(tabs, source_tab_id)
+            if source.get("url") != ORIGINAL_DRIVE_URL:
+                raise ImporterError(
+                    f"source tab {source_tab_id} must be exactly {ORIGINAL_DRIVE_URL}"
+                )
 
-        final_source = self._tab(self.bcb.list_tabs(), source_tab_id)
-        if final_source.get("url") != ORIGINAL_DRIVE_URL:
-            raise ImporterError("source tab did not return to the exact original Drive URL")
+            # Discovery completes before the first Docs navigation so a changing
+            # Drive grid cannot add work after the bounded candidate set is chosen.
+            candidates = self.discover(source_tab_id)
+            total_chars = 0
+            for candidate in candidates:
+                try:
+                    note = self.extract_one(source_tab_id, candidate)
+                    total_chars += len(note.normalized_text)
+                    if total_chars > self.limits.max_total_chars:
+                        raise ImporterError(
+                            f"run exceeds max-total-chars={self.limits.max_total_chars}"
+                        )
+                    outcome = import_note(output, note, dry_run=dry_run)
+                    counts[outcome] += 1
+                except (ImporterError, StoreError) as exc:
+                    counts["failed"] += 1
+                    print(f"failed {candidate.file_id}: {exc}", file=sys.stderr)
+                finally:
+                    self._restore_drive(source_tab_id)
+
+            final_source = self._tab(self.bcb.list_tabs(), source_tab_id)
+            if final_source.get("url") != ORIGINAL_DRIVE_URL:
+                raise ImporterError("source tab did not return to the exact original Drive URL")
+        except (ImporterError, StoreError) as exc:
+            run_error = str(exc)
+            raise
+        finally:
+            write_run_log(
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc),
+                counts=counts,
+                candidate_count=len(candidates),
+                output=output.expanduser(),
+                export_method="authenticated in-page XHR to /export?format=txt",
+                source_tab_id=source_tab_id,
+                dry_run=dry_run,
+                error=run_error,
+            )
         return counts
 
 
@@ -466,7 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.max_files < 1 or args.max_chars < 1 or args.max_total_chars < 1 or args.timeout <= 0:
-        print("limits and timeout must be positive", file=sys.stderr)
+        print("limits and timeouts must be positive", file=sys.stderr)
         return 2
     try:
         counts = MeetingNoteImporter(

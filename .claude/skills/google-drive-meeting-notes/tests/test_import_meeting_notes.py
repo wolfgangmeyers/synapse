@@ -15,10 +15,10 @@ from meeting_notes_store import Note, StoreError, import_note, normalize_text  #
 
 
 class FakeBcb:
-    def __init__(self, candidates, texts=None):
+    def __init__(self, candidates, exports=None):
         self.tabs = [{"id": 10, "url": "https://drive.google.com/drive/u/1/shared-with-me", "title": "Drive"}]
         self.candidates = candidates
-        self.texts = texts or {}
+        self.exports = exports or {}
         self.calls = []
 
     def health(self):
@@ -40,27 +40,18 @@ class FakeBcb:
             return {"ready": True, "on_drive": True, "item_list": True, "candidates": self.candidates}
         if code == importer.DOC_READY_JS:
             return {"ready": True, "url": self.tabs[0]["url"], "line_count": 1}
-        if code == importer.DOC_ENABLE_SCREEN_READER_JS:
-            return {"clicked": False}
-        if code == importer.DOC_EXTRACT_JS:
+        if code == importer.DOC_TITLE_JS:
             file_id = self.tabs[0]["url"].split("/document/d/", 1)[1].split("/", 1)[0]
-            raw = self.texts.get(file_id, {})
-            if isinstance(raw, str):
-                raw = {"body_text": raw}
             title = next(
                 (item["title"] for item in self.candidates if item.get("file_id") == file_id),
                 "",
             )
-            body_text = raw.get("body_text", "")
-            screen_reader_text = raw.get("screen_reader_text", "")
-            return {
-                "ok": bool(body_text or screen_reader_text),
-                "title": raw.get("title", title),
-                "body_text": body_text,
-                "screen_reader_text": screen_reader_text,
-                "url": self.tabs[0]["url"],
-            }
-        raise AssertionError(f"unexpected JS: {code[:80]}")
+            return {"title": title, "url": self.tabs[0]["url"]}
+        if importer.DOC_FETCH_EXPORT_JS in code:
+            file_id = self.tabs[0]["url"].split("/document/d/", 1)[1].split("/", 1)[0]
+            text = self.exports.get(file_id, "")
+            return {"ok": bool(text), "status": 200 if text else 404, "text": text}
+        raise AssertionError(f"unexpected JS: {code[:120]}")
 
 
 class StoreTests(unittest.TestCase):
@@ -135,39 +126,29 @@ Next steps: circulate the revised plan."""
         self.assertNotIn("Saved to Drive", text)
         self.assertNotIn("Image options", text)
 
-    def test_extract_note_text_accepts_two_prose_lines_without_exact_title(self):
-        body = """Discussed roadmap priorities with product and engineering.
-Next steps: circulate the revised plan and confirm owners."""
-        self.assertEqual(
-            importer.extract_note_text("Weekly Product Meeting", body, ""),
-            body,
-        )
-
-    def test_extract_note_text_fails_closed_for_ui_only_views(self):
-        text = importer.extract_note_text(
-            "Weekly Product Meeting",
-            "Saved to Drive\nImage options\nShare",
-            "Saved to Drive\nImage options",
-        )
-        self.assertEqual(text, "")
+    def test_validate_export_text_rejects_empty_or_tiny_exports(self):
+        with self.assertRaisesRegex(importer.ImporterError, "empty"):
+            importer.validate_export_text("   \n")
+        with self.assertRaisesRegex(importer.ImporterError, "too short"):
+            importer.validate_export_text("tiny")
 
     def test_run_uses_only_existing_tab_and_restores_source(self):
-        fake = FakeBcb(
-            self.candidates(),
-            {
-                "a": {
-                    "body_text": "Platform Standup - Notes by Gemini\nSummary\nThe team reviewed this week's release risks.",
-                    "screen_reader_text": "Saved to Drive\nImage options",
-                },
-                "z": {
-                    "body_text": "Weekly Product Meeting\nContent\nProduct and engineering agreed on the next planning cycle.",
-                    "screen_reader_text": "Saved to Drive\nImage options",
-                },
-            },
-        )
         with tempfile.TemporaryDirectory() as temp:
-            service = importer.MeetingNoteImporter(fake, limits=importer.Limits(max_files=10), timeout=1, sleep=lambda _: None)
-            result = service.run(source_tab_id=10, output=Path(temp), dry_run=False)
+            fake = FakeBcb(
+                self.candidates(),
+                {
+                    "a": "Platform Standup - Notes by Gemini\nSummary\nThe team reviewed this week's release risks in detail.",
+                    "z": "Weekly Product Meeting\nContent\nProduct and engineering agreed on the next planning cycle.",
+                },
+            )
+            service = importer.MeetingNoteImporter(
+                fake,
+                limits=importer.Limits(max_files=10),
+                timeout=1,
+                sleep=lambda _: None,
+            )
+            with patch("import_meeting_notes.write_run_log"):
+                result = service.run(source_tab_id=10, output=Path(temp), dry_run=False)
             self.assertEqual(result["imported"], 2)
             self.assertEqual(result["failed"], 0)
             self.assertEqual(fake.tabs, [{"id": 10, "url": importer.ORIGINAL_DRIVE_URL, "title": "Drive"}])
@@ -186,13 +167,16 @@ Next steps: circulate the revised plan and confirm owners."""
             self.assertEqual(sorted(path.name for path in Path(temp).glob("*.md")), ["a.md", "z.md"])
 
     def test_extraction_failure_is_reported_and_tab_restored(self):
-        fake = FakeBcb(
-            self.candidates()[:1],
-            {"z": {"body_text": "Saved to Drive\nImage options", "screen_reader_text": "Share"}},
-        )
         with tempfile.TemporaryDirectory() as temp:
-            service = importer.MeetingNoteImporter(fake, limits=importer.Limits(), timeout=1, sleep=lambda _: None)
-            result = service.run(source_tab_id=10, output=Path(temp), dry_run=True)
+            fake = FakeBcb(self.candidates()[:1], {"z": "too short"})
+            service = importer.MeetingNoteImporter(
+                fake,
+                limits=importer.Limits(),
+                timeout=1,
+                sleep=lambda _: None,
+            )
+            with patch("import_meeting_notes.write_run_log"):
+                result = service.run(source_tab_id=10, output=Path(temp), dry_run=True)
             self.assertEqual(result["failed"], 1)
             self.assertEqual(fake.tabs[0]["url"], "https://drive.google.com/drive/u/1/shared-with-me")
 

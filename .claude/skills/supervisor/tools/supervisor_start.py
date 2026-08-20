@@ -61,10 +61,12 @@ from _tmux import (
     kill_window,
     new_window,
     pane_commands,
+    respawn_window,
     send_command_line,
     send_enter,
     send_text,
     send_text_and_enter,
+    set_remain_on_exit,
     window_exists,
 )
 from worker_runtime_config import (
@@ -639,7 +641,8 @@ def ensure_service_window(window, command, is_healthy, label, *, timeout=SERVICE
                           output=emit, sleep=time.sleep, now=time.monotonic,
                           send_command=send_command_line,
                           exists=window_exists, make_session=ensure_session,
-                          make_window=new_window, remove_window=kill_window):
+                          make_window=new_window, remove_window=kill_window,
+                          restart_window=respawn_window, keep_window=set_remain_on_exit):
     """Start a loopback service in its own tmux window, and verify it is answering.
 
     Returns True when this call started it, False when it was already healthy. Raises
@@ -649,25 +652,29 @@ def ensure_service_window(window, command, is_healthy, label, *, timeout=SERVICE
     exists so a caller can defer side effects it needs only when something is actually
     started, such as creating the router database's parent directory.
 
-    A window that already exists is never typed into. If the service is not answering and
-    its window is there, something is already in that pane, and pasting a second command
-    on top of it is worse than stopping and saying so.
+    Service windows use ``remain-on-exit`` so a process exit leaves the window in place.
+    When the window already exists but the service is down, ``respawn-window`` replaces
+    the pane command instead of typing into a live shell.
     """
     if is_healthy():
         output(f"{label} already up.")
         return False
     make_session()
-    if exists(window):
-        raise StartupError(
-            f"{label} is not answering, but tmux window '{SESSION}:{window}' already exists. "
-            f"Nothing was sent into it. Look at it with: tmux attach -t {SESSION} and select "
-            f"'{window}'."
-        )
     command = command() if callable(command) else command
-    make_window(window)
-    send_command(window, command)
+    restarted = False
+    if exists(window):
+        keep_window(window, True)
+        restart_window(window, command)
+        restarted = True
+    else:
+        make_window(window)
+        keep_window(window, True)
+        send_command(window, command)
     if wait_until(is_healthy, timeout, sleep=sleep, now=now):
-        output(f"Started {label} in '{SESSION}:{window}'.")
+        if restarted:
+            output(f"Restarted {label} in '{SESSION}:{window}'.")
+        else:
+            output(f"Started {label} in '{SESSION}:{window}'.")
         return True
     # Remove the window this call created before giving up. Left behind, it trips the
     # refusal above on the next run, and one transient failure would turn the start path
