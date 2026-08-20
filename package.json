@@ -13,6 +13,7 @@
     "desktop:package": "node desktop/electron/package.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.82.1",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "markdown-it": "14.3.0",

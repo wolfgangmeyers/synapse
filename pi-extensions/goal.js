@@ -1,3 +1,5 @@
+import { complete } from "@earendil-works/pi-ai/compat";
+
 const GOAL_STATE_ENTRY = "goal-state";
 const GOAL_RESULT_TYPE = "goal-result";
 const GOAL_UPDATE_TYPE = "goal-update";
@@ -323,18 +325,27 @@ export function createGoalExtension(pi) {
         // the evaluator call.
         if (ownerActivityState(ctx) === "suppressed") return;
         evaluatorCalls = Math.min(evaluatorCalls + 1, MAX_EVALUATOR_CALLS);
-        const response = await ctx.modelRegistry.complete(
-          ctx.model,
-          {
-            systemPrompt: EVALUATOR_PROMPT.replace("<goal description>", goal),
-            messages: [{
-              role: "user",
-              content: [{ type: "text", text: `Goal: ${goal}\n\nActive conversation:\n${boundedActiveContext(ctx).map((message) => `${message.role}: ${message.content[0].text}`).join("\n\n")}\n\nReturn exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>.` }],
-              timestamp: Date.now(),
-            }],
-          },
-          { signal: controller.signal },
-        );
+        const request = {
+          systemPrompt: EVALUATOR_PROMPT.replace("<goal description>", goal),
+          messages: [{
+            role: "user",
+            content: [{ type: "text", text: `Goal: ${goal}\n\nActive conversation:\n${boundedActiveContext(ctx).map((message) => `${message.role}: ${message.content[0].text}`).join("\n\n")}\n\nReturn exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>.` }],
+            timestamp: Date.now(),
+          }],
+        };
+        let response;
+        if (ctx.model?.provider === "test" && typeof ctx.modelRegistry?.complete === "function") {
+          response = await ctx.modelRegistry.complete(ctx.model, request, { signal: controller.signal });
+        } else {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+          if (!auth.ok) throw new Error(auth.error);
+          response = await complete(ctx.model, request, {
+            signal: controller.signal,
+            apiKey: auth.apiKey,
+            headers: auth.headers,
+            env: auth.env,
+          });
+        }
         if (runGeneration !== generation || controller.signal.aborted) return;
         const { outcome, rationale } = responseEvaluation(response);
         const wakeup = outcome === "NOT_DONE"
