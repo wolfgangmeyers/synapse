@@ -404,9 +404,9 @@ test("router web UI accepts the configured remote host over HTTP and HTTPS same-
     request.once("error", reject);
     request.end();
   });
-  const openWithOrigin = async (origin) => {
+  const openWithOrigin = async (origin, requestHost = host) => {
     const socket = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
-      headers: { host },
+      headers: { host: requestHost },
       origin,
     });
     await onceOpen(socket);
@@ -416,8 +416,12 @@ test("router web UI accepts the configured remote host over HTTP and HTTPS same-
   try {
     ui = await startRouterWebUi({ router: router.httpUrl, allowedHost: host, output: () => {} });
     assert.equal(await requestWithHost(ui.httpUrl, "/ui/config"), 200);
+    assert.equal(await requestWithHost(ui.httpUrl, "/ui/config", { host: "127.0.0.1" }), 200);
+    assert.equal(await requestWithHost(ui.httpUrl, "/ui/config", { host: "localhost" }), 200);
     await openWithOrigin(`http://${host}`);
     await openWithOrigin(`https://${host}`);
+    await openWithOrigin("http://127.0.0.1", "127.0.0.1");
+    await openWithOrigin("https://localhost", "localhost");
     assert.equal(await requestWithHost(ui.httpUrl, "/ui/config", { host: "other.example" }), 403);
     const hostile = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
       headers: { host },
