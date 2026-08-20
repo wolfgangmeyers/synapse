@@ -97,6 +97,17 @@ def new_window(name):
     run(["new-window", "-d", "-t", f"={SESSION}", "-n", name])
 
 
+def set_remain_on_exit(window, enabled=True):
+    """Keep a service window open after its foreground process exits."""
+    value = "on" if enabled else "off"
+    run(["set-window-option", "-t", f"{SESSION}:{window}", "remain-on-exit", value], check=False)
+
+
+def respawn_window(window, command):
+    """Replace the pane command in *window* without destroying the window."""
+    run(["respawn-window", "-k", "-t", f"{SESSION}:{window}", command], check=False)
+
+
 def pane_commands(window):
     """Foreground process names for every pane in *window*, outermost list order.
 

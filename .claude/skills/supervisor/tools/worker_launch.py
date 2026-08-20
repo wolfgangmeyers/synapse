@@ -170,6 +170,19 @@ def resolve_pi_provider(model, models_store_path=None):
     return PI_PROVIDER
 
 
+def split_pi_model_spec(model):
+    """Return an explicit provider and model when the CLI spec includes one."""
+    if model is None:
+        return None, None
+    model = model.strip()
+    if "/" not in model:
+        return None, model
+    provider, model_id = model.split("/", 1)
+    if not provider or not model_id:
+        return None, model
+    return provider, model_id
+
+
 def _validate_compaction_levels(levels):
     if not isinstance(levels, list) or not levels:
         raise ValueError("compaction policy must define at least one percentage level")
@@ -593,8 +606,9 @@ def main():
         if not args.model:
             print("Error: --model must not be empty", file=sys.stderr)
             sys.exit(1)
-    pi_model = args.model or PI_MODEL
-    pi_provider = resolve_pi_provider(args.model)
+    explicit_provider, explicit_model = split_pi_model_spec(args.model)
+    pi_model = explicit_model or PI_MODEL
+    pi_provider = explicit_provider or resolve_pi_provider(args.model)
     cursor_model = None
     if args.agent == "cursor":
         try:
