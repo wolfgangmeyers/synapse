@@ -1,5 +1,3 @@
-import { complete } from "@earendil-works/pi-ai/compat";
-
 const GOAL_STATE_ENTRY = "goal-state";
 const GOAL_RESULT_TYPE = "goal-result";
 const GOAL_UPDATE_TYPE = "goal-update";
@@ -98,7 +96,7 @@ function responseEvaluation(response) {
     : undefined;
   const rawReason = lines.length === 2 ? lines[1].match(/^REASON: (.*)$/)?.[1] : undefined;
   if (!OUTCOMES.has(verdict) || !rawReason || rawReason.trim().length === 0 || rawReason.length > MAX_RATIONALE_CHARS) {
-    return { outcome: "NOT_DONE", rationale: "Invalid evaluator output." };
+    return { outcome: "NOT_DONE", rationale: "Invalid evaluator output: " + JSON.stringify(response) };
   }
   return {
     outcome: verdict,
@@ -112,6 +110,34 @@ function goalResultContent(wakeup, outcome, rationale) {
 
 function responseOutcome(response) {
   return responseEvaluation(response).outcome;
+}
+
+function errorDetails(error) {
+  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+async function completeEvaluator(ctx, request, signal) {
+  const registry = ctx.modelRegistry;
+  const provider = registry?.getProvider?.(ctx.model?.provider);
+  if (typeof provider?.streamSimple === "function") {
+    const auth = await registry.getApiKeyAndHeaders(ctx.model);
+    if (!auth.ok) throw new Error(auth.error);
+    return provider.streamSimple(ctx.model, request, {
+      signal,
+      apiKey: auth.apiKey,
+      headers: auth.headers,
+      env: auth.env,
+    }).result();
+  }
+  if (typeof registry?.complete === "function") {
+    return registry.complete(ctx.model, request, { signal });
+  }
+  throw new Error("Model registry cannot evaluate the active goal");
 }
 
 export { boundedActiveContext, responseEvaluation, responseOutcome };
@@ -241,7 +267,8 @@ export function createGoalExtension(pi) {
         } else {
           skipNextSettle = true;
         }
-      } catch {
+      } catch(e) {
+        console.error(e);
         skipNextSettle = false;
       }
     }, 0);
@@ -333,19 +360,7 @@ export function createGoalExtension(pi) {
             timestamp: Date.now(),
           }],
         };
-        let response;
-        if (ctx.model?.provider === "test" && typeof ctx.modelRegistry?.complete === "function") {
-          response = await ctx.modelRegistry.complete(ctx.model, request, { signal: controller.signal });
-        } else {
-          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-          if (!auth.ok) throw new Error(auth.error);
-          response = await complete(ctx.model, request, {
-            signal: controller.signal,
-            apiKey: auth.apiKey,
-            headers: auth.headers,
-            env: auth.env,
-          });
-        }
+        const response = await completeEvaluator(ctx, request, controller.signal);
         if (runGeneration !== generation || controller.signal.aborted) return;
         const { outcome, rationale } = responseEvaluation(response);
         const wakeup = outcome === "NOT_DONE"
@@ -359,17 +374,17 @@ export function createGoalExtension(pi) {
           display: true,
           details: { goal, outcome, rationale },
         });
-      } catch {
+      } catch(e) {
         if (runGeneration !== generation || controller.signal.aborted) return;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
           content: goalResultContent(
             `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`,
             "NOT_DONE",
-            "Evaluator unavailable.",
+            "Evaluator unavailable: " + errorDetails(e),
           ),
           display: true,
-          details: { goal, outcome: "NOT_DONE", rationale: "Evaluator unavailable." },
+          details: { goal, outcome: "NOT_DONE", rationale: "Evaluator unavailable" },
         });
       } finally {
         if (activeAbort === controller) activeAbort = undefined;

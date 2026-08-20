@@ -7,7 +7,7 @@ const GOAL_ENTRY = "goal-state";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 const MAX_CONTEXT_BYTES = 24_000;
 
-function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }, complete, onSendMessage, sendMessage, sessionId } = {}) {
+function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }, complete, model = { provider: "test", id: "goal" }, provider, onSendMessage, sendMessage, sessionId } = {}) {
   const handlers = new Map();
   const eventHandlers = new Map();
   const emittedEvents = [];
@@ -34,8 +34,12 @@ function fixture({ response = { content: [{ type: "text", text: "VERDICT: COMPLE
     },
   };
   const context = {
-    model: { provider: "test", id: "goal" },
-    modelRegistry: { complete: complete ?? (async () => response) },
+    model,
+    modelRegistry: {
+      complete: complete ?? (async () => response),
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "cursor-api-key", headers: {}, env: {} }),
+      getProvider: () => provider,
+    },
     sessionManager: {
       getBranch: () => branch,
       buildContextEntries: () => branch,
@@ -81,14 +85,14 @@ test("evaluator parses only a strict verdict line and bounds the visible rationa
   });
   assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: COMPLETED extra\nREASON: This must not change the outcome." }] }), {
     outcome: "NOT_DONE",
-    rationale: "Invalid evaluator output.",
+    rationale: 'Invalid evaluator output: {"content":[{"type":"text","text":"VERDICT: COMPLETED extra\\nREASON: This must not change the outcome."}]}',
   });
   assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: one\nREASON: two" }] }), {
     outcome: "NOT_DONE",
-    rationale: "Invalid evaluator output.",
+    rationale: 'Invalid evaluator output: {"content":[{"type":"text","text":"VERDICT: NOT_DONE\\nREASON: one\\nREASON: two"}]}',
   });
   assert.equal(responseEvaluation({ content: [{ type: "text", text: "REASON: Missing verdict" }] }).outcome, "NOT_DONE");
-  assert.equal(responseEvaluation({ content: [{ type: "text", text: `VERDICT: NOT_DONE\nREASON: ${"x".repeat(300)}` }] }).rationale, "Invalid evaluator output.");
+  assert.match(responseEvaluation({ content: [{ type: "text", text: `VERDICT: NOT_DONE\nREASON: ${"x".repeat(300)}` }] }).rationale, /^Invalid evaluator output: /);
 });
 
 test("goal tool registers its action schema and shares state with /goal", async () => {
@@ -182,6 +186,35 @@ test("settled goal evaluation forwards bounded tool-result text without non-text
   assert.doesNotMatch(context, /must stay redacted|codex_search|search-call/);
 });
 
+test("settled goal evaluation uses the registered provider stream instead of compat", async () => {
+  const calls = [];
+  const current = fixture({
+    model: { provider: "cursor", api: "cursor-sdk", id: "gpt-5.6-luna" },
+    complete: async () => {
+      throw new Error("compat path must not be used");
+    },
+    provider: {
+      streamSimple(model, request, options) {
+        calls.push({ model, request, options });
+        return {
+          result: async () => ({ content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] }),
+        };
+      },
+    },
+  });
+  await setGoal(current, "use the Cursor provider");
+
+  await settle(current);
+  await flushDeferred();
+  await flushDeferred();
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].model, current.context.model);
+  assert.equal(calls[0].options.apiKey, "cursor-api-key");
+  assert.ok(calls[0].options.signal instanceof AbortSignal);
+  assert.match(current.sent[0].message.content, /VERDICT: COMPLETED/);
+});
+
 test("settled goal evaluation uses bounded active context and exact steer wakeup options", async () => {
   const calls = [];
   const current = fixture({ complete: async (model, request, options) => {
@@ -252,7 +285,7 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
     await settle(current);
     await flushDeferred();
     await flushDeferred();
-    assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.\nVERDICT: NOT_DONE\nREASON: Invalid evaluator output.");
+    assert.match(current.sent[0].message.content, /^Goal check: NOT_DONE\. Resume working toward this goal: make progress\.\nVERDICT: NOT_DONE\nREASON: Invalid evaluator output: /);
   }
 
   let reject = true;
@@ -261,7 +294,7 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
   await settle(current);
   await flushDeferred();
   await flushDeferred();
-  assert.equal(current.sent[0].message.content, "Goal check: NOT_DONE. Resume working toward this goal: make progress.\nVERDICT: NOT_DONE\nREASON: Evaluator unavailable.");
+  assert.match(current.sent[0].message.content, /^Goal check: NOT_DONE\. Resume working toward this goal: make progress\.\nVERDICT: NOT_DONE\nREASON: Evaluator unavailable: Error: provider unavailable/);
 });
 
 test("BLOCKED wakeup tells the worker to contact the supervisor", async () => {

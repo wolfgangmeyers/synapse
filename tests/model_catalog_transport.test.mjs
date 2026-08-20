@@ -30,7 +30,7 @@ function nextFrame(socket, predicate = () => true, timeoutMs = 1_000) {
   });
 }
 
-async function connect(wsUrl, { agentId, instanceId, sync = false } = {}) {
+async function connect(wsUrl, { agentId, instanceId, sync = false, agentRole } = {}) {
   const socket = new WebSocket(wsUrl);
   await new Promise((resolve, reject) => {
     socket.once("open", resolve);
@@ -43,6 +43,7 @@ async function connect(wsUrl, { agentId, instanceId, sync = false } = {}) {
     type: "register",
     agent_id: agentId,
     instance_id: instanceId,
+    ...(agentRole === undefined ? {} : { agent_role: agentRole }),
     ...(sync ? { conversation_sync: "v1" } : {}),
   }));
   return { socket, registered: await registered };
@@ -202,6 +203,16 @@ test("model catalog frames validate and activity frames stay lightweight", () =>
   assert.throws(() => validateClientFrame({
     ...modelControlResult,
     available_models: [{ provider: "provider", id: "model" }],
+  }));
+  assert.throws(() => validateClientFrame({
+    ...modelControlResult,
+    error_code: "unexpected_error",
+  }));
+  assert.throws(() => validateClientFrame({
+    ...modelControlResult,
+    accepted: false,
+    error_code: "model_unavailable",
+    current_model: undefined,
   }));
   const maximumCatalog = Array.from({ length: 1_000 }, (_, index) => ({
     provider: "provider",
@@ -557,7 +568,7 @@ test("router fences model control by source lease and connected target", async (
   const app = await routerFixture();
   const sockets = [];
   try {
-    const source = await connect(app.wsUrl, { agentId: "source-agent", instanceId: "source-instance" });
+    const source = await connect(app.wsUrl, { agentId: "source-agent", instanceId: "source-instance", agentRole: "user_interaction" });
     sockets.push(source.socket);
     const target = await connect(app.wsUrl, { agentId: "target-agent", instanceId: "target-instance" });
     sockets.push(target.socket);
@@ -580,7 +591,7 @@ test("router fences model control by source lease and connected target", async (
     await closeSocket(source.socket);
     sockets.splice(sockets.indexOf(source.socket), 1);
 
-    const replacementSource = await connect(app.wsUrl, { agentId: "source-agent", instanceId: "replacement-source-instance" });
+    const replacementSource = await connect(app.wsUrl, { agentId: "source-agent", instanceId: "replacement-source-instance", agentRole: "user_interaction" });
     sockets.push(replacementSource.socket);
     await closeSocket(target.socket);
     sockets.splice(sockets.indexOf(target.socket), 1);
@@ -632,7 +643,7 @@ test("router does not acknowledge a model control when the target send throws", 
   const sockets = [];
   const originalSend = WebSocket.prototype.send;
   try {
-    const source = await connect(app.wsUrl, { agentId: "send-source", instanceId: "send-source-instance" });
+    const source = await connect(app.wsUrl, { agentId: "send-source", instanceId: "send-source-instance", agentRole: "user_interaction" });
     sockets.push(source.socket);
     const target = await connect(app.wsUrl, { agentId: "send-target", instanceId: "send-target-instance" });
     sockets.push(target.socket);
@@ -706,7 +717,7 @@ test("router accepts one exact model-control result and rejects mismatches, dupl
   });
   const sockets = [];
   try {
-    const source = await connect(app.wsUrl, { agentId: "source-agent", instanceId: "source-instance" });
+    const source = await connect(app.wsUrl, { agentId: "source-agent", instanceId: "source-instance", agentRole: "user_interaction" });
     sockets.push(source.socket);
     const target = await connect(app.wsUrl, { agentId: "target-agent", instanceId: "target-instance" });
     sockets.push(target.socket);
@@ -858,7 +869,7 @@ test("router rejects a result after the exact source lease expires", async () =>
   });
   const sockets = [];
   try {
-    const source = await connect(app.wsUrl, { agentId: "expiring-source", instanceId: "expiring-source-instance" });
+    const source = await connect(app.wsUrl, { agentId: "expiring-source", instanceId: "expiring-source-instance", agentRole: "user_interaction" });
     sockets.push(source.socket);
     nowMs += 500;
     const target = await connect(app.wsUrl, { agentId: "live-target", instanceId: "live-target-instance" });
@@ -918,11 +929,11 @@ test("router bounds pending model controls and cleans them up when either exact 
   });
   const sockets = [];
   try {
-    const source = await connect(app.wsUrl, { agentId: "source-one", instanceId: "source-one-instance" });
+    const source = await connect(app.wsUrl, { agentId: "source-one", instanceId: "source-one-instance", agentRole: "user_interaction" });
     sockets.push(source.socket);
-    const sourceTwo = await connect(app.wsUrl, { agentId: "source-two", instanceId: "source-two-instance" });
+    const sourceTwo = await connect(app.wsUrl, { agentId: "source-two", instanceId: "source-two-instance", agentRole: "user_interaction" });
     sockets.push(sourceTwo.socket);
-    const sourceThree = await connect(app.wsUrl, { agentId: "source-three", instanceId: "source-three-instance" });
+    const sourceThree = await connect(app.wsUrl, { agentId: "source-three", instanceId: "source-three-instance", agentRole: "user_interaction" });
     sockets.push(sourceThree.socket);
     const target = await connect(app.wsUrl, { agentId: "target-one", instanceId: "target-one-instance" });
     sockets.push(target.socket);
@@ -965,7 +976,7 @@ test("router bounds pending model controls and cleans them up when either exact 
 
     await closeSocket(source.socket);
     sockets.splice(sockets.indexOf(source.socket), 1);
-    const sourceReplacement = await connect(app.wsUrl, { agentId: "source-one", instanceId: "source-one-instance" });
+    const sourceReplacement = await connect(app.wsUrl, { agentId: "source-one", instanceId: "source-one-instance", agentRole: "user_interaction" });
     sockets.push(sourceReplacement.socket);
     const afterSourceCleanup = nextFrame(target.socket, (frame) => frame.type === "model_control" && frame.control_id === "control-after-source-close");
     sendControl(sourceReplacement, "target-one", "control-after-source-close");

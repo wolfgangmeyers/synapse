@@ -6,6 +6,7 @@ import {
   historyRequestMatches,
   matchesActiveScope,
   mergeAgentModelProjection,
+  mergeAgentModelSnapshot,
   modelControlStatusTitle,
   normalizeModelSummaries,
   normalizeModelSummary,
@@ -60,6 +61,8 @@ const state = {
   messages: {},
   historyRequests: new Map(),
   pendingModelControls: new Map(),
+  deferredModelCatalogs: new Map(),
+  modelControlUpdatedAtMs: new Map(),
   draftPeers: new Set(),
   expandedSubagents: new Set(),
   lastLifecycleSnapshotVersion: 0,
@@ -258,7 +261,7 @@ async function handleEvent(event) {
   if (event.type === "agents") {
     state.agents = event.agents
       .filter((agent) => agent.agent_id !== state.agentId)
-      .map((agent) => mergeAgentSnapshot(agent));
+      .map((agent) => mergeAgentSnapshot(agent, event.generatedAt));
     if (Number.isSafeInteger(event.activitySnapshotVersion)) state.lastLifecycleSnapshotVersion = Math.max(state.lastLifecycleSnapshotVersion, event.activitySnapshotVersion);
     renderAgents();
     renderConversation();
@@ -293,12 +296,16 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "agent_model_catalog") {
-    updateAgentModelCatalog(event.agent, event.instanceId, {
+    const projection = {
       ...(Object.hasOwn(event, "currentModel") ? { currentModel: event.currentModel } : {}),
       availableModels: event.availableModels,
       totalCount: event.totalCount,
       truncated: event.truncated,
-    });
+    };
+    if (normalizeModelSummaries(projection.availableModels).length === 0
+      && deferEmptyModelCatalog(event.agent, event.instanceId, projection)) return;
+    clearDeferredModelCatalog(event.agent, event.instanceId);
+    updateAgentModelCatalog(event.agent, event.instanceId, projection);
     return;
   }
   if (event.type === "model_control_result") {
@@ -306,8 +313,19 @@ async function handleEvent(event) {
     if (settled === undefined) return;
     const targetAgentId = settled.pending.peer;
     const projection = settled.projection;
+    if (normalizeModelSummary(event.currentModel) !== undefined) {
+      state.modelControlUpdatedAtMs.set(targetAgentId, Date.now());
+    }
     if (Object.keys(projection).length > 0) {
       updateAgentModelCatalog(targetAgentId, event.instanceId, projection, { render: false, replaceInstance: false });
+    }
+    const deferredCatalogKey = modelCatalogKey(targetAgentId, settled.pending.instanceId);
+    if (!hasPendingModelControl(targetAgentId, settled.pending.instanceId)) {
+      const deferredCatalog = state.deferredModelCatalogs.get(deferredCatalogKey);
+      if (deferredCatalog !== undefined) {
+        state.deferredModelCatalogs.delete(deferredCatalogKey);
+        updateAgentModelCatalog(targetAgentId, settled.pending.instanceId, deferredCatalog, { render: false, replaceInstance: false });
+      }
     }
     if (modelPickerSelection?.controlId === event.controlId) modelPickerSelection = undefined;
     if (targetAgentId === state.selectedPeer) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
@@ -408,6 +426,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
   state.agents = [];
+  state.modelControlUpdatedAtMs.clear();
   state.reminders = [];
   state.expandedSubagents.clear();
   state.lastLifecycleSnapshotVersion = 0;
@@ -466,9 +485,10 @@ function setStatus(stateName, detail, agentId = state.agentId, routerUrl = state
 
 function showModelControlStatus(accepted, targetAgentId, currentModel, errorCode) {
   const target = targetAgentId || "agent";
-  elements.statusDot.className = `status-dot ${accepted ? "connected" : "offline"}`;
-  elements.statusTitle.textContent = modelControlStatusTitle(accepted, errorCode);
-  elements.statusDetail.textContent = accepted
+  const confirmed = accepted === true && currentModel !== undefined;
+  elements.statusDot.className = `status-dot ${confirmed ? "connected" : "offline"}`;
+  elements.statusTitle.textContent = modelControlStatusTitle(confirmed, errorCode);
+  elements.statusDetail.textContent = confirmed
     ? `${target} · ${currentModel === undefined ? "unknown model" : modelKey(currentModel)}`
     : `${target} · ${errorCode || "unavailable_model"}`;
 }
@@ -672,6 +692,43 @@ function updateAgentModelCatalog(peer, instanceId, projection, { render = true, 
     renderAgents();
     renderConversation();
     if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
+  }
+}
+
+function modelCatalogKey(peer, instanceId) {
+  return `${peer}\u001f${instanceId ?? ""}`;
+}
+
+function pendingModelControlMatchesAgent(pending, peer, instanceId) {
+  return pending?.peer === peer
+    && (pending.instanceId === undefined || instanceId === undefined || pending.instanceId === instanceId);
+}
+
+function pendingModelControlsForAgent(peer, instanceId) {
+  return [...state.pendingModelControls.values()].filter((pending) => pendingModelControlMatchesAgent(pending, peer, instanceId));
+}
+
+function hasPendingModelControl(peer, instanceId) {
+  return pendingModelControlsForAgent(peer, instanceId).length > 0;
+}
+
+function deferEmptyModelCatalog(peer, instanceId, projection) {
+  const pendingControls = pendingModelControlsForAgent(peer, instanceId);
+  if (pendingControls.length === 0) return false;
+  for (const pending of pendingControls) {
+    state.deferredModelCatalogs.set(modelCatalogKey(peer, pending.instanceId), {
+      availableModels: [],
+      totalCount: projection.totalCount,
+      truncated: projection.truncated,
+    });
+  }
+  return true;
+}
+
+function clearDeferredModelCatalog(peer, instanceId) {
+  state.deferredModelCatalogs.delete(modelCatalogKey(peer, instanceId));
+  for (const pending of pendingModelControlsForAgent(peer, instanceId)) {
+    state.deferredModelCatalogs.delete(modelCatalogKey(peer, pending.instanceId));
   }
 }
 
@@ -1276,31 +1333,34 @@ function applyLifecycleUpdateEvent(agent, routerVersion, { render = true } = {})
   if (render) { renderAgents(); renderConversation(); }
 }
 
-function mergeAgentSnapshot(agent) {
+function mergeAgentSnapshot(agent, snapshotGeneratedAt) {
   const current = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
-  const sameInstance = current !== undefined
-    && (agent.instance_id === undefined || current.instance_id === undefined || agent.instance_id === current.instance_id);
-  const availableModelsProvided = Object.hasOwn(agent, "available_models");
-  const currentModelProvided = Object.hasOwn(agent, "current_model");
-  const modelFields = {
-    ...(currentModelProvided
-      ? { current_model: normalizeModelSummary(agent.current_model) }
-      : (sameInstance && current?.current_model !== undefined ? { current_model: current.current_model } : {})),
-    ...(availableModelsProvided
-      ? { available_models: normalizeModelSummaries(agent.available_models) }
-      : (sameInstance && current?.available_models !== undefined ? { available_models: current.available_models } : {})),
-    model_catalog_total_count: availableModelsProvided
-      ? Math.max(
-        normalizeModelSummaries(agent.available_models).length,
-        Number.isSafeInteger(agent.model_catalog_total_count)
-          ? agent.model_catalog_total_count
-          : normalizeModelSummaries(agent.available_models).length,
-      )
-      : (sameInstance ? current?.model_catalog_total_count ?? 0 : 0),
-    model_catalog_truncated: availableModelsProvided
-      ? agent.model_catalog_truncated === true
-      : (sameInstance ? current?.model_catalog_truncated === true : false),
-  };
+  const snapshotGeneratedAtMs = Date.parse(snapshotGeneratedAt);
+  const modelControlUpdatedAtMs = state.modelControlUpdatedAtMs.get(agent.agent_id);
+  const pendingEmptyCatalog = Object.hasOwn(agent, "available_models")
+    && normalizeModelSummaries(agent.available_models).length === 0
+    && deferEmptyModelCatalog(agent.agent_id, agent.instance_id, {
+      availableModels: agent.available_models,
+      totalCount: agent.model_catalog_total_count,
+      truncated: agent.model_catalog_truncated,
+    });
+  const modelSnapshot = pendingEmptyCatalog && current?.available_models !== undefined
+    ? {
+      ...agent,
+      available_models: current.available_models,
+      model_catalog_total_count: current.model_catalog_total_count,
+      model_catalog_truncated: current.model_catalog_truncated,
+    }
+    : agent;
+  const modelFields = mergeAgentModelSnapshot(current, modelSnapshot, {
+    snapshotGeneratedAtMs,
+    modelControlUpdatedAtMs,
+  });
+  if (Number.isFinite(snapshotGeneratedAtMs)
+    && Number.isFinite(modelControlUpdatedAtMs)
+    && snapshotGeneratedAtMs >= modelControlUpdatedAtMs) {
+    state.modelControlUpdatedAtMs.delete(agent.agent_id);
+  }
   const projectedAgent = { ...agent, ...modelFields };
   const normalizedGoal = normalizeGoalProjection(agent.goal);
   const goalFields = normalizedGoal === undefined ? {} : { goal: normalizedGoal };
@@ -1371,6 +1431,7 @@ function selectModel(model) {
     model: { provider: model.provider, id: model.id },
   })) {
     state.pendingModelControls.delete(controlId);
+    state.deferredModelCatalogs.delete(modelCatalogKey(peer, targetInstanceId));
     modelPickerSelection = undefined;
     renderModelControls(state.agents.find((agent) => agent.agent_id === peer));
     showModelControlStatus(false, peer, undefined, "ui_not_connected");
@@ -1379,6 +1440,7 @@ function selectModel(model) {
 
 function clearPendingModelControls({ render = true } = {}) {
   state.pendingModelControls.clear();
+  state.deferredModelCatalogs.clear();
   modelPickerSelection = undefined;
   if (render) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
 }

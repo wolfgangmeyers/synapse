@@ -219,12 +219,14 @@ function createBrowserClient(browser, {
     pendingControlsByControlId.delete(controlId);
     pendingControlsByRequestId.delete(pending.requestId);
     clearTimeout(pending.timer);
+    const accepted = result.accepted === true;
     sendBrowser({
       type: "model_control_result",
       controlId,
       targetAgentId: pending.targetAgentId,
-      accepted: result.accepted,
-      ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+      accepted,
+      ...(!accepted && result.errorCode === undefined ? { errorCode: "model_control_failed" } : {}),
+      ...(!accepted && result.errorCode !== undefined ? { errorCode: result.errorCode } : {}),
       ...(result.instanceId === undefined ? {} : { instanceId: result.instanceId }),
       ...(result.currentModel === undefined ? {} : { currentModel: result.currentModel }),
       agentId: configured.agentId,

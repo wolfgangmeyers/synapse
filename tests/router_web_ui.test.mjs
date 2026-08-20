@@ -19,6 +19,7 @@ import {
   matchesActiveScope,
   matchingPendingModelControl,
   mergeAgentModelProjection,
+  mergeAgentModelSnapshot,
   modelControlStatusTitle,
   normalizeModelSummaries,
   upsertLifecycleAgent,
@@ -93,6 +94,7 @@ test("matches model control results only to the pending control and target", () 
 
 test("model control status distinguishes confirmed rejection from transport uncertainty", () => {
   assert.equal(modelControlStatusTitle(true), "Model changed");
+  assert.equal(modelControlStatusTitle("true"), "Model change not confirmed");
   assert.equal(modelControlStatusTitle(false, "model_unavailable"), "Model change rejected");
   for (const errorCode of ["control_timeout", "router_disconnected", "router_reconnecting", "ui_not_connected"]) {
     assert.equal(modelControlStatusTitle(false, errorCode), "Model change not confirmed");
@@ -157,6 +159,33 @@ test("model control state applies authoritative current models without replacing
   assert.equal(stale.changed, false);
   assert.deepEqual(stale.agents[0].current_model, current);
   assert.deepEqual(normalizeModelSummaries([{ provider: "provider", id: `${supplementaryId}🚀` }]), []);
+});
+
+test("model control state keeps the optimistic picker projection across stale snapshots", () => {
+  const current = {
+    agent_id: "target-agent",
+    instance_id: "target-instance",
+    current_model: { provider: "provider", id: "target" },
+    available_models: [
+      { provider: "provider", id: "current" },
+      { provider: "provider", id: "target" },
+    ],
+    model_catalog_total_count: 2,
+    model_catalog_truncated: false,
+  };
+  const stale = mergeAgentModelSnapshot(current, {
+    ...current,
+    current_model: { provider: "provider", id: "current" },
+    available_models: [],
+    model_catalog_total_count: 0,
+  }, {
+    snapshotGeneratedAtMs: 100,
+    modelControlUpdatedAtMs: 200,
+  });
+
+  assert.deepEqual(stale.current_model, current.current_model);
+  assert.deepEqual(stale.available_models, current.available_models);
+  assert.equal(stale.model_catalog_total_count, current.model_catalog_total_count);
 });
 
 const renderMarkdown = (body) => markdownToSafeHtml(body, MarkdownIt);
@@ -330,6 +359,16 @@ test("router and web UI reject DNS-rebinding authorities", async () => {
 
     ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
     assert.equal(await requestWithHost(ui.httpUrl, "/ui/config", "rebind.example:8787"), 403);
+
+    const hostileOriginSocket = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
+      origin: "http://hostile.example",
+    });
+    const hostileOriginStatus = await new Promise((resolve, reject) => {
+      hostileOriginSocket.once("unexpected-response", (_request, response) => resolve(response.statusCode));
+      hostileOriginSocket.once("open", () => reject(new Error("hostile-origin socket unexpectedly opened")));
+      hostileOriginSocket.once("error", () => {});
+    });
+    assert.equal(hostileOriginStatus, 403);
 
     const rejectedSocket = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
       headers: { host: "rebind.example:8787" },
@@ -768,6 +807,37 @@ test("router web UI removes an expired lifecycle child from a v2 update and reco
   }
 });
 
+test("router rejects model controls submitted by ordinary connected agents", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  try {
+    const source = await connectRouterAgent(router.wsUrl, "ordinary-source", sockets);
+    const target = await connectRouterAgent(router.wsUrl, "ordinary-target", sockets);
+    const requestId = "ordinary-model-control";
+    const rejected = nextRouterFrame(source.socket, (frame) => frame.type === "error" && frame.request_id === requestId);
+    const targetReceived = expectNoEvent(target.socket, (frame) => frame.type === "model_control", 150);
+    source.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: requestId,
+      type: "model_control",
+      agent_id: "ordinary-source",
+      instance_id: source.registered.instance_id,
+      lease_id: source.registered.lease_id,
+      target_agent_id: "ordinary-target",
+      target_instance_id: target.registered.instance_id,
+      control_id: "ordinary-control",
+      action: "set_model",
+      model: { provider: "provider", id: "model" },
+    }));
+
+    assert.equal((await rejected).code, "model_control_not_allowed");
+    await targetReceived;
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await router.close();
+  }
+});
+
 test("router web UI passes received subagent activity through /v1/agents and live frames and clears on zero", async () => {
   const router = await startTestRouter();
   const sockets = [];
@@ -1130,6 +1200,28 @@ test("router web app sends a model control from the picker and applies the resul
       lease_id: peer.registered.lease_id,
       model_summaries: [],
     }));
+    assert.deepEqual(await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const controls = document.querySelector("#model-controls");
+        const label = document.querySelector("#model-current-label")?.textContent;
+        const options = [...document.querySelectorAll(".model-option")].map((element) => element.textContent);
+        if (controls && !controls.hidden && label === "provider/target" && options.length === 2) {
+          return { hidden: controls.hidden, label, options };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const controls = document.querySelector("#model-controls");
+      return {
+        hidden: controls?.hidden,
+        label: document.querySelector("#model-current-label")?.textContent,
+        options: [...document.querySelectorAll(".model-option")].map((element) => element.textContent),
+      };
+    })()`), {
+      hidden: false,
+      label: "provider/target",
+      options: ["Current model (provider)provider/current", "Target model (provider)provider/target"],
+    });
     peer.socket.send(JSON.stringify({
       version: "v1",
       frame_id: "dom-model-peer-empty-catalog-result",
