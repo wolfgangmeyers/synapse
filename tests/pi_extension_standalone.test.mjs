@@ -1010,6 +1010,61 @@ test("mailbox client serializes model controls in arrival order", async () => {
   client.close();
 });
 
+test("mailbox client re-checks queued model-control expiry before execution", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  let now = 0;
+  const started = [];
+  const traces = [];
+  let finishFirst;
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    onModelControl: ({ controlId, model }) => {
+      started.push(controlId);
+      if (controlId === "control-1") {
+        return new Promise((resolve) => { finishFirst = () => resolve({ accepted: true, currentModel: model }); });
+      }
+      return Promise.resolve({ accepted: true, currentModel: model });
+    },
+    onModelControlTrace: (event) => traces.push(event),
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    now: () => now,
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+  for (const [controlId, expiresAt] of [["control-1", 100], ["control-2", 10]]) {
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+      type: "model_control",
+      source_agent_id: "controller",
+      control_id: controlId,
+      action: "set_model",
+      model: { provider: "provider", id: controlId },
+      expires_at: new Date(expiresAt).toISOString(),
+    }) }));
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["control-1"]);
+
+  now = 20;
+  finishFirst();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["control-1"]);
+  assert.equal(socket.sent.some((frame) => frame.type === "model_control_result" && frame.control_id === "control-2"), false);
+  assert.ok(traces.some(({ event, control_id, reason }) => event === "client_model_control_dropped"
+    && control_id === "control-2" && reason === "expired"));
+  client.close();
+});
+
 test("mailbox client contains async model-control result failures after disconnect", async () => {
   const socket = new EventTarget();
   socket.readyState = 0;
@@ -1144,6 +1199,30 @@ test("model control preserves protocol limits and returns exact failure codes", 
   assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_switch_failed");
   delete fixture.pi.setModel;
   assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_switch_unavailable");
+});
+
+test("model control reconciles a Pi model mutation that throws afterward", async () => {
+  let modelControl;
+  const current = { provider: "provider", id: "current" };
+  const target = { provider: "provider", id: "target" };
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current, target],
+    setModel: (_model, context) => {
+      context.model = target;
+      throw new Error("switch reported failure after mutation");
+    },
+    createClient: (options) => {
+      modelControl = options.onModelControl;
+      return { connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {} };
+    },
+  });
+  await sessionStart(fixture);
+
+  assert.deepEqual(await modelControl({ action: "set_model", model: target }), {
+    accepted: true,
+    currentModel: target,
+  });
 });
 
 test("model switch override yields to reflected and later local model context", async () => {

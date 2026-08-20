@@ -155,6 +155,20 @@ function normalizeModelSummary(model) {
   return { provider, id, ...(name.length > 0 ? { name } : {}) };
 }
 
+function normalizeModelControlResult(result) {
+  const accepted = result?.accepted === true;
+  const errorCode = typeof result?.errorCode === "string"
+    && /^[a-z][a-z0-9_]{0,127}$/.test(result.errorCode.trim())
+    ? result.errorCode.trim()
+    : "model_switch_failed";
+  const currentModel = normalizeModelSummary(result?.currentModel);
+  return {
+    accepted,
+    ...(accepted ? {} : { errorCode }),
+    ...(currentModel === undefined ? {} : { currentModel }),
+  };
+}
+
 function normalizeModelSummaries(models, maximum = MAX_MODELS) {
   if (!Array.isArray(models)) return [];
   const seen = new Set();
@@ -649,25 +663,11 @@ export function createMailboxClient({
     });
     let result;
     try {
-      modelControlTrace("client_model_control_callback_started", {
-        lease_id: context.leaseId,
-        control_id: frame.control_id,
-        source_agent_id: frame.source_agent_id,
-      });
       result = await onModelControl({
         controlId: frame.control_id,
         sourceAgentId: frame.source_agent_id,
         action: frame.action,
         model: normalizeModelSummary(frame.model),
-      });
-      modelControlTrace("client_model_control_callback_completed", {
-        lease_id: context.leaseId,
-        control_id: frame.control_id,
-        source_agent_id: frame.source_agent_id,
-        accepted: result?.accepted === true,
-        ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
-        ...(result?.currentModel?.provider === undefined ? {} : { current_provider: result.currentModel.provider }),
-        ...(result?.currentModel?.id === undefined ? {} : { current_model_id: result.currentModel.id }),
       });
     } catch (error) {
       modelControlTrace("client_model_control_callback_failed", {
@@ -678,7 +678,8 @@ export function createMailboxClient({
       });
       result = { accepted: false, errorCode: "model_switch_failed" };
     }
-    const currentModel = normalizeModelSummary(result?.currentModel);
+    const normalizedResult = normalizeModelControlResult(result);
+    const currentModel = normalizedResult.currentModel;
     publishModelCatalog({ force: true });
     if (!modelControlContextIsCurrent(context)) {
       modelControlTrace("client_model_control_result_failed", {
@@ -699,16 +700,16 @@ export function createMailboxClient({
         lease_id: context.leaseId,
         source_agent_id: frame.source_agent_id,
         control_id: frame.control_id,
-        accepted: result?.accepted === true,
-        ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
+        accepted: normalizedResult.accepted,
+        ...(normalizedResult.errorCode === undefined ? {} : { error_code: normalizedResult.errorCode }),
         ...(currentModel === undefined ? {} : { current_model: currentModel }),
       }));
       modelControlTrace("client_model_control_result_sent", {
         lease_id: context.leaseId,
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
-        accepted: result?.accepted === true,
-        ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
+        accepted: normalizedResult.accepted,
+        ...(normalizedResult.errorCode === undefined ? {} : { error_code: normalizedResult.errorCode }),
         ...(currentModel?.provider === undefined ? {} : { current_provider: currentModel.provider }),
         ...(currentModel?.id === undefined ? {} : { current_model_id: currentModel.id }),
       });

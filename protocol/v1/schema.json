@@ -305,7 +305,18 @@
         "accepted": { "type": "boolean" },
         "error_code": { "type": "string", "minLength": 1, "maxLength": 128 },
         "current_model": { "$ref": "#/$defs/modelSummary" }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": { "accepted": { "const": true } },
+          "required": ["current_model"],
+          "not": { "required": ["error_code"] }
+        },
+        {
+          "properties": { "accepted": { "const": false } },
+          "required": ["error_code", "current_model"]
+        }
+      ]
     },
     "messageArrivalClientFrame": {
       "type": "object",

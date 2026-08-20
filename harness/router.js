@@ -785,6 +785,17 @@ export function createAgentRouter({
         closeSocket(currentSocket, 4003, "lease not active");
         return;
       }
+      if (session.agentRole !== "user_interaction") {
+        emit("model_control_source_role_rejected", {
+          control_id: frame.control_id,
+          source_agent_id: session.agentId,
+          source_instance_id: session.instanceId,
+          target_agent_id: frame.target_agent_id,
+          source_role: session.agentRole,
+        });
+        sendError(currentSocket, generateFrameId, "model_control_not_allowed", frame.frame_id);
+        return;
+      }
       const target = sessions.get(frame.target_agent_id);
       if (target === undefined
         || target.instanceId !== frame.target_instance_id

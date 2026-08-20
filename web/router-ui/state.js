@@ -11,6 +11,7 @@ const CONFIRMED_MODEL_REJECTION_CODES = new Set([
   "model_switch_rejected",
   "model_switch_unavailable",
   "model_unavailable",
+  "model_control_not_allowed",
   "unsupported_model_control",
 ]);
 const SCOPED_EVENT_TYPES = new Set([
@@ -71,7 +72,7 @@ export function matchingPendingModelControl(pendingControls, event) {
 }
 
 export function modelControlStatusTitle(accepted, errorCode) {
-  if (accepted) return "Model changed";
+  if (accepted === true) return "Model changed";
   return CONFIRMED_MODEL_REJECTION_CODES.has(errorCode)
     ? "Model change rejected"
     : "Model change not confirmed";
@@ -161,6 +162,56 @@ export function mergeAgentModelProjection(agents, peer, instanceId, projection, 
       : [...agents, next],
     currentModel: nextModel,
     changed: true,
+  };
+}
+
+export function mergeAgentModelSnapshot(
+  current,
+  incoming,
+  { snapshotGeneratedAtMs, modelControlUpdatedAtMs } = {},
+) {
+  const sameInstance = current !== undefined
+    && (incoming.instance_id === undefined || current.instance_id === undefined || incoming.instance_id === current.instance_id);
+  const stale = sameInstance
+    && Number.isFinite(snapshotGeneratedAtMs)
+    && Number.isFinite(modelControlUpdatedAtMs)
+    && snapshotGeneratedAtMs < modelControlUpdatedAtMs;
+  const currentModelProvided = Object.hasOwn(incoming, "current_model");
+  const availableModelsProvided = Object.hasOwn(incoming, "available_models");
+  const currentModel = stale
+    ? normalizeModelSummary(current.current_model)
+    : (currentModelProvided
+      ? normalizeModelSummary(incoming.current_model)
+      : (sameInstance ? normalizeModelSummary(current.current_model) : undefined));
+  const availableModels = stale
+    ? normalizeModelSummaries(current.available_models)
+    : (availableModelsProvided
+      ? normalizeModelSummaries(incoming.available_models)
+      : (sameInstance ? normalizeModelSummaries(current.available_models) : []));
+  const totalCount = stale
+    ? Math.max(availableModels.length, Number.isSafeInteger(current.model_catalog_total_count)
+      ? current.model_catalog_total_count
+      : availableModels.length)
+    : (availableModelsProvided
+      ? Math.max(
+        availableModels.length,
+        Number.isSafeInteger(incoming.model_catalog_total_count)
+          ? incoming.model_catalog_total_count
+          : availableModels.length,
+      )
+      : (sameInstance ? current.model_catalog_total_count ?? 0 : 0));
+  const truncated = stale
+    ? current.model_catalog_truncated === true
+    : (availableModelsProvided
+      ? incoming.model_catalog_truncated === true
+      : (sameInstance ? current.model_catalog_truncated === true : false));
+  return {
+    ...(currentModel === undefined ? {} : { current_model: currentModel }),
+    ...(availableModelsProvided || stale || current?.available_models !== undefined
+      ? { available_models: availableModels }
+      : {}),
+    model_catalog_total_count: totalCount,
+    model_catalog_truncated: truncated,
   };
 }
 

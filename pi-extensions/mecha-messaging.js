@@ -539,8 +539,9 @@ export function appendMemoryCaptureDiagnostic(event, { path = memoryCaptureDiagn
   appendBoundedJsonl(record, { path, maxBytes, keepBytes });
 }
 
-const NATIVE_SUBAGENT_TRACE_PATH_ENV = "MECHA_PI_NATIVE_SUBAGENT_TRACE_PATH";
-const NATIVE_SUBAGENT_TRACE_MAX_BYTES = 512 * 1024;
+const EXTENSION_TRACE_PATH_ENV = "MECHA_PI_EXTENSION_TRACE_PATH";
+const LEGACY_NATIVE_SUBAGENT_TRACE_PATH_ENV = "MECHA_PI_NATIVE_SUBAGENT_TRACE_PATH";
+const EXTENSION_TRACE_MAX_BYTES = 512 * 1024;
 const NATIVE_SUBAGENT_TRACE_STRING_FIELDS = new Set([
   "agent_id", "instance_id", "parent_session_id", "session_id", "subagent_id", "event_id",
   "status", "reason", "error_code", "error_name", "source", "frame_type", "disposition", "state", "phase",
@@ -569,26 +570,29 @@ export function summarizeNativeSubagents(subagents) {
   });
 }
 
-export function createNativeSubagentTrace({
+export function createExtensionTrace({
   environment = process.env,
-  path = typeof environment?.[NATIVE_SUBAGENT_TRACE_PATH_ENV] === "string" && environment[NATIVE_SUBAGENT_TRACE_PATH_ENV].trim().length > 0
-    ? environment[NATIVE_SUBAGENT_TRACE_PATH_ENV].trim()
+  path = typeof environment?.[EXTENSION_TRACE_PATH_ENV] === "string" && environment[EXTENSION_TRACE_PATH_ENV].trim().length > 0
+    ? environment[EXTENSION_TRACE_PATH_ENV].trim()
+    : typeof environment?.[LEGACY_NATIVE_SUBAGENT_TRACE_PATH_ENV] === "string"
+      && environment[LEGACY_NATIVE_SUBAGENT_TRACE_PATH_ENV].trim().length > 0
+      ? environment[LEGACY_NATIVE_SUBAGENT_TRACE_PATH_ENV].trim()
     : undefined,
-  maxBytes = NATIVE_SUBAGENT_TRACE_MAX_BYTES,
+  maxBytes = EXTENSION_TRACE_MAX_BYTES,
   now = () => new Date(),
 } = {}) {
   if (path === undefined) return { enabled: false, record: () => false };
-  if (typeof path !== "string" || path.length === 0) throw new TypeError("native subagent trace path is invalid");
-  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("native subagent trace maxBytes must be a positive safe integer");
-  if (typeof now !== "function") throw new TypeError("native subagent trace clock must be a function");
+  if (typeof path !== "string" || path.length === 0) throw new TypeError("extension trace path is invalid");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("extension trace maxBytes must be a positive safe integer");
+  if (typeof now !== "function") throw new TypeError("extension trace clock must be a function");
   return {
     enabled: true,
     record(event, fields = {}) {
       try {
-        if (typeof event !== "string" || !/^[a-z][a-z0-9_.-]{0,80}$/.test(event)) throw new TypeError("native subagent trace event is invalid");
-        if (fields === null || typeof fields !== "object" || Array.isArray(fields)) throw new TypeError("native subagent trace fields are invalid");
+        if (typeof event !== "string" || !/^[a-z][a-z0-9_.-]{0,80}$/.test(event)) throw new TypeError("extension trace event is invalid");
+        if (fields === null || typeof fields !== "object" || Array.isArray(fields)) throw new TypeError("extension trace fields are invalid");
         const timestamp = now();
-        if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) throw new TypeError("native subagent trace clock is invalid");
+        if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) throw new TypeError("extension trace clock is invalid");
         const record = { timestamp: timestamp.toISOString(), event };
         for (const [key, value] of Object.entries(fields)) {
           if (NATIVE_SUBAGENT_TRACE_STRING_FIELDS.has(key) && typeof value === "string") record[key] = value.slice(0, 128);
@@ -614,6 +618,8 @@ export function createNativeSubagentTrace({
     },
   };
 }
+
+export const createNativeSubagentTrace = createExtensionTrace;
 
 function orphanToolResultDiagnosticsPath(environment = process.env) {
   if (typeof environment.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH === "string" && environment.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH.trim().length > 0) return environment.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH.trim();
@@ -2028,6 +2034,7 @@ export function createMechaMessagingExtension(pi, {
   async function switchPiModel(input, context) {
     const requested = modelSelector(input);
     const before = effectiveModelProjection(context);
+    const nativeBefore = modelProjection(context);
     traceNativeSubagent("extension_model_switch_started", {
       requested_provider: requested.provider,
       requested_model_id: requested.id,
@@ -2050,7 +2057,23 @@ export function createMechaMessagingExtension(pi, {
     if (selectedModel === undefined) {
       throw new ModelControlError("model_unavailable", `Model ${requested.provider}/${requested.id} is not available`);
     }
-    const switched = await pi.setModel(selectedModel);
+    let switched;
+    try {
+      switched = await pi.setModel(selectedModel);
+    } catch (error) {
+      const after = modelProjection(context);
+      if (!sameModelIdentity(nativeBefore.current, projectModelMetadata(selectedModel))
+        && sameModelIdentity(after.current, projectModelMetadata(selectedModel))) {
+        traceNativeSubagent("extension_model_set_result", {
+          requested_provider: requested.provider,
+          requested_model_id: requested.id,
+          switched: true,
+          mutation_before_throw: true,
+        });
+        return selectedModel;
+      }
+      throw error;
+    }
     traceNativeSubagent("extension_model_set_result", {
       requested_provider: requested.provider,
       requested_model_id: requested.id,
