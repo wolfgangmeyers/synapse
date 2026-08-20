@@ -161,7 +161,12 @@ test("fails v2 closed when migration 017 is missing", async (t) => {
   t.after(async () => { await router.close(); repository.close(); });
   const routerUrl = await router.listen();
   const capabilities = await (await fetch(new URL("/v1/capabilities", routerUrl.replace("ws://", "http://")))).json();
-  assert.deepEqual(capabilities, { subagent_lifecycle_v2: false, lifecycle_error: "migration_017_required" });
+  assert.deepEqual(capabilities, {
+    model_catalog_v1: true,
+    model_catalog_limits: { frame_bytes: 60 * 1024 },
+    subagent_lifecycle_v2: false,
+    lifecycle_error: "migration_017_required",
+  });
   const { socket, registration } = await connectLegacyClient(t, routerUrl);
   const error = nextFrame(socket, "error");
   socket.send(JSON.stringify({
@@ -316,6 +321,8 @@ test("validates router and checkout-source client rollout in an isolated home", 
     cwd: process.cwd(), env: { ...process.env, HOME: home },
   });
   assert.deepEqual(await (await fetch(new URL("/v1/capabilities", legacy.httpUrl))).json(), {
+    model_catalog_v1: true,
+    model_catalog_limits: { frame_bytes: 60 * 1024 },
     subagent_lifecycle_v2: false,
     lifecycle_error: "migration_017_required",
   });
@@ -363,6 +370,8 @@ test("validates router and checkout-source client rollout in an isolated home", 
     cwd: process.cwd(), env: { ...process.env, HOME: home },
   });
   assert.deepEqual(await (await fetch(new URL("/v1/capabilities", restored.httpUrl))).json(), {
+    model_catalog_v1: true,
+    model_catalog_limits: { frame_bytes: 60 * 1024 },
     subagent_lifecycle_v2: false,
     lifecycle_error: "migration_017_required",
   });

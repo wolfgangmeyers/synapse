@@ -2,6 +2,7 @@ import { mergeMessages } from "./history.js";
 
 const DRAFT_LIMIT = 200;
 const DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_MODEL_SUMMARIES = 1_000;
 const SCOPED_EVENT_TYPES = new Set([
   "agents",
   "agents_error",
@@ -48,6 +49,79 @@ export function matchesActiveScope(event, active) {
 
 export function historyRequestMatches(event, selectedPeer, requestId) {
   return event.peer === selectedPeer && event.requestId === requestId;
+}
+
+export function matchingPendingModelControl(pendingControls, event) {
+  if (!(pendingControls instanceof Map) || typeof event?.controlId !== "string") return undefined;
+  const pending = pendingControls.get(event.controlId);
+  return pending?.peer === event.targetAgentId ? pending : undefined;
+}
+
+export function consumePendingModelControl(pendingControls, event) {
+  const pending = matchingPendingModelControl(pendingControls, event);
+  if (pending === undefined) return undefined;
+  pendingControls.delete(event.controlId);
+  return {
+    pending,
+    projection: {
+      ...(Object.hasOwn(event, "currentModel") ? { currentModel: event.currentModel } : {}),
+      ...(Object.hasOwn(event, "availableModels") ? { availableModels: event.availableModels } : {}),
+    },
+  };
+}
+
+export function normalizeModelSummary(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const provider = typeof value.provider === "string" ? value.provider.trim().slice(0, 128) : "";
+  const id = typeof value.id === "string" ? value.id.trim().slice(0, 256) : "";
+  if (provider.length === 0 || id.length === 0) return undefined;
+  const name = typeof value.name === "string" ? value.name.trim().slice(0, 256) : "";
+  return { provider, id, ...(name.length > 0 ? { name } : {}) };
+}
+
+export function normalizeModelSummaries(values) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  return values.map(normalizeModelSummary).filter((model) => {
+    if (model === undefined) return false;
+    const key = `${model.provider}\u0000${model.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, MAX_MODEL_SUMMARIES);
+}
+
+export function mergeAgentModelProjection(agents, peer, instanceId, projection) {
+  if (!peer) return { agents, currentModel: undefined, changed: false };
+  const current = agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
+  const sameInstance = instanceId === undefined || current.instance_id === undefined || current.instance_id === instanceId;
+  const base = sameInstance ? current : { agent_id: peer, activity_state: "idle", instance_id: instanceId };
+  const modelProvided = Object.hasOwn(projection, "currentModel");
+  const modelsProvided = Object.hasOwn(projection, "availableModels");
+  const nextModel = modelProvided
+    ? normalizeModelSummary(projection.currentModel)
+    : (sameInstance ? normalizeModelSummary(base.current_model) : undefined);
+  const nextModels = modelsProvided
+    ? normalizeModelSummaries(projection.availableModels)
+    : (sameInstance ? normalizeModelSummaries(base.available_models) : []);
+  if (sameInstance
+    && JSON.stringify(base.current_model) === JSON.stringify(nextModel)
+    && JSON.stringify(base.available_models) === JSON.stringify(nextModels)) {
+    return { agents, currentModel: nextModel, changed: false };
+  }
+  const next = {
+    ...base,
+    ...(instanceId === undefined ? {} : { instance_id: instanceId }),
+    ...(nextModel === undefined ? {} : { current_model: nextModel }),
+    ...(modelsProvided || base.available_models !== undefined ? { available_models: nextModels } : {}),
+  };
+  return {
+    agents: agents.some((agent) => agent.agent_id === peer)
+      ? agents.map((agent) => agent.agent_id === peer ? next : agent)
+      : [...agents, next],
+    currentModel: nextModel,
+    changed: true,
+  };
 }
 
 export function canSendDraft(peer, body, imageCount) {

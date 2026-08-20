@@ -285,18 +285,6 @@
         "model": { "$ref": "#/$defs/modelSummary" }
       }
     },
-    "modelControlForwardedFrame": {
-      "type": "object", "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "control_id", "model"],
-      "properties": {
-        "version": { "const": "v1" },
-        "frame_id": { "$ref": "#/$defs/frameId" },
-        "type": { "const": "model_control_forwarded" },
-        "agent_id": { "$ref": "#/$defs/agentId" },
-        "control_id": { "$ref": "#/$defs/frameId" },
-        "model": { "$ref": "#/$defs/modelSummary" }
-      }
-    },
     "modelControlResultFrame": {
       "type": "object", "additionalProperties": false,
       "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "accepted"],
@@ -852,7 +840,6 @@
         { "$ref": "#/$defs/messageFrame" },
         { "$ref": "#/$defs/conversationMessageFrame" },
         { "$ref": "#/$defs/modelControlForwardFrame" },
-        { "$ref": "#/$defs/modelControlForwardedFrame" },
         { "$ref": "#/$defs/modelControlResultFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" },
         { "$ref": "#/$defs/agentActivityFrame" },

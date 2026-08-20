@@ -99,7 +99,7 @@ function createMessagingFixture({
       dispose() {},
     }),
   });
-  return { childHandlers, context, createContext, handlers, mailboxClients, modelSwitches, sent, tools };
+  return { childHandlers, context, createContext, handlers, mailboxClients, modelSwitches, pi, sent, tools };
 }
 
 async function emitToolCalls(fixture, toolNames, context = fixture.context) {
@@ -609,7 +609,6 @@ test("real mailbox model-control delivery switches the Pi model", async () => {
     control_id: "control-1",
     accepted: true,
     current_model: target,
-    available_models: [current, target],
   });
   client.close();
 });
@@ -642,6 +641,412 @@ test("parent model control rejects invalid requests without changing the Pi mode
   });
   assert.deepEqual(fixture.modelSwitches, []);
   assert.deepEqual(fixture.context.model, current);
+});
+
+test("mailbox client capability-gates and byte-bounds changed model catalogs", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const intervals = [];
+  const traces = [];
+  const provider = "p".repeat(128);
+  const first = { provider, id: "i".repeat(256), name: "n".repeat(256) };
+  let catalog = [first, ...Array.from({ length: 100 }, (_, index) => ({
+    provider: "provider",
+    id: `model-${index}-${"x".repeat(200)}`,
+    name: `Model ${index} ${"y".repeat(200)}`,
+  }))];
+  let catalogReads = 0;
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    getModelCatalog: () => {
+      catalogReads += 1;
+      return catalog;
+    },
+    onModelControlTrace: (event) => traces.push(event),
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        subagent_lifecycle_v2: false,
+        model_catalog_v1: true,
+        model_catalog_limits: { frame_bytes: 1_024 },
+      }),
+    }),
+    generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
+    renewIntervalMs: 11_000,
+    setIntervalImpl: (callback, delay) => {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
+    clearIntervalImpl: () => {},
+  });
+
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  const register = socket.sent.find((frame) => frame.type === "register");
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered",
+    agent_id: "worker",
+    instance_id: client.instanceId,
+    lease_id: "lease-1",
+    request_id: register.frame_id,
+  }) }));
+  await connected;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const published = socket.sent.filter((frame) => frame.type === "model_catalog");
+  assert.equal(published.length, 1);
+  assert.ok(Buffer.byteLength(JSON.stringify(published[0]), "utf8") <= 1_024);
+  assert.deepEqual(published[0].model_summaries[0], first);
+  assert.ok(published[0].model_summaries.length < catalog.length);
+  assert.equal("truncated" in published[0], false);
+
+  intervals.find(({ delay }) => delay === 10_000).callback();
+  assert.equal(catalogReads, 2);
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 1);
+
+  catalog = [{ provider: "provider", id: "replacement" }];
+  intervals.find(({ delay }) => delay === 10_000).callback();
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 2);
+  assert.ok(traces.some(({ event }) => event === "client_model_catalog_published"));
+  client.close();
+});
+
+test("mailbox client retries catalog publication after frame-budget and send failures", async () => {
+  async function run({ frameBytes, failFirstCatalogSend = false }) {
+    const socket = new EventTarget();
+    socket.readyState = 0;
+    socket.sent = [];
+    let catalogSendFailures = failFirstCatalogSend ? 1 : 0;
+    socket.send = (payload) => {
+      const frame = JSON.parse(payload);
+      if (frame.type === "model_catalog" && catalogSendFailures > 0) {
+        catalogSendFailures -= 1;
+        throw new Error("catalog send failed");
+      }
+      socket.sent.push(frame);
+    };
+    socket.close = () => { socket.readyState = 3; };
+    const intervals = [];
+    const traces = [];
+    const client = createMailboxClient({
+      agentId: "worker",
+      onEnvelope: () => {},
+      getModelCatalog: () => [{ provider: "provider", id: "model" }],
+      onModelControlTrace: (event) => traces.push(event),
+      webSocketFactory: () => socket,
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          subagent_lifecycle_v2: false,
+          model_catalog_v1: true,
+          model_catalog_limits: { frame_bytes: frameBytes },
+        }),
+      }),
+      renewIntervalMs: 11_000,
+      setIntervalImpl: (callback, delay) => {
+        intervals.push({ callback, delay });
+        return intervals.length;
+      },
+      clearIntervalImpl: () => {},
+    });
+    const connected = client.connect();
+    socket.readyState = 1;
+    socket.dispatchEvent(new Event("open"));
+    const register = socket.sent.find((frame) => frame.type === "register");
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+      type: "registered",
+      agent_id: "worker",
+      instance_id: client.instanceId,
+      lease_id: "lease-1",
+      request_id: register.frame_id,
+    }) }));
+    await connected;
+    await new Promise((resolve) => setImmediate(resolve));
+    return { client, intervals, socket, traces };
+  }
+
+  const tooSmall = await run({ frameBytes: 1 });
+  assert.equal(tooSmall.socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  assert.ok(tooSmall.traces.some(({ event, reason }) => event === "client_model_catalog_publish_failed"
+    && reason === "frame_budget_too_small"));
+  tooSmall.client.close();
+
+  const transientFailure = await run({ frameBytes: 1_024, failFirstCatalogSend: true });
+  assert.equal(transientFailure.socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  assert.ok(transientFailure.traces.some(({ event, reason }) => event === "client_model_catalog_publish_failed"
+    && reason === "socket_send_failed"));
+  transientFailure.intervals.find(({ delay }) => delay === 10_000).callback();
+  assert.equal(transientFailure.socket.sent.filter((frame) => frame.type === "model_catalog").length, 1);
+  transientFailure.client.close();
+});
+
+test("mailbox client publishes no catalog without capability or after registry failure", async () => {
+  async function run(capabilities, getModelCatalog) {
+    const socket = new EventTarget();
+    socket.readyState = 0;
+    socket.sent = [];
+    socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+    socket.close = () => { socket.readyState = 3; };
+    const traces = [];
+    const intervals = [];
+    const client = createMailboxClient({
+      agentId: "worker",
+      onEnvelope: () => {},
+      getModelCatalog,
+      onModelControlTrace: (event) => traces.push(event),
+      webSocketFactory: () => socket,
+      fetchImpl: async () => ({ ok: true, json: async () => capabilities }),
+      renewIntervalMs: 11_000,
+      setIntervalImpl: (callback, delay) => {
+        intervals.push({ callback, delay });
+        return intervals.length;
+      },
+      clearIntervalImpl: () => {},
+    });
+    const connected = client.connect();
+    socket.readyState = 1;
+    socket.dispatchEvent(new Event("open"));
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+      type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+    }) }));
+    await connected;
+    await new Promise((resolve) => setImmediate(resolve));
+    return { client, intervals, socket, traces };
+  }
+
+  const unsupported = await run({ subagent_lifecycle_v2: false }, () => [{ provider: "provider", id: "model" }]);
+  assert.equal(unsupported.socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  unsupported.client.close();
+
+  let registryReads = 0;
+  const failed = await run(
+    { subagent_lifecycle_v2: false, model_catalog_v1: true },
+    () => {
+      registryReads += 1;
+      if (registryReads === 1) throw new Error("registry exploded");
+      return [{ provider: "provider", id: "recovered" }];
+    },
+  );
+  assert.equal(failed.socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  assert.ok(failed.traces.some(({ event, error_name }) => event === "client_model_catalog_read_failed" && error_name === "Error"));
+  failed.intervals.find(({ delay }) => delay === 10_000).callback();
+  assert.equal(failed.socket.sent.some((frame) => frame.type === "model_catalog"), true);
+  failed.client.close();
+});
+
+test("mailbox client serializes model controls in arrival order", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const started = [];
+  const resolvers = [];
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    onModelControl: ({ controlId, model }) => new Promise((resolve) => {
+      started.push(controlId);
+      resolvers.push(() => resolve({ accepted: true, currentModel: model, availableModels: [model] }));
+    }),
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+  for (const controlId of ["control-1", "control-2"]) {
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+      type: "model_control",
+      source_agent_id: "controller",
+      control_id: controlId,
+      action: "set_model",
+      model: { provider: "provider", id: controlId },
+    }) }));
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["control-1"]);
+  resolvers.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["control-1", "control-2"]);
+  resolvers.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    socket.sent.filter((frame) => frame.type === "model_control_result").map((frame) => frame.control_id),
+    ["control-1", "control-2"],
+  );
+  client.close();
+});
+
+test("mailbox client contains async model-control result failures after disconnect", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const traces = [];
+  let finish;
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    onModelControl: () => new Promise((resolve) => { finish = resolve; }),
+    onModelControlTrace: (event) => traces.push(event),
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "model_control",
+    source_agent_id: "controller",
+    control_id: "control-disconnect",
+    action: "set_model",
+    model: { provider: "provider", id: "target" },
+  }) }));
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = 3;
+  socket.dispatchEvent(new Event("close"));
+  finish({ accepted: true, currentModel: { provider: "provider", id: "target" } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(socket.sent.some((frame) => frame.type === "model_control_result"), false);
+  assert.ok(traces.some(({ event, reason }) => event === "client_model_control_result_failed" && reason === "client_not_connected"));
+  client.close();
+});
+
+test("model control preserves protocol limits and returns exact failure codes", async () => {
+  let modelControl;
+  let getModelCatalog;
+  const provider = "p".repeat(128);
+  const current = { provider, id: "c".repeat(256), name: "C".repeat(256) };
+  const target = { provider, id: "t".repeat(256), name: "T".repeat(256) };
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current, target],
+    createClient: (options) => {
+      modelControl = options.onModelControl;
+      getModelCatalog = options.getModelCatalog;
+      return { connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {} };
+    },
+  });
+  await sessionStart(fixture);
+
+  assert.deepEqual(getModelCatalog(), [current, target]);
+  assert.equal((await modelControl({ action: "set_model", model: target })).accepted, true);
+  assert.equal((await modelControl({ action: "unknown", model: target })).errorCode, "unsupported_model_control");
+  assert.equal((await modelControl({ action: "set_model", model: { provider, id: "x".repeat(257) } })).errorCode, "invalid_model");
+  assert.equal((await modelControl({ action: "set_model", model: { provider, id: "missing" } })).errorCode, "model_unavailable");
+
+  fixture.context.modelRegistry = undefined;
+  assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_registry_unavailable");
+  fixture.context.modelRegistry = { getAvailable() { throw new Error("registry failed"); } };
+  assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_registry_failed");
+  assert.throws(() => getModelCatalog(), /registry failed/);
+  fixture.context.modelRegistry = { getAvailable: () => ({ malformed: true }) };
+  assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_registry_unavailable");
+
+  fixture.context.modelRegistry = { getAvailable: () => [current, target] };
+  fixture.pi.setModel = () => false;
+  assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_switch_rejected");
+  fixture.pi.setModel = () => { throw new Error("switch failed"); };
+  assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_switch_failed");
+  delete fixture.pi.setModel;
+  assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_switch_unavailable");
+});
+
+test("remote and local model switches share one serialized queue", async () => {
+  let modelControl;
+  const started = [];
+  const resolvers = [];
+  const current = { provider: "provider", id: "current" };
+  const remote = { provider: "provider", id: "remote" };
+  const local = { provider: "provider", id: "local" };
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current, remote, local],
+    setModel: (model) => new Promise((resolve) => {
+      started.push(model.id);
+      resolvers.push(resolve);
+    }),
+    createClient: (options) => {
+      modelControl = options.onModelControl;
+      return { connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {} };
+    },
+  });
+  await sessionStart(fixture);
+
+  const remoteResult = modelControl({ action: "set_model", model: remote });
+  await new Promise((resolve) => setImmediate(resolve));
+  const localResult = fixture.tools.get(MODEL_SWITCH_TOOL_NAME).execute(
+    "call-local",
+    local,
+    undefined,
+    undefined,
+    fixture.context,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["remote"]);
+
+  resolvers.shift()(true);
+  assert.equal((await remoteResult).accepted, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["remote", "local"]);
+  resolvers.shift()(true);
+  assert.equal((await localResult).isError, undefined);
+});
+
+test("model switch override yields to reflected and later local model context", async () => {
+  let modelControl;
+  const activity = [];
+  const current = { provider: "provider", id: "current" };
+  const target = { provider: "provider", id: "target" };
+  const local = { provider: "provider", id: "local" };
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current, target, local],
+    updateContextModel: false,
+    createClient: (options) => {
+      modelControl = options.onModelControl;
+      return {
+        connect: async () => {},
+        close() {},
+        sendReceipt() {},
+        sendActivity: (...args) => activity.push(args),
+      };
+    },
+  });
+  await sessionStart(fixture);
+  await modelControl({ action: "set_model", model: target });
+  assert.deepEqual(activity.at(-1)[1].currentModel, target);
+
+  fixture.context.model = target;
+  for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
+  fixture.context.model = local;
+  for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
+  assert.deepEqual(activity.at(-1)[1].currentModel, local);
+
+  await modelControl({ action: "set_model", model: target });
+  const freshContext = fixture.createContext();
+  freshContext.model = local;
+  for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, freshContext);
+  assert.deepEqual(activity.at(-1)[1].currentModel, local);
 });
 
 test("mecha_mailbox_send is registered with the recipient, body, and subject schema", () => {

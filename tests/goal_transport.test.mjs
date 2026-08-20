@@ -70,8 +70,10 @@ test("router projects goal state through activity, snapshot, off, and replacemen
     const replacementSnapshot = await fetch(wsUrl.replace("ws://", "http://").replace("/v1/agents", "/v1/agents")).then((response) => response.json());
     const replacementAgent = replacementSnapshot.agents.find((agent) => agent.agent_id === "worker");
     assert.equal(replacementAgent.goal, undefined);
+    assert.deepEqual(replacementAgent.available_models, []);
     assert.deepEqual(Object.keys(replacementAgent).sort(), [
-      "activity_state", "agent_id", "agent_role", "connected_at", "lease_expires_at", "subagent_count", "subagents",
+      "activity_state", "agent_id", "agent_role", "available_models", "connected_at", "lease_expires_at",
+      "subagent_count", "subagents",
     ]);
   } finally {
     for (const socket of sockets) socket.close();

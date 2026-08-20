@@ -1,9 +1,13 @@
 import { HISTORY_RETENTION_MS, mergeMessages, messageKey, messageTime, pruneHistoryMessages, reconcileHistoryMessages } from "./history.js";
 import {
   canSendDraft,
+  consumePendingModelControl,
   draftScope,
   historyRequestMatches,
   matchesActiveScope,
+  mergeAgentModelProjection,
+  normalizeModelSummaries,
+  normalizeModelSummary,
   ownerScope,
   peerScope,
   pruneDrafts,
@@ -27,7 +31,6 @@ const IMAGE_STORE_NAME = "image_attachments";
 const DRAFT_STORE_KEY = "mecha.web.drafts";
 const SELECTED_PEER_STORE_KEY = "mecha.web.selectedPeers";
 const MAX_IMAGES = 3;
-const MAX_MODEL_SUMMARIES = 1_000;
 const MAX_IMAGE_EDGE = 1600;
 const IMAGE_JPEG_QUALITY = 0.92;
 const MAX_IMAGE_BYTES = 768 * 1024;
@@ -55,6 +58,7 @@ const state = {
   images: [],
   messages: {},
   historyRequests: new Map(),
+  pendingModelControls: new Map(),
   draftPeers: new Set(),
   expandedSubagents: new Set(),
   lastLifecycleSnapshotVersion: 0,
@@ -217,10 +221,13 @@ elements.draft.addEventListener("keydown", (event) => {
 function connectUiSocket() {
   state.socket?.close();
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  state.socket = new WebSocket(`${protocol}//${location.host}/ui/events`);
-  state.socket.addEventListener("open", () => sendCommand({ type: "connect", routerUrl: state.routerUrl, agentId: state.agentId }));
-  state.socket.addEventListener("message", (event) => { void handleEvent(JSON.parse(event.data)); });
-  state.socket.addEventListener("close", () => {
+  const socket = new WebSocket(`${protocol}//${location.host}/ui/events`);
+  state.socket = socket;
+  socket.addEventListener("open", () => sendCommand({ type: "connect", routerUrl: state.routerUrl, agentId: state.agentId }));
+  socket.addEventListener("message", (event) => { void handleEvent(JSON.parse(event.data)); });
+  socket.addEventListener("close", () => {
+    if (state.socket !== socket) return;
+    clearPendingModelControls();
     setStatus("reconnecting", "UI server connection closed; retrying…");
     setTimeout(connectUiSocket, 1000);
   });
@@ -283,26 +290,21 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "agent_model_catalog") {
-    updateAgentModelCatalog(event.agent, event.instanceId, event.currentModel, event.availableModels);
+    updateAgentModelCatalog(event.agent, event.instanceId, {
+      ...(Object.hasOwn(event, "currentModel") ? { currentModel: event.currentModel } : {}),
+      availableModels: event.availableModels,
+    });
     return;
   }
   if (event.type === "model_control_result") {
-    const targetAgentId = event.targetAgentId ?? event.agentId;
-    if (event.accepted) {
-      const current = normalizeModelSummary(event.currentModel);
-      if (current !== undefined && targetAgentId === state.selectedPeer) {
-        modelPickerSelection = { peer: state.selectedPeer, model: current };
-      }
-      if (current !== undefined || Array.isArray(event.availableModels)) {
-        updateAgentModelCatalog(targetAgentId, event.instanceId, current, event.availableModels);
-      }
-      if (targetAgentId === state.selectedPeer) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
-      showModelControlStatus(true, targetAgentId, current);
-    } else {
-      modelPickerSelection = undefined;
-      showModelControlStatus(false, targetAgentId, undefined, event.errorCode);
-      renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
-    }
+    const settled = consumePendingModelControl(state.pendingModelControls, event);
+    if (settled === undefined) return;
+    const targetAgentId = settled.pending.peer;
+    const projection = settled.projection;
+    if (Object.keys(projection).length > 0) updateAgentModelCatalog(targetAgentId, event.instanceId, projection, { render: false });
+    if (modelPickerSelection?.controlId === event.controlId) modelPickerSelection = undefined;
+    if (targetAgentId === state.selectedPeer) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
+    showModelControlStatus(event.accepted, targetAgentId, normalizeModelSummary(event.currentModel), event.errorCode);
     return;
   }
   if (event.type === "message_arrival") {
@@ -394,6 +396,7 @@ function showArrivedMessageDialog(arrival) {
 async function switchRouter(routerUrl, { connect = false } = {}) {
   closeReminderDialog();
   closeGoalDialog();
+  clearPendingModelControls({ render: false });
   saveCurrentDraft();
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
@@ -653,33 +656,21 @@ function updateAgentActivity(peer, activityState, subagentCount = 0, subagents =
   if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
 }
 
-function updateAgentModelCatalog(peer, instanceId, incomingModel, incomingModels) {
+function updateAgentModelCatalog(peer, instanceId, projection, { render = true } = {}) {
   if (!peer || peer === state.agentId) return;
-  const current = state.agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
-  const sameInstance = instanceId === undefined || current.instance_id === undefined || current.instance_id === instanceId;
-  const base = sameInstance ? current : { agent_id: peer, activity_state: "idle", instance_id: instanceId };
-  const nextModel = normalizeModelSummary(incomingModel) ?? (sameInstance ? normalizeModelSummary(base.current_model) : undefined);
-  const nextModels = normalizeModelSummaries(incomingModels);
-  if (sameInstance
-    && JSON.stringify(base.current_model) === JSON.stringify(nextModel)
-    && JSON.stringify(base.available_models) === JSON.stringify(nextModels)) return;
-  const next = {
-    ...base,
-    ...(instanceId === undefined ? {} : { instance_id: instanceId }),
-    ...(nextModel === undefined ? {} : { current_model: nextModel }),
-    available_models: nextModels,
-  };
-  state.agents = state.agents.some((agent) => agent.agent_id === peer)
-    ? state.agents.map((agent) => agent.agent_id === peer ? next : agent)
-    : [...state.agents, next];
-  if (peer === state.selectedPeer && nextModel !== undefined
+  const merged = mergeAgentModelProjection(state.agents, peer, instanceId, projection);
+  if (!merged.changed) return;
+  state.agents = merged.agents;
+  if (peer === state.selectedPeer && merged.currentModel !== undefined
     && modelPickerSelection?.peer === peer
-    && modelKey(modelPickerSelection.model) === modelKey(nextModel)) {
+    && modelKey(modelPickerSelection.model) === modelKey(merged.currentModel)) {
     modelPickerSelection = undefined;
   }
-  renderAgents();
-  renderConversation();
-  if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
+  if (render) {
+    renderAgents();
+    renderConversation();
+    if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
+  }
 }
 
 function requestHistory(peer) {
@@ -1314,27 +1305,6 @@ function normalizeGoalProjection(value) {
   return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
 }
 
-function normalizeModelSummary(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const provider = typeof value.provider === "string" ? value.provider.trim().slice(0, 128) : "";
-  const id = typeof value.id === "string" ? value.id.trim().slice(0, 256) : "";
-  if (provider.length === 0 || id.length === 0) return undefined;
-  const name = typeof value.name === "string" ? value.name.trim().slice(0, 256) : "";
-  return { provider, id, ...(name.length > 0 ? { name } : {}) };
-}
-
-function normalizeModelSummaries(values) {
-  if (!Array.isArray(values)) return [];
-  const seen = new Set();
-  return values.map(normalizeModelSummary).filter((model) => {
-    if (model === undefined) return false;
-    const key = `${model.provider}\u0000${model.id}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, MAX_MODEL_SUMMARIES);
-}
-
 function modelKey(model) {
   return `${model.provider}/${model.id}`;
 }
@@ -1356,12 +1326,20 @@ function setModelPickerOpen(open, { focus = false } = {}) {
 function selectModel(model) {
   const peer = state.selectedPeer;
   if (!peer) return;
-  modelPickerSelection = { peer, model };
+  const controlId = `model-control-${crypto.randomUUID()}`;
+  state.pendingModelControls.set(controlId, { peer, model });
+  modelPickerSelection = { peer, model, controlId };
   elements.modelCurrentLabel.textContent = modelKey(model);
   modelPickerSearchText = "";
   elements.modelSearch.value = "";
   setModelPickerOpen(false);
-  sendCommand({ type: "set_model", targetAgentId: peer, model: { provider: model.provider, id: model.id } });
+  sendCommand({ type: "set_model", controlId, targetAgentId: peer, model: { provider: model.provider, id: model.id } });
+}
+
+function clearPendingModelControls({ render = true } = {}) {
+  state.pendingModelControls.clear();
+  modelPickerSelection = undefined;
+  if (render) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
 }
 
 function renderModelOptions(models) {

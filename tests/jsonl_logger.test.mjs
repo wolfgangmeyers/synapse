@@ -63,6 +63,56 @@ test("JSONL logger persists correlated model-control events without payload cont
     current_provider: "openai-codex",
     current_model_id: "gpt-5.6-terra",
   }), true);
+  assert.equal(logger.log("model_control_pending_removed", {
+    control_id: "control-expired",
+    source_agent_id: "controller",
+    source_instance_id: "controller-instance",
+    source_lease_id: "controller-lease",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    reason: "expired",
+  }), true);
+  assert.equal(logger.log("model_control_result_pending_rejected", {
+    control_id: "control-late",
+    source_agent_id: "controller",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    reason: "not_pending",
+  }), true);
+  assert.equal(logger.log("model_control_pending_rejected", {
+    control_id: "control-capacity",
+    source_agent_id: "controller",
+    source_instance_id: "controller-instance",
+    source_lease_id: "controller-lease",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    reason: "capacity_exceeded",
+  }), true);
+  assert.equal(logger.log("model_control_pending_rejected", {
+    control_id: "control-private-rejection",
+    source_agent_id: "controller",
+    source_instance_id: "controller-instance",
+    source_lease_id: "controller-lease",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    reason: "capacity_exceeded",
+    body: "private",
+  }), false);
+  assert.equal(logger.log("model_control_pending_removed", {
+    control_id: "control-private-model",
+    source_agent_id: "controller",
+    source_instance_id: "controller-instance",
+    source_lease_id: "controller-lease",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    reason: "expired",
+    model: { provider: "private", id: "private" },
+  }), false);
   assert.equal(logger.log("model_control_forwarded", {
     control_id: "control-private",
     source_agent_id: "controller",
@@ -83,6 +133,9 @@ test("JSONL logger persists correlated model-control events without payload cont
   })), [
     { event: "model_control_forwarded", control_id: "control-1" },
     { event: "model_control_result_received", control_id: "control-1", accepted: true },
+    { event: "model_control_pending_removed", control_id: "control-expired" },
+    { event: "model_control_result_pending_rejected", control_id: "control-late" },
+    { event: "model_control_pending_rejected", control_id: "control-capacity" },
   ]);
 });
 
