@@ -12,6 +12,8 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const DEFAULT_ROUTER = "http://127.0.0.1:8765";
 const DEFAULT_AGENT_ID = "wolfgang-web";
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1"]);
+const HOSTNAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i;
 const AGENT_REFRESH_INTERVAL_MS = 10_000;
 // The router owns a 30-second pending-control TTL and sweeps once a second.
 // Keep the browser fallback beyond that authoritative rejection window.
@@ -33,7 +35,13 @@ const root = resolve(fileURLToPath(new URL("../web/router-ui", import.meta.url))
 const markdownItBrowserPath = resolve(fileURLToPath(new URL("../web/router-ui/vendor/markdown-it.js", import.meta.url)));
 
 export function parseArguments(argv) {
-  const options = { host: DEFAULT_HOST, port: DEFAULT_PORT, router: DEFAULT_ROUTER, defaultAgentId: DEFAULT_AGENT_ID };
+  const options = {
+    host: DEFAULT_HOST,
+    port: DEFAULT_PORT,
+    router: DEFAULT_ROUTER,
+    defaultAgentId: DEFAULT_AGENT_ID,
+    allowedHost: process.env.MECHA_WEB_UI_ALLOWED_HOST,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (["--host", "--port", "--router", "--default-agent-id"].includes(argument)) {
@@ -59,6 +67,7 @@ export async function startRouterWebUi({
   port = 0,
   router = DEFAULT_ROUTER,
   defaultAgentId = DEFAULT_AGENT_ID,
+  allowedHost = process.env.MECHA_WEB_UI_ALLOWED_HOST,
   modelControlTimeoutMs,
   maxPendingModelControls = MAX_PENDING_MODEL_CONTROLS,
   capabilitiesFetchImpl = fetch,
@@ -67,6 +76,7 @@ export async function startRouterWebUi({
 } = {}) {
   router = normalizeRouterUrl(router);
   defaultAgentId = normalizeAgentId(defaultAgentId);
+  allowedHost = normalizeAllowedHost(allowedHost);
   if (modelControlTimeoutMs !== undefined
     && (!Number.isSafeInteger(modelControlTimeoutMs) || modelControlTimeoutMs < 1)) {
     throw new Error("modelControlTimeoutMs must be a positive integer");
@@ -76,7 +86,7 @@ export async function startRouterWebUi({
   if (!Number.isSafeInteger(capabilityDiscoveryTimeoutMs) || capabilityDiscoveryTimeoutMs < 1) throw new Error("capabilityDiscoveryTimeoutMs must be a positive integer");
   const clients = new Set();
   const server = createServer((request, response) => {
-    if (!browserAuthorityIsAllowed(request.headers.host)) {
+    if (!browserAuthorityIsAllowed(request.headers.host, allowedHost)) {
       sendJson(response, 403, { error: "request_host_rejected" });
       return;
     }
@@ -87,12 +97,12 @@ export async function startRouterWebUi({
     path: "/ui/events",
     perMessageDeflate: false,
     verifyClient: ({ origin, req }, done) => {
-      if (!browserAuthorityIsAllowed(req.headers.host)) {
+      if (!browserAuthorityIsAllowed(req.headers.host, allowedHost)) {
         done(false, 403, "browser host rejected");
         return;
       }
       const hostHeader = req.headers.host;
-      if (origin === `http://${hostHeader}`) {
+      if (origin === `http://${hostHeader}` || origin === `https://${hostHeader}`) {
         done(true);
         return;
       }
@@ -133,11 +143,20 @@ export async function startRouterWebUi({
   };
 }
 
-function browserAuthorityIsAllowed(authority) {
+function normalizeAllowedHost(value) {
+  if (value === undefined || value === "") return undefined;
+  const host = String(value).trim().toLowerCase();
+  if (!HOSTNAME.test(host)) throw new Error("allowedHost must be a hostname");
+  return host;
+}
+
+function browserAuthorityIsAllowed(authority, allowedHost) {
   if (typeof authority !== "string" || authority.length === 0) return false;
   try {
     const hostname = new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, "");
-    return hostname === "127.0.0.1" || hostname === "::1";
+    return allowedHost === undefined
+      ? LOOPBACK_HOSTNAMES.has(hostname)
+      : hostname.toLowerCase() === allowedHost;
   } catch {
     return false;
   }

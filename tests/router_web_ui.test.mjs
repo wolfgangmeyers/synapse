@@ -386,6 +386,70 @@ test("router and web UI reject DNS-rebinding authorities", async () => {
   }
 });
 
+test("router web UI accepts the configured remote host over HTTP and HTTPS same-origin WebSockets", async () => {
+  const router = await startTestRouter();
+  let ui;
+  const host = "donuts-cloud.tailcdfd89.ts.net";
+  const requestWithHost = (baseUrl, path, headers = {}) => new Promise((resolve, reject) => {
+    const url = new URL(path, baseUrl);
+    const request = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      headers: { host, ...headers },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+  const openWithOrigin = async (origin) => {
+    const socket = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
+      headers: { host },
+      origin,
+    });
+    await onceOpen(socket);
+    socket.close();
+    return socket;
+  };
+  try {
+    ui = await startRouterWebUi({ router: router.httpUrl, allowedHost: host, output: () => {} });
+    assert.equal(await requestWithHost(ui.httpUrl, "/ui/config"), 200);
+    await openWithOrigin(`http://${host}`);
+    await openWithOrigin(`https://${host}`);
+    assert.equal(await requestWithHost(ui.httpUrl, "/ui/config", { host: "other.example" }), 403);
+    const hostile = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
+      headers: { host },
+      origin: "https://other.example",
+    });
+    const hostileStatus = await new Promise((resolve, reject) => {
+      hostile.once("unexpected-response", (_request, response) => resolve(response.statusCode));
+      hostile.once("open", () => reject(new Error("hostile-origin socket unexpectedly opened")));
+      hostile.once("error", () => {});
+    });
+    assert.equal(hostileStatus, 403);
+  } finally {
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router web UI reads and validates MECHA_WEB_UI_ALLOWED_HOST", async () => {
+  const previous = process.env.MECHA_WEB_UI_ALLOWED_HOST;
+  process.env.MECHA_WEB_UI_ALLOWED_HOST = "donuts-cloud.tailcdfd89.ts.net";
+  try {
+    assert.equal(parseArguments([]).allowedHost, "donuts-cloud.tailcdfd89.ts.net");
+    await assert.rejects(
+      startRouterWebUi({ allowedHost: "https://donuts-cloud.tailcdfd89.ts.net" }),
+      /allowedHost must be a hostname/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.MECHA_WEB_UI_ALLOWED_HOST;
+    else process.env.MECHA_WEB_UI_ALLOWED_HOST = previous;
+  }
+});
+
 test("router HTTP API rejects escaped newline text in message bodies", async () => {
   const router = await startTestRouter();
   try {
