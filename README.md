@@ -1,6 +1,6 @@
 # mecha-developer
 
-Personal dev-tooling skills for AI coding agents — supervisor, worker, watchdog, mailbox, reminders, install, decompose, kb, voice, augment-persona, generate-persona, worktree, workflows, test-coverage.
+Personal dev-tooling skills for AI coding agents — supervisor, worker, watchdog, mailbox, reminders, install, decompose, subagent-orchestration, kb, voice, augment-persona, generate-persona, worktree, workflows, test-coverage.
 
 Companion repos:
 - `wolfgangmeyers/mecha-review` — self-contained PR review and review-adjacent skills (review-pr, robot-review, pr-summary, pr-validate, pr-context, explain)

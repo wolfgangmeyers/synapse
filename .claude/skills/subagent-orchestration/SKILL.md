@@ -1,147 +1,205 @@
 ---
 name: subagent-orchestration
-description: Use native/background subagents without handing off parent ownership. Load before a supervisor or worker delegates bounded work to subagents. This is not for managed worker launch or long-lived worker management.
+description: Delegate bounded work to native or background subagents with clear contracts, evidence gates, context limits, safe handoffs, and explicit stop rules.
 ---
 
 # Subagent Orchestration
 
-Use this when a parent agent is about to delegate work to native or background subagents.
+Load this skill before a worker or supervisor delegates work to a native or background subagent.
+It covers short-lived subagents inside a task. It does not replace `worker`, `worker-launch`,
+`supervisor`, `decompose`, or `workflows`.
 
-This applies to supervisors and workers. It is about parent-to-subagent delegation inside the current lane. It is not about launching or managing long-lived workers.
+## Ownership
 
-## Rule
+The parent owns the task. A subagent owns only the bounded outcome in its handoff.
 
-The parent owns the task.
+The parent keeps:
 
-Subagents handle bounded pieces. The parent keeps orchestration, state, approvals, integration judgment, and final validation.
+- task scope, requirements, and current state;
+- sequencing and dependencies;
+- integration and conflict decisions;
+- approval, external, and irreversible gates;
+- final validation and readiness judgment;
+- user, supervisor, and mailbox communication.
 
-Do not hand an entire workload to one subagent. Split the work into small observable questions. Delegate the parts that reduce context or unblock parallel checks, then integrate the results yourself.
+A subagent supplies evidence for a decision. It does not decide that the whole task is ready, close
+the task, manage reminders, reply to the user, or hand the entire workload to another agent.
 
-## Use subagents for
+A managed worker owns a durable implementation lane. That worker can orchestrate subagents for
+repo exploration, narrow implementation slices, test triage, validation, or review. The worker
+integrates their results and remains responsible for the lane.
 
-- Bounded exploration of a repo, PR, log, test failure, or document set.
-- Parallel reads where each subagent can inspect a separate area.
-- Test and log triage with a clear failure or command output.
-- Focused review passes by risk area.
-- Alternative analysis when two approaches need independent evidence.
-- Artifact verification: diff checks, generated output checks, posted-content checks, or command-output checks.
-- Narrow implementation slices only when the mutation path and ownership are explicit.
+## Choose the smallest useful shape
 
-## Do not use subagents for
+Use one subagent when the task is one bounded question or slice with one clear output. Examples:
 
-- Whole-task handoff.
-- Long-running implementation ownership.
-- External approval, PR state, deployment, spending, credential, or lifecycle decisions.
-- Work that needs continuous parent judgment.
-- Stateful orchestration, reminders, mailbox replies, or user coordination.
-- Mutation without exact paths, allowed commands, rollback expectations, and stopping rules.
-- One giant prompt that asks a subagent to plan, implement, test, review, and decide readiness.
+- inspect one API contract and report mismatches;
+- find the tests covering one behavior;
+- run one focused validation command and explain a failure;
+- implement one isolated helper with named files and tests.
 
-Use managed workers for durable implementation lanes. Use subagents for bounded pieces inside a lane.
+Decompose a large batch into bounded steps when it has independent areas, sequential dependencies,
+several distinct evidence needs, or enough context that one agent would lose the thread. Give each
+step one owner and one observable result. Use `decompose` when the work needs independently shippable
+phases. Use the canonical workflow from `workflows` when the task must follow a named workflow.
 
-## Decomposition pattern
+Do not decompose an atomic change into artificial phases. Do not ask one subagent to plan,
+implement, test, review, and decide readiness for the whole task.
 
-1. State the parent-owned outcome.
-2. State explicit non-goals.
-3. Split the work into small questions with observable outputs.
-4. Launch independent subagents in parallel when their work does not depend on each other.
-5. Integrate the results in the parent context.
-6. Verify claims against direct evidence.
-7. Launch follow-up subagents only for specific remaining unknowns.
-8. Make the final judgment yourself.
-
-If a subagent result changes the plan, the parent decides what changes. The subagent does not become the owner.
-
-## Parent responsibilities
-
-The parent owns:
-
-- Task context and current state.
-- Decomposition and sequencing.
-- Reminders and async follow-up.
-- Mailbox replies and user-facing status.
-- Approval gates.
-- Conflict resolution between subagent findings.
-- Final diff, artifact, or PR judgment.
-- Final validation evidence.
-- Irreversible or external decisions.
-- Saving durable lessons to the KB or skills when the lesson is reusable.
-
-## Prompt shape
-
-A subagent prompt should include:
-
-- Exact goal.
-- Input paths, PRs, branches, commits, logs, or commands.
-- Allowed commands.
-- Mutation rules: read-only, exact files allowed, or no mutation.
-- Non-goals.
-- Time or turn bounds.
-- Output schema.
-- Evidence requirements.
-- Stop conditions.
-
-Good output schema:
+For a batch, write the dependency order explicitly:
 
 ```text
-Findings:
-- [claim] [evidence path/line/command]
-
-Checked:
-- [what files, commands, logs, commits, or artifacts were inspected]
-
-Not checked:
-- [explicit gaps]
-
-Recommendation:
-- [one bounded next step, or none]
+research contracts -> choose approach -> implement slice -> validate slice -> integrate -> final validation
 ```
 
-Make the evidence small. Ask for paths, line numbers, command names, and short excerpts. Do not ask for transcripts unless the transcript itself is the artifact.
+Parallelize only steps that do not share mutable files, state, or decisions. Keep dependent steps
+sequential. A later step must consume the earlier step's verified output, not its optimistic summary.
 
-## Result handling
+## Write a contract before launching
 
-Treat subagent summaries as claims.
+Every handoff states the smallest observable outcome and the non-goals. Include:
 
-Verify the evidence before relying on them. Check enough source, diff, command output, log, PR state, or artifact content to confirm the claim. If subagents disagree, reconcile the disagreement in the parent context. Send a follow-up subagent only for the specific fact still unknown.
+```text
+Goal: one result the parent can inspect.
+Inputs: exact files, commit, branch, logs, or commands.
+Allowed work: read-only, named files, named commands, or a specific mutation.
+Non-goals: what the subagent must leave alone.
+Dependencies: required predecessor artifact or condition.
+Evidence: output, test result, artifact path, or source line needed to prove the result.
+Stop/escalate: the condition that ends the work or needs the parent.
+Return: concise findings, evidence pointers, gaps, and one recommendation.
+```
 
-Do not copy large raw output into the parent context. Pull the minimum evidence needed for the parent judgment. If the full transcript matters, fetch it only for the section you need.
+For a multi-step task, define the contract between each predecessor and successor:
 
-If a result teaches a reusable lesson, save the distilled version where it belongs: KB for project facts, a skill for workflow rules, or a review heuristic for review misses.
+```text
+Predecessor produces: [named artifact or decision].
+Successor may assume: [verified facts only].
+Successor must prove: [next acceptance condition].
+If missing or contradictory: stop and report the exact gap.
+```
 
-## Context budget
+Do not hide requirements in a long prompt. Do not leave the subagent to infer the base revision,
+file ownership, allowed commands, or what counts as done.
 
-Subagents should reduce parent context load.
+## Evidence gates
 
-Do not have every subagent paste every file it read. Ask for conclusions, evidence pointers, and gaps. The parent can read the cited lines directly when needed.
+A result is a claim until the parent checks the evidence. Require direct, compact proof:
 
-## Common failure modes
+- source claims: path, symbol, and relevant line;
+- test claims: exact command and meaningful output;
+- artifact claims: the actual file or generated output that will be used;
+- git claims: branch, commit, or immutable diff identity;
+- runtime claims: the real request, process output, or observed state.
 
-- One giant subagent owns the whole task.
-- Async subagents are launched with no reminder or poll path.
-- The parent blocks synchronously and becomes unreachable.
-- Duplicate subagents inspect the same thing and produce inconsistent state.
-- Results are accepted without evidence.
-- A subagent mutates outside its scope.
-- A subagent does integration judgment that belongs to the parent.
-- The parent pulls full transcripts into context by default.
+The parent accepts a step only when its contract is met, the evidence covers the acceptance
+condition, and the change stayed within scope. Read the cited source or artifact yourself. Do not
+accept a clean check over a scratch file when the shipped artifact is assembled elsewhere.
 
-## Good pattern
+For mutations, use exact paths and a rollback method. Avoid overlapping writers. Commit before
+reviewing or handing off a mutation when a stable target is needed. Reviewers and validators should
+use that immutable commit or diff, not a mutable working tree.
 
-Parent outcome: review a risky PR before posting comments.
+If a check can be made to pass without testing the behavior, fix the check or add the missing
+assertion. For important tests, prove the test fails when its assertion or relevant behavior is
+removed. The parent decides whether the evidence is sufficient.
 
-Non-goals: no GitHub writes, no code changes.
+## Context and attention budget
 
-Subagents:
+Subagents exist to reduce context load, not to move a transcript into the parent window.
 
-1. API contract check: read the route, request validation, and generated client diff. Report mismatches with file lines.
-2. Persistence check: read migrations and data access paths. Report data-loss or backward-compatibility risk.
-3. Test check: map changed behavior to tests. Report missing assertions and the command that should fail.
+- Ask for conclusions, short evidence pointers, and explicit gaps.
+- Do not request full file dumps or command transcripts unless they are the artifact.
+- Give each subagent a separate focus area. Do not launch duplicate reads of the same question.
+- Keep the parent focused on decisions, integration, and final checks.
+- Pass verified artifacts and contracts to the next step. Do not resend the whole conversation.
+- When a worker approaches its context limit, stop at a safe boundary and write a handoff with the
+  current artifact, evidence, unresolved questions, and exact next action. Compact or resume only
+  after the current step is settled. Never restart from memory.
 
-Parent then reads the cited lines, reconciles findings, runs or checks the relevant validation, and decides what feedback is real.
+A large result is a context problem. Ask the subagent to reduce it to the few facts that change the
+parent's decision, then read the cited lines directly.
 
-## Bad pattern
+## Async execution and no polling loops
 
-"Review this PR, decide whether it is safe, write the comments, and tell me when to approve it."
+Launch independent subagents in the background by default so the parent stays reachable. Continue
+with other unblocked work. Do not block the parent on a synchronous subagent call, and do not run a
+sleep-and-poll loop to watch it.
 
-That hands off the parent job. Split it into focused checks, then make the decision in the parent thread.
+Use the runtime's completion notification, mailbox message, or one scheduled reminder to trigger
+inspection. If the tool requires retrieving a completed result, retrieve it once after the
+completion signal. A queued message is not proof that it was read, and a completion notice is not
+proof that the evidence is correct.
+
+The reminder must name the artifact and next action. Cancel it when the result is received or the
+subagent is stopped. Do not create repeated reminders that only report that work is still running.
+
+## Safe handoffs
+
+Before a successor starts, the parent verifies:
+
+1. the predecessor reached its stated stop condition;
+2. the output artifact exists at the expected path or commit;
+3. the evidence supports the predecessor's claims;
+4. the successor has the exact base, inputs, allowed files, and acceptance condition.
+
+Keep file ownership disjoint whenever possible. If two steps must touch one file, sequence them and
+hand off the latest immutable state. Never let a read-only auditor mutate the implementation tree.
+Never use a subagent handoff to smuggle in authorization for a commit, push, external service,
+production, deployment, IAM, deletion, or other gated operation.
+
+A safe handoff is short:
+
+```text
+Completed: [artifact and exact revision].
+Evidence: [commands, outputs, and paths].
+Open: [only unresolved requirement or risk].
+Next owner: [agent].
+Next action: [one executable step].
+```
+
+## Stop, continue, or escalate
+
+Stop the subagent when its contract is satisfied, when it reaches the stated stopping condition, or
+when continuing would expand scope. Report the evidence and leave integration to the parent.
+
+Continue with a conservative reversible choice when the issue is ordinary uncertainty, missing
+polish, or local setup that does not prevent the requested artifact. Do not turn a subagent failure
+into a whole-task blocker without checking the failure directly.
+
+Escalate to the parent when:
+
+- a requirement, external contract, security boundary, data-loss risk, or irreversible decision is
+  unclear or contradicted;
+- the required input or predecessor artifact is missing;
+- the allowed mutation would overlap another owner or cannot be rolled back;
+- the same failure persists after a direct diagnostic and one sound retry;
+- the requested outcome cannot be proved with the available evidence.
+
+An escalation names the exact condition, what was checked, the evidence, and the smallest decision or
+next action needed. Do not send a vague "blocked" status. The parent decides whether to change the
+plan, retry, reassign, or stop.
+
+## Parent closeout
+
+Before declaring the task complete, the parent:
+
+1. reconciles every subagent result with direct evidence;
+2. maps each changed file and output to a requirement or validated blocker;
+3. checks the final target, not an earlier draft or scratch artifact;
+4. runs the required tests, coverage, review, and live proof for the task;
+5. records unresolved decisions and hands off only concrete next actions.
+
+The parent owns the final answer. Subagent summaries are inputs to that answer, not a substitute for
+it.
+
+## Common failures
+
+- One giant prompt hands off the whole task.
+- A worker delegates ownership instead of delegating lifting.
+- Parallel agents write the same files or inspect the same question.
+- A successor starts from an unverified summary.
+- A parent blocks synchronously or polls in a tight loop.
+- Full transcripts consume the context budget.
+- A subagent makes a readiness, approval, or external-service decision.
+- A blocker is reported without a requirement, contract, or direct evidence.
