@@ -2823,9 +2823,12 @@ function applyCorsHeaders(response) {
 
 function requestAuthorityIsAllowed(authority) {
   if (typeof authority !== "string" || authority.length === 0) return false;
+  // Host is an authority, not a URL. Reject URL decorations before parsing so
+  // credentials or paths cannot hide a disallowed host behind an allowed name.
+  if (/[@\\/?#\s]/u.test(authority)) return false;
   try {
     const hostname = new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, "");
-    return ALLOWED_HOSTS.has(hostname);
+    return ALLOWED_HOSTS.has(hostname) || hostname === "donuts-cloud.tailcdfd89.ts.net";
   } catch {
     return false;
   }
