@@ -37,6 +37,55 @@ test("JSONL logger persists declared mailbox events and rejects body-bearing fie
   ]);
 });
 
+test("JSONL logger persists correlated model-control events without payload content", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-jsonl-model-control-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const logPath = join(directory, "router.jsonl");
+  const logger = createJsonlLogger({ logPath, clock: () => new Date("2030-01-01T00:00:00.000Z") });
+
+  assert.equal(logger.log("model_control_forwarded", {
+    control_id: "control-1",
+    source_agent_id: "controller",
+    source_instance_id: "controller-instance",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    requested_provider: "openai-codex",
+    requested_model_id: "gpt-5.6-terra",
+  }), true);
+  assert.equal(logger.log("model_control_result_received", {
+    control_id: "control-1",
+    source_agent_id: "controller",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    accepted: true,
+    current_provider: "openai-codex",
+    current_model_id: "gpt-5.6-terra",
+  }), true);
+  assert.equal(logger.log("model_control_forwarded", {
+    control_id: "control-private",
+    source_agent_id: "controller",
+    source_instance_id: "controller-instance",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    target_lease_id: "worker-lease",
+    requested_provider: "openai-codex",
+    requested_model_id: "gpt-5.6-terra",
+    body: "private",
+  }), false);
+
+  const records = (await readFile(logPath, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(records.map(({ event, control_id, accepted }) => ({
+    event,
+    control_id,
+    ...(accepted === undefined ? {} : { accepted }),
+  })), [
+    { event: "model_control_forwarded", control_id: "control-1" },
+    { event: "model_control_result_received", control_id: "control-1", accepted: true },
+  ]);
+});
+
 test("JSONL logger rotates at the size limit and keeps on-disk usage bounded", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-jsonl-rotate-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

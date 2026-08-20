@@ -38,6 +38,17 @@ const STRING_FIELDS = new Set([
   "signal",
   "host",
   "router_url",
+  "control_id",
+  "source_agent_id",
+  "source_instance_id",
+  "source_lease_id",
+  "target_agent_id",
+  "target_instance_id",
+  "target_lease_id",
+  "requested_provider",
+  "requested_model_id",
+  "current_provider",
+  "current_model_id",
 ]);
 const NUMBER_FIELDS = new Set([
   "attempt",
@@ -50,7 +61,7 @@ const NUMBER_FIELDS = new Set([
   "server_job_success_count",
   "server_job_failure_count",
 ]);
-const BOOLEAN_FIELDS = new Set(["created", "deduped", "recovered", "released", "terminal"]);
+const BOOLEAN_FIELDS = new Set(["created", "deduped", "recovered", "released", "terminal", "accepted"]);
 const EVENT_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const EVENT_SCHEMAS = Object.freeze({
   schema_migration: schema(["migration_id"]),
@@ -87,6 +98,67 @@ const EVENT_SCHEMAS = Object.freeze({
   server_job_succeeded: schema(["job_key", "scheduled_for", "attempt", "message_id"]),
   server_job_failed: schema(["job_key", "scheduled_for", "attempt", "error_code", "terminal"]),
   message_retried: schema(["message_id", "agent_id", "state"]),
+  model_control_received: schema([
+    "control_id",
+    "source_agent_id",
+    "source_instance_id",
+    "source_lease_id",
+    "target_agent_id",
+    "requested_provider",
+    "requested_model_id",
+  ]),
+  model_control_source_lease_rejected: schema([
+    "control_id",
+    "source_agent_id",
+    "source_instance_id",
+    "source_lease_id",
+    "target_agent_id",
+  ]),
+  model_control_target_unavailable: schema([
+    "control_id",
+    "source_agent_id",
+    "source_instance_id",
+    "target_agent_id",
+  ]),
+  model_control_forwarded: schema([
+    "control_id",
+    "source_agent_id",
+    "source_instance_id",
+    "target_agent_id",
+    "target_instance_id",
+    "target_lease_id",
+    "requested_provider",
+    "requested_model_id",
+  ]),
+  model_control_result_received: schema([
+    "control_id",
+    "source_agent_id",
+    "target_agent_id",
+    "target_instance_id",
+    "target_lease_id",
+    "accepted",
+  ], ["error_code", "current_provider", "current_model_id"]),
+  model_control_result_lease_rejected: schema([
+    "control_id",
+    "source_agent_id",
+    "target_agent_id",
+    "target_instance_id",
+    "target_lease_id",
+  ]),
+  model_control_result_source_unavailable: schema([
+    "control_id",
+    "source_agent_id",
+    "target_agent_id",
+    "target_instance_id",
+  ]),
+  model_control_result_forwarded: schema([
+    "control_id",
+    "source_agent_id",
+    "source_instance_id",
+    "target_agent_id",
+    "target_instance_id",
+    "accepted",
+  ], ["error_code", "current_provider", "current_model_id"]),
 });
 
 export function rotateJsonlLog(logPath, maxBytes = DEFAULT_MAX_LOG_BYTES) {

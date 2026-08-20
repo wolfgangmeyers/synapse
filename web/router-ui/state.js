@@ -10,6 +10,8 @@ const SCOPED_EVENT_TYPES = new Set([
   "message",
   "conversation_message",
   "agent_activity",
+  "agent_model_catalog",
+  "model_control_result",
   "message_arrival",
   "history",
   "history_error",

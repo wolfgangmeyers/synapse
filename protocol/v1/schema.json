@@ -69,6 +69,17 @@
         { "if": { "properties": { "enabled": { "const": false } } }, "then": { "properties": { "goal": { "const": "" } } } }
       ]
     },
+    "modelSummary": {
+      "type": "object", "additionalProperties": false, "required": ["provider", "id"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "modelSummaries": {
+      "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/modelSummary" }
+    },
     "failureReason": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$" },
     "utcMillis": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
     "leaseIdentity": {
@@ -224,7 +235,84 @@
         "activity_state": { "$ref": "#/$defs/clientActivityState" },
         "subagent_count": { "$ref": "#/$defs/subagentCount" },
         "subagents": { "$ref": "#/$defs/subagentSummaries" },
-        "goal": { "$ref": "#/$defs/goalProjection" }
+        "goal": { "$ref": "#/$defs/goalProjection" },
+        "current_model": { "$ref": "#/$defs/modelSummary" }
+      }
+    },
+    "modelCatalogFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "model_summaries"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "model_catalog" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "model_summaries": { "$ref": "#/$defs/modelSummaries" }
+      }
+    },
+    "modelControlFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "target_agent_id", "control_id", "action", "model"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "model_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "target_agent_id": { "$ref": "#/$defs/agentId" },
+        "control_id": { "$ref": "#/$defs/frameId" },
+        "action": { "const": "set_model" },
+        "model": { "$ref": "#/$defs/modelSummary" }
+      }
+    },
+    "modelControlForwardFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "action", "model"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "model_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" },
+        "control_id": { "$ref": "#/$defs/frameId" },
+        "action": { "const": "set_model" },
+        "model": { "$ref": "#/$defs/modelSummary" }
+      }
+    },
+    "modelControlForwardedFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "control_id", "model"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "model_control_forwarded" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "control_id": { "$ref": "#/$defs/frameId" },
+        "model": { "$ref": "#/$defs/modelSummary" }
+      }
+    },
+    "modelControlResultFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "accepted"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "model_control_result" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" },
+        "control_id": { "$ref": "#/$defs/frameId" },
+        "accepted": { "type": "boolean" },
+        "error_code": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "current_model": { "$ref": "#/$defs/modelSummary" },
+        "available_models": { "$ref": "#/$defs/modelSummaries" }
       }
     },
     "messageArrivalClientFrame": {
@@ -453,6 +541,15 @@
           "$ref": "#/$defs/activityFrame"
         },
         {
+          "$ref": "#/$defs/modelCatalogFrame"
+        },
+        {
+          "$ref": "#/$defs/modelControlFrame"
+        },
+        {
+          "$ref": "#/$defs/modelControlResultFrame"
+        },
+        {
           "$ref": "#/$defs/messageArrivalClientFrame"
         },
         {
@@ -655,6 +752,22 @@
         "subagent_count": { "$ref": "#/$defs/subagentCount" },
         "goal": { "$ref": "#/$defs/goalProjection" },
         "subagents": { "$ref": "#/$defs/subagentSummaries" },
+        "current_model": { "$ref": "#/$defs/modelSummary" },
+        "generated_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
+    "agentModelCatalogFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "model_summaries", "generated_at"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "agent_model_catalog" },
+        "agent_id": { "$ref": "#/$defs/agentId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "model_summaries": { "$ref": "#/$defs/modelSummaries" },
+        "current_model": { "$ref": "#/$defs/modelSummary" },
         "generated_at": { "$ref": "#/$defs/utcMillis" }
       }
     },
@@ -738,8 +851,12 @@
         { "$ref": "#/$defs/pongFrame" },
         { "$ref": "#/$defs/messageFrame" },
         { "$ref": "#/$defs/conversationMessageFrame" },
+        { "$ref": "#/$defs/modelControlForwardFrame" },
+        { "$ref": "#/$defs/modelControlForwardedFrame" },
+        { "$ref": "#/$defs/modelControlResultFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" },
         { "$ref": "#/$defs/agentActivityFrame" },
+        { "$ref": "#/$defs/agentModelCatalogFrame" },
         { "$ref": "#/$defs/messageArrivalServerFrame" },
         { "$ref": "#/$defs/subagentStateSnapshotFrame" },
         { "$ref": "#/$defs/subagentStateUpdateFrame" },

@@ -37,6 +37,7 @@ import {
 } from "./protocol.js";
 
 const DEFAULT_MAX_FRAME_BYTES = 64 * 1024;
+const MAX_MODEL_SUMMARIES = 1_000;
 // Accommodates text messages plus up to three browser-compressed image attachments
 // while still capping a single loopback request.
 const MAX_REQUEST_BYTES = 6 * 1024 * 1024;
@@ -205,6 +206,7 @@ export function createAgentRouter({
   const pendingDeliveryOffers = new Map();
   const activityByAgentId = new Map();
   const goalByAgentId = new Map();
+  const modelByAgentId = new Map();
   // V2 is deliberately unavailable instead of silently becoming a second
   // process-local lifecycle store when a router starts against a pre-017 DB.
   const lifecycleV2Available = typeof repository.migrationIds === "function"
@@ -279,6 +281,18 @@ export function createAgentRouter({
         }
         if (frame.type === "activity") {
           receiveActivity(socket, frame);
+          return;
+        }
+        if (frame.type === "model_catalog") {
+          receiveModelCatalog(socket, frame);
+          return;
+        }
+        if (frame.type === "model_control") {
+          receiveModelControl(socket, frame);
+          return;
+        }
+        if (frame.type === "model_control_result") {
+          receiveModelControlResult(socket, frame);
           return;
         }
         if (frame.type === "subagent_sync_enable") {
@@ -375,9 +389,11 @@ export function createAgentRouter({
         const lease = owner === undefined ? undefined : repository.leaseFor(frame.agent_id);
         if (owner !== undefined && lease !== undefined
           && Date.parse(lease.expires_at) > currentTimeMs(clock)) {
-          if (owner.instanceId !== frame.instance_id) {
+          if (owner.instanceId !== frame.instance_id
+            || modelByAgentId.get(frame.agent_id)?.instanceId !== frame.instance_id) {
             activityByAgentId.delete(frame.agent_id);
             goalByAgentId.delete(frame.agent_id);
+            modelByAgentId.delete(frame.agent_id);
           }
           session = createSession(currentSocket, frame, lease, owner.deliveryInstanceId);
           subscribers.set(frame.instance_id, session);
@@ -408,9 +424,12 @@ export function createAgentRouter({
           leaseDurationMs,
         });
         const replacement = sessions.get(frame.agent_id);
-        if (replacement !== undefined && replacement.instanceId !== frame.instance_id) {
+        if ((replacement !== undefined && replacement.instanceId !== frame.instance_id)
+          || (modelByAgentId.get(frame.agent_id)?.instanceId !== undefined
+            && modelByAgentId.get(frame.agent_id).instanceId !== frame.instance_id)) {
           activityByAgentId.delete(frame.agent_id);
           goalByAgentId.delete(frame.agent_id);
+          modelByAgentId.delete(frame.agent_id);
         }
         session = createSession(currentSocket, frame, lease, frame.instance_id);
         cancelPendingDeliveryOffer(frame.agent_id);
@@ -675,7 +694,172 @@ export function createAgentRouter({
       }
       // Keep publishing byte-compatible legacy activity during the rollout. The
       // connected-agent snapshot selects durable children once this producer is v2.
-      updateAgentActivity(session.agentId, frame.activity_state, frame.subagent_count ?? 0, frame.subagents, frame.goal, session.instanceId);
+      updateAgentActivity(
+        session.agentId,
+        frame.activity_state,
+        frame.subagent_count ?? 0,
+        frame.subagents,
+        frame.goal,
+        session.instanceId,
+        frame.current_model,
+      );
+    }
+
+    function receiveModelCatalog(currentSocket, frame) {
+      if (!matchesSessionLease(frame)) {
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      const previousProjection = modelByAgentId.get(session.agentId);
+      const modelSummaries = normalizeModelSummaries(frame.model_summaries);
+      modelByAgentId.set(session.agentId, {
+        instanceId: session.instanceId,
+        currentModel: previousProjection?.instanceId === session.instanceId
+          ? previousProjection.currentModel
+          : undefined,
+        availableModels: modelSummaries,
+      });
+      broadcastAgentModelCatalog(session.agentId, session.instanceId, modelSummaries);
+    }
+
+    function receiveModelControl(currentSocket, frame) {
+      emit("model_control_received", {
+        control_id: frame.control_id,
+        source_agent_id: frame.agent_id,
+        source_instance_id: frame.instance_id,
+        source_lease_id: frame.lease_id,
+        target_agent_id: frame.target_agent_id,
+        requested_provider: frame.model.provider,
+        requested_model_id: frame.model.id,
+      });
+      if (!matchesSessionLease(frame)) {
+        emit("model_control_source_lease_rejected", {
+          control_id: frame.control_id,
+          source_agent_id: frame.agent_id,
+          source_instance_id: frame.instance_id,
+          source_lease_id: frame.lease_id,
+          target_agent_id: frame.target_agent_id,
+        });
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      const target = sessions.get(frame.target_agent_id);
+      if (target === undefined || !sessionHasActiveLease(target)) {
+        emit("model_control_target_unavailable", {
+          control_id: frame.control_id,
+          source_agent_id: session.agentId,
+          source_instance_id: session.instanceId,
+          target_agent_id: frame.target_agent_id,
+        });
+        sendError(currentSocket, generateFrameId, "target_not_connected", frame.frame_id);
+        return;
+      }
+      sendFrame(target.socket, generateFrameId, {
+        type: "model_control",
+        agent_id: target.agentId,
+        instance_id: target.instanceId,
+        lease_id: target.leaseId,
+        source_agent_id: session.agentId,
+        control_id: frame.control_id,
+        action: frame.action,
+        model: frame.model,
+      });
+      emit("model_control_forwarded", {
+        control_id: frame.control_id,
+        source_agent_id: session.agentId,
+        source_instance_id: session.instanceId,
+        target_agent_id: target.agentId,
+        target_instance_id: target.instanceId,
+        target_lease_id: target.leaseId,
+        requested_provider: frame.model.provider,
+        requested_model_id: frame.model.id,
+      });
+      // This confirms the router accepted the request and handed it to the
+      // target's active socket. It deliberately does not claim the model was
+      // changed; the target reports that separately in model_control_result.
+      sendFrame(currentSocket, generateFrameId, {
+        type: "model_control_forwarded",
+        agent_id: target.agentId,
+        control_id: frame.control_id,
+        model: frame.model,
+      });
+    }
+
+    function receiveModelControlResult(currentSocket, frame) {
+      emit("model_control_result_received", {
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        target_agent_id: frame.agent_id,
+        target_instance_id: frame.instance_id,
+        target_lease_id: frame.lease_id,
+        accepted: frame.accepted,
+        ...(frame.error_code === undefined ? {} : { error_code: frame.error_code }),
+        ...(frame.current_model === undefined ? {} : {
+          current_provider: frame.current_model.provider,
+          current_model_id: frame.current_model.id,
+        }),
+      });
+      if (!matchesSessionLease(frame)) {
+        emit("model_control_result_lease_rejected", {
+          control_id: frame.control_id,
+          source_agent_id: frame.source_agent_id,
+          target_agent_id: frame.agent_id,
+          target_instance_id: frame.instance_id,
+          target_lease_id: frame.lease_id,
+        });
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      const source = sessions.get(frame.source_agent_id);
+      const previousProjection = modelByAgentId.get(session.agentId);
+      const currentModel = normalizeModelSummary(frame.current_model);
+      const availableModels = frame.available_models === undefined
+        ? previousProjection?.availableModels ?? []
+        : normalizeModelSummaries(frame.available_models);
+      if (currentModel !== undefined || frame.available_models !== undefined) {
+        modelByAgentId.set(session.agentId, {
+          instanceId: session.instanceId,
+          currentModel: currentModel ?? previousProjection?.currentModel,
+          availableModels,
+        });
+      }
+      if (source === undefined || !sessionHasActiveLease(source)) {
+        emit("model_control_result_source_unavailable", {
+          control_id: frame.control_id,
+          source_agent_id: frame.source_agent_id,
+          target_agent_id: session.agentId,
+          target_instance_id: session.instanceId,
+        });
+        return;
+      }
+      sendFrame(source.socket, generateFrameId, {
+        type: "model_control_result",
+        agent_id: session.agentId,
+        instance_id: session.instanceId,
+        lease_id: session.leaseId,
+        source_agent_id: frame.source_agent_id,
+        control_id: frame.control_id,
+        accepted: frame.accepted,
+        ...(frame.error_code === undefined ? {} : { error_code: frame.error_code }),
+        ...(frame.current_model === undefined ? {} : { current_model: frame.current_model }),
+        available_models: frame.available_models ?? [],
+      });
+      emit("model_control_result_forwarded", {
+        control_id: frame.control_id,
+        source_agent_id: source.agentId,
+        source_instance_id: source.instanceId,
+        target_agent_id: session.agentId,
+        target_instance_id: session.instanceId,
+        accepted: frame.accepted,
+        ...(frame.error_code === undefined ? {} : { error_code: frame.error_code }),
+        ...(frame.current_model === undefined ? {} : {
+          current_provider: frame.current_model.provider,
+          current_model_id: frame.current_model.id,
+        }),
+      });
     }
 
     function receiveMessageArrival(currentSocket, frame) {
@@ -1249,6 +1433,27 @@ export function createAgentRouter({
     return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
   }
 
+  function normalizeModelSummary(value) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const provider = typeof value.provider === "string" ? value.provider.trim().slice(0, 128) : "";
+    const id = typeof value.id === "string" ? value.id.trim().slice(0, 256) : "";
+    if (provider.length === 0 || id.length === 0) return undefined;
+    const name = typeof value.name === "string" ? value.name.trim().slice(0, 256) : "";
+    return { provider, id, ...(name.length > 0 ? { name } : {}) };
+  }
+
+  function normalizeModelSummaries(values) {
+    if (!Array.isArray(values)) return [];
+    const seen = new Set();
+    return values.map(normalizeModelSummary).filter((model) => {
+      if (model === undefined) return false;
+      const key = `${model.provider}\u0000${model.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, MAX_MODEL_SUMMARIES);
+  }
+
   function normalizeSubagents(subagents, subagentCount = 0) {
     if (!Array.isArray(subagents)) return [];
     return subagents.map((summary) => {
@@ -1317,7 +1522,7 @@ export function createAgentRouter({
     });
   }
 
-  function broadcastAgentActivity(agentId, activityState, subagentCount = 0, subagents = [], generatedAt = new Date(currentTimeMs(clock)).toISOString(), instanceId, goal) {
+  function broadcastAgentActivity(agentId, activityState, subagentCount = 0, subagents = [], generatedAt = new Date(currentTimeMs(clock)).toISOString(), instanceId, goal, currentModel) {
     for (const recipient of conversationSessions.values()) {
       for (const session of recipient.values()) {
         sendFrame(session.socket, generateFrameId, {
@@ -1328,6 +1533,23 @@ export function createAgentRouter({
           subagent_count: subagentCount,
           subagents,
           ...(goal === undefined ? {} : { goal }),
+          ...(currentModel === undefined ? {} : { current_model: currentModel }),
+          generated_at: generatedAt,
+        });
+      }
+    }
+  }
+
+  function broadcastAgentModelCatalog(agentId, instanceId, modelSummaries, generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
+    const currentModel = modelByAgentId.get(agentId)?.currentModel;
+    for (const recipient of conversationSessions.values()) {
+      for (const session of recipient.values()) {
+        sendFrame(session.socket, generateFrameId, {
+          type: "agent_model_catalog",
+          agent_id: agentId,
+          instance_id: instanceId,
+          model_summaries: modelSummaries,
+          ...(currentModel === undefined ? {} : { current_model: currentModel }),
           generated_at: generatedAt,
         });
       }
@@ -1352,7 +1574,7 @@ export function createAgentRouter({
     }
   }
 
-  function updateAgentActivity(agentId, activityState, subagentCount = 0, subagents, incomingGoal, instanceId) {
+  function updateAgentActivity(agentId, activityState, subagentCount = 0, subagents, incomingGoal, instanceId, incomingModel) {
     const nowMs = currentTimeMs(clock);
     const generatedAt = new Date(nowMs).toISOString();
     const currentGoal = goalByAgentId.get(agentId);
@@ -1360,6 +1582,18 @@ export function createAgentRouter({
     const normalizedGoal = incomingGoal === undefined ? undefined : normalizeGoalProjection(incomingGoal);
     if (normalizedGoal !== undefined && instanceId !== undefined) goalByAgentId.set(agentId, { instanceId, goal: normalizedGoal });
     const goal = goalByAgentId.get(agentId)?.goal;
+    const normalizedModel = incomingModel === undefined ? undefined : normalizeModelSummary(incomingModel);
+    const previousProjection = modelByAgentId.get(agentId);
+    const previousModel = previousProjection?.currentModel;
+    if (normalizedModel !== undefined
+      && (previousProjection === undefined || previousProjection.instanceId === instanceId)) {
+      modelByAgentId.set(agentId, {
+        instanceId,
+        currentModel: normalizedModel,
+        availableModels: previousProjection?.availableModels ?? [],
+      });
+    }
+    const modelProjection = modelByAgentId.get(agentId);
     const previousState = observableAgentActivity(agentId, nowMs);
     const previousCount = observableSubagentCount(agentId, nowMs);
     const previousSubagents = observableSubagents(agentId, nowMs);
@@ -1380,8 +1614,9 @@ export function createAgentRouter({
         subagentCount: visibleCount,
         subagents: visibleSubagents,
       });
-      if (previousState !== nextState || previousCount !== visibleCount || !sameSubagents(previousSubagents, visibleSubagents) || JSON.stringify(previousGoal) !== JSON.stringify(goal)) {
-        broadcastAgentActivity(agentId, nextState, visibleCount, visibleSubagents, generatedAt, instanceId, goal);
+      if (previousState !== nextState || previousCount !== visibleCount || !sameSubagents(previousSubagents, visibleSubagents) || JSON.stringify(previousGoal) !== JSON.stringify(goal)
+        || JSON.stringify(previousModel) !== JSON.stringify(modelProjection?.currentModel)) {
+        broadcastAgentActivity(agentId, nextState, visibleCount, visibleSubagents, generatedAt, instanceId, goal, modelProjection?.currentModel);
       }
       if (previousState === "compacting" && nextState !== "compacting" && session !== undefined) {
         session.deliveryPaused = false;
@@ -1394,8 +1629,9 @@ export function createAgentRouter({
       session.deliveryPaused = false;
       offerQueuedMessages(agentId);
     }
-    if (previousState !== "idle" || previousCount !== 0 || previousSubagents.length > 0 || JSON.stringify(previousGoal) !== JSON.stringify(goal)) {
-      broadcastAgentActivity(agentId, "idle", 0, [], generatedAt, instanceId, goal);
+    if (previousState !== "idle" || previousCount !== 0 || previousSubagents.length > 0 || JSON.stringify(previousGoal) !== JSON.stringify(goal)
+      || JSON.stringify(previousModel) !== JSON.stringify(modelProjection?.currentModel)) {
+      broadcastAgentActivity(agentId, "idle", 0, [], generatedAt, instanceId, goal, modelProjection?.currentModel);
     }
   }
 
@@ -1416,7 +1652,17 @@ export function createAgentRouter({
         session.deliveryPaused = false;
         offerQueuedMessages(agentId);
       }
-      broadcastAgentActivity(agentId, "idle", 0, [], generatedAt, activity.instanceId, goalByAgentId.get(agentId)?.instanceId === activity.instanceId ? goalByAgentId.get(agentId).goal : undefined);
+      const modelProjection = modelByAgentId.get(agentId);
+      broadcastAgentActivity(
+        agentId,
+        "idle",
+        0,
+        [],
+        generatedAt,
+        activity.instanceId,
+        goalByAgentId.get(agentId)?.instanceId === activity.instanceId ? goalByAgentId.get(agentId).goal : undefined,
+        modelProjection?.currentModel,
+      );
     }
   }
 
@@ -1431,6 +1677,9 @@ export function createAgentRouter({
       const producer = lifecycleV2Available ? repository.subagentLifecycleProducerFor(session.agentId) : undefined;
       const lifecycle = lifecycleByAgent.get(session.agentId)
         ?? (producer?.authority === "v2" ? lifecycleAgentSnapshot(session.agentId) : undefined);
+      const modelProjection = modelByAgentId.get(session.agentId)?.instanceId === session.instanceId
+        ? modelByAgentId.get(session.agentId)
+        : undefined;
       agents.push({
         agent_id: session.agentId,
         agent_role: session.agentRole,
@@ -1439,6 +1688,10 @@ export function createAgentRouter({
         activity_state: observableAgentActivity(session.agentId),
         subagent_count: lifecycle?.subagent_count ?? observableSubagentCount(session.agentId),
         subagents: lifecycle?.subagents ?? observableSubagents(session.agentId),
+        ...(modelProjection?.currentModel === undefined
+          ? {}
+          : { current_model: modelProjection.currentModel }),
+        available_models: modelProjection?.availableModels ?? [],
         ...(goalByAgentId.get(session.agentId)?.instanceId === session.instanceId
           ? { goal: goalByAgentId.get(session.agentId).goal }
           : {}),
