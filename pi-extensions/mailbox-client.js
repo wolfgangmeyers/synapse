@@ -21,6 +21,7 @@ const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_REPLY_TIMEOUT_MS = 5_000;
 const DEFAULT_CAPABILITY_TIMEOUT_MS = 2_000;
 const MODEL_CATALOG_REFRESH_INTERVAL_MS = 10_000;
+const MAX_MODEL_CATALOG_FRAME_BYTES = 64 * 1024;
 const MAX_SUBAGENTS = 999;
 const LIFECYCLE_JOURNAL_MAX_ITEMS = 256;
 const LIFECYCLE_JOURNAL_MAX_BYTES = 262_144;
@@ -128,12 +129,18 @@ function normalizeSubagents(subagents) {
   return subagents.map(normalizeSubagentSummary).filter(Boolean).slice(0, MAX_SUBAGENTS);
 }
 
+function normalizeModelString(value, maximum) {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  return normalized.length > 0 && [...normalized].length <= maximum ? normalized : "";
+}
+
 function normalizeModelSummary(model) {
   if (model === undefined || model === null || typeof model !== "object" || Array.isArray(model)) return undefined;
-  const provider = typeof model.provider === "string" ? model.provider.trim().slice(0, 128) : "";
-  const id = typeof model.id === "string" ? model.id.trim().slice(0, 256) : "";
+  const provider = normalizeModelString(model.provider, 128);
+  const id = normalizeModelString(model.id, 256);
   if (provider.length === 0 || id.length === 0) return undefined;
-  const name = typeof model.name === "string" ? model.name.trim().slice(0, 256) : "";
+  const name = normalizeModelString(model.name, 256);
   return { provider, id, ...(name.length > 0 ? { name } : {}) };
 }
 
@@ -243,7 +250,11 @@ export function createMailboxClient({
   let lifecycleConnectionDisabled = false;
   let lifecycleSequence = 0;
   let lifecycleRouterVersion = 0;
-  let modelCatalogSocket;
+  let capabilitiesSocket;
+  let modelCatalogSupported = false;
+  let modelCatalogFrameBytes = MAX_MODEL_CATALOG_FRAME_BYTES;
+  let lastPublishedModelCatalog;
+  let modelControlTail = Promise.resolve();
   // The newest full assertion is retained separately from the retry journal. A reconnect must
   // lead with it, because a replacement lease is fenced until the router accepts a snapshot.
   let lifecycleSnapshotChildren = [];
@@ -475,20 +486,89 @@ export function createMailboxClient({
     });
   }
 
-  function sendModelCatalog() {
-    let catalog;
-    try {
-      catalog = getModelCatalog();
-    } catch {
-      catalog = [];
-    }
-    send({
+  function modelCatalogFrame(modelSummaries) {
+    return {
+      version: "v1",
+      frame_id: generateId(),
       type: "model_catalog",
       agent_id: agentId,
       instance_id: instanceId,
       lease_id: leaseId,
-      model_summaries: normalizeModelSummaries(catalog),
+      model_summaries: modelSummaries,
+    };
+  }
+
+  function fitModelCatalogFrame(modelSummaries) {
+    const frame = modelCatalogFrame([]);
+    const serialize = (count) => {
+      frame.model_summaries = modelSummaries.slice(0, count);
+      return JSON.stringify(frame);
+    };
+    if (Buffer.byteLength(serialize(0), "utf8") > modelCatalogFrameBytes) return undefined;
+    let low = 0;
+    let high = modelSummaries.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (Buffer.byteLength(serialize(middle), "utf8") <= modelCatalogFrameBytes) low = middle;
+      else high = middle - 1;
+    }
+    const serialized = serialize(low);
+    return { frame, serialized, signature: JSON.stringify(frame.model_summaries) };
+  }
+
+  function publishModelCatalog({ force = false } = {}) {
+    if (!modelCatalogSupported || !socketOpen(socket) || leaseId === undefined) return false;
+    let catalog;
+    try {
+      catalog = getModelCatalog();
+    } catch (error) {
+      modelControlTrace("client_model_catalog_read_failed", { error_name: error?.name ?? "Error" });
+      return false;
+    }
+    const summaries = normalizeModelSummaries(catalog);
+    const fitted = fitModelCatalogFrame(summaries);
+    if (fitted === undefined) {
+      modelControlTrace("client_model_catalog_publish_failed", { reason: "frame_budget_too_small", frame_bytes: modelCatalogFrameBytes });
+      return false;
+    }
+    if (!force && fitted.signature === lastPublishedModelCatalog) {
+      modelControlTrace("client_model_catalog_unchanged", {
+        model_count: fitted.frame.model_summaries.length,
+        source_model_count: summaries.length,
+      });
+      return false;
+    }
+    try {
+      socket.send(fitted.serialized);
+    } catch (error) {
+      modelControlTrace("client_model_catalog_publish_failed", {
+        reason: socketOpen(socket) ? "socket_send_failed" : "client_not_connected",
+        error_name: error?.name ?? "Error",
+      });
+      return false;
+    }
+    lastPublishedModelCatalog = fitted.signature;
+    modelControlTrace("client_model_catalog_published", {
+      model_count: fitted.frame.model_summaries.length,
+      source_model_count: summaries.length,
+      bytes: Buffer.byteLength(fitted.serialized, "utf8"),
+      truncated: fitted.frame.model_summaries.length < summaries.length,
     });
+    return true;
+  }
+
+  function ensureModelCatalogTimer() {
+    if (!modelCatalogSupported || modelCatalogTimer !== undefined) return;
+    modelCatalogTimer = setIntervalImpl(() => {
+      try {
+        publishModelCatalog();
+      } catch (error) {
+        modelControlTrace("client_model_catalog_publish_failed", {
+          reason: "unexpected_error",
+          error_name: error?.name ?? "Error",
+        });
+      }
+    }, MODEL_CATALOG_REFRESH_INTERVAL_MS);
   }
 
   async function receiveModelControl(frame) {
@@ -528,26 +608,44 @@ export function createMailboxClient({
       result = { accepted: false, errorCode: "model_switch_failed" };
     }
     const currentModel = normalizeModelSummary(result?.currentModel);
-    const availableModels = normalizeModelSummaries(result?.availableModels);
-    send({
-      type: "model_control_result",
-      agent_id: agentId,
-      instance_id: instanceId,
-      lease_id: leaseId,
-      source_agent_id: frame.source_agent_id,
-      control_id: frame.control_id,
-      accepted: result?.accepted === true,
-      ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
-      ...(currentModel === undefined ? {} : { current_model: currentModel }),
-      available_models: availableModels,
-    });
-    modelControlTrace("client_model_control_result_sent", {
-      control_id: frame.control_id,
-      source_agent_id: frame.source_agent_id,
-      accepted: result?.accepted === true,
-      ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
-      ...(currentModel?.provider === undefined ? {} : { current_provider: currentModel.provider }),
-      ...(currentModel?.id === undefined ? {} : { current_model_id: currentModel.id }),
+    try {
+      send({
+        type: "model_control_result",
+        agent_id: agentId,
+        instance_id: instanceId,
+        lease_id: leaseId,
+        source_agent_id: frame.source_agent_id,
+        control_id: frame.control_id,
+        accepted: result?.accepted === true,
+        ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
+        ...(currentModel === undefined ? {} : { current_model: currentModel }),
+      });
+      modelControlTrace("client_model_control_result_sent", {
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        accepted: result?.accepted === true,
+        ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
+        ...(currentModel?.provider === undefined ? {} : { current_provider: currentModel.provider }),
+        ...(currentModel?.id === undefined ? {} : { current_model_id: currentModel.id }),
+      });
+    } catch (error) {
+      modelControlTrace("client_model_control_result_failed", {
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: socketOpen(socket) ? "socket_send_failed" : "client_not_connected",
+        error_name: error?.name ?? "Error",
+      });
+    }
+  }
+
+  function enqueueModelControl(frame) {
+    const pending = modelControlTail.then(() => receiveModelControl(frame));
+    modelControlTail = pending.catch((error) => {
+      modelControlTrace("client_model_control_processing_failed", {
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        error_name: error?.name ?? "Error",
+      });
     });
   }
 
@@ -653,6 +751,8 @@ export function createMailboxClient({
     lifecycleSupported = false;
     lifecycleReady = false;
     lifecycleConnectionDisabled = false;
+    modelCatalogSupported = false;
+    capabilitiesSocket = undefined;
     lifecycleTrace("client_lifecycle_disconnected", { connected: false, error_name: error?.name, phase: kickstartRouter ? "kickstart" : "socket" });
     if (stopped) return;
     report("disconnected", error);
@@ -671,23 +771,43 @@ export function createMailboxClient({
     }
   }
 
-  async function discoverLifecycle(currentSocket) {
+  async function discoverCapabilities(currentSocket) {
     lifecycleTrace("client_lifecycle_capability_lookup", { phase: "started" });
+    modelControlTrace("client_model_catalog_capability_lookup", { phase: "started" });
     try {
       const response = await fetchImpl(`${routerHttpUrl(routerUrl)}/v1/capabilities`, { signal: AbortSignal.timeout(capabilityTimeoutMs) });
       const capabilities = response.ok ? await response.json() : undefined;
       if (socket !== currentSocket || stopped) return;
       lifecycleSupported = capabilities?.subagent_lifecycle_v2 === true;
       lifecycleTrace("client_lifecycle_capability_result", { available: lifecycleSupported, ready: response.ok });
-      if (!lifecycleSupported) return;
-      lifecycleConnectionDisabled = false;
-      lifecycleTrace("client_lifecycle_sync_enable_attempt", { router_version: lifecycleRouterVersion });
-      send({ type: "subagent_sync_enable", agent_id: agentId, instance_id: instanceId, lease_id: leaseId,
-        ...(lifecycleRouterVersion > 0 ? { after_version: lifecycleRouterVersion } : {}) });
+      modelCatalogSupported = capabilities?.model_catalog_v1 === true;
+      const advertisedFrameBytes = capabilities?.model_catalog_limits?.frame_bytes;
+      modelCatalogFrameBytes = Number.isSafeInteger(advertisedFrameBytes) && advertisedFrameBytes > 0
+        ? Math.min(advertisedFrameBytes, MAX_MODEL_CATALOG_FRAME_BYTES)
+        : MAX_MODEL_CATALOG_FRAME_BYTES;
+      modelControlTrace("client_model_catalog_capability_result", {
+        available: modelCatalogSupported,
+        ready: response.ok,
+        frame_bytes: modelCatalogFrameBytes,
+      });
+      if (modelCatalogSupported) {
+        publishModelCatalog({ force: true });
+        ensureModelCatalogTimer();
+      }
+      if (lifecycleSupported) {
+        lifecycleConnectionDisabled = false;
+        lifecycleTrace("client_lifecycle_sync_enable_attempt", { router_version: lifecycleRouterVersion });
+        send({ type: "subagent_sync_enable", agent_id: agentId, instance_id: instanceId, lease_id: leaseId,
+          ...(lifecycleRouterVersion > 0 ? { after_version: lifecycleRouterVersion } : {}) });
+      }
     } catch (error) {
       lifecycleTrace("client_lifecycle_capability_error", { error_name: error?.name ?? "Error" });
+      modelControlTrace("client_model_catalog_capability_error", { error_name: error?.name ?? "Error" });
       // 404/timeouts are the old-router fallback. Do not log payloads or source text.
-      if (socket === currentSocket && !stopped) lifecycleSupported = false;
+      if (socket === currentSocket && !stopped) {
+        lifecycleSupported = false;
+        modelCatalogSupported = false;
+      }
     }
   }
 
@@ -698,19 +818,6 @@ export function createMailboxClient({
       rebindLifecycleJournalLease();
       reconnectAttempt = 0;
       log(`MECHA_V2_FRAME registered agent=${agentId} lease=${leaseId}`);
-      if (modelCatalogSocket !== socket) {
-        sendModelCatalog();
-        modelCatalogSocket = socket;
-      }
-      if (modelCatalogTimer === undefined) {
-        modelCatalogTimer = setIntervalImpl(() => {
-          try {
-            sendModelCatalog();
-          } catch (error) {
-            log(`MECHA_V2_FRAME model_catalog_failed agent=${agentId} error=${error.message}`);
-          }
-        }, MODEL_CATALOG_REFRESH_INTERVAL_MS);
-      }
       if (renewTimer === undefined) {
         renewTimer = setIntervalImpl(() => {
           try {
@@ -726,7 +833,10 @@ export function createMailboxClient({
         rejectInitialConnection = undefined;
       }
       report("connected");
-      void discoverLifecycle(socket);
+      if (capabilitiesSocket !== socket) {
+        capabilitiesSocket = socket;
+        void discoverCapabilities(socket);
+      }
       return;
     }
     if (frame.type === "subagent_state_snapshot" || frame.type === "subagent_state_replay") {
@@ -764,7 +874,7 @@ export function createMailboxClient({
       return;
     }
     if (frame.type === "model_control") {
-      await receiveModelControl(frame);
+      enqueueModelControl(frame);
       return;
     }
     if (frame.type !== "message") {
@@ -826,7 +936,7 @@ export function createMailboxClient({
         closeSocket(currentSocket);
       }
     });
-    currentSocket.addEventListener("message", async (payload) => {
+    currentSocket.addEventListener("message", (payload) => {
       if (socket !== currentSocket || stopped) return;
       let frame;
       try {
@@ -839,12 +949,19 @@ export function createMailboxClient({
         closeSocket(currentSocket);
         return;
       }
-      await receive(frame);
-      if (frame.type === "error" || frame.type === "lease_rejected") {
-        const error = new Error(`Mailbox v2 registration rejected (${frame.code ?? "unknown"})`);
-        disconnected(currentSocket, error);
-        closeSocket(currentSocket);
-      }
+      void receive(frame).then(() => {
+        if (frame.type === "error" || frame.type === "lease_rejected") {
+          const error = new Error(`Mailbox v2 registration rejected (${frame.code ?? "unknown"})`);
+          disconnected(currentSocket, error);
+          closeSocket(currentSocket);
+        }
+      }).catch((error) => {
+        modelControlTrace("client_receive_failed", {
+          frame_type: frame.type,
+          error_name: error?.name ?? "Error",
+        });
+        log(`MECHA_V2_FRAME receive_failed agent=${agentId} type=${frame.type ?? "unknown"} error=${error?.message ?? "unknown"}`);
+      });
     });
     currentSocket.addEventListener("error", (event) => {
       const error = event.error ?? new Error("Mailbox v2 socket error");

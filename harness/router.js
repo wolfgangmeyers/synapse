@@ -38,6 +38,10 @@ import {
 
 const DEFAULT_MAX_FRAME_BYTES = 64 * 1024;
 const MAX_MODEL_SUMMARIES = 1_000;
+const MODEL_CATALOG_MAX_FRAME_BYTES = 60 * 1024;
+const DEFAULT_PENDING_MODEL_CONTROL_TTL_MS = 30_000;
+const DEFAULT_MAX_PENDING_MODEL_CONTROLS = 256;
+const DEFAULT_MAX_PENDING_MODEL_CONTROLS_PER_SOURCE = 16;
 // Accommodates text messages plus up to three browser-compressed image attachments
 // while still capping a single loopback request.
 const MAX_REQUEST_BYTES = 6 * 1024 * 1024;
@@ -101,6 +105,9 @@ export function createAgentRouter({
   mechaDeveloperUpdateReminderIntervalMs = DEFAULT_MECHA_DEVELOPER_UPDATE_REMINDER_INTERVAL_MS,
   deliveryOfferCoalesceMs = 25,
   activityTtlMs = 15_000,
+  pendingModelControlTtlMs = DEFAULT_PENDING_MODEL_CONTROL_TTL_MS,
+  maxPendingModelControls = DEFAULT_MAX_PENDING_MODEL_CONTROLS,
+  maxPendingModelControlsPerSource = DEFAULT_MAX_PENDING_MODEL_CONTROLS_PER_SOURCE,
   generateFrameId = createNanoId,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
@@ -157,6 +164,17 @@ export function createAgentRouter({
   if (!Number.isSafeInteger(activityTtlMs) || activityTtlMs <= 0) {
     throw new TypeError("activityTtlMs must be a positive safe integer");
   }
+  if (!Number.isSafeInteger(pendingModelControlTtlMs) || pendingModelControlTtlMs <= 0) {
+    throw new TypeError("pendingModelControlTtlMs must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maxPendingModelControls) || maxPendingModelControls <= 0) {
+    throw new TypeError("maxPendingModelControls must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maxPendingModelControlsPerSource)
+    || maxPendingModelControlsPerSource <= 0
+    || maxPendingModelControlsPerSource > maxPendingModelControls) {
+    throw new TypeError("maxPendingModelControlsPerSource must be a positive safe integer no greater than maxPendingModelControls");
+  }
   if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
     throw new TypeError("maxFrameBytes must be a positive safe integer");
   }
@@ -207,6 +225,9 @@ export function createAgentRouter({
   const activityByAgentId = new Map();
   const goalByAgentId = new Map();
   const modelByAgentId = new Map();
+  // Model-control results are useful only while both exact sessions and leases
+  // remain connected. TTL and capacity limits bound targets that never reply.
+  const pendingModelControls = new Map();
   // V2 is deliberately unavailable instead of silently becoming a second
   // process-local lifecycle store when a router starts against a pre-017 DB.
   const lifecycleV2Available = typeof repository.migrationIds === "function"
@@ -338,6 +359,7 @@ export function createAgentRouter({
     });
     socket.on("close", () => {
       if (session === undefined) return;
+      removePendingModelControlsForSession(session);
       if (session.conversationSync === "v1") {
         const subscribers = conversationSessions.get(session.agentId);
         if (subscribers?.get(session.instanceId) === session) subscribers.delete(session.instanceId);
@@ -354,6 +376,7 @@ export function createAgentRouter({
       if (sessions.get(session.agentId) === session) {
         sessions.delete(session.agentId);
         cancelPendingDeliveryOffer(session.agentId);
+        modelByAgentId.delete(session.agentId);
         if (session.suppressActivityClearOnClose !== true && observableAgentActivity(session.agentId) !== "compacting") {
           clearAgentActivity(session.agentId);
         }
@@ -746,25 +769,74 @@ export function createAgentRouter({
         return;
       }
       const target = sessions.get(frame.target_agent_id);
-      if (target === undefined || !sessionHasActiveLease(target)) {
+      if (target === undefined
+        || target.socket.readyState !== WebSocket.OPEN
+        || !sessionHasActiveLease(target)) {
         emit("model_control_target_unavailable", {
           control_id: frame.control_id,
           source_agent_id: session.agentId,
           source_instance_id: session.instanceId,
           target_agent_id: frame.target_agent_id,
+          reason: "target_not_connected",
         });
         sendError(currentSocket, generateFrameId, "target_not_connected", frame.frame_id);
         return;
       }
-      sendFrame(target.socket, generateFrameId, {
-        type: "model_control",
-        agent_id: target.agentId,
-        instance_id: target.instanceId,
-        lease_id: target.leaseId,
-        source_agent_id: session.agentId,
-        control_id: frame.control_id,
-        action: frame.action,
-        model: frame.model,
+      pruneExpiredPendingModelControls();
+      const key = pendingModelControlKey(session.agentId, frame.control_id);
+      if (pendingModelControls.has(key)) {
+        emitModelControlPendingRejected(frame, target, "duplicate_control_id");
+        sendError(currentSocket, generateFrameId, "model_control_already_pending", frame.frame_id);
+        return;
+      }
+      let sourcePendingCount = 0;
+      for (const pending of pendingModelControls.values()) {
+        if (pending.sourceSession === session) sourcePendingCount += 1;
+      }
+      if (pendingModelControls.size >= maxPendingModelControls
+        || sourcePendingCount >= maxPendingModelControlsPerSource) {
+        emitModelControlPendingRejected(frame, target, "capacity_exceeded");
+        sendError(currentSocket, generateFrameId, "model_control_capacity_exceeded", frame.frame_id);
+        return;
+      }
+      let forwarded = false;
+      try {
+        forwarded = sendFrame(target.socket, generateFrameId, {
+          type: "model_control",
+          agent_id: target.agentId,
+          instance_id: target.instanceId,
+          lease_id: target.leaseId,
+          source_agent_id: session.agentId,
+          control_id: frame.control_id,
+          action: frame.action,
+          model: frame.model,
+        });
+      } catch {
+        // A synchronous WebSocket send failure is a failed forward.
+      }
+      if (!forwarded) {
+        emit("model_control_target_unavailable", {
+          control_id: frame.control_id,
+          source_agent_id: session.agentId,
+          source_instance_id: session.instanceId,
+          target_agent_id: target.agentId,
+          reason: "target_send_failed",
+        });
+        sendError(currentSocket, generateFrameId, "target_send_failed", frame.frame_id);
+        return;
+      }
+      pendingModelControls.set(key, {
+        controlId: frame.control_id,
+        requestFrameId: frame.frame_id,
+        sourceSession: session,
+        sourceAgentId: session.agentId,
+        sourceInstanceId: session.instanceId,
+        sourceLeaseId: session.leaseId,
+        targetSession: target,
+        targetAgentId: target.agentId,
+        targetInstanceId: target.instanceId,
+        targetLeaseId: target.leaseId,
+        expiresAtMs: currentTimeMs(clock) + pendingModelControlTtlMs,
       });
       emit("model_control_forwarded", {
         control_id: frame.control_id,
@@ -776,18 +848,62 @@ export function createAgentRouter({
         requested_provider: frame.model.provider,
         requested_model_id: frame.model.id,
       });
-      // This confirms the router accepted the request and handed it to the
-      // target's active socket. It deliberately does not claim the model was
-      // changed; the target reports that separately in model_control_result.
-      sendFrame(currentSocket, generateFrameId, {
-        type: "model_control_forwarded",
-        agent_id: target.agentId,
-        control_id: frame.control_id,
-        model: frame.model,
-      });
     }
 
     function receiveModelControlResult(currentSocket, frame) {
+      if (!matchesSessionLease(frame)) {
+        emit("model_control_result_lease_rejected", {
+          control_id: frame.control_id,
+          source_agent_id: frame.source_agent_id,
+          target_agent_id: frame.agent_id,
+          target_instance_id: frame.instance_id,
+          target_lease_id: frame.lease_id,
+        });
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      pruneExpiredPendingModelControls();
+      const key = pendingModelControlKey(frame.source_agent_id, frame.control_id);
+      const pending = pendingModelControls.get(key);
+      if (pending === undefined
+        || pending.targetSession !== session
+        || pending.targetAgentId !== frame.agent_id
+        || pending.targetInstanceId !== frame.instance_id
+        || pending.targetLeaseId !== frame.lease_id) {
+        emit("model_control_result_pending_rejected", {
+          control_id: frame.control_id,
+          source_agent_id: frame.source_agent_id,
+          target_agent_id: frame.agent_id,
+          target_instance_id: frame.instance_id,
+          target_lease_id: frame.lease_id,
+          reason: pending === undefined ? "not_pending" : "target_mismatch",
+        });
+        sendError(currentSocket, generateFrameId, "model_control_result_not_pending", frame.frame_id);
+        return;
+      }
+      const source = pending.sourceSession;
+      if (source.agentId !== frame.source_agent_id
+        || source.instanceId !== pending.sourceInstanceId
+        || source.leaseId !== pending.sourceLeaseId
+        || source.socket.readyState !== WebSocket.OPEN
+        || !sessionHasActiveLease(source)) {
+        pendingModelControls.delete(key);
+        emitPendingModelControlRemoved(pending, "source_unavailable");
+        emit("model_control_result_pending_rejected", {
+          control_id: frame.control_id,
+          source_agent_id: frame.source_agent_id,
+          target_agent_id: frame.agent_id,
+          target_instance_id: frame.instance_id,
+          target_lease_id: frame.lease_id,
+          reason: "source_unavailable",
+        });
+        sendError(currentSocket, generateFrameId, "model_control_result_not_pending", frame.frame_id);
+        return;
+      }
+      // Consume before changing projection or forwarding so every later result is
+      // rejected as a duplicate without touching the retained catalog.
+      pendingModelControls.delete(key);
       emit("model_control_result_received", {
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
@@ -801,19 +917,6 @@ export function createAgentRouter({
           current_model_id: frame.current_model.id,
         }),
       });
-      if (!matchesSessionLease(frame)) {
-        emit("model_control_result_lease_rejected", {
-          control_id: frame.control_id,
-          source_agent_id: frame.source_agent_id,
-          target_agent_id: frame.agent_id,
-          target_instance_id: frame.instance_id,
-          target_lease_id: frame.lease_id,
-        });
-        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
-        closeSocket(currentSocket, 4003, "lease not active");
-        return;
-      }
-      const source = sessions.get(frame.source_agent_id);
       const previousProjection = modelByAgentId.get(session.agentId);
       const currentModel = normalizeModelSummary(frame.current_model);
       const availableModels = frame.available_models === undefined
@@ -826,16 +929,7 @@ export function createAgentRouter({
           availableModels,
         });
       }
-      if (source === undefined || !sessionHasActiveLease(source)) {
-        emit("model_control_result_source_unavailable", {
-          control_id: frame.control_id,
-          source_agent_id: frame.source_agent_id,
-          target_agent_id: session.agentId,
-          target_instance_id: session.instanceId,
-        });
-        return;
-      }
-      sendFrame(source.socket, generateFrameId, {
+      const resultForwarded = sendFrame(source.socket, generateFrameId, {
         type: "model_control_result",
         agent_id: session.agentId,
         instance_id: session.instanceId,
@@ -845,8 +939,17 @@ export function createAgentRouter({
         accepted: frame.accepted,
         ...(frame.error_code === undefined ? {} : { error_code: frame.error_code }),
         ...(frame.current_model === undefined ? {} : { current_model: frame.current_model }),
-        available_models: frame.available_models ?? [],
+        ...(frame.available_models === undefined ? {} : { available_models: frame.available_models }),
       });
+      if (!resultForwarded) {
+        emit("model_control_result_source_unavailable", {
+          control_id: frame.control_id,
+          source_agent_id: frame.source_agent_id,
+          target_agent_id: session.agentId,
+          target_instance_id: session.instanceId,
+        });
+        return;
+      }
       emit("model_control_result_forwarded", {
         control_id: frame.control_id,
         source_agent_id: source.agentId,
@@ -1060,6 +1163,7 @@ export function createAgentRouter({
       clearInterval(mechaDeveloperUpdateReminderTimer);
       for (const timer of pendingDeliveryOffers.values()) clearTimeout(timer);
       pendingDeliveryOffers.clear();
+      pendingModelControls.clear();
       for (const socket of webSocketServer.clients) {
         socket.terminate();
       }
@@ -1087,6 +1191,7 @@ export function createAgentRouter({
 
   function sweepMessageLifecycles() {
     pruneExpiredRateLimitEntries(currentTimeMs(clock));
+    pruneExpiredPendingModelControls();
     const staleAgents = sweepStaleAgentResources();
     const expired = sweepExpiredUnclaimedMessages();
     const timedOut = sweepDeliveryTimeouts();
@@ -1405,6 +1510,79 @@ export function createAgentRouter({
       && lease.lease_id === candidate.leaseId
       && lease.instance_id === candidate.deliveryInstanceId
       && lease.expires_at > generatedAt;
+  }
+
+  function pendingModelControlKey(sourceAgentId, controlId) {
+    return `${sourceAgentId}\u0000${controlId}`;
+  }
+
+  function emitModelControlPendingRejected(frame, target, reason) {
+    emit("model_control_pending_rejected", {
+      control_id: frame.control_id,
+      source_agent_id: frame.agent_id,
+      source_instance_id: frame.instance_id,
+      source_lease_id: frame.lease_id,
+      target_agent_id: frame.target_agent_id,
+      ...(target === undefined ? {} : {
+        target_instance_id: target.instanceId,
+        target_lease_id: target.leaseId,
+      }),
+      reason,
+    });
+  }
+
+  function emitPendingModelControlRemoved(pending, reason) {
+    emit("model_control_pending_removed", {
+      control_id: pending.controlId,
+      source_agent_id: pending.sourceAgentId,
+      source_instance_id: pending.sourceInstanceId,
+      source_lease_id: pending.sourceLeaseId,
+      target_agent_id: pending.targetAgentId,
+      target_instance_id: pending.targetInstanceId,
+      target_lease_id: pending.targetLeaseId,
+      reason,
+    });
+  }
+
+  function pruneExpiredPendingModelControls(nowMs = currentTimeMs(clock)) {
+    for (const [key, pending] of pendingModelControls.entries()) {
+      if (pending.expiresAtMs > nowMs) continue;
+      pendingModelControls.delete(key);
+      emitPendingModelControlRemoved(pending, "expired");
+      if (pending.sourceSession.socket.readyState === WebSocket.OPEN
+        && sessionHasActiveLease(pending.sourceSession)) {
+        sendError(
+          pending.sourceSession.socket,
+          generateFrameId,
+          "model_control_expired",
+          pending.requestFrameId,
+        );
+      }
+    }
+  }
+
+  function removePendingModelControlsForSession(disconnectedSession) {
+    for (const [key, pending] of pendingModelControls.entries()) {
+      const sourceDisconnected = pending.sourceSession === disconnectedSession;
+      const targetDisconnected = pending.targetSession === disconnectedSession;
+      if (!sourceDisconnected && !targetDisconnected) continue;
+      pendingModelControls.delete(key);
+      emitPendingModelControlRemoved(
+        pending,
+        sourceDisconnected ? "source_disconnected" : "target_disconnected",
+      );
+      if (targetDisconnected
+        && !sourceDisconnected
+        && pending.sourceSession.socket.readyState === WebSocket.OPEN
+        && sessionHasActiveLease(pending.sourceSession)) {
+        sendError(
+          pending.sourceSession.socket,
+          generateFrameId,
+          "target_not_connected",
+          pending.requestFrameId,
+        );
+      }
+    }
   }
 
   function observableAgentActivity(agentId, nowMs = currentTimeMs(clock)) {
@@ -1800,6 +1978,8 @@ export function createAgentRouter({
     }
     if (request.method === "GET" && requestUrl.pathname === "/v1/capabilities") {
       sendHttpJson(response, 200, {
+        model_catalog_v1: true,
+        model_catalog_limits: { frame_bytes: Math.min(MODEL_CATALOG_MAX_FRAME_BYTES, maxFrameBytes) },
         subagent_lifecycle_v2: lifecycleV2Available,
         ...(lifecycleV2Available ? { lifecycle_limits: { subagents: 999, id_bytes: 128, description_bytes: 512 } } : { lifecycle_error: "migration_017_required" }),
       });
@@ -2565,8 +2745,8 @@ function applyCorsHeaders(response) {
 }
 
 function isBrowserCorsRoute(method, pathname) {
-  if (method === "OPTIONS") return ["/v1/agents", "/v1/messages", "/v1/health"].includes(pathname);
-  return (method === "GET" && ["/v1/agents", "/v1/health"].includes(pathname))
+  if (method === "OPTIONS") return ["/v1/messages", "/v1/health"].includes(pathname);
+  return (method === "GET" && pathname === "/v1/health")
     || (method === "POST" && pathname === "/v1/messages");
 }
 
@@ -2600,7 +2780,7 @@ function sendError(socket, generateFrameId, code, requestId) {
 }
 
 function sendFrame(socket, generateFrameId, fields, validate = true) {
-  if (socket.readyState !== WebSocket.OPEN) return;
+  if (socket.readyState !== WebSocket.OPEN) return false;
   const frame = {
     version: "v1",
     frame_id: generateFrameId(),
@@ -2608,6 +2788,7 @@ function sendFrame(socket, generateFrameId, fields, validate = true) {
   };
   if (validate) validateServerFrame(frame);
   socket.send(JSON.stringify(frame));
+  return true;
 }
 
 function closeSocket(socket, code, reason) {

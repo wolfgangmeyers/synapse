@@ -12,7 +12,15 @@ import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { parseArguments, startRouterWebUi } from "../tools/router_web_ui.mjs";
 import { mergeMessages } from "../web/router-ui/history.js";
-import { applyLifecycleSnapshot, matchesActiveScope, upsertLifecycleAgent } from "../web/router-ui/state.js";
+import {
+  applyLifecycleSnapshot,
+  consumePendingModelControl,
+  matchesActiveScope,
+  matchingPendingModelControl,
+  mergeAgentModelProjection,
+  normalizeModelSummaries,
+  upsertLifecycleAgent,
+} from "../web/router-ui/state.js";
 import { isAllowedMarkdownLink, markdownToSafeHtml, renderMarkdownBody, textWithoutMarkdownImages } from "../web/router-ui/markdown.js";
 
 const webAgentId = "web-test-client";
@@ -63,6 +71,67 @@ test("clears lifecycle badge state from a newer zero-count snapshot", () => {
   const result = applyLifecycleSnapshot(upsertLifecycleAgent([], lifecycleAgent(3)), [lifecycleAgent(4, 0)], 4, 3);
   assert.equal(result.agents[0].subagent_count, 0);
   assert.deepEqual(result.agents[0].subagents, []);
+});
+
+test("matches model control results only to the pending control and target", () => {
+  const pending = new Map([["control-1", { peer: "target-agent", model: { provider: "provider", id: "model" } }]]);
+  assert.equal(matchingPendingModelControl(pending, {
+    controlId: "control-1",
+    targetAgentId: "target-agent",
+  }), pending.get("control-1"));
+  assert.equal(matchingPendingModelControl(pending, {
+    controlId: "control-1",
+    targetAgentId: "other-agent",
+  }), undefined);
+  assert.equal(matchingPendingModelControl(pending, {
+    controlId: "late-control",
+    targetAgentId: "target-agent",
+  }), undefined);
+});
+
+test("model control state applies authoritative results and preserves omitted catalogs", () => {
+  const current = { provider: "provider", id: "current" };
+  const target = { provider: "provider", id: "target" };
+  const catalog = [current, target];
+  const pending = new Map([
+    ["accepted-control", { peer: "target-agent", model: target }],
+    ["rejected-control", { peer: "target-agent", model: target }],
+  ]);
+  const agents = [{
+    agent_id: "target-agent",
+    instance_id: "target-instance",
+    activity_state: "idle",
+    current_model: current,
+    available_models: catalog,
+  }];
+
+  const accepted = consumePendingModelControl(pending, {
+    controlId: "accepted-control",
+    targetAgentId: "target-agent",
+    accepted: true,
+    currentModel: target,
+  });
+  assert.deepEqual(accepted.projection, { currentModel: target });
+  const acceptedState = mergeAgentModelProjection(agents, "target-agent", "target-instance", accepted.projection);
+  assert.deepEqual(acceptedState.agents[0].current_model, target);
+  assert.deepEqual(acceptedState.agents[0].available_models, catalog);
+
+  const rejected = consumePendingModelControl(pending, {
+    controlId: "rejected-control",
+    targetAgentId: "target-agent",
+    accepted: false,
+    currentModel: current,
+    availableModels: [],
+  });
+  const rejectedState = mergeAgentModelProjection(acceptedState.agents, "target-agent", "target-instance", rejected.projection);
+  assert.deepEqual(rejectedState.agents[0].current_model, current);
+  assert.deepEqual(rejectedState.agents[0].available_models, []);
+  assert.equal(pending.size, 0);
+  assert.equal(consumePendingModelControl(pending, {
+    controlId: "accepted-control",
+    targetAgentId: "target-agent",
+  }), undefined);
+  assert.equal(normalizeModelSummaries([target, target]).length, 1);
 });
 
 const renderMarkdown = (body) => markdownToSafeHtml(body, MarkdownIt);
@@ -176,7 +245,7 @@ test("router web UI accepts remote HTTP routers and rejects unsafe router URLs",
   }
 });
 
-test("router HTTP API allows browser CORS for web UI requests", async () => {
+test("router HTTP API limits browser CORS to public web UI request routes", async () => {
   const router = await startTestRouter();
   try {
     const preflight = await fetch(new URL("/v1/messages", router.httpUrl), {
@@ -194,7 +263,7 @@ test("router HTTP API allows browser CORS for web UI requests", async () => {
 
     const agents = await fetch(new URL("/v1/agents", router.httpUrl), { headers: { origin: "https://anywhere.example" } });
     assert.equal(agents.status, 200);
-    assert.equal(agents.headers.get("access-control-allow-origin"), "*");
+    assert.equal(agents.headers.get("access-control-allow-origin"), null);
 
     const history = await fetch(new URL("/v1/conversations?owner=cors-web&peer=cors-peer", router.httpUrl), {
       headers: { origin: "https://untrusted.example" },
@@ -372,6 +441,7 @@ test("router web UI serves the app and relays live router messages", async () =>
     const activity = await activeEvent;
     assert.equal(activity.activityState, "active");
     assert.equal(activity.subagentCount, 2);
+    assert.equal(Object.hasOwn(activity, "availableModels"), false);
 
     const catalog = Array.from({ length: 150 }, (_, index) => ({
       provider: "catalog-provider",
@@ -391,15 +461,32 @@ test("router web UI serves the app and relays live router messages", async () =>
     const catalogProjection = await catalogEvent;
     assert.equal(catalogProjection.availableModels.length, catalog.length);
     assert.deepEqual(catalogProjection.availableModels.at(-1), catalog.at(-1));
+    const postCatalogActivityEvent = waitForEvent(browser, (event) => event.type === "agent_activity"
+      && event.agent === "peer-agent" && event.activityState === "idle");
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "peer-agent-post-catalog-activity",
+      type: "activity",
+      agent_id: "peer-agent",
+      instance_id: "peer-agent-instance",
+      lease_id: peer.registered.lease_id,
+      activity_state: "settled",
+      subagent_count: 0,
+    }));
+    const postCatalogActivity = await postCatalogActivityEvent;
+    assert.equal(Object.hasOwn(postCatalogActivity, "availableModels"), false);
 
     const targetModel = catalog[0];
+    const controlId = "browser-control-accepted";
     const forwardedControl = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control");
     browser.send(JSON.stringify({
       type: "set_model",
+      controlId,
       targetAgentId: "peer-agent",
       model: { provider: targetModel.provider, id: targetModel.id },
     }));
     const control = await forwardedControl;
+    assert.equal(control.control_id, controlId);
     assert.equal(control.agent_id, "peer-agent");
     assert.equal(control.instance_id, "peer-agent-instance");
     assert.equal(control.lease_id, peer.registered.lease_id);
@@ -777,6 +864,7 @@ test("router web app sends a model control from the picker and applies the resul
 
     const currentModel = { provider: "provider", id: "current", name: "Current model" };
     const targetModel = { provider: "provider", id: "target", name: "Target model" };
+    const fallbackModel = { provider: "provider", id: "fallback", name: "Fallback model" };
     const peerReady = await domBrowser.evaluate(`(async () => {
       const deadline = Date.now() + 2_000;
       while (Date.now() < deadline) {
@@ -810,6 +898,26 @@ test("router web app sends a model control from the picker and applies the resul
       return false;
     })()`);
     assert.equal(targetReady, true);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-model-peer-activity-after-catalog",
+      type: "activity",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      activity_state: "active",
+      subagent_count: 0,
+    }));
+    const catalogPreserved = await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const controls = document.querySelector("#model-controls");
+        if (!controls?.hidden && controls.querySelectorAll(".model-option").length === 2) return true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    })()`);
+    assert.equal(catalogPreserved, true);
 
     const forwardedControl = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control");
     const clicked = await domBrowser.evaluate(`(() => {
@@ -852,6 +960,16 @@ test("router web app sends a model control from the picker and applies the resul
     assert.equal(successStatus.title, "Model changed");
     assert.equal(successStatus.detail, "dom-model-peer · provider/target");
 
+    const rejectedControlFrame = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id !== control.control_id);
+    const selectedCurrent = await domBrowser.evaluate(`(() => {
+      document.querySelector("#model-current")?.click();
+      const option = [...document.querySelectorAll(".model-option")].find((element) => element.textContent.includes("Current model"));
+      option?.click();
+      return option !== undefined;
+    })()`);
+    assert.equal(selectedCurrent, true);
+    const rejectedControl = await rejectedControlFrame;
     peer.socket.send(JSON.stringify({
       version: "v1",
       frame_id: "dom-model-peer-rejected-result",
@@ -860,31 +978,321 @@ test("router web app sends a model control from the picker and applies the resul
       instance_id: "dom-model-peer-instance",
       lease_id: peer.registered.lease_id,
       source_agent_id: "wolfgang-web",
-      control_id: `${control.control_id}-rejected`,
+      control_id: rejectedControl.control_id,
       accepted: false,
       error_code: "model_unavailable",
-      current_model: targetModel,
-      available_models: [currentModel, targetModel],
+      current_model: fallbackModel,
+      available_models: [fallbackModel, targetModel],
     }));
     const rejectedStatus = await domBrowser.evaluate(`(async () => {
       const deadline = Date.now() + 2_000;
       while (Date.now() < deadline) {
         const title = document.querySelector("#status-title")?.textContent;
         const detail = document.querySelector("#status-detail")?.textContent;
-        if (title === "Model change rejected" && detail === "dom-model-peer · model_unavailable") return { title, detail };
+        const current = document.querySelector("#model-current-label")?.textContent;
+        const options = [...document.querySelectorAll(".model-option")].map((element) => element.textContent);
+        if (title === "Model change rejected" && detail === "dom-model-peer · model_unavailable"
+          && current === "provider/fallback" && options.length === 2) return { title, detail, current, options };
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       return {
         title: document.querySelector("#status-title")?.textContent,
         detail: document.querySelector("#status-detail")?.textContent,
+        current: document.querySelector("#model-current-label")?.textContent,
+        options: [...document.querySelectorAll(".model-option")].map((element) => element.textContent),
       };
     })()`);
-    assert.deepEqual(rejectedStatus, {
-      title: "Model change rejected",
-      detail: "dom-model-peer · model_unavailable",
-    });
+    assert.equal(rejectedStatus.title, "Model change rejected");
+    assert.equal(rejectedStatus.detail, "dom-model-peer · model_unavailable");
+    assert.equal(rejectedStatus.current, "provider/fallback");
+    assert.equal(rejectedStatus.options.length, 2);
+
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-model-peer-duplicate-result",
+      type: "model_control_result",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: "wolfgang-web",
+      control_id: rejectedControl.control_id,
+      accepted: true,
+      current_model: targetModel,
+      available_models: [targetModel],
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(await domBrowser.evaluate(`(() => ({
+      title: document.querySelector("#status-title")?.textContent,
+      current: document.querySelector("#model-current-label")?.textContent,
+    }))()`), { title: "Model change rejected", current: "provider/fallback" });
+
+    const emptyCatalogControlFrame = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id !== rejectedControl.control_id);
+    assert.equal(await domBrowser.evaluate(`(() => {
+      document.querySelector("#model-current")?.click();
+      const option = [...document.querySelectorAll(".model-option")].find((element) => element.textContent.includes("Target model"));
+      option?.click();
+      return option !== undefined;
+    })()`), true);
+    const emptyCatalogControl = await emptyCatalogControlFrame;
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-model-peer-empty-catalog-result",
+      type: "model_control_result",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: "wolfgang-web",
+      control_id: emptyCatalogControl.control_id,
+      accepted: false,
+      error_code: "model_unavailable",
+      current_model: fallbackModel,
+      available_models: [],
+    }));
+    assert.equal(await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        if (document.querySelector("#model-controls")?.hidden) return true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    })()`), true);
+
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-model-peer-catalog-for-disconnect",
+      type: "model_catalog",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      model_summaries: [fallbackModel, targetModel],
+    }));
+    const disconnectControlFrame = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id !== emptyCatalogControl.control_id);
+    assert.equal(await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const currentButton = document.querySelector("#model-current");
+        if (!document.querySelector("#model-controls")?.hidden) {
+          currentButton?.click();
+          const option = [...document.querySelectorAll(".model-option")].find((element) => element.textContent.includes("Target model"));
+          if (option) {
+            option.click();
+            return document.querySelector("#model-current-label")?.textContent === "provider/target";
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    })()`), true);
+    await disconnectControlFrame;
+    await ui.close();
+    ui = undefined;
+    assert.equal(await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const label = document.querySelector("#model-current-label")?.textContent;
+        if (label === "provider/fallback") return label;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return document.querySelector("#model-current-label")?.textContent;
+    })()`), "provider/fallback");
   } finally {
     await domBrowser?.close();
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router web UI correlates target-not-connected errors to the caller control ID", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  try {
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    const browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "missing-target-control",
+      targetAgentId: "missing-target",
+      model: { provider: "provider", id: "model" },
+    }));
+    const rejected = await waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "missing-target-control");
+    assert.equal(rejected.accepted, false);
+    assert.equal(rejected.errorCode, "target_not_connected");
+    assert.equal(rejected.targetAgentId, "missing-target");
+
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "invalid-command-control",
+      targetAgentId: "missing-target",
+      model: { provider: "", id: "model" },
+    }));
+    const invalid = await waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "invalid-command-control");
+    assert.equal(invalid.accepted, false);
+    assert.equal(invalid.errorCode, "command_error");
+    assert.equal(invalid.targetAgentId, "missing-target");
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router web UI rejects timed out and reconnecting controls and ignores late results", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "control-peer", sockets);
+    ui = await startRouterWebUi({
+      router: router.httpUrl,
+      modelControlTimeoutMs: 50,
+      output: () => {},
+    });
+    const browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+
+    const timedOutForward = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "timed-out-control");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "timed-out-control",
+      targetAgentId: "control-peer",
+      model: { provider: "provider", id: "slow" },
+    }));
+    const timedOutControl = await timedOutForward;
+    const timedOut = await waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "timed-out-control");
+    assert.equal(timedOut.accepted, false);
+    assert.equal(timedOut.errorCode, "control_timeout");
+
+    const noLateTimeout = expectNoEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "timed-out-control", 150);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "late-timeout-result",
+      type: "model_control_result",
+      agent_id: "control-peer",
+      instance_id: "control-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: webAgentId,
+      control_id: timedOutControl.control_id,
+      accepted: true,
+      current_model: { provider: "provider", id: "slow" },
+    }));
+    await noLateTimeout;
+
+    const reconnectForward = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "reconnecting-control");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "reconnecting-control",
+      targetAgentId: "control-peer",
+      model: { provider: "provider", id: "reconnect" },
+    }));
+    const reconnectControl = await reconnectForward;
+    const reconnectRejected = waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "reconnecting-control");
+    const reconnected = waitForEvent(browser, (event) => event.type === "status" && event.state === "connected", 2_000);
+    browser.send(JSON.stringify({ type: "connect", routerUrl: router.httpUrl, agentId: webAgentId }));
+    const rejection = await reconnectRejected;
+    assert.equal(rejection.accepted, false);
+    assert.equal(rejection.errorCode, "router_reconnecting");
+    await reconnected;
+
+    const noLateReconnect = expectNoEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "reconnecting-control", 150);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "late-reconnect-result",
+      type: "model_control_result",
+      agent_id: "control-peer",
+      instance_id: "control-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: webAgentId,
+      control_id: reconnectControl.control_id,
+      accepted: false,
+      error_code: "late_result",
+    }));
+    await noLateReconnect;
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router web UI evicts the oldest pending model control at capacity", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "capacity-peer", sockets);
+    ui = await startRouterWebUi({
+      router: router.httpUrl,
+      maxPendingModelControls: 1,
+      output: () => {},
+    });
+    const browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+
+    const firstForward = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "capacity-control-one");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "capacity-control-one",
+      targetAgentId: "capacity-peer",
+      model: { provider: "provider", id: "one" },
+    }));
+    const firstControl = await firstForward;
+
+    const evicted = waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "capacity-control-one");
+    const secondForward = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "capacity-control-two");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "capacity-control-two",
+      targetAgentId: "capacity-peer",
+      model: { provider: "provider", id: "two" },
+    }));
+    assert.equal((await evicted).errorCode, "too_many_pending_controls");
+    const secondControl = await secondForward;
+
+    const noLateFirstResult = expectNoEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "capacity-control-one", 150);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "capacity-result-one",
+      type: "model_control_result",
+      agent_id: "capacity-peer",
+      instance_id: "capacity-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: webAgentId,
+      control_id: firstControl.control_id,
+      accepted: true,
+      current_model: { provider: "provider", id: "one" },
+    }));
+    await noLateFirstResult;
+
+    const accepted = waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "capacity-control-two");
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "capacity-result-two",
+      type: "model_control_result",
+      agent_id: "capacity-peer",
+      instance_id: "capacity-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: webAgentId,
+      control_id: secondControl.control_id,
+      accepted: true,
+      current_model: { provider: "provider", id: "two" },
+    }));
+    assert.equal((await accepted).accepted, true);
+  } finally {
     for (const socket of sockets) socket.close?.();
     await ui?.close();
     await router.close();
@@ -983,8 +1391,24 @@ test("router web UI relay reconnects after router restart and resumes one canoni
     assert.equal(firstResponse.status, 201);
     const first = (await firstLive).message;
 
+    const controlPeer = await connectRouterAgent(wsUrl, "restart-control-peer", sockets);
+    const forwardedControl = nextRouterFrame(controlPeer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "router-close-control");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "router-close-control",
+      targetAgentId: "restart-control-peer",
+      model: { provider: "provider", id: "pending-at-close" },
+    }));
+    await forwardedControl;
+    const closeRejected = waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "router-close-control", 2_000);
     const reconnecting = waitForEvent(browser, (event) => event.type === "status" && event.state === "reconnecting", 2_000);
     await router.close();
+    const closeResult = await closeRejected;
+    assert.equal(closeResult.accepted, false);
+    assert.equal(closeResult.errorCode, "router_disconnected");
+    assert.equal(closeResult.targetAgentId, "restart-control-peer");
     await reconnecting;
     router = createAgentRouter({ repository, port: routerPort, timeoutSweepIntervalMs: 60_000, deliveryOfferCoalesceMs: 0 });
     wsUrl = await router.listen();
@@ -1161,13 +1585,13 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.modelSearch\.addEventListener\("input"/);
   assert.match(app, /function setModelPickerOpen/);
   assert.match(app, /function selectModel/);
-  assert.match(app, /sendCommand\(\{ type: "set_model", targetAgentId: peer, model: \{ provider: model\.provider, id: model\.id \} \}\)/);
+  assert.match(app, /sendCommand\(\{ type: "set_model", controlId, targetAgentId: peer, model: \{ provider: model\.provider, id: model\.id \} \}\)/);
   assert.match(app, /event\.type === "agent_model_catalog"/);
-  assert.match(app, /const targetAgentId = event\.targetAgentId \?\? event\.agentId;/);
-  assert.match(app, /updateAgentModelCatalog\(targetAgentId, event\.instanceId, current, event\.availableModels\)/);
+  assert.match(app, /const settled = consumePendingModelControl\(state\.pendingModelControls, event\);/);
+  assert.match(app, /updateAgentModelCatalog\(targetAgentId, event\.instanceId, projection, \{ render: false \}\)/);
   assert.match(app, /function updateAgentModelCatalog/);
-  assert.match(app, /const MAX_MODEL_SUMMARIES = 1_000;/);
-  assert.match(app, /\.slice\(0, MAX_MODEL_SUMMARIES\)/);
+  assert.match(webState, /const MAX_MODEL_SUMMARIES = 1_000;/);
+  assert.match(webState, /\.slice\(0, MAX_MODEL_SUMMARIES\)/);
   assert.match(app, /elements\.modelOptions\.replaceChildren/);
   assert.doesNotMatch(app, /modelSelect|modelApply/);
   assert.match(app, /event\.type === "agent_activity"/);
@@ -1227,6 +1651,8 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(styles, /\.model-menu \{[\s\S]*position: absolute;[\s\S]*right: 0;/);
   assert.match(styles, /\.model-current i \{[\s\S]*font-size: 0\.7rem;/);
   assert.match(webState, /"agent_model_catalog"/);
+  assert.match(webState, /function matchingPendingModelControl/);
+  assert.match(webState, /function mergeAgentModelProjection/);
 });
 
 test("router web app stores bounded scoped conversation history in IndexedDB", async () => {
@@ -1437,6 +1863,25 @@ function waitForEvent(socket, predicate, timeoutMs = 1000) {
     const onMessage = (payload) => {
       const event = JSON.parse(payload.toString("utf8"));
       if (predicate(event)) cleanup(resolve, event);
+    };
+    const onError = (error) => cleanup(reject, error);
+    const cleanup = (done, value) => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+      done(value);
+    };
+    socket.on("message", onMessage);
+    socket.once("error", onError);
+  });
+}
+
+function expectNoEvent(socket, predicate, timeoutMs = 100) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => cleanup(resolve), timeoutMs);
+    const onMessage = (payload) => {
+      const event = JSON.parse(payload.toString("utf8"));
+      if (predicate(event)) cleanup(reject, new Error(`received unexpected ${event.type} event`));
     };
     const onError = (error) => cleanup(reject, error);
     const cleanup = (done, value) => {

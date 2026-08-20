@@ -855,8 +855,10 @@ test("discovery exposes only active sessions with role and no lease metadata", a
     assert.equal(snapshot.agents[0].activity_state, "idle");
     assert.equal(snapshot.agents[0].subagent_count, 0);
     assert.deepEqual(snapshot.agents[0].subagents, []);
+    assert.deepEqual(snapshot.agents[0].available_models, []);
     assert.deepEqual(Object.keys(snapshot.agents[0]).sort(), [
-      "activity_state", "agent_id", "agent_role", "connected_at", "lease_expires_at", "subagent_count", "subagents",
+      "activity_state", "agent_id", "agent_role", "available_models", "connected_at", "lease_expires_at",
+      "subagent_count", "subagents",
     ]);
   } finally {
     socket?.terminate();

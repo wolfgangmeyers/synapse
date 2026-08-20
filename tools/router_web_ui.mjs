@@ -13,7 +13,10 @@ const DEFAULT_PORT = 8787;
 const DEFAULT_ROUTER = "http://127.0.0.1:8765";
 const DEFAULT_AGENT_ID = "wolfgang-web";
 const AGENT_REFRESH_INTERVAL_MS = 10_000;
+const MODEL_CONTROL_TIMEOUT_MS = 10_000;
+const MAX_PENDING_MODEL_CONTROLS = 100;
 const AGENT_ID = /^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const CONTROL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CONTENT_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".css", "text/css; charset=utf-8"],
@@ -48,9 +51,19 @@ export function parseArguments(argv) {
   return options;
 }
 
-export async function startRouterWebUi({ host = DEFAULT_HOST, port = 0, router = DEFAULT_ROUTER, defaultAgentId = DEFAULT_AGENT_ID, output = console.log } = {}) {
+export async function startRouterWebUi({
+  host = DEFAULT_HOST,
+  port = 0,
+  router = DEFAULT_ROUTER,
+  defaultAgentId = DEFAULT_AGENT_ID,
+  modelControlTimeoutMs = MODEL_CONTROL_TIMEOUT_MS,
+  maxPendingModelControls = MAX_PENDING_MODEL_CONTROLS,
+  output = console.log,
+} = {}) {
   router = normalizeRouterUrl(router);
   defaultAgentId = normalizeAgentId(defaultAgentId);
+  if (!Number.isSafeInteger(modelControlTimeoutMs) || modelControlTimeoutMs < 1) throw new Error("modelControlTimeoutMs must be a positive integer");
+  if (!Number.isSafeInteger(maxPendingModelControls) || maxPendingModelControls < 1) throw new Error("maxPendingModelControls must be a positive integer");
   const clients = new Set();
   const server = createServer((request, response) => {
     void handleRequest(request, response, { router, defaultAgentId }).catch(() => sendJson(response, 500, { error: "internal_error" }));
@@ -73,7 +86,11 @@ export async function startRouterWebUi({ host = DEFAULT_HOST, port = 0, router =
     },
   });
   browserWss.on("connection", (browser) => {
-    const client = createBrowserClient(browser, { defaultRouter: router });
+    const client = createBrowserClient(browser, {
+      defaultRouter: router,
+      modelControlTimeoutMs,
+      maxPendingModelControls,
+    });
     clients.add(client);
     browser.on("close", () => {
       clients.delete(client);
@@ -137,7 +154,7 @@ async function handleRequest(request, response, { router, defaultAgentId }) {
   }
 }
 
-function createBrowserClient(browser, { defaultRouter }) {
+function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, maxPendingModelControls }) {
   let routerSocket;
   let reconnectTimer;
   let refreshTimer;
@@ -147,6 +164,8 @@ function createBrowserClient(browser, { defaultRouter }) {
   let lifecycleEnabled = false;
   let lifecycleVersion = 0;
   const pendingDeliveries = new Map();
+  const pendingControlsByControlId = new Map();
+  const pendingControlsByRequestId = new Map();
   let configured = {
     routerUrl: normalizeRouterUrl(defaultRouter),
     agentId: `web-${randomUUID().slice(0, 8)}`,
@@ -160,6 +179,44 @@ function createBrowserClient(browser, { defaultRouter }) {
     return true;
   };
   const setStatus = (state, detail) => sendBrowser({ type: "status", state, detail, agentId: configured.agentId, routerUrl: configured.routerUrl });
+  const settlePendingControl = (controlId, result) => {
+    const pending = pendingControlsByControlId.get(controlId);
+    if (pending === undefined) return false;
+    pendingControlsByControlId.delete(controlId);
+    pendingControlsByRequestId.delete(pending.requestId);
+    clearTimeout(pending.timer);
+    sendBrowser({
+      type: "model_control_result",
+      controlId,
+      targetAgentId: pending.targetAgentId,
+      accepted: result.accepted,
+      ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+      ...(result.instanceId === undefined ? {} : { instanceId: result.instanceId }),
+      ...(result.currentModel === undefined ? {} : { currentModel: result.currentModel }),
+      ...(result.availableModels === undefined ? {} : { availableModels: result.availableModels }),
+      agentId: configured.agentId,
+      routerUrl: configured.routerUrl,
+    });
+    return true;
+  };
+  const rejectAllPendingControls = (errorCode) => {
+    for (const controlId of [...pendingControlsByControlId.keys()]) {
+      settlePendingControl(controlId, { accepted: false, errorCode });
+    }
+  };
+  const trackPendingControl = ({ controlId, requestId, targetAgentId }) => {
+    if (pendingControlsByControlId.has(controlId)) throw new Error("Control ID is already pending");
+    while (pendingControlsByControlId.size >= maxPendingModelControls) {
+      const oldestControlId = pendingControlsByControlId.keys().next().value;
+      settlePendingControl(oldestControlId, { accepted: false, errorCode: "too_many_pending_controls" });
+    }
+    const timer = setTimeout(() => {
+      settlePendingControl(controlId, { accepted: false, errorCode: "control_timeout" });
+    }, modelControlTimeoutMs);
+    const pending = { controlId, requestId, targetAgentId, timer };
+    pendingControlsByControlId.set(controlId, pending);
+    pendingControlsByRequestId.set(requestId, pending);
+  };
   const refreshAgents = async () => {
     const generation = ++refreshGeneration;
     const routerUrl = configured.routerUrl;
@@ -193,6 +250,7 @@ function createBrowserClient(browser, { defaultRouter }) {
     clearTimeout(reconnectTimer);
     clearInterval(refreshTimer);
     clearInterval(renewTimer);
+    rejectAllPendingControls("router_reconnecting");
     configured = { ...configured, instanceId: randomUUID(), leaseId: "" };
     lifecycleEnabled = false;
     const generation = ++connectionGeneration;
@@ -233,7 +291,16 @@ function createBrowserClient(browser, { defaultRouter }) {
         refreshTimer = setInterval(refreshAgents, AGENT_REFRESH_INTERVAL_MS);
         return;
       }
-      if (frame.type === "lease_rejected" || frame.type === "error") {
+      if (frame.type === "error") {
+        const pending = pendingControlsByRequestId.get(frame.request_id);
+        if (pending !== undefined) {
+          settlePendingControl(pending.controlId, { accepted: false, errorCode: frame.code ?? "router_error" });
+          return;
+        }
+        setStatus("error", frame.code ?? "Router rejected the connection");
+        return;
+      }
+      if (frame.type === "lease_rejected") {
         setStatus("error", frame.code ?? "Router rejected the connection");
         return;
       }
@@ -256,7 +323,9 @@ function createBrowserClient(browser, { defaultRouter }) {
           subagents: Array.isArray(frame.subagents) ? frame.subagents : [],
           ...(frame.goal === undefined ? {} : { goal: frame.goal }),
           ...(frame.current_model === undefined ? {} : { currentModel: frame.current_model }),
-          availableModels: Array.isArray(frame.available_models) ? frame.available_models : [],
+          ...(frame.available_models === undefined ? {} : {
+            availableModels: Array.isArray(frame.available_models) ? frame.available_models : [],
+          }),
           generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
@@ -277,17 +346,14 @@ function createBrowserClient(browser, { defaultRouter }) {
         return;
       }
       if (frame.type === "model_control_result") {
-        sendBrowser({
-          type: "model_control_result",
+        const pending = pendingControlsByControlId.get(frame.control_id);
+        if (pending === undefined || pending.targetAgentId !== frame.agent_id) return;
+        settlePendingControl(frame.control_id, {
           accepted: frame.accepted,
-          errorCode: frame.error_code,
-          currentModel: frame.current_model,
-          availableModels: frame.available_models ?? [],
-          targetAgentId: frame.agent_id,
+          ...(frame.error_code === undefined ? {} : { errorCode: frame.error_code }),
+          ...(frame.current_model === undefined ? {} : { currentModel: frame.current_model }),
+          ...(frame.available_models === undefined ? {} : { availableModels: frame.available_models }),
           instanceId: frame.instance_id,
-          controlId: frame.control_id,
-          agentId: configured.agentId,
-          routerUrl: configured.routerUrl,
         });
         return;
       }
@@ -347,11 +413,13 @@ function createBrowserClient(browser, { defaultRouter }) {
     });
     routerSocket.on("close", () => {
       if (generation !== connectionGeneration) return;
+      rejectAllPendingControls("router_disconnected");
       setStatus("reconnecting", "Router connection closed; retrying…");
       reconnectTimer = setTimeout(connectRouter, 1_000);
     });
     routerSocket.on("error", () => {
       if (generation !== connectionGeneration) return;
+      rejectAllPendingControls("router_unavailable");
       setStatus("reconnecting", "Router unavailable; retrying…");
     });
   };
@@ -432,6 +500,7 @@ function createBrowserClient(browser, { defaultRouter }) {
           return;
         }
         if (command.type === "set_model") {
+          const controlId = normalizeControlId(command.controlId ?? "");
           const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
           const provider = String(command.model?.provider ?? "").trim();
           const id = String(command.model?.id ?? "").trim();
@@ -444,21 +513,40 @@ function createBrowserClient(browser, { defaultRouter }) {
             throw new Error("Model provider and id are required");
           }
           if (routerSocket?.readyState !== WebSocket.OPEN || configured.leaseId === "") throw new Error("Router is not connected");
+          const requestId = `model-control-${randomUUID()}`;
+          trackPendingControl({ controlId, requestId, targetAgentId });
           routerSocket.send(JSON.stringify({
             version: "v1",
-            frame_id: `model-control-${randomUUID()}`,
+            frame_id: requestId,
             type: "model_control",
             agent_id: configured.agentId,
             instance_id: configured.instanceId,
             lease_id: configured.leaseId,
             target_agent_id: targetAgentId,
-            control_id: `model-control-${randomUUID()}`,
+            control_id: controlId,
             action: "set_model",
             model: { provider, id },
           }));
         }
       } catch (error) {
-        sendBrowser({ type: "command_error", message: error.message });
+        const controlId = command?.type === "set_model" && CONTROL_ID.test(command.controlId)
+          ? command.controlId
+          : undefined;
+        if (controlId !== undefined) {
+          if (!settlePendingControl(controlId, { accepted: false, errorCode: "command_error" })) {
+            sendBrowser({
+              type: "model_control_result",
+              controlId,
+              targetAgentId: String(command.targetAgentId ?? ""),
+              accepted: false,
+              errorCode: "command_error",
+              agentId: configured.agentId,
+              routerUrl: configured.routerUrl,
+            });
+          }
+        } else {
+          sendBrowser({ type: "command_error", message: error.message });
+        }
       }
     })();
   });
@@ -472,6 +560,9 @@ function createBrowserClient(browser, { defaultRouter }) {
       connectionGeneration++;
       for (const pending of pendingDeliveries.values()) clearTimeout(pending.timer);
       pendingDeliveries.clear();
+      for (const pending of pendingControlsByControlId.values()) clearTimeout(pending.timer);
+      pendingControlsByControlId.clear();
+      pendingControlsByRequestId.clear();
       routerSocket?.close(1000, "browser closed");
     },
   };
@@ -592,6 +683,12 @@ function normalizeAgentId(value) {
   const agentId = String(value).trim();
   if (!AGENT_ID.test(agentId) || agentId.length > 128) throw new Error("Agent IDs use letters, numbers, ., _, and -");
   return agentId;
+}
+
+function normalizeControlId(value) {
+  const controlId = String(value).trim();
+  if (!CONTROL_ID.test(controlId)) throw new Error("Control ID is invalid");
+  return controlId;
 }
 
 function normalizeConversationPeer(value) {

@@ -64,13 +64,17 @@ function closeSocket(socket) {
   });
 }
 
-async function routerFixture() {
+async function routerFixture(routerOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), "model-catalog-"));
-  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const repository = openMessageRepository({
+    databasePath: join(directory, "router.sqlite"),
+    ...(routerOptions.clock === undefined ? {} : { clock: routerOptions.clock }),
+  });
   const router = createAgentRouter({
     repository,
     timeoutSweepIntervalMs: 60_000,
     imageAttachmentDirectory: join(directory, "attachments"),
+    ...routerOptions,
   });
   const wsUrl = await router.listen();
   return {
@@ -93,6 +97,19 @@ function modelCatalog(size, prefix = "provider") {
     id: `model-${index}`,
     name: `Model ${index}`,
   }));
+}
+
+async function modelCatalogCapabilityResponse() {
+  return {
+    ok: true,
+    async json() {
+      return {
+        model_catalog_v1: true,
+        model_catalog_limits: { frame_bytes: 60 * 1024 },
+        subagent_lifecycle_v2: false,
+      };
+    },
+  };
 }
 
 class FakeSocket {
@@ -178,6 +195,7 @@ test("mailbox client sends the full catalog once per registration socket and omi
       catalogCalls += 1;
       return catalog;
     },
+    fetchImpl: modelCatalogCapabilityResponse,
     webSocketFactory: () => {
       const socket = new FakeSocket(sent);
       sockets.push(socket);
@@ -215,14 +233,15 @@ test("mailbox client sends the full catalog once per registration socket and omi
     agent_role: "agent",
   });
   await connected;
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(catalogCalls, 1);
   assert.equal(sent.filter((frame) => frame.type === "model_catalog").length, 1);
   assert.equal(sent.find((frame) => frame.type === "model_catalog").model_summaries.length, 150);
   assert.deepEqual(intervals.map(({ delay }) => delay), [10_000, 10_000]);
-  intervals[0].callback();
+  intervals[1].callback();
   assert.equal(catalogCalls, 2);
-  assert.equal(sent.filter((frame) => frame.type === "model_catalog").length, 2);
+  assert.equal(sent.filter((frame) => frame.type === "model_catalog").length, 1);
   client.sendActivity("active", { currentModel: catalog[0], availableModels: catalog });
   assert.equal("available_models" in sent.at(-1), false);
 
@@ -256,8 +275,9 @@ test("mailbox client sends the full catalog once per registration socket and omi
     recovered: true,
     agent_role: "agent",
   });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(catalogCalls, 3);
-  assert.equal(sent.filter((frame) => frame.type === "model_catalog").length, 3);
+  assert.equal(sent.filter((frame) => frame.type === "model_catalog").length, 2);
   client.close();
 });
 
@@ -277,6 +297,7 @@ test("mailbox client receives model control and reports the target result", asyn
       controls.push(control);
       return { accepted: true, currentModel: target, availableModels: [current, target] };
     },
+    fetchImpl: modelCatalogCapabilityResponse,
     webSocketFactory: () => {
       const socket = new FakeSocket(sent);
       sockets.push(socket);
@@ -314,6 +335,7 @@ test("mailbox client receives model control and reports the target result", asyn
     agent_role: "agent",
   });
   await connected;
+  await new Promise((resolve) => setImmediate(resolve));
 
   sockets[0].message({
     version: "v1",
@@ -345,7 +367,7 @@ test("mailbox client receives model control and reports the target result", asyn
   assert.equal(result.control_id, "control-1");
   assert.equal(result.accepted, true);
   assert.deepEqual(result.current_model, target);
-  assert.deepEqual(result.available_models, [current, target]);
+  assert.equal("available_models" in result, false);
   assert.equal(timers.length, 0);
   assert.equal(intervals.length, 2);
   client.close();
@@ -410,7 +432,7 @@ test("router retains bounded catalogs per active agent, projects updates, and wr
 
     await closeSocket(worker.socket);
     sockets.splice(sockets.indexOf(worker.socket), 1);
-    const replacement = await connect(app.wsUrl, { agentId: "catalog-worker", instanceId: "replacement-instance" });
+    const replacement = await connect(app.wsUrl, { agentId: "catalog-worker", instanceId: "worker-instance" });
     sockets.push(replacement.socket);
     const replacementSnapshot = await (await fetch(`${app.httpUrl}/v1/agents`)).json();
     const replacementAgent = replacementSnapshot.agents.find((agent) => agent.agent_id === "catalog-worker");
@@ -466,6 +488,351 @@ test("router fences model control by source lease and connected target", async (
       model: { provider: "provider", id: "target" },
     }));
     assert.equal((await disconnectedError).code, "target_not_connected");
+  } finally {
+    for (const socket of sockets) await closeSocket(socket).catch(() => {});
+    await app.close();
+  }
+});
+
+test("router does not acknowledge a model control when the target send throws", async () => {
+  const app = await routerFixture();
+  const sockets = [];
+  const originalSend = WebSocket.prototype.send;
+  try {
+    const source = await connect(app.wsUrl, { agentId: "send-source", instanceId: "send-source-instance" });
+    sockets.push(source.socket);
+    const target = await connect(app.wsUrl, { agentId: "send-target", instanceId: "send-target-instance" });
+    sockets.push(target.socket);
+
+    WebSocket.prototype.send = function failTargetModelControl(payload, ...args) {
+      const frame = JSON.parse(payload.toString());
+      if (frame.type === "model_control" && frame.target_agent_id === undefined) {
+        throw new Error("injected target send failure");
+      }
+      return originalSend.call(this, payload, ...args);
+    };
+
+    const outcome = nextFrame(source.socket, (frame) => frame.type === "error");
+    originalSend.call(source.socket, JSON.stringify({
+      version: "v1",
+      frame_id: "send-failure-control",
+      type: "model_control",
+      agent_id: "send-source",
+      instance_id: "send-source-instance",
+      lease_id: source.registered.lease_id,
+      target_agent_id: "send-target",
+      control_id: "send-failure",
+      action: "set_model",
+      model: { provider: "provider", id: "target" },
+    }));
+    const response = await outcome;
+    assert.equal(response.type, "error");
+    assert.equal(response.code, "target_send_failed");
+  } finally {
+    WebSocket.prototype.send = originalSend;
+    for (const socket of sockets) await closeSocket(socket).catch(() => {});
+    await app.close();
+  }
+});
+
+test("router advertises model catalog support without exposing the agent snapshot to browser CORS", async () => {
+  const app = await routerFixture();
+  try {
+    const capabilities = await (await fetch(`${app.httpUrl}/v1/capabilities`)).json();
+    assert.equal(capabilities.model_catalog_v1, true);
+    assert.equal(capabilities.model_catalog_limits.frame_bytes, 60 * 1024);
+
+    const agents = await fetch(`${app.httpUrl}/v1/agents`, {
+      headers: { origin: "https://untrusted.example" },
+    });
+    assert.equal(agents.status, 200);
+    assert.equal(agents.headers.get("access-control-allow-origin"), null);
+
+    const preflight = await fetch(`${app.httpUrl}/v1/agents`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://untrusted.example",
+        "access-control-request-method": "GET",
+      },
+    });
+    assert.equal(preflight.status, 404);
+    assert.equal(preflight.headers.get("access-control-allow-origin"), null);
+  } finally {
+    await app.close();
+  }
+});
+
+test("router accepts one exact model-control result and rejects mismatches, duplicates, and expiry", async () => {
+  let nowMs = Date.now();
+  const clock = () => new Date(nowMs);
+  const app = await routerFixture({
+    clock,
+    leaseDurationMs: 60_000,
+    pendingModelControlTtlMs: 30_000,
+  });
+  const sockets = [];
+  try {
+    const source = await connect(app.wsUrl, { agentId: "source-agent", instanceId: "source-instance" });
+    sockets.push(source.socket);
+    const target = await connect(app.wsUrl, { agentId: "target-agent", instanceId: "target-instance" });
+    sockets.push(target.socket);
+    const otherTarget = await connect(app.wsUrl, { agentId: "other-target", instanceId: "other-target-instance" });
+    sockets.push(otherTarget.socket);
+
+    const initialCatalog = [{ provider: "provider", id: "initial" }];
+    target.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "initial-catalog",
+      type: "model_catalog",
+      agent_id: "target-agent",
+      instance_id: "target-instance",
+      lease_id: target.registered.lease_id,
+      model_summaries: initialCatalog,
+    }));
+
+    const forwarded = nextFrame(target.socket, (frame) => frame.type === "model_control");
+    source.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "control-request",
+      type: "model_control",
+      agent_id: "source-agent",
+      instance_id: "source-instance",
+      lease_id: source.registered.lease_id,
+      target_agent_id: "target-agent",
+      control_id: "control-one",
+      action: "set_model",
+      model: { provider: "provider", id: "selected" },
+    }));
+    await forwarded;
+
+    const wrongTargetError = nextFrame(otherTarget.socket, (frame) => frame.type === "error");
+    otherTarget.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "wrong-target-result",
+      type: "model_control_result",
+      agent_id: "other-target",
+      instance_id: "other-target-instance",
+      lease_id: otherTarget.registered.lease_id,
+      source_agent_id: "source-agent",
+      control_id: "control-one",
+      accepted: true,
+      current_model: { provider: "provider", id: "wrong-target" },
+    }));
+    assert.equal((await wrongTargetError).code, "model_control_result_not_pending");
+    const otherTargetSnapshot = (await (await fetch(`${app.httpUrl}/v1/agents`)).json()).agents
+      .find((agent) => agent.agent_id === "other-target");
+    assert.equal(otherTargetSnapshot.current_model, undefined);
+
+    const mismatchError = nextFrame(target.socket, (frame) => frame.type === "error");
+    target.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "mismatched-result",
+      type: "model_control_result",
+      agent_id: "target-agent",
+      instance_id: "target-instance",
+      lease_id: target.registered.lease_id,
+      source_agent_id: "different-source",
+      control_id: "control-one",
+      accepted: true,
+      current_model: { provider: "provider", id: "mismatched" },
+      available_models: [{ provider: "provider", id: "mismatched" }],
+    }));
+    assert.equal((await mismatchError).code, "model_control_result_not_pending");
+    let targetSnapshot = (await (await fetch(`${app.httpUrl}/v1/agents`)).json()).agents
+      .find((agent) => agent.agent_id === "target-agent");
+    assert.deepEqual(targetSnapshot.available_models, initialCatalog);
+    assert.equal(targetSnapshot.current_model, undefined);
+
+    const resultForSource = nextFrame(source.socket, (frame) => frame.type === "model_control_result");
+    const acceptedProjection = [{ provider: "provider", id: "selected" }];
+    const exactResult = {
+      version: "v1",
+      frame_id: "exact-result",
+      type: "model_control_result",
+      agent_id: "target-agent",
+      instance_id: "target-instance",
+      lease_id: target.registered.lease_id,
+      source_agent_id: "source-agent",
+      control_id: "control-one",
+      accepted: true,
+      current_model: acceptedProjection[0],
+      available_models: acceptedProjection,
+    };
+    target.socket.send(JSON.stringify(exactResult));
+    assert.equal((await resultForSource).accepted, true);
+
+    const duplicateError = nextFrame(target.socket, (frame) => frame.type === "error");
+    target.socket.send(JSON.stringify({ ...exactResult, frame_id: "duplicate-result" }));
+    assert.equal((await duplicateError).code, "model_control_result_not_pending");
+    targetSnapshot = (await (await fetch(`${app.httpUrl}/v1/agents`)).json()).agents
+      .find((agent) => agent.agent_id === "target-agent");
+    assert.deepEqual(targetSnapshot.current_model, acceptedProjection[0]);
+    assert.deepEqual(targetSnapshot.available_models, acceptedProjection);
+
+    const secondForward = nextFrame(target.socket, (frame) => frame.type === "model_control" && frame.control_id === "control-expiring");
+    source.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "expiring-control-request",
+      type: "model_control",
+      agent_id: "source-agent",
+      instance_id: "source-instance",
+      lease_id: source.registered.lease_id,
+      target_agent_id: "target-agent",
+      control_id: "control-expiring",
+      action: "set_model",
+      model: { provider: "provider", id: "late" },
+    }));
+    await secondForward;
+    nowMs += 30_001;
+    const lateError = nextFrame(target.socket, (frame) => frame.type === "error");
+    target.socket.send(JSON.stringify({
+      ...exactResult,
+      frame_id: "late-result",
+      control_id: "control-expiring",
+      current_model: { provider: "provider", id: "late" },
+      available_models: [{ provider: "provider", id: "late" }],
+    }));
+    assert.equal((await lateError).code, "model_control_result_not_pending");
+    targetSnapshot = (await (await fetch(`${app.httpUrl}/v1/agents`)).json()).agents
+      .find((agent) => agent.agent_id === "target-agent");
+    assert.deepEqual(targetSnapshot.current_model, acceptedProjection[0]);
+    assert.deepEqual(targetSnapshot.available_models, acceptedProjection);
+  } finally {
+    for (const socket of sockets) await closeSocket(socket).catch(() => {});
+    await app.close();
+  }
+});
+
+test("router rejects a result after the exact source lease expires", async () => {
+  let nowMs = Date.now();
+  const app = await routerFixture({
+    clock: () => new Date(nowMs),
+    leaseDurationMs: 1_000,
+    pendingModelControlTtlMs: 30_000,
+  });
+  const sockets = [];
+  try {
+    const source = await connect(app.wsUrl, { agentId: "expiring-source", instanceId: "expiring-source-instance" });
+    sockets.push(source.socket);
+    nowMs += 500;
+    const target = await connect(app.wsUrl, { agentId: "live-target", instanceId: "live-target-instance" });
+    sockets.push(target.socket);
+
+    const forwarded = nextFrame(target.socket, (frame) => frame.type === "model_control");
+    source.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "expiring-source-control",
+      type: "model_control",
+      agent_id: "expiring-source",
+      instance_id: "expiring-source-instance",
+      lease_id: source.registered.lease_id,
+      target_agent_id: "live-target",
+      control_id: "expiring-source-control",
+      action: "set_model",
+      model: { provider: "provider", id: "target" },
+    }));
+    await forwarded;
+
+    nowMs += 600;
+    let sourceResultCount = 0;
+    const countSourceResult = (payload) => {
+      if (JSON.parse(payload.toString("utf8")).type === "model_control_result") sourceResultCount += 1;
+    };
+    source.socket.on("message", countSourceResult);
+    const rejected = nextFrame(target.socket, (frame) => frame.type === "error");
+    target.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "result-after-source-expiry",
+      type: "model_control_result",
+      agent_id: "live-target",
+      instance_id: "live-target-instance",
+      lease_id: target.registered.lease_id,
+      source_agent_id: "expiring-source",
+      control_id: "expiring-source-control",
+      accepted: true,
+      current_model: { provider: "provider", id: "target" },
+    }));
+    assert.equal((await rejected).code, "model_control_result_not_pending");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    source.socket.off("message", countSourceResult);
+    assert.equal(sourceResultCount, 0);
+    const snapshot = await (await fetch(`${app.httpUrl}/v1/agents`)).json();
+    assert.equal(snapshot.agents.find((agent) => agent.agent_id === "live-target").current_model, undefined);
+  } finally {
+    for (const socket of sockets) await closeSocket(socket).catch(() => {});
+    await app.close();
+  }
+});
+
+test("router bounds pending model controls and cleans them up when either exact session disconnects", async () => {
+  const app = await routerFixture({
+    maxPendingModelControls: 2,
+    maxPendingModelControlsPerSource: 1,
+  });
+  const sockets = [];
+  try {
+    const source = await connect(app.wsUrl, { agentId: "source-one", instanceId: "source-one-instance" });
+    sockets.push(source.socket);
+    const sourceTwo = await connect(app.wsUrl, { agentId: "source-two", instanceId: "source-two-instance" });
+    sockets.push(sourceTwo.socket);
+    const sourceThree = await connect(app.wsUrl, { agentId: "source-three", instanceId: "source-three-instance" });
+    sockets.push(sourceThree.socket);
+    const target = await connect(app.wsUrl, { agentId: "target-one", instanceId: "target-one-instance" });
+    sockets.push(target.socket);
+    const targetTwo = await connect(app.wsUrl, { agentId: "target-two", instanceId: "target-two-instance" });
+    sockets.push(targetTwo.socket);
+
+    const sendControl = (sender, targetAgentId, controlId) => sender.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: `${controlId}-frame`,
+      type: "model_control",
+      agent_id: sender.registered.agent_id,
+      instance_id: sender.registered.instance_id,
+      lease_id: sender.registered.lease_id,
+      target_agent_id: targetAgentId,
+      control_id: controlId,
+      action: "set_model",
+      model: { provider: "provider", id: controlId },
+    }));
+
+    const firstForward = nextFrame(target.socket, (frame) => frame.type === "model_control" && frame.control_id === "control-one");
+    sendControl(source, "target-one", "control-one");
+    await firstForward;
+
+    const duplicateError = nextFrame(source.socket, (frame) => frame.type === "error");
+    sendControl(source, "target-one", "control-one");
+    assert.equal((await duplicateError).code, "model_control_already_pending");
+
+    const perSourceError = nextFrame(source.socket, (frame) => frame.type === "error");
+    sendControl(source, "target-two", "control-two");
+    assert.equal((await perSourceError).code, "model_control_capacity_exceeded");
+
+    const secondForward = nextFrame(targetTwo.socket, (frame) => frame.type === "model_control" && frame.control_id === "control-three");
+    sendControl(sourceTwo, "target-two", "control-three");
+    await secondForward;
+
+    const globalError = nextFrame(sourceThree.socket, (frame) => frame.type === "error");
+    sendControl(sourceThree, "target-one", "control-four");
+    assert.equal((await globalError).code, "model_control_capacity_exceeded");
+
+    await closeSocket(source.socket);
+    sockets.splice(sockets.indexOf(source.socket), 1);
+    const sourceReplacement = await connect(app.wsUrl, { agentId: "source-one", instanceId: "source-one-instance" });
+    sockets.push(sourceReplacement.socket);
+    const afterSourceCleanup = nextFrame(target.socket, (frame) => frame.type === "model_control" && frame.control_id === "control-after-source-close");
+    sendControl(sourceReplacement, "target-one", "control-after-source-close");
+    await afterSourceCleanup;
+
+    const targetDisconnected = nextFrame(sourceTwo.socket, (frame) => frame.type === "error"
+      && frame.request_id === "control-three-frame");
+    await closeSocket(targetTwo.socket);
+    assert.equal((await targetDisconnected).code, "target_not_connected");
+    sockets.splice(sockets.indexOf(targetTwo.socket), 1);
+    const targetTwoReplacement = await connect(app.wsUrl, { agentId: "target-two", instanceId: "target-two-instance" });
+    sockets.push(targetTwoReplacement.socket);
+    const afterTargetCleanup = nextFrame(targetTwoReplacement.socket, (frame) => frame.type === "model_control" && frame.control_id === "control-after-target-close");
+    sendControl(sourceTwo, "target-two", "control-after-target-close");
+    await afterTargetCleanup;
   } finally {
     for (const socket of sockets) await closeSocket(socket).catch(() => {});
     await app.close();

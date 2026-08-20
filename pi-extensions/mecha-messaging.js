@@ -45,28 +45,27 @@ function normalizeGoalProjection(value) {
   return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
 }
 
-function boundedModelString(value) {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim().slice(0, MAX_MODEL_METADATA_STRING)
-    : undefined;
+function boundedModelString(value, maximum) {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 && [...normalized].length <= maximum ? normalized : undefined;
 }
 
 function projectModelMetadata(model) {
   if (model === null || typeof model !== "object" || Array.isArray(model)) return undefined;
-  const provider = boundedModelString(model.provider);
-  const id = boundedModelString(model.id);
-  const name = boundedModelString(model.name);
+  const provider = boundedModelString(model.provider, MAX_MODEL_PROVIDER_CHARS);
+  const id = boundedModelString(model.id, MAX_MODEL_ID_CHARS);
+  const name = boundedModelString(model.name, MAX_MODEL_NAME_CHARS);
   const contextWindow = Number.isSafeInteger(model.contextWindow) && model.contextWindow >= 0
     ? model.contextWindow
     : undefined;
   const maxTokens = Number.isSafeInteger(model.maxTokens) && model.maxTokens >= 0
     ? model.maxTokens
     : undefined;
-  if (provider === undefined && id === undefined && name === undefined
-    && contextWindow === undefined && maxTokens === undefined) return undefined;
+  if (provider === undefined || id === undefined) return undefined;
   return {
-    ...(provider === undefined ? {} : { provider }),
-    ...(id === undefined ? {} : { id }),
+    provider,
+    id,
     ...(name === undefined ? {} : { name }),
     ...(contextWindow === undefined ? {} : { contextWindow }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
@@ -82,14 +81,47 @@ function availableModelsForContext(context) {
   }
 }
 
+class ModelControlError extends Error {
+  constructor(code, message, options) {
+    super(message, options);
+    this.name = "ModelControlError";
+    this.code = code;
+  }
+}
+
+function readAvailableModelsForContext(context) {
+  const getAvailable = context?.modelRegistry?.getAvailable;
+  if (typeof getAvailable !== "function") {
+    throw new ModelControlError("model_registry_unavailable", "Pi model registry is unavailable");
+  }
+  let available;
+  try {
+    available = getAvailable.call(context.modelRegistry);
+  } catch (error) {
+    throw new ModelControlError("model_registry_failed", error?.message ?? "Pi model registry failed", { cause: error });
+  }
+  if (!Array.isArray(available)) {
+    throw new ModelControlError("model_registry_unavailable", "Pi model registry is unavailable");
+  }
+  return available;
+}
+
+function projectAvailableModels(context) {
+  return readAvailableModelsForContext(context)
+    .slice(0, MAX_MODEL_METADATA_ITEMS)
+    .map(projectModelMetadata)
+    .filter(Boolean);
+}
+
 function modelProjection(context) {
-  const availableModels = availableModelsForContext(context) ?? [];
+  const availableModels = availableModelsForContext(context);
   return {
     current: projectModelMetadata(context?.model) ?? null,
-    available: availableModels
+    available: (availableModels ?? [])
       .slice(0, MAX_MODEL_METADATA_ITEMS)
       .map(projectModelMetadata)
       .filter(Boolean),
+    availableKnown: availableModels !== undefined,
   };
 }
 
@@ -147,7 +179,7 @@ const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
     ],
   },
   [MODEL_SWITCH_TOOL_NAME]: {
-    promptSnippet: "Inspect available Pi models or switch the current model",
+    promptSnippet: "Switch the current Pi model",
     promptGuidelines: [
       "Use mecha_model_switch with the exact provider and id from the available model list.",
       "Call pi__mecha_model_switch through the Cursor pi bridge.",
@@ -161,7 +193,9 @@ const INLINE_TOOL_BLOCK_REASON = "Top-level inline write-ish tool calls are bloc
 // Keep the catalog bounded while allowing the configured Pi registry to reach
 // the UI instead of silently dropping the models after the first page.
 const MAX_MODEL_METADATA_ITEMS = 1_000;
-const MAX_MODEL_METADATA_STRING = 128;
+const MAX_MODEL_PROVIDER_CHARS = 128;
+const MAX_MODEL_ID_CHARS = 256;
+const MAX_MODEL_NAME_CHARS = 256;
 
 const SMALL_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 40, guidance: "consider compacting at a reasonable stopping point to keep future calls cheaper" }),
@@ -1297,6 +1331,7 @@ export function createMechaMessagingExtension(pi, {
   // published immediately even if the next event has not supplied a fresh
   // context snapshot yet.
   let modelSwitchOverride;
+  let modelSwitchTail = Promise.resolve();
   let lastActivitySent;
   let lastNativeSubagentReadDiagnosticMs;
   function nativeSubagentService(ownerSessionId = parentActivityContext?.sessionManager?.getSessionId?.()) {
@@ -1657,17 +1692,39 @@ export function createMechaMessagingExtension(pi, {
     if (modelSwitchOverride?.sessionId !== undefined
       && modelSwitchOverride.sessionId === sessionId
       && modelSwitchOverride.model !== undefined) {
+      const contextChanged = context !== modelSwitchOverride.sourceContext;
+      const reflected = sameModelIdentity(projection.current, modelSwitchOverride.model);
+      const locallyChanged = !sameModelIdentity(projection.current, modelSwitchOverride.sourceModel);
+      if (contextChanged || reflected || locallyChanged) {
+        modelSwitchOverride = undefined;
+        return projection;
+      }
       return { ...projection, current: modelSwitchOverride.model };
     }
     return projection;
+  }
+
+  function sameModelIdentity(left, right) {
+    return left?.provider === right?.provider && left?.id === right?.id;
   }
 
   function rememberSuccessfulModelSwitch(context, model) {
     const projected = projectModelMetadata(model);
     const sessionId = contextSessionId(context);
     if (projected !== undefined && sessionId !== undefined) {
-      modelSwitchOverride = { sessionId, model: projected };
+      modelSwitchOverride = {
+        sessionId,
+        model: projected,
+        sourceContext: context,
+        sourceModel: modelProjection(context).current,
+      };
     }
+  }
+
+  function serializeModelSwitch(operation) {
+    const result = modelSwitchTail.then(operation);
+    modelSwitchTail = result.catch(() => {});
+    return result;
   }
 
   function parentActivityStateFromPiContext() {
@@ -1968,14 +2025,17 @@ export function createMechaMessagingExtension(pi, {
 
   function modelSelector(input) {
     if (input === null || typeof input !== "object" || Array.isArray(input)
-      || Object.keys(input).some((key) => !["provider", "id"].includes(key))) {
-      throw new Error("model provider and id are required");
+      || Object.keys(input).some((key) => !["provider", "id", "name"].includes(key))) {
+      throw new ModelControlError("invalid_model", "model provider and id are required");
     }
     const provider = typeof input.provider === "string" ? input.provider.trim() : "";
     const id = typeof input.id === "string" ? input.id.trim() : "";
-    if (provider.length === 0 || provider.length > MAX_MODEL_METADATA_STRING
-      || id.length === 0 || id.length > MAX_MODEL_METADATA_STRING) {
-      throw new Error("model provider and id must be non-empty strings of at most 128 characters");
+    if (provider.length === 0 || [...provider].length > MAX_MODEL_PROVIDER_CHARS
+      || id.length === 0 || [...id].length > MAX_MODEL_ID_CHARS) {
+      throw new ModelControlError(
+        "invalid_model",
+        `model provider and id must be non-empty strings of at most ${MAX_MODEL_PROVIDER_CHARS} and ${MAX_MODEL_ID_CHARS} characters`,
+      );
     }
     return { provider, id };
   }
@@ -1989,9 +2049,10 @@ export function createMechaMessagingExtension(pi, {
       ...(before.current?.provider === undefined ? {} : { current_provider: before.current.provider }),
       ...(before.current?.id === undefined ? {} : { current_model_id: before.current.id }),
     });
-    if (typeof pi.setModel !== "function") throw new Error("Pi model switching is unavailable");
-    const availableModels = availableModelsForContext(context);
-    if (availableModels === undefined) throw new Error("Pi model registry is unavailable");
+    if (typeof pi.setModel !== "function") {
+      throw new ModelControlError("model_switch_unavailable", "Pi model switching is unavailable");
+    }
+    const availableModels = readAvailableModelsForContext(context);
     traceNativeSubagent("extension_model_registry_read", {
       requested_provider: requested.provider,
       requested_model_id: requested.id,
@@ -2001,24 +2062,34 @@ export function createMechaMessagingExtension(pi, {
       const projected = projectModelMetadata(candidate);
       return projected?.provider === requested.provider && projected?.id === requested.id;
     });
-    if (selectedModel === undefined) throw new Error(`Model ${requested.provider}/${requested.id} is not available`);
+    if (selectedModel === undefined) {
+      throw new ModelControlError("model_unavailable", `Model ${requested.provider}/${requested.id} is not available`);
+    }
     const switched = await pi.setModel(selectedModel);
     traceNativeSubagent("extension_model_set_result", {
       requested_provider: requested.provider,
       requested_model_id: requested.id,
       switched: switched === true,
     });
-    if (switched !== true) throw new Error(`Pi rejected model ${requested.provider}/${requested.id}`);
+    if (switched !== true) {
+      throw new ModelControlError("model_switch_rejected", `Pi rejected model ${requested.provider}/${requested.id}`);
+    }
     return selectedModel;
   }
 
   function modelControlErrorCode(error) {
-    if (/not available/.test(error?.message ?? "")) return "model_unavailable";
-    if (/required|must be non-empty|unavailable/.test(error?.message ?? "")) return "invalid_model";
-    return "model_switch_failed";
+    return [
+      "invalid_model",
+      "unsupported_model_control",
+      "model_registry_unavailable",
+      "model_registry_failed",
+      "model_unavailable",
+      "model_switch_unavailable",
+      "model_switch_rejected",
+    ].includes(error?.code) ? error.code : "model_switch_failed";
   }
 
-  async function handleModelControl({ controlId, sourceAgentId, action, model }) {
+  async function performModelControl({ controlId, sourceAgentId, action, model }) {
     traceNativeSubagent("extension_model_control_entered", {
       control_id: controlId,
       source_agent_id: sourceAgentId,
@@ -2028,7 +2099,9 @@ export function createMechaMessagingExtension(pi, {
       available: parentActivityContext !== undefined,
     });
     try {
-      if (action !== "set_model") throw new Error("unsupported model control action");
+      if (action !== "set_model") {
+        throw new ModelControlError("unsupported_model_control", "unsupported model control action");
+      }
       const switchedModel = await switchPiModel(model, parentActivityContext);
       rememberSuccessfulModelSwitch(parentActivityContext, switchedModel);
       refreshActivityState(parentActivityContext);
@@ -2043,7 +2116,7 @@ export function createMechaMessagingExtension(pi, {
       return {
         accepted: true,
         currentModel: projection.current,
-        availableModels: projection.available,
+        ...(projection.availableKnown ? { availableModels: projection.available } : {}),
       };
     } catch (error) {
       const projection = effectiveModelProjection(parentActivityContext);
@@ -2060,9 +2133,13 @@ export function createMechaMessagingExtension(pi, {
         accepted: false,
         errorCode: modelControlErrorCode(error),
         currentModel: projection.current,
-        availableModels: projection.available,
+        ...(projection.availableKnown ? { availableModels: projection.available } : {}),
       };
     }
+  }
+
+  function handleModelControl(control) {
+    return serializeModelSwitch(() => performModelControl(control));
   }
 
   pi.registerTool({
@@ -2180,16 +2257,22 @@ export function createMechaMessagingExtension(pi, {
       additionalProperties: false,
       required: ["provider", "id"],
       properties: {
-        provider: { type: "string", minLength: 1, maxLength: MAX_MODEL_METADATA_STRING },
-        id: { type: "string", minLength: 1, maxLength: MAX_MODEL_METADATA_STRING },
+        provider: { type: "string", minLength: 1, maxLength: MAX_MODEL_PROVIDER_CHARS },
+        id: { type: "string", minLength: 1, maxLength: MAX_MODEL_ID_CHARS },
       },
     },
     async execute(_toolCallId, input, _signal, _onUpdate, toolContext) {
-      const status = () => effectiveModelProjection(toolContext);
+      const status = () => {
+        const projection = effectiveModelProjection(toolContext);
+        return { current: projection.current, available: projection.available };
+      };
       try {
-        const switchedModel = await switchPiModel(input, toolContext);
-        rememberSuccessfulModelSwitch(toolContext, switchedModel);
-        refreshActivityState(toolContext);
+        await serializeModelSwitch(async () => {
+          const selected = await switchPiModel(input, toolContext);
+          rememberSuccessfulModelSwitch(toolContext, selected);
+          refreshActivityState(toolContext);
+          return selected;
+        });
         const projection = status();
         return {
           content: [{ type: "text", text: JSON.stringify(projection) }],
@@ -2575,7 +2658,17 @@ export function createMechaMessagingExtension(pi, {
         onEnvelope: (message, delivery) => { if (!mailboxPausedForCompaction) coordinator?.onEnvelope(message, delivery); },
         onModelControl: handleModelControl,
         onModelControlTrace: ({ event, ...fields }) => traceNativeSubagent(event, fields),
-        getModelCatalog: () => effectiveModelProjection(parentActivityContext).available,
+        getModelCatalog: () => {
+          try {
+            return projectAvailableModels(parentActivityContext);
+          } catch (error) {
+            traceNativeSubagent("extension_model_catalog_read_failed", {
+              error_code: modelControlErrorCode(error),
+              error_name: error?.name ?? "Error",
+            });
+            throw error;
+          }
+        },
         onLifecycleReady: ({ routerVersion, reconnect }) => traceNativeSubagent("extension_client_lifecycle_ready", {
           router_version: routerVersion, reconnect,
         }),
