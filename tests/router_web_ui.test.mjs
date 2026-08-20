@@ -18,6 +18,7 @@ import {
   matchesActiveScope,
   matchingPendingModelControl,
   mergeAgentModelProjection,
+  modelControlStatusTitle,
   normalizeModelSummaries,
   upsertLifecycleAgent,
 } from "../web/router-ui/state.js";
@@ -89,7 +90,15 @@ test("matches model control results only to the pending control and target", () 
   }), undefined);
 });
 
-test("model control state applies authoritative results and preserves omitted catalogs", () => {
+test("model control status distinguishes confirmed rejection from transport uncertainty", () => {
+  assert.equal(modelControlStatusTitle(true), "Model changed");
+  assert.equal(modelControlStatusTitle(false, "model_unavailable"), "Model change rejected");
+  for (const errorCode of ["control_timeout", "router_disconnected", "router_reconnecting", "ui_not_connected"]) {
+    assert.equal(modelControlStatusTitle(false, errorCode), "Model change not confirmed");
+  }
+});
+
+test("model control state applies authoritative current models without replacing catalogs", () => {
   const current = { provider: "provider", id: "current" };
   const target = { provider: "provider", id: "target" };
   const catalog = [current, target];
@@ -103,6 +112,8 @@ test("model control state applies authoritative results and preserves omitted ca
     activity_state: "idle",
     current_model: current,
     available_models: catalog,
+    model_catalog_total_count: 3,
+    model_catalog_truncated: true,
   }];
 
   const accepted = consumePendingModelControl(pending, {
@@ -115,23 +126,36 @@ test("model control state applies authoritative results and preserves omitted ca
   const acceptedState = mergeAgentModelProjection(agents, "target-agent", "target-instance", accepted.projection);
   assert.deepEqual(acceptedState.agents[0].current_model, target);
   assert.deepEqual(acceptedState.agents[0].available_models, catalog);
+  assert.equal(acceptedState.agents[0].model_catalog_total_count, 3);
+  assert.equal(acceptedState.agents[0].model_catalog_truncated, true);
 
   const rejected = consumePendingModelControl(pending, {
     controlId: "rejected-control",
     targetAgentId: "target-agent",
     accepted: false,
     currentModel: current,
-    availableModels: [],
   });
   const rejectedState = mergeAgentModelProjection(acceptedState.agents, "target-agent", "target-instance", rejected.projection);
   assert.deepEqual(rejectedState.agents[0].current_model, current);
-  assert.deepEqual(rejectedState.agents[0].available_models, []);
+  assert.deepEqual(rejectedState.agents[0].available_models, catalog);
   assert.equal(pending.size, 0);
   assert.equal(consumePendingModelControl(pending, {
     controlId: "accepted-control",
     targetAgentId: "target-agent",
   }), undefined);
   assert.equal(normalizeModelSummaries([target, target]).length, 1);
+  const supplementaryId = "🚀".repeat(256);
+  assert.equal(normalizeModelSummaries([{ provider: "provider", id: supplementaryId }])[0].id, supplementaryId);
+  const stale = mergeAgentModelProjection(
+    rejectedState.agents,
+    "target-agent",
+    "retired-instance",
+    { currentModel: { provider: "provider", id: "stale" } },
+    { replaceInstance: false },
+  );
+  assert.equal(stale.changed, false);
+  assert.deepEqual(stale.agents[0].current_model, current);
+  assert.deepEqual(normalizeModelSummaries([{ provider: "provider", id: `${supplementaryId}🚀` }]), []);
 });
 
 const renderMarkdown = (body) => markdownToSafeHtml(body, MarkdownIt);
@@ -426,6 +450,7 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.equal(agents.agentId, webAgentId);
     assert.deepEqual(agents.agents.find((agent) => agent.agent_id === "peer-agent").agent_role, "agent");
     assert.equal(agents.agents.find((agent) => agent.agent_id === "peer-agent").activity_state, "idle");
+    assert.equal(agents.agents.find((agent) => agent.agent_id === "peer-agent").instance_id, "peer-agent-instance");
 
     const activeEvent = waitForEvent(browser, (event) => event.type === "agent_activity" && event.agent === "peer-agent");
     peer.socket.send(JSON.stringify({
@@ -461,6 +486,8 @@ test("router web UI serves the app and relays live router messages", async () =>
     const catalogProjection = await catalogEvent;
     assert.equal(catalogProjection.availableModels.length, catalog.length);
     assert.deepEqual(catalogProjection.availableModels.at(-1), catalog.at(-1));
+    assert.equal(catalogProjection.totalCount, catalog.length);
+    assert.equal(catalogProjection.truncated, false);
     const postCatalogActivityEvent = waitForEvent(browser, (event) => event.type === "agent_activity"
       && event.agent === "peer-agent" && event.activityState === "idle");
     peer.socket.send(JSON.stringify({
@@ -475,6 +502,16 @@ test("router web UI serves the app and relays live router messages", async () =>
     }));
     const postCatalogActivity = await postCatalogActivityEvent;
     assert.equal(Object.hasOwn(postCatalogActivity, "availableModels"), false);
+    const postActivitySnapshot = await (await fetch(`${routerHttpUrl}/v1/agents`)).json();
+    assert.deepEqual(
+      postActivitySnapshot.agents.find((agent) => agent.agent_id === "peer-agent").available_models,
+      catalog,
+    );
+    const lightweightSnapshot = await (await fetch(`${routerHttpUrl}/v1/agents?models=omit`)).json();
+    assert.equal(
+      Object.hasOwn(lightweightSnapshot.agents.find((agent) => agent.agent_id === "peer-agent"), "available_models"),
+      false,
+    );
 
     const targetModel = catalog[0];
     const controlId = "browser-control-accepted";
@@ -492,6 +529,7 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.equal(control.lease_id, peer.registered.lease_id);
     assert.equal(control.source_agent_id, webAgentId);
     assert.deepEqual(control.model, { provider: targetModel.provider, id: targetModel.id });
+    assert.match(control.expires_at, /^\d{4}-\d{2}-\d{2}T/);
 
     const modelControlResult = waitForEvent(browser, (event) => event.type === "model_control_result" && event.controlId === control.control_id);
     peer.socket.send(JSON.stringify({
@@ -505,7 +543,6 @@ test("router web UI serves the app and relays live router messages", async () =>
       control_id: control.control_id,
       accepted: true,
       current_model: targetModel,
-      available_models: catalog,
     }));
     const result = await modelControlResult;
     assert.equal(result.agentId, webAgentId);
@@ -942,7 +979,6 @@ test("router web app sends a model control from the picker and applies the resul
       control_id: control.control_id,
       accepted: true,
       current_model: targetModel,
-      available_models: [currentModel, targetModel],
     }));
     const applied = await domBrowser.evaluate(`(async () => {
       const deadline = Date.now() + 2_000;
@@ -972,6 +1008,15 @@ test("router web app sends a model control from the picker and applies the resul
     const rejectedControl = await rejectedControlFrame;
     peer.socket.send(JSON.stringify({
       version: "v1",
+      frame_id: "dom-model-peer-fallback-catalog",
+      type: "model_catalog",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      model_summaries: [fallbackModel, targetModel],
+    }));
+    peer.socket.send(JSON.stringify({
+      version: "v1",
       frame_id: "dom-model-peer-rejected-result",
       type: "model_control_result",
       agent_id: "dom-model-peer",
@@ -982,7 +1027,6 @@ test("router web app sends a model control from the picker and applies the resul
       accepted: false,
       error_code: "model_unavailable",
       current_model: fallbackModel,
-      available_models: [fallbackModel, targetModel],
     }));
     const rejectedStatus = await domBrowser.evaluate(`(async () => {
       const deadline = Date.now() + 2_000;
@@ -1018,7 +1062,6 @@ test("router web app sends a model control from the picker and applies the resul
       control_id: rejectedControl.control_id,
       accepted: true,
       current_model: targetModel,
-      available_models: [targetModel],
     }));
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.deepEqual(await domBrowser.evaluate(`(() => ({
@@ -1037,6 +1080,15 @@ test("router web app sends a model control from the picker and applies the resul
     const emptyCatalogControl = await emptyCatalogControlFrame;
     peer.socket.send(JSON.stringify({
       version: "v1",
+      frame_id: "dom-model-peer-empty-catalog",
+      type: "model_catalog",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      model_summaries: [],
+    }));
+    peer.socket.send(JSON.stringify({
+      version: "v1",
       frame_id: "dom-model-peer-empty-catalog-result",
       type: "model_control_result",
       agent_id: "dom-model-peer",
@@ -1047,7 +1099,6 @@ test("router web app sends a model control from the picker and applies the resul
       accepted: false,
       error_code: "model_unavailable",
       current_model: fallbackModel,
-      available_models: [],
     }));
     assert.equal(await domBrowser.evaluate(`(async () => {
       const deadline = Date.now() + 2_000;
@@ -1097,6 +1148,20 @@ test("router web app sends a model control from the picker and applies the resul
       }
       return document.querySelector("#model-current-label")?.textContent;
     })()`), "provider/fallback");
+    assert.deepEqual(await domBrowser.evaluate(`(() => {
+      document.querySelector("#model-current")?.click();
+      const option = [...document.querySelectorAll(".model-option")].find((element) => element.textContent.includes("Target model"));
+      option?.click();
+      return {
+        title: document.querySelector("#status-title")?.textContent,
+        detail: document.querySelector("#status-detail")?.textContent,
+        current: document.querySelector("#model-current-label")?.textContent,
+      };
+    })()`), {
+      title: "Model change not confirmed",
+      detail: "dom-model-peer · ui_not_connected",
+      current: "provider/fallback",
+    });
   } finally {
     await domBrowser?.close();
     for (const socket of sockets) socket.close?.();
@@ -1222,6 +1287,128 @@ test("router web UI rejects timed out and reconnecting controls and ignores late
     for (const socket of sockets) socket.close?.();
     await ui?.close();
     await router.close();
+  }
+});
+
+test("router web UI uses the router pending-control TTL as the authoritative timeout", async () => {
+  const router = await startTestRouter({
+    routerOptions: { pendingModelControlTtlMs: 80, timeoutSweepIntervalMs: 10 },
+  });
+  const sockets = [];
+  let ui;
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "ttl-peer", sockets);
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    const browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+    const forwarded = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "ttl-control");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "ttl-control",
+      targetAgentId: "ttl-peer",
+      model: { provider: "provider", id: "slow" },
+    }));
+    await forwarded;
+    const expired = await waitForEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "ttl-control", 2_000);
+    assert.equal(expired.accepted, false);
+    assert.equal(expired.errorCode, "model_control_expired");
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router web UI bounds delayed capability discovery and falls back to the default control timeout", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "delayed-capability-peer", sockets);
+    ui = await startRouterWebUi({
+      router: router.httpUrl,
+      capabilityDiscoveryTimeoutMs: 20,
+      capabilitiesFetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+      output: () => {},
+    });
+    const browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+    const forwarded = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "delayed-capability-control");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "delayed-capability-control",
+      targetAgentId: "delayed-capability-peer",
+      model: { provider: "provider", id: "slow" },
+    }));
+    const control = await forwarded;
+    await expectNoEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === control.control_id, 100);
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router web UI resets a discovered control timeout when reconnect capability discovery fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "router-web-ui-timeout-reset-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  let router = createAgentRouter({
+    repository,
+    pendingModelControlTtlMs: 1,
+    timeoutSweepIntervalMs: 60_000,
+  });
+  const sockets = [];
+  let ui;
+  let capabilityCalls = 0;
+  try {
+    let wsUrl = await router.listen();
+    const routerHttpUrl = wsUrl.replace("ws://", "http://").replace("/v1/agents", "");
+    const routerPort = Number(new URL(routerHttpUrl).port);
+    ui = await startRouterWebUi({
+      router: routerHttpUrl,
+      capabilitiesFetchImpl: async (url, options) => {
+        capabilityCalls += 1;
+        if (capabilityCalls > 1) throw new Error("capabilities unavailable after restart");
+        return fetch(url, options);
+      },
+      output: () => {},
+    });
+    const browser = await connectBrowser(ui.httpUrl, routerHttpUrl, "timeout-reset-web", sockets);
+    const reconnecting = waitForEvent(browser, (event) => event.type === "status" && event.state === "reconnecting", 2_000);
+    await router.close();
+    await reconnecting;
+
+    router = createAgentRouter({
+      repository,
+      port: routerPort,
+      timeoutSweepIntervalMs: 60_000,
+    });
+    wsUrl = await router.listen();
+    const reconnected = waitForEvent(browser, (event) => event.type === "status" && event.state === "connected", 3_000);
+    const peer = await connectRouterAgent(wsUrl, "timeout-reset-peer", sockets);
+    await reconnected;
+    const forwarded = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control"
+      && frame.control_id === "timeout-reset-control");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      controlId: "timeout-reset-control",
+      targetAgentId: "timeout-reset-peer",
+      model: { provider: "provider", id: "slow" },
+    }));
+    await forwarded;
+    await expectNoEvent(browser, (event) => event.type === "model_control_result"
+      && event.controlId === "timeout-reset-control", 2_100);
+    assert.equal(capabilityCalls, 2);
+  } finally {
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -1483,6 +1670,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(html, /id="model-picker" class="model-picker"/);
   assert.match(html, /id="model-current" class="model-current" type="button"/);
   assert.match(html, /id="model-search" class="model-search" type="text"/);
+  assert.match(html, /id="model-catalog-note" class="model-catalog-note" hidden/);
   assert.match(html, /id="model-options" class="model-options" role="listbox"/);
   assert.doesNotMatch(html, /model-apply|datalist/);
   assert.match(html, /<i class="fa-solid fa-arrows-rotate" aria-hidden="true"><\/i>/);
@@ -1588,8 +1776,10 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /sendCommand\(\{ type: "set_model", controlId, targetAgentId: peer, model: \{ provider: model\.provider, id: model\.id \} \}\)/);
   assert.match(app, /event\.type === "agent_model_catalog"/);
   assert.match(app, /const settled = consumePendingModelControl\(state\.pendingModelControls, event\);/);
-  assert.match(app, /updateAgentModelCatalog\(targetAgentId, event\.instanceId, projection, \{ render: false \}\)/);
+  assert.match(app, /updateAgentModelCatalog\(targetAgentId, event\.instanceId, projection, \{ render: false, replaceInstance: false \}\)/);
   assert.match(app, /function updateAgentModelCatalog/);
+  assert.match(app, /`Showing \$\{models\.length\} of \$\{totalCount\} models\.`/);
+  assert.match(app, /if \(modelPickerOpen\) renderModelOptions\(models\);/);
   assert.match(webState, /const MAX_MODEL_SUMMARIES = 1_000;/);
   assert.match(webState, /\.slice\(0, MAX_MODEL_SUMMARIES\)/);
   assert.match(app, /elements\.modelOptions\.replaceChildren/);

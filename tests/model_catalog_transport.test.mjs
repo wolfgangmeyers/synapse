@@ -157,6 +157,9 @@ test("model catalog frames validate and activity frames stay lightweight", () =>
     instance_id: "instance",
     lease_id: "lease",
     model_summaries: [{ provider: "provider", id: "model", name: "Model" }],
+    current_model: { provider: "provider", id: "model", name: "Model" },
+    total_count: 1,
+    truncated: false,
   };
   assert.equal(validateClientFrame(catalog), catalog);
   assert.doesNotThrow(() => validateServerFrame({
@@ -166,7 +169,56 @@ test("model catalog frames validate and activity frames stay lightweight", () =>
     agent_id: "worker",
     instance_id: "instance",
     model_summaries: catalog.model_summaries,
+    total_count: 1,
+    truncated: false,
     generated_at: "2030-01-01T00:00:00.000Z",
+  }));
+  assert.doesNotThrow(() => validateServerFrame({
+    version: "v1",
+    frame_id: "model-control-forward",
+    type: "model_control",
+    agent_id: "worker",
+    instance_id: "instance",
+    lease_id: "lease",
+    source_agent_id: "controller",
+    control_id: "control",
+    action: "set_model",
+    model: { provider: "provider", id: "model" },
+    expires_at: "2030-01-01T00:00:30.000Z",
+  }));
+  const modelControlResult = {
+    version: "v1",
+    frame_id: "model-control-result",
+    type: "model_control_result",
+    agent_id: "worker",
+    instance_id: "instance",
+    lease_id: "lease",
+    source_agent_id: "controller",
+    control_id: "control",
+    accepted: true,
+    current_model: { provider: "provider", id: "model" },
+  };
+  assert.equal(validateClientFrame(modelControlResult), modelControlResult);
+  assert.throws(() => validateClientFrame({
+    ...modelControlResult,
+    available_models: [{ provider: "provider", id: "model" }],
+  }));
+  const maximumCatalog = Array.from({ length: 1_000 }, (_, index) => ({
+    provider: "provider",
+    id: `model-${index}`,
+  }));
+  assert.doesNotThrow(() => validateClientFrame({
+    ...catalog,
+    frame_id: "maximum-catalog",
+    model_summaries: maximumCatalog,
+    total_count: 1_000,
+  }));
+  assert.throws(() => validateClientFrame({
+    ...catalog,
+    frame_id: "oversized-catalog",
+    model_summaries: [...maximumCatalog, { provider: "provider", id: "model-overflow" }],
+    total_count: 1_000,
+    truncated: true,
   }));
   assert.throws(() => validateClientFrame({
     version: "v1",
@@ -195,6 +247,7 @@ test("mailbox client sends the full catalog once per registration socket and omi
       catalogCalls += 1;
       return catalog;
     },
+    getCurrentModel: () => catalog[0],
     fetchImpl: modelCatalogCapabilityResponse,
     webSocketFactory: () => {
       const socket = new FakeSocket(sent);
@@ -238,11 +291,13 @@ test("mailbox client sends the full catalog once per registration socket and omi
   assert.equal(catalogCalls, 1);
   assert.equal(sent.filter((frame) => frame.type === "model_catalog").length, 1);
   assert.equal(sent.find((frame) => frame.type === "model_catalog").model_summaries.length, 150);
+  assert.deepEqual(sent.find((frame) => frame.type === "model_catalog").current_model, catalog[0]);
   assert.deepEqual(intervals.map(({ delay }) => delay), [10_000, 10_000]);
   intervals[1].callback();
   assert.equal(catalogCalls, 2);
   assert.equal(sent.filter((frame) => frame.type === "model_catalog").length, 1);
   client.sendActivity("active", { currentModel: catalog[0], availableModels: catalog });
+  assert.equal("current_model" in sent.at(-1), true);
   assert.equal("available_models" in sent.at(-1), false);
 
   sockets[0].message({
@@ -289,14 +344,19 @@ test("mailbox client receives model control and reports the target result", asyn
   const controls = [];
   const current = { provider: "provider", id: "current" };
   const target = { provider: "provider", id: "target" };
+  let catalog = [current, target];
+  let currentProjection = current;
   let id = 0;
   const client = createMailboxClient({
     agentId: "worker",
     onEnvelope: () => {},
     onModelControl: async (control) => {
       controls.push(control);
+      currentProjection = target;
       return { accepted: true, currentModel: target, availableModels: [current, target] };
     },
+    getModelCatalog: () => catalog,
+    getCurrentModel: () => currentProjection,
     fetchImpl: modelCatalogCapabilityResponse,
     webSocketFactory: () => {
       const socket = new FakeSocket(sent);
@@ -368,6 +428,11 @@ test("mailbox client receives model control and reports the target result", asyn
   assert.equal(result.accepted, true);
   assert.deepEqual(result.current_model, target);
   assert.equal("available_models" in result, false);
+  const catalogFrames = sent.filter((frame) => frame.type === "model_catalog");
+  assert.equal(catalogFrames.length, 2);
+  assert.deepEqual(catalogFrames.at(-1).model_summaries, [current, target]);
+  assert.deepEqual(catalogFrames.at(-1).current_model, target);
+  assert.ok(sent.indexOf(catalogFrames.at(-1)) < sent.indexOf(result));
   assert.equal(timers.length, 0);
   assert.equal(intervals.length, 2);
   client.close();
@@ -384,7 +449,11 @@ test("router retains bounded catalogs per active agent, projects updates, and wr
     const other = await connect(app.wsUrl, { agentId: "other-worker", instanceId: "other-instance" });
     sockets.push(other.socket);
 
-    const largeCatalog = modelCatalog(150, "large-provider");
+    const supplementaryId = "🚀".repeat(256);
+    const largeCatalog = [
+      ...modelCatalog(150, "large-provider"),
+      { provider: "large-provider", id: supplementaryId },
+    ];
     const largeProjection = nextFrame(ui.socket, (frame) => frame.type === "agent_model_catalog" && frame.agent_id === "catalog-worker");
     worker.socket.send(JSON.stringify({
       version: "v1",
@@ -396,7 +465,8 @@ test("router retains bounded catalogs per active agent, projects updates, and wr
       model_summaries: largeCatalog,
     }));
     const projection = await largeProjection;
-    assert.equal(projection.model_summaries.length, 150);
+    assert.equal(projection.model_summaries.length, 151);
+    assert.equal(projection.model_summaries.at(-1).id, supplementaryId);
     assert.equal("conversation_message" in projection, false);
 
     const otherCatalog = modelCatalog(1, "other-provider");
@@ -413,7 +483,7 @@ test("router retains bounded catalogs per active agent, projects updates, and wr
     const snapshotResponse = await fetch(`${app.httpUrl}/v1/agents`);
     const snapshot = await snapshotResponse.json();
     const agents = new Map(snapshot.agents.map((agent) => [agent.agent_id, agent]));
-    assert.equal(agents.get("catalog-worker").available_models.length, 150);
+    assert.equal(agents.get("catalog-worker").available_models.length, 151);
     assert.deepEqual(agents.get("other-worker").available_models, otherCatalog);
 
     const renewed = nextFrame(worker.socket, (frame) => frame.type === "registered" && frame.request_id === "renew-worker");
@@ -427,7 +497,7 @@ test("router retains bounded catalogs per active agent, projects updates, and wr
     }));
     await renewed;
     const renewedSnapshot = await (await fetch(`${app.httpUrl}/v1/agents`)).json();
-    assert.equal(new Map(renewedSnapshot.agents.map((agent) => [agent.agent_id, agent])).get("catalog-worker").available_models.length, 150);
+    assert.equal(new Map(renewedSnapshot.agents.map((agent) => [agent.agent_id, agent])).get("catalog-worker").available_models.length, 151);
     assert.deepEqual(app.repository.conversationHistory({ owner: "shared-user", peer: "catalog-worker" }), []);
 
     await closeSocket(worker.socket);
@@ -439,6 +509,46 @@ test("router retains bounded catalogs per active agent, projects updates, and wr
     assert.deepEqual(replacementAgent.available_models, []);
   } finally {
     for (const socket of sockets) await closeSocket(socket).catch(() => {});
+    await app.close();
+  }
+});
+
+test("router closes expired sessions and discards their model catalogs", async () => {
+  const app = await routerFixture({ leaseDurationMs: 40, timeoutSweepIntervalMs: 10 });
+  let worker;
+  try {
+    worker = await connect(app.wsUrl, { agentId: "expiring-catalog-worker", instanceId: "worker-instance" });
+    worker.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "expiring-catalog",
+      type: "model_catalog",
+      agent_id: "expiring-catalog-worker",
+      instance_id: "worker-instance",
+      lease_id: worker.registered.lease_id,
+      model_summaries: [{ provider: "provider", id: "model" }],
+    }));
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for expired session close")), 1_000);
+      worker.socket.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    const expiredSnapshot = await (await fetch(`${app.httpUrl}/v1/agents`)).json();
+    assert.equal(expiredSnapshot.agents.some((agent) => agent.agent_id === "expiring-catalog-worker"), false);
+
+    const replacement = await connect(app.wsUrl, {
+      agentId: "expiring-catalog-worker",
+      instanceId: "replacement-instance",
+    });
+    worker = replacement;
+    const replacementSnapshot = await (await fetch(`${app.httpUrl}/v1/agents`)).json();
+    assert.deepEqual(
+      replacementSnapshot.agents.find((agent) => agent.agent_id === "expiring-catalog-worker").available_models,
+      [],
+    );
+  } finally {
+    if (worker?.socket.readyState !== WebSocket.CLOSED) await closeSocket(worker.socket).catch(() => {});
     await app.close();
   }
 });
@@ -635,7 +745,6 @@ test("router accepts one exact model-control result and rejects mismatches, dupl
       control_id: "control-one",
       accepted: true,
       current_model: { provider: "provider", id: "mismatched" },
-      available_models: [{ provider: "provider", id: "mismatched" }],
     }));
     assert.equal((await mismatchError).code, "model_control_result_not_pending");
     let targetSnapshot = (await (await fetch(`${app.httpUrl}/v1/agents`)).json()).agents
@@ -645,6 +754,16 @@ test("router accepts one exact model-control result and rejects mismatches, dupl
 
     const resultForSource = nextFrame(source.socket, (frame) => frame.type === "model_control_result");
     const acceptedProjection = [{ provider: "provider", id: "selected" }];
+    target.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "accepted-catalog",
+      type: "model_catalog",
+      agent_id: "target-agent",
+      instance_id: "target-instance",
+      lease_id: target.registered.lease_id,
+      model_summaries: acceptedProjection,
+      current_model: acceptedProjection[0],
+    }));
     const exactResult = {
       version: "v1",
       frame_id: "exact-result",
@@ -656,7 +775,6 @@ test("router accepts one exact model-control result and rejects mismatches, dupl
       control_id: "control-one",
       accepted: true,
       current_model: acceptedProjection[0],
-      available_models: acceptedProjection,
     };
     target.socket.send(JSON.stringify(exactResult));
     assert.equal((await resultForSource).accepted, true);
@@ -684,14 +802,16 @@ test("router accepts one exact model-control result and rejects mismatches, dupl
     }));
     await secondForward;
     nowMs += 30_001;
+    const expiredForSource = nextFrame(source.socket, (frame) => frame.type === "error"
+      && frame.request_id === "expiring-control-request");
     const lateError = nextFrame(target.socket, (frame) => frame.type === "error");
     target.socket.send(JSON.stringify({
       ...exactResult,
       frame_id: "late-result",
       control_id: "control-expiring",
       current_model: { provider: "provider", id: "late" },
-      available_models: [{ provider: "provider", id: "late" }],
     }));
+    assert.equal((await expiredForSource).code, "model_control_expired");
     assert.equal((await lateError).code, "model_control_result_not_pending");
     targetSnapshot = (await (await fetch(`${app.httpUrl}/v1/agents`)).json()).agents
       .find((agent) => agent.agent_id === "target-agent");

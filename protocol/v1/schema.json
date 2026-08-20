@@ -250,7 +250,10 @@
         "agent_id": { "$ref": "#/$defs/agentId" },
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "lease_id": { "$ref": "#/$defs/leaseId" },
-        "model_summaries": { "$ref": "#/$defs/modelSummaries" }
+        "model_summaries": { "$ref": "#/$defs/modelSummaries" },
+        "total_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "truncated": { "type": "boolean" },
+        "current_model": { "$ref": "#/$defs/modelSummary" }
       }
     },
     "modelControlFrame": {
@@ -271,7 +274,7 @@
     },
     "modelControlForwardFrame": {
       "type": "object", "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "action", "model"],
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "action", "model", "expires_at"],
       "properties": {
         "version": { "const": "v1" },
         "frame_id": { "$ref": "#/$defs/frameId" },
@@ -282,7 +285,8 @@
         "source_agent_id": { "$ref": "#/$defs/agentId" },
         "control_id": { "$ref": "#/$defs/frameId" },
         "action": { "const": "set_model" },
-        "model": { "$ref": "#/$defs/modelSummary" }
+        "model": { "$ref": "#/$defs/modelSummary" },
+        "expires_at": { "$ref": "#/$defs/utcMillis" }
       }
     },
     "modelControlResultFrame": {
@@ -299,8 +303,7 @@
         "control_id": { "$ref": "#/$defs/frameId" },
         "accepted": { "type": "boolean" },
         "error_code": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "current_model": { "$ref": "#/$defs/modelSummary" },
-        "available_models": { "$ref": "#/$defs/modelSummaries" }
+        "current_model": { "$ref": "#/$defs/modelSummary" }
       }
     },
     "messageArrivalClientFrame": {
@@ -755,6 +758,8 @@
         "agent_id": { "$ref": "#/$defs/agentId" },
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "model_summaries": { "$ref": "#/$defs/modelSummaries" },
+        "total_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "truncated": { "type": "boolean" },
         "current_model": { "$ref": "#/$defs/modelSummary" },
         "generated_at": { "$ref": "#/$defs/utcMillis" }
       }

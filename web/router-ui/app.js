@@ -6,6 +6,7 @@ import {
   historyRequestMatches,
   matchesActiveScope,
   mergeAgentModelProjection,
+  modelControlStatusTitle,
   normalizeModelSummaries,
   normalizeModelSummary,
   ownerScope,
@@ -124,6 +125,7 @@ const elements = {
   modelCurrentLabel: document.querySelector("#model-current-label"),
   modelMenu: document.querySelector("#model-menu"),
   modelSearch: document.querySelector("#model-search"),
+  modelCatalogNote: document.querySelector("#model-catalog-note"),
   modelOptions: document.querySelector("#model-options"),
 };
 
@@ -234,7 +236,9 @@ function connectUiSocket() {
 }
 
 function sendCommand(command) {
-  if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify(command));
+  if (state.socket?.readyState !== WebSocket.OPEN) return false;
+  state.socket.send(JSON.stringify(command));
+  return true;
 }
 
 async function handleEvent(event) {
@@ -285,7 +289,6 @@ async function handleEvent(event) {
       event.instanceId,
       Object.prototype.hasOwnProperty.call(event, "goal"),
       event.currentModel,
-      event.availableModels,
     );
     return;
   }
@@ -293,6 +296,8 @@ async function handleEvent(event) {
     updateAgentModelCatalog(event.agent, event.instanceId, {
       ...(Object.hasOwn(event, "currentModel") ? { currentModel: event.currentModel } : {}),
       availableModels: event.availableModels,
+      totalCount: event.totalCount,
+      truncated: event.truncated,
     });
     return;
   }
@@ -301,7 +306,9 @@ async function handleEvent(event) {
     if (settled === undefined) return;
     const targetAgentId = settled.pending.peer;
     const projection = settled.projection;
-    if (Object.keys(projection).length > 0) updateAgentModelCatalog(targetAgentId, event.instanceId, projection, { render: false });
+    if (Object.keys(projection).length > 0) {
+      updateAgentModelCatalog(targetAgentId, event.instanceId, projection, { render: false, replaceInstance: false });
+    }
     if (modelPickerSelection?.controlId === event.controlId) modelPickerSelection = undefined;
     if (targetAgentId === state.selectedPeer) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
     showModelControlStatus(event.accepted, targetAgentId, normalizeModelSummary(event.currentModel), event.errorCode);
@@ -460,7 +467,7 @@ function setStatus(stateName, detail, agentId = state.agentId, routerUrl = state
 function showModelControlStatus(accepted, targetAgentId, currentModel, errorCode) {
   const target = targetAgentId || "agent";
   elements.statusDot.className = `status-dot ${accepted ? "connected" : "offline"}`;
-  elements.statusTitle.textContent = accepted ? "Model changed" : "Model change rejected";
+  elements.statusTitle.textContent = modelControlStatusTitle(accepted, errorCode);
   elements.statusDetail.textContent = accepted
     ? `${target} · ${currentModel === undefined ? "unknown model" : modelKey(currentModel)}`
     : `${target} · ${errorCode || "unavailable_model"}`;
@@ -623,7 +630,7 @@ function selectPeer(peer) {
   requestHistory(peer);
 }
 
-function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = [], incomingGoal, instanceId, goalProvided = incomingGoal !== undefined, incomingModel, incomingModels) {
+function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = [], incomingGoal, instanceId, goalProvided = incomingGoal !== undefined, incomingModel) {
   if (!peer || peer === state.agentId) return;
   const current = state.agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
   const sameInstance = instanceId === undefined || current.instance_id === instanceId;
@@ -636,7 +643,7 @@ function updateAgentActivity(peer, activityState, subagentCount = 0, subagents =
     : (incomingCount > 0 && currentSummaries.length === incomingCount ? currentSummaries : []);
   const nextGoal = goalProvided ? normalizeGoalProjection(incomingGoal) : (sameInstance ? normalizeGoalProjection(base.goal) : undefined);
   const nextModel = normalizeModelSummary(incomingModel) ?? (sameInstance ? normalizeModelSummary(base.current_model) : undefined);
-  const nextModels = normalizeModelSummaries(incomingModels ?? (sameInstance ? base.available_models : []));
+  const nextModels = normalizeModelSummaries(sameInstance ? base.available_models : []);
   const normalizedCount = Math.max(summaries.length, incomingCount);
   const hasDurableLifecycle = Number.isSafeInteger(base.subagent_version);
   if (!hasDurableLifecycle && normalizedCount === 0) state.expandedSubagents.delete(peer);
@@ -656,9 +663,9 @@ function updateAgentActivity(peer, activityState, subagentCount = 0, subagents =
   if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
 }
 
-function updateAgentModelCatalog(peer, instanceId, projection, { render = true } = {}) {
+function updateAgentModelCatalog(peer, instanceId, projection, { render = true, replaceInstance = true } = {}) {
   if (!peer || peer === state.agentId) return;
-  const merged = mergeAgentModelProjection(state.agents, peer, instanceId, projection);
+  const merged = mergeAgentModelProjection(state.agents, peer, instanceId, projection, { replaceInstance });
   if (!merged.changed) return;
   state.agents = merged.agents;
   if (peer === state.selectedPeer && merged.currentModel !== undefined
@@ -1276,6 +1283,30 @@ function applyLifecycleUpdateEvent(agent, routerVersion, { render = true } = {})
 
 function mergeAgentSnapshot(agent) {
   const current = state.agents.find((candidate) => candidate.agent_id === agent.agent_id);
+  const sameInstance = current !== undefined
+    && (agent.instance_id === undefined || current.instance_id === undefined || agent.instance_id === current.instance_id);
+  const availableModelsProvided = Object.hasOwn(agent, "available_models");
+  const currentModelProvided = Object.hasOwn(agent, "current_model");
+  const modelFields = {
+    ...(currentModelProvided
+      ? { current_model: normalizeModelSummary(agent.current_model) }
+      : (sameInstance && current?.current_model !== undefined ? { current_model: current.current_model } : {})),
+    ...(availableModelsProvided
+      ? { available_models: normalizeModelSummaries(agent.available_models) }
+      : (sameInstance && current?.available_models !== undefined ? { available_models: current.available_models } : {})),
+    model_catalog_total_count: availableModelsProvided
+      ? Math.max(
+        normalizeModelSummaries(agent.available_models).length,
+        Number.isSafeInteger(agent.model_catalog_total_count)
+          ? agent.model_catalog_total_count
+          : normalizeModelSummaries(agent.available_models).length,
+      )
+      : (sameInstance ? current?.model_catalog_total_count ?? 0 : 0),
+    model_catalog_truncated: availableModelsProvided
+      ? agent.model_catalog_truncated === true
+      : (sameInstance ? current?.model_catalog_truncated === true : false),
+  };
+  const projectedAgent = { ...agent, ...modelFields };
   const normalizedGoal = normalizeGoalProjection(agent.goal);
   const goalFields = normalizedGoal === undefined ? {} : { goal: normalizedGoal };
   if (Number.isSafeInteger(current?.subagent_version)
@@ -1284,13 +1315,15 @@ function mergeAgentSnapshot(agent) {
       || (agent.subagent_version === current.subagent_version
         && ((agent.subagent_count ?? 0) !== (current.subagent_count ?? 0)
           || !sameSubagents(agent.subagents, current.subagents))))) {
-    return { ...agent, ...goalFields, subagent_version: current.subagent_version, subagent_count: current.subagent_count, subagents: current.subagents };
+    return { ...projectedAgent, ...goalFields, subagent_version: current.subagent_version, subagent_count: current.subagent_count, subagents: current.subagents };
   }
   const incomingSummaries = normalizeSubagents(agent.subagents);
   const incomingCount = Number.isSafeInteger(agent.subagent_count) ? agent.subagent_count : 0;
-  if (incomingSummaries.length > 0 || incomingCount === 0) return { ...agent, ...goalFields, subagents: incomingSummaries };
+  if (incomingSummaries.length > 0 || incomingCount === 0) return { ...projectedAgent, ...goalFields, subagents: incomingSummaries };
   const currentSummaries = normalizeSubagents(current?.subagents);
-  return currentSummaries.length === incomingCount ? { ...agent, ...goalFields, subagents: currentSummaries } : { ...agent, ...goalFields, subagents: [] };
+  return currentSummaries.length === incomingCount
+    ? { ...projectedAgent, ...goalFields, subagents: currentSummaries }
+    : { ...projectedAgent, ...goalFields, subagents: [] };
 }
 function compactingBadgeMarkup(extraClass = "") {
   return `<span class="compacting-indicator${extraClass ? ` ${extraClass}` : ""}" aria-label="Agent is compacting"><span class="compacting-dot"></span><span>Compacting</span></span>`;
@@ -1333,7 +1366,12 @@ function selectModel(model) {
   modelPickerSearchText = "";
   elements.modelSearch.value = "";
   setModelPickerOpen(false);
-  sendCommand({ type: "set_model", controlId, targetAgentId: peer, model: { provider: model.provider, id: model.id } });
+  if (!sendCommand({ type: "set_model", controlId, targetAgentId: peer, model: { provider: model.provider, id: model.id } })) {
+    state.pendingModelControls.delete(controlId);
+    modelPickerSelection = undefined;
+    renderModelControls(state.agents.find((agent) => agent.agent_id === peer));
+    showModelControlStatus(false, peer, undefined, "ui_not_connected");
+  }
 }
 
 function clearPendingModelControls({ render = true } = {}) {
@@ -1371,6 +1409,13 @@ function renderModelOptions(models) {
 function renderModelControls(agent) {
   const models = normalizeModelSummaries(agent?.available_models);
   elements.modelControls.hidden = agent === undefined || models.length === 0;
+  const totalCount = Number.isSafeInteger(agent?.model_catalog_total_count)
+    ? Math.max(models.length, agent.model_catalog_total_count)
+    : models.length;
+  elements.modelCatalogNote.hidden = agent?.model_catalog_truncated !== true;
+  elements.modelCatalogNote.textContent = agent?.model_catalog_truncated === true
+    ? `Showing ${models.length} of ${totalCount} models.`
+    : "";
   if (elements.modelControls.hidden) {
     setModelPickerOpen(false);
     modelPickerPeer = "";
@@ -1395,7 +1440,7 @@ function renderModelControls(agent) {
     ? selectedModel
     : currentModel;
   elements.modelCurrentLabel.textContent = current === undefined ? "Select model" : modelKey(current);
-  renderModelOptions(models);
+  if (modelPickerOpen) renderModelOptions(models);
 }
 
 function goalIndicatorMarkup(goal, peerName) {

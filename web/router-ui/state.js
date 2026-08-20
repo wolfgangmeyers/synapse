@@ -3,6 +3,14 @@ import { mergeMessages } from "./history.js";
 const DRAFT_LIMIT = 200;
 const DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_MODEL_SUMMARIES = 1_000;
+const CONFIRMED_MODEL_REJECTION_CODES = new Set([
+  "invalid_model",
+  "model_registry_failed",
+  "model_registry_unavailable",
+  "model_switch_failed",
+  "model_unavailable",
+  "unsupported_model_control_action",
+]);
 const SCOPED_EVENT_TYPES = new Set([
   "agents",
   "agents_error",
@@ -57,6 +65,13 @@ export function matchingPendingModelControl(pendingControls, event) {
   return pending?.peer === event.targetAgentId ? pending : undefined;
 }
 
+export function modelControlStatusTitle(accepted, errorCode) {
+  if (accepted) return "Model changed";
+  return CONFIRMED_MODEL_REJECTION_CODES.has(errorCode)
+    ? "Model change rejected"
+    : "Model change not confirmed";
+}
+
 export function consumePendingModelControl(pendingControls, event) {
   const pending = matchingPendingModelControl(pendingControls, event);
   if (pending === undefined) return undefined;
@@ -65,18 +80,23 @@ export function consumePendingModelControl(pendingControls, event) {
     pending,
     projection: {
       ...(Object.hasOwn(event, "currentModel") ? { currentModel: event.currentModel } : {}),
-      ...(Object.hasOwn(event, "availableModels") ? { availableModels: event.availableModels } : {}),
     },
   };
 }
 
 export function normalizeModelSummary(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const provider = typeof value.provider === "string" ? value.provider.trim().slice(0, 128) : "";
-  const id = typeof value.id === "string" ? value.id.trim().slice(0, 256) : "";
+  const provider = normalizeModelString(value.provider, 128);
+  const id = normalizeModelString(value.id, 256);
   if (provider.length === 0 || id.length === 0) return undefined;
-  const name = typeof value.name === "string" ? value.name.trim().slice(0, 256) : "";
+  const name = normalizeModelString(value.name, 256);
   return { provider, id, ...(name.length > 0 ? { name } : {}) };
+}
+
+function normalizeModelString(value, maximum) {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  return normalized.length > 0 && [...normalized].length <= maximum ? normalized : "";
 }
 
 export function normalizeModelSummaries(values) {
@@ -91,22 +111,35 @@ export function normalizeModelSummaries(values) {
   }).slice(0, MAX_MODEL_SUMMARIES);
 }
 
-export function mergeAgentModelProjection(agents, peer, instanceId, projection) {
+export function mergeAgentModelProjection(agents, peer, instanceId, projection, { replaceInstance = true } = {}) {
   if (!peer) return { agents, currentModel: undefined, changed: false };
   const current = agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
   const sameInstance = instanceId === undefined || current.instance_id === undefined || current.instance_id === instanceId;
+  if (!sameInstance && !replaceInstance) {
+    return { agents, currentModel: normalizeModelSummary(current.current_model), changed: false };
+  }
   const base = sameInstance ? current : { agent_id: peer, activity_state: "idle", instance_id: instanceId };
   const modelProvided = Object.hasOwn(projection, "currentModel");
   const modelsProvided = Object.hasOwn(projection, "availableModels");
+  const totalCountProvided = Object.hasOwn(projection, "totalCount");
+  const truncatedProvided = Object.hasOwn(projection, "truncated");
   const nextModel = modelProvided
     ? normalizeModelSummary(projection.currentModel)
     : (sameInstance ? normalizeModelSummary(base.current_model) : undefined);
   const nextModels = modelsProvided
     ? normalizeModelSummaries(projection.availableModels)
     : (sameInstance ? normalizeModelSummaries(base.available_models) : []);
+  const nextTotalCount = totalCountProvided
+    ? Math.max(nextModels.length, Number.isSafeInteger(projection.totalCount) ? projection.totalCount : nextModels.length)
+    : (modelsProvided ? nextModels.length : (sameInstance ? base.model_catalog_total_count ?? nextModels.length : nextModels.length));
+  const nextTruncated = truncatedProvided
+    ? projection.truncated === true
+    : (modelsProvided ? false : (sameInstance ? base.model_catalog_truncated === true : false));
   if (sameInstance
     && JSON.stringify(base.current_model) === JSON.stringify(nextModel)
-    && JSON.stringify(base.available_models) === JSON.stringify(nextModels)) {
+    && JSON.stringify(base.available_models) === JSON.stringify(nextModels)
+    && base.model_catalog_total_count === nextTotalCount
+    && base.model_catalog_truncated === nextTruncated) {
     return { agents, currentModel: nextModel, changed: false };
   }
   const next = {
@@ -114,6 +147,8 @@ export function mergeAgentModelProjection(agents, peer, instanceId, projection) 
     ...(instanceId === undefined ? {} : { instance_id: instanceId }),
     ...(nextModel === undefined ? {} : { current_model: nextModel }),
     ...(modelsProvided || base.available_models !== undefined ? { available_models: nextModels } : {}),
+    model_catalog_total_count: nextTotalCount,
+    model_catalog_truncated: nextTruncated,
   };
   return {
     agents: agents.some((agent) => agent.agent_id === peer)
