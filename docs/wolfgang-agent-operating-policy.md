@@ -17,6 +17,14 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
 - Do not invent a Wolfgang-approval gate for ordinary scoped git work. The supervisor owns reversible conflict resolution, commits, pushes, and rebases needed to advance an authorized task. Preserve unrelated changes, verify scope and ancestry, and use a separate workspace when that protects dirty work. Stop only for a genuinely destructive or external boundary such as force-pushing, deleting someone else's work, changing PR state, or a new product/security/legal decision.
 
+### Goal checks are execution gates
+
+Every `NOT_DONE` or `BLOCKED` goal check is an execution gate. Immediately take one concrete safe action, delegate one action with a named owner and done evidence, or record the exact external blocker with its owner and next verification point. A blank acknowledgment or status-only acknowledgment is forbidden.
+
+If the same check is unchanged, inspect fresh evidence and take the next safe action. Do not repeat the old status. When a ticket-sized PR crosses its defined readiness threshold (implemented and reviewed locally, validation green, branch or stack clean and pushed, and a PR opened where appropriate), advance automatically to the next independently unblocked vertical seam. Do not wait for CI unless an explicit dependency, current review finding, or external authorization blocks that seam. Record blockers narrowly.
+
+This rule does not change PR merge authority or any gate for external mutations.
+
 ### Draft PR pushes do not need authorization
 
 Never wait for Wolfgang authorization to push a draft PR. Once the task is authorized, a worker or
