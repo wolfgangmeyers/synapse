@@ -27,6 +27,7 @@ const IMAGE_STORE_NAME = "image_attachments";
 const DRAFT_STORE_KEY = "mecha.web.drafts";
 const SELECTED_PEER_STORE_KEY = "mecha.web.selectedPeers";
 const MAX_IMAGES = 3;
+const MAX_MODEL_SUMMARIES = 1_000;
 const MAX_IMAGE_EDGE = 1600;
 const IMAGE_JPEG_QUALITY = 0.92;
 const MAX_IMAGE_BYTES = 768 * 1024;
@@ -69,6 +70,10 @@ const state = {
   goalDialogPeer: "",
   goalDialogReturnFocus: null,
 };
+let modelPickerPeer = "";
+let modelPickerSearchText = "";
+let modelPickerOpen = false;
+let modelPickerSelection;
 
 const elements = {
   statusDot: document.querySelector("#status-dot"),
@@ -109,6 +114,13 @@ const elements = {
   goalDialog: document.querySelector("#goal-dialog"),
   goalDialogTitle: document.querySelector("#goal-dialog-title"),
   goalDialogBody: document.querySelector("#goal-dialog-body"),
+  modelControls: document.querySelector("#model-controls"),
+  modelPicker: document.querySelector("#model-picker"),
+  modelCurrent: document.querySelector("#model-current"),
+  modelCurrentLabel: document.querySelector("#model-current-label"),
+  modelMenu: document.querySelector("#model-menu"),
+  modelSearch: document.querySelector("#model-search"),
+  modelOptions: document.querySelector("#model-options"),
 };
 
 const config = await fetch("/ui/config").then((response) => response.json()).catch(() => ({}));
@@ -142,6 +154,19 @@ elements.addRouter.addEventListener("click", () => {
   void saveRouterEditor();
 });
 elements.refresh.addEventListener("click", () => sendCommand({ type: "refresh_agents" }));
+elements.modelCurrent.addEventListener("click", () => {
+  setModelPickerOpen(!modelPickerOpen, { focus: !modelPickerOpen });
+});
+elements.modelSearch.addEventListener("input", () => {
+  modelPickerSearchText = elements.modelSearch.value;
+  renderModelOptions(normalizeModelSummaries(state.agents.find((agent) => agent.agent_id === state.selectedPeer)?.available_models));
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("#model-picker")) setModelPickerOpen(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && modelPickerOpen) setModelPickerOpen(false);
+});
 elements.agentFilter.addEventListener("input", () => {
   state.agentFilter = elements.agentFilter.value;
   renderAgents();
@@ -244,7 +269,40 @@ async function handleEvent(event) {
     return;
   }
   if (event.type === "agent_activity") {
-    updateAgentActivity(event.agent, event.activityState, event.subagentCount, event.subagents, event.goal, event.instanceId, Object.prototype.hasOwnProperty.call(event, "goal"));
+    updateAgentActivity(
+      event.agent,
+      event.activityState,
+      event.subagentCount,
+      event.subagents,
+      event.goal,
+      event.instanceId,
+      Object.prototype.hasOwnProperty.call(event, "goal"),
+      event.currentModel,
+      event.availableModels,
+    );
+    return;
+  }
+  if (event.type === "agent_model_catalog") {
+    updateAgentModelCatalog(event.agent, event.instanceId, event.currentModel, event.availableModels);
+    return;
+  }
+  if (event.type === "model_control_result") {
+    const targetAgentId = event.targetAgentId ?? event.agentId;
+    if (event.accepted) {
+      const current = normalizeModelSummary(event.currentModel);
+      if (current !== undefined && targetAgentId === state.selectedPeer) {
+        modelPickerSelection = { peer: state.selectedPeer, model: current };
+      }
+      if (current !== undefined || Array.isArray(event.availableModels)) {
+        updateAgentModelCatalog(targetAgentId, event.instanceId, current, event.availableModels);
+      }
+      if (targetAgentId === state.selectedPeer) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
+      showModelControlStatus(true, targetAgentId, current);
+    } else {
+      modelPickerSelection = undefined;
+      showModelControlStatus(false, targetAgentId, undefined, event.errorCode);
+      renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
+    }
     return;
   }
   if (event.type === "message_arrival") {
@@ -394,6 +452,15 @@ function setStatus(stateName, detail, agentId = state.agentId, routerUrl = state
   elements.statusDot.className = `status-dot ${stateName === "connected" ? "connected" : stateName === "connecting" || stateName === "reconnecting" ? "connecting" : "offline"}`;
   elements.statusTitle.textContent = stateName === "connected" ? `Connected as ${agentId}` : stateName[0].toUpperCase() + stateName.slice(1);
   elements.statusDetail.textContent = stateName === "connected" ? "" : `${detail || ""}${routerUrl ? ` · ${displayRouter(routerUrl)}` : ""}`;
+}
+
+function showModelControlStatus(accepted, targetAgentId, currentModel, errorCode) {
+  const target = targetAgentId || "agent";
+  elements.statusDot.className = `status-dot ${accepted ? "connected" : "offline"}`;
+  elements.statusTitle.textContent = accepted ? "Model changed" : "Model change rejected";
+  elements.statusDetail.textContent = accepted
+    ? `${target} · ${currentModel === undefined ? "unknown model" : modelKey(currentModel)}`
+    : `${target} · ${errorCode || "unavailable_model"}`;
 }
 
 function render() {
@@ -553,7 +620,7 @@ function selectPeer(peer) {
   requestHistory(peer);
 }
 
-function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = [], incomingGoal, instanceId, goalProvided = incomingGoal !== undefined) {
+function updateAgentActivity(peer, activityState, subagentCount = 0, subagents = [], incomingGoal, instanceId, goalProvided = incomingGoal !== undefined, incomingModel, incomingModels) {
   if (!peer || peer === state.agentId) return;
   const current = state.agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
   const sameInstance = instanceId === undefined || current.instance_id === instanceId;
@@ -565,18 +632,51 @@ function updateAgentActivity(peer, activityState, subagentCount = 0, subagents =
     ? incomingSummaries
     : (incomingCount > 0 && currentSummaries.length === incomingCount ? currentSummaries : []);
   const nextGoal = goalProvided ? normalizeGoalProjection(incomingGoal) : (sameInstance ? normalizeGoalProjection(base.goal) : undefined);
+  const nextModel = normalizeModelSummary(incomingModel) ?? (sameInstance ? normalizeModelSummary(base.current_model) : undefined);
+  const nextModels = normalizeModelSummaries(incomingModels ?? (sameInstance ? base.available_models : []));
   const normalizedCount = Math.max(summaries.length, incomingCount);
   const hasDurableLifecycle = Number.isSafeInteger(base.subagent_version);
   if (!hasDurableLifecycle && normalizedCount === 0) state.expandedSubagents.delete(peer);
-  if (base.activity_state === activityState && hasDurableLifecycle && JSON.stringify(base.goal) === JSON.stringify(nextGoal)) return;
+  if (base.activity_state === activityState && hasDurableLifecycle && JSON.stringify(base.goal) === JSON.stringify(nextGoal)
+    && JSON.stringify(base.current_model) === JSON.stringify(nextModel) && JSON.stringify(base.available_models) === JSON.stringify(nextModels)) return;
   // sameSubagents(current.subagents, summaries)) return; is equivalent for the same-incarnation base below.
-  if (base.activity_state === activityState && (base.subagent_count ?? 0) === normalizedCount && sameSubagents(base.subagents, summaries) && JSON.stringify(base.goal) === JSON.stringify(nextGoal) && base.instance_id === instanceId) return;
+  if (base.activity_state === activityState && (base.subagent_count ?? 0) === normalizedCount && sameSubagents(base.subagents, summaries) && JSON.stringify(base.goal) === JSON.stringify(nextGoal)
+    && JSON.stringify(base.current_model) === JSON.stringify(nextModel) && JSON.stringify(base.available_models) === JSON.stringify(nextModels) && base.instance_id === instanceId) return;
   const next = hasDurableLifecycle
-    ? { ...base, activity_state: activityState, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }) }
-    : { ...base, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }) };
+    ? { ...base, activity_state: activityState, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }), ...(nextModel === undefined ? {} : { current_model: nextModel }), available_models: nextModels }
+    : { ...base, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }), ...(nextModel === undefined ? {} : { current_model: nextModel }), available_models: nextModels };
   state.agents = state.agents.some((agent) => agent.agent_id === peer)
     ? state.agents.map((agent) => agent.agent_id === peer ? next : agent)
     : [...state.agents, next];
+  renderAgents();
+  renderConversation();
+  if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
+}
+
+function updateAgentModelCatalog(peer, instanceId, incomingModel, incomingModels) {
+  if (!peer || peer === state.agentId) return;
+  const current = state.agents.find((agent) => agent.agent_id === peer) ?? { agent_id: peer, activity_state: "idle" };
+  const sameInstance = instanceId === undefined || current.instance_id === undefined || current.instance_id === instanceId;
+  const base = sameInstance ? current : { agent_id: peer, activity_state: "idle", instance_id: instanceId };
+  const nextModel = normalizeModelSummary(incomingModel) ?? (sameInstance ? normalizeModelSummary(base.current_model) : undefined);
+  const nextModels = normalizeModelSummaries(incomingModels);
+  if (sameInstance
+    && JSON.stringify(base.current_model) === JSON.stringify(nextModel)
+    && JSON.stringify(base.available_models) === JSON.stringify(nextModels)) return;
+  const next = {
+    ...base,
+    ...(instanceId === undefined ? {} : { instance_id: instanceId }),
+    ...(nextModel === undefined ? {} : { current_model: nextModel }),
+    available_models: nextModels,
+  };
+  state.agents = state.agents.some((agent) => agent.agent_id === peer)
+    ? state.agents.map((agent) => agent.agent_id === peer ? next : agent)
+    : [...state.agents, next];
+  if (peer === state.selectedPeer && nextModel !== undefined
+    && modelPickerSelection?.peer === peer
+    && modelKey(modelPickerSelection.model) === modelKey(nextModel)) {
+    modelPickerSelection = undefined;
+  }
   renderAgents();
   renderConversation();
   if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
@@ -636,6 +736,7 @@ function renderConversation() {
   elements.peerAvatar.textContent = peer ? monogram(peer) : "?";
   elements.peerAvatar.className = `avatar${peer ? "" : " muted"}`;
   const selectedAgent = state.agents.find((agent) => agent.agent_id === peer);
+  renderModelControls(selectedAgent);
   const active = selectedAgent?.activity_state === "active";
   const compacting = selectedAgent?.activity_state === "compacting";
   elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}${compacting ? compactingBadgeMarkup("inline") : ""}` : "Pick an agent";
@@ -1211,6 +1312,112 @@ function normalizeGoalProjection(value) {
   if (!value.enabled && value.goal !== "") return undefined;
   if (value.enabled && value.goal.length === 0) return undefined;
   return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
+}
+
+function normalizeModelSummary(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const provider = typeof value.provider === "string" ? value.provider.trim().slice(0, 128) : "";
+  const id = typeof value.id === "string" ? value.id.trim().slice(0, 256) : "";
+  if (provider.length === 0 || id.length === 0) return undefined;
+  const name = typeof value.name === "string" ? value.name.trim().slice(0, 256) : "";
+  return { provider, id, ...(name.length > 0 ? { name } : {}) };
+}
+
+function normalizeModelSummaries(values) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  return values.map(normalizeModelSummary).filter((model) => {
+    if (model === undefined) return false;
+    const key = `${model.provider}\u0000${model.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, MAX_MODEL_SUMMARIES);
+}
+
+function modelKey(model) {
+  return `${model.provider}/${model.id}`;
+}
+
+function modelOptionLabel(model) {
+  return model.name ? `${model.name} (${model.provider})` : modelKey(model);
+}
+
+function setModelPickerOpen(open, { focus = false } = {}) {
+  modelPickerOpen = open;
+  elements.modelMenu.hidden = !open;
+  elements.modelCurrent.setAttribute("aria-expanded", String(open));
+  if (open) {
+    renderModelOptions(normalizeModelSummaries(state.agents.find((agent) => agent.agent_id === state.selectedPeer)?.available_models));
+    if (focus) requestAnimationFrame(() => elements.modelSearch.focus());
+  }
+}
+
+function selectModel(model) {
+  const peer = state.selectedPeer;
+  if (!peer) return;
+  modelPickerSelection = { peer, model };
+  elements.modelCurrentLabel.textContent = modelKey(model);
+  modelPickerSearchText = "";
+  elements.modelSearch.value = "";
+  setModelPickerOpen(false);
+  sendCommand({ type: "set_model", targetAgentId: peer, model: { provider: model.provider, id: model.id } });
+}
+
+function renderModelOptions(models) {
+  const query = modelPickerSearchText.trim().toLowerCase();
+  const visibleModels = models.filter((model) => `${modelKey(model)} ${modelOptionLabel(model)}`.toLowerCase().includes(query));
+  if (visibleModels.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "model-options-empty";
+    empty.textContent = "No matching models";
+    elements.modelOptions.replaceChildren(empty);
+    return;
+  }
+  elements.modelOptions.replaceChildren(...visibleModels.map((model) => {
+    const option = document.createElement("button");
+    option.className = "model-option";
+    option.type = "button";
+    option.role = "option";
+    option.setAttribute("aria-selected", String(modelKey(model) === elements.modelCurrentLabel.textContent));
+    const name = document.createElement("strong");
+    name.textContent = modelOptionLabel(model);
+    const key = document.createElement("small");
+    key.textContent = modelKey(model);
+    option.append(name, key);
+    option.addEventListener("click", () => selectModel(model));
+    return option;
+  }));
+}
+
+function renderModelControls(agent) {
+  const models = normalizeModelSummaries(agent?.available_models);
+  elements.modelControls.hidden = agent === undefined || models.length === 0;
+  if (elements.modelControls.hidden) {
+    setModelPickerOpen(false);
+    modelPickerPeer = "";
+    modelPickerSelection = undefined;
+    modelPickerSearchText = "";
+    elements.modelSearch.value = "";
+    elements.modelCurrentLabel.textContent = "Select model";
+    elements.modelOptions.replaceChildren();
+    return;
+  }
+  if (modelPickerPeer !== state.selectedPeer) {
+    modelPickerPeer = state.selectedPeer;
+    modelPickerSelection = undefined;
+    modelPickerSearchText = "";
+    elements.modelSearch.value = "";
+  }
+  const selectedModel = modelPickerSelection?.peer === state.selectedPeer
+    ? normalizeModelSummary(modelPickerSelection.model)
+    : undefined;
+  const currentModel = normalizeModelSummary(agent.current_model);
+  const current = selectedModel && (!currentModel || modelKey(selectedModel) !== modelKey(currentModel))
+    ? selectedModel
+    : currentModel;
+  elements.modelCurrentLabel.textContent = current === undefined ? "Select model" : modelKey(current);
+  renderModelOptions(models);
 }
 
 function goalIndicatorMarkup(goal, peerName) {

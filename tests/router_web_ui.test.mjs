@@ -12,7 +12,7 @@ import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { parseArguments, startRouterWebUi } from "../tools/router_web_ui.mjs";
 import { mergeMessages } from "../web/router-ui/history.js";
-import { applyLifecycleSnapshot, upsertLifecycleAgent } from "../web/router-ui/state.js";
+import { applyLifecycleSnapshot, matchesActiveScope, upsertLifecycleAgent } from "../web/router-ui/state.js";
 import { isAllowedMarkdownLink, markdownToSafeHtml, renderMarkdownBody, textWithoutMarkdownImages } from "../web/router-ui/markdown.js";
 
 const webAgentId = "web-test-client";
@@ -373,6 +373,64 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.equal(activity.activityState, "active");
     assert.equal(activity.subagentCount, 2);
 
+    const catalog = Array.from({ length: 150 }, (_, index) => ({
+      provider: "catalog-provider",
+      id: `model-${index}`,
+      name: `Model ${index}`,
+    }));
+    const catalogEvent = waitForEvent(browser, (event) => event.type === "agent_model_catalog" && event.agent === "peer-agent");
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "peer-agent-catalog",
+      type: "model_catalog",
+      agent_id: "peer-agent",
+      instance_id: "peer-agent-instance",
+      lease_id: peer.registered.lease_id,
+      model_summaries: catalog,
+    }));
+    const catalogProjection = await catalogEvent;
+    assert.equal(catalogProjection.availableModels.length, catalog.length);
+    assert.deepEqual(catalogProjection.availableModels.at(-1), catalog.at(-1));
+
+    const targetModel = catalog[0];
+    const forwardedControl = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control");
+    browser.send(JSON.stringify({
+      type: "set_model",
+      targetAgentId: "peer-agent",
+      model: { provider: targetModel.provider, id: targetModel.id },
+    }));
+    const control = await forwardedControl;
+    assert.equal(control.agent_id, "peer-agent");
+    assert.equal(control.instance_id, "peer-agent-instance");
+    assert.equal(control.lease_id, peer.registered.lease_id);
+    assert.equal(control.source_agent_id, webAgentId);
+    assert.deepEqual(control.model, { provider: targetModel.provider, id: targetModel.id });
+
+    const modelControlResult = waitForEvent(browser, (event) => event.type === "model_control_result" && event.controlId === control.control_id);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "peer-agent-model-result",
+      type: "model_control_result",
+      agent_id: "peer-agent",
+      instance_id: "peer-agent-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: webAgentId,
+      control_id: control.control_id,
+      accepted: true,
+      current_model: targetModel,
+      available_models: catalog,
+    }));
+    const result = await modelControlResult;
+    assert.equal(result.agentId, webAgentId);
+    assert.equal(result.targetAgentId, "peer-agent");
+    assert.equal(result.instanceId, "peer-agent-instance");
+    assert.equal(result.accepted, true);
+    assert.equal(matchesActiveScope(result, { routerUrl: routerHttpUrl, agentId: webAgentId }), true);
+    const updatedAgents = await (await fetch(`${routerHttpUrl}/v1/agents`)).json();
+    const updatedPeer = updatedAgents.agents.find((agent) => agent.agent_id === "peer-agent");
+    assert.deepEqual(updatedPeer.current_model, targetModel);
+    assert.deepEqual(updatedPeer.available_models, catalog);
+
     const arrivalEvent = waitForEvent(browser, (event) => event.type === "message_arrival" && event.agent === "peer-agent");
     peer.socket.send(JSON.stringify({
       version: "v1",
@@ -699,6 +757,140 @@ test("router web app renders the agent-row subagent badge from received activity
   }
 });
 
+test("router web app sends a model control from the picker and applies the result", async (t) => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  let domBrowser;
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "dom-model-peer", sockets);
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    try {
+      domBrowser = await startElectronDomBrowser(ui.httpUrl);
+    } catch (error) {
+      if (error.code === "ELECTRON_UNAVAILABLE") {
+        t.skip(`Electron cannot launch in this test environment: ${error.message}`);
+        return;
+      }
+      throw error;
+    }
+
+    const currentModel = { provider: "provider", id: "current", name: "Current model" };
+    const targetModel = { provider: "provider", id: "target", name: "Target model" };
+    const peerReady = await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        if ([...document.querySelectorAll(".agent-row")].some((element) => element.textContent.includes("Dom Model Peer"))) return true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    })()`);
+    assert.equal(peerReady, true);
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-model-peer-catalog",
+      type: "model_catalog",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      model_summaries: [currentModel, targetModel],
+    }));
+
+    const targetReady = await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const row = [...document.querySelectorAll(".agent-row")].find((element) => element.textContent.includes("Dom Model Peer"));
+        if (row) {
+          row.click();
+          const controls = document.querySelector("#model-controls");
+          if (!controls?.hidden && controls.querySelectorAll(".model-option").length === 2) return true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    })()`);
+    assert.equal(targetReady, true);
+
+    const forwardedControl = nextRouterFrame(peer.socket, (frame) => frame.type === "model_control");
+    const clicked = await domBrowser.evaluate(`(() => {
+      const option = [...document.querySelectorAll(".model-option")].find((element) => element.textContent.includes("Target model"));
+      option?.click();
+      return option !== undefined;
+    })()`);
+    assert.equal(clicked, true);
+    const control = await forwardedControl;
+    assert.equal(control.agent_id, "dom-model-peer");
+    assert.equal(control.source_agent_id, "wolfgang-web");
+    assert.deepEqual(control.model, { provider: targetModel.provider, id: targetModel.id });
+
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-model-peer-result",
+      type: "model_control_result",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: "wolfgang-web",
+      control_id: control.control_id,
+      accepted: true,
+      current_model: targetModel,
+      available_models: [currentModel, targetModel],
+    }));
+    const applied = await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        if (document.querySelector("#model-current-label")?.textContent === "provider/target") return true;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return false;
+    })()`);
+    assert.equal(applied, true);
+    const successStatus = await domBrowser.evaluate(`(() => ({
+      title: document.querySelector("#status-title")?.textContent,
+      detail: document.querySelector("#status-detail")?.textContent,
+    }))()`);
+    assert.equal(successStatus.title, "Model changed");
+    assert.equal(successStatus.detail, "dom-model-peer · provider/target");
+
+    peer.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "dom-model-peer-rejected-result",
+      type: "model_control_result",
+      agent_id: "dom-model-peer",
+      instance_id: "dom-model-peer-instance",
+      lease_id: peer.registered.lease_id,
+      source_agent_id: "wolfgang-web",
+      control_id: `${control.control_id}-rejected`,
+      accepted: false,
+      error_code: "model_unavailable",
+      current_model: targetModel,
+      available_models: [currentModel, targetModel],
+    }));
+    const rejectedStatus = await domBrowser.evaluate(`(async () => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const title = document.querySelector("#status-title")?.textContent;
+        const detail = document.querySelector("#status-detail")?.textContent;
+        if (title === "Model change rejected" && detail === "dom-model-peer · model_unavailable") return { title, detail };
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return {
+        title: document.querySelector("#status-title")?.textContent,
+        detail: document.querySelector("#status-detail")?.textContent,
+      };
+    })()`);
+    assert.deepEqual(rejectedStatus, {
+      title: "Model change rejected",
+      detail: "dom-model-peer · model_unavailable",
+    });
+  } finally {
+    await domBrowser?.close();
+    for (const socket of sockets) socket.close?.();
+    await ui?.close();
+    await router.close();
+  }
+});
+
 test("two web sessions with one username receive live fanout and reconnect history", async () => {
   const router = await startTestRouter();
   const sockets = [];
@@ -864,6 +1056,11 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(html, /id="attach-image" class="secondary attach-image" type="button" disabled aria-label="Attach images"/);
   assert.match(html, /id="open-add-router" type="button" aria-label="Add router"/);
   assert.match(html, /id="close-router-dialog" value="cancel" aria-label="Close routers"/);
+  assert.match(html, /id="model-picker" class="model-picker"/);
+  assert.match(html, /id="model-current" class="model-current" type="button"/);
+  assert.match(html, /id="model-search" class="model-search" type="text"/);
+  assert.match(html, /id="model-options" class="model-options" role="listbox"/);
+  assert.doesNotMatch(html, /model-apply|datalist/);
   assert.match(html, /<i class="fa-solid fa-arrows-rotate" aria-hidden="true"><\/i>/);
   assert.match(html, /<i class="fa-solid fa-chevron-down" aria-hidden="true"><\/i>/);
   assert.match(html, /<i class="fa-solid fa-paperclip" aria-hidden="true"><\/i>/);
@@ -960,6 +1157,19 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /if \(event\.state === "connected"\) backfillSelectedConversation\(\)/);
   assert.match(app, /function backfillSelectedConversation\(\) \{[\s\S]*requestHistory\(peer\);[\s\S]*setTimeout\(\(\) => \{[\s\S]*state\.selectedPeer === peer && state\.routerUrl === routerUrl && state\.agentId === agentId[\s\S]*requestHistory\(peer\);[\s\S]*\}, 500\);[\s\S]*\}/);
   assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
+  assert.match(app, /elements\.modelCurrent\.addEventListener\("click"/);
+  assert.match(app, /elements\.modelSearch\.addEventListener\("input"/);
+  assert.match(app, /function setModelPickerOpen/);
+  assert.match(app, /function selectModel/);
+  assert.match(app, /sendCommand\(\{ type: "set_model", targetAgentId: peer, model: \{ provider: model\.provider, id: model\.id \} \}\)/);
+  assert.match(app, /event\.type === "agent_model_catalog"/);
+  assert.match(app, /const targetAgentId = event\.targetAgentId \?\? event\.agentId;/);
+  assert.match(app, /updateAgentModelCatalog\(targetAgentId, event\.instanceId, current, event\.availableModels\)/);
+  assert.match(app, /function updateAgentModelCatalog/);
+  assert.match(app, /const MAX_MODEL_SUMMARIES = 1_000;/);
+  assert.match(app, /\.slice\(0, MAX_MODEL_SUMMARIES\)/);
+  assert.match(app, /elements\.modelOptions\.replaceChildren/);
+  assert.doesNotMatch(app, /modelSelect|modelApply/);
   assert.match(app, /event\.type === "agent_activity"/);
   assert.match(app, /event\.type === "message_arrival"/);
   assert.match(app, /ARRIVED_MESSAGE_VISIBLE_MS = 60_000/);
@@ -1013,6 +1223,10 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(styles, /body \{[\s\S]*overflow: hidden;/);
   assert.match(styles, /\.shell \{[\s\S]*height: 100dvh;[\s\S]*overflow: hidden;/);
   assert.match(styles, /\.messages \{[\s\S]*overflow: auto;/);
+  assert.match(styles, /\.model-picker \{[\s\S]*position: relative;/);
+  assert.match(styles, /\.model-menu \{[\s\S]*position: absolute;[\s\S]*right: 0;/);
+  assert.match(styles, /\.model-current i \{[\s\S]*font-size: 0\.7rem;/);
+  assert.match(webState, /"agent_model_catalog"/);
 });
 
 test("router web app stores bounded scoped conversation history in IndexedDB", async () => {
@@ -1046,6 +1260,7 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.doesNotMatch(app, /saveRecordsForPeer\(db, state\.routerUrl, state\.agentId/);
   const server = await readFile(new URL("../tools/router_web_ui.mjs", import.meta.url), "utf8");
   assert.match(server, /type: "message"[\s\S]*agentId: configured\.agentId[\s\S]*routerUrl: configured\.routerUrl/);
+  assert.match(server, /frame\.type === "agent_model_catalog"[\s\S]*type: "agent_model_catalog"[\s\S]*availableModels:/);
   assert.match(server, /const AGENT_REFRESH_INTERVAL_MS = 10_000;/);
   assert.match(server, /refreshTimer = setInterval\(refreshAgents, AGENT_REFRESH_INTERVAL_MS\)/);
   assert.match(server, /conversation_sync: "v1"/);

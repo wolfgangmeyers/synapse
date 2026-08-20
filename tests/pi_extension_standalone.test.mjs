@@ -17,14 +17,29 @@ import {
   createInlineToolPolicy,
   createMechaMessagingExtension,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
+  MODEL_SWITCH_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging.js";
 import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
 
-function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-session", header = {}, contextUsage, nowImpl = Date.now, client: configuredClient, createClient, resolveCurrentAgentId = () => "worker" } = {}) {
+function createMessagingFixture({
+  sendMessage = () => {},
+  sessionId = "parent-session",
+  header = {},
+  contextUsage,
+  nowImpl = Date.now,
+  client: configuredClient,
+  createClient,
+  resolveCurrentAgentId = () => "worker",
+  model = { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+  availableModels = [model],
+  setModel = () => true,
+  updateContextModel = true,
+} = {}) {
   const handlers = new Map();
   const childHandlers = new Map();
   const tools = new Map();
   const sent = [];
+  const modelSwitches = [];
   const mailboxClients = [];
   const createContext = (currentSessionId = sessionId) => ({
     sessionManager: {
@@ -35,6 +50,8 @@ function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-se
       getSessionFile: () => `/tmp/${currentSessionId}.jsonl`,
     },
     ...(contextUsage === undefined ? {} : { getContextUsage: contextUsage }),
+    model,
+    modelRegistry: { getAvailable: () => availableModels },
     ui: { notify() {}, setStatus() {} },
   });
   const context = createContext();
@@ -47,6 +64,12 @@ function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-se
     },
     registerCommand() {},
     registerTool(tool) { tools.set(tool.name, tool); },
+    setModel(nextModel) {
+      modelSwitches.push(nextModel);
+      const switched = setModel(nextModel, context);
+      if (switched && updateContextModel) context.model = nextModel;
+      return switched;
+    },
     sendMessage: (...args) => {
       sent.push(args);
       sendMessage(...args);
@@ -76,7 +99,7 @@ function createMessagingFixture({ sendMessage = () => {}, sessionId = "parent-se
       dispose() {},
     }),
   });
-  return { childHandlers, context, createContext, handlers, mailboxClients, sent, tools };
+  return { childHandlers, context, createContext, handlers, mailboxClients, modelSwitches, sent, tools };
 }
 
 async function emitToolCalls(fixture, toolNames, context = fixture.context) {
@@ -367,6 +390,259 @@ test("session-scoped allowance reset preserves mailbox delivery after agent star
 async function sessionStart(fixture, context = fixture.context) {
   for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, context);
 }
+
+test("activity broadcasts current model metadata without recurring catalog payloads", async () => {
+  const activity = [];
+  const current = {
+    provider: "openai-codex",
+    id: "gpt-5.6-terra",
+    name: "GPT-5.6 Terra",
+    contextWindow: 1_000_000,
+    unsupportedObject: { secret: true },
+  };
+  const available = [
+    current,
+    { provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5", maxTokens: 64_000 },
+    ...Array.from({ length: 110 }, (_, index) => ({ provider: "provider", id: `model-${index}` })),
+  ];
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: available,
+    client: {
+      connect: async () => {},
+      close() {},
+      sendReceipt() {},
+      sendActivity: (...args) => activity.push(args),
+    },
+  });
+  await sessionStart(fixture);
+  for (const handler of fixture.handlers.get("agent_start") ?? []) await handler({}, fixture.context);
+
+  assert.equal(activity.length, 1);
+  assert.equal(activity[0][0], "active");
+  assert.deepEqual(activity[0][1].subagentCount, 0);
+  assert.deepEqual(activity[0][1].subagents, []);
+  assert.deepEqual(activity[0][1].currentModel, {
+    provider: "openai-codex",
+    id: "gpt-5.6-terra",
+    name: "GPT-5.6 Terra",
+    contextWindow: 1_000_000,
+  });
+  assert.equal("availableModels" in activity[0][1], false);
+  assert.doesNotThrow(() => JSON.stringify(activity[0][1]));
+});
+
+test("mecha_model_switch validates availability and switches through Pi", async () => {
+  const current = { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra" };
+  const target = { provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5" };
+  const fixture = createMessagingFixture({ model: current, availableModels: [current, target] });
+  await sessionStart(fixture);
+  const result = await fixture.tools.get(MODEL_SWITCH_TOOL_NAME).execute(
+    "call-1",
+    { provider: target.provider, id: target.id },
+    undefined,
+    undefined,
+    fixture.context,
+  );
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(fixture.modelSwitches, [target]);
+  assert.deepEqual(result.details.current, target);
+  assert.deepEqual(result.details.available, [current, target]);
+  assert.match(result.content[0].text, /claude-opus-5/);
+});
+
+test("mecha_model_switch rejects malformed and unavailable requests without changing model", async () => {
+  const current = { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra" };
+  const fixture = createMessagingFixture({ model: current, availableModels: [current] });
+  await sessionStart(fixture);
+  const tool = fixture.tools.get(MODEL_SWITCH_TOOL_NAME);
+
+  for (const input of [
+    { provider: "", id: "gpt-5.6-terra" },
+    { provider: "anthropic", id: "missing-model" },
+  ]) {
+    const result = await tool.execute("call-1", input, undefined, undefined, fixture.context);
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.details.current, current);
+    assert.deepEqual(result.details.available, [current]);
+  }
+  assert.deepEqual(fixture.modelSwitches, []);
+  assert.deepEqual(fixture.context.model, current);
+});
+
+test("mecha_model_switch invokes the distinct parent model-control callback", async () => {
+  let modelControl;
+  let getModelCatalog;
+  const current = { provider: "openai-codex", id: "gpt-5.6-terra" };
+  const target = { provider: "anthropic", id: "claude-opus-5" };
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current, target],
+    createClient: (options) => {
+      modelControl = options.onModelControl;
+      getModelCatalog = options.getModelCatalog;
+      return { connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {} };
+    },
+  });
+  await sessionStart(fixture);
+  assert.equal(typeof modelControl, "function");
+  assert.equal(typeof getModelCatalog, "function");
+  assert.deepEqual(getModelCatalog(), [current, target]);
+  const result = await modelControl({
+    action: "set_model",
+    model: target,
+    controlId: "control-1",
+    sourceAgentId: "controller",
+  });
+
+  assert.deepEqual(result, {
+    accepted: true,
+    currentModel: target,
+    availableModels: [current, target],
+  });
+});
+
+test("parent model control publishes the selected model before a fresh context snapshot", async () => {
+  let modelControl;
+  const activity = [];
+  const current = { provider: "openai-codex", id: "gpt-5.6-terra" };
+  const target = { provider: "anthropic", id: "claude-opus-5" };
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current, target],
+    updateContextModel: false,
+    createClient: (options) => {
+      modelControl = options.onModelControl;
+      return {
+        connect: async () => {},
+        close() {},
+        sendReceipt() {},
+        sendActivity: (...args) => activity.push(args),
+      };
+    },
+  });
+  await sessionStart(fixture);
+
+  const result = await modelControl({ action: "set_model", model: target });
+
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.currentModel, target);
+  assert.deepEqual(activity.at(-1)[1].currentModel, target);
+  assert.deepEqual(fixture.context.model, current);
+});
+
+test("real mailbox model-control delivery switches the Pi model", async () => {
+  const current = { provider: "openai-codex", id: "gpt-5.6-terra" };
+  const target = { provider: "anthropic", id: "claude-opus-5" };
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  let client;
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current, target],
+    createClient: (options) => {
+      client = createMailboxClient({
+        ...options,
+        routerUrl: "http://127.0.0.1:8765",
+        webSocketFactory: () => socket,
+        fetchImpl: async () => ({ ok: false, json: async () => ({}) }),
+        generateId: (() => {
+          let id = 0;
+          return () => `model-control-${++id}`;
+        })(),
+      });
+      return client;
+    },
+  });
+
+  await sessionStart(fixture);
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  const register = socket.sent.find((frame) => frame.type === "register");
+  socket.dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      version: "v1",
+      frame_id: "registered-model-control",
+      type: "registered",
+      request_id: register.frame_id,
+      agent_id: "worker",
+      instance_id: client.instanceId,
+      lease_id: "lease-model-control",
+      expires_at: "2030-01-01T00:00:00.000Z",
+      recovered: false,
+      agent_role: "agent",
+    }),
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  socket.dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      version: "v1",
+      frame_id: "control-model",
+      type: "model_control",
+      agent_id: "worker",
+      instance_id: client.instanceId,
+      lease_id: "lease-model-control",
+      source_agent_id: "controller",
+      control_id: "control-1",
+      action: "set_model",
+      model: target,
+    }),
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(fixture.modelSwitches, [target]);
+  assert.deepEqual(fixture.context.model, target);
+  const modelControlResult = socket.sent.find((frame) => frame.type === "model_control_result");
+  assert.deepEqual({ ...modelControlResult, frame_id: "ignored" }, {
+    version: "v1",
+    frame_id: "ignored",
+    type: "model_control_result",
+    agent_id: "worker",
+    instance_id: client.instanceId,
+    lease_id: "lease-model-control",
+    source_agent_id: "controller",
+    control_id: "control-1",
+    accepted: true,
+    current_model: target,
+    available_models: [current, target],
+  });
+  client.close();
+});
+
+test("parent model control rejects invalid requests without changing the Pi model", async () => {
+  let modelControl;
+  const current = { provider: "openai-codex", id: "gpt-5.6-terra" };
+  const fixture = createMessagingFixture({
+    model: current,
+    availableModels: [current],
+    createClient: (options) => {
+      modelControl = options.onModelControl;
+      return { connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {} };
+    },
+  });
+  await sessionStart(fixture);
+
+  const result = await modelControl({
+    action: "set_model",
+    model: { provider: "anthropic", id: "missing-model" },
+    controlId: "control-1",
+    sourceAgentId: "controller",
+  });
+
+  assert.deepEqual(result, {
+    accepted: false,
+    errorCode: "model_unavailable",
+    currentModel: current,
+    availableModels: [current],
+  });
+  assert.deepEqual(fixture.modelSwitches, []);
+  assert.deepEqual(fixture.context.model, current);
+});
 
 test("mecha_mailbox_send is registered with the recipient, body, and subject schema", () => {
   const fixture = createMessagingFixture();

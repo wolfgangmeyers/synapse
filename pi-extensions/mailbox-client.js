@@ -20,6 +20,7 @@ const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 250;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_REPLY_TIMEOUT_MS = 5_000;
 const DEFAULT_CAPABILITY_TIMEOUT_MS = 2_000;
+const MODEL_CATALOG_REFRESH_INTERVAL_MS = 10_000;
 const MAX_SUBAGENTS = 999;
 const LIFECYCLE_JOURNAL_MAX_ITEMS = 256;
 const LIFECYCLE_JOURNAL_MAX_BYTES = 262_144;
@@ -28,6 +29,7 @@ const LIFECYCLE_JOURNAL_MAX_AGE_MS = 10 * 60_000;
 const SUBAGENT_STATUSES = new Set(["queued", "running", "completed", "steered", "aborted", "stopped", "error"]);
 const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
 const MAX_GOAL_CHARS = 4_000;
+const MAX_MODELS = 1_000;
 
 // This pattern is narrower than the protocol's agentId on purpose, and the difference is a dot.
 // The protocol allows `A-Za-z0-9._-` (protocol/v1/schema.json, $defs.agentId); a tmux window name
@@ -126,6 +128,27 @@ function normalizeSubagents(subagents) {
   return subagents.map(normalizeSubagentSummary).filter(Boolean).slice(0, MAX_SUBAGENTS);
 }
 
+function normalizeModelSummary(model) {
+  if (model === undefined || model === null || typeof model !== "object" || Array.isArray(model)) return undefined;
+  const provider = typeof model.provider === "string" ? model.provider.trim().slice(0, 128) : "";
+  const id = typeof model.id === "string" ? model.id.trim().slice(0, 256) : "";
+  if (provider.length === 0 || id.length === 0) return undefined;
+  const name = typeof model.name === "string" ? model.name.trim().slice(0, 256) : "";
+  return { provider, id, ...(name.length > 0 ? { name } : {}) };
+}
+
+function normalizeModelSummaries(models) {
+  if (!Array.isArray(models)) return [];
+  const seen = new Set();
+  return models.map(normalizeModelSummary).filter((model) => {
+    if (model === undefined) return false;
+    const key = `${model.provider}\u0000${model.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, MAX_MODELS);
+}
+
 function normalizeTerminalReason(reason) {
   const normalized = typeof reason === "string" ? reason.trim().toLowerCase() : "";
   return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : "completed";
@@ -166,6 +189,8 @@ export function createMailboxClient({
   random = Math.random,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
   // Which id space this client belongs to. Presence-only clients pass assertPresenceAgentId, which
   // accepts exactly the ids assertAgentId rejects.
   assertIdentity = assertAgentId,
@@ -178,6 +203,9 @@ export function createMailboxClient({
   onLifecycleReady = () => {},
   onLifecycleDiagnostic = () => {},
   onLifecycleTrace = () => {},
+  onModelControlTrace = () => {},
+  onModelControl = async () => ({ accepted: false, errorCode: "unsupported" }),
+  getModelCatalog = () => [],
 } = {}) {
   assertIdentity(agentId);
   if (typeof onEnvelope !== "function") throw new TypeError("onEnvelope is required");
@@ -191,6 +219,9 @@ export function createMailboxClient({
   if (!Number.isSafeInteger(capabilityTimeoutMs) || capabilityTimeoutMs <= 0) throw new TypeError("capabilityTimeoutMs must be a positive safe integer");
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (typeof onLifecycleReady !== "function" || typeof onLifecycleDiagnostic !== "function" || typeof onLifecycleTrace !== "function") throw new TypeError("lifecycle callbacks must be functions");
+  if (typeof onModelControlTrace !== "function") throw new TypeError("onModelControlTrace must be a function");
+  if (typeof onModelControl !== "function") throw new TypeError("onModelControl must be a function");
+  if (typeof getModelCatalog !== "function") throw new TypeError("getModelCatalog must be a function");
   if (typeof parentSessionId !== "string" || parentSessionId.length === 0 || typeof producerEpoch !== "string" || !/^[0-9a-fA-F-]{36}$/.test(producerEpoch)) throw new TypeError("valid lifecycle identity is required");
   validateReconnectOptions(reconnectInitialDelayMs, reconnectMaxDelayMs);
   routerHttpUrl(routerUrl);
@@ -199,6 +230,7 @@ export function createMailboxClient({
   let socket;
   let leaseId;
   let renewTimer;
+  let modelCatalogTimer;
   let reconnectTimer;
   let reconnectAttempt = 0;
   let stopped = false;
@@ -211,6 +243,7 @@ export function createMailboxClient({
   let lifecycleConnectionDisabled = false;
   let lifecycleSequence = 0;
   let lifecycleRouterVersion = 0;
+  let modelCatalogSocket;
   // The newest full assertion is retained separately from the retry journal. A reconnect must
   // lead with it, because a replacement lease is fenced until the router accepts a snapshot.
   let lifecycleSnapshotChildren = [];
@@ -236,6 +269,20 @@ export function createMailboxClient({
       onLifecycleTrace({ event, agent_id: agentId, instance_id: instanceId, parent_session_id: parentSessionId, ...fields });
     } catch {
       // Trace collection cannot alter lifecycle delivery.
+    }
+  }
+
+  function modelControlTrace(event, fields = {}) {
+    try {
+      onModelControlTrace({
+        event,
+        agent_id: agentId,
+        instance_id: instanceId,
+        lease_id: leaseId,
+        ...fields,
+      });
+    } catch {
+      // Diagnostic callbacks cannot alter model-control delivery.
     }
   }
 
@@ -405,7 +452,7 @@ export function createMailboxClient({
     return frame?.event_id;
   }
 
-  function activity(activityState, { subagentCount = 0, subagents, goal } = {}) {
+  function activity(activityState, { subagentCount = 0, subagents, goal, currentModel } = {}) {
     if (!["active", "settled", "compacting"].includes(activityState)) {
       throw new TypeError("unsupported mailbox activity state");
     }
@@ -424,6 +471,83 @@ export function createMailboxClient({
       subagent_count: clampedCount,
       ...(summaries.length > 0 || clampedCount === 0 ? { subagents: summaries } : {}),
       ...(normalizeGoalProjection(goal) === undefined ? {} : { goal: normalizeGoalProjection(goal) }),
+      ...(normalizeModelSummary(currentModel) === undefined ? {} : { current_model: normalizeModelSummary(currentModel) }),
+    });
+  }
+
+  function sendModelCatalog() {
+    let catalog;
+    try {
+      catalog = getModelCatalog();
+    } catch {
+      catalog = [];
+    }
+    send({
+      type: "model_catalog",
+      agent_id: agentId,
+      instance_id: instanceId,
+      lease_id: leaseId,
+      model_summaries: normalizeModelSummaries(catalog),
+    });
+  }
+
+  async function receiveModelControl(frame) {
+    modelControlTrace("client_model_control_received", {
+      control_id: frame.control_id,
+      source_agent_id: frame.source_agent_id,
+      requested_provider: frame.model?.provider,
+      requested_model_id: frame.model?.id,
+      action: frame.action,
+    });
+    let result;
+    try {
+      modelControlTrace("client_model_control_callback_started", {
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+      });
+      result = await onModelControl({
+        controlId: frame.control_id,
+        sourceAgentId: frame.source_agent_id,
+        action: frame.action,
+        model: normalizeModelSummary(frame.model),
+      });
+      modelControlTrace("client_model_control_callback_completed", {
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        accepted: result?.accepted === true,
+        ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
+        ...(result?.currentModel?.provider === undefined ? {} : { current_provider: result.currentModel.provider }),
+        ...(result?.currentModel?.id === undefined ? {} : { current_model_id: result.currentModel.id }),
+      });
+    } catch (error) {
+      modelControlTrace("client_model_control_callback_failed", {
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        error_name: error?.name ?? "Error",
+      });
+      result = { accepted: false, errorCode: "model_switch_failed" };
+    }
+    const currentModel = normalizeModelSummary(result?.currentModel);
+    const availableModels = normalizeModelSummaries(result?.availableModels);
+    send({
+      type: "model_control_result",
+      agent_id: agentId,
+      instance_id: instanceId,
+      lease_id: leaseId,
+      source_agent_id: frame.source_agent_id,
+      control_id: frame.control_id,
+      accepted: result?.accepted === true,
+      ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
+      ...(currentModel === undefined ? {} : { current_model: currentModel }),
+      available_models: availableModels,
+    });
+    modelControlTrace("client_model_control_result_sent", {
+      control_id: frame.control_id,
+      source_agent_id: frame.source_agent_id,
+      accepted: result?.accepted === true,
+      ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
+      ...(currentModel?.provider === undefined ? {} : { current_provider: currentModel.provider }),
+      ...(currentModel?.id === undefined ? {} : { current_model_id: currentModel.id }),
     });
   }
 
@@ -476,8 +600,10 @@ export function createMailboxClient({
   }
 
   function clearConnectionTimers() {
-    clearInterval(renewTimer);
+    clearIntervalImpl(renewTimer);
     renewTimer = undefined;
+    clearIntervalImpl(modelCatalogTimer);
+    modelCatalogTimer = undefined;
     if (reconnectTimer !== undefined) clearTimeoutImpl(reconnectTimer);
     reconnectTimer = undefined;
   }
@@ -518,8 +644,10 @@ export function createMailboxClient({
 
   function disconnected(currentSocket, error, { kickstartRouter = false } = {}) {
     if (socket !== currentSocket) return;
-    clearInterval(renewTimer);
+    clearIntervalImpl(renewTimer);
     renewTimer = undefined;
+    clearIntervalImpl(modelCatalogTimer);
+    modelCatalogTimer = undefined;
     socket = undefined;
     leaseId = undefined;
     lifecycleSupported = false;
@@ -570,8 +698,21 @@ export function createMailboxClient({
       rebindLifecycleJournalLease();
       reconnectAttempt = 0;
       log(`MECHA_V2_FRAME registered agent=${agentId} lease=${leaseId}`);
+      if (modelCatalogSocket !== socket) {
+        sendModelCatalog();
+        modelCatalogSocket = socket;
+      }
+      if (modelCatalogTimer === undefined) {
+        modelCatalogTimer = setIntervalImpl(() => {
+          try {
+            sendModelCatalog();
+          } catch (error) {
+            log(`MECHA_V2_FRAME model_catalog_failed agent=${agentId} error=${error.message}`);
+          }
+        }, MODEL_CATALOG_REFRESH_INTERVAL_MS);
+      }
       if (renewTimer === undefined) {
-        renewTimer = setInterval(() => {
+        renewTimer = setIntervalImpl(() => {
           try {
             send({ type: "lease_renew", agent_id: agentId, instance_id: instanceId, lease_id: leaseId });
           } catch (error) {
@@ -620,6 +761,10 @@ export function createMailboxClient({
       lifecycleRouterVersion = Math.max(lifecycleRouterVersion, frame.router_version ?? 0);
       lifecycleJournal.delete(pending.frame.event_id);
       lifecycleTrace("client_lifecycle_acknowledged", { event_id: frame.event_id, client_sequence: frame.client_sequence, router_version: lifecycleRouterVersion, pending: lifecycleJournal.size });
+      return;
+    }
+    if (frame.type === "model_control") {
+      await receiveModelControl(frame);
       return;
     }
     if (frame.type !== "message") {

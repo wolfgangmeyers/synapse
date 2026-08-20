@@ -45,6 +45,54 @@ function normalizeGoalProjection(value) {
   return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
 }
 
+function boundedModelString(value) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim().slice(0, MAX_MODEL_METADATA_STRING)
+    : undefined;
+}
+
+function projectModelMetadata(model) {
+  if (model === null || typeof model !== "object" || Array.isArray(model)) return undefined;
+  const provider = boundedModelString(model.provider);
+  const id = boundedModelString(model.id);
+  const name = boundedModelString(model.name);
+  const contextWindow = Number.isSafeInteger(model.contextWindow) && model.contextWindow >= 0
+    ? model.contextWindow
+    : undefined;
+  const maxTokens = Number.isSafeInteger(model.maxTokens) && model.maxTokens >= 0
+    ? model.maxTokens
+    : undefined;
+  if (provider === undefined && id === undefined && name === undefined
+    && contextWindow === undefined && maxTokens === undefined) return undefined;
+  return {
+    ...(provider === undefined ? {} : { provider }),
+    ...(id === undefined ? {} : { id }),
+    ...(name === undefined ? {} : { name }),
+    ...(contextWindow === undefined ? {} : { contextWindow }),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+  };
+}
+
+function availableModelsForContext(context) {
+  try {
+    const available = context?.modelRegistry?.getAvailable?.();
+    return Array.isArray(available) ? available : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function modelProjection(context) {
+  const availableModels = availableModelsForContext(context) ?? [];
+  return {
+    current: projectModelMetadata(context?.model) ?? null,
+    available: availableModels
+      .slice(0, MAX_MODEL_METADATA_ITEMS)
+      .map(projectModelMetadata)
+      .filter(Boolean),
+  };
+}
+
 function getOwnerSubagentsService(ownerSessionId) {
   const services = globalThis[PI_SUBAGENTS_SERVICE_REGISTRY]?.services;
   return typeof ownerSessionId === "string" && typeof services?.get === "function"
@@ -54,6 +102,7 @@ function getOwnerSubagentsService(ownerSessionId) {
 
 const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
 export const INLINE_TOOL_ALLOWANCE_TOOL_NAME = "mecha_request_inline_tool_allowance";
+export const MODEL_SWITCH_TOOL_NAME = "mecha_model_switch";
 const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
   mecha_parent_message: {
     promptSnippet: "Send a message from a native subagent to its parent",
@@ -97,11 +146,22 @@ const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
       "Call pi__mecha_context through the Cursor pi bridge.",
     ],
   },
+  [MODEL_SWITCH_TOOL_NAME]: {
+    promptSnippet: "Inspect available Pi models or switch the current model",
+    promptGuidelines: [
+      "Use mecha_model_switch with the exact provider and id from the available model list.",
+      "Call pi__mecha_model_switch through the Cursor pi bridge.",
+    ],
+  },
 });
 const INLINE_ACTION_TOOL_NAMES = new Set(["bash", "edit", "write"]);
 const INLINE_TOOL_POOL_CAPACITY = 5;
 const INLINE_TOOL_REPLENISHMENT_INTERVAL_MS = 60_000;
 const INLINE_TOOL_BLOCK_REASON = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround.";
+// Keep the catalog bounded while allowing the configured Pi registry to reach
+// the UI instead of silently dropping the models after the first page.
+const MAX_MODEL_METADATA_ITEMS = 1_000;
+const MAX_MODEL_METADATA_STRING = 128;
 
 const SMALL_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 40, guidance: "consider compacting at a reasonable stopping point to keep future calls cheaper" }),
@@ -459,13 +519,16 @@ const NATIVE_SUBAGENT_TRACE_MAX_BYTES = 512 * 1024;
 const NATIVE_SUBAGENT_TRACE_STRING_FIELDS = new Set([
   "agent_id", "instance_id", "parent_session_id", "session_id", "subagent_id", "event_id",
   "status", "reason", "error_code", "error_name", "source", "frame_type", "disposition", "state", "phase",
+  "control_id", "source_agent_id", "target_agent_id", "lease_id", "action",
+  "requested_provider", "requested_model_id", "current_provider", "current_model_id",
 ]);
 const NATIVE_SUBAGENT_TRACE_NUMBER_FIELDS = new Set([
   "client_sequence", "router_version", "subagent_count", "snapshot_count", "pending", "bytes", "description_length",
-  "recipient_count", "attempt", "heartbeat_interval_ms",
+  "recipient_count", "attempt", "heartbeat_interval_ms", "available_count",
 ]);
 const NATIVE_SUBAGENT_TRACE_BOOLEAN_FIELDS = new Set([
   "available", "registry_available", "lifecycle_service", "connected", "ready", "reconnect", "published",
+  "accepted", "switched",
 ]);
 
 export function summarizeNativeSubagents(subagents) {
@@ -1229,6 +1292,11 @@ export function createMechaMessagingExtension(pi, {
   let activityHeartbeatTimer;
   let activityHeartbeatActive = false;
   let parentActivityContext;
+  // Extension event contexts expose the model as a read-only snapshot. Keep a
+  // short-lived per-session override so a successful remote switch is
+  // published immediately even if the next event has not supplied a fresh
+  // context snapshot yet.
+  let modelSwitchOverride;
   let lastActivitySent;
   let lastNativeSubagentReadDiagnosticMs;
   function nativeSubagentService(ownerSessionId = parentActivityContext?.sessionManager?.getSessionId?.()) {
@@ -1579,6 +1647,29 @@ export function createMechaMessagingExtension(pi, {
     if (context !== undefined) parentActivityContext = context;
   }
 
+  function contextSessionId(context) {
+    return context?.sessionManager?.getSessionId?.();
+  }
+
+  function effectiveModelProjection(context) {
+    const projection = modelProjection(context);
+    const sessionId = contextSessionId(context);
+    if (modelSwitchOverride?.sessionId !== undefined
+      && modelSwitchOverride.sessionId === sessionId
+      && modelSwitchOverride.model !== undefined) {
+      return { ...projection, current: modelSwitchOverride.model };
+    }
+    return projection;
+  }
+
+  function rememberSuccessfulModelSwitch(context, model) {
+    const projected = projectModelMetadata(model);
+    const sessionId = contextSessionId(context);
+    if (projected !== undefined && sessionId !== undefined) {
+      modelSwitchOverride = { sessionId, model: projected };
+    }
+  }
+
   function parentActivityStateFromPiContext() {
     // Precedence is deliberate: compaction masks ordinary work, Pi's live idle
     // bit wins when available, and the latch is only the older-context fallback.
@@ -1606,11 +1697,14 @@ export function createMechaMessagingExtension(pi, {
     const reconciled = reconciliation?.changed === true;
     const subagents = publicSubagentSummaries();
     const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
+    const model = effectiveModelProjection(parentActivityContext);
+    const currentModel = model.current ?? undefined;
     const unchanged = lastActivitySent !== undefined
       && lastActivitySent.state === state
       && lastActivitySent.subagentCount === subagentCount
       && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents)
-      && JSON.stringify(lastActivitySent.goal) === JSON.stringify(goalProjectionReceived ? goalProjection : undefined);
+      && JSON.stringify(lastActivitySent.goal) === JSON.stringify(goalProjectionReceived ? goalProjection : undefined)
+      && JSON.stringify(lastActivitySent.currentModel) === JSON.stringify(currentModel);
     // Settled with no subagents is terminal until reconciliation changes it; unlike
     // active work and settled subagents, it does not need a TTL refresh frame.
     if (unchanged && state === "settled" && subagentCount === 0 && !force && !reconciled) return false;
@@ -1622,8 +1716,16 @@ export function createMechaMessagingExtension(pi, {
         subagentCount,
         subagents,
         ...(goalProjectionReceived ? { goal: goalProjection } : {}),
+        currentModel,
       });
-      lastActivitySent = { state, subagentCount, subagents, goal: goalProjectionReceived ? goalProjection : undefined, sentAtMs: nowMs };
+      lastActivitySent = {
+        state,
+        subagentCount,
+        subagents,
+        goal: goalProjectionReceived ? goalProjection : undefined,
+        currentModel,
+        sentAtMs: nowMs,
+      };
       return true;
     } catch {
       // Activity is an ephemeral UI hint; mailbox delivery and reconnect behavior own real work.
@@ -1864,6 +1966,105 @@ export function createMechaMessagingExtension(pi, {
       : client;
   }
 
+  function modelSelector(input) {
+    if (input === null || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).some((key) => !["provider", "id"].includes(key))) {
+      throw new Error("model provider and id are required");
+    }
+    const provider = typeof input.provider === "string" ? input.provider.trim() : "";
+    const id = typeof input.id === "string" ? input.id.trim() : "";
+    if (provider.length === 0 || provider.length > MAX_MODEL_METADATA_STRING
+      || id.length === 0 || id.length > MAX_MODEL_METADATA_STRING) {
+      throw new Error("model provider and id must be non-empty strings of at most 128 characters");
+    }
+    return { provider, id };
+  }
+
+  async function switchPiModel(input, context) {
+    const requested = modelSelector(input);
+    const before = effectiveModelProjection(context);
+    traceNativeSubagent("extension_model_switch_started", {
+      requested_provider: requested.provider,
+      requested_model_id: requested.id,
+      ...(before.current?.provider === undefined ? {} : { current_provider: before.current.provider }),
+      ...(before.current?.id === undefined ? {} : { current_model_id: before.current.id }),
+    });
+    if (typeof pi.setModel !== "function") throw new Error("Pi model switching is unavailable");
+    const availableModels = availableModelsForContext(context);
+    if (availableModels === undefined) throw new Error("Pi model registry is unavailable");
+    traceNativeSubagent("extension_model_registry_read", {
+      requested_provider: requested.provider,
+      requested_model_id: requested.id,
+      available_count: availableModels.length,
+    });
+    const selectedModel = availableModels.find((candidate) => {
+      const projected = projectModelMetadata(candidate);
+      return projected?.provider === requested.provider && projected?.id === requested.id;
+    });
+    if (selectedModel === undefined) throw new Error(`Model ${requested.provider}/${requested.id} is not available`);
+    const switched = await pi.setModel(selectedModel);
+    traceNativeSubagent("extension_model_set_result", {
+      requested_provider: requested.provider,
+      requested_model_id: requested.id,
+      switched: switched === true,
+    });
+    if (switched !== true) throw new Error(`Pi rejected model ${requested.provider}/${requested.id}`);
+    return selectedModel;
+  }
+
+  function modelControlErrorCode(error) {
+    if (/not available/.test(error?.message ?? "")) return "model_unavailable";
+    if (/required|must be non-empty|unavailable/.test(error?.message ?? "")) return "invalid_model";
+    return "model_switch_failed";
+  }
+
+  async function handleModelControl({ controlId, sourceAgentId, action, model }) {
+    traceNativeSubagent("extension_model_control_entered", {
+      control_id: controlId,
+      source_agent_id: sourceAgentId,
+      action,
+      ...(model?.provider === undefined ? {} : { requested_provider: model.provider }),
+      ...(model?.id === undefined ? {} : { requested_model_id: model.id }),
+      available: parentActivityContext !== undefined,
+    });
+    try {
+      if (action !== "set_model") throw new Error("unsupported model control action");
+      const switchedModel = await switchPiModel(model, parentActivityContext);
+      rememberSuccessfulModelSwitch(parentActivityContext, switchedModel);
+      refreshActivityState(parentActivityContext);
+      const projection = effectiveModelProjection(parentActivityContext);
+      traceNativeSubagent("extension_model_control_completed", {
+        control_id: controlId,
+        source_agent_id: sourceAgentId,
+        accepted: true,
+        ...(projection.current?.provider === undefined ? {} : { current_provider: projection.current.provider }),
+        ...(projection.current?.id === undefined ? {} : { current_model_id: projection.current.id }),
+      });
+      return {
+        accepted: true,
+        currentModel: projection.current,
+        availableModels: projection.available,
+      };
+    } catch (error) {
+      const projection = effectiveModelProjection(parentActivityContext);
+      traceNativeSubagent("extension_model_control_completed", {
+        control_id: controlId,
+        source_agent_id: sourceAgentId,
+        accepted: false,
+        error_code: modelControlErrorCode(error),
+        error_name: error?.name ?? "Error",
+        ...(projection.current?.provider === undefined ? {} : { current_provider: projection.current.provider }),
+        ...(projection.current?.id === undefined ? {} : { current_model_id: projection.current.id }),
+      });
+      return {
+        accepted: false,
+        errorCode: modelControlErrorCode(error),
+        currentModel: projection.current,
+        availableModels: projection.available,
+      };
+    }
+  }
+
   pi.registerTool({
     name: "mecha_parent_message",
     label: "Message parent",
@@ -1965,6 +2166,38 @@ export function createMechaMessagingExtension(pi, {
         return { content: [{ type: "text", text }], details: grant };
       } catch (error) {
         return { content: [{ type: "text", text: error.message }], details: error.details ?? {}, isError: true };
+      }
+    },
+  });
+
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name: MODEL_SWITCH_TOOL_NAME,
+    label: "Switch Pi model",
+    description: "Switch Pi to an available model by its exact provider and id.",
+    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA[MODEL_SWITCH_TOOL_NAME],
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["provider", "id"],
+      properties: {
+        provider: { type: "string", minLength: 1, maxLength: MAX_MODEL_METADATA_STRING },
+        id: { type: "string", minLength: 1, maxLength: MAX_MODEL_METADATA_STRING },
+      },
+    },
+    async execute(_toolCallId, input, _signal, _onUpdate, toolContext) {
+      const status = () => effectiveModelProjection(toolContext);
+      try {
+        const switchedModel = await switchPiModel(input, toolContext);
+        rememberSuccessfulModelSwitch(toolContext, switchedModel);
+        refreshActivityState(toolContext);
+        const projection = status();
+        return {
+          content: [{ type: "text", text: JSON.stringify(projection) }],
+          details: projection,
+        };
+      } catch (error) {
+        const projection = status();
+        return { content: [{ type: "text", text: error.message }], details: projection, isError: true };
       }
     },
   });
@@ -2293,6 +2526,7 @@ export function createMechaMessagingExtension(pi, {
       return;
     }
     mailboxSendRateLimits.clear();
+    modelSwitchOverride = undefined;
     // Keep allowance state across agent runs; a parent session owns one pool for its lifetime.
     inlineToolPolicy.reset();
     mailboxSendRateLimits.clear();
@@ -2339,6 +2573,9 @@ export function createMechaMessagingExtension(pi, {
         agentId,
         parentSessionId: sessionId,
         onEnvelope: (message, delivery) => { if (!mailboxPausedForCompaction) coordinator?.onEnvelope(message, delivery); },
+        onModelControl: handleModelControl,
+        onModelControlTrace: ({ event, ...fields }) => traceNativeSubagent(event, fields),
+        getModelCatalog: () => effectiveModelProjection(parentActivityContext).available,
         onLifecycleReady: ({ routerVersion, reconnect }) => traceNativeSubagent("extension_client_lifecycle_ready", {
           router_version: routerVersion, reconnect,
         }),

@@ -255,7 +255,37 @@ function createBrowserClient(browser, { defaultRouter }) {
           subagentCount: frame.subagent_count ?? 0,
           subagents: Array.isArray(frame.subagents) ? frame.subagents : [],
           ...(frame.goal === undefined ? {} : { goal: frame.goal }),
+          ...(frame.current_model === undefined ? {} : { currentModel: frame.current_model }),
+          availableModels: Array.isArray(frame.available_models) ? frame.available_models : [],
           generatedAt: frame.generated_at,
+          agentId: configured.agentId,
+          routerUrl: configured.routerUrl,
+        });
+        return;
+      }
+      if (frame.type === "agent_model_catalog") {
+        sendBrowser({
+          type: "agent_model_catalog",
+          agent: frame.agent_id,
+          ...(frame.instance_id === undefined ? {} : { instanceId: frame.instance_id }),
+          ...(frame.current_model === undefined ? {} : { currentModel: frame.current_model }),
+          availableModels: Array.isArray(frame.model_summaries) ? frame.model_summaries : [],
+          generatedAt: frame.generated_at,
+          agentId: configured.agentId,
+          routerUrl: configured.routerUrl,
+        });
+        return;
+      }
+      if (frame.type === "model_control_result") {
+        sendBrowser({
+          type: "model_control_result",
+          accepted: frame.accepted,
+          errorCode: frame.error_code,
+          currentModel: frame.current_model,
+          availableModels: frame.available_models ?? [],
+          targetAgentId: frame.agent_id,
+          instanceId: frame.instance_id,
+          controlId: frame.control_id,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
         });
@@ -399,6 +429,33 @@ function createBrowserClient(browser, { defaultRouter }) {
         }
         if (command.type === "send_message") {
           await sendMessage(command, configured, sendBrowser, refreshAgents);
+          return;
+        }
+        if (command.type === "set_model") {
+          const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
+          const provider = String(command.model?.provider ?? "").trim();
+          const id = String(command.model?.id ?? "").trim();
+          // Pi model IDs commonly include routing/size suffixes such as
+          // `@272k:fast`; the target extension performs the authoritative
+          // availability check, so the relay only rejects control characters
+          // and oversized values here.
+          if (provider.length === 0 || provider.length > 128 || id.length === 0 || id.length > 256
+            || /[\u0000-\u001f\u007f]/u.test(provider) || /[\u0000-\u001f\u007f]/u.test(id)) {
+            throw new Error("Model provider and id are required");
+          }
+          if (routerSocket?.readyState !== WebSocket.OPEN || configured.leaseId === "") throw new Error("Router is not connected");
+          routerSocket.send(JSON.stringify({
+            version: "v1",
+            frame_id: `model-control-${randomUUID()}`,
+            type: "model_control",
+            agent_id: configured.agentId,
+            instance_id: configured.instanceId,
+            lease_id: configured.leaseId,
+            target_agent_id: targetAgentId,
+            control_id: `model-control-${randomUUID()}`,
+            action: "set_model",
+            model: { provider, id },
+          }));
         }
       } catch (error) {
         sendBrowser({ type: "command_error", message: error.message });
