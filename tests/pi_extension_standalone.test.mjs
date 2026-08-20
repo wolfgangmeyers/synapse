@@ -18,7 +18,6 @@ import {
   createMechaMessagingExtension,
   createNativeSubagentTrace,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
-  MODEL_SWITCH_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging.js";
 import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
 
@@ -433,46 +432,7 @@ test("activity broadcasts current model metadata without recurring catalog paylo
   assert.doesNotThrow(() => JSON.stringify(activity[0][1]));
 });
 
-test("mecha_model_switch validates availability and switches through Pi", async () => {
-  const current = { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra" };
-  const target = { provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5" };
-  const fixture = createMessagingFixture({ model: current, availableModels: [current, target] });
-  await sessionStart(fixture);
-  const result = await fixture.tools.get(MODEL_SWITCH_TOOL_NAME).execute(
-    "call-1",
-    { provider: target.provider, id: target.id },
-    undefined,
-    undefined,
-    fixture.context,
-  );
-
-  assert.equal(result.isError, undefined);
-  assert.deepEqual(fixture.modelSwitches, [target]);
-  assert.deepEqual(result.details.current, target);
-  assert.deepEqual(result.details.available, [current, target]);
-  assert.match(result.content[0].text, /claude-opus-5/);
-});
-
-test("mecha_model_switch rejects malformed and unavailable requests without changing model", async () => {
-  const current = { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra" };
-  const fixture = createMessagingFixture({ model: current, availableModels: [current] });
-  await sessionStart(fixture);
-  const tool = fixture.tools.get(MODEL_SWITCH_TOOL_NAME);
-
-  for (const input of [
-    { provider: "", id: "gpt-5.6-terra" },
-    { provider: "anthropic", id: "missing-model" },
-  ]) {
-    const result = await tool.execute("call-1", input, undefined, undefined, fixture.context);
-    assert.equal(result.isError, true);
-    assert.deepEqual(result.details.current, current);
-    assert.deepEqual(result.details.available, [current]);
-  }
-  assert.deepEqual(fixture.modelSwitches, []);
-  assert.deepEqual(fixture.context.model, current);
-});
-
-test("mecha_model_switch invokes the distinct parent model-control callback", async () => {
+test("parent model control invokes the distinct mailbox callback", async () => {
   let modelControl;
   let getModelCatalog;
   const current = { provider: "openai-codex", id: "gpt-5.6-terra" };
@@ -500,7 +460,6 @@ test("mecha_model_switch invokes the distinct parent model-control callback", as
   assert.deepEqual(result, {
     accepted: true,
     currentModel: target,
-    availableModels: [current, target],
   });
 });
 
@@ -660,7 +619,6 @@ test("parent model control rejects invalid requests without changing the Pi mode
     accepted: false,
     errorCode: "model_unavailable",
     currentModel: current,
-    availableModels: [current],
   });
   assert.deepEqual(fixture.modelSwitches, []);
   assert.deepEqual(fixture.context.model, current);
@@ -739,9 +697,18 @@ test("mailbox client capability-gates and byte-bounds changed model catalogs", a
   assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 2);
   assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").at(-1).total_count, catalog.length);
 
-  catalog = [{ provider: "provider", id: "replacement" }];
+  catalog = Array.from({ length: 1_001 }, (_, index) => ({
+    provider: "provider",
+    id: `compact-${index}`,
+  }));
   intervals.find(({ delay }) => delay === 10_000).callback();
   assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 3);
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").at(-1).total_count, 1_001);
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").at(-1).truncated, true);
+
+  catalog = [{ provider: "provider", id: "replacement" }];
+  intervals.find(({ delay }) => delay === 10_000).callback();
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 4);
   assert.ok(traces.some(({ event }) => event === "client_model_catalog_published"));
   client.close();
 });
@@ -899,7 +866,7 @@ test("mailbox client publishes no catalog without capability or after registry f
       getModelCatalog,
       onModelControlTrace: (event) => traces.push(event),
       webSocketFactory: () => socket,
-      fetchImpl: async () => ({ ok: responseOk, json: async () => capabilities }),
+      fetchImpl: async () => ({ ok: responseOk, status: responseOk ? 200 : 404, json: async () => capabilities }),
       renewIntervalMs: 11_000,
       setIntervalImpl: (callback, delay) => {
         intervals.push({ callback, delay });
@@ -926,6 +893,7 @@ test("mailbox client publishes no catalog without capability or after registry f
 
   const missingCapabilities = await run({}, () => [{ provider: "provider", id: "model" }], { responseOk: false });
   assert.equal(missingCapabilities.socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  assert.equal(missingCapabilities.traces.some(({ event }) => event === "client_model_catalog_capability_retry_scheduled"), false);
   missingCapabilities.client.close();
 
   let registryReads = 0;
@@ -942,6 +910,52 @@ test("mailbox client publishes no catalog without capability or after registry f
   failed.intervals.find(({ delay }) => delay === 10_000).callback();
   assert.equal(failed.socket.sent.some((frame) => frame.type === "model_catalog"), true);
   failed.client.close();
+});
+
+test("mailbox client retries transient capability discovery failures", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const timers = [];
+  const traces = [];
+  let capabilityCalls = 0;
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    getModelCatalog: () => [{ provider: "provider", id: "model" }],
+    onModelControlTrace: (event) => traces.push(event),
+    webSocketFactory: () => socket,
+    fetchImpl: async () => {
+      capabilityCalls += 1;
+      return capabilityCalls === 1
+        ? { ok: false, status: 503, json: async () => ({}) }
+        : { ok: true, status: 200, json: async () => ({ model_catalog_v1: true }) };
+    },
+    setTimeoutImpl: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeoutImpl: () => {},
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  assert.equal(timers[0].delay, 1_000);
+  assert.ok(traces.some(({ event }) => event === "client_model_catalog_capability_retry_scheduled"));
+  timers[0].callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(capabilityCalls, 2);
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 1);
+  client.close();
 });
 
 test("mailbox client serializes model controls in arrival order", async () => {
@@ -1130,47 +1144,6 @@ test("model control preserves protocol limits and returns exact failure codes", 
   assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_switch_failed");
   delete fixture.pi.setModel;
   assert.equal((await modelControl({ action: "set_model", model: target })).errorCode, "model_switch_unavailable");
-});
-
-test("remote and local model switches share one serialized queue", async () => {
-  let modelControl;
-  const started = [];
-  const resolvers = [];
-  const current = { provider: "provider", id: "current" };
-  const remote = { provider: "provider", id: "remote" };
-  const local = { provider: "provider", id: "local" };
-  const fixture = createMessagingFixture({
-    model: current,
-    availableModels: [current, remote, local],
-    setModel: (model) => new Promise((resolve) => {
-      started.push(model.id);
-      resolvers.push(resolve);
-    }),
-    createClient: (options) => {
-      modelControl = options.onModelControl;
-      return { connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {} };
-    },
-  });
-  await sessionStart(fixture);
-
-  const remoteResult = modelControl({ action: "set_model", model: remote });
-  await new Promise((resolve) => setImmediate(resolve));
-  const localResult = fixture.tools.get(MODEL_SWITCH_TOOL_NAME).execute(
-    "call-local",
-    local,
-    undefined,
-    undefined,
-    fixture.context,
-  );
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(started, ["remote"]);
-
-  resolvers.shift()(true);
-  assert.equal((await remoteResult).accepted, true);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(started, ["remote", "local"]);
-  resolvers.shift()(true);
-  assert.equal((await localResult).isError, undefined);
 });
 
 test("model switch override yields to reflected and later local model context", async () => {

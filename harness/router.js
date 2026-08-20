@@ -254,6 +254,10 @@ export function createAgentRouter({
   // When the last lifecycle_sweep_completed was written, for any reason.
   let lastSweepRecordMs;
   const server = createServer((request, response) => {
+    if (!requestAuthorityIsAllowed(request.headers.host)) {
+      sendHttpError(response, 403, "browser_origin_rejected");
+      return;
+    }
     void handleHttpRequest(request, response).catch(() => {
       emit("router_error", { error_code: "internal_error" });
       sendHttpError(response, 500, "internal_error");
@@ -264,7 +268,11 @@ export function createAgentRouter({
     path,
     maxPayload: maxFrameBytes,
     perMessageDeflate: false,
-    verifyClient: ({ origin }, done) => {
+    verifyClient: ({ origin, req }, done) => {
+      if (!requestAuthorityIsAllowed(req.headers.host)) {
+        done(false, 403, "request host rejected");
+        return;
+      }
       if (origin !== undefined) {
         done(false, 403, "browser origins are not accepted");
         return;
@@ -412,8 +420,9 @@ export function createAgentRouter({
         const lease = owner === undefined ? undefined : repository.leaseFor(frame.agent_id);
         if (owner !== undefined && lease !== undefined
           && Date.parse(lease.expires_at) > currentTimeMs(clock)) {
+          const modelInstanceId = modelByAgentId.get(frame.agent_id)?.instanceId;
           if (owner.instanceId !== frame.instance_id
-            || modelByAgentId.get(frame.agent_id)?.instanceId !== frame.instance_id) {
+            || (modelInstanceId !== undefined && modelInstanceId !== frame.instance_id)) {
             activityByAgentId.delete(frame.agent_id);
             goalByAgentId.delete(frame.agent_id);
             modelByAgentId.delete(frame.agent_id);
@@ -778,6 +787,7 @@ export function createAgentRouter({
       }
       const target = sessions.get(frame.target_agent_id);
       if (target === undefined
+        || target.instanceId !== frame.target_instance_id
         || target.socket.readyState !== WebSocket.OPEN
         || !sessionHasActiveLease(target)) {
         emit("model_control_target_unavailable", {
@@ -785,9 +795,18 @@ export function createAgentRouter({
           source_agent_id: session.agentId,
           source_instance_id: session.instanceId,
           target_agent_id: frame.target_agent_id,
-          reason: "target_not_connected",
+          reason: target === undefined || target.instanceId === frame.target_instance_id
+            ? "target_not_connected"
+            : "target_instance_changed",
         });
-        sendError(currentSocket, generateFrameId, "target_not_connected", frame.frame_id);
+        sendError(
+          currentSocket,
+          generateFrameId,
+          target !== undefined && target.instanceId !== frame.target_instance_id
+            ? "target_instance_changed"
+            : "target_not_connected",
+          frame.frame_id,
+        );
         return;
       }
       pruneExpiredPendingModelControls();
@@ -1998,6 +2017,10 @@ export function createAgentRouter({
 
   async function handleHttpRequest(request, response) {
     const requestUrl = new URL(request.url ?? "/", "http://router.local");
+    if (request.headers.origin !== undefined && !isBrowserCorsRoute(request.method, requestUrl.pathname)) {
+      sendHttpError(response, 403, "browser_origin_rejected");
+      return;
+    }
     if (isBrowserCorsRoute(request.method, requestUrl.pathname)) applyCorsHeaders(response);
     if (request.method === "OPTIONS") {
       if (isBrowserCorsRoute(request.method, requestUrl.pathname)) {
@@ -2785,6 +2808,16 @@ function sendHttpJson(response, statusCode, payload, headers = {}) {
 
 function applyCorsHeaders(response) {
   for (const [header, value] of Object.entries(CORS_HEADERS)) response.setHeader(header, value);
+}
+
+function requestAuthorityIsAllowed(authority) {
+  if (typeof authority !== "string" || authority.length === 0) return false;
+  try {
+    const hostname = new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, "");
+    return ALLOWED_HOSTS.has(hostname);
+  } catch {
+    return false;
+  }
 }
 
 function isBrowserCorsRoute(method, pathname) {

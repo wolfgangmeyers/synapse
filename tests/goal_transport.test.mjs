@@ -111,7 +111,9 @@ test("EventBus goal state reaches the router and WebUI snapshot/live state", asy
     const routerWsUrl = await router.listen();
     const routerHttpUrl = routerWsUrl.replace("ws://", "http://").replace("/v1/agents", "");
     ui = await startRouterWebUi({ router: routerHttpUrl, output: () => {} });
-    browser = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`);
+    browser = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
+      origin: ui.httpUrl,
+    });
     await new Promise((resolve, reject) => { browser.once("open", resolve); browser.once("error", reject); });
     browser.send(JSON.stringify({ type: "connect", routerUrl: routerHttpUrl, agentId: "goal-web" }));
     await nextFrame(browser, (event) => event.type === "status" && event.state === "connected");

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -286,13 +287,13 @@ test("router HTTP API limits browser CORS to public web UI request routes", asyn
     assert.match(preflight.headers.get("access-control-allow-headers") ?? "", /content-type/);
 
     const agents = await fetch(new URL("/v1/agents", router.httpUrl), { headers: { origin: "https://anywhere.example" } });
-    assert.equal(agents.status, 200);
+    assert.equal(agents.status, 403);
     assert.equal(agents.headers.get("access-control-allow-origin"), null);
 
     const history = await fetch(new URL("/v1/conversations?owner=cors-web&peer=cors-peer", router.httpUrl), {
       headers: { origin: "https://untrusted.example" },
     });
-    assert.equal(history.status, 200);
+    assert.equal(history.status, 403);
     assert.equal(history.headers.get("access-control-allow-origin"), null);
 
     const message = await fetch(new URL("/v1/messages", router.httpUrl), {
@@ -303,6 +304,45 @@ test("router HTTP API limits browser CORS to public web UI request routes", asyn
     assert.equal(message.status, 201);
     assert.equal(message.headers.get("access-control-allow-origin"), "*");
   } finally {
+    await router.close();
+  }
+});
+
+test("router and web UI reject DNS-rebinding authorities", async () => {
+  const router = await startTestRouter();
+  let ui;
+  try {
+    const requestWithHost = (baseUrl, path, host) => new Promise((resolve, reject) => {
+      const url = new URL(path, baseUrl);
+      const request = httpRequest({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        headers: { host },
+      }, (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode));
+      });
+      request.once("error", reject);
+      request.end();
+    });
+    assert.equal(await requestWithHost(router.httpUrl, "/v1/agents", "rebind.example:8765"), 403);
+
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    assert.equal(await requestWithHost(ui.httpUrl, "/ui/config", "rebind.example:8787"), 403);
+
+    const rejectedSocket = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
+      headers: { host: "rebind.example:8787" },
+      origin: "http://rebind.example:8787",
+    });
+    const status = await new Promise((resolve, reject) => {
+      rejectedSocket.once("unexpected-response", (_request, response) => resolve(response.statusCode));
+      rejectedSocket.once("open", () => reject(new Error("DNS-rebinding socket unexpectedly opened")));
+      rejectedSocket.once("error", () => {});
+    });
+    assert.equal(status, 403);
+  } finally {
+    await ui?.close();
     await router.close();
   }
 });
@@ -436,7 +476,9 @@ test("router web UI serves the app and relays live router messages", async () =>
     assert.deepEqual(await configResponse.json(), { defaultRouter: routerHttpUrl, defaultAgentId: "wolfgang-web" });
 
     const peer = await connectRouterAgent(routerWsUrl, "peer-agent", sockets);
-    const browser = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`);
+    const browser = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, {
+      origin: ui.httpUrl,
+    });
     sockets.push(browser);
     await onceOpen(browser);
     browser.send(JSON.stringify({ type: "connect", routerUrl: routerHttpUrl, agentId: webAgentId }));
@@ -520,6 +562,7 @@ test("router web UI serves the app and relays live router messages", async () =>
       type: "set_model",
       controlId,
       targetAgentId: "peer-agent",
+      targetInstanceId: "peer-agent-instance",
       model: { provider: targetModel.provider, id: targetModel.id },
     }));
     const control = await forwardedControl;
@@ -1181,6 +1224,7 @@ test("router web UI correlates target-not-connected errors to the caller control
       type: "set_model",
       controlId: "missing-target-control",
       targetAgentId: "missing-target",
+      targetInstanceId: "missing-target-instance",
       model: { provider: "provider", id: "model" },
     }));
     const rejected = await waitForEvent(browser, (event) => event.type === "model_control_result"
@@ -1193,6 +1237,7 @@ test("router web UI correlates target-not-connected errors to the caller control
       type: "set_model",
       controlId: "invalid-command-control",
       targetAgentId: "missing-target",
+      targetInstanceId: "missing-target-instance",
       model: { provider: "", id: "model" },
     }));
     const invalid = await waitForEvent(browser, (event) => event.type === "model_control_result"
@@ -1226,6 +1271,7 @@ test("router web UI rejects timed out and reconnecting controls and ignores late
       type: "set_model",
       controlId: "timed-out-control",
       targetAgentId: "control-peer",
+      targetInstanceId: "control-peer-instance",
       model: { provider: "provider", id: "slow" },
     }));
     const timedOutControl = await timedOutForward;
@@ -1256,6 +1302,7 @@ test("router web UI rejects timed out and reconnecting controls and ignores late
       type: "set_model",
       controlId: "reconnecting-control",
       targetAgentId: "control-peer",
+      targetInstanceId: "control-peer-instance",
       model: { provider: "provider", id: "reconnect" },
     }));
     const reconnectControl = await reconnectForward;
@@ -1306,6 +1353,7 @@ test("router web UI uses the router pending-control TTL as the authoritative tim
       type: "set_model",
       controlId: "ttl-control",
       targetAgentId: "ttl-peer",
+      targetInstanceId: "ttl-peer-instance",
       model: { provider: "provider", id: "slow" },
     }));
     await forwarded;
@@ -1341,6 +1389,7 @@ test("router web UI bounds delayed capability discovery and falls back to the de
       type: "set_model",
       controlId: "delayed-capability-control",
       targetAgentId: "delayed-capability-peer",
+      targetInstanceId: "delayed-capability-peer-instance",
       model: { provider: "provider", id: "slow" },
     }));
     const control = await forwarded;
@@ -1397,6 +1446,7 @@ test("router web UI resets a discovered control timeout when reconnect capabilit
       type: "set_model",
       controlId: "timeout-reset-control",
       targetAgentId: "timeout-reset-peer",
+      targetInstanceId: "timeout-reset-peer-instance",
       model: { provider: "provider", id: "slow" },
     }));
     await forwarded;
@@ -1431,6 +1481,7 @@ test("router web UI evicts the oldest pending model control at capacity", async 
       type: "set_model",
       controlId: "capacity-control-one",
       targetAgentId: "capacity-peer",
+      targetInstanceId: "capacity-peer-instance",
       model: { provider: "provider", id: "one" },
     }));
     const firstControl = await firstForward;
@@ -1443,6 +1494,7 @@ test("router web UI evicts the oldest pending model control at capacity", async 
       type: "set_model",
       controlId: "capacity-control-two",
       targetAgentId: "capacity-peer",
+      targetInstanceId: "capacity-peer-instance",
       model: { provider: "provider", id: "two" },
     }));
     assert.equal((await evicted).errorCode, "too_many_pending_controls");
@@ -1585,6 +1637,7 @@ test("router web UI relay reconnects after router restart and resumes one canoni
       type: "set_model",
       controlId: "router-close-control",
       targetAgentId: "restart-control-peer",
+      targetInstanceId: "restart-control-peer-instance",
       model: { provider: "provider", id: "pending-at-close" },
     }));
     await forwardedControl;
@@ -1773,7 +1826,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.modelSearch\.addEventListener\("input"/);
   assert.match(app, /function setModelPickerOpen/);
   assert.match(app, /function selectModel/);
-  assert.match(app, /sendCommand\(\{ type: "set_model", controlId, targetAgentId: peer, model: \{ provider: model\.provider, id: model\.id \} \}\)/);
+  assert.match(app, /sendCommand\(\{\s+type: "set_model",\s+controlId,\s+targetAgentId: peer,\s+targetInstanceId,\s+model: \{ provider: model\.provider, id: model\.id \},\s+\}\)/);
   assert.match(app, /event\.type === "agent_model_catalog"/);
   assert.match(app, /const settled = consumePendingModelControl\(state\.pendingModelControls, event\);/);
   assert.match(app, /updateAgentModelCatalog\(targetAgentId, event\.instanceId, projection, \{ render: false, replaceInstance: false \}\)/);
@@ -1904,7 +1957,9 @@ async function startTestRouter({ clock = undefined, routerOptions = {} } = {}) {
 }
 
 async function connectBrowser(uiHttpUrl, routerHttpUrl, agentId, sockets) {
-  const browser = new WebSocket(`${uiHttpUrl.replace("http://", "ws://")}/ui/events`);
+  const browser = new WebSocket(`${uiHttpUrl.replace("http://", "ws://")}/ui/events`, {
+    origin: uiHttpUrl,
+  });
   sockets.push(browser);
   await onceOpen(browser);
   browser.send(JSON.stringify({ type: "connect", routerUrl: routerHttpUrl, agentId }));
@@ -1915,7 +1970,9 @@ async function connectBrowser(uiHttpUrl, routerHttpUrl, agentId, sockets) {
 }
 
 async function connectBrowserWithLifecycleSnapshot(uiHttpUrl, routerHttpUrl, agentId, sockets) {
-  const socket = new WebSocket(`${uiHttpUrl.replace("http://", "ws://")}/ui/events`);
+  const socket = new WebSocket(`${uiHttpUrl.replace("http://", "ws://")}/ui/events`, {
+    origin: uiHttpUrl,
+  });
   sockets.push(socket);
   await onceOpen(socket);
   const connected = waitForEvent(socket, (event) => event.type === "status" && event.state === "connected", 2_000);

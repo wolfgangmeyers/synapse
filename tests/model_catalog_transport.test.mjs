@@ -571,6 +571,7 @@ test("router fences model control by source lease and connected target", async (
       instance_id: "source-instance",
       lease_id: "stale-lease",
       target_agent_id: "target-agent",
+      target_instance_id: "target-instance",
       control_id: "control-stale",
       action: "set_model",
       model: { provider: "provider", id: "target" },
@@ -593,11 +594,33 @@ test("router fences model control by source lease and connected target", async (
       instance_id: "replacement-source-instance",
       lease_id: replacementSource.registered.lease_id,
       target_agent_id: "target-agent",
+      target_instance_id: "missing-target-instance",
       control_id: "control-disconnected",
       action: "set_model",
       model: { provider: "provider", id: "target" },
     }));
     assert.equal((await disconnectedError).code, "target_not_connected");
+
+    const replacementTarget = await connect(app.wsUrl, {
+      agentId: "target-agent",
+      instanceId: "replacement-target-instance",
+    });
+    sockets.push(replacementTarget.socket);
+    const replacedError = nextFrame(replacementSource.socket, (frame) => frame.type === "error");
+    replacementSource.socket.send(JSON.stringify({
+      version: "v1",
+      frame_id: "replaced-target-control",
+      type: "model_control",
+      agent_id: "source-agent",
+      instance_id: "replacement-source-instance",
+      lease_id: replacementSource.registered.lease_id,
+      target_agent_id: "target-agent",
+      target_instance_id: "target-instance",
+      control_id: "control-replaced-target",
+      action: "set_model",
+      model: { provider: "provider", id: "target" },
+    }));
+    assert.equal((await replacedError).code, "target_instance_changed");
   } finally {
     for (const socket of sockets) await closeSocket(socket).catch(() => {});
     await app.close();
@@ -631,6 +654,7 @@ test("router does not acknowledge a model control when the target send throws", 
       instance_id: "send-source-instance",
       lease_id: source.registered.lease_id,
       target_agent_id: "send-target",
+      target_instance_id: "send-target-instance",
       control_id: "send-failure",
       action: "set_model",
       model: { provider: "provider", id: "target" },
@@ -655,7 +679,7 @@ test("router advertises model catalog support without exposing the agent snapsho
     const agents = await fetch(`${app.httpUrl}/v1/agents`, {
       headers: { origin: "https://untrusted.example" },
     });
-    assert.equal(agents.status, 200);
+    assert.equal(agents.status, 403);
     assert.equal(agents.headers.get("access-control-allow-origin"), null);
 
     const preflight = await fetch(`${app.httpUrl}/v1/agents`, {
@@ -665,7 +689,7 @@ test("router advertises model catalog support without exposing the agent snapsho
         "access-control-request-method": "GET",
       },
     });
-    assert.equal(preflight.status, 404);
+    assert.equal(preflight.status, 403);
     assert.equal(preflight.headers.get("access-control-allow-origin"), null);
   } finally {
     await app.close();
@@ -709,6 +733,7 @@ test("router accepts one exact model-control result and rejects mismatches, dupl
       instance_id: "source-instance",
       lease_id: source.registered.lease_id,
       target_agent_id: "target-agent",
+      target_instance_id: "target-instance",
       control_id: "control-one",
       action: "set_model",
       model: { provider: "provider", id: "selected" },
@@ -796,6 +821,7 @@ test("router accepts one exact model-control result and rejects mismatches, dupl
       instance_id: "source-instance",
       lease_id: source.registered.lease_id,
       target_agent_id: "target-agent",
+      target_instance_id: "target-instance",
       control_id: "control-expiring",
       action: "set_model",
       model: { provider: "provider", id: "late" },
@@ -847,6 +873,7 @@ test("router rejects a result after the exact source lease expires", async () =>
       instance_id: "expiring-source-instance",
       lease_id: source.registered.lease_id,
       target_agent_id: "live-target",
+      target_instance_id: "live-target-instance",
       control_id: "expiring-source-control",
       action: "set_model",
       model: { provider: "provider", id: "target" },
@@ -910,6 +937,7 @@ test("router bounds pending model controls and cleans them up when either exact 
       instance_id: sender.registered.instance_id,
       lease_id: sender.registered.lease_id,
       target_agent_id: targetAgentId,
+      target_instance_id: `${targetAgentId}-instance`,
       control_id: controlId,
       action: "set_model",
       model: { provider: "provider", id: controlId },

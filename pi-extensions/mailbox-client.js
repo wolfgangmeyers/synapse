@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 const WebSocket = globalThis.WebSocket;
 
@@ -33,6 +33,15 @@ const MAX_GOAL_CHARS = 4_000;
 const MAX_MODELS = 1_000;
 const MAX_QUEUED_MODEL_CONTROLS = 256;
 const DEFAULT_MODEL_CONTROL_TTL_MS = 30_000;
+const CAPABILITY_RETRY_INITIAL_DELAY_MS = 1_000;
+const CAPABILITY_RETRY_MAX_DELAY_MS = 30_000;
+const FATAL_ROUTER_ERROR_CODES = new Set([
+  "already_registered",
+  "internal_error",
+  "invalid_frame",
+  "lease_expired",
+  "lease_not_active",
+]);
 
 // This pattern is narrower than the protocol's agentId on purpose, and the difference is a dot.
 // The protocol allows `A-Za-z0-9._-` (protocol/v1/schema.json, $defs.agentId); a tmux window name
@@ -146,7 +155,7 @@ function normalizeModelSummary(model) {
   return { provider, id, ...(name.length > 0 ? { name } : {}) };
 }
 
-function normalizeModelSummaries(models) {
+function normalizeModelSummaries(models, maximum = MAX_MODELS) {
   if (!Array.isArray(models)) return [];
   const seen = new Set();
   return models.map(normalizeModelSummary).filter((model) => {
@@ -155,7 +164,21 @@ function normalizeModelSummaries(models) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, MAX_MODELS);
+  }).slice(0, maximum);
+}
+
+function modelCatalogSourceSignature(frameSignature, sourceSummaries) {
+  const hash = createHash("sha256");
+  hash.update(frameSignature);
+  for (const model of sourceSummaries) {
+    hash.update("\u0000");
+    hash.update(model.provider);
+    hash.update("\u0000");
+    hash.update(model.id);
+    hash.update("\u0000");
+    hash.update(model.name ?? "");
+  }
+  return hash.digest("hex");
 }
 
 function normalizeTerminalReason(reason) {
@@ -244,6 +267,8 @@ export function createMailboxClient({
   let modelCatalogTimer;
   let reconnectTimer;
   let reconnectAttempt = 0;
+  let capabilityRetryTimer;
+  let capabilityRetryAttempt = 0;
   let stopped = false;
   let paused = false;
   let initialConnection;
@@ -510,8 +535,8 @@ export function createMailboxClient({
     };
   }
 
-  function fitModelCatalogFrame(modelSummaries, currentModel) {
-    const frame = modelCatalogFrame([], modelSummaries.length, currentModel);
+  function fitModelCatalogFrame(modelSummaries, currentModel, totalCount = modelSummaries.length) {
+    const frame = modelCatalogFrame([], totalCount, currentModel);
     const serialize = (count) => {
       frame.model_summaries = modelSummaries.slice(0, count);
       frame.truncated = count < frame.total_count;
@@ -549,17 +574,19 @@ export function createMailboxClient({
       modelControlTrace("client_model_catalog_read_failed", { error_name: error?.name ?? "Error" });
       return false;
     }
-    const summaries = normalizeModelSummaries(catalog);
-    const fitted = fitModelCatalogFrame(summaries, currentModel);
+    if (!Array.isArray(catalog)) {
+      modelControlTrace("client_model_catalog_read_failed", { error_name: "TypeError" });
+      return false;
+    }
+    const sourceSummaries = normalizeModelSummaries(catalog, 1_000_000);
+    const summaries = sourceSummaries.slice(0, MAX_MODELS);
+    const fitted = fitModelCatalogFrame(summaries, currentModel, sourceSummaries.length);
     if (fitted === undefined) {
       modelControlTrace("client_model_catalog_publish_failed", { reason: "frame_budget_too_small", frame_bytes: modelCatalogFrameBytes });
       return false;
     }
-    if (!force && fitted.signature === lastPublishedModelCatalog) {
-      modelControlTrace("client_model_catalog_unchanged", {
-        model_count: fitted.frame.model_summaries.length,
-        source_model_count: summaries.length,
-      });
+    const sourceSignature = modelCatalogSourceSignature(fitted.signature, sourceSummaries);
+    if (!force && sourceSignature === lastPublishedModelCatalog) {
       return false;
     }
     try {
@@ -571,12 +598,12 @@ export function createMailboxClient({
       });
       return false;
     }
-    lastPublishedModelCatalog = fitted.signature;
+    lastPublishedModelCatalog = sourceSignature;
     modelControlTrace("client_model_catalog_published", {
       model_count: fitted.frame.model_summaries.length,
-      source_model_count: summaries.length,
+      source_model_count: sourceSummaries.length,
       bytes: Buffer.byteLength(fitted.serialized, "utf8"),
-      truncated: fitted.frame.model_summaries.length < summaries.length,
+      truncated: fitted.frame.model_summaries.length < sourceSummaries.length,
     });
     return true;
   }
@@ -815,6 +842,9 @@ export function createMailboxClient({
     modelCatalogTimer = undefined;
     if (reconnectTimer !== undefined) clearTimeoutImpl(reconnectTimer);
     reconnectTimer = undefined;
+    if (capabilityRetryTimer !== undefined) clearTimeoutImpl(capabilityRetryTimer);
+    capabilityRetryTimer = undefined;
+    capabilityRetryAttempt = 0;
   }
 
   function reportKickstartFailure(error) {
@@ -858,6 +888,9 @@ export function createMailboxClient({
     renewTimer = undefined;
     clearIntervalImpl(modelCatalogTimer);
     modelCatalogTimer = undefined;
+    if (capabilityRetryTimer !== undefined) clearTimeoutImpl(capabilityRetryTimer);
+    capabilityRetryTimer = undefined;
+    capabilityRetryAttempt = 0;
     socket = undefined;
     leaseId = undefined;
     lifecycleSupported = false;
@@ -883,13 +916,35 @@ export function createMailboxClient({
     }
   }
 
+  function scheduleCapabilityRetry(currentSocket) {
+    if (socket !== currentSocket || stopped || paused || capabilityRetryTimer !== undefined) return;
+    const delay = Math.min(
+      CAPABILITY_RETRY_MAX_DELAY_MS,
+      CAPABILITY_RETRY_INITIAL_DELAY_MS * (2 ** Math.min(capabilityRetryAttempt, 5)),
+    );
+    capabilityRetryAttempt += 1;
+    modelControlTrace("client_model_catalog_capability_retry_scheduled", {
+      attempt: capabilityRetryAttempt,
+    });
+    capabilityRetryTimer = setTimeoutImpl(() => {
+      capabilityRetryTimer = undefined;
+      if (socket === currentSocket && !stopped && !paused) void discoverCapabilities(currentSocket);
+    }, delay);
+  }
+
   async function discoverCapabilities(currentSocket) {
     lifecycleTrace("client_lifecycle_capability_lookup", { phase: "started" });
     modelControlTrace("client_model_catalog_capability_lookup", { phase: "started" });
     try {
       const response = await fetchImpl(`${routerHttpUrl(routerUrl)}/v1/capabilities`, { signal: AbortSignal.timeout(capabilityTimeoutMs) });
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`Capability discovery failed (${response.status ?? "unknown"})`);
+      }
       const capabilities = response.ok ? await response.json() : undefined;
       if (socket !== currentSocket || stopped) return;
+      if (capabilityRetryTimer !== undefined) clearTimeoutImpl(capabilityRetryTimer);
+      capabilityRetryTimer = undefined;
+      capabilityRetryAttempt = 0;
       lifecycleSupported = capabilities?.subagent_lifecycle_v2 === true;
       lifecycleTrace("client_lifecycle_capability_result", { available: lifecycleSupported, ready: response.ok });
       modelCatalogSupported = capabilities?.model_catalog_v1 === true;
@@ -915,10 +970,10 @@ export function createMailboxClient({
     } catch (error) {
       lifecycleTrace("client_lifecycle_capability_error", { error_name: error?.name ?? "Error" });
       modelControlTrace("client_model_catalog_capability_error", { error_name: error?.name ?? "Error" });
-      // 404/timeouts are the old-router fallback. Do not log payloads or source text.
       if (socket === currentSocket && !stopped) {
         lifecycleSupported = false;
         modelCatalogSupported = false;
+        scheduleCapabilityRetry(currentSocket);
       }
     }
   }
@@ -1062,7 +1117,8 @@ export function createMailboxClient({
         return;
       }
       void receive(frame).then(() => {
-        if (frame.type === "error" || frame.type === "lease_rejected") {
+        if (frame.type === "lease_rejected"
+          || (frame.type === "error" && FATAL_ROUTER_ERROR_CODES.has(frame.code))) {
           const error = new Error(`Mailbox v2 registration rejected (${frame.code ?? "unknown"})`);
           disconnected(currentSocket, error);
           closeSocket(currentSocket);
