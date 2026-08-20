@@ -12,7 +12,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const DEFAULT_ROUTER = "http://127.0.0.1:8765";
 const DEFAULT_AGENT_ID = "wolfgang-web";
-const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1"]);
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const HOSTNAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i;
 const AGENT_REFRESH_INTERVAL_MS = 10_000;
 // The router owns a 30-second pending-control TTL and sweeps once a second.
@@ -154,9 +154,8 @@ function browserAuthorityIsAllowed(authority, allowedHost) {
   if (typeof authority !== "string" || authority.length === 0) return false;
   try {
     const hostname = new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, "");
-    return allowedHost === undefined
-      ? LOOPBACK_HOSTNAMES.has(hostname)
-      : hostname.toLowerCase() === allowedHost;
+    return LOOPBACK_HOSTNAMES.has(hostname.toLowerCase())
+      || (allowedHost !== undefined && hostname.toLowerCase() === allowedHost);
   } catch {
     return false;
   }
