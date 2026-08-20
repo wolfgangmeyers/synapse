@@ -558,11 +558,12 @@ const NATIVE_SUBAGENT_TRACE_STRING_FIELDS = new Set([
 ]);
 const NATIVE_SUBAGENT_TRACE_NUMBER_FIELDS = new Set([
   "client_sequence", "router_version", "subagent_count", "snapshot_count", "pending", "bytes", "description_length",
-  "recipient_count", "attempt", "heartbeat_interval_ms", "available_count",
+  "recipient_count", "attempt", "heartbeat_interval_ms", "available_count", "model_count", "source_model_count",
+  "frame_bytes",
 ]);
 const NATIVE_SUBAGENT_TRACE_BOOLEAN_FIELDS = new Set([
   "available", "registry_available", "lifecycle_service", "connected", "ready", "reconnect", "published",
-  "accepted", "switched",
+  "accepted", "switched", "truncated",
 ]);
 
 export function summarizeNativeSubagents(subagents) {
@@ -2669,6 +2670,7 @@ export function createMechaMessagingExtension(pi, {
             throw error;
           }
         },
+        getCurrentModel: () => effectiveModelProjection(parentActivityContext).current,
         onLifecycleReady: ({ routerVersion, reconnect }) => traceNativeSubagent("extension_client_lifecycle_ready", {
           router_version: routerVersion, reconnect,
         }),

@@ -736,14 +736,22 @@ export function createAgentRouter({
       }
       const previousProjection = modelByAgentId.get(session.agentId);
       const modelSummaries = normalizeModelSummaries(frame.model_summaries);
+      const currentModel = normalizeModelSummary(frame.current_model);
+      const totalCount = Math.max(modelSummaries.length, frame.total_count ?? modelSummaries.length);
+      const truncated = frame.truncated === true || totalCount > modelSummaries.length;
       modelByAgentId.set(session.agentId, {
         instanceId: session.instanceId,
-        currentModel: previousProjection?.instanceId === session.instanceId
+        currentModel: currentModel ?? (previousProjection?.instanceId === session.instanceId
           ? previousProjection.currentModel
-          : undefined,
+          : undefined),
         availableModels: modelSummaries,
+        totalCount,
+        truncated,
       });
-      broadcastAgentModelCatalog(session.agentId, session.instanceId, modelSummaries);
+      broadcastAgentModelCatalog(session.agentId, session.instanceId, modelSummaries, {
+        totalCount,
+        truncated,
+      });
     }
 
     function receiveModelControl(currentSocket, frame) {
@@ -799,6 +807,7 @@ export function createAgentRouter({
         sendError(currentSocket, generateFrameId, "model_control_capacity_exceeded", frame.frame_id);
         return;
       }
+      const expiresAtMs = currentTimeMs(clock) + pendingModelControlTtlMs;
       let forwarded = false;
       try {
         forwarded = sendFrame(target.socket, generateFrameId, {
@@ -810,6 +819,7 @@ export function createAgentRouter({
           control_id: frame.control_id,
           action: frame.action,
           model: frame.model,
+          expires_at: new Date(expiresAtMs).toISOString(),
         });
       } catch {
         // A synchronous WebSocket send failure is a failed forward.
@@ -836,7 +846,7 @@ export function createAgentRouter({
         targetAgentId: target.agentId,
         targetInstanceId: target.instanceId,
         targetLeaseId: target.leaseId,
-        expiresAtMs: currentTimeMs(clock) + pendingModelControlTtlMs,
+        expiresAtMs,
       });
       emit("model_control_forwarded", {
         control_id: frame.control_id,
@@ -919,14 +929,13 @@ export function createAgentRouter({
       });
       const previousProjection = modelByAgentId.get(session.agentId);
       const currentModel = normalizeModelSummary(frame.current_model);
-      const availableModels = frame.available_models === undefined
-        ? previousProjection?.availableModels ?? []
-        : normalizeModelSummaries(frame.available_models);
-      if (currentModel !== undefined || frame.available_models !== undefined) {
+      if (currentModel !== undefined) {
         modelByAgentId.set(session.agentId, {
           instanceId: session.instanceId,
           currentModel: currentModel ?? previousProjection?.currentModel,
-          availableModels,
+          availableModels: previousProjection?.availableModels ?? [],
+          totalCount: previousProjection?.totalCount ?? previousProjection?.availableModels.length ?? 0,
+          truncated: previousProjection?.truncated ?? false,
         });
       }
       const resultForwarded = sendFrame(source.socket, generateFrameId, {
@@ -939,7 +948,6 @@ export function createAgentRouter({
         accepted: frame.accepted,
         ...(frame.error_code === undefined ? {} : { error_code: frame.error_code }),
         ...(frame.current_model === undefined ? {} : { current_model: frame.current_model }),
-        ...(frame.available_models === undefined ? {} : { available_models: frame.available_models }),
       });
       if (!resultForwarded) {
         emit("model_control_result_source_unavailable", {
@@ -1458,8 +1466,19 @@ export function createAgentRouter({
     if (typeof repository.recoverStaleLeases === "function") {
       repository.recoverStaleLeases();
     }
-    if (typeof repository.recoverStaleAgentResources !== "function") return [];
-    return repository.recoverStaleAgentResources();
+    const recovered = typeof repository.recoverStaleAgentResources === "function"
+      ? repository.recoverStaleAgentResources()
+      : [];
+    const connectedSessions = new Set(sessions.values());
+    for (const subscribers of conversationSessions.values()) {
+      for (const candidate of subscribers.values()) connectedSessions.add(candidate);
+    }
+    for (const candidate of connectedSessions) {
+      if (sessionHasActiveLease(candidate)) continue;
+      sendError(candidate.socket, generateFrameId, "lease_expired");
+      closeSocket(candidate.socket, 4001, "lease expired");
+    }
+    return recovered;
   }
 
   function sessionIsActive(candidate) {
@@ -1613,11 +1632,17 @@ export function createAgentRouter({
 
   function normalizeModelSummary(value) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const provider = typeof value.provider === "string" ? value.provider.trim().slice(0, 128) : "";
-    const id = typeof value.id === "string" ? value.id.trim().slice(0, 256) : "";
+    const provider = normalizeModelString(value.provider, 128);
+    const id = normalizeModelString(value.id, 256);
     if (provider.length === 0 || id.length === 0) return undefined;
-    const name = typeof value.name === "string" ? value.name.trim().slice(0, 256) : "";
+    const name = normalizeModelString(value.name, 256);
     return { provider, id, ...(name.length > 0 ? { name } : {}) };
+  }
+
+  function normalizeModelString(value, maximum) {
+    if (typeof value !== "string") return "";
+    const normalized = value.trim();
+    return normalized.length > 0 && [...normalized].length <= maximum ? normalized : "";
   }
 
   function normalizeModelSummaries(values) {
@@ -1718,7 +1743,13 @@ export function createAgentRouter({
     }
   }
 
-  function broadcastAgentModelCatalog(agentId, instanceId, modelSummaries, generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
+  function broadcastAgentModelCatalog(
+    agentId,
+    instanceId,
+    modelSummaries,
+    { totalCount = modelSummaries.length, truncated = false } = {},
+    generatedAt = new Date(currentTimeMs(clock)).toISOString(),
+  ) {
     const currentModel = modelByAgentId.get(agentId)?.currentModel;
     for (const recipient of conversationSessions.values()) {
       for (const session of recipient.values()) {
@@ -1727,6 +1758,8 @@ export function createAgentRouter({
           agent_id: agentId,
           instance_id: instanceId,
           model_summaries: modelSummaries,
+          total_count: totalCount,
+          truncated,
           ...(currentModel === undefined ? {} : { current_model: currentModel }),
           generated_at: generatedAt,
         });
@@ -1769,6 +1802,8 @@ export function createAgentRouter({
         instanceId,
         currentModel: normalizedModel,
         availableModels: previousProjection?.availableModels ?? [],
+        totalCount: previousProjection?.totalCount ?? 0,
+        truncated: previousProjection?.truncated ?? false,
       });
     }
     const modelProjection = modelByAgentId.get(agentId);
@@ -1844,7 +1879,7 @@ export function createAgentRouter({
     }
   }
 
-  function connectedAgentsSnapshot() {
+  function connectedAgentsSnapshot({ includeModels = true } = {}) {
     const generatedAt = new Date(currentTimeMs(clock)).toISOString();
     const agents = [];
     const lifecycleSnapshot = lifecycleV2Available ? repository.subagentLifecycleSnapshot() : { router_version: 0, agents: [] };
@@ -1860,6 +1895,7 @@ export function createAgentRouter({
         : undefined;
       agents.push({
         agent_id: session.agentId,
+        instance_id: session.instanceId,
         agent_role: session.agentRole,
         connected_at: session.connectedAt,
         lease_expires_at: lease.expires_at,
@@ -1869,7 +1905,11 @@ export function createAgentRouter({
         ...(modelProjection?.currentModel === undefined
           ? {}
           : { current_model: modelProjection.currentModel }),
-        available_models: modelProjection?.availableModels ?? [],
+        ...(includeModels ? {
+          available_models: modelProjection?.availableModels ?? [],
+          model_catalog_total_count: modelProjection?.totalCount ?? modelProjection?.availableModels.length ?? 0,
+          model_catalog_truncated: modelProjection?.truncated ?? false,
+        } : {}),
         ...(goalByAgentId.get(session.agentId)?.instanceId === session.instanceId
           ? { goal: goalByAgentId.get(session.agentId).goal }
           : {}),
@@ -1980,6 +2020,7 @@ export function createAgentRouter({
       sendHttpJson(response, 200, {
         model_catalog_v1: true,
         model_catalog_limits: { frame_bytes: Math.min(MODEL_CATALOG_MAX_FRAME_BYTES, maxFrameBytes) },
+        model_control_limits: { pending_ttl_ms: pendingModelControlTtlMs },
         subagent_lifecycle_v2: lifecycleV2Available,
         ...(lifecycleV2Available ? { lifecycle_limits: { subagents: 999, id_bytes: 128, description_bytes: 512 } } : { lifecycle_error: "migration_017_required" }),
       });
@@ -2010,7 +2051,9 @@ export function createAgentRouter({
       return;
     }
     if (request.method === "GET" && requestUrl.pathname === "/v1/agents") {
-      sendHttpJson(response, 200, connectedAgentsSnapshot());
+      sendHttpJson(response, 200, connectedAgentsSnapshot({
+        includeModels: requestUrl.searchParams.get("models") !== "omit",
+      }));
       return;
     }
     if (request.method === "GET" && requestUrl.pathname === "/v1/conversations") {

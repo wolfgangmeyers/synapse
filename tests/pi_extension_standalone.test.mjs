@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import test from "node:test";
@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile);
 import {
   createInlineToolPolicy,
   createMechaMessagingExtension,
+  createNativeSubagentTrace,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
   MODEL_SWITCH_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging.js";
@@ -610,6 +611,28 @@ test("real mailbox model-control delivery switches the Pi model", async () => {
     accepted: true,
     current_model: target,
   });
+  socket.dispatchEvent(new MessageEvent("message", {
+    data: JSON.stringify({
+      version: "v1",
+      frame_id: "control-missing-model",
+      type: "model_control",
+      agent_id: "worker",
+      instance_id: client.instanceId,
+      lease_id: "lease-model-control",
+      source_agent_id: "controller",
+      control_id: "control-missing",
+      action: "set_model",
+      model: { provider: "anthropic", id: "missing-model" },
+      expires_at: "2030-01-01T00:00:00.000Z",
+    }),
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const rejectedResult = socket.sent.find((frame) => frame.type === "model_control_result"
+    && frame.control_id === "control-missing");
+  assert.equal(rejectedResult.accepted, false);
+  assert.equal(rejectedResult.error_code, "model_unavailable");
+  assert.deepEqual(rejectedResult.current_model, target);
+  assert.deepEqual(fixture.modelSwitches, [target]);
   client.close();
 });
 
@@ -704,16 +727,91 @@ test("mailbox client capability-gates and byte-bounds changed model catalogs", a
   assert.ok(Buffer.byteLength(JSON.stringify(published[0]), "utf8") <= 1_024);
   assert.deepEqual(published[0].model_summaries[0], first);
   assert.ok(published[0].model_summaries.length < catalog.length);
-  assert.equal("truncated" in published[0], false);
+  assert.equal(published[0].truncated, true);
+  assert.equal(published[0].total_count, catalog.length);
 
   intervals.find(({ delay }) => delay === 10_000).callback();
   assert.equal(catalogReads, 2);
   assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 1);
 
-  catalog = [{ provider: "provider", id: "replacement" }];
+  catalog = [...catalog, { provider: "provider", id: "omitted-tail-change" }];
   intervals.find(({ delay }) => delay === 10_000).callback();
   assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 2);
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").at(-1).total_count, catalog.length);
+
+  catalog = [{ provider: "provider", id: "replacement" }];
+  intervals.find(({ delay }) => delay === 10_000).callback();
+  assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 3);
   assert.ok(traces.some(({ event }) => event === "client_model_catalog_published"));
+  client.close();
+});
+
+test("native trace retains model catalog size and truncation diagnostics", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "model-catalog-trace-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "trace.jsonl");
+  const trace = createNativeSubagentTrace({ path, now: () => new Date("2030-01-01T00:00:00.000Z") });
+  assert.equal(trace.record("client_model_catalog_published", {
+    model_count: 90,
+    source_model_count: 100,
+    frame_bytes: 61_000,
+    truncated: true,
+  }), true);
+  const record = JSON.parse((await readFile(path, "utf8")).trim());
+  assert.deepEqual(record, {
+    timestamp: "2030-01-01T00:00:00.000Z",
+    event: "client_model_catalog_published",
+    model_count: 90,
+    source_model_count: 100,
+    frame_bytes: 61_000,
+    truncated: true,
+  });
+});
+
+test("mailbox client keeps fallback catalog frames within 64 KiB", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const catalog = Array.from({ length: 1_000 }, (_, index) => ({
+    provider: "p".repeat(128),
+    id: `${String(index).padStart(4, "0")}${"i".repeat(252)}`,
+    name: "n".repeat(256),
+  }));
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    getModelCatalog: () => catalog,
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ model_catalog_v1: true, subagent_lifecycle_v2: false }),
+    }),
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  const register = socket.sent.find((frame) => frame.type === "register");
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered",
+    agent_id: "worker",
+    instance_id: client.instanceId,
+    lease_id: "lease-1",
+    request_id: register.frame_id,
+  }) }));
+  await connected;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const published = socket.sent.find((frame) => frame.type === "model_catalog");
+  assert.ok(Buffer.byteLength(JSON.stringify(published), "utf8") <= 65_536);
+  assert.equal(published.truncated, true);
+  assert.equal(published.total_count, 1_000);
+  const nextFrame = {
+    ...published,
+    model_summaries: catalog.slice(0, published.model_summaries.length + 1),
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(nextFrame), "utf8") > 65_536);
   client.close();
 });
 
@@ -787,7 +885,7 @@ test("mailbox client retries catalog publication after frame-budget and send fai
 });
 
 test("mailbox client publishes no catalog without capability or after registry failure", async () => {
-  async function run(capabilities, getModelCatalog) {
+  async function run(capabilities, getModelCatalog, { responseOk = true } = {}) {
     const socket = new EventTarget();
     socket.readyState = 0;
     socket.sent = [];
@@ -801,7 +899,7 @@ test("mailbox client publishes no catalog without capability or after registry f
       getModelCatalog,
       onModelControlTrace: (event) => traces.push(event),
       webSocketFactory: () => socket,
-      fetchImpl: async () => ({ ok: true, json: async () => capabilities }),
+      fetchImpl: async () => ({ ok: responseOk, json: async () => capabilities }),
       renewIntervalMs: 11_000,
       setIntervalImpl: (callback, delay) => {
         intervals.push({ callback, delay });
@@ -822,7 +920,13 @@ test("mailbox client publishes no catalog without capability or after registry f
 
   const unsupported = await run({ subagent_lifecycle_v2: false }, () => [{ provider: "provider", id: "model" }]);
   assert.equal(unsupported.socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  unsupported.client.sendActivity("active", { currentModel: { provider: "provider", id: "model" } });
+  assert.equal("current_model" in unsupported.socket.sent.at(-1), false);
   unsupported.client.close();
+
+  const missingCapabilities = await run({}, () => [{ provider: "provider", id: "model" }], { responseOk: false });
+  assert.equal(missingCapabilities.socket.sent.some((frame) => frame.type === "model_catalog"), false);
+  missingCapabilities.client.close();
 
   let registryReads = 0;
   const failed = await run(
@@ -848,6 +952,7 @@ test("mailbox client serializes model controls in arrival order", async () => {
   socket.close = () => { socket.readyState = 3; };
   const started = [];
   const resolvers = [];
+  const traces = [];
   const client = createMailboxClient({
     agentId: "worker",
     onEnvelope: () => {},
@@ -855,6 +960,7 @@ test("mailbox client serializes model controls in arrival order", async () => {
       started.push(controlId);
       resolvers.push(() => resolve({ accepted: true, currentModel: model, availableModels: [model] }));
     }),
+    onModelControlTrace: (event) => traces.push(event),
     webSocketFactory: () => socket,
     fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
   });
@@ -885,6 +991,8 @@ test("mailbox client serializes model controls in arrival order", async () => {
     socket.sent.filter((frame) => frame.type === "model_control_result").map((frame) => frame.control_id),
     ["control-1", "control-2"],
   );
+  assert.ok(traces.filter(({ event }) => event.startsWith("client_model_control_"))
+    .every(({ instance_id, lease_id }) => instance_id === client.instanceId && lease_id === "lease-1"));
   client.close();
 });
 
@@ -927,7 +1035,60 @@ test("mailbox client contains async model-control result failures after disconne
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(socket.sent.some((frame) => frame.type === "model_control_result"), false);
-  assert.ok(traces.some(({ event, reason }) => event === "client_model_control_result_failed" && reason === "client_not_connected"));
+  assert.ok(traces.some(({ event, reason }) => event === "client_model_control_result_failed" && reason === "stale_connection"));
+  client.close();
+});
+
+test("mailbox client drops queued model controls when their connection closes", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const started = [];
+  const traces = [];
+  let finishFirst;
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    onModelControl: ({ controlId, model }) => {
+      started.push(controlId);
+      if (controlId === "control-1") {
+        return new Promise((resolve) => { finishFirst = () => resolve({ accepted: true, currentModel: model }); });
+      }
+      return Promise.resolve({ accepted: true, currentModel: model });
+    },
+    onModelControlTrace: (event) => traces.push(event),
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+  for (const controlId of ["control-1", "control-2"]) {
+    socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+      type: "model_control",
+      source_agent_id: "controller",
+      control_id: controlId,
+      action: "set_model",
+      model: { provider: "provider", id: controlId },
+    }) }));
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["control-1"]);
+  socket.readyState = 3;
+  socket.dispatchEvent(new Event("close"));
+  finishFirst();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["control-1"]);
+  assert.ok(traces.some(({ event, control_id, reason }) => event === "client_model_control_dropped"
+    && control_id === "control-2" && reason === "disconnected"));
   client.close();
 });
 

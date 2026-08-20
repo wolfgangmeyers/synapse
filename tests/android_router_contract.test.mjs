@@ -852,13 +852,16 @@ test("discovery exposes only active sessions with role and no lease metadata", a
     }]);
     assert.match(snapshot.agents[0].connected_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.match(snapshot.agents[0].lease_expires_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.equal(snapshot.agents[0].instance_id, register.instance_id);
     assert.equal(snapshot.agents[0].activity_state, "idle");
     assert.equal(snapshot.agents[0].subagent_count, 0);
     assert.deepEqual(snapshot.agents[0].subagents, []);
     assert.deepEqual(snapshot.agents[0].available_models, []);
+    assert.equal(snapshot.agents[0].model_catalog_total_count, 0);
+    assert.equal(snapshot.agents[0].model_catalog_truncated, false);
     assert.deepEqual(Object.keys(snapshot.agents[0]).sort(), [
-      "activity_state", "agent_id", "agent_role", "available_models", "connected_at", "lease_expires_at",
-      "subagent_count", "subagents",
+      "activity_state", "agent_id", "agent_role", "available_models", "connected_at", "instance_id", "lease_expires_at",
+      "model_catalog_total_count", "model_catalog_truncated", "subagent_count", "subagents",
     ]);
   } finally {
     socket?.terminate();

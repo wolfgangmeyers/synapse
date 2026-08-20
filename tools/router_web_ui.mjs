@@ -13,7 +13,10 @@ const DEFAULT_PORT = 8787;
 const DEFAULT_ROUTER = "http://127.0.0.1:8765";
 const DEFAULT_AGENT_ID = "wolfgang-web";
 const AGENT_REFRESH_INTERVAL_MS = 10_000;
-const MODEL_CONTROL_TIMEOUT_MS = 10_000;
+// The router owns a 30-second pending-control TTL and sweeps once a second.
+// Keep the browser fallback beyond that authoritative rejection window.
+const MODEL_CONTROL_TIMEOUT_MS = 35_000;
+const CAPABILITY_DISCOVERY_TIMEOUT_MS = 1_000;
 const MAX_PENDING_MODEL_CONTROLS = 100;
 const AGENT_ID = /^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CONTROL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -56,14 +59,21 @@ export async function startRouterWebUi({
   port = 0,
   router = DEFAULT_ROUTER,
   defaultAgentId = DEFAULT_AGENT_ID,
-  modelControlTimeoutMs = MODEL_CONTROL_TIMEOUT_MS,
+  modelControlTimeoutMs,
   maxPendingModelControls = MAX_PENDING_MODEL_CONTROLS,
+  capabilitiesFetchImpl = fetch,
+  capabilityDiscoveryTimeoutMs = CAPABILITY_DISCOVERY_TIMEOUT_MS,
   output = console.log,
 } = {}) {
   router = normalizeRouterUrl(router);
   defaultAgentId = normalizeAgentId(defaultAgentId);
-  if (!Number.isSafeInteger(modelControlTimeoutMs) || modelControlTimeoutMs < 1) throw new Error("modelControlTimeoutMs must be a positive integer");
+  if (modelControlTimeoutMs !== undefined
+    && (!Number.isSafeInteger(modelControlTimeoutMs) || modelControlTimeoutMs < 1)) {
+    throw new Error("modelControlTimeoutMs must be a positive integer");
+  }
   if (!Number.isSafeInteger(maxPendingModelControls) || maxPendingModelControls < 1) throw new Error("maxPendingModelControls must be a positive integer");
+  if (typeof capabilitiesFetchImpl !== "function") throw new Error("capabilitiesFetchImpl must be a function");
+  if (!Number.isSafeInteger(capabilityDiscoveryTimeoutMs) || capabilityDiscoveryTimeoutMs < 1) throw new Error("capabilityDiscoveryTimeoutMs must be a positive integer");
   const clients = new Set();
   const server = createServer((request, response) => {
     void handleRequest(request, response, { router, defaultAgentId }).catch(() => sendJson(response, 500, { error: "internal_error" }));
@@ -90,6 +100,8 @@ export async function startRouterWebUi({
       defaultRouter: router,
       modelControlTimeoutMs,
       maxPendingModelControls,
+      capabilitiesFetchImpl,
+      capabilityDiscoveryTimeoutMs,
     });
     clients.add(client);
     browser.on("close", () => {
@@ -154,7 +166,13 @@ async function handleRequest(request, response, { router, defaultAgentId }) {
   }
 }
 
-function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, maxPendingModelControls }) {
+function createBrowserClient(browser, {
+  defaultRouter,
+  modelControlTimeoutMs,
+  maxPendingModelControls,
+  capabilitiesFetchImpl,
+  capabilityDiscoveryTimeoutMs,
+}) {
   let routerSocket;
   let reconnectTimer;
   let refreshTimer;
@@ -163,6 +181,8 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
   let connectionGeneration = 0;
   let lifecycleEnabled = false;
   let lifecycleVersion = 0;
+  let includeModelsInNextRefresh = true;
+  let effectiveModelControlTimeoutMs = modelControlTimeoutMs ?? MODEL_CONTROL_TIMEOUT_MS;
   const pendingDeliveries = new Map();
   const pendingControlsByControlId = new Map();
   const pendingControlsByRequestId = new Map();
@@ -193,7 +213,6 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
       ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
       ...(result.instanceId === undefined ? {} : { instanceId: result.instanceId }),
       ...(result.currentModel === undefined ? {} : { currentModel: result.currentModel }),
-      ...(result.availableModels === undefined ? {} : { availableModels: result.availableModels }),
       agentId: configured.agentId,
       routerUrl: configured.routerUrl,
     });
@@ -212,7 +231,7 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
     }
     const timer = setTimeout(() => {
       settlePendingControl(controlId, { accepted: false, errorCode: "control_timeout" });
-    }, modelControlTimeoutMs);
+    }, effectiveModelControlTimeoutMs);
     const pending = { controlId, requestId, targetAgentId, timer };
     pendingControlsByControlId.set(controlId, pending);
     pendingControlsByRequestId.set(requestId, pending);
@@ -228,12 +247,13 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
       return body;
     };
     const [agentsResult, remindersResult] = await Promise.allSettled([
-      load("/v1/agents"),
+      load(includeModelsInNextRefresh ? "/v1/agents" : "/v1/agents?models=omit"),
       load("/v1/reminders"),
     ]);
     if (generation !== refreshGeneration) return;
     if (agentsResult.status === "fulfilled") {
       const agentsBody = agentsResult.value;
+      includeModelsInNextRefresh = false;
       sendBrowser({ type: "agents", agents: agentsBody.agents ?? [], generatedAt: agentsBody.generated_at, activitySnapshotVersion: agentsBody.activity_snapshot_version, agentId, routerUrl });
     } else {
       sendBrowser({ type: "agents_error", message: agentsResult.reason.message, agentId, routerUrl });
@@ -251,6 +271,8 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
     clearInterval(refreshTimer);
     clearInterval(renewTimer);
     rejectAllPendingControls("router_reconnecting");
+    includeModelsInNextRefresh = true;
+    effectiveModelControlTimeoutMs = modelControlTimeoutMs ?? MODEL_CONTROL_TIMEOUT_MS;
     configured = { ...configured, instanceId: randomUUID(), leaseId: "" };
     lifecycleEnabled = false;
     const generation = ++connectionGeneration;
@@ -282,13 +304,32 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
       }
       if (frame.type === "registered") {
         configured.leaseId = frame.lease_id;
-        setStatus("connected", `Connected as ${configured.agentId}`);
         clearInterval(renewTimer);
         renewTimer = setInterval(() => renewLease(), 10_000);
-        refreshAgents();
-        void enableLifecycleSync(generation);
-        clearInterval(refreshTimer);
-        refreshTimer = setInterval(refreshAgents, AGENT_REFRESH_INTERVAL_MS);
+        void (async () => {
+          let discoveredModelControlTimeoutMs = MODEL_CONTROL_TIMEOUT_MS;
+          if (modelControlTimeoutMs === undefined) {
+            try {
+              const response = await capabilitiesFetchImpl(new URL("/v1/capabilities", configured.routerUrl), {
+                signal: AbortSignal.timeout(capabilityDiscoveryTimeoutMs),
+              });
+              const capabilities = await response.json();
+              const routerTtlMs = capabilities?.model_control_limits?.pending_ttl_ms;
+              if (response.ok && Number.isSafeInteger(routerTtlMs) && routerTtlMs > 0) {
+                discoveredModelControlTimeoutMs = routerTtlMs + 2_000;
+              }
+            } catch {
+              discoveredModelControlTimeoutMs = MODEL_CONTROL_TIMEOUT_MS;
+            }
+          }
+          if (generation !== connectionGeneration || configured.leaseId !== frame.lease_id) return;
+          effectiveModelControlTimeoutMs = modelControlTimeoutMs ?? discoveredModelControlTimeoutMs;
+          setStatus("connected", `Connected as ${configured.agentId}`);
+          refreshAgents();
+          void enableLifecycleSync(generation);
+          clearInterval(refreshTimer);
+          refreshTimer = setInterval(refreshAgents, AGENT_REFRESH_INTERVAL_MS);
+        })();
         return;
       }
       if (frame.type === "error") {
@@ -314,6 +355,8 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
         return;
       }
       if (frame.type === "agent_activity") {
+        refreshGeneration += 1;
+        void refreshAgents();
         sendBrowser({
           type: "agent_activity",
           agent: frame.agent_id,
@@ -323,9 +366,6 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
           subagents: Array.isArray(frame.subagents) ? frame.subagents : [],
           ...(frame.goal === undefined ? {} : { goal: frame.goal }),
           ...(frame.current_model === undefined ? {} : { currentModel: frame.current_model }),
-          ...(frame.available_models === undefined ? {} : {
-            availableModels: Array.isArray(frame.available_models) ? frame.available_models : [],
-          }),
           generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
@@ -333,12 +373,16 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
         return;
       }
       if (frame.type === "agent_model_catalog") {
+        refreshGeneration += 1;
+        void refreshAgents();
         sendBrowser({
           type: "agent_model_catalog",
           agent: frame.agent_id,
           ...(frame.instance_id === undefined ? {} : { instanceId: frame.instance_id }),
           ...(frame.current_model === undefined ? {} : { currentModel: frame.current_model }),
           availableModels: Array.isArray(frame.model_summaries) ? frame.model_summaries : [],
+          totalCount: frame.total_count ?? frame.model_summaries?.length ?? 0,
+          truncated: frame.truncated === true,
           generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
@@ -346,13 +390,14 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
         return;
       }
       if (frame.type === "model_control_result") {
+        refreshGeneration += 1;
+        void refreshAgents();
         const pending = pendingControlsByControlId.get(frame.control_id);
         if (pending === undefined || pending.targetAgentId !== frame.agent_id) return;
         settlePendingControl(frame.control_id, {
           accepted: frame.accepted,
           ...(frame.error_code === undefined ? {} : { errorCode: frame.error_code }),
           ...(frame.current_model === undefined ? {} : { currentModel: frame.current_model }),
-          ...(frame.available_models === undefined ? {} : { availableModels: frame.available_models }),
           instanceId: frame.instance_id,
         });
         return;
@@ -508,7 +553,7 @@ function createBrowserClient(browser, { defaultRouter, modelControlTimeoutMs, ma
           // `@272k:fast`; the target extension performs the authoritative
           // availability check, so the relay only rejects control characters
           // and oversized values here.
-          if (provider.length === 0 || provider.length > 128 || id.length === 0 || id.length > 256
+          if (provider.length === 0 || [...provider].length > 128 || id.length === 0 || [...id].length > 256
             || /[\u0000-\u001f\u007f]/u.test(provider) || /[\u0000-\u001f\u007f]/u.test(id)) {
             throw new Error("Model provider and id are required");
           }

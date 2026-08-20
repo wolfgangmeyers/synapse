@@ -164,6 +164,7 @@ test("fails v2 closed when migration 017 is missing", async (t) => {
   assert.deepEqual(capabilities, {
     model_catalog_v1: true,
     model_catalog_limits: { frame_bytes: 60 * 1024 },
+    model_control_limits: { pending_ttl_ms: 30_000 },
     subagent_lifecycle_v2: false,
     lifecycle_error: "migration_017_required",
   });
@@ -323,6 +324,7 @@ test("validates router and checkout-source client rollout in an isolated home", 
   assert.deepEqual(await (await fetch(new URL("/v1/capabilities", legacy.httpUrl))).json(), {
     model_catalog_v1: true,
     model_catalog_limits: { frame_bytes: 60 * 1024 },
+    model_control_limits: { pending_ttl_ms: 30_000 },
     subagent_lifecycle_v2: false,
     lifecycle_error: "migration_017_required",
   });
@@ -372,6 +374,7 @@ test("validates router and checkout-source client rollout in an isolated home", 
   assert.deepEqual(await (await fetch(new URL("/v1/capabilities", restored.httpUrl))).json(), {
     model_catalog_v1: true,
     model_catalog_limits: { frame_bytes: 60 * 1024 },
+    model_control_limits: { pending_ttl_ms: 30_000 },
     subagent_lifecycle_v2: false,
     lifecycle_error: "migration_017_required",
   });

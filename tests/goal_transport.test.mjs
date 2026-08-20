@@ -71,9 +71,11 @@ test("router projects goal state through activity, snapshot, off, and replacemen
     const replacementAgent = replacementSnapshot.agents.find((agent) => agent.agent_id === "worker");
     assert.equal(replacementAgent.goal, undefined);
     assert.deepEqual(replacementAgent.available_models, []);
+    assert.equal(replacementAgent.model_catalog_total_count, 0);
+    assert.equal(replacementAgent.model_catalog_truncated, false);
     assert.deepEqual(Object.keys(replacementAgent).sort(), [
-      "activity_state", "agent_id", "agent_role", "available_models", "connected_at", "lease_expires_at",
-      "subagent_count", "subagents",
+      "activity_state", "agent_id", "agent_role", "available_models", "connected_at", "instance_id", "lease_expires_at",
+      "model_catalog_total_count", "model_catalog_truncated", "subagent_count", "subagents",
     ]);
   } finally {
     for (const socket of sockets) socket.close();

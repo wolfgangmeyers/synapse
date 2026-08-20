@@ -31,6 +31,8 @@ const SUBAGENT_STATUSES = new Set(["queued", "running", "completed", "steered", 
 const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
 const MAX_GOAL_CHARS = 4_000;
 const MAX_MODELS = 1_000;
+const MAX_QUEUED_MODEL_CONTROLS = 256;
+const DEFAULT_MODEL_CONTROL_TTL_MS = 30_000;
 
 // This pattern is narrower than the protocol's agentId on purpose, and the difference is a dot.
 // The protocol allows `A-Za-z0-9._-` (protocol/v1/schema.json, $defs.agentId); a tmux window name
@@ -213,6 +215,7 @@ export function createMailboxClient({
   onModelControlTrace = () => {},
   onModelControl = async () => ({ accepted: false, errorCode: "unsupported" }),
   getModelCatalog = () => [],
+  getCurrentModel = () => undefined,
 } = {}) {
   assertIdentity(agentId);
   if (typeof onEnvelope !== "function") throw new TypeError("onEnvelope is required");
@@ -229,6 +232,7 @@ export function createMailboxClient({
   if (typeof onModelControlTrace !== "function") throw new TypeError("onModelControlTrace must be a function");
   if (typeof onModelControl !== "function") throw new TypeError("onModelControl must be a function");
   if (typeof getModelCatalog !== "function") throw new TypeError("getModelCatalog must be a function");
+  if (typeof getCurrentModel !== "function") throw new TypeError("getCurrentModel must be a function");
   if (typeof parentSessionId !== "string" || parentSessionId.length === 0 || typeof producerEpoch !== "string" || !/^[0-9a-fA-F-]{36}$/.test(producerEpoch)) throw new TypeError("valid lifecycle identity is required");
   validateReconnectOptions(reconnectInitialDelayMs, reconnectMaxDelayMs);
   routerHttpUrl(routerUrl);
@@ -254,7 +258,8 @@ export function createMailboxClient({
   let modelCatalogSupported = false;
   let modelCatalogFrameBytes = MAX_MODEL_CATALOG_FRAME_BYTES;
   let lastPublishedModelCatalog;
-  let modelControlTail = Promise.resolve();
+  const modelControlQueue = [];
+  let modelControlProcessing = false;
   // The newest full assertion is retained separately from the retry journal. A reconnect must
   // lead with it, because a replacement lease is fenced until the router accepts a snapshot.
   let lifecycleSnapshotChildren = [];
@@ -482,11 +487,13 @@ export function createMailboxClient({
       subagent_count: clampedCount,
       ...(summaries.length > 0 || clampedCount === 0 ? { subagents: summaries } : {}),
       ...(normalizeGoalProjection(goal) === undefined ? {} : { goal: normalizeGoalProjection(goal) }),
-      ...(normalizeModelSummary(currentModel) === undefined ? {} : { current_model: normalizeModelSummary(currentModel) }),
+      ...(!modelCatalogSupported || normalizeModelSummary(currentModel) === undefined
+        ? {}
+        : { current_model: normalizeModelSummary(currentModel) }),
     });
   }
 
-  function modelCatalogFrame(modelSummaries) {
+  function modelCatalogFrame(modelSummaries, totalCount = modelSummaries.length, currentModel = undefined) {
     return {
       version: "v1",
       frame_id: generateId(),
@@ -495,13 +502,19 @@ export function createMailboxClient({
       instance_id: instanceId,
       lease_id: leaseId,
       model_summaries: modelSummaries,
+      total_count: totalCount,
+      truncated: modelSummaries.length < totalCount,
+      ...(normalizeModelSummary(currentModel) === undefined
+        ? {}
+        : { current_model: normalizeModelSummary(currentModel) }),
     };
   }
 
-  function fitModelCatalogFrame(modelSummaries) {
-    const frame = modelCatalogFrame([]);
+  function fitModelCatalogFrame(modelSummaries, currentModel) {
+    const frame = modelCatalogFrame([], modelSummaries.length, currentModel);
     const serialize = (count) => {
       frame.model_summaries = modelSummaries.slice(0, count);
+      frame.truncated = count < frame.total_count;
       return JSON.stringify(frame);
     };
     if (Buffer.byteLength(serialize(0), "utf8") > modelCatalogFrameBytes) return undefined;
@@ -513,20 +526,31 @@ export function createMailboxClient({
       else high = middle - 1;
     }
     const serialized = serialize(low);
-    return { frame, serialized, signature: JSON.stringify(frame.model_summaries) };
+    return {
+      frame,
+      serialized,
+      signature: JSON.stringify({
+        model_summaries: frame.model_summaries,
+        total_count: frame.total_count,
+        truncated: frame.truncated,
+        current_model: frame.current_model,
+      }),
+    };
   }
 
   function publishModelCatalog({ force = false } = {}) {
     if (!modelCatalogSupported || !socketOpen(socket) || leaseId === undefined) return false;
     let catalog;
+    let currentModel;
     try {
       catalog = getModelCatalog();
+      currentModel = getCurrentModel();
     } catch (error) {
       modelControlTrace("client_model_catalog_read_failed", { error_name: error?.name ?? "Error" });
       return false;
     }
     const summaries = normalizeModelSummaries(catalog);
-    const fitted = fitModelCatalogFrame(summaries);
+    const fitted = fitModelCatalogFrame(summaries, currentModel);
     if (fitted === undefined) {
       modelControlTrace("client_model_catalog_publish_failed", { reason: "frame_budget_too_small", frame_bytes: modelCatalogFrameBytes });
       return false;
@@ -571,8 +595,25 @@ export function createMailboxClient({
     }, MODEL_CATALOG_REFRESH_INTERVAL_MS);
   }
 
-  async function receiveModelControl(frame) {
+  function modelControlContextIsCurrent(context) {
+    return socket === context.socket
+      && leaseId === context.leaseId
+      && socketOpen(context.socket)
+      && context.expiresAtMs > now();
+  }
+
+  async function receiveModelControl(frame, context) {
+    if (!modelControlContextIsCurrent(context)) {
+      modelControlTrace("client_model_control_dropped", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: context.expiresAtMs <= now() ? "expired" : "stale_connection",
+      });
+      return;
+    }
     modelControlTrace("client_model_control_received", {
+      lease_id: context.leaseId,
       control_id: frame.control_id,
       source_agent_id: frame.source_agent_id,
       requested_provider: frame.model?.provider,
@@ -582,6 +623,7 @@ export function createMailboxClient({
     let result;
     try {
       modelControlTrace("client_model_control_callback_started", {
+        lease_id: context.leaseId,
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
       });
@@ -592,6 +634,7 @@ export function createMailboxClient({
         model: normalizeModelSummary(frame.model),
       });
       modelControlTrace("client_model_control_callback_completed", {
+        lease_id: context.leaseId,
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
         accepted: result?.accepted === true,
@@ -601,6 +644,7 @@ export function createMailboxClient({
       });
     } catch (error) {
       modelControlTrace("client_model_control_callback_failed", {
+        lease_id: context.leaseId,
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
         error_name: error?.name ?? "Error",
@@ -608,19 +652,32 @@ export function createMailboxClient({
       result = { accepted: false, errorCode: "model_switch_failed" };
     }
     const currentModel = normalizeModelSummary(result?.currentModel);
+    publishModelCatalog({ force: true });
+    if (!modelControlContextIsCurrent(context)) {
+      modelControlTrace("client_model_control_result_failed", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: context.expiresAtMs <= now() ? "expired" : "stale_connection",
+      });
+      return;
+    }
     try {
-      send({
+      context.socket.send(JSON.stringify({
+        version: "v1",
+        frame_id: generateId(),
         type: "model_control_result",
         agent_id: agentId,
         instance_id: instanceId,
-        lease_id: leaseId,
+        lease_id: context.leaseId,
         source_agent_id: frame.source_agent_id,
         control_id: frame.control_id,
         accepted: result?.accepted === true,
         ...(result?.errorCode === undefined ? {} : { error_code: String(result.errorCode).slice(0, 128) }),
         ...(currentModel === undefined ? {} : { current_model: currentModel }),
-      });
+      }));
       modelControlTrace("client_model_control_result_sent", {
+        lease_id: context.leaseId,
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
         accepted: result?.accepted === true,
@@ -630,23 +687,77 @@ export function createMailboxClient({
       });
     } catch (error) {
       modelControlTrace("client_model_control_result_failed", {
+        lease_id: context.leaseId,
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
-        reason: socketOpen(socket) ? "socket_send_failed" : "client_not_connected",
+        reason: socketOpen(context.socket) ? "socket_send_failed" : "client_not_connected",
         error_name: error?.name ?? "Error",
       });
     }
   }
 
+  async function drainModelControlQueue() {
+    if (modelControlProcessing) return;
+    modelControlProcessing = true;
+    try {
+      while (modelControlQueue.length > 0) {
+        const pending = modelControlQueue.shift();
+        await receiveModelControl(pending.frame, pending.context);
+      }
+    } finally {
+      modelControlProcessing = false;
+      if (modelControlQueue.length > 0) void drainModelControlQueue();
+    }
+  }
+
   function enqueueModelControl(frame) {
-    const pending = modelControlTail.then(() => receiveModelControl(frame));
-    modelControlTail = pending.catch((error) => {
+    const parsedExpiry = Date.parse(frame.expires_at);
+    const context = {
+      socket,
+      leaseId,
+      expiresAtMs: Number.isFinite(parsedExpiry) ? parsedExpiry : now() + DEFAULT_MODEL_CONTROL_TTL_MS,
+    };
+    if (!modelControlContextIsCurrent(context)) {
+      modelControlTrace("client_model_control_dropped", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: "stale_connection",
+      });
+      return;
+    }
+    if (modelControlQueue.length >= MAX_QUEUED_MODEL_CONTROLS) {
+      modelControlTrace("client_model_control_dropped", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: "queue_capacity",
+      });
+      return;
+    }
+    modelControlQueue.push({ frame, context });
+    void drainModelControlQueue().catch((error) => {
       modelControlTrace("client_model_control_processing_failed", {
+        lease_id: context.leaseId,
         control_id: frame.control_id,
         source_agent_id: frame.source_agent_id,
         error_name: error?.name ?? "Error",
       });
     });
+  }
+
+  function dropQueuedModelControls(currentSocket, reason) {
+    for (let index = modelControlQueue.length - 1; index >= 0; index -= 1) {
+      const pending = modelControlQueue[index];
+      if (pending.context.socket !== currentSocket) continue;
+      modelControlQueue.splice(index, 1);
+      modelControlTrace("client_model_control_dropped", {
+        lease_id: pending.context.leaseId,
+        control_id: pending.frame.control_id,
+        source_agent_id: pending.frame.source_agent_id,
+        reason,
+      });
+    }
   }
 
   function messageArrival(message) {
@@ -742,6 +853,7 @@ export function createMailboxClient({
 
   function disconnected(currentSocket, error, { kickstartRouter = false } = {}) {
     if (socket !== currentSocket) return;
+    dropQueuedModelControls(currentSocket, "disconnected");
     clearIntervalImpl(renewTimer);
     renewTimer = undefined;
     clearIntervalImpl(modelCatalogTimer);
@@ -1007,6 +1119,7 @@ export function createMailboxClient({
       paused = true;
       clearConnectionTimers();
       const currentSocket = socket;
+      if (currentSocket !== undefined) dropQueuedModelControls(currentSocket, "paused");
       socket = undefined;
       leaseId = undefined;
       if (currentSocket !== undefined) closeSocket(currentSocket);
@@ -1046,6 +1159,7 @@ export function createMailboxClient({
       stopped = true;
       clearConnectionTimers();
       const currentSocket = socket;
+      if (currentSocket !== undefined) dropQueuedModelControls(currentSocket, "closed");
       socket = undefined;
       leaseId = undefined;
       if (rejectInitialConnection !== undefined) {
