@@ -8,8 +8,10 @@ const CONFIRMED_MODEL_REJECTION_CODES = new Set([
   "model_registry_failed",
   "model_registry_unavailable",
   "model_switch_failed",
+  "model_switch_rejected",
+  "model_switch_unavailable",
   "model_unavailable",
-  "unsupported_model_control_action",
+  "unsupported_model_control",
 ]);
 const SCOPED_EVENT_TYPES = new Set([
   "agents",
@@ -62,7 +64,10 @@ export function historyRequestMatches(event, selectedPeer, requestId) {
 export function matchingPendingModelControl(pendingControls, event) {
   if (!(pendingControls instanceof Map) || typeof event?.controlId !== "string") return undefined;
   const pending = pendingControls.get(event.controlId);
-  return pending?.peer === event.targetAgentId ? pending : undefined;
+  if (pending?.peer !== event.targetAgentId) return undefined;
+  if (pending.instanceId !== undefined && event.instanceId !== undefined
+    && pending.instanceId !== event.instanceId) return undefined;
+  return pending;
 }
 
 export function modelControlStatusTitle(accepted, errorCode) {

@@ -76,6 +76,10 @@ export async function startRouterWebUi({
   if (!Number.isSafeInteger(capabilityDiscoveryTimeoutMs) || capabilityDiscoveryTimeoutMs < 1) throw new Error("capabilityDiscoveryTimeoutMs must be a positive integer");
   const clients = new Set();
   const server = createServer((request, response) => {
+    if (!browserAuthorityIsAllowed(request.headers.host)) {
+      sendJson(response, 403, { error: "request_host_rejected" });
+      return;
+    }
     void handleRequest(request, response, { router, defaultAgentId }).catch(() => sendJson(response, 500, { error: "internal_error" }));
   });
   const browserWss = new WebSocketServer({
@@ -83,12 +87,12 @@ export async function startRouterWebUi({
     path: "/ui/events",
     perMessageDeflate: false,
     verifyClient: ({ origin, req }, done) => {
-      if (origin === undefined) {
-        done(true);
+      if (!browserAuthorityIsAllowed(req.headers.host)) {
+        done(false, 403, "browser host rejected");
         return;
       }
       const hostHeader = req.headers.host;
-      if (origin === `http://${hostHeader}` || origin === `https://${hostHeader}`) {
+      if (origin === `http://${hostHeader}`) {
         done(true);
         return;
       }
@@ -127,6 +131,16 @@ export async function startRouterWebUi({
       await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
     },
   };
+}
+
+function browserAuthorityIsAllowed(authority) {
+  if (typeof authority !== "string" || authority.length === 0) return false;
+  try {
+    const hostname = new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, "");
+    return hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
 }
 
 async function handleRequest(request, response, { router, defaultAgentId }) {
@@ -547,6 +561,7 @@ function createBrowserClient(browser, {
         if (command.type === "set_model") {
           const controlId = normalizeControlId(command.controlId ?? "");
           const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
+          const targetInstanceId = normalizeInstanceId(command.targetInstanceId ?? "");
           const provider = String(command.model?.provider ?? "").trim();
           const id = String(command.model?.id ?? "").trim();
           // Pi model IDs commonly include routing/size suffixes such as
@@ -568,6 +583,7 @@ function createBrowserClient(browser, {
             instance_id: configured.instanceId,
             lease_id: configured.leaseId,
             target_agent_id: targetAgentId,
+            target_instance_id: targetInstanceId,
             control_id: controlId,
             action: "set_model",
             model: { provider, id },
@@ -734,6 +750,12 @@ function normalizeControlId(value) {
   const controlId = String(value).trim();
   if (!CONTROL_ID.test(controlId)) throw new Error("Control ID is invalid");
   return controlId;
+}
+
+function normalizeInstanceId(value) {
+  const instanceId = String(value).trim();
+  if (!CONTROL_ID.test(instanceId)) throw new Error("Instance ID is invalid");
+  return instanceId;
 }
 
 function normalizeConversationPeer(value) {

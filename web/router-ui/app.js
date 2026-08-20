@@ -668,11 +668,6 @@ function updateAgentModelCatalog(peer, instanceId, projection, { render = true, 
   const merged = mergeAgentModelProjection(state.agents, peer, instanceId, projection, { replaceInstance });
   if (!merged.changed) return;
   state.agents = merged.agents;
-  if (peer === state.selectedPeer && merged.currentModel !== undefined
-    && modelPickerSelection?.peer === peer
-    && modelKey(modelPickerSelection.model) === modelKey(merged.currentModel)) {
-    modelPickerSelection = undefined;
-  }
   if (render) {
     renderAgents();
     renderConversation();
@@ -1359,14 +1354,22 @@ function setModelPickerOpen(open, { focus = false } = {}) {
 function selectModel(model) {
   const peer = state.selectedPeer;
   if (!peer) return;
+  const targetInstanceId = state.agents.find((agent) => agent.agent_id === peer)?.instance_id;
+  if (!targetInstanceId) return;
   const controlId = `model-control-${crypto.randomUUID()}`;
-  state.pendingModelControls.set(controlId, { peer, model });
+  state.pendingModelControls.set(controlId, { peer, model, instanceId: targetInstanceId });
   modelPickerSelection = { peer, model, controlId };
   elements.modelCurrentLabel.textContent = modelKey(model);
   modelPickerSearchText = "";
   elements.modelSearch.value = "";
   setModelPickerOpen(false);
-  if (!sendCommand({ type: "set_model", controlId, targetAgentId: peer, model: { provider: model.provider, id: model.id } })) {
+  if (!sendCommand({
+    type: "set_model",
+    controlId,
+    targetAgentId: peer,
+    targetInstanceId,
+    model: { provider: model.provider, id: model.id },
+  })) {
     state.pendingModelControls.delete(controlId);
     modelPickerSelection = undefined;
     renderModelControls(state.agents.find((agent) => agent.agent_id === peer));

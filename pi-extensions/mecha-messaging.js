@@ -108,7 +108,7 @@ function readAvailableModelsForContext(context) {
 
 function projectAvailableModels(context) {
   return readAvailableModelsForContext(context)
-    .slice(0, MAX_MODEL_METADATA_ITEMS)
+    .slice(0, 1_000_000)
     .map(projectModelMetadata)
     .filter(Boolean);
 }
@@ -121,7 +121,6 @@ function modelProjection(context) {
       .slice(0, MAX_MODEL_METADATA_ITEMS)
       .map(projectModelMetadata)
       .filter(Boolean),
-    availableKnown: availableModels !== undefined,
   };
 }
 
@@ -134,7 +133,6 @@ function getOwnerSubagentsService(ownerSessionId) {
 
 const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
 export const INLINE_TOOL_ALLOWANCE_TOOL_NAME = "mecha_request_inline_tool_allowance";
-export const MODEL_SWITCH_TOOL_NAME = "mecha_model_switch";
 const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
   mecha_parent_message: {
     promptSnippet: "Send a message from a native subagent to its parent",
@@ -176,13 +174,6 @@ const MECHA_MESSAGING_CURSOR_TOOL_METADATA = Object.freeze({
     promptGuidelines: [
       "Use mecha_context with action status, set_policy, or compact for context-threshold and compaction control.",
       "Call pi__mecha_context through the Cursor pi bridge.",
-    ],
-  },
-  [MODEL_SWITCH_TOOL_NAME]: {
-    promptSnippet: "Switch the current Pi model",
-    promptGuidelines: [
-      "Use mecha_model_switch with the exact provider and id from the available model list.",
-      "Call pi__mecha_model_switch through the Cursor pi bridge.",
     ],
   },
 });
@@ -1332,7 +1323,6 @@ export function createMechaMessagingExtension(pi, {
   // published immediately even if the next event has not supplied a fresh
   // context snapshot yet.
   let modelSwitchOverride;
-  let modelSwitchTail = Promise.resolve();
   let lastActivitySent;
   let lastNativeSubagentReadDiagnosticMs;
   function nativeSubagentService(ownerSessionId = parentActivityContext?.sessionManager?.getSessionId?.()) {
@@ -1720,12 +1710,6 @@ export function createMechaMessagingExtension(pi, {
         sourceModel: modelProjection(context).current,
       };
     }
-  }
-
-  function serializeModelSwitch(operation) {
-    const result = modelSwitchTail.then(operation);
-    modelSwitchTail = result.catch(() => {});
-    return result;
   }
 
   function parentActivityStateFromPiContext() {
@@ -2117,7 +2101,6 @@ export function createMechaMessagingExtension(pi, {
       return {
         accepted: true,
         currentModel: projection.current,
-        ...(projection.availableKnown ? { availableModels: projection.available } : {}),
       };
     } catch (error) {
       const projection = effectiveModelProjection(parentActivityContext);
@@ -2134,13 +2117,12 @@ export function createMechaMessagingExtension(pi, {
         accepted: false,
         errorCode: modelControlErrorCode(error),
         currentModel: projection.current,
-        ...(projection.availableKnown ? { availableModels: projection.available } : {}),
       };
     }
   }
 
   function handleModelControl(control) {
-    return serializeModelSwitch(() => performModelControl(control));
+    return performModelControl(control);
   }
 
   pi.registerTool({
@@ -2244,44 +2226,6 @@ export function createMechaMessagingExtension(pi, {
         return { content: [{ type: "text", text }], details: grant };
       } catch (error) {
         return { content: [{ type: "text", text: error.message }], details: error.details ?? {}, isError: true };
-      }
-    },
-  });
-
-  if (typeof pi.registerTool === "function") pi.registerTool({
-    name: MODEL_SWITCH_TOOL_NAME,
-    label: "Switch Pi model",
-    description: "Switch Pi to an available model by its exact provider and id.",
-    ...MECHA_MESSAGING_CURSOR_TOOL_METADATA[MODEL_SWITCH_TOOL_NAME],
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      required: ["provider", "id"],
-      properties: {
-        provider: { type: "string", minLength: 1, maxLength: MAX_MODEL_PROVIDER_CHARS },
-        id: { type: "string", minLength: 1, maxLength: MAX_MODEL_ID_CHARS },
-      },
-    },
-    async execute(_toolCallId, input, _signal, _onUpdate, toolContext) {
-      const status = () => {
-        const projection = effectiveModelProjection(toolContext);
-        return { current: projection.current, available: projection.available };
-      };
-      try {
-        await serializeModelSwitch(async () => {
-          const selected = await switchPiModel(input, toolContext);
-          rememberSuccessfulModelSwitch(toolContext, selected);
-          refreshActivityState(toolContext);
-          return selected;
-        });
-        const projection = status();
-        return {
-          content: [{ type: "text", text: JSON.stringify(projection) }],
-          details: projection,
-        };
-      } catch (error) {
-        const projection = status();
-        return { content: [{ type: "text", text: error.message }], details: projection, isError: true };
       }
     },
   });

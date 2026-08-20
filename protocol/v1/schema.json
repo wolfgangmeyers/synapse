@@ -251,14 +251,14 @@
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "lease_id": { "$ref": "#/$defs/leaseId" },
         "model_summaries": { "$ref": "#/$defs/modelSummaries" },
-        "total_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "total_count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
         "truncated": { "type": "boolean" },
         "current_model": { "$ref": "#/$defs/modelSummary" }
       }
     },
     "modelControlFrame": {
       "type": "object", "additionalProperties": false,
-      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "target_agent_id", "control_id", "action", "model"],
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "action", "model"],
       "properties": {
         "version": { "const": "v1" },
         "frame_id": { "$ref": "#/$defs/frameId" },
@@ -267,6 +267,7 @@
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "lease_id": { "$ref": "#/$defs/leaseId" },
         "target_agent_id": { "$ref": "#/$defs/agentId" },
+        "target_instance_id": { "$ref": "#/$defs/instanceId" },
         "control_id": { "$ref": "#/$defs/frameId" },
         "action": { "const": "set_model" },
         "model": { "$ref": "#/$defs/modelSummary" }
@@ -758,7 +759,7 @@
         "agent_id": { "$ref": "#/$defs/agentId" },
         "instance_id": { "$ref": "#/$defs/instanceId" },
         "model_summaries": { "$ref": "#/$defs/modelSummaries" },
-        "total_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "total_count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
         "truncated": { "type": "boolean" },
         "current_model": { "$ref": "#/$defs/modelSummary" },
         "generated_at": { "$ref": "#/$defs/utcMillis" }
