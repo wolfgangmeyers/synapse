@@ -436,51 +436,36 @@ with open(settings_path, "w") as f:
 print(f"set: promptSuggestionEnabled = false in {settings_path}")
 ```
 
-### 9. Install the Priority Handoff Monitor
+### 9. Install supervisor tool-call recovery
 
-The deterministic five-minute **Priority Handoff Monitor** is separate from the LLM-based Watchdog. It has no Git-hook requirement, no workflow dependency, and creates no Mailbox reminder. It requires only:
-
-- Python 3 and a user crontab;
-- a running Mailbox V2 router reachable at `${MECHA_ROUTER_URL:-http://127.0.0.1:8765}`; and
-- an initialized supervisor state file at `${MECHA_STATE_FILE:-$HOME/.mecha-developer/supervisor-state.json}` before its live state/reminder check.
-
-From the portable repository root, install exactly one schedule:
+Supervisor sessions can fail when Pi persists an orphaned tool result after
+compaction. Keep the narrow recovery check on its own five-minute schedule:
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-MECHA_ROUTER_URL="${MECHA_ROUTER_URL:-http://127.0.0.1:8765}"
-export MECHA_ROUTER_URL
-
-curl --fail --silent --show-error "$MECHA_ROUTER_URL/v1/health"
-/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --install-schedule
+/usr/bin/python3 "$REPO_ROOT/.claude/skills/supervisor/tools/supervisor_tool_call_recovery.py" \
+  --dry-run
 ```
 
-Expected install output starts with `Installed one five-minute Priority Handoff Monitor schedule:`. Re-running the command replaces an earlier marked monitor entry and the retired legacy priority entry, leaving one `# mecha-priority-handoff-monitor` line. It does not alter an independent LLM Watchdog schedule.
-
-For a machine being cut over from legacy Watchdog reminders, after the router and supervisor state are available, review then apply the one-time reconciliation:
+Install exactly one marked schedule alongside the other local cron jobs:
 
 ```bash
-/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --reconcile-retired-controls --dry-run
-/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --reconcile-retired-controls
+RECOVERY="$REPO_ROOT/.claude/skills/supervisor/tools/supervisor_tool_call_recovery.py"
+CURRENT_CRONTAB="$(crontab -l 2>/dev/null || true)"
+FILTERED_CRONTAB="$(printf '%s\n' "$CURRENT_CRONTAB" | grep -Ev 'mecha-priority-handoff-monitor|priority_handoff_monitor.py|watchdog.py --priority-only' || true)"
+if ! printf '%s\n' "$FILTERED_CRONTAB" | grep -q "mecha-supervisor-tool-call-recovery"; then
+  FILTERED_CRONTAB="$FILTERED_CRONTAB
+*/5 * * * * /usr/bin/python3 $RECOVERY >> ~/.mecha-developer/supervisor-tool-call-recovery.log 2>&1 # mecha-supervisor-tool-call-recovery"
+  echo "added: supervisor tool-call recovery cron job"
+else
+  echo "skipped: supervisor tool-call recovery cron job already exists"
+fi
+printf '%s\n' "$FILTERED_CRONTAB" | crontab -
 ```
 
-The second command records only the exact historical terminal reminder IDs in supervisor state, clears the stale `priority_control.watchdog_reminder_id` reference, and cancels only an unlinked scheduled legacy control. Terminal failed/dead-letter records that the router cannot cancel are retired legacy controls: their liveness reference is cleared/ignored, not replaced. New terminal delivery failures are not ignored. Expected output starts with `PRIORITY HANDOFF MONITOR RETIRED:` and includes the owner, action, and resolved-when proof.
-
-Validate a new-machine installation after supervisor state exists:
-
-```bash
-crontab -l | grep -F "# mecha-priority-handoff-monitor"
-MECHA_ROUTER_URL="$MECHA_ROUTER_URL" /usr/bin/python3 \
-  "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --dry-run
-```
-
-The first command must print exactly one matching cron line. The second must print `PRIORITY HANDOFF MONITOR OK: state and router reminder evidence are current; no priority handoff breach.` when the state/router are healthy, or an actionable `WARN`/`FAIL` with `owner=`, `action=`, and `resolved-when=`.
-
-The monitor appends to `$HOME/.mecha-developer/priority-handoff-monitor.log` and trims it to 1 MiB (retaining its newest 512 KiB) on every invocation. Roll it back without touching other cron entries:
-
-```bash
-/usr/bin/python3 "$REPO_ROOT/.claude/skills/watchdog/tools/priority_handoff_monitor.py" --remove-schedule
-```
+The recovery check only examines recent supervisor session files and restarts
+the `mecha:supervisor` window when strict orphan-tool-result evidence exists.
+Its log is bounded by the existing daily log-retention job.
 
 ### 10. Set Up Other Crontab Jobs
 
@@ -520,8 +505,6 @@ if ! crontab -l 2>/dev/null | grep -q "memory_monitor.py"; then
 else
   echo "skipped: memory monitor cron job already exists"
 fi
-
-# The Priority Handoff Monitor is installed in step 9. Do not add a second schedule here.
 
 # Mailbox V2 router owns reminder scheduling. Remove retired cron producers
 # so they cannot create duplicate or filesystem-backed deliveries.
@@ -579,7 +562,7 @@ fi
 
 The cron jobs:
 - **memory_monitor.py**: Runs every 5 minutes. Monitors context window usage for active workers and alerts when approaching limits.
-- **Priority Handoff Monitor**: Runs every five minutes. It reads supervisor state and durable Mailbox router reminders, reports actionable terminal-priority and handoff faults, and bounds `~/.mecha-developer/priority-handoff-monitor.log` to 1 MiB. It does not create a reminder. `--remove-schedule` removes only its marked cron entry.
+- **Supervisor tool-call recovery**: Runs every five minutes. It detects strict orphan-tool-result crashes and restarts only the supervisor window with a recovery handoff.
 - **Mailbox V2 router**: Persists and schedules durable reminders; no reminder cron job or reminder JSON file is used.
 - **logrotate**: Runs daily. Rotates logs in `~/.mecha-developer/` when they exceed size limits; keeps 1 backup, discards anything older than 24 hours.
 
@@ -616,7 +599,7 @@ echo "=== Crontab ==="
 crontab -l 2>/dev/null | grep "mailbox_cron.py" && echo "WARN: retired mailbox cron job remains" || echo "no retired mailbox cron job"
 crontab -l 2>/dev/null | grep "standing_orders_cron.py" && echo "WARN: retired standing-orders cron job remains" || echo "no retired standing-orders cron job (router owns delivery)"
 crontab -l 2>/dev/null | grep "memory_monitor.py" || echo "no memory monitor cron job"
-crontab -l 2>/dev/null | grep "mecha-priority-handoff-monitor" || echo "no Priority Handoff Monitor cron job"
+crontab -l 2>/dev/null | grep "mecha-supervisor-tool-call-recovery" || echo "no supervisor tool-call recovery cron job"
 crontab -l 2>/dev/null | grep "reminders/tools/reminder_cron.py" && echo "WARN: retired reminder cron job remains" || echo "Mailbox V2 router owns reminder scheduling"
 crontab -l 2>/dev/null | grep "kb_reminder_cron.py" && echo "WARN: retired KB maintenance reminder cron job remains" || echo "Router owns KB maintenance reminder scheduling"
 ```
