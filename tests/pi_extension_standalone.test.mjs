@@ -391,6 +391,25 @@ async function sessionStart(fixture, context = fixture.context) {
   for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, context);
 }
 
+test("managed workers receive their tmux identity on startup and resume", async () => {
+  for (const [reason, agentId] of [["startup", "worker-start"], ["resume", "worker-resumed"]]) {
+    const fixture = createMessagingFixture({ resolveCurrentAgentId: () => agentId });
+    for (const handler of fixture.handlers.get("session_start") ?? []) {
+      await handler({ reason }, fixture.context);
+    }
+
+    assert.deepEqual(fixture.sent, [[{
+      customType: "mecha-worker-identity",
+      content: `Your managed worker identity is ${agentId}.`,
+      display: false,
+      details: { agent_id: agentId },
+    }, {
+      deliverAs: "followUp",
+      triggerTurn: false,
+    }]], reason);
+  }
+});
+
 test("activity broadcasts current model metadata without recurring catalog payloads", async () => {
   const activity = [];
   const current = {

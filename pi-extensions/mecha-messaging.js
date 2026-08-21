@@ -2585,6 +2585,12 @@ export function createMechaMessagingExtension(pi, {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
       parentAgentId = agentId;
+      pi.sendMessage({
+        customType: "mecha-worker-identity",
+        content: `Your managed worker identity is ${agentId}.`,
+        display: false,
+        details: { agent_id: agentId },
+      }, { deliverAs: "followUp", triggerTurn: false });
       rememberParentActivityContext(context);
       settledNotificationPending = false;
       settledNotificationAgentId = agentId;
