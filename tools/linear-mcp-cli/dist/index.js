@@ -4,12 +4,22 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import open from 'open';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { auth, } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 const SERVER_URL = 'https://mcp.linear.app/mcp';
+const VOICE_REVIEW_CONFIRMATION_FLAG = '--confirm-wolfgang-voice-review';
+const COMMENT_TOOLS = new Set(['save_comment', 'save_diff_comment']);
+function requiresVoiceReviewConfirmation(tool, args) {
+    return COMMENT_TOOLS.has(tool) || (tool === 'submit_diff_review' && typeof args.body === 'string');
+}
+function assertVoiceReviewConfirmation(tool, args, confirmed) {
+    if (requiresVoiceReviewConfirmation(tool, args) && !confirmed) {
+        throw new Error(`Human-facing Linear posts under Wolfgang's name require the Wolfgang voice review. Pass ${VOICE_REVIEW_CONFIRMATION_FLAG}.`);
+    }
+}
 // OAuth clients register their redirect URI. Keep this stable so the registered
 // client remains usable across invocations.
 const OAUTH_PORT = 3389;
@@ -181,7 +191,7 @@ program.command('tools').description('List Linear MCP tools').option('--json', '
         for (const tool of result.tools)
             console.log(`${tool.name}${tool.description ? `\t${tool.description}` : ''}`);
 });
-program.command('call <tool> <arguments-json>').description('Call a Linear MCP tool with a JSON object').action(async (tool, rawArguments) => {
+program.command('call <tool> <arguments-json>').description('Call a Linear MCP tool with a JSON object').addOption(new Option(VOICE_REVIEW_CONFIRMATION_FLAG).hideHelp()).action(async (tool, rawArguments, options) => {
     let args;
     try {
         args = JSON.parse(rawArguments);
@@ -191,6 +201,7 @@ program.command('call <tool> <arguments-json>').description('Call a Linear MCP t
     }
     if (!args || Array.isArray(args) || typeof args !== 'object')
         throw new Error('arguments-json must be a JSON object.');
+    assertVoiceReviewConfirmation(tool, args, options.confirmWolfgangVoiceReview === true);
     const result = await withClient(client => client.callTool({ name: tool, arguments: args }));
     console.log(JSON.stringify(result, null, 2));
 });
