@@ -27,6 +27,8 @@ const MAX_WAITING_AUTHORIZATION_WAKEUPS = 3;
 const MAX_SNOOZE_TURN_LIMIT = 20;
 const COMPLETIONS_TO_RESET_WAKEUPS = 3;
 const DEFAULT_SNOOZE_DURATION_MS = 60_000;
+const DEFAULT_SNOOZE_REFILL_YIELD_MS = 30_000;
+const DEFAULT_SNOOZE_REFILL_ELAPSED_MS = 60_000;
 const SUPERVISOR_WAIT_DURATION_MS = 5 * 60_000;
 const EVALUATOR_PROMPT = "goal: <goal description> - supervisor-dependent blocking is BLOCKED; return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE|WAITING_FOR_USER_AUTHORIZATION and REASON: <concise rationale>";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
@@ -95,7 +97,7 @@ function restoreState(ctx) {
     blockedWakeups: 0,
     completedThings: 0,
     goalLockEnabled: false,
-    snoozeEnabled: false,
+    snoozeEnabled: true,
     snoozeDurationMs: DEFAULT_SNOOZE_DURATION_MS,
   };
   for (const entry of ctx.sessionManager.getBranch?.() ?? []) {
@@ -115,7 +117,7 @@ function restoreState(ctx) {
         ? data.completedThings % COMPLETIONS_TO_RESET_WAKEUPS
         : 0,
       goalLockEnabled: data.goalLockEnabled === true,
-      snoozeEnabled: data.snoozeEnabled === true,
+      snoozeEnabled: !Object.hasOwn(data, "snoozeEnabled") || data.snoozeEnabled === true,
       snoozeDurationMs: Number.isSafeInteger(data.snoozeDurationMs) && data.snoozeDurationMs > 0
         ? data.snoozeDurationMs
         : DEFAULT_SNOOZE_DURATION_MS,
@@ -288,14 +290,14 @@ export function createGoalExtension(pi, options = {}) {
   let completedThings = 0;
   let goalLockEnabled = false;
   let completedOffAllowance = false;
-  let snoozeEnabled = false;
+  let snoozeEnabled = true;
   let snoozeDurationMs = DEFAULT_SNOOZE_DURATION_MS;
   let snoozeTurnLimit;
   let snoozeBudgetCapMs;
   let snoozeBudgetAvailableMs = 0;
   let snoozeBudgetLastAtMs;
-  let snoozeRefillYieldMs;
-  let snoozeRefillElapsedMs;
+  let snoozeRefillYieldMs = DEFAULT_SNOOZE_REFILL_YIELD_MS;
+  let snoozeRefillElapsedMs = DEFAULT_SNOOZE_REFILL_ELAPSED_MS;
   let compactionLifecyclePause = false;
   let lastOwnerGateState = "allowed";
 
@@ -320,8 +322,8 @@ export function createGoalExtension(pi, options = {}) {
     snoozeBudgetCapMs = undefined;
     snoozeBudgetAvailableMs = 0;
     snoozeBudgetLastAtMs = undefined;
-    snoozeRefillYieldMs = undefined;
-    snoozeRefillElapsedMs = undefined;
+    snoozeRefillYieldMs = DEFAULT_SNOOZE_REFILL_YIELD_MS;
+    snoozeRefillElapsedMs = DEFAULT_SNOOZE_REFILL_ELAPSED_MS;
   };
   const setSnoozeBudget = (durationMs) => {
     snoozeBudgetCapMs = durationMs;

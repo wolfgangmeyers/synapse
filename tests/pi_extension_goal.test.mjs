@@ -148,7 +148,7 @@ test("goal tool registers its action schema and shares state with /goal", async 
   assert.deepEqual(current.notices.at(-1), { message: "Goal enabled: ship the tool", type: "info" });
 
   const statusResult = await callGoalTool(current, { action: "status" });
-  assert.deepEqual(statusResult.details, { action: "status", enabled: true, goal: "ship the tool", evaluatorCalls: 0, notDoneWakeups: 0, blockedWakeups: 0, waitingAuthWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000, lastOwnerGateState: "allowed" });
+  assert.deepEqual(statusResult.details, { action: "status", enabled: true, goal: "ship the tool", evaluatorCalls: 0, notDoneWakeups: 0, blockedWakeups: 0, waitingAuthWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000, lastOwnerGateState: "allowed" });
   const updateResult = await callGoalTool(current, { action: "set", goal: "ship the updated tool" });
   assert.deepEqual(updateResult.details, { action: "set", enabled: true, goal: "ship the updated tool" });
   const offResult = await callGoalTool(current, { action: "off" });
@@ -170,7 +170,7 @@ test("/goal commands persist branch-local state and support status/off", async (
   assert.deepEqual(current.entries.at(-1), {
     type: "custom",
     customType: GOAL_ENTRY,
-    data: { enabled: true, goal: "ship the focused extension", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000 },
+    data: { enabled: true, goal: "ship the focused extension", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000 },
   });
   await current.commands.get("goal").handler("status", current.context);
   assert.deepEqual(current.notices.at(-1), { message: "Goal enabled: ship the focused extension", type: "info" });
@@ -182,7 +182,7 @@ test("/goal commands persist branch-local state and support status/off", async (
   assert.deepEqual(restored.notices.at(-1), { message: "Goal enabled: ship the focused extension", type: "info" });
 
   await restored.commands.get("goal").handler("off", restored.context);
-  assert.deepEqual(restored.entries.at(-1).data, { enabled: false, goal: "ship the focused extension", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000 });
+  assert.deepEqual(restored.entries.at(-1).data, { enabled: false, goal: "ship the focused extension", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000 });
   await settle(restored);
   assert.equal(restored.sent.length, 0);
 });
@@ -331,6 +331,7 @@ test("session compaction pauses a scheduled evaluator and reactivates it after c
 test("session compaction gates and resumes the goal self-wakeup", async () => {
   const current = fixture({ sessionId: "session" });
   await setGoal(current, "make progress");
+  await current.commands.get("goal-snooze").handler("off", current.context);
   current.handlers.get("session_before_compact")({}, current.context);
   await flushDeferred();
   assert.equal(current.sent.length, 0, "self-wakeup cannot bypass compaction");
@@ -429,6 +430,7 @@ test("settled goal evaluation uses the registered provider stream instead of com
     },
   });
   await setGoal(current, "use the Cursor provider");
+  await current.commands.get("goal-snooze").handler("off", current.context);
 
   await settle(current);
   await flushDeferred();
@@ -448,6 +450,7 @@ test("settled goal evaluation uses bounded active context and exact steer wakeup
     return { content: [{ type: "text", text: "VERDICT: COMPLETED\nREASON: The goal is complete." }] };
   } });
   await setGoal(current, "finish the goal extension");
+  await current.commands.get("goal-snooze").handler("off", current.context);
   current.branch.push({ type: "message", message: { role: "user", content: "x".repeat(MAX_CONTEXT_BYTES * 2) } });
 
   await settle(current);
@@ -485,6 +488,7 @@ test("NOT_DONE defers its continuation, skips exactly one injected settle, and e
     },
   });
   await setGoal(current, "make progress");
+  await current.commands.get("goal-snooze").handler("off", current.context);
 
   await settle(current);
   assert.equal(current.sent.length, 0, "the continuation waits until the settled callback returns");
@@ -509,6 +513,7 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
   ]) {
     const current = fixture({ complete: async () => response });
     await setGoal(current, "make progress");
+    await current.commands.get("goal-snooze").handler("off", current.context);
     await settle(current);
     await flushDeferred();
     await flushDeferred();
@@ -518,6 +523,7 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
   let reject = true;
   const current = fixture({ complete: async () => { if (reject) throw new Error("provider unavailable"); return { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: A supervisor decision is required." }] }; } });
   await setGoal(current, "make progress");
+  await current.commands.get("goal-snooze").handler("off", current.context);
   await settle(current);
   await flushDeferred();
   await flushDeferred();
@@ -531,6 +537,7 @@ test("BLOCKED wakeup contacts the supervisor and starts the automatic wait", asy
     response: { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: A supervisor decision is required." }] },
   });
   await setGoal(current, "finish the goal extension");
+  await current.commands.get("goal-snooze").handler("off", current.context);
   await settle(current);
   runtime.advance(0);
   await Promise.resolve();
@@ -542,7 +549,7 @@ test("BLOCKED wakeup contacts the supervisor and starts the automatic wait", asy
   assert.equal(current.sent[0].message.content, "Goal check: BLOCKED. CONTACT OR BUG THE SUPERVISOR NOW TO GET UNBLOCKED. A special automatic 5-minute wait is starting. I will wake you after 5 minutes to prompt you to contact the supervisor again.\nVERDICT: BLOCKED\nREASON: A supervisor decision is required.");
 });
 
-test("BLOCKED wait expires into a normal evaluator independently of snooze limits", async () => {
+test("BLOCKED wait expires independently of the custom snooze turn limit and budget", async () => {
   const runtime = fakeTimer();
   const calls = [];
   const outcomes = ["BLOCKED", "NOT_DONE"];
@@ -557,6 +564,7 @@ test("BLOCKED wait expires into a normal evaluator independently of snooze limit
   await setGoal(current, "finish the goal extension");
   await current.commands.get("goal-snooze").handler("1s", current.context);
   await current.commands.get("goal-snooze-turn-limit").handler("1", current.context);
+  assert.equal(current.notices.at(-1).message, "Goal snooze turn limit set: 1");
   await current.commands.get("goal-snooze-budget").handler("1s", current.context);
   await settle(current);
   runtime.advance(0);
@@ -801,6 +809,7 @@ test("BLOCKED wait defers through compaction and is canceled by a goal change", 
 test("WAITING_FOR_USER_AUTHORIZATION wakeup demands immediate action and carries its outcome", async () => {
   const current = fixture({ response: { content: [{ type: "text", text: "VERDICT: WAITING_FOR_USER_AUTHORIZATION\nREASON: Authorization appears necessary." }] } });
   await setGoal(current, "finish the goal extension");
+  await current.commands.get("goal-snooze").handler("off", current.context);
   await settle(current);
   await flushDeferred();
   await flushDeferred();
@@ -1105,7 +1114,7 @@ test("the wakeup macrotask rechecks owner activity after evaluation", async () =
     await flushDeferred();
     assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 0, "active owner work suppresses the wakeup");
     const status = await callGoalTool(current, { action: "status" });
-    assert.deepEqual(status.details, { action: "status", enabled: true, goal: "wait for the owner child", evaluatorCalls: 1, notDoneWakeups: 0, blockedWakeups: 0, waitingAuthWakeups: 0, completedThings: 1, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000, lastOwnerGateState: "suppressed" });
+    assert.deepEqual(status.details, { action: "status", enabled: true, goal: "wait for the owner child", evaluatorCalls: 1, notDoneWakeups: 0, blockedWakeups: 0, waitingAuthWakeups: 0, completedThings: 1, goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000, lastOwnerGateState: "suppressed" });
     active = false;
     await settle(current);
     await flushDeferred();
@@ -1135,6 +1144,7 @@ test("goal off cancels an in-flight evaluation and prevents stale injection", as
   let resolve;
   const current = fixture({ complete: () => new Promise((done) => { resolve = done; }) });
   await setGoal(current, "cancel safely");
+  await current.commands.get("goal-snooze").handler("off", current.context);
   const pending = settle(current);
   await flushDeferred();
   await current.commands.get("goal").handler("off", current.context);
@@ -1143,19 +1153,18 @@ test("goal off cancels an in-flight evaluation and prevents stale injection", as
   assert.equal(current.sent.length, 0);
 });
 
-test("goal snooze is opt-in, parses duration, and injects availability once", async () => {
+test("goal snooze is enabled by default, parses duration, and injects availability once", async () => {
   const current = fixture({
     complete: async () => ({ content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] }),
   });
   const snoozeTool = current.tools.get("goal_snooze");
   assert.ok(snoozeTool);
-  const unavailable = await snoozeTool.execute("snooze", {}, undefined, undefined, current.context);
-  assert.equal(unavailable.isError, true);
-  assert.match(unavailable.content[0].text, /not enabled/);
+  const initialStatus = await callGoalTool(current, { action: "status" });
+  assert.equal(initialStatus.details.snoozeEnabled, true);
+  assert.equal(initialStatus.details.snoozeDurationMs, 60_000);
 
   await setGoal(current, "make progress");
   await flushDeferred();
-  current.sent.length = 0;
 
   await current.commands.get("goal-snooze").handler("", current.context);
   assert.deepEqual(current.entries.at(-1).data, {
@@ -1587,7 +1596,52 @@ test("session recovery clears ephemeral snooze budget and turn limit but restore
   assert.equal((await callGoalTool(recovered, { action: "status" })).details.notDoneWakeups, 1);
 });
 
-test("legacy goal state defaults snooze to disabled and the standard duration", async () => {
+test("snooze defaults remain configurable and persist across session recovery", async () => {
+  const current = fixture();
+  await setGoal(current, "recover snooze settings");
+  await current.commands.get("goal-snooze").handler("off", current.context);
+  await current.commands.get("goal-snooze").handler("123s", current.context);
+
+  const recovered = fixture();
+  recovered.branch.push(...current.branch);
+  await recovered.handlers.get("session_start")({}, recovered.context);
+  const status = await callGoalTool(recovered, { action: "status" });
+  assert.equal(status.details.snoozeEnabled, true);
+  assert.equal(status.details.snoozeDurationMs, 123_000);
+
+  await current.commands.get("goal-snooze").handler("off", current.context);
+  const disabled = fixture();
+  disabled.branch.push(...current.branch);
+  await disabled.handlers.get("session_start")({}, disabled.context);
+  const disabledStatus = await callGoalTool(disabled, { action: "status" });
+  assert.equal(disabledStatus.details.snoozeEnabled, false);
+  assert.equal(disabledStatus.details.snoozeDurationMs, 123_000);
+});
+
+test("default snooze budget refill yields thirty seconds per minute", async () => {
+  const runtime = fakeTimer();
+  const current = fixture({ extensionOptions: runtime });
+  await setGoal(current, "refill snooze budget");
+  await current.commands.get("goal-snooze").handler("1m", current.context);
+  await current.commands.get("goal-snooze-budget").handler("1m", current.context);
+  const snooze = current.tools.get("goal_snooze");
+
+  let waiting = snooze.execute("snooze", {}, undefined, undefined, current.context);
+  runtime.advance(60_000);
+  assert.equal((await waiting).isError, undefined);
+  runtime.advance(0);
+  await current.commands.get("goal-snooze").handler("15s", current.context);
+  runtime.advance(30_000);
+
+  waiting = snooze.execute("snooze", {}, undefined, undefined, current.context);
+  runtime.advance(15_000);
+  assert.equal((await waiting).isError, undefined);
+  runtime.advance(0);
+  const exhausted = await snooze.execute("snooze", {}, undefined, undefined, current.context);
+  assert.equal(exhausted.isError, true, "thirty seconds should refill fifteen seconds after the first minute is spent");
+});
+
+test("legacy goal state defaults snooze to enabled with the standard duration", async () => {
   const current = fixture();
   current.branch.push({
     type: "custom",
@@ -1595,8 +1649,7 @@ test("legacy goal state defaults snooze to disabled and the standard duration", 
     data: { enabled: true, goal: "legacy goal", notDoneWakeups: 0, completedThings: 0 },
   });
   await current.handlers.get("session_start")({}, current.context);
-  const unavailable = await current.tools.get("goal_snooze").execute("snooze", {}, undefined, undefined, current.context);
-  assert.equal(unavailable.isError, true);
-  await current.commands.get("goal-snooze").handler("", current.context);
-  assert.equal(current.entries.at(-1).data.snoozeDurationMs, 60_000);
+  const status = await callGoalTool(current, { action: "status" });
+  assert.equal(status.details.snoozeEnabled, true);
+  assert.equal(status.details.snoozeDurationMs, 60_000);
 });

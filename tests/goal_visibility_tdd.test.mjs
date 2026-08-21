@@ -47,8 +47,9 @@ test("goal publishes cached normalized state and replays it to a late subscriber
 });
 
 test("goal set persists before one deferred self-wakeup and off does not wake", async () => {
-  const current = fixture({ onSend: (entries) => assert.deepEqual(entries.at(-1).data, { enabled: true, goal: "start work" }) });
+  const current = fixture({ onSend: (entries) => assert.deepEqual(entries.at(-1).data, { enabled: true, goal: "start work", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000 }) });
   await current.commands.get("goal").handler("set start work", current.context);
+  await current.commands.get("goal-snooze").handler("off", current.context);
   assert.equal(current.sent.length, 0);
   await flush();
   assert.equal(current.sent.length, 1);
@@ -61,7 +62,8 @@ test("goal set persists before one deferred self-wakeup and off does not wake", 
 test("goal wake failure leaves persisted state and does not evaluate", async () => {
   const current = fixture({ onSend: () => { throw new Error("wake unavailable"); } });
   await current.commands.get("goal").handler("set keep working", current.context);
+  await current.commands.get("goal-snooze").handler("off", current.context);
   await flush();
-  assert.deepEqual(current.entries.at(-1).data, { enabled: true, goal: "keep working" });
+  assert.deepEqual(current.entries.at(-1).data, { enabled: true, goal: "keep working", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000 });
   assert.equal(current.sent.length, 1);
 });
