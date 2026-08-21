@@ -20,6 +20,8 @@ const GOAL_PARAMETERS = {
 
 const MAX_RATIONALE_CHARS = 240;
 const MAX_EVALUATOR_CALLS = 1_000_000;
+const MAX_NOT_DONE_WAKEUPS = 10;
+const COMPLETIONS_TO_RESET_WAKEUPS = 3;
 const EVALUATOR_PROMPT = "goal: <goal description> - return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 
@@ -35,7 +37,7 @@ function goalProjection(state) {
 }
 
 function restoreState(ctx) {
-  let restored = { enabled: false, goal: "" };
+  let restored = { enabled: false, goal: "", notDoneWakeups: 0, completedThings: 0 };
   for (const entry of ctx.sessionManager.getBranch?.() ?? []) {
     if (entry.type !== "custom" || entry.customType !== GOAL_STATE_ENTRY) continue;
     const data = entry.data;
@@ -43,6 +45,12 @@ function restoreState(ctx) {
     restored = {
       enabled: data.enabled === true,
       goal: normalizeGoal(data.goal),
+      notDoneWakeups: Number.isInteger(data.notDoneWakeups) && data.notDoneWakeups >= 0
+        ? Math.min(data.notDoneWakeups, MAX_NOT_DONE_WAKEUPS)
+        : 0,
+      completedThings: Number.isInteger(data.completedThings) && data.completedThings >= 0
+        ? data.completedThings % COMPLETIONS_TO_RESET_WAKEUPS
+        : 0,
     };
   }
   return restored;
@@ -108,6 +116,22 @@ function goalResultContent(wakeup, outcome, rationale) {
   return `${wakeup}\nVERDICT: ${outcome}\nREASON: ${rationale}`;
 }
 
+function notDoneWakeup(goal, attempt) {
+  const messages = [
+    `Goal check: NOT_DONE. Pick the next concrete action and do it now: ${goal}.`,
+    `Goal check: NOT_DONE. You still have work to do. Take the next concrete action now: ${goal}.`,
+    `Goal check: NOT_DONE. Stop circling the task. Make real progress now: ${goal}.`,
+    `Goal check: NOT_DONE. This goal needs action, not another status update. Do the next step: ${goal}.`,
+    `Goal check: NOT_DONE. Get back to the work now. Finish one concrete piece: ${goal}.`,
+    `Goal check: NOT_DONE. You are still responsible for this. Take the next action now: ${goal}.`,
+    `Goal check: NOT_DONE. Do not leave this sitting. Make the next concrete change now: ${goal}.`,
+    `Goal check: NOT_DONE. Enough waiting. Move this goal forward right now: ${goal}.`,
+    `Goal check: NOT_DONE. Finish the next piece now. Do not stop at an explanation: ${goal}.`,
+    `Goal check: NOT_DONE. This has waited long enough. Take one concrete action now and finish it: ${goal}.`,
+  ];
+  return messages[attempt - 1];
+}
+
 function responseOutcome(response) {
   return responseEvaluation(response).outcome;
 }
@@ -151,22 +175,22 @@ export function createGoalExtension(pi) {
       && (sessionId === undefined || contextSessionId === undefined || contextSessionId === sessionId);
   };
   let generation = 0;
-  let skipNextSettle = false;
   let deferredEvaluation;
   let activeAbort;
   let evaluatorCalls = 0;
+  let notDoneWakeups = 0;
+  let completedThings = 0;
   let lastOwnerGateState = "allowed";
 
   const cancel = () => {
     generation += 1;
-    skipNextSettle = false;
     if (deferredEvaluation !== undefined) clearTimeout(deferredEvaluation);
     deferredEvaluation = undefined;
     activeAbort?.abort();
     activeAbort = undefined;
   };
 
-  const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, { ...state });
+  const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, { ...state, notDoneWakeups, completedThings });
   const publish = () => {
     try { pi.events?.emit?.(GOAL_STATE_EVENT, goalProjection(state)); } catch { /* optional UI publication is best-effort */ }
   };
@@ -188,6 +212,8 @@ export function createGoalExtension(pi) {
     action,
     ...state,
     evaluatorCalls,
+    notDoneWakeups,
+    completedThings,
     lastOwnerGateState,
   });
   const ownerActivityState = (ctx) => {
@@ -219,6 +245,8 @@ export function createGoalExtension(pi) {
       if (!goal) return { ok: false, message: "A goal description is required for set." };
       cancel();
       evaluatorCalls = 0;
+      notDoneWakeups = 0;
+      completedThings = 0;
       lastOwnerGateState = "allowed";
       state = { enabled: true, goal };
       persist();
@@ -241,35 +269,15 @@ export function createGoalExtension(pi) {
   };
   const scheduleInjection = (event, ctx, runGeneration, controller, message) => {
     if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx)) return;
-    skipNextSettle = true;
     setTimeout(() => {
-      if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx) || !state.enabled || !state.goal) {
-        if (runGeneration === generation && !controller.signal.aborted) skipNextSettle = false;
-        return;
-      }
+      if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx) || !state.enabled || !state.goal) return;
       // Re-check in the wakeup macrotask. The evaluator result is stale if an
       // owner child was admitted after complete() returned.
-      if (ownerActivityState(ctx) === "suppressed") {
-        skipNextSettle = false;
-        return;
-      }
+      if (ownerActivityState(ctx) === "suppressed") return;
       try {
-        const sendResult = pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
-        if (sendResult && typeof sendResult.then === "function") {
-          Promise.resolve(sendResult).then(
-            () => {
-              if (runGeneration === generation && !controller.signal.aborted && isCurrentSession(event, ctx)) skipNextSettle = true;
-            },
-            () => {
-              if (runGeneration === generation && !controller.signal.aborted && isCurrentSession(event, ctx)) skipNextSettle = false;
-            },
-          );
-        } else {
-          skipNextSettle = true;
-        }
+        pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
       } catch(e) {
         console.error(e);
-        skipNextSettle = false;
       }
     }, 0);
   };
@@ -281,6 +289,8 @@ export function createGoalExtension(pi) {
     if (!isCurrentSession(event, ctx)) return;
     cancel();
     state = restoreState(ctx);
+    notDoneWakeups = state.notDoneWakeups;
+    completedThings = state.completedThings;
     publish();
   });
 
@@ -329,12 +339,6 @@ export function createGoalExtension(pi) {
 
   pi.on("agent_settled", (event, ctx) => {
     if (!isCurrentSession(event, ctx) || !state.enabled || !state.goal || !ctx.model) return;
-    // The steer wakeup owns the next settle. Consume that marker before the
-    // optional subagent gate so a child cannot make a later normal settle skip.
-    if (skipNextSettle) {
-      skipNextSettle = false;
-      return;
-    }
     if (ownerActivityState(ctx) === "suppressed" || deferredEvaluation !== undefined || activeAbort) return;
     const runGeneration = generation;
     const goal = state.goal;
@@ -363,8 +367,21 @@ export function createGoalExtension(pi) {
         const response = await completeEvaluator(ctx, request, controller.signal);
         if (runGeneration !== generation || controller.signal.aborted) return;
         const { outcome, rationale } = responseEvaluation(response);
+        if (outcome === "COMPLETED") {
+          completedThings += 1;
+          if (completedThings >= COMPLETIONS_TO_RESET_WAKEUPS) {
+            notDoneWakeups = 0;
+            completedThings = 0;
+          }
+          persist();
+        }
+        if (outcome === "NOT_DONE" && notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
         const wakeup = outcome === "NOT_DONE"
-          ? `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`
+          ? (() => {
+            notDoneWakeups += 1;
+            persist();
+            return notDoneWakeup(goal, notDoneWakeups);
+          })()
           : outcome === "BLOCKED"
             ? "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed."
             : "Goal check: COMPLETED. Contact the supervisor and report completion. Disable future goal notifications with /goal off.";
@@ -375,11 +392,15 @@ export function createGoalExtension(pi) {
           details: { goal, outcome, rationale },
         });
       } catch(e) {
-        if (runGeneration !== generation || controller.signal.aborted) return;
+        if (runGeneration !== generation || controller.signal.aborted || notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
           content: goalResultContent(
-            `Goal check: NOT_DONE. Resume working toward this goal: ${goal}.`,
+            (() => {
+              notDoneWakeups += 1;
+              persist();
+              return notDoneWakeup(goal, notDoneWakeups);
+            })(),
             "NOT_DONE",
             "Evaluator unavailable: " + errorDetails(e),
           ),
