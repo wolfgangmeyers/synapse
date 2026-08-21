@@ -3,7 +3,6 @@ import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isIP } from "node:net";
 import { basename, join } from "node:path";
 
 import WebSocket, { WebSocketServer } from "ws";
@@ -255,10 +254,6 @@ export function createAgentRouter({
   // When the last lifecycle_sweep_completed was written, for any reason.
   let lastSweepRecordMs;
   const server = createServer((request, response) => {
-    if (!requestAuthorityIsAllowed(request.headers.host)) {
-      sendHttpError(response, 403, "browser_origin_rejected");
-      return;
-    }
     void handleHttpRequest(request, response).catch(() => {
       emit("router_error", { error_code: "internal_error" });
       sendHttpError(response, 500, "internal_error");
@@ -269,11 +264,7 @@ export function createAgentRouter({
     path,
     maxPayload: maxFrameBytes,
     perMessageDeflate: false,
-    verifyClient: ({ origin, req }, done) => {
-      if (!requestAuthorityIsAllowed(req.headers.host)) {
-        done(false, 403, "request host rejected");
-        return;
-      }
+    verifyClient: ({ origin }, done) => {
       if (origin !== undefined) {
         done(false, 403, "browser origins are not accepted");
         return;
@@ -2820,45 +2811,6 @@ function sendHttpJson(response, statusCode, payload, headers = {}) {
 
 function applyCorsHeaders(response) {
   for (const [header, value] of Object.entries(CORS_HEADERS)) response.setHeader(header, value);
-}
-
-function requestAuthorityIsAllowed(authority) {
-  if (typeof authority !== "string" || authority.length === 0) return false;
-  // Host is an authority, not a URL. Reject URL decorations before parsing so
-  // credentials or paths cannot hide a disallowed host behind an allowed name.
-  if (/[@\\/?#\s]/u.test(authority)) return false;
-
-  const ipv4Authority = /^((?:\d{1,3}\.){3}\d{1,3})(?::\d+)?$/u.exec(authority);
-  if (ipv4Authority !== null) {
-    if (isIP(ipv4Authority[1]) !== 4) return false;
-    try {
-      new URL(`http://${authority}`);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  const ipv6Authority = /^\[([^\]]+)\](?::\d+)?$/u.exec(authority);
-  if (ipv6Authority !== null) {
-    if (isIP(ipv6Authority[1]) !== 6) return false;
-    try {
-      new URL(`http://${authority}`);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  // Do not let URL parsing normalize malformed numeric authorities into an IP
-  // that happens to match a hostname rule.
-  if (/^(?:\d|\[)/u.test(authority)) return false;
-  try {
-    const hostname = new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, "");
-    return ALLOWED_HOSTS.has(hostname) || hostname === "donuts-cloud.tailcdfd89.ts.net";
-  } catch {
-    return false;
-  }
 }
 
 function isBrowserCorsRoute(method, pathname) {
