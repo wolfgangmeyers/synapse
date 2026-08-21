@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { isIP } from "node:net";
 import { basename, join } from "node:path";
 
 import WebSocket, { WebSocketServer } from "ws";
@@ -2826,6 +2827,32 @@ function requestAuthorityIsAllowed(authority) {
   // Host is an authority, not a URL. Reject URL decorations before parsing so
   // credentials or paths cannot hide a disallowed host behind an allowed name.
   if (/[@\\/?#\s]/u.test(authority)) return false;
+
+  const ipv4Authority = /^((?:\d{1,3}\.){3}\d{1,3})(?::\d+)?$/u.exec(authority);
+  if (ipv4Authority !== null) {
+    if (isIP(ipv4Authority[1]) !== 4) return false;
+    try {
+      new URL(`http://${authority}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const ipv6Authority = /^\[([^\]]+)\](?::\d+)?$/u.exec(authority);
+  if (ipv6Authority !== null) {
+    if (isIP(ipv6Authority[1]) !== 6) return false;
+    try {
+      new URL(`http://${authority}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Do not let URL parsing normalize malformed numeric authorities into an IP
+  // that happens to match a hostname rule.
+  if (/^(?:\d|\[)/u.test(authority)) return false;
   try {
     const hostname = new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, "");
     return ALLOWED_HOSTS.has(hostname) || hostname === "donuts-cloud.tailcdfd89.ts.net";
