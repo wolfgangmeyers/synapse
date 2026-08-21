@@ -23,6 +23,21 @@ This repo is the home for non-review developer workflow skills.
 
 Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls back to `pi`, and explicit `--agent` always overrides the default. Ordinary managed Pi workers and subagents use provider `openai-codex` and model `gpt-5.6-terra`; PR-review workers and their subagents use `gpt-5.6-luna`. Another model requires an explicit task requirement. Claude workers are launched with a Mailbox V2 sidecar that registers as the normal worker agent ID and pastes sanitized mailbox messages into the Claude tmux pane; phase 1 does not scrape Claude replies, so Claude workers reply with `mailbox_send.py`.
 
+## Shell fallbacks and service scripts
+
+Use the managed Python tools first. When a model-session tool is unavailable, these shell-invoked fallbacks have narrow roles:
+
+| Script | Use | Required setup and boundary |
+|---|---|---|
+| `.claude/skills/supervisor/tools/worker_launch.py` | Start or resume a managed worker from a shell. | Run with `python3`, `--window`, `--dir`, and the recorded runtime/session. It owns tmux creation, runtime flags, workspace trust, and supported Mailbox setup. Check `--help`, stderr, and `worker_capture.py` after failure. Do not replace it with hand-typed tmux or agent commands. |
+| `.claude/skills/supervisor/tools/mailbox_send.py` | Send Mailbox V2 messages when native `mecha_mailbox_send` is unavailable. | Requires the loopback router and an agent-ID recipient. Sender identity comes from the current tmux window; use `--from` only for a verified service or launcher identity. Queue acceptance is not consumption proof. |
+| `.claude/skills/supervisor/tools/cron-bootstrap.sh` | Wrap cron jobs that need the user's login environment. | Sources shell profiles and, when present, reads the local Claude OAuth token file into the child process. Use only from cron; never print or copy the token. |
+| `.claude/skills/watchdog/tools/watchdog-agent.sh` | Run the optional Codex watchdog wrapper. | Keeps state, logs, locks, and work files under `MECHA_STATE_DIR` (default `~/.mecha-developer`) and validates paths. It is not a worker launcher. |
+| `.claude/skills/supervisor/tools/hooks/claude-activity.sh` | Claude Code activity hook used by the sidecar. | Requires `TMUX_PANE` and a live sidecar marker. It must remain fast and exit successfully; it is not a launcher or mailbox sender. |
+| `tools/run_router.sh` | Start this checkout's local Mailbox V2 router with its configured database/log paths. | Inspect the existing router and paths before running. Keep the router loopback-only and do not point it at an unknown or shared database. |
+
+If the installed `~/.claude` link is stale, invoke the canonical checkout path and repair installation separately. Never put credentials, tokens, or auth state in commands, logs, task files, or documentation.
+
 ## Pi context thresholds and self-compaction
 
 The Mailbox V2 Pi extension monitors `ctx.getContextUsage()` and sends direct in-session notifications when percentage thresholds are crossed. The default policy uses a sensible 40/50/60/70/80/90 ladder for ordinary 272k-token workers and keeps stricter internal defaults for very large context windows.

@@ -18,6 +18,28 @@ When a Pi worker needs to send a message, call `mecha_mailbox_send({ recipient, 
 - Read worker state before acting. Use the recorded `worktree`, `branch`, `window`, `agent`, and `session`; do not infer them from memory.
 - Set or keep reminder coverage for active work, then cancel or downgrade it when it stops protecting an active risk.
 
+## Shell fallback when launch tooling fails
+
+Run the launcher from a shell with an explicit interpreter and absolute tool path:
+
+```bash
+python3 ~/.claude/skills/supervisor/tools/worker_launch.py \
+  --window "$WORKER_NAME" --dir "$WORKTREE_PATH" --agent pi --skip-permissions
+```
+
+Before retrying, check `python3 .../worker_launch.py --help`, the launcher stderr, and the target pane with `worker_capture.py`. The launcher must create the tmux window, apply the runtime configuration, and establish the supported Mailbox path. Do not replace it with `tmux new-window`, `pi`, `claude`, `codex`, or `cursor` commands typed by hand: those bypass state, identity, trust setup, and possibly Mailbox delivery. If the installed `~/.claude` path is stale, invoke the canonical checkout copy at `/Users/wolfgang/code/mecha-developer/.claude/skills/supervisor/tools/worker_launch.py` and repair the install separately.
+
+`mailbox_send.py` is the shell-invoked delivery fallback when the native `mecha_mailbox_send` tool is unavailable:
+
+```bash
+python3 ~/.claude/skills/supervisor/tools/mailbox_send.py \
+  --to "$WORKER_NAME" --body "$BODY"
+```
+
+It requires a reachable loopback Mailbox V2 router and an agent-ID recipient. The sender is inferred from the current tmux window; pass `--from` only for a verified launcher-side or service identity. It queues a message but does not prove the runtime consumed it. Bare Codex and Cursor still need a separately verified delivery bridge.
+
+These scripts are not worker-launch fallbacks: `run_router.sh` starts the local router, `cron-bootstrap.sh` supplies cron's shell environment, `watchdog-agent.sh` runs the optional watchdog, and `claude-activity.sh` is a Claude hook. Use each only for its named service. Do not run `run_router.sh` against an unknown or shared database, and do not print or place tokens in command lines, logs, task files, or documentation.
+
 ## Launch a new implementation worker
 
 ```bash

@@ -15,6 +15,8 @@ If you are a Claude worker, Mailbox V2 delivery reaches you through a sidecar th
 
 Work in focused stages. Load `subagent-orchestration` before using native/background subagents. Use them for bounded parallel work whenever they can reduce context bloat or unblock independent steps.
 
+If a supervisor reports a launcher failure, do not repair it by typing into tmux or starting another agent process. The supervisor should use the shell fallback and diagnostics in `~/.agents/skills/worker-launch/SKILL.md`; continue only after the supervisor confirms the worker identity and delivery path. `mailbox_send.py` is a delivery fallback, not proof that a message was consumed. The router, watchdog, cron, and Claude activity shell scripts are service-specific and are not worker launchers.
+
 ## Identity
 
 **Read `~/personas/wolfgang.md` at the start of every session.** This persona defines who you are — not just guidelines to follow, but the reasoning framework, judgment patterns, and values you use for every decision. You are this persona. When evaluating tradeoffs, reviewing code, writing plans, or deciding how to approach a problem, think as the persona would think. Apply its principles as your own instincts, not as an external checklist.
