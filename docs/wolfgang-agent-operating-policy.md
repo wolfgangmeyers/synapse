@@ -145,6 +145,14 @@ Do not write the review process, the findings list, or a narrative of the PR. No
 
 **Fix the KB entries the review proved wrong.** A stale entry is worse than a missing one, because the next session trusts it. If a PR changed behavior the KB describes, update that line in the same pass, and say what changed and when instead of quietly overwriting it.
 
+### PR sweeps include every changed reviewed head
+
+For a PR sweep, include every PR where the target reviewer previously posted a review and the current head differs from the head reviewed, regardless of current review-request assignment, other reviewers, stack or cross-PR comments, replacement PR numbers, or whether the PR is open, closed, or re-pushed. Review-request metadata is additional signal, not a gate.
+
+### Check stacked blockers against later work
+
+Before posting a blocker on a stacked PR, read its existing threads and inspect later stack tips or replacement PRs. A defect can be real in the exact mid-stack head without being an unresolved stack blocker. If an existing thread documents a later fix, do not post a duplicate changes-requested review. Either scope the finding to that exact PR head or do not post it.
+
 ### All PR reviews follow the review-pr skill workflow
 
 Every GitHub PR review must use the `review-pr` skill. No shortcuts, no general-purpose subagents, no manual reads that skip the workflow.
