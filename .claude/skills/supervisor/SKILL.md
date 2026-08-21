@@ -480,6 +480,8 @@ The project's dev-env skill handles mechanics; the supervisor handles access sch
 
 ## Worker Tasks
 
+**Worktree prerequisite:** Before every `worker_launch.py` call, create an isolated worktree or assign an existing task worktree and record the exact project, branch, and worktree in supervisor state. Never launch a worker with missing worktree state; the supervisor checkout is not an implementation worktree.
+
 For all managed worker launch, import, resume/relaunch, follow-up handoff, parking, shutdown, existing-PR fix, and worker lifecycle details, read `../worker-launch/SKILL.md` before acting. That skill is the canonical worker-lifecycle guide; this supervisor skill keeps only the mandatory supervisor-facing obligations.
 
 Mandatory obligations that remain here:
@@ -496,6 +498,10 @@ Mandatory obligations that remain here:
 - On worker completion, park first with `worker_park.py`, then interrogate missing evidence by mail, verify requirements, evidence, diff scope, review/coverage gates, and the mandatory background explain overview pass from `worker-launch` before accepting completion.
 - Follow `worker-launch` for Codex launch/session/config details and the supervisor-owned review fallback when Codex subagents are unavailable.
 - Follow `worker-launch` for abandonment. Never remove a worker worktree until the PR is merged/closed, Wolfgang explicitly authorizes teardown, or the task is explicitly abandoned after dirty work classification.
+
+### Troubleshooting worker launches
+
+A tmux or managed-window listing only proves that a window exists. Inspect the actual tmux pane for trust prompts, advance an expected prompt, then verify Mailbox V2 connectivity with a reply from the worker.
 
 ### Worker goals in normal handoffs
 
@@ -907,7 +913,7 @@ If you relaunch a monitor (e.g. to add phone notifications), kill the old proces
 
 ## Worker Management Tools
 
-Read `../worker-launch/SKILL.md` for command shapes and lifecycle rules for `worker_launch.py`, `mailbox_send.py`, `worker_capture.py`, `worker_park.py`, `worker_shutdown.py`, `worker_kill.py`, `worker_compact.py`, `handoff.py`, `worker_send_requirements.py`, and `worker_list.py`.
+Read `../worker-launch/SKILL.md` for command shapes and lifecycle rules for `worker_launch.py`, `mailbox_send.py`, `worker_capture.py`, `worker_park.py`, `worker_shutdown.py`, `worker_kill.py`, `worker_compact.py`, `handoff.py`, `worker_send_requirements.py`, and `worker_list.py`. If a managed launch fails, use that skill's shell fallback and diagnostics. Do not substitute hand-typed tmux or agent commands.
 
 Supervisor-specific rule: use the provided tools and update supervisor state immediately after any worker lifecycle change. Resolve sidecar warnings from shutdown/kill tools before marking a window free; otherwise the router can accept mail for a dead worker.
 
