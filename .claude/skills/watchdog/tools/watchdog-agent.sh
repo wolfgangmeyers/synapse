@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Optional Codex-agent watchdog wrapper.
-# This LLM Watchdog wrapper is separate from the Priority Handoff Monitor.
+# This wrapper is independent of supervisor tool-call recovery.
 # It is not installed by the scheduler.
 
 set -u

@@ -63,7 +63,7 @@ could affect files, external communication, or destructive operations.
 | `unramble` | Compress verbose Claude output into concise Wolfgang voice. Use when Claude sends wall-of-text output that needs condensation before forwarding to a human. |
 | `voice` | Generate a voice profile from writing samples so an LLM can reproduce how someone speaks and writes. Source-agnostic: works with Facebook exports, chat logs, email archives, plain text, or any writing samples. |
 | `voice-review-builder` | Collect and distill Wolfgang's feedback on PR review comments to improve review voice and review quality. |
-| `watchdog` | LLM-based Watchdog momentum-nudge guidance. The separate Priority Handoff Monitor owns deterministic five-minute checks. Not for direct invocation. |
+| `watchdog` | LLM-based Watchdog momentum-nudge guidance. Not for direct invocation. |
 | `worker` | Worker agent instructions — provided by the supervisor when launching or resuming a managed worker. Provides rules, mailbox communication patterns, and the standard plan/implement/review workflow. Supervisors instruct workers to read it through the runtime's verified delivery path; do not invoke manually. |
 | `worker-launch` | Managed worker launch, resume, follow-up handoff, parking, shutdown, and Mailbox V2 coordination guidance for supervisors. |
 | `wolfgang-voice-review` | Private final gate for rewriting validated PR review findings into Wolfgang's review voice before posting. |

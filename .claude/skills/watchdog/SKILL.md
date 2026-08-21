@@ -1,12 +1,12 @@
 ---
 name: watchdog
-description: LLM-based Watchdog momentum-nudge guidance; the separate Priority Handoff Monitor owns deterministic five-minute checks, not user-invocable.
+description: LLM-based Watchdog momentum-nudge guidance, not user-invocable.
 user_invocable: false
 ---
 
 # Watchdog Momentum Nudge
 
-The LLM-based Watchdog is separate from the deterministic **Priority Handoff Monitor**. The monitor runs every five minutes as `tools/priority_handoff_monitor.py`, reads supervisor state and router reminders, and can be removed with `tools/priority_handoff_monitor.py --remove-schedule`.
+The LLM-based Watchdog nudges the supervisor when concrete corrective action is needed.
 
 ## Watchdog self-reminder requirement
 
@@ -17,7 +17,7 @@ Use the current tmux window name, usually `watchdog`, and set a recurring thirty
 ```bash
 python3 ~/.claude/skills/reminders/tools/reminders.py set \
   --window watchdog \
-  --message "Evaluate the supervisor and managed workers now. Read the watchdog skill first. Capture current evidence from supervisor state, panes, reminders, and priority PR/work evidence. Get a substantive update from the supervisor if needed. Verify the work is on the priority list, is following Wolfgang's current spec, and is still moving. Send the supervisor a concise mailbox nudge only when a concrete corrective action is required: off-priority work, drift from the spec, missing evidence, stalled worker, premature integration/network action, or reminder/priority handoff failure. Otherwise stay quiet. Do not mutate state, reminders, workers, files, or external systems." \
+  --message "Evaluate the supervisor and managed workers now. Read the watchdog skill first. Capture current evidence from supervisor state, panes, reminders, and priority PR/work evidence. Get a substantive update from the supervisor if needed. Verify the work is on the priority list, is following Wolfgang's current spec, and is still moving. Send the supervisor a concise mailbox nudge only when a concrete corrective action is required: off-priority work, drift from the spec, missing evidence, stalled worker, premature integration/network action, or reminder failure. Otherwise stay quiet. Do not mutate state, reminders, workers, files, or external systems." \
   --every 30m
 ```
 
@@ -40,8 +40,6 @@ Do not expose internal workflow or process narration. Do not use report labels, 
 When Wolfgang directs an outcome be carried to completion or gives broad authorization, ordinary reversible implementation, validation, review, local database/session setup, local browser auth setup, and trusted-local integration require no further approval; stop only for an explicit hold or a genuine new external, irreversible, security, legal, production, or credential-exfiltration decision. Flag any invented authorization wait and tell the supervisor to take the already-authorized next step. In a local development environment, missing Playwright storage state, disabled dev-login flags, absent fixture rows, or an unauthenticated Playwright context are not external blockers. Nudge the supervisor to use the local database/runtime it controls, check the real browser session, open the browser for manual login if useful, capture ignored local auth state, and keep running every non-auth gate in parallel.
 
 Do not accept the supervisor's claimed blocker just because it is stable or repeated. Stable can mean the supervisor is stuck on its own misconception. When a blocker halts a keep-moving task, especially a spec/implementation chain, challenge the premise: compare it to existing code, existing product contracts, prior accepted specs, and the user's broad instruction. If the supervisor says it cannot proceed because a contract is missing, invented, or waiting on Wolfgang, ask whether the smallest sound correction is already obvious from the repo. If so, nudge the supervisor to correct the spec/plan and continue instead of parking. The watchdog should push back harder when the supervisor is using caution to avoid a reversible decision.
-
-Priority review cadence is five minutes while any priority is active. The Priority Handoff Monitor inspects supervisor state, durable router reminders, and the direct task handoff record before panes. It reports handoff faults but does not mutate priority/task state, reminders, or workers during normal runs. Every WARN or FAIL names its owner, exact corrective action, and resolved-when proof. Terminal legacy failed/dead-letter Watchdog reminders recorded by the one-time cutover are retired legacy controls: clear/ignore their liveness reference rather than recreating a reminder. New terminal delivery failures remain actionable. On every priority evaluation, review priorities in order and interrogate every proposed block: "What explicit requirement, recorded acceptance criterion, external contract, or actual safety/data-loss risk makes this block real?" Require the source and direct evidence. If none exists, call it an invented implementation assumption. Tell the supervisor to remove or correct it with the smallest sound change, retain an appropriate bound, verify the user's actual outcome, and continue. If the same blocker repeats across reminders without new evidence while local-dev work remains, nudge against the loop itself: the supervisor must stop re-verifying, perform a reversible workaround or manual-login/browser handoff, and advance the next unrun validation gate.
 
 ## Supervisor Health Compliance
 
