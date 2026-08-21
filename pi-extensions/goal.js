@@ -1,12 +1,13 @@
 const GOAL_STATE_ENTRY = "goal-state";
 const GOAL_RESULT_TYPE = "goal-result";
 const GOAL_UPDATE_TYPE = "goal-update";
+const GOAL_SNOOZE_AVAILABILITY_TYPE = "goal-snooze-availability";
 export const GOAL_STATE_EVENT = "goal:state";
 export const GOAL_STATE_REQUEST_EVENT = "goal:state-request";
 const MAX_GOAL_CHARS = 4_000;
 const MAX_CONTEXT_MESSAGES = 32;
 const MAX_CONTEXT_CHARS = 24_000;
-const OUTCOMES = new Set(["BLOCKED", "COMPLETED", "NOT_DONE"]);
+const OUTCOMES = new Set(["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"]);
 const GOAL_ACTIONS = new Set(["set", "status", "off"]);
 const GOAL_PARAMETERS = {
   type: "object",
@@ -21,13 +22,63 @@ const GOAL_PARAMETERS = {
 const MAX_RATIONALE_CHARS = 240;
 const MAX_EVALUATOR_CALLS = 1_000_000;
 const MAX_NOT_DONE_WAKEUPS = 10;
+const MAX_BLOCKED_WAKEUPS = 10;
+const MAX_WAITING_AUTHORIZATION_WAKEUPS = 3;
+const MAX_SNOOZE_TURN_LIMIT = 20;
 const COMPLETIONS_TO_RESET_WAKEUPS = 3;
-const EVALUATOR_PROMPT = "goal: <goal description> - return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>";
+const DEFAULT_SNOOZE_DURATION_MS = 60_000;
+const SUPERVISOR_WAIT_DURATION_MS = 5 * 60_000;
+const EVALUATOR_PROMPT = "goal: <goal description> - supervisor-dependent blocking is BLOCKED; return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE|WAITING_FOR_USER_AUTHORIZATION and REASON: <concise rationale>";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 
 function normalizeGoal(value) {
   if (typeof value !== "string") return "";
   return value.trim().slice(0, MAX_GOAL_CHARS);
+}
+
+function compactToolCallAction(toolCall) {
+  if (!toolCall || toolCall.type !== "toolCall" || toolCall.name !== "mecha_context") return false;
+  let argumentsValue = toolCall.arguments;
+  if (typeof argumentsValue === "string") {
+    try { argumentsValue = JSON.parse(argumentsValue); } catch { return false; }
+  }
+  return argumentsValue?.action === "compact";
+}
+
+export function hasPendingCompaction(ctx) {
+  const pendingToolCallIds = new Set();
+  for (const entry of ctx?.sessionManager?.getBranch?.() ?? []) {
+    const message = entry?.type === "message" ? entry.message : undefined;
+    if (message?.role === "assistant" && Array.isArray(message.content)) {
+      for (const toolCall of message.content) {
+        if (compactToolCallAction(toolCall) && typeof toolCall.id === "string") pendingToolCallIds.add(toolCall.id);
+      }
+    } else if (message?.role === "toolResult" && typeof message.toolCallId === "string") {
+      pendingToolCallIds.delete(message.toolCallId);
+    }
+  }
+  return pendingToolCallIds.size > 0;
+}
+
+function parsePositiveDuration(value) {
+  const match = typeof value === "string" ? value.trim().match(/^([1-9]\d*)([sm])$/) : undefined;
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  const durationMs = amount * (match[2] === "m" ? 60_000 : 1_000);
+  return Number.isSafeInteger(amount) && Number.isSafeInteger(durationMs) && durationMs > 0
+    ? durationMs
+    : undefined;
+}
+
+function snoozeDurationFromInput(value) {
+  return parsePositiveDuration(value) ?? DEFAULT_SNOOZE_DURATION_MS;
+}
+
+function parseSnoozeTurnLimit(value) {
+  const input = typeof value === "string" ? value.trim() : "";
+  if (!/^\d+$/.test(input)) return undefined;
+  const limit = Number(input);
+  return Number.isInteger(limit) && limit >= 1 && limit <= MAX_SNOOZE_TURN_LIMIT ? limit : undefined;
 }
 
 function goalProjection(state) {
@@ -37,7 +88,16 @@ function goalProjection(state) {
 }
 
 function restoreState(ctx) {
-  let restored = { enabled: false, goal: "", notDoneWakeups: 0, completedThings: 0 };
+  let restored = {
+    enabled: false,
+    goal: "",
+    notDoneWakeups: 0,
+    blockedWakeups: 0,
+    completedThings: 0,
+    goalLockEnabled: false,
+    snoozeEnabled: false,
+    snoozeDurationMs: DEFAULT_SNOOZE_DURATION_MS,
+  };
   for (const entry of ctx.sessionManager.getBranch?.() ?? []) {
     if (entry.type !== "custom" || entry.customType !== GOAL_STATE_ENTRY) continue;
     const data = entry.data;
@@ -46,11 +106,19 @@ function restoreState(ctx) {
       enabled: data.enabled === true,
       goal: normalizeGoal(data.goal),
       notDoneWakeups: Number.isInteger(data.notDoneWakeups) && data.notDoneWakeups >= 0
-        ? Math.min(data.notDoneWakeups, MAX_NOT_DONE_WAKEUPS)
+        ? Math.min(data.notDoneWakeups, MAX_SNOOZE_TURN_LIMIT)
+        : 0,
+      blockedWakeups: Number.isInteger(data.blockedWakeups) && data.blockedWakeups >= 0
+        ? Math.min(data.blockedWakeups, MAX_BLOCKED_WAKEUPS)
         : 0,
       completedThings: Number.isInteger(data.completedThings) && data.completedThings >= 0
         ? data.completedThings % COMPLETIONS_TO_RESET_WAKEUPS
         : 0,
+      goalLockEnabled: data.goalLockEnabled === true,
+      snoozeEnabled: data.snoozeEnabled === true,
+      snoozeDurationMs: Number.isSafeInteger(data.snoozeDurationMs) && data.snoozeDurationMs > 0
+        ? data.snoozeDurationMs
+        : DEFAULT_SNOOZE_DURATION_MS,
     };
   }
   return restored;
@@ -100,7 +168,7 @@ function responseText(response) {
 function responseEvaluation(response) {
   const lines = responseText(response).split(/\r?\n/);
   const verdict = lines.length === 2
-    ? lines[0].match(/^VERDICT: (BLOCKED|COMPLETED|NOT_DONE)$/)?.[1]
+    ? lines[0].match(/^VERDICT: (BLOCKED|COMPLETED|NOT_DONE|WAITING_FOR_USER_AUTHORIZATION)$/)?.[1]
     : undefined;
   const rawReason = lines.length === 2 ? lines[1].match(/^REASON: (.*)$/)?.[1] : undefined;
   if (!OUTCOMES.has(verdict) || !rawReason || rawReason.trim().length === 0 || rawReason.length > MAX_RATIONALE_CHARS) {
@@ -118,19 +186,40 @@ function goalResultContent(wakeup, outcome, rationale) {
 
 function notDoneWakeup(goal, attempt) {
   const messages = [
-    `Goal check: NOT_DONE. Pick the next concrete action and do it now: ${goal}.`,
-    `Goal check: NOT_DONE. You still have work to do. Take the next concrete action now: ${goal}.`,
-    `Goal check: NOT_DONE. Stop circling the task. Make real progress now: ${goal}.`,
-    `Goal check: NOT_DONE. This goal needs action, not another status update. Do the next step: ${goal}.`,
-    `Goal check: NOT_DONE. Get back to the work now. Finish one concrete piece: ${goal}.`,
-    `Goal check: NOT_DONE. You are still responsible for this. Take the next action now: ${goal}.`,
-    `Goal check: NOT_DONE. Do not leave this sitting. Make the next concrete change now: ${goal}.`,
-    `Goal check: NOT_DONE. Enough waiting. Move this goal forward right now: ${goal}.`,
-    `Goal check: NOT_DONE. Finish the next piece now. Do not stop at an explanation: ${goal}.`,
-    `Goal check: NOT_DONE. This has waited long enough. Take one concrete action now and finish it: ${goal}.`,
+    `NOT_DONE: Review ${goal} and take the next concrete action now.`,
+    `NOT_DONE: Continue ${goal} by completing its next actionable step now.`,
+    `NOT_DONE: Re-engage with ${goal} and deliver the next concrete result now.`,
+    `NOT_DONE: Identify what remains for ${goal} and act on it now.`,
+    `NOT_DONE: Advance ${goal} with a specific, verifiable next action now.`,
+    `NOT_DONE: ${goal} still needs action—COMPLETE the next step now!`,
+    `NOT_DONE: Return to ${goal}, address the current gap, and move it forward NOW.`,
+    `NOT_DONE: Take ownership of ${goal} and complete its next concrete action now!`,
+    `NOT_DONE: Do not leave ${goal} idle—resolve the next blocker and proceed NOW.`,
+    `NOT_DONE: ${goal} requires visible progress: take the next actionable step now!`,
+    `NOT_DONE: ${goal} is NOT_DONE. Resolve the highest-priority remaining item and act now.`,
+    `NOT_DONE: Move ${goal} forward immediately by completing the next required action.`,
+    `NOT_DONE: ${goal} remains incomplete—address the outstanding work and produce a result NOW.`,
+    `NOT_DONE: Take direct action on ${goal} now; do not stop at planning or inspection.`,
+    `NOT_DONE: ${goal} needs urgent progress. Complete the next concrete deliverable NOW!`,
+    `NOT_DONE: ${goal} IS STILL INCOMPLETE. Take the next required action immediately!`,
+    `NOT_DONE: ACT NOW on ${goal}: resolve the top remaining issue and report the concrete result.`,
+    `NOT_DONE: ${goal} cannot remain stalled. COMPLETE THE NEXT ACTION NOW and make progress visible!`,
+    `NOT_DONE: TAKE OWNERSHIP of ${goal} immediately—finish the highest-priority remaining step and verify it NOW!`,
+    `NOT_DONE: ${goal} IS NOT COMPLETE. ACT NOW, DELIVER THE NEXT VERIFIED RESULT, AND ACCOUNT FOR THE REMAINING WORK!`,
   ];
   return messages[attempt - 1];
 }
+
+function waitingAuthorizationWakeup(goal, attempt) {
+  const messages = [
+    "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed.",
+    `Goal check: BLOCKED. Take the next concrete action on ${goal} now, then contact the supervisor with what is needed.`,
+    `Goal check: BLOCKED. Escalate the blocker now: advance ${goal} and report the concrete result.`,
+  ];
+  return messages[Math.min(attempt, messages.length) - 1];
+}
+
+const supervisorBlockedWakeup = "Goal check: BLOCKED. CONTACT OR BUG THE SUPERVISOR NOW TO GET UNBLOCKED. A special automatic 5-minute wait is starting. I will wake you after 5 minutes to prompt you to contact the supervisor again.";
 
 function responseOutcome(response) {
   return responseEvaluation(response).outcome;
@@ -166,7 +255,12 @@ async function completeEvaluator(ctx, request, signal) {
 
 export { boundedActiveContext, responseEvaluation, responseOutcome };
 
-export function createGoalExtension(pi) {
+export function createGoalExtension(pi, options = {}) {
+  const clockNow = typeof options.clock?.now === "function"
+    ? () => options.clock.now()
+    : () => Date.now();
+  const setTimer = options.setTimeout ?? options.timer?.setTimeout ?? setTimeout;
+  const clearTimer = options.clearTimeout ?? options.timer?.clearTimeout ?? clearTimeout;
   let sessionId = pi.getSessionId?.();
   let state = { enabled: false, goal: "" };
   const isCurrentSession = (event, ctx) => {
@@ -176,27 +270,162 @@ export function createGoalExtension(pi) {
   };
   let generation = 0;
   let deferredEvaluation;
+  let deferredEvaluationRequest;
   let activeAbort;
+  let activeEvaluationRequest;
+  let pendingSelfWake;
+  let pendingSnooze;
+  let pendingSnoozeAvailability;
+  let pendingSnoozeWakeup;
+  let deferredSnoozeWakeup;
+  let pendingSupervisorWakeup;
+  let deferredSupervisorWakeup;
+  let snoozeAvailabilityInjected = false;
   let evaluatorCalls = 0;
   let notDoneWakeups = 0;
+  let blockedWakeups = 0;
+  let waitingAuthWakeups = 0;
   let completedThings = 0;
+  let goalLockEnabled = false;
+  let completedOffAllowance = false;
+  let snoozeEnabled = false;
+  let snoozeDurationMs = DEFAULT_SNOOZE_DURATION_MS;
+  let snoozeTurnLimit;
+  let snoozeBudgetCapMs;
+  let snoozeBudgetAvailableMs = 0;
+  let snoozeBudgetLastAtMs;
+  let snoozeRefillYieldMs;
+  let snoozeRefillElapsedMs;
+  let compactionLifecyclePause = false;
   let lastOwnerGateState = "allowed";
 
+  const refreshSnoozeBudget = () => {
+    if (snoozeBudgetCapMs === undefined || pendingSnooze) return;
+    const current = clockNow();
+    if (!Number.isFinite(current)) return;
+    if (snoozeBudgetLastAtMs === undefined) {
+      snoozeBudgetLastAtMs = current;
+      return;
+    }
+    const elapsed = current - snoozeBudgetLastAtMs;
+    snoozeBudgetLastAtMs = current;
+    if (elapsed <= 0 || snoozeRefillYieldMs === undefined || snoozeRefillElapsedMs === undefined) return;
+    const earned = (elapsed / snoozeRefillElapsedMs) * snoozeRefillYieldMs;
+    snoozeBudgetAvailableMs = Math.min(
+      snoozeBudgetCapMs,
+      Number.isFinite(earned) ? snoozeBudgetAvailableMs + earned : snoozeBudgetCapMs,
+    );
+  };
+  const clearSnoozeBudget = () => {
+    snoozeBudgetCapMs = undefined;
+    snoozeBudgetAvailableMs = 0;
+    snoozeBudgetLastAtMs = undefined;
+    snoozeRefillYieldMs = undefined;
+    snoozeRefillElapsedMs = undefined;
+  };
+  const setSnoozeBudget = (durationMs) => {
+    snoozeBudgetCapMs = durationMs;
+    snoozeBudgetAvailableMs = durationMs;
+    snoozeBudgetLastAtMs = clockNow();
+  };
+  const setSnoozeRefill = (yieldMs, elapsedMs) => {
+    refreshSnoozeBudget();
+    snoozeRefillYieldMs = yieldMs;
+    snoozeRefillElapsedMs = elapsedMs;
+    snoozeBudgetLastAtMs = clockNow();
+  };
+  const pauseBudgetAt = (timestamp) => {
+    if (snoozeBudgetCapMs !== undefined && Number.isFinite(timestamp)) snoozeBudgetLastAtMs = timestamp;
+  };
+  const consumeSnoozeBudget = (pending, completedAt) => {
+    if (snoozeBudgetCapMs === undefined) return;
+    const elapsed = Math.max(0, completedAt - pending.startedAt);
+    // A positive balance admits a wait. The full completed interval is charged,
+    // so a short refill can leave debt that later refill periods repay.
+    snoozeBudgetAvailableMs -= elapsed;
+    pauseBudgetAt(completedAt);
+  };
+  const settleSnooze = (pending, completed) => {
+    if (pendingSnooze !== pending) return;
+    pendingSnooze = undefined;
+    clearTimer(pending.timeout);
+    pending.signal?.removeEventListener?.("abort", pending.onAbort);
+    if (completed) consumeSnoozeBudget(pending, clockNow());
+    else pauseBudgetAt(clockNow());
+    pending.onSettled?.(completed);
+  };
+  const cancelSnooze = () => {
+    const pending = pendingSnooze;
+    if (pending) settleSnooze(pending, false);
+  };
+  const cancelSnoozeAvailability = () => {
+    if (pendingSnoozeAvailability === undefined) return;
+    clearTimer(pendingSnoozeAvailability);
+    pendingSnoozeAvailability = undefined;
+  };
+  const cancelSnoozeWakeup = () => {
+    if (pendingSnoozeWakeup !== undefined) clearTimer(pendingSnoozeWakeup);
+    pendingSnoozeWakeup = undefined;
+    deferredSnoozeWakeup = undefined;
+  };
+  const cancelSupervisorWakeup = () => {
+    if (pendingSupervisorWakeup?.timeout !== undefined) clearTimer(pendingSupervisorWakeup.timeout);
+    pendingSupervisorWakeup = undefined;
+    deferredSupervisorWakeup = undefined;
+  };
+  const scheduleSnooze = (durationMs, signal, onSettled) => {
+    const pending = { signal, onAbort: undefined, onSettled, startedAt: clockNow(), timeout: undefined };
+    pending.onAbort = () => settleSnooze(pending, false);
+    pendingSnooze = pending;
+    pauseBudgetAt(pending.startedAt);
+    if (signal?.aborted) {
+      settleSnooze(pending, false);
+      return;
+    }
+    signal?.addEventListener?.("abort", pending.onAbort, { once: true });
+    pending.timeout = setTimer(() => settleSnooze(pending, true), durationMs);
+  };
   const cancel = () => {
     generation += 1;
-    if (deferredEvaluation !== undefined) clearTimeout(deferredEvaluation);
+    if (deferredEvaluation !== undefined) clearTimer(deferredEvaluation);
     deferredEvaluation = undefined;
+    deferredEvaluationRequest = undefined;
+    activeEvaluationRequest = undefined;
+    if (pendingSelfWake !== undefined) clearTimer(pendingSelfWake.timeout);
+    pendingSelfWake = undefined;
+    cancelSnooze();
+    cancelSnoozeAvailability();
+    cancelSnoozeWakeup();
+    cancelSupervisorWakeup();
     activeAbort?.abort();
     activeAbort = undefined;
   };
 
-  const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, { ...state, notDoneWakeups, completedThings });
+  const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, {
+    ...state,
+    notDoneWakeups,
+    blockedWakeups,
+    completedThings,
+    goalLockEnabled,
+    snoozeEnabled,
+    snoozeDurationMs,
+  });
   const publish = () => {
     try { pi.events?.emit?.(GOAL_STATE_EVENT, goalProjection(state)); } catch { /* optional UI publication is best-effort */ }
   };
-  const scheduleSelfWake = (goal) => {
+  const scheduleSelfWake = (goal, ctx) => {
     if (typeof sessionId !== "string" || sessionId.length === 0) return;
-    setTimeout(() => {
+    const pending = { goal, ctx, runGeneration: generation, timeout: undefined };
+    pendingSelfWake = pending;
+    pending.timeout = setTimer(() => {
+      if (pendingSelfWake !== pending) return;
+      pending.timeout = undefined;
+      if (pending.runGeneration !== generation || !state.enabled || state.goal !== goal || !isCurrentSession(undefined, ctx)) {
+        pendingSelfWake = undefined;
+        return;
+      }
+      if (compactionPending(ctx)) return;
+      pendingSelfWake = undefined;
       try {
         pi.sendMessage({
           customType: GOAL_UPDATE_TYPE,
@@ -208,12 +437,174 @@ export function createGoalExtension(pi) {
     }, 0);
   };
   const notify = (ctx, message, level = "info") => ctx.ui?.notify?.(message, level);
+  const compactionPending = (ctx) => compactionLifecyclePause || hasPendingCompaction(ctx);
+  const resumePendingSelfWake = (ctx) => {
+    const pending = pendingSelfWake;
+    if (!pending || compactionPending(ctx) || pending.runGeneration !== generation
+      || !state.enabled || state.goal !== pending.goal || !isCurrentSession(undefined, ctx)) return;
+    pendingSelfWake = undefined;
+    try {
+      pi.sendMessage({
+        customType: GOAL_UPDATE_TYPE,
+        content: `Goal set: ${pending.goal}. Begin working toward this goal.`,
+        display: true,
+        details: { enabled: true, goal: pending.goal },
+      }, { deliverAs: "steer", triggerTurn: true });
+    } catch { /* persistence remains authoritative when the session cannot wake */ }
+  };
+  const scheduleSnoozeAvailability = (ctx) => {
+    if (snoozeAvailabilityInjected || pendingSnoozeAvailability !== undefined) return;
+    const runGeneration = generation;
+    pendingSnoozeAvailability = setTimer(() => {
+      pendingSnoozeAvailability = undefined;
+      if (runGeneration !== generation || !state.enabled || !state.goal || !snoozeEnabled
+        || notDoneWakeups >= currentWakeupLimit() || compactionPending(ctx)) return;
+      try {
+        pi.sendMessage({
+          customType: GOAL_SNOOZE_AVAILABILITY_TYPE,
+          content: "Goal snooze is available. Use goal_snooze to deliberately wait before the next goal wakeup.",
+          display: true,
+          details: { goal: state.goal, durationMs: snoozeDurationMs },
+        }, { deliverAs: "steer", triggerTurn: true });
+        snoozeAvailabilityInjected = true;
+      } catch { /* availability remains optional when the session cannot wake */ }
+    }, 0);
+  };
+  const scheduleSnoozeWakeup = (goal, runGeneration, wakeup, ctx, allowAfterDisable = false) => {
+    const timeout = setTimer(() => {
+      if (pendingSnoozeWakeup === timeout) pendingSnoozeWakeup = undefined;
+      if (runGeneration !== generation || !state.enabled || state.goal !== goal
+        || !isCurrentSession(undefined, ctx) || (!snoozeEnabled && !allowAfterDisable)) return;
+      if (compactionPending(ctx)) {
+        deferredSnoozeWakeup = { goal, runGeneration, wakeup, ctx, allowAfterDisable };
+        return;
+      }
+      try {
+        pi.sendMessage({
+          customType: GOAL_RESULT_TYPE,
+          content: goalResultContent(wakeup, "NOT_DONE", "Work remains."),
+          display: true,
+          details: { goal, outcome: "NOT_DONE", rationale: "Work remains." },
+        }, { deliverAs: "steer", triggerTurn: true });
+      } catch (error) {
+        console.error(error);
+      }
+    }, 0);
+    pendingSnoozeWakeup = timeout;
+  };
+  const resumeDeferredSnoozeWakeup = (ctx) => {
+    if (compactionPending(ctx) || deferredSnoozeWakeup === undefined) return;
+    const pending = deferredSnoozeWakeup;
+    deferredSnoozeWakeup = undefined;
+    scheduleSnoozeWakeup(pending.goal, pending.runGeneration, pending.wakeup, pending.ctx, pending.allowAfterDisable);
+  };
+  const deliverSupervisorWakeup = (pending) => {
+    if (pendingSupervisorWakeup !== pending) return;
+    if (pending.runGeneration !== generation || !state.enabled || state.goal !== pending.goal
+      || !isCurrentSession(pending.event, pending.ctx)) {
+      pendingSupervisorWakeup = undefined;
+      if (deferredSupervisorWakeup === pending) deferredSupervisorWakeup = undefined;
+      return;
+    }
+    if (compactionPending(pending.ctx)) {
+      deferredSupervisorWakeup = pending;
+      return;
+    }
+    pendingSupervisorWakeup = undefined;
+    // Re-evaluate the live goal after the wait. The evaluator decides whether
+    // work is still blocked, complete, waiting, or ready for another action.
+    scheduleDeferredEvaluation(pending.event, pending.ctx, pending.runGeneration, pending.goal);
+  };
+  const scheduleSupervisorWakeup = (event, goal, ctx, runGeneration) => {
+    if (pendingSupervisorWakeup !== undefined) return undefined;
+    const pending = { event, goal, ctx, runGeneration, timeout: undefined };
+    pendingSupervisorWakeup = pending;
+    pending.timeout = setTimer(() => {
+      if (pendingSupervisorWakeup !== pending) return;
+      pending.timeout = undefined;
+      deliverSupervisorWakeup(pending);
+    }, SUPERVISOR_WAIT_DURATION_MS);
+    return () => {
+      if (pendingSupervisorWakeup !== pending) return;
+      clearTimer(pending.timeout);
+      pendingSupervisorWakeup = undefined;
+      if (deferredSupervisorWakeup === pending) deferredSupervisorWakeup = undefined;
+    };
+  };
+  const resumeDeferredSupervisorWakeup = (ctx) => {
+    if (compactionPending(ctx) || deferredSupervisorWakeup === undefined) return;
+    const pending = deferredSupervisorWakeup;
+    deferredSupervisorWakeup = undefined;
+    setTimer(() => deliverSupervisorWakeup(pending), 0);
+  };
+  const deactivateSnooze = ({ preservePendingWakeup = false, clearBudget = false } = {}) => {
+    snoozeEnabled = false;
+    snoozeAvailabilityInjected = false;
+    snoozeTurnLimit = undefined;
+    cancelSnooze();
+    cancelSnoozeAvailability();
+    if (!preservePendingWakeup) cancelSnoozeWakeup();
+    if (clearBudget) clearSnoozeBudget();
+    persist();
+  };
+  const configureSnooze = (input, ctx) => {
+    if (input === "off") {
+      deactivateSnooze({ clearBudget: true });
+      return "Goal snooze off";
+    }
+    const wasEnabled = snoozeEnabled;
+    snoozeEnabled = true;
+    snoozeDurationMs = snoozeDurationFromInput(input);
+    persist();
+    if (!wasEnabled && state.enabled && state.goal) scheduleSnoozeAvailability(ctx);
+    return "Goal snooze enabled";
+  };
+  const configureSnoozeTurnLimit = (input) => {
+    const limit = parseSnoozeTurnLimit(input);
+    if (limit === undefined) return { ok: false, message: "Usage: /goal-snooze-turn-limit <1-20>" };
+    snoozeTurnLimit = limit;
+    return { ok: true, message: `Goal snooze turn limit set: ${limit}` };
+  };
+  const configureSnoozeBudget = (input) => {
+    if (input === "off") {
+      clearSnoozeBudget();
+      return { ok: true, message: "Goal snooze budget off" };
+    }
+    const durationMs = parsePositiveDuration(input);
+    if (durationMs === undefined) return { ok: false, message: "Usage: /goal-snooze-budget <duration> | /goal-snooze-budget off" };
+    setSnoozeBudget(durationMs);
+    return { ok: true, message: "Goal snooze budget set" };
+  };
+  const configureSnoozeRefill = (input) => {
+    const match = typeof input === "string" ? input.trim().match(/^([^/]+)\/([^/]+)$/) : undefined;
+    const yieldMs = parsePositiveDuration(match?.[1]);
+    const elapsedMs = parsePositiveDuration(match?.[2]);
+    if (yieldMs === undefined || elapsedMs === undefined) {
+      return { ok: false, message: "Usage: /goal-snooze-budget-refill <yield>/<elapsed>" };
+    }
+    setSnoozeRefill(yieldMs, elapsedMs);
+    return { ok: true, message: "Goal snooze budget refill set" };
+  };
+  const configureGoalLock = (input) => {
+    if (input !== "on" && input !== "off") return { ok: false, message: "Usage: /goal-lock on | /goal-lock off" };
+    goalLockEnabled = input === "on";
+    persist();
+    return { ok: true, message: `Goal lock ${goalLockEnabled ? "on" : "off"}` };
+  };
+  const currentWakeupLimit = () => snoozeEnabled && snoozeTurnLimit !== undefined
+    ? snoozeTurnLimit
+    : MAX_NOT_DONE_WAKEUPS;
   const statusDetails = (action) => ({
     action,
     ...state,
     evaluatorCalls,
     notDoneWakeups,
+    blockedWakeups,
+    waitingAuthWakeups,
     completedThings,
+    goalLockEnabled,
+    snoozeEnabled,
+    snoozeDurationMs,
     lastOwnerGateState,
   });
   const ownerActivityState = (ctx) => {
@@ -236,9 +627,15 @@ export function createGoalExtension(pi) {
     }
     return lastOwnerGateState;
   };
-  const applyAction = (action, rawGoal) => {
+  const applyAction = (action, rawGoal, ctx, { programmatic = false } = {}) => {
     if (!GOAL_ACTIONS.has(action)) {
       return { ok: false, message: "Invalid action. Use set, status, or off." };
+    }
+    if (programmatic && goalLockEnabled && action !== "status") {
+      const canTurnOffCompletedGoal = action === "off" && completedOffAllowance && state.enabled && state.goal;
+      if (!canTurnOffCompletedGoal) {
+        return { ok: false, message: "Goal lock is on. Use /goal-lock off to change the goal." };
+      }
     }
     if (action === "set") {
       const goal = normalizeGoal(rawGoal);
@@ -246,12 +643,16 @@ export function createGoalExtension(pi) {
       cancel();
       evaluatorCalls = 0;
       notDoneWakeups = 0;
+      blockedWakeups = 0;
+      waitingAuthWakeups = 0;
       completedThings = 0;
+      completedOffAllowance = false;
       lastOwnerGateState = "allowed";
       state = { enabled: true, goal };
       persist();
       publish();
-      scheduleSelfWake(goal);
+      scheduleSelfWake(goal, ctx);
+      if (snoozeEnabled) scheduleSnoozeAvailability(ctx);
       return { ok: true, message: `Goal set: ${goal}`, details: { action, ...state } };
     }
     if (action === "status") {
@@ -262,120 +663,82 @@ export function createGoalExtension(pi) {
       };
     }
     cancel();
+    waitingAuthWakeups = 0;
+    completedOffAllowance = false;
     state = { ...state, enabled: false };
+    if (programmatic && goalLockEnabled) goalLockEnabled = false;
     persist();
     publish();
     return { ok: true, message: "Goal off", details: { action, ...state } };
   };
-  const scheduleInjection = (event, ctx, runGeneration, controller, message) => {
+  const scheduleInjection = (event, ctx, runGeneration, controller, message, beforeSend) => {
     if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx)) return;
-    setTimeout(() => {
+    setTimer(() => {
       if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx) || !state.enabled || !state.goal) return;
       // Re-check in the wakeup macrotask. The evaluator result is stale if an
       // owner child was admitted after complete() returned.
-      if (ownerActivityState(ctx) === "suppressed") return;
+      if (compactionPending(ctx) || ownerActivityState(ctx) === "suppressed") return;
+      let undoBeforeSend;
       try {
+        undoBeforeSend = beforeSend?.();
         pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
       } catch(e) {
+        undoBeforeSend?.();
         console.error(e);
       }
     }, 0);
   };
-
-  pi.events?.on?.(GOAL_STATE_REQUEST_EVENT, () => publish());
-
-  pi.on("session_start", async (event, ctx) => {
-    if (sessionId === undefined) sessionId = event?.sessionId ?? ctx.sessionManager?.getSessionId?.();
-    if (!isCurrentSession(event, ctx)) return;
-    cancel();
-    state = restoreState(ctx);
-    notDoneWakeups = state.notDoneWakeups;
-    completedThings = state.completedThings;
-    publish();
-  });
-
-  pi.on("session_shutdown", async (event, ctx) => {
-    if (!isCurrentSession(event, ctx)) return;
-    cancel();
-  });
-
-  pi.registerTool({
-    name: "goal",
-    label: "Goal",
-    description: "Set, inspect, or disable the active goal evaluator.",
-    promptSnippet: "Set, inspect, or disable the active goal evaluator.",
-    promptGuidelines: [
-      "Use goal with action set, status, or off for standing goal evaluation.",
-      "Call pi__goal through the Cursor pi bridge.",
-    ],
-    parameters: GOAL_PARAMETERS,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!isCurrentSession(undefined, ctx)) {
-        return { content: [{ type: "text", text: "Goal is unavailable in this session." }], isError: true };
-      }
-      const result = applyAction(params?.action, params?.goal);
-      return {
-        content: [{ type: "text", text: result.message }],
-        ...(result.details ? { details: result.details } : {}),
-        ...(result.ok ? {} : { isError: true }),
-      };
-    },
-  });
-
-  pi.registerCommand("goal", {
-    description: "Set, inspect, or disable the active goal evaluator",
-    handler: async (args, ctx) => {
-      if (!isCurrentSession(undefined, ctx)) return;
-      const input = typeof args === "string" ? args.trim() : "";
-      const [command, ...rest] = input.split(/\s+/);
-      const result = applyAction(command, rest.join(" "));
-      if (result.ok) {
-        notify(ctx, result.message);
+  const scheduleDeferredEvaluation = (event, ctx, runGeneration, goal) => {
+    if (deferredEvaluation !== undefined || activeAbort) return;
+    const pending = { event, ctx, runGeneration, goal };
+    deferredEvaluationRequest = pending;
+    deferredEvaluation = setTimer(async () => {
+      deferredEvaluation = undefined;
+      if (deferredEvaluationRequest !== pending) return;
+      deferredEvaluationRequest = undefined;
+      if (runGeneration !== generation || !isCurrentSession(event, ctx) || !state.enabled || state.goal !== goal || !ctx.model) return;
+      if (compactionPending(ctx)) {
+        deferredEvaluationRequest = pending;
         return;
       }
-      notify(ctx, command === "set" ? "Usage: /goal set <goal>" : "Usage: /goal set <goal> | /goal status | /goal off", "error");
-    },
-  });
-
-  pi.on("agent_settled", (event, ctx) => {
-    if (!isCurrentSession(event, ctx) || !state.enabled || !state.goal || !ctx.model) return;
-    if (ownerActivityState(ctx) === "suppressed" || deferredEvaluation !== undefined || activeAbort) return;
-    const runGeneration = generation;
-    const goal = state.goal;
-    // agent_settled can run inside Pi's turn bookkeeping. Defer the evaluator
-    // to a macrotask so it observes the fully settled branch and never overlaps
-    // another evaluation scheduled by the same turn.
-    deferredEvaluation = setTimeout(async () => {
-      deferredEvaluation = undefined;
-      if (runGeneration !== generation || !isCurrentSession(event, ctx) || !state.enabled || state.goal !== goal || !ctx.model) return;
       const controller = new AbortController();
       activeAbort = controller;
+      activeEvaluationRequest = pending;
       try {
         // The owner service is authoritative at this boundary. A child can be
         // admitted after the settle event, so the earlier gate cannot protect
         // the evaluator call.
-        if (ownerActivityState(ctx) === "suppressed") return;
+        if (compactionPending(ctx) || ownerActivityState(ctx) === "suppressed") return;
         evaluatorCalls = Math.min(evaluatorCalls + 1, MAX_EVALUATOR_CALLS);
         const request = {
           systemPrompt: EVALUATOR_PROMPT.replace("<goal description>", goal),
           messages: [{
             role: "user",
-            content: [{ type: "text", text: `Goal: ${goal}\n\nActive conversation:\n${boundedActiveContext(ctx).map((message) => `${message.role}: ${message.content[0].text}`).join("\n\n")}\n\nReturn exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE and REASON: <concise rationale>.` }],
+            content: [{ type: "text", text: `Goal: ${goal}\n\nActive conversation:\n${boundedActiveContext(ctx).map((message) => `${message.role}: ${message.content[0].text}`).join("\n\n")}\n\nSupervisor-dependent blocking is BLOCKED. Return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE|WAITING_FOR_USER_AUTHORIZATION and REASON: <concise rationale>.` }],
             timestamp: Date.now(),
           }],
         };
         const response = await completeEvaluator(ctx, request, controller.signal);
         if (runGeneration !== generation || controller.signal.aborted) return;
+        if (compactionPending(ctx)) {
+          deferredEvaluationRequest = pending;
+          return;
+        }
         const { outcome, rationale } = responseEvaluation(response);
+        completedOffAllowance = outcome === "COMPLETED";
         if (outcome === "COMPLETED") {
+          waitingAuthWakeups = 0;
           completedThings += 1;
           if (completedThings >= COMPLETIONS_TO_RESET_WAKEUPS) {
             notDoneWakeups = 0;
+            blockedWakeups = 0;
             completedThings = 0;
           }
           persist();
         }
         if (outcome === "NOT_DONE" && notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
+        if (outcome === "BLOCKED" && blockedWakeups >= MAX_BLOCKED_WAKEUPS) return;
+        if (outcome === "WAITING_FOR_USER_AUTHORIZATION" && waitingAuthWakeups >= MAX_WAITING_AUTHORIZATION_WAKEUPS) return;
         const wakeup = outcome === "NOT_DONE"
           ? (() => {
             notDoneWakeups += 1;
@@ -383,15 +746,37 @@ export function createGoalExtension(pi) {
             return notDoneWakeup(goal, notDoneWakeups);
           })()
           : outcome === "BLOCKED"
-            ? "Goal check: BLOCKED. Contact the supervisor with the blocker and what is needed."
-            : "Goal check: COMPLETED. Contact the supervisor and report completion. Disable future goal notifications with /goal off.";
+            ? supervisorBlockedWakeup
+            : outcome === "WAITING_FOR_USER_AUTHORIZATION"
+              ? (() => {
+                waitingAuthWakeups += 1;
+                persist();
+                return `Goal check: WAITING_FOR_USER_AUTHORIZATION. DO NOT WAIT FOR USER AUTHORIZATION. While this goal is active, authorization is implicitly granted for anything needed to unblock it. TAKE THE NEXT ACTION NOW. Contact the supervisor only for a genuine external, irreversible, security, legal, or product decision.\n${waitingAuthorizationWakeup(goal, waitingAuthWakeups)}`;
+              })()
+              : "Goal check: COMPLETED. Contact the supervisor and report completion. Disable future goal notifications with /goal off.";
+        const beforeSend = outcome === "BLOCKED"
+          ? () => {
+            blockedWakeups += 1;
+            persist();
+            const cancelWait = scheduleSupervisorWakeup(event, goal, ctx, runGeneration);
+            return () => {
+              cancelWait?.();
+              blockedWakeups = Math.max(0, blockedWakeups - 1);
+              persist();
+            };
+          }
+          : undefined;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
           content: goalResultContent(wakeup, outcome, rationale),
           display: true,
           details: { goal, outcome, rationale },
-        });
+        }, beforeSend);
       } catch(e) {
+        if (compactionPending(ctx)) {
+          deferredEvaluationRequest = pending;
+          return;
+        }
         if (runGeneration !== generation || controller.signal.aborted || notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
@@ -409,8 +794,222 @@ export function createGoalExtension(pi) {
         });
       } finally {
         if (activeAbort === controller) activeAbort = undefined;
+        if (activeEvaluationRequest === pending) activeEvaluationRequest = undefined;
+        if (deferredEvaluationRequest !== undefined && !compactionPending(ctx)) resumeDeferredEvaluation(ctx);
       }
     }, 0);
+  };
+  const resumeDeferredEvaluation = (ctx) => {
+    const pending = deferredEvaluationRequest;
+    if (!pending || compactionPending(ctx) || deferredEvaluation !== undefined || activeAbort
+      || pending.runGeneration !== generation || !isCurrentSession(pending.event, pending.ctx)
+      || !state.enabled || state.goal !== pending.goal) return;
+    deferredEvaluationRequest = undefined;
+    scheduleDeferredEvaluation(pending.event, pending.ctx, pending.runGeneration, pending.goal);
+  };
+
+  pi.events?.on?.(GOAL_STATE_REQUEST_EVENT, () => publish());
+
+  pi.on("session_start", async (event, ctx) => {
+    if (sessionId === undefined) sessionId = event?.sessionId ?? ctx.sessionManager?.getSessionId?.();
+    if (!isCurrentSession(event, ctx)) return;
+    cancel();
+    compactionLifecyclePause = false;
+    snoozeAvailabilityInjected = false;
+    const restored = restoreState(ctx);
+    state = { enabled: restored.enabled, goal: restored.goal };
+    notDoneWakeups = restored.notDoneWakeups;
+    blockedWakeups = restored.blockedWakeups;
+    waitingAuthWakeups = 0;
+    completedThings = restored.completedThings;
+    goalLockEnabled = restored.goalLockEnabled;
+    completedOffAllowance = false;
+    snoozeEnabled = restored.snoozeEnabled;
+    snoozeDurationMs = restored.snoozeDurationMs;
+    snoozeTurnLimit = undefined;
+    clearSnoozeBudget();
+    publish();
+    if (state.enabled && snoozeEnabled) scheduleSnoozeAvailability(ctx);
+  });
+
+  pi.on("session_before_compact", (event, ctx) => {
+    if (!isCurrentSession(event, ctx)) return;
+    compactionLifecyclePause = true;
+    if (activeAbort && activeEvaluationRequest) {
+      deferredEvaluationRequest = activeEvaluationRequest;
+      activeAbort.abort();
+    }
+    event?.signal?.addEventListener?.("abort", () => {
+      compactionLifecyclePause = false;
+      setTimer(() => {
+        resumePendingSelfWake(ctx);
+        resumeDeferredEvaluation(ctx);
+        resumeDeferredSnoozeWakeup(ctx);
+        resumeDeferredSupervisorWakeup(ctx);
+      }, 0);
+    }, { once: true });
+  });
+
+  pi.on("session_compact", (_event, ctx) => {
+    if (!isCurrentSession(undefined, ctx)) return;
+    compactionLifecyclePause = false;
+    resumePendingSelfWake(ctx);
+    resumeDeferredEvaluation(ctx);
+    resumeDeferredSnoozeWakeup(ctx);
+    resumeDeferredSupervisorWakeup(ctx);
+    if (state.enabled && snoozeEnabled) scheduleSnoozeAvailability(ctx);
+  });
+
+  pi.on("session_shutdown", async (event, ctx) => {
+    if (!isCurrentSession(event, ctx)) return;
+    compactionLifecyclePause = false;
+    cancel();
+  });
+
+  pi.registerTool({
+    name: "goal",
+    label: "Goal",
+    description: "Set, inspect, or disable the active goal evaluator.",
+    promptSnippet: "Set, inspect, or disable the active goal evaluator.",
+    promptGuidelines: [
+      "Use goal with action set, status, or off for standing goal evaluation.",
+      "Call pi__goal through the Cursor pi bridge.",
+    ],
+    parameters: GOAL_PARAMETERS,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!isCurrentSession(undefined, ctx)) {
+        return { content: [{ type: "text", text: "Goal is unavailable in this session." }], isError: true };
+      }
+      const result = applyAction(params?.action, params?.goal, ctx, { programmatic: true });
+      return {
+        content: [{ type: "text", text: result.message }],
+        ...(result.details ? { details: result.details } : {}),
+        ...(result.ok ? {} : { isError: true }),
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "goal_snooze",
+    label: "Goal Snooze",
+    description: "Deliberately wait before resuming an active goal when snooze is enabled.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      if (!isCurrentSession(undefined, ctx)) {
+        return { content: [{ type: "text", text: "Goal snooze is unavailable in this session." }], isError: true };
+      }
+      if (!snoozeEnabled) {
+        return { content: [{ type: "text", text: "Goal snooze is not enabled. Use /goal-snooze first." }], isError: true };
+      }
+      if (!state.enabled || !state.goal) {
+        return { content: [{ type: "text", text: "Goal snooze needs an active goal." }], isError: true };
+      }
+      if (pendingSnooze || pendingSnoozeWakeup !== undefined || deferredSnoozeWakeup !== undefined) {
+        return { content: [{ type: "text", text: "Goal snooze is already waiting." }], isError: true };
+      }
+      refreshSnoozeBudget();
+      if (snoozeBudgetCapMs !== undefined && snoozeBudgetAvailableMs <= 0) {
+        return { content: [{ type: "text", text: "Goal snooze budget is exhausted. Wait for a refill." }], isError: true };
+      }
+      if (notDoneWakeups >= currentWakeupLimit()) {
+        return { content: [{ type: "text", text: "Goal snooze ended. The goal retry limit has been reached." }] };
+      }
+      const goal = state.goal;
+      const runGeneration = generation;
+      if (_signal?.aborted) {
+        return { content: [{ type: "text", text: "Goal snooze was canceled." }], isError: true };
+      }
+      scheduleSnooze(snoozeDurationMs, _signal, (waited) => {
+        if (!waited || runGeneration !== generation || !snoozeEnabled || !state.enabled || state.goal !== goal) return;
+        if (notDoneWakeups >= currentWakeupLimit()) return;
+        notDoneWakeups += 1;
+        const reachedCustomLimit = snoozeTurnLimit !== undefined && notDoneWakeups >= snoozeTurnLimit;
+        const exhaustedBudget = snoozeBudgetCapMs !== undefined
+          && snoozeBudgetAvailableMs <= 0
+          && snoozeRefillYieldMs === undefined;
+        persist();
+        scheduleSnoozeWakeup(goal, runGeneration, notDoneWakeup(goal, notDoneWakeups), ctx, reachedCustomLimit || exhaustedBudget);
+        if (reachedCustomLimit || exhaustedBudget) deactivateSnooze({ preservePendingWakeup: true });
+      });
+      return { content: [{ type: "text", text: "Goal snooze scheduled. The next goal wakeup will be delivered after the configured delay." }] };
+    },
+  });
+
+  pi.registerCommand("goal", {
+    description: "Set, inspect, or disable the active goal evaluator",
+    handler: async (args, ctx) => {
+      if (!isCurrentSession(undefined, ctx)) return;
+      const input = typeof args === "string" ? args.trim() : "";
+      const [command, ...rest] = input.split(/\s+/);
+      const result = applyAction(command, rest.join(" "), ctx);
+      if (result.ok) {
+        notify(ctx, result.message);
+        return;
+      }
+      notify(ctx, command === "set" ? "Usage: /goal set <goal>" : "Usage: /goal set <goal> | /goal status | /goal off", "error");
+    },
+  });
+
+  pi.registerCommand("goal-lock", {
+    description: "Enable or disable protection against programmatic goal changes",
+    handler: async (args, ctx) => {
+      if (!isCurrentSession(undefined, ctx)) return;
+      const result = configureGoalLock(typeof args === "string" ? args.trim() : "");
+      notify(ctx, result.message, result.ok ? "info" : "error");
+    },
+  });
+
+  pi.registerCommand("goal-snooze", {
+    description: "Enable or disable deliberate goal snoozing",
+    handler: async (args, ctx) => {
+      if (!isCurrentSession(undefined, ctx)) return;
+      const input = typeof args === "string" ? args.trim() : "";
+      notify(ctx, configureSnooze(input, ctx));
+    },
+  });
+
+  pi.registerCommand("goal-snooze-turn-limit", {
+    description: "Set the ephemeral goal snooze turn limit",
+    handler: async (args, ctx) => {
+      if (!isCurrentSession(undefined, ctx)) return;
+      const result = configureSnoozeTurnLimit(typeof args === "string" ? args.trim() : "");
+      notify(ctx, result.message, result.ok ? "info" : "error");
+    },
+  });
+
+  pi.registerCommand("goal-snooze-budget", {
+    description: "Set or clear the ephemeral goal snooze time budget",
+    handler: async (args, ctx) => {
+      if (!isCurrentSession(undefined, ctx)) return;
+      const result = configureSnoozeBudget(typeof args === "string" ? args.trim() : "");
+      notify(ctx, result.message, result.ok ? "info" : "error");
+    },
+  });
+
+  pi.registerCommand("goal-snooze-budget-refill", {
+    description: "Set the ephemeral goal snooze budget refill rate",
+    handler: async (args, ctx) => {
+      if (!isCurrentSession(undefined, ctx)) return;
+      const result = configureSnoozeRefill(typeof args === "string" ? args.trim() : "");
+      notify(ctx, result.message, result.ok ? "info" : "error");
+    },
+  });
+
+  pi.on("agent_settled", (event, ctx) => {
+    if (!isCurrentSession(event, ctx)) return;
+    if (!compactionPending(ctx)) resumePendingSelfWake(ctx);
+    if (!state.enabled || !state.goal || !ctx.model) return;
+    if (compactionPending(ctx)) return;
+    resumeDeferredSnoozeWakeup(ctx);
+    if (pendingSnooze || pendingSnoozeWakeup !== undefined || deferredSnoozeWakeup !== undefined) return;
+    if (snoozeEnabled) scheduleSnoozeAvailability(ctx);
+    if (ownerActivityState(ctx) === "suppressed" || pendingSupervisorWakeup !== undefined
+      || deferredSupervisorWakeup !== undefined || deferredEvaluation !== undefined || activeAbort) return;
+    scheduleDeferredEvaluation(event, ctx, generation, state.goal);
   });
 }
 
