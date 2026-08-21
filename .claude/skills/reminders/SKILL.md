@@ -24,6 +24,23 @@ session; it prevents hidden delivery to a literal `me` mailbox. All commands
 use the local Mailbox V2 router; pass `--router-url` only for another exact
 loopback HTTP(S) base URL.
 
+## PR sweep reminder template
+
+Use this reusable message when setting a PR sweep reminder:
+
+> Sweep every repository in the relevant GitHub organization. Include every PR where the target reviewer previously posted a review and the current head differs from the head reviewed, regardless of current review-request assignment, other reviewers, stack or cross-PR comments, replacement PR numbers, or whether the PR is open, closed, or re-pushed. Treat review-request metadata as additional signal, not a gate.
+
+## Recurring reminders
+
+Use `--every <duration>` with `reminders set` to create a recurring reminder. Duration
+forms include `30s`, `10m`, and `1h` (and the other forms listed below).
+`--window current`, `--window self`, and `--window me` resolve to the current tmux
+window. Use `reminders update <id> --every <duration>` to change an existing reminder
+to recurring. If supported, `--in <duration>` changes it back to a one-shot reminder.
+
+Recurring reminders require a live WebSocket lease for the target. Missed occurrences
+are skipped. Delete a recurring reminder with `reminders delete <id>` when it is done.
+
 ## Examples
 
 Set a reminder for 10 minutes from now:
