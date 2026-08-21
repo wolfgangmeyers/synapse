@@ -34,3 +34,4 @@ REDIRECT.md
 VERIFY.md
 .claude/cache/
 .worktrees/
+harness/router.db
