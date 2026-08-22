@@ -735,6 +735,7 @@ function goalControlErrorMessage(code, message) {
     target_instance_changed: "That agent restarted. Close this editor and try again.",
     target_not_connected: "That agent is no longer connected.",
     goal_control_unavailable: "Goal controls are not available on this router.",
+    goal_control_blocking_unavailable: "This router does not support disabling goal blocking.",
     invalid_settings: "Check the goal settings and try again.",
     invalid_goal: "Enter a goal before saving.",
     control_timeout: "The goal change timed out.",
@@ -1463,6 +1464,7 @@ function compactingBadgeMarkup(extraClass = "") {
 const DEFAULT_GOAL_STATE = {
   enabled: false,
   goal: "",
+  blocking: true,
   goal_lock_enabled: false,
   snooze_enabled: true,
   snooze_duration_ms: 60_000,
@@ -1483,7 +1485,8 @@ function normalizeGoalProjection(value) {
 
 function normalizeGoalStateValue(value) {
   const projection = normalizeGoalProjection(value);
-  if (!projection || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
+  if (!projection || (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean")
+    || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
     || !positiveGoalInteger(value.snooze_duration_ms) || !positiveGoalInteger(value.snooze_refill_yield_ms)
     || !positiveGoalInteger(value.snooze_refill_elapsed_ms)
     || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
@@ -1492,6 +1495,7 @@ function normalizeGoalStateValue(value) {
   if (!counts || typeof counts !== "object" || !["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"].every((key) => Number.isSafeInteger(counts[key]) && counts[key] >= 0)) return undefined;
   return {
     ...projection,
+    blocking: value.blocking !== false,
     goal_lock_enabled: value.goal_lock_enabled,
     snooze_enabled: value.snooze_enabled,
     snooze_duration_ms: value.snooze_duration_ms,
@@ -1673,7 +1677,7 @@ function openGoalEditor(peer, returnFocus) {
   state.goalDraft = goalDraftFromState(source);
   renderGoalDialog(peer);
   elements.goalDialog.showModal();
-  requestAnimationFrame(() => elements.goalDialogBody.querySelector("textarea, input")?.focus());
+  requestAnimationFrame(() => elements.goalDialogBody.querySelector("button, textarea, input")?.focus());
 }
 
 function closeGoalDialog() {
@@ -1688,6 +1692,7 @@ function goalDraftFromState(stateValue) {
   return {
     enabled: stateValue.enabled === true,
     goal: stateValue.goal || "",
+    blocking: stateValue.blocking !== false,
     goal_lock_enabled: stateValue.goal_lock_enabled === true,
     snooze_enabled: stateValue.snooze_enabled !== false,
     snooze_duration_ms: stateValue.snooze_duration_ms || DEFAULT_GOAL_STATE.snooze_duration_ms,
@@ -1708,7 +1713,7 @@ function renderGoalDialog(peer) {
   const form = document.createElement("div");
   form.className = "goal-editor-form";
   form.addEventListener("input", (event) => updateGoalDraftFromInput(event.target));
-  form.append(goalCheckbox("goal-enabled", "Goal on", draft.enabled));
+  form.append(goalToggle("goal-enabled", "Goal", draft.enabled));
   const goalLabel = document.createElement("label");
   goalLabel.textContent = "What should this agent work toward?";
   const goalText = document.createElement("textarea");
@@ -1720,11 +1725,12 @@ function renderGoalDialog(peer) {
   goalText.disabled = !draft.enabled;
   goalLabel.append(goalText);
   form.append(goalLabel);
-  form.append(goalCheckbox("goal-lock", "Keep this goal locked", draft.goal_lock_enabled));
+  form.append(goalToggle("goal-blocking", "Block when blocked", draft.blocking));
+  form.append(goalToggle("goal-lock", "Goal lock", draft.goal_lock_enabled, { lock: true }));
   const snoozeFieldset = document.createElement("fieldset");
   const snoozeLegend = document.createElement("legend");
   snoozeLegend.textContent = "Snooze settings";
-  snoozeFieldset.append(snoozeLegend, goalCheckbox("snooze-enabled", "Allow snoozing", draft.snooze_enabled));
+  snoozeFieldset.append(snoozeLegend, goalToggle("snooze-enabled", "Allow snoozing", draft.snooze_enabled));
   snoozeFieldset.append(numberField("snooze-duration", "Snooze duration (seconds)", draft.snooze_duration_ms / 1000, 1));
   snoozeFieldset.append(numberField("snooze-turn-limit", "Snooze turn limit (optional)", draft.snooze_turn_limit ?? "", 1, 20));
   snoozeFieldset.append(numberField("snooze-budget", "Snooze budget (minutes, optional)", draft.snooze_budget_cap_ms === null ? "" : draft.snooze_budget_cap_ms / 60_000, 1));
@@ -1754,15 +1760,42 @@ function renderGoalDialog(peer) {
   elements.goalDialogFooter.append(status, actions);
 }
 
-function goalCheckbox(id, labelText, checked) {
-  const label = document.createElement("label");
-  label.className = "goal-checkbox";
-  const input = document.createElement("input");
-  input.type = "checkbox";
-  input.id = id;
-  input.checked = checked;
-  label.append(input, document.createTextNode(labelText));
-  return label;
+function goalToggle(id, labelText, pressed, { lock = false } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = id;
+  button.className = `goal-toggle${lock ? " goal-lock-toggle" : ""}`;
+  const label = document.createElement("span");
+  label.className = "goal-toggle-label";
+  label.textContent = labelText;
+  const track = document.createElement("span");
+  track.className = "goal-toggle-track";
+  track.setAttribute("aria-hidden", "true");
+  const thumb = document.createElement("span");
+  thumb.className = "goal-toggle-thumb";
+  track.append(thumb);
+  const status = document.createElement("span");
+  status.className = "goal-toggle-state";
+  const icon = lock ? document.createElement("i") : undefined;
+  if (icon) icon.setAttribute("aria-hidden", "true");
+  button.append(...(icon ? [icon] : []), label, ...(lock ? [] : [track]), status);
+  button.addEventListener("click", () => {
+    setGoalToggleState(button, button.getAttribute("aria-pressed") !== "true");
+    updateGoalDraftFromInput(button);
+  });
+  setGoalToggleState(button, pressed);
+  return button;
+}
+
+function setGoalToggleState(button, pressed) {
+  const lock = button.classList.contains("goal-lock-toggle");
+  button.setAttribute("aria-pressed", String(pressed));
+  button.setAttribute("aria-label", `${button.querySelector(".goal-toggle-label")?.textContent ?? "Goal setting"}: ${lock ? (pressed ? "LOCKED" : "UNLOCKED") : (pressed ? "ON" : "OFF")}`);
+  button.classList.toggle("is-on", pressed);
+  const state = button.querySelector(".goal-toggle-state");
+  if (state) state.textContent = lock ? (pressed ? "LOCKED" : "UNLOCKED") : (pressed ? "ON" : "OFF");
+  const icon = button.querySelector("i");
+  if (icon) icon.className = `fa-solid ${pressed ? "fa-lock" : "fa-lock-open"}`;
 }
 
 function numberField(id, labelText, value, min, max) {
@@ -1787,10 +1820,14 @@ function updateGoalDraftFromInput(input) {
     const value = Number(input.value);
     return Number.isSafeInteger(value) && value > 0 ? value : fallback;
   };
-  if (input.id === "goal-enabled") state.goalDraft.enabled = input.checked;
+  if (input.classList?.contains("goal-toggle")) {
+    const pressed = input.getAttribute("aria-pressed") === "true";
+    if (input.id === "goal-enabled") state.goalDraft.enabled = pressed;
+    if (input.id === "goal-blocking") state.goalDraft.blocking = pressed;
+    if (input.id === "goal-lock") state.goalDraft.goal_lock_enabled = pressed;
+    if (input.id === "snooze-enabled") state.goalDraft.snooze_enabled = pressed;
+  }
   if (input.id === "goal-text") state.goalDraft.goal = input.value;
-  if (input.id === "goal-lock") state.goalDraft.goal_lock_enabled = input.checked;
-  if (input.id === "snooze-enabled") state.goalDraft.snooze_enabled = input.checked;
   if (input.id === "snooze-duration") state.goalDraft.snooze_duration_ms = (number(60) || 60) * 1000;
   if (input.id === "snooze-turn-limit") state.goalDraft.snooze_turn_limit = number(null);
   if (input.id === "snooze-budget") state.goalDraft.snooze_budget_cap_ms = input.value === "" ? null : (number(null) || 1) * 60_000;
@@ -1798,7 +1835,7 @@ function updateGoalDraftFromInput(input) {
   if (input.id === "snooze-elapsed") state.goalDraft.snooze_refill_elapsed_ms = (number(60) || 60) * 1000;
   if (input.id === "goal-enabled") {
     const text = elements.goalDialogBody.querySelector("#goal-text");
-    if (text) text.disabled = !input.checked;
+    if (text) text.disabled = input.getAttribute("aria-pressed") !== "true";
   }
 }
 
@@ -1837,6 +1874,7 @@ function sendGoalControl() {
     action,
     goal: action === "off" ? "" : draft.goal,
     settings: {
+      blocking: draft.blocking,
       goal_lock_enabled: draft.goal_lock_enabled,
       snooze_enabled: draft.snooze_enabled,
       snooze_duration_ms: draft.snooze_duration_ms,

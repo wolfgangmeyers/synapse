@@ -80,6 +80,7 @@ test("protocol validates typed goal control, confirmation, and full-state frames
   const goalState = {
     enabled: true,
     goal: "ship the goal editor",
+    blocking: true,
     goal_lock_enabled: true,
     snooze_enabled: true,
     snooze_duration_ms: 120_000,
@@ -90,6 +91,7 @@ test("protocol validates typed goal control, confirmation, and full-state frames
     outcome_counts: { BLOCKED: 2, COMPLETED: 3, NOT_DONE: 4, WAITING_FOR_USER_AUTHORIZATION: 1 },
   };
   const settings = {
+    blocking: goalState.blocking,
     goal_lock_enabled: goalState.goal_lock_enabled,
     snooze_enabled: goalState.snooze_enabled,
     snooze_duration_ms: goalState.snooze_duration_ms,
@@ -105,6 +107,8 @@ test("protocol validates typed goal control, confirmation, and full-state frames
     control_id: "goal-control-1", action: "set", goal: goalState.goal, settings,
   };
   assert.deepEqual(validateClientFrame(control).settings, settings);
+  assert.deepEqual(validateClientFrame({ ...control, settings: Object.fromEntries(Object.entries(settings).filter(([key]) => key !== "blocking")) }).settings.blocking, undefined);
+  assert.throws(() => validateClientFrame({ ...control, settings: { ...settings, blocking: "yes" } }));
   assert.throws(() => validateClientFrame({ ...control, settings: { ...settings, snooze_duration_ms: 0 } }));
   assert.throws(() => validateClientFrame({ ...control, action: "off", goal: "must be blank" }));
 
@@ -124,6 +128,8 @@ test("protocol validates typed goal control, confirmation, and full-state frames
   };
   assert.deepEqual(validateClientFrame(result).goal_state, goalState);
   assert.deepEqual(validateServerFrame(result).goal_state, goalState);
+  assert.throws(() => validateClientFrame({ ...result, goal_state: { ...goalState, blocking: 1 } }));
+  assert.throws(() => validateServerFrame({ ...result, goal_state: { ...goalState, blocking: 1 } }));
 
   const state = {
     version: "v1", frame_id: "goal-state-1", type: "goal_state",
@@ -197,6 +203,7 @@ test("router forwards exact-instance goal controls and projects confirmed goal s
     const worker = await register(wsUrl, "worker", "worker-instance");
     sockets.push(web.socket, worker.socket);
     const settings = {
+      blocking: true,
       goal_lock_enabled: false,
       snooze_enabled: true,
       snooze_duration_ms: 60_000,
@@ -400,6 +407,7 @@ test("goal controls require an interaction source and keep pending controls boun
   });
   const sockets = [];
   const settings = {
+    blocking: true,
     goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 60_000,
@@ -479,6 +487,7 @@ test("router projects goal state through activity, snapshot, off, and replacemen
     const goalState = {
       enabled: true,
       goal: "ship the goal",
+      blocking: true,
       goal_lock_enabled: false,
       snooze_enabled: true,
       snooze_duration_ms: 60_000,
@@ -627,6 +636,7 @@ test("typed WebUI goal control reaches goal.js and returns correlated live and s
   let resolveWorkerConnected;
   const workerConnected = new Promise((resolve) => { resolveWorkerConnected = resolve; });
   const settings = {
+    blocking: true,
     goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 60_000,
@@ -639,6 +649,7 @@ test("typed WebUI goal control reaches goal.js and returns correlated live and s
   const expectedGoalState = {
     enabled: true,
     goal,
+    blocking: true,
     goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 60_000,
