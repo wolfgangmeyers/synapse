@@ -42,6 +42,7 @@ const MODEL_CATALOG_MAX_FRAME_BYTES = 60 * 1024;
 const DEFAULT_PENDING_MODEL_CONTROL_TTL_MS = 30_000;
 const DEFAULT_MAX_PENDING_MODEL_CONTROLS = 256;
 const DEFAULT_MAX_PENDING_MODEL_CONTROLS_PER_SOURCE = 16;
+const DEFAULT_GOAL_CONTROL_DESIRED_TTL_MS = 10 * 60_000;
 // Accommodates text messages plus up to three browser-compressed image attachments
 // while still capping a single loopback request.
 const MAX_REQUEST_BYTES = 6 * 1024 * 1024;
@@ -108,6 +109,7 @@ export function createAgentRouter({
   pendingModelControlTtlMs = DEFAULT_PENDING_MODEL_CONTROL_TTL_MS,
   maxPendingModelControls = DEFAULT_MAX_PENDING_MODEL_CONTROLS,
   maxPendingModelControlsPerSource = DEFAULT_MAX_PENDING_MODEL_CONTROLS_PER_SOURCE,
+  goalControlDesiredTtlMs = DEFAULT_GOAL_CONTROL_DESIRED_TTL_MS,
   generateFrameId = createNanoId,
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
@@ -175,6 +177,9 @@ export function createAgentRouter({
     || maxPendingModelControlsPerSource > maxPendingModelControls) {
     throw new TypeError("maxPendingModelControlsPerSource must be a positive safe integer no greater than maxPendingModelControls");
   }
+  if (!Number.isSafeInteger(goalControlDesiredTtlMs) || goalControlDesiredTtlMs <= 0) {
+    throw new TypeError("goalControlDesiredTtlMs must be a positive safe integer");
+  }
   if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes <= 0) {
     throw new TypeError("maxFrameBytes must be a positive safe integer");
   }
@@ -224,10 +229,17 @@ export function createAgentRouter({
   const pendingDeliveryOffers = new Map();
   const activityByAgentId = new Map();
   const goalByAgentId = new Map();
+  const goalStateByAgentId = new Map();
   const modelByAgentId = new Map();
   // Model-control results are useful only while both exact sessions and leases
   // remain connected. TTL and capacity limits bound targets that never reply.
   const pendingModelControls = new Map();
+  const pendingGoalControls = new Map();
+  // Keep desired controls in SQLite so a temporary socket loss can replay to
+  // the same process instance. A different instance deletes the old record.
+  const goalControlV1Available = typeof repository.migrationIds === "function"
+    && repository.migrationIds().includes("019_goal_control_desired_state")
+    && ["goalControlDesiredFor", "upsertGoalControlDesired", "deleteGoalControlDesiredExcept", "pruneGoalControlDesired"].every((method) => typeof repository[method] === "function");
   // V2 is deliberately unavailable instead of silently becoming a second
   // process-local lifecycle store when a router starts against a pre-017 DB.
   const lifecycleV2Available = typeof repository.migrationIds === "function"
@@ -316,6 +328,18 @@ export function createAgentRouter({
           receiveModelControlResult(socket, frame);
           return;
         }
+        if (frame.type === "goal_control") {
+          receiveGoalControl(socket, frame);
+          return;
+        }
+        if (frame.type === "goal_control_result") {
+          receiveGoalControlResult(socket, frame);
+          return;
+        }
+        if (frame.type === "goal_state") {
+          receiveGoalState(socket, frame);
+          return;
+        }
         if (frame.type === "subagent_sync_enable") {
           enableSubagentSync(socket, frame);
           return;
@@ -360,6 +384,7 @@ export function createAgentRouter({
     socket.on("close", () => {
       if (session === undefined) return;
       removePendingModelControlsForSession(session);
+      removePendingGoalControlsForSession(session);
       if (session.conversationSync === "v1") {
         const subscribers = conversationSessions.get(session.agentId);
         if (subscribers?.get(session.instanceId) === session) subscribers.delete(session.instanceId);
@@ -413,10 +438,15 @@ export function createAgentRouter({
         if (owner !== undefined && lease !== undefined
           && Date.parse(lease.expires_at) > currentTimeMs(clock)) {
           const modelInstanceId = modelByAgentId.get(frame.agent_id)?.instanceId;
+          if (goalControlV1Available) repository.deleteGoalControlDesiredExcept({
+            agentId: frame.agent_id,
+            instanceId: frame.instance_id,
+          });
           if (owner.instanceId !== frame.instance_id
             || (modelInstanceId !== undefined && modelInstanceId !== frame.instance_id)) {
             activityByAgentId.delete(frame.agent_id);
             goalByAgentId.delete(frame.agent_id);
+            goalStateByAgentId.delete(frame.agent_id);
             modelByAgentId.delete(frame.agent_id);
           }
           session = createSession(currentSocket, frame, lease, owner.deliveryInstanceId);
@@ -424,6 +454,7 @@ export function createAgentRouter({
           if (owner === reconnecting) sessions.set(frame.agent_id, session);
           emitRegistered(frame, lease);
           sendRegistered(frame, lease);
+          replayGoalControlDesired(session);
           if (reconnecting !== undefined && reconnecting.socket !== currentSocket) {
             sendError(reconnecting.socket, generateFrameId, "lease_expired");
             closeSocket(reconnecting.socket, 4001, "lease expired");
@@ -448,11 +479,20 @@ export function createAgentRouter({
           leaseDurationMs,
         });
         const replacement = sessions.get(frame.agent_id);
+        if (goalControlV1Available) repository.deleteGoalControlDesiredExcept({
+          agentId: frame.agent_id,
+          instanceId: frame.instance_id,
+        });
         if ((replacement !== undefined && replacement.instanceId !== frame.instance_id)
+          || (goalByAgentId.get(frame.agent_id)?.instanceId !== undefined
+            && goalByAgentId.get(frame.agent_id).instanceId !== frame.instance_id)
+          || (goalStateByAgentId.get(frame.agent_id)?.instanceId !== undefined
+            && goalStateByAgentId.get(frame.agent_id).instanceId !== frame.instance_id)
           || (modelByAgentId.get(frame.agent_id)?.instanceId !== undefined
             && modelByAgentId.get(frame.agent_id).instanceId !== frame.instance_id)) {
           activityByAgentId.delete(frame.agent_id);
           goalByAgentId.delete(frame.agent_id);
+          goalStateByAgentId.delete(frame.agent_id);
           modelByAgentId.delete(frame.agent_id);
         }
         session = createSession(currentSocket, frame, lease, frame.instance_id);
@@ -467,6 +507,7 @@ export function createAgentRouter({
           closeSocket(replacement.socket, 4001, "lease expired");
         }
         sendRegistered(frame, lease);
+        replayGoalControlDesired(session);
         offerSession(session);
       } catch (error) {
         if (error instanceof DuplicateAgentLeaseError) {
@@ -995,6 +1036,155 @@ export function createAgentRouter({
       });
     }
 
+    function receiveGoalControl(currentSocket, frame) {
+      if (!goalControlV1Available) {
+        sendError(currentSocket, generateFrameId, "goal_control_unavailable", frame.frame_id);
+        return;
+      }
+      if (!matchesSessionLease(frame)) {
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      if (session.agentRole !== "user_interaction") {
+        sendError(currentSocket, generateFrameId, "goal_control_not_allowed", frame.frame_id);
+        return;
+      }
+      const target = sessions.get(frame.target_agent_id);
+      if (target === undefined
+        || target.instanceId !== frame.target_instance_id
+        || target.socket.readyState !== WebSocket.OPEN
+        || !sessionHasActiveLease(target)) {
+        sendError(
+          currentSocket,
+          generateFrameId,
+          target !== undefined && target.instanceId !== frame.target_instance_id
+            ? "target_instance_changed"
+            : "target_not_connected",
+          frame.frame_id,
+        );
+        return;
+      }
+      pruneExpiredPendingGoalControls();
+      const key = pendingModelControlKey(session.agentId, frame.control_id);
+      if (pendingGoalControls.has(key)) {
+        sendError(currentSocket, generateFrameId, "goal_control_already_pending", frame.frame_id);
+        return;
+      }
+      let sourcePendingCount = 0;
+      for (const pending of pendingGoalControls.values()) {
+        if (pending.sourceSession === session) sourcePendingCount += 1;
+      }
+      if (pendingGoalControls.size >= maxPendingModelControls || sourcePendingCount >= maxPendingModelControlsPerSource) {
+        sendError(currentSocket, generateFrameId, "goal_control_capacity_exceeded", frame.frame_id);
+        return;
+      }
+      const expiresAtMs = currentTimeMs(clock) + goalControlDesiredTtlMs;
+      let desired;
+      try {
+        desired = repository.upsertGoalControlDesired({
+          agentId: target.agentId,
+          instanceId: target.instanceId,
+          config: {
+            sourceAgentId: session.agentId,
+            controlId: frame.control_id,
+            action: frame.action,
+            goal: frame.goal,
+            settings: frame.settings,
+          },
+          expiresAt: new Date(expiresAtMs).toISOString(),
+        });
+      } catch {
+        sendError(currentSocket, generateFrameId, "goal_control_persist_failed", frame.frame_id);
+        return;
+      }
+      if (!forwardGoalControlDesired(target, desired)) {
+        // The desired control is durable and will replay if this exact process
+        // reconnects. The source gets a clear live-send failure instead of a
+        // false acknowledgement.
+        sendError(currentSocket, generateFrameId, "target_send_failed", frame.frame_id);
+        return;
+      }
+      pendingGoalControls.set(key, {
+        controlId: frame.control_id,
+        requestFrameId: frame.frame_id,
+        sourceSession: session,
+        sourceAgentId: session.agentId,
+        sourceInstanceId: session.instanceId,
+        sourceLeaseId: session.leaseId,
+        targetSession: target,
+        targetAgentId: target.agentId,
+        targetInstanceId: target.instanceId,
+        targetLeaseId: target.leaseId,
+        revision: desired.revision,
+        expiresAtMs,
+      });
+    }
+
+    function receiveGoalControlResult(currentSocket, frame) {
+      if (!goalControlV1Available) {
+        sendError(currentSocket, generateFrameId, "goal_control_unavailable", frame.frame_id);
+        return;
+      }
+      if (!matchesSessionLease(frame)) {
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      pruneExpiredPendingGoalControls();
+      const desired = repository.goalControlDesiredFor({
+        agentId: session.agentId,
+        instanceId: session.instanceId,
+      });
+      const desiredMatches = desired !== undefined
+        && desired.revision === frame.revision
+        && desired.config?.controlId === frame.control_id
+        && desired.config?.sourceAgentId === frame.source_agent_id;
+      const key = pendingModelControlKey(frame.source_agent_id, frame.control_id);
+      const pending = pendingGoalControls.get(key);
+      if (!desiredMatches || (pending !== undefined && (pending.targetSession !== session
+        || pending.targetInstanceId !== frame.instance_id
+        || pending.targetLeaseId !== frame.lease_id
+        || pending.revision !== frame.revision))) {
+        sendError(currentSocket, generateFrameId, "goal_control_result_not_pending", frame.frame_id);
+        return;
+      }
+      recordGoalState(session.agentId, session.instanceId, frame.goal_state);
+      if (pending === undefined) return;
+      pendingGoalControls.delete(key);
+      const source = pending.sourceSession;
+      if (source.agentId !== frame.source_agent_id
+        || source.instanceId !== pending.sourceInstanceId
+        || source.leaseId !== pending.sourceLeaseId
+        || source.socket.readyState !== WebSocket.OPEN
+        || !sessionHasActiveLease(source)) return;
+      sendFrame(source.socket, generateFrameId, {
+        type: "goal_control_result",
+        agent_id: session.agentId,
+        instance_id: session.instanceId,
+        lease_id: session.leaseId,
+        source_agent_id: frame.source_agent_id,
+        control_id: frame.control_id,
+        revision: frame.revision,
+        accepted: frame.accepted,
+        ...(frame.error_code === undefined ? {} : { error_code: frame.error_code }),
+        goal_state: frame.goal_state,
+      });
+    }
+
+    function receiveGoalState(currentSocket, frame) {
+      if (!goalControlV1Available) {
+        sendError(currentSocket, generateFrameId, "goal_control_unavailable", frame.frame_id);
+        return;
+      }
+      if (!matchesSessionLease(frame)) {
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      recordGoalState(session.agentId, session.instanceId, frame.goal_state);
+    }
+
     function receiveMessageArrival(currentSocket, frame) {
       if (session === undefined
         || !sessionHasActiveLease(session)
@@ -1194,6 +1384,7 @@ export function createAgentRouter({
       for (const timer of pendingDeliveryOffers.values()) clearTimeout(timer);
       pendingDeliveryOffers.clear();
       pendingModelControls.clear();
+      pendingGoalControls.clear();
       for (const socket of webSocketServer.clients) {
         socket.terminate();
       }
@@ -1222,6 +1413,8 @@ export function createAgentRouter({
   function sweepMessageLifecycles() {
     pruneExpiredRateLimitEntries(currentTimeMs(clock));
     pruneExpiredPendingModelControls();
+    pruneExpiredPendingGoalControls();
+    const goalControls = goalControlV1Available ? repository.pruneGoalControlDesired() : 0;
     const staleAgents = sweepStaleAgentResources();
     const expired = sweepExpiredUnclaimedMessages();
     const timedOut = sweepDeliveryTimeouts();
@@ -1269,6 +1462,7 @@ export function createAgentRouter({
       ...(lifecycle.tombstones === 0 ? {} : { lifecycle_tombstone_pruned_count: lifecycle.tombstones }),
       ...(lifecycle.ledger === 0 ? {} : { lifecycle_ledger_pruned_count: lifecycle.ledger }),
       ...(lifecycle.producers === 0 ? {} : { lifecycle_producer_pruned_count: lifecycle.producers }),
+      ...(goalControls === 0 ? {} : { goal_control_pruned_count: goalControls }),
     };
     // An all-zero sweep records no work, and the sweep runs every second, so logging
     // every one of them is pure volume. Log the ones that did something, plus an
@@ -1282,7 +1476,7 @@ export function createAgentRouter({
       emit("lifecycle_sweep_completed", sweepCounts);
       lastSweepRecordMs = now;
     }
-    return { staleAgents, expired, timedOut, reminders, serverJobs, conversations, lifecycle };
+    return { staleAgents, expired, timedOut, reminders, serverJobs, conversations, lifecycle, goalControls };
   }
 
   function sendMechaDeveloperUpdateReminder() {
@@ -1602,6 +1796,25 @@ export function createAgentRouter({
     }
   }
 
+  function pruneExpiredPendingGoalControls(nowMs = currentTimeMs(clock)) {
+    for (const [key, pending] of pendingGoalControls.entries()) {
+      if (pending.expiresAtMs > nowMs) continue;
+      pendingGoalControls.delete(key);
+      if (pending.sourceSession.socket.readyState === WebSocket.OPEN && sessionHasActiveLease(pending.sourceSession)) {
+        sendError(pending.sourceSession.socket, generateFrameId, "goal_control_expired", pending.requestFrameId);
+      }
+    }
+  }
+
+  function removePendingGoalControlsForSession(disconnectedSession) {
+    for (const [key, pending] of pendingGoalControls.entries()) {
+      if (pending.sourceSession !== disconnectedSession && pending.targetSession !== disconnectedSession) continue;
+      // Desired state stays durable through a socket drop. The next connection
+      // of the same instance receives it; a replacement deletes it on register.
+      pendingGoalControls.delete(key);
+    }
+  }
+
   function removePendingModelControlsForSession(disconnectedSession) {
     for (const [key, pending] of pendingModelControls.entries()) {
       const sourceDisconnected = pending.sourceSession === disconnectedSession;
@@ -1747,6 +1960,101 @@ export function createAgentRouter({
     });
   }
 
+  function normalizeGoalState(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
+      || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
+      || !Number.isSafeInteger(value.snooze_duration_ms) || value.snooze_duration_ms < 1
+      || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
+      || !(value.snooze_budget_cap_ms === null || (Number.isSafeInteger(value.snooze_budget_cap_ms) && value.snooze_budget_cap_ms >= 1))
+      || !Number.isSafeInteger(value.snooze_refill_yield_ms) || value.snooze_refill_yield_ms < 1
+      || !Number.isSafeInteger(value.snooze_refill_elapsed_ms) || value.snooze_refill_elapsed_ms < 1
+      || !value.outcome_counts || typeof value.outcome_counts !== "object") return undefined;
+    const counts = value.outcome_counts;
+    if (!["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"].every(
+      (outcome) => Number.isSafeInteger(counts[outcome]) && counts[outcome] >= 0,
+    )) return undefined;
+    const goal = normalizeGoalProjection(value);
+    if (goal === undefined) return undefined;
+    return {
+      ...goal,
+      goal_lock_enabled: value.goal_lock_enabled,
+      snooze_enabled: value.snooze_enabled,
+      snooze_duration_ms: value.snooze_duration_ms,
+      snooze_turn_limit: value.snooze_turn_limit,
+      snooze_budget_cap_ms: value.snooze_budget_cap_ms,
+      snooze_refill_yield_ms: value.snooze_refill_yield_ms,
+      snooze_refill_elapsed_ms: value.snooze_refill_elapsed_ms,
+      outcome_counts: {
+        BLOCKED: counts.BLOCKED,
+        COMPLETED: counts.COMPLETED,
+        NOT_DONE: counts.NOT_DONE,
+        WAITING_FOR_USER_AUTHORIZATION: counts.WAITING_FOR_USER_AUTHORIZATION,
+      },
+    };
+  }
+
+  function broadcastAgentGoalState(agentId, instanceId, goalState, generatedAt = new Date(currentTimeMs(clock)).toISOString()) {
+    for (const recipient of conversationSessions.values()) {
+      for (const candidate of recipient.values()) {
+        sendFrame(candidate.socket, generateFrameId, {
+          type: "agent_goal_state",
+          agent_id: agentId,
+          instance_id: instanceId,
+          goal_state: goalState,
+          generated_at: generatedAt,
+        });
+      }
+    }
+  }
+
+  function recordGoalState(agentId, instanceId, value) {
+    const goalState = normalizeGoalState(value);
+    if (goalState === undefined) return false;
+    const previous = goalStateByAgentId.get(agentId);
+    goalStateByAgentId.set(agentId, { instanceId, goalState });
+    goalByAgentId.set(agentId, { instanceId, goal: { enabled: goalState.enabled, goal: goalState.goal } });
+    if (previous?.instanceId === instanceId && JSON.stringify(previous.goalState) === JSON.stringify(goalState)) return false;
+    broadcastAgentGoalState(agentId, instanceId, goalState);
+    return true;
+  }
+
+  function forwardGoalControlDesired(target, desired) {
+    const config = desired?.config;
+    if (!config || typeof config.sourceAgentId !== "string" || typeof config.controlId !== "string"
+      || !["set", "off"].includes(config.action) || typeof config.goal !== "string"
+      || !config.settings || typeof config.settings !== "object") return false;
+    try {
+      return sendFrame(target.socket, generateFrameId, {
+        type: "goal_control",
+        agent_id: target.agentId,
+        instance_id: target.instanceId,
+        lease_id: target.leaseId,
+        source_agent_id: config.sourceAgentId,
+        control_id: config.controlId,
+        revision: desired.revision,
+        action: config.action,
+        goal: config.goal,
+        settings: config.settings,
+        expires_at: desired.expires_at,
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  function replayGoalControlDesired(target) {
+    if (!goalControlV1Available || !sessionHasActiveLease(target)) return false;
+    try {
+      return forwardGoalControlDesired(target, repository.goalControlDesiredFor({
+        agentId: target.agentId,
+        instanceId: target.instanceId,
+      }));
+    } catch {
+      return false;
+    }
+  }
+
   function broadcastAgentActivity(agentId, activityState, subagentCount = 0, subagents = [], generatedAt = new Date(currentTimeMs(clock)).toISOString(), instanceId, goal, currentModel) {
     for (const recipient of conversationSessions.values()) {
       for (const session of recipient.values()) {
@@ -1812,6 +2120,8 @@ export function createAgentRouter({
     const generatedAt = new Date(nowMs).toISOString();
     const currentGoal = goalByAgentId.get(agentId);
     if (currentGoal !== undefined && instanceId !== undefined && currentGoal.instanceId !== instanceId) goalByAgentId.delete(agentId);
+    const currentGoalState = goalStateByAgentId.get(agentId);
+    if (currentGoalState !== undefined && instanceId !== undefined && currentGoalState.instanceId !== instanceId) goalStateByAgentId.delete(agentId);
     const normalizedGoal = incomingGoal === undefined ? undefined : normalizeGoalProjection(incomingGoal);
     if (normalizedGoal !== undefined && instanceId !== undefined) goalByAgentId.set(agentId, { instanceId, goal: normalizedGoal });
     const goal = goalByAgentId.get(agentId)?.goal;
@@ -1935,6 +2245,9 @@ export function createAgentRouter({
         ...(goalByAgentId.get(session.agentId)?.instanceId === session.instanceId
           ? { goal: goalByAgentId.get(session.agentId).goal }
           : {}),
+        ...(goalStateByAgentId.get(session.agentId)?.instanceId === session.instanceId
+          ? { goal_state: goalStateByAgentId.get(session.agentId).goalState }
+          : {}),
         ...(lifecycle === undefined ? {} : { subagent_version: lifecycle.subagent_version }),
       });
     }
@@ -2047,6 +2360,10 @@ export function createAgentRouter({
         model_catalog_v1: true,
         model_catalog_limits: { frame_bytes: Math.min(MODEL_CATALOG_MAX_FRAME_BYTES, maxFrameBytes) },
         model_control_limits: { pending_ttl_ms: pendingModelControlTtlMs },
+        goal_control_v1: goalControlV1Available,
+        ...(goalControlV1Available
+          ? { goal_control_limits: { desired_ttl_ms: goalControlDesiredTtlMs } }
+          : { goal_control_error: "migration_019_required" }),
         subagent_lifecycle_v2: lifecycleV2Available,
         ...(lifecycleV2Available ? { lifecycle_limits: { subagents: 999, id_bytes: 128, description_bytes: 512 } } : { lifecycle_error: "migration_017_required" }),
       });

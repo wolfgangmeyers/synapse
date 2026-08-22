@@ -32,7 +32,9 @@ const MESSAGE_ARRIVAL_PREVIEW_CHARS = 140;
 const MAX_GOAL_CHARS = 4_000;
 const MAX_MODELS = 1_000;
 const MAX_QUEUED_MODEL_CONTROLS = 256;
+const MAX_QUEUED_GOAL_CONTROLS = 256;
 const DEFAULT_MODEL_CONTROL_TTL_MS = 30_000;
+const DEFAULT_GOAL_CONTROL_TTL_MS = 30_000;
 const CAPABILITY_RETRY_INITIAL_DELAY_MS = 1_000;
 const CAPABILITY_RETRY_MAX_DELAY_MS = 30_000;
 const FATAL_ROUTER_ERROR_CODES = new Set([
@@ -181,6 +183,108 @@ function normalizeModelSummaries(models, maximum = MAX_MODELS) {
   }).slice(0, maximum);
 }
 
+const GOAL_OUTCOME_KEYS = ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"];
+const GOAL_STATE_KEYS = [
+  "enabled", "goal", "goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit",
+  "snoozeBudgetCapMs", "snoozeRefillYieldMs", "snoozeRefillElapsedMs", "outcomeCounts",
+];
+const GOAL_SETTINGS_KEYS = [
+  "goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit", "snoozeBudgetCapMs",
+  "snoozeRefillYieldMs", "snoozeRefillElapsedMs",
+];
+
+function positiveGoalInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function normalizeGoalControlSettings(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || GOAL_SETTINGS_KEYS.length !== Object.keys(value).length
+    || GOAL_SETTINGS_KEYS.some((key) => !Object.hasOwn(value, key))) return undefined;
+  const snoozeTurnLimit = value.snoozeTurnLimit === null ? null : positiveGoalInteger(value.snoozeTurnLimit);
+  const snoozeBudgetCapMs = value.snoozeBudgetCapMs === null ? null : positiveGoalInteger(value.snoozeBudgetCapMs);
+  if (typeof value.goalLockEnabled !== "boolean" || typeof value.snoozeEnabled !== "boolean"
+    || positiveGoalInteger(value.snoozeDurationMs) === undefined
+    || (value.snoozeTurnLimit !== null && (snoozeTurnLimit === undefined || snoozeTurnLimit > 20))
+    || (value.snoozeBudgetCapMs !== null && snoozeBudgetCapMs === undefined)
+    || positiveGoalInteger(value.snoozeRefillYieldMs) === undefined
+    || positiveGoalInteger(value.snoozeRefillElapsedMs) === undefined) return undefined;
+  return {
+    goalLockEnabled: value.goalLockEnabled,
+    snoozeEnabled: value.snoozeEnabled,
+    snoozeDurationMs: value.snoozeDurationMs,
+    snoozeTurnLimit,
+    snoozeBudgetCapMs,
+    snoozeRefillYieldMs: value.snoozeRefillYieldMs,
+    snoozeRefillElapsedMs: value.snoozeRefillElapsedMs,
+  };
+}
+
+function normalizeGoalState(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || GOAL_STATE_KEYS.length !== Object.keys(value).length
+    || GOAL_STATE_KEYS.some((key) => !Object.hasOwn(value, key))
+    || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
+    || value.goal.length > MAX_GOAL_CHARS
+    || (value.enabled && value.goal.length === 0)
+    || (!value.enabled && value.goal !== "")) return undefined;
+  const settings = normalizeGoalControlSettings(Object.fromEntries(GOAL_SETTINGS_KEYS.map((key) => [key, value[key]])));
+  if (settings === undefined || value.outcomeCounts === null || typeof value.outcomeCounts !== "object"
+    || Array.isArray(value.outcomeCounts) || Object.keys(value.outcomeCounts).length !== GOAL_OUTCOME_KEYS.length
+    || GOAL_OUTCOME_KEYS.some((key) => !Object.hasOwn(value.outcomeCounts, key)
+      || !Number.isSafeInteger(value.outcomeCounts[key]) || value.outcomeCounts[key] < 0
+      || value.outcomeCounts[key] > 1_000_000)) return undefined;
+  return {
+    enabled: value.enabled,
+    goal: value.enabled ? value.goal : "",
+    ...settings,
+    outcomeCounts: Object.fromEntries(GOAL_OUTCOME_KEYS.map((key) => [key, value.outcomeCounts[key]])),
+  };
+}
+
+function defaultGoalState() {
+  return {
+    enabled: false,
+    goal: "",
+    goalLockEnabled: false,
+    snoozeEnabled: true,
+    snoozeDurationMs: 60_000,
+    snoozeTurnLimit: null,
+    snoozeBudgetCapMs: null,
+    snoozeRefillYieldMs: 30_000,
+    snoozeRefillElapsedMs: 60_000,
+    outcomeCounts: Object.fromEntries(GOAL_OUTCOME_KEYS.map((key) => [key, 0])),
+  };
+}
+
+function goalStateToWire(state) {
+  return {
+    enabled: state.enabled,
+    goal: state.goal,
+    goal_lock_enabled: state.goalLockEnabled,
+    snooze_enabled: state.snoozeEnabled,
+    snooze_duration_ms: state.snoozeDurationMs,
+    snooze_turn_limit: state.snoozeTurnLimit,
+    snooze_budget_cap_ms: state.snoozeBudgetCapMs,
+    snooze_refill_yield_ms: state.snoozeRefillYieldMs,
+    snooze_refill_elapsed_ms: state.snoozeRefillElapsedMs,
+    outcome_counts: state.outcomeCounts,
+  };
+}
+
+function goalSettingsFromWire(settings) {
+  if (settings === null || typeof settings !== "object" || Array.isArray(settings)) return undefined;
+  return normalizeGoalControlSettings({
+    goalLockEnabled: settings.goal_lock_enabled,
+    snoozeEnabled: settings.snooze_enabled,
+    snoozeDurationMs: settings.snooze_duration_ms,
+    snoozeTurnLimit: settings.snooze_turn_limit,
+    snoozeBudgetCapMs: settings.snooze_budget_cap_ms,
+    snoozeRefillYieldMs: settings.snooze_refill_yield_ms,
+    snoozeRefillElapsedMs: settings.snooze_refill_elapsed_ms,
+  });
+}
+
 function modelCatalogSourceSignature(frameSignature, sourceSummaries) {
   const hash = createHash("sha256");
   hash.update(frameSignature);
@@ -253,6 +357,9 @@ export function createMailboxClient({
   onModelControl = async () => ({ accepted: false, errorCode: "unsupported" }),
   getModelCatalog = () => [],
   getCurrentModel = () => undefined,
+  onGoalControlTrace = () => {},
+  onGoalControl = async () => ({ accepted: false, errorCode: "unsupported" }),
+  getGoalState = defaultGoalState,
 } = {}) {
   assertIdentity(agentId);
   if (typeof onEnvelope !== "function") throw new TypeError("onEnvelope is required");
@@ -270,6 +377,9 @@ export function createMailboxClient({
   if (typeof onModelControl !== "function") throw new TypeError("onModelControl must be a function");
   if (typeof getModelCatalog !== "function") throw new TypeError("getModelCatalog must be a function");
   if (typeof getCurrentModel !== "function") throw new TypeError("getCurrentModel must be a function");
+  if (typeof onGoalControlTrace !== "function") throw new TypeError("onGoalControlTrace must be a function");
+  if (typeof onGoalControl !== "function") throw new TypeError("onGoalControl must be a function");
+  if (typeof getGoalState !== "function") throw new TypeError("getGoalState must be a function");
   if (typeof parentSessionId !== "string" || parentSessionId.length === 0 || typeof producerEpoch !== "string" || !/^[0-9a-fA-F-]{36}$/.test(producerEpoch)) throw new TypeError("valid lifecycle identity is required");
   validateReconnectOptions(reconnectInitialDelayMs, reconnectMaxDelayMs);
   routerHttpUrl(routerUrl);
@@ -297,8 +407,12 @@ export function createMailboxClient({
   let modelCatalogSupported = false;
   let modelCatalogFrameBytes = MAX_MODEL_CATALOG_FRAME_BYTES;
   let lastPublishedModelCatalog;
+  let goalControlSupported = false;
+  let latestGoalState;
   const modelControlQueue = [];
   let modelControlProcessing = false;
+  const goalControlQueue = [];
+  let goalControlProcessing = false;
   // The newest full assertion is retained separately from the retry journal. A reconnect must
   // lead with it, because a replacement lease is fenced until the router accepts a snapshot.
   let lifecycleSnapshotChildren = [];
@@ -338,6 +452,20 @@ export function createMailboxClient({
       });
     } catch {
       // Diagnostic callbacks cannot alter model-control delivery.
+    }
+  }
+
+  function goalControlTrace(event, fields = {}) {
+    try {
+      onGoalControlTrace({
+        event,
+        agent_id: agentId,
+        instance_id: instanceId,
+        lease_id: leaseId,
+        ...fields,
+      });
+    } catch {
+      // Diagnostic callbacks cannot alter goal-control delivery.
     }
   }
 
@@ -788,6 +916,210 @@ export function createMailboxClient({
     }
   }
 
+  function readGoalState() {
+    try {
+      const normalized = normalizeGoalState(getGoalState());
+      if (normalized !== undefined) {
+        latestGoalState = normalized;
+        return normalized;
+      }
+      goalControlTrace("client_goal_state_read_failed", { error_name: "TypeError" });
+    } catch (error) {
+      goalControlTrace("client_goal_state_read_failed", { error_name: error?.name ?? "Error" });
+    }
+    return undefined;
+  }
+
+  function publishGoalState({ refresh = false } = {}) {
+    if (refresh && latestGoalState === undefined) {
+      readGoalState();
+      if (latestGoalState === undefined) latestGoalState = defaultGoalState();
+    }
+    if (!goalControlSupported || !socketOpen(socket) || leaseId === undefined) return false;
+    const state = latestGoalState ?? defaultGoalState();
+    try {
+      socket.send(JSON.stringify({
+        version: "v1",
+        frame_id: generateId(),
+        type: "goal_state",
+        agent_id: agentId,
+        instance_id: instanceId,
+        lease_id: leaseId,
+        goal_state: goalStateToWire(state),
+      }));
+      goalControlTrace("client_goal_state_published", {});
+      return true;
+    } catch (error) {
+      goalControlTrace("client_goal_state_publish_failed", {
+        reason: socketOpen(socket) ? "socket_send_failed" : "client_not_connected",
+        error_name: error?.name ?? "Error",
+      });
+      return false;
+    }
+  }
+
+  function goalControlContextIsCurrent(context) {
+    return context.leaseId !== undefined
+      && socket === context.socket
+      && leaseId === context.leaseId
+      && socketOpen(context.socket)
+      && context.expiresAtMs > now();
+  }
+
+  async function receiveGoalControl(frame, context) {
+    if (!goalControlContextIsCurrent(context)) {
+      goalControlTrace("client_goal_control_dropped", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: context.expiresAtMs <= now() ? "expired" : "stale_connection",
+      });
+      return;
+    }
+    goalControlTrace("client_goal_control_received", {
+      lease_id: context.leaseId,
+      control_id: frame.control_id,
+      source_agent_id: frame.source_agent_id,
+      target_instance_id: frame.instance_id,
+      revision: frame.revision,
+      action: frame.action,
+    });
+    let result;
+    try {
+      result = await onGoalControl({
+        controlId: frame.control_id,
+        sourceAgentId: frame.source_agent_id,
+        targetAgentId: frame.agent_id,
+        targetInstanceId: frame.instance_id,
+        revision: frame.revision,
+        action: frame.action,
+        goal: frame.goal,
+        settings: goalSettingsFromWire(frame.settings),
+      });
+    } catch (error) {
+      goalControlTrace("client_goal_control_callback_failed", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        error_name: error?.name ?? "Error",
+      });
+      result = { accepted: false, errorCode: "goal_control_failed" };
+    }
+    const accepted = result?.accepted === true;
+    const errorCode = typeof result?.errorCode === "string"
+      && /^[a-z][a-z0-9_]{0,127}$/.test(result.errorCode.trim())
+      ? result.errorCode.trim()
+      : "goal_control_failed";
+    let state = normalizeGoalState(result?.goalState);
+    if (state === undefined) state = readGoalState();
+    if (state === undefined) state = latestGoalState ?? defaultGoalState();
+    latestGoalState = state;
+    if (!goalControlContextIsCurrent(context)) {
+      goalControlTrace("client_goal_control_result_failed", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: context.expiresAtMs <= now() ? "expired" : "stale_connection",
+      });
+      return;
+    }
+    try {
+      context.socket.send(JSON.stringify({
+        version: "v1",
+        frame_id: generateId(),
+        type: "goal_control_result",
+        agent_id: agentId,
+        instance_id: instanceId,
+        lease_id: context.leaseId,
+        source_agent_id: frame.source_agent_id,
+        control_id: frame.control_id,
+        revision: frame.revision,
+        accepted,
+        ...(accepted ? {} : { error_code: errorCode }),
+        goal_state: goalStateToWire(state),
+      }));
+      goalControlTrace("client_goal_control_result_sent", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        accepted,
+        revision: frame.revision,
+      });
+    } catch (error) {
+      goalControlTrace("client_goal_control_result_failed", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: socketOpen(context.socket) ? "socket_send_failed" : "client_not_connected",
+        error_name: error?.name ?? "Error",
+      });
+    }
+  }
+
+  async function drainGoalControlQueue() {
+    if (goalControlProcessing) return;
+    goalControlProcessing = true;
+    try {
+      while (goalControlQueue.length > 0) {
+        const pending = goalControlQueue.shift();
+        await receiveGoalControl(pending.frame, pending.context);
+      }
+    } finally {
+      goalControlProcessing = false;
+      if (goalControlQueue.length > 0) void drainGoalControlQueue();
+    }
+  }
+
+  function enqueueGoalControl(frame) {
+    const parsedExpiry = Date.parse(frame.expires_at);
+    const context = {
+      socket,
+      leaseId,
+      expiresAtMs: Number.isFinite(parsedExpiry) ? parsedExpiry : now() + DEFAULT_GOAL_CONTROL_TTL_MS,
+    };
+    if (!goalControlContextIsCurrent(context)) {
+      goalControlTrace("client_goal_control_dropped", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: "stale_connection",
+      });
+      return;
+    }
+    if (goalControlQueue.length >= MAX_QUEUED_GOAL_CONTROLS) {
+      goalControlTrace("client_goal_control_dropped", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        reason: "queue_capacity",
+      });
+      return;
+    }
+    goalControlQueue.push({ frame, context });
+    void drainGoalControlQueue().catch((error) => {
+      goalControlTrace("client_goal_control_processing_failed", {
+        lease_id: context.leaseId,
+        control_id: frame.control_id,
+        source_agent_id: frame.source_agent_id,
+        error_name: error?.name ?? "Error",
+      });
+    });
+  }
+
+  function dropQueuedGoalControls(currentSocket, reason) {
+    for (let index = goalControlQueue.length - 1; index >= 0; index -= 1) {
+      const pending = goalControlQueue[index];
+      if (pending.context.socket !== currentSocket) continue;
+      goalControlQueue.splice(index, 1);
+      goalControlTrace("client_goal_control_dropped", {
+        lease_id: pending.context.leaseId,
+        control_id: pending.frame.control_id,
+        source_agent_id: pending.frame.source_agent_id,
+        reason,
+      });
+    }
+  }
+
   function messageArrival(message) {
     const sourceKind = message?.source?.kind;
     if (!message || typeof message.id !== "string" || typeof message.from !== "string" || typeof message.to !== "string"
@@ -885,6 +1217,7 @@ export function createMailboxClient({
   function disconnected(currentSocket, error, { kickstartRouter = false } = {}) {
     if (socket !== currentSocket) return;
     dropQueuedModelControls(currentSocket, "disconnected");
+    dropQueuedGoalControls(currentSocket, "disconnected");
     clearIntervalImpl(renewTimer);
     renewTimer = undefined;
     clearIntervalImpl(modelCatalogTimer);
@@ -898,6 +1231,7 @@ export function createMailboxClient({
     lifecycleReady = false;
     lifecycleConnectionDisabled = false;
     modelCatalogSupported = false;
+    goalControlSupported = false;
     capabilitiesSocket = undefined;
     lifecycleTrace("client_lifecycle_disconnected", { connected: false, error_name: error?.name, phase: kickstartRouter ? "kickstart" : "socket" });
     if (stopped) return;
@@ -927,6 +1261,9 @@ export function createMailboxClient({
     modelControlTrace("client_model_catalog_capability_retry_scheduled", {
       attempt: capabilityRetryAttempt,
     });
+    goalControlTrace("client_goal_control_capability_retry_scheduled", {
+      attempt: capabilityRetryAttempt,
+    });
     capabilityRetryTimer = setTimeoutImpl(() => {
       capabilityRetryTimer = undefined;
       if (socket === currentSocket && !stopped && !paused) void discoverCapabilities(currentSocket);
@@ -936,6 +1273,7 @@ export function createMailboxClient({
   async function discoverCapabilities(currentSocket) {
     lifecycleTrace("client_lifecycle_capability_lookup", { phase: "started" });
     modelControlTrace("client_model_catalog_capability_lookup", { phase: "started" });
+    goalControlTrace("client_goal_control_capability_lookup", { phase: "started" });
     try {
       const response = await fetchImpl(`${routerHttpUrl(routerUrl)}/v1/capabilities`, { signal: AbortSignal.timeout(capabilityTimeoutMs) });
       if (!response.ok && response.status !== 404) {
@@ -949,6 +1287,8 @@ export function createMailboxClient({
       lifecycleSupported = capabilities?.subagent_lifecycle_v2 === true;
       lifecycleTrace("client_lifecycle_capability_result", { available: lifecycleSupported, ready: response.ok });
       modelCatalogSupported = capabilities?.model_catalog_v1 === true;
+      goalControlSupported = capabilities?.goal_control_v1 === true;
+      goalControlTrace("client_goal_control_capability_result", { available: goalControlSupported, ready: response.ok });
       const advertisedFrameBytes = capabilities?.model_catalog_limits?.frame_bytes;
       modelCatalogFrameBytes = Number.isSafeInteger(advertisedFrameBytes) && advertisedFrameBytes > 0
         ? Math.min(advertisedFrameBytes, MAX_MODEL_CATALOG_FRAME_BYTES)
@@ -962,6 +1302,7 @@ export function createMailboxClient({
         publishModelCatalog({ force: true });
         ensureModelCatalogTimer();
       }
+      if (goalControlSupported) publishGoalState({ refresh: true });
       if (lifecycleSupported) {
         lifecycleConnectionDisabled = false;
         lifecycleTrace("client_lifecycle_sync_enable_attempt", { router_version: lifecycleRouterVersion });
@@ -971,9 +1312,11 @@ export function createMailboxClient({
     } catch (error) {
       lifecycleTrace("client_lifecycle_capability_error", { error_name: error?.name ?? "Error" });
       modelControlTrace("client_model_catalog_capability_error", { error_name: error?.name ?? "Error" });
+      goalControlTrace("client_goal_control_capability_error", { error_name: error?.name ?? "Error" });
       if (socket === currentSocket && !stopped) {
         lifecycleSupported = false;
         modelCatalogSupported = false;
+        goalControlSupported = false;
         scheduleCapabilityRetry(currentSocket);
       }
     }
@@ -1043,6 +1386,10 @@ export function createMailboxClient({
     }
     if (frame.type === "model_control") {
       enqueueModelControl(frame);
+      return;
+    }
+    if (frame.type === "goal_control") {
+      enqueueGoalControl(frame);
       return;
     }
     if (frame.type !== "message") {
@@ -1158,6 +1505,12 @@ export function createMailboxClient({
     },
     sendReceipt: receipt,
     sendActivity: activity,
+    sendGoalState(state) {
+      const normalized = normalizeGoalState(state);
+      if (normalized === undefined) throw new TypeError("a valid full goal state is required");
+      latestGoalState = normalized;
+      return publishGoalState();
+    },
     sendLifecycleSnapshot: lifecycleSnapshot,
     sendLifecycleEvent: lifecycleEvent,
     requestLifecycleResync() {
@@ -1176,7 +1529,10 @@ export function createMailboxClient({
       paused = true;
       clearConnectionTimers();
       const currentSocket = socket;
-      if (currentSocket !== undefined) dropQueuedModelControls(currentSocket, "paused");
+      if (currentSocket !== undefined) {
+        dropQueuedModelControls(currentSocket, "paused");
+        dropQueuedGoalControls(currentSocket, "paused");
+      }
       socket = undefined;
       leaseId = undefined;
       if (currentSocket !== undefined) closeSocket(currentSocket);
@@ -1216,7 +1572,10 @@ export function createMailboxClient({
       stopped = true;
       clearConnectionTimers();
       const currentSocket = socket;
-      if (currentSocket !== undefined) dropQueuedModelControls(currentSocket, "closed");
+      if (currentSocket !== undefined) {
+        dropQueuedModelControls(currentSocket, "closed");
+        dropQueuedGoalControls(currentSocket, "closed");
+      }
       socket = undefined;
       leaseId = undefined;
       if (rejectInitialConnection !== undefined) {

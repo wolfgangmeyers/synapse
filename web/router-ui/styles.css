@@ -124,9 +124,90 @@ p:empty { display: none; }
 .message-dialog::backdrop { background: rgba(5,7,12,0.68); }
 #reminders-dialog { width: min(680px, calc(100vw - 32px)); }
 #reminders-dialog-body { max-height: min(52vh, 520px); overflow-y: auto; word-break: break-word; }
-#goal-dialog { width: min(680px, calc(100vw - 32px)); }
-#goal-dialog-body { max-height: min(52vh, 520px); overflow-y: auto; word-break: break-word; }
+#goal-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+}
+#goal-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+  word-break: break-word;
+}
+.goal-editor-dialog .dialog-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  max-height: calc(100dvh - 32px);
+}
+.goal-dialog-footer {
+  min-height: 0;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.goal-dialog-footer .goal-editor-status { margin: 0 0 10px; }
 .goal-dialog-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.goal-header-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(181,188,208,0.34);
+  border-radius: 999px;
+  background: rgba(181,188,208,0.12);
+  color: var(--muted);
+  font-size: 0;
+  line-height: 1;
+}
+.goal-header-button i { font-size: 11px; }
+.goal-header-button.has-goal {
+  border-color: rgba(244,114,182,0.66);
+  background: rgba(190,24,93,0.34);
+  color: #f9a8d4;
+}
+.goal-header-button.has-goal i { color: #f472b6; }
+.goal-header-button:disabled { opacity: 0.55; }
+.goal-header-button:not(:disabled):hover { background: rgba(181,188,208,0.22); }
+.goal-header-button.has-goal:not(:disabled):hover { background: rgba(190,24,93,0.48); }
+.goal-editor-form { display: grid; gap: 14px; }
+.goal-editor-form label, .goal-editor-form legend { color: var(--muted); font-size: 13px; font-weight: 700; }
+.goal-editor-form textarea {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  min-height: 240px;
+  max-height: min(60vh, 560px);
+  resize: vertical;
+  line-height: 1.55;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface-raised);
+  border-color: rgba(157,168,255,0.34);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.24);
+}
+.goal-editor-form textarea:focus {
+  border-color: var(--secondary);
+  box-shadow: 0 0 0 3px rgba(120,224,205,0.14), inset 0 1px 3px rgba(0,0,0,0.24);
+}
+.goal-editor-form fieldset { display: grid; gap: 10px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 16px; }
+.goal-editor-form legend { padding: 0 6px; }
+.goal-checkbox { display: flex !important; align-items: center; gap: 9px; color: var(--text) !important; }
+.goal-checkbox input { width: 20px; height: 20px; accent-color: var(--primary); }
+.goal-number-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 150px); align-items: center; gap: 12px; }
+.goal-number-field input { padding: 8px 10px; }
+.goal-outcome-counts { padding: 10px 12px; border-radius: 12px; background: var(--canvas); font-size: 13px; }
+.goal-editor-status { min-height: 1.4em; color: var(--muted); font-size: 13px; }
+.goal-editor-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.goal-editor-actions .secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
+.goal-editor-form button:focus-visible, .goal-header-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .reminder-indicator {
   display: inline-flex;
   align-items: center;
@@ -550,4 +631,5 @@ p:empty { display: none; }
   .shell { grid-template-columns: 1fr; grid-template-rows: minmax(180px, 35dvh) minmax(0, 1fr); height: 100dvh; min-height: 0; overflow: hidden; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
   .conversation { min-height: 0; }
+  .goal-editor-form textarea { min-height: 200px; max-height: 50vh; }
 }
