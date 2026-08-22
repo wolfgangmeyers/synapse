@@ -332,6 +332,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"],
       "properties": {
+        "blocking": { "type": "boolean" },
         "goal_lock_enabled": { "type": "boolean" },
         "snooze_enabled": { "type": "boolean" },
         "snooze_duration_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
@@ -347,6 +348,7 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "goal": { "type": "string", "maxLength": 4000 },
+        "blocking": { "type": "boolean" },
         "goal_lock_enabled": { "type": "boolean" },
         "snooze_enabled": { "type": "boolean" },
         "snooze_duration_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },

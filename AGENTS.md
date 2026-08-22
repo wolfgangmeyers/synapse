@@ -112,6 +112,8 @@ For any production-code implementation or change, the canonical `dev-loop` workf
 
 ## Delegation and Review Discipline
 
+**MUST HAVE: Never request review from someone on a PR while CI is not green. Getting CI green is the highest priority for a PR.**
+
 Before normal delegation, state the smallest observable outcome and explicit non-goals. At final review, map every changed file to an acceptance criterion or validated blocker; remove unsupported changes. Do not blame Pi or a model for a failure without controlled evidence separating it from the harness, prompt, extension, configuration, and process control.
 
 When PR review feedback reveals a reusable lesson, capture the tribal knowledge instead of treating it as a one-off fix. Update the appropriate `mecha-review` robot-review heuristic, review skill, or agent-facing guidance so future reviews catch the same class of issue, then route or implement the product-code fix separately.

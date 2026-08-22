@@ -221,6 +221,7 @@ function createBrowserClient(browser, {
   let connectionGeneration = 0;
   let lifecycleEnabled = false;
   let lifecycleVersion = 0;
+  let goalControlBlockingSupported = false;
   let includeModelsInNextRefresh = true;
   let effectiveModelControlTimeoutMs = modelControlTimeoutMs ?? MODEL_CONTROL_TIMEOUT_MS;
   const effectiveGoalControlTimeoutMs = goalControlTimeoutMs ?? GOAL_CONTROL_TIMEOUT_MS;
@@ -358,6 +359,7 @@ function createBrowserClient(browser, {
     effectiveModelControlTimeoutMs = modelControlTimeoutMs ?? MODEL_CONTROL_TIMEOUT_MS;
     configured = { ...configured, instanceId: randomUUID(), leaseId: "" };
     lifecycleEnabled = false;
+    goalControlBlockingSupported = false;
     const generation = ++connectionGeneration;
     routerSocket?.close(1000, "reconnecting");
     const wsUrl = routerWsUrl(configured.routerUrl);
@@ -391,21 +393,23 @@ function createBrowserClient(browser, {
         renewTimer = setInterval(() => renewLease(), 10_000);
         void (async () => {
           let discoveredModelControlTimeoutMs = MODEL_CONTROL_TIMEOUT_MS;
-          if (modelControlTimeoutMs === undefined) {
-            try {
-              const response = await capabilitiesFetchImpl(new URL("/v1/capabilities", configured.routerUrl), {
-                signal: AbortSignal.timeout(capabilityDiscoveryTimeoutMs),
-              });
-              const capabilities = await response.json();
-              const routerTtlMs = capabilities?.model_control_limits?.pending_ttl_ms;
-              if (response.ok && Number.isSafeInteger(routerTtlMs) && routerTtlMs > 0) {
-                discoveredModelControlTimeoutMs = routerTtlMs + 2_000;
-              }
-            } catch {
-              discoveredModelControlTimeoutMs = MODEL_CONTROL_TIMEOUT_MS;
+          let discoveredGoalControlBlockingSupported = false;
+          try {
+            const response = await capabilitiesFetchImpl(new URL("/v1/capabilities", configured.routerUrl), {
+              signal: AbortSignal.timeout(capabilityDiscoveryTimeoutMs),
+            });
+            const capabilities = await response.json();
+            const routerTtlMs = capabilities?.model_control_limits?.pending_ttl_ms;
+            if (response.ok && Number.isSafeInteger(routerTtlMs) && routerTtlMs > 0) {
+              discoveredModelControlTimeoutMs = routerTtlMs + 2_000;
             }
+            discoveredGoalControlBlockingSupported = response.ok && capabilities?.goal_control_blocking_v1 === true;
+          } catch {
+            discoveredModelControlTimeoutMs = MODEL_CONTROL_TIMEOUT_MS;
+            discoveredGoalControlBlockingSupported = false;
           }
           if (generation !== connectionGeneration || configured.leaseId !== frame.lease_id) return;
+          goalControlBlockingSupported = discoveredGoalControlBlockingSupported;
           effectiveModelControlTimeoutMs = modelControlTimeoutMs ?? discoveredModelControlTimeoutMs;
           setStatus("connected", `Connected as ${configured.agentId}`);
           refreshAgents();
@@ -671,7 +675,13 @@ function createBrowserClient(browser, {
           const settings = normalizeGoalControlSettings(command.settings);
           if (!['set', 'off'].includes(action)) throw new Error("Goal action is invalid");
           if (action === "set" && (goal.trim() === "" || [...goal].length > 4000)) throw new Error("A goal description is required");
+          if (!goalControlBlockingSupported && settings.blocking === false) {
+            const error = new Error("This router does not support disabling goal blocking.");
+            error.code = "goal_control_blocking_unavailable";
+            throw error;
+          }
           if (routerSocket?.readyState !== WebSocket.OPEN || configured.leaseId === "") throw new Error("Router is not connected");
+          const { blocking: unusedBlocking, ...legacySettings } = settings;
           const requestId = `goal-control-${randomUUID()}`;
           trackPendingGoalControl({ controlId, requestId, targetAgentId, targetInstanceId });
           routerSocket.send(JSON.stringify({
@@ -686,7 +696,7 @@ function createBrowserClient(browser, {
             control_id: controlId,
             action,
             goal,
-            settings,
+            settings: goalControlBlockingSupported ? settings : legacySettings,
           }));
           return;
         }
@@ -726,14 +736,17 @@ function createBrowserClient(browser, {
           ? command.controlId
           : undefined;
         if (goalControlId !== undefined) {
-          if (!settlePendingGoalControl(goalControlId, { accepted: false, errorCode: "command_error", message: error.message })) {
+          const errorCode = error?.code === "goal_control_blocking_unavailable"
+            ? error.code
+            : "command_error";
+          if (!settlePendingGoalControl(goalControlId, { accepted: false, errorCode, message: error.message })) {
             sendBrowser({
               type: "goal_control_result",
               controlId: goalControlId,
               targetAgentId: String(command.targetAgentId ?? ""),
               targetInstanceId: String(command.targetInstanceId ?? ""),
               accepted: false,
-              errorCode: "command_error",
+              errorCode,
               message: error.message,
               agentId: configured.agentId,
               routerUrl: configured.routerUrl,
@@ -918,10 +931,12 @@ function normalizeGoalControlSettings(value) {
     "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit",
     "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms",
   ];
-  if (Object.keys(value).length !== required.length || required.some((key) => !Object.hasOwn(value, key))) {
+  const allowed = [...required, "blocking"];
+  if (Object.keys(value).some((key) => !allowed.includes(key)) || required.some((key) => !Object.hasOwn(value, key))) {
     throw new Error("Goal settings are incomplete");
   }
-  if (typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
+  if ((Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean")
+    || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
     || !positiveInteger(value.snooze_duration_ms) || !positiveInteger(value.snooze_refill_yield_ms)
     || !positiveInteger(value.snooze_refill_elapsed_ms)
     || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
@@ -929,6 +944,7 @@ function normalizeGoalControlSettings(value) {
     throw new Error("Goal settings are invalid");
   }
   return {
+    blocking: value.blocking !== false,
     goal_lock_enabled: value.goal_lock_enabled,
     snooze_enabled: value.snooze_enabled,
     snooze_duration_ms: value.snooze_duration_ms,

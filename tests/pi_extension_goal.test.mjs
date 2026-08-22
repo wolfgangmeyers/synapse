@@ -160,6 +160,7 @@ test("goal tool registers its action schema and shares state with /goal", async 
     action: "status",
     enabled: true,
     goal: "ship the tool",
+    blocking: true,
     evaluatorCalls: 0,
     notDoneWakeups: 0,
     blockedWakeups: 0,
@@ -197,6 +198,7 @@ test("typed goal control persists full configuration and current-session outcome
     response: { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] },
   });
   const settings = {
+    blocking: true,
     goalLockEnabled: true,
     snoozeEnabled: true,
     snoozeDurationMs: 120_000,
@@ -236,6 +238,7 @@ test("typed goal control persists full configuration and current-session outcome
     notDoneWakeups: 0,
     blockedWakeups: 0,
     completedThings: 0,
+    blocking: true,
     goalLockEnabled: true,
     snoozeEnabled: true,
     snoozeDurationMs: 120_000,
@@ -274,6 +277,7 @@ test("/goal commands persist branch-local state and support status/off", async (
       notDoneWakeups: 0,
       blockedWakeups: 0,
       completedThings: 0,
+      blocking: true,
       goalLockEnabled: false,
       snoozeEnabled: true,
       snoozeDurationMs: 60_000,
@@ -296,6 +300,7 @@ test("/goal commands persist branch-local state and support status/off", async (
     notDoneWakeups: 0,
     blockedWakeups: 0,
     completedThings: 0,
+    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -665,6 +670,56 @@ test("BLOCKED wakeup contacts the supervisor and starts the automatic wait", asy
   await Promise.resolve();
   runtime.advance(0);
   assert.equal(current.sent[0].message.content, "Goal check: BLOCKED. CONTACT OR BUG THE SUPERVISOR NOW TO GET UNBLOCKED. A special automatic 5-minute wait is starting. I will wake you after 5 minutes to prompt you to contact the supervisor again.\nVERDICT: BLOCKED\nREASON: A supervisor decision is required.");
+});
+
+test("disabled blocking reports BLOCKED without scheduling the supervisor wait", async () => {
+  const runtime = fakeTimer();
+  const outcomes = ["BLOCKED", "NOT_DONE"];
+  const current = fixture({
+    extensionOptions: runtime,
+    complete: async () => {
+      const outcome = outcomes.shift();
+      return { content: [{ type: "text", text: `VERDICT: ${outcome}\nREASON: The evaluator checked the goal.` }] };
+    },
+  });
+  const settings = {
+    blocking: false,
+    goalLockEnabled: false,
+    snoozeEnabled: false,
+    snoozeDurationMs: 60_000,
+    snoozeTurnLimit: null,
+    snoozeBudgetCapMs: null,
+    snoozeRefillYieldMs: 30_000,
+    snoozeRefillElapsedMs: 60_000,
+  };
+  const applied = applyGoalControl(current, {
+    action: "set",
+    controlId: "goal-control-no-blocking",
+    targetInstanceId: "mailbox-instance-1",
+    revision: 1,
+    goal: "finish without supervisor blocking",
+    settings,
+  });
+  assert.equal(applied.accepted, true);
+  assert.equal(applied.goalState.blocking, false);
+  await settle(current);
+  for (let step = 0; step < 5; step += 1) {
+    runtime.advance(0);
+    await Promise.resolve();
+  }
+  const results = () => current.sent.filter(({ message }) => message.customType === "goal-result");
+  assert.equal(results().length, 1);
+  assert.equal(results()[0].message.details.outcome, "BLOCKED");
+  assert.match(results()[0].message.content, /^Goal check: BLOCKED\. Continue with the next concrete action and report what is needed\./);
+  assert.doesNotMatch(results()[0].message.content, /5-minute|CONTACT OR BUG/);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.blocking, false);
+  await settle(current);
+  for (let step = 0; step < 5; step += 1) {
+    runtime.advance(0);
+    await Promise.resolve();
+  }
+  assert.equal(results().length, 2, "a disabled BLOCKED result does not hold the five-minute supervisor wait");
+  assert.equal(results()[1].message.details.outcome, "NOT_DONE");
 });
 
 test("BLOCKED wait expires independently of the custom snooze turn limit and budget", async () => {
@@ -1236,6 +1291,7 @@ test("the wakeup macrotask rechecks owner activity after evaluation", async () =
       action: "status",
       enabled: true,
       goal: "wait for the owner child",
+      blocking: true,
       evaluatorCalls: 1,
       notDoneWakeups: 0,
       blockedWakeups: 0,
@@ -1309,6 +1365,7 @@ test("goal snooze is enabled by default, parses duration, and injects availabili
     notDoneWakeups: 0,
     blockedWakeups: 0,
     completedThings: 0,
+    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -1562,6 +1619,7 @@ test("snooze commands persist turn limits, budgets, and refills for the WebUI", 
     notDoneWakeups: 0,
     blockedWakeups: 0,
     completedThings: 0,
+    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -1804,4 +1862,5 @@ test("legacy goal state defaults snooze to enabled with the standard duration", 
   const status = await callGoalTool(current, { action: "status" });
   assert.equal(status.details.snoozeEnabled, true);
   assert.equal(status.details.snoozeDurationMs, 60_000);
+  assert.equal(status.details.blocking, true);
 });

@@ -6,6 +6,7 @@ import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
 const state = {
   enabled: true,
   goal: "ship goal control",
+  blocking: true,
   goalLockEnabled: true,
   snoozeEnabled: true,
   snoozeDurationMs: 60_000,
@@ -16,10 +17,11 @@ const state = {
   outcomeCounts: { BLOCKED: 1, COMPLETED: 2, NOT_DONE: 3, WAITING_FOR_USER_AUTHORIZATION: 4 },
 };
 
-function wireState(value = state) {
+function wireState(value = state, { includeBlocking = true } = {}) {
   return {
     enabled: value.enabled,
     goal: value.goal,
+    ...(includeBlocking ? { blocking: value.blocking !== false } : {}),
     goal_lock_enabled: value.goalLockEnabled,
     snooze_enabled: value.snoozeEnabled,
     snooze_duration_ms: value.snoozeDurationMs,
@@ -31,8 +33,8 @@ function wireState(value = state) {
   };
 }
 
-function wireSettings(value = state) {
-  const full = wireState(value);
+function wireSettings(value = state, options) {
+  const full = wireState(value, options);
   const { outcome_counts: unused, ...settings } = full;
   return settings;
 }
@@ -64,7 +66,7 @@ async function registeredClient({ capabilities, getGoalState = () => state, onGo
       sockets.push(socket);
       return socket;
     }),
-    fetchImpl: async () => ({ ok: true, json: async () => capabilities ?? { goal_control_v1: true } }),
+    fetchImpl: async () => ({ ok: true, json: async () => capabilities ?? { goal_control_v1: true, goal_control_blocking_v1: true } }),
     generateId: (() => { let id = 0; return () => `id-${++id}`; })(),
     reconnectInitialDelayMs: 1,
     reconnectMaxDelayMs: 1,
@@ -120,6 +122,47 @@ test("goal state publication is capability-gated and uses a separate full-state 
   supported.client.close();
 });
 
+test("legacy full goal state defaults missing blocking to true on the wire", async () => {
+  const legacy = { ...state };
+  delete legacy.blocking;
+  const fixture = await registeredClient({ getGoalState: () => legacy });
+  const published = fixture.sent.find((frame) => frame.type === "goal_state");
+  assert.equal(published.goal_state.blocking, true);
+  fixture.client.close();
+});
+
+test("legacy goal control capability omits blocking from outbound frames", async () => {
+  const controls = [];
+  const fixture = await registeredClient({
+    capabilities: { goal_control_v1: true },
+    onGoalControl: async (control) => {
+      controls.push(control);
+      return { accepted: true, goalState: { ...state, blocking: false } };
+    },
+  });
+  const published = fixture.sent.find((frame) => frame.type === "goal_state");
+  assert.equal(Object.hasOwn(published.goal_state, "blocking"), false);
+
+  fixture.socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "goal_control",
+    agent_id: "worker",
+    instance_id: fixture.client.instanceId,
+    lease_id: "lease-1",
+    source_agent_id: "controller",
+    control_id: "legacy-control",
+    revision: 8,
+    action: "set",
+    goal: state.goal,
+    settings: wireSettings(state, { includeBlocking: false }),
+    expires_at: "2030-01-01T00:00:30.000Z",
+  }) }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controls[0].settings.blocking, true);
+  const result = fixture.sent.find((frame) => frame.type === "goal_control_result");
+  assert.equal(Object.hasOwn(result.goal_state, "blocking"), false);
+  fixture.client.close();
+});
+
 test("incoming goal control maps the request and returns correlated full state", async () => {
   const controls = [];
   const fixture = await registeredClient({
@@ -151,6 +194,7 @@ test("incoming goal control maps the request and returns correlated full state",
     action: "set",
     goal: state.goal,
     settings: {
+      blocking: true,
       goalLockEnabled: true,
       snoozeEnabled: true,
       snoozeDurationMs: 60_000,

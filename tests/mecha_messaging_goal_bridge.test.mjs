@@ -5,6 +5,7 @@ import goalExtension, { GOAL_CONTROL_REQUEST_EVENT } from "../pi-extensions/goal
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging.js";
 
 const settings = {
+  blocking: true,
   goalLockEnabled: true,
   snoozeEnabled: true,
   snoozeDurationMs: 120_000,
@@ -98,6 +99,7 @@ test("bridges complete goal state and typed parent controls through the EventBus
   assert.deepEqual(options.getGoalState(), {
     enabled: false,
     goal: "",
+    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
