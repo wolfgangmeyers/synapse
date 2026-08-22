@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import MarkdownIt from "markdown-it";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
@@ -871,6 +871,151 @@ test("router web UI removes an expired lifecycle child from a v2 update and reco
   } finally {
     for (const socket of sockets) socket.close?.();
     await ui?.close();
+    await router.close();
+  }
+});
+
+test("current routers advertise goal control blocking capability", async () => {
+  const router = await startTestRouter();
+  try {
+    const response = await fetch(new URL("/v1/capabilities", router.httpUrl));
+    assert.equal(response.status, 200);
+    const capabilities = await response.json();
+    assert.equal(capabilities.goal_control_v1, true);
+    assert.equal(capabilities.goal_control_blocking_v1, true);
+  } finally {
+    await router.close();
+  }
+});
+
+test("router WebUI gates blocking controls by the router capability", async () => {
+  const router = await startGoalControlTestRouter({ getCapabilities: () => capabilities });
+  const sockets = [];
+  let ui;
+  let browser;
+  let capabilities = { goal_control_v1: true };
+  const settings = {
+    blocking: true,
+    goal_lock_enabled: false,
+    snooze_enabled: true,
+    snooze_duration_ms: 60_000,
+    snooze_turn_limit: null,
+    snooze_budget_cap_ms: null,
+    snooze_refill_yield_ms: 30_000,
+    snooze_refill_elapsed_ms: 60_000,
+  };
+  try {
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    browser = await connectBrowser(ui.httpUrl, router.httpUrl, webAgentId, sockets);
+
+    browser.send(JSON.stringify({
+      type: "goal_control",
+      controlId: "legacy-blocking-control",
+      targetAgentId: "blocking-capability-peer",
+      targetInstanceId: "blocking-capability-peer-instance",
+      action: "set",
+      goal: "keep blocking",
+      settings,
+    }));
+    await waitFor(() => router.controls.length === 1);
+    const legacyFrame = router.controls[0];
+    assert.equal(Object.hasOwn(legacyFrame.settings, "blocking"), false);
+
+    const rejected = waitForEvent(browser, (event) => event.type === "goal_control_result" && event.controlId === "legacy-disabled-control");
+    browser.send(JSON.stringify({
+      type: "goal_control",
+      controlId: "legacy-disabled-control",
+      targetAgentId: "blocking-capability-peer",
+      targetInstanceId: "blocking-capability-peer-instance",
+      action: "set",
+      goal: "disable blocking",
+      settings: { ...settings, blocking: false },
+    }));
+    const rejection = await rejected;
+    assert.equal(rejection.accepted, false);
+    assert.equal(rejection.errorCode, "goal_control_blocking_unavailable");
+    assert.equal(rejection.message, "This router does not support disabling goal blocking.");
+
+    capabilities = { goal_control_v1: true, goal_control_blocking_v1: true };
+    const reconnected = waitForEvent(browser, (event) => event.type === "status" && event.state === "connected");
+    browser.send(JSON.stringify({ type: "connect", routerUrl: router.httpUrl, agentId: webAgentId }));
+    await reconnected;
+
+    browser.send(JSON.stringify({
+      type: "goal_control",
+      controlId: "current-blocking-control",
+      targetAgentId: "blocking-capability-peer",
+      targetInstanceId: "blocking-capability-peer-instance",
+      action: "set",
+      goal: "disable blocking on a new router",
+      settings: { ...settings, blocking: false },
+    }));
+    await waitFor(() => router.controls.length === 2);
+    const currentFrame = router.controls[1];
+    assert.equal(currentFrame.settings.blocking, false);
+  } finally {
+    browser?.close();
+    await ui?.close();
+    for (const socket of sockets) socket.close();
+    await router.close();
+  }
+});
+
+test("router WebUI ignores stale capability responses", async () => {
+  const router = await startTestRouter();
+  const sockets = [];
+  let ui;
+  let browser;
+  let capabilityCalls = 0;
+  let releaseOldCapability;
+  const oldCapabilityResponse = new Promise((resolve) => { releaseOldCapability = resolve; });
+  try {
+    const peer = await connectRouterAgent(router.wsUrl, "stale-capability-peer", sockets);
+    ui = await startRouterWebUi({
+      router: router.httpUrl,
+      capabilitiesFetchImpl: async () => {
+        capabilityCalls += 1;
+        if (capabilityCalls === 1) return oldCapabilityResponse;
+        return { ok: true, json: async () => ({ goal_control_v1: true, goal_control_blocking_v1: true }) };
+      },
+      output: () => {},
+    });
+    browser = new WebSocket(`${ui.httpUrl.replace("http://", "ws://")}/ui/events`, { origin: ui.httpUrl });
+    sockets.push(browser);
+    await onceOpen(browser);
+    browser.send(JSON.stringify({ type: "connect", routerUrl: router.httpUrl, agentId: webAgentId }));
+    await waitFor(() => capabilityCalls === 1);
+
+    const reconnected = waitForEvent(browser, (event) => event.type === "status" && event.state === "connected");
+    browser.send(JSON.stringify({ type: "connect", routerUrl: router.httpUrl, agentId: webAgentId }));
+    await reconnected;
+
+    releaseOldCapability({ ok: true, json: async () => ({ goal_control_v1: true }) });
+    await new Promise((resolve) => setImmediate(resolve));
+    const forwarded = nextRouterFrame(peer.socket, (frame) => frame.type === "goal_control" && frame.control_id === "stale-capability-control");
+    browser.send(JSON.stringify({
+      type: "goal_control",
+      controlId: "stale-capability-control",
+      targetAgentId: "stale-capability-peer",
+      targetInstanceId: "stale-capability-peer-instance",
+      action: "set",
+      goal: "keep blocking disabled",
+      settings: {
+        blocking: false,
+        goal_lock_enabled: false,
+        snooze_enabled: true,
+        snooze_duration_ms: 60_000,
+        snooze_turn_limit: null,
+        snooze_budget_cap_ms: null,
+        snooze_refill_yield_ms: 30_000,
+        snooze_refill_elapsed_ms: 60_000,
+      },
+    }));
+    assert.equal((await forwarded).settings.blocking, false);
+  } finally {
+    browser?.close();
+    await ui?.close();
+    for (const socket of sockets) socket.close();
     await router.close();
   }
 });
@@ -2096,6 +2241,79 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.match(server, /type: "conversation_message"/);
   assert.doesNotMatch(server, /refreshTimer = setInterval\(refreshAgents, 60_000\)/);
 });
+
+async function startGoalControlTestRouter({ getCapabilities = () => ({ goal_control_v1: true, goal_control_blocking_v1: true }) } = {}) {
+  const controls = [];
+  const server = createServer((request, response) => {
+    if (request.url === "/v1/capabilities") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(getCapabilities()));
+      return;
+    }
+    if (request.url === "/v1/agents") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ agents: [] }));
+      return;
+    }
+    if (request.url === "/v1/reminders") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ reminders: [] }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  const webSocketServer = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (request, socket, head) => {
+    if (request.url !== "/v1/agents") {
+      socket.destroy();
+      return;
+    }
+    webSocketServer.handleUpgrade(request, socket, head, (client) => webSocketServer.emit("connection", client, request));
+  });
+  webSocketServer.on("connection", (socket) => {
+    socket.on("message", (payload) => {
+      const frame = JSON.parse(payload.toString("utf8"));
+      if (frame.type === "register") {
+        socket.send(JSON.stringify({
+          version: "v1",
+          frame_id: "registered",
+          type: "registered",
+          agent_id: frame.agent_id,
+          instance_id: frame.instance_id,
+          lease_id: "fake-lease",
+          request_id: frame.frame_id,
+        }));
+      } else if (frame.type === "goal_control") {
+        controls.push(frame);
+        socket.send(JSON.stringify({
+          version: "v1",
+          frame_id: `result-${frame.control_id}`,
+          type: "goal_control_result",
+          agent_id: frame.target_agent_id,
+          instance_id: frame.target_instance_id,
+          lease_id: "fake-lease",
+          source_agent_id: frame.agent_id,
+          control_id: frame.control_id,
+          revision: frame.revision ?? 1,
+          accepted: false,
+          error_code: "test_rejected",
+        }));
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const httpUrl = `http://127.0.0.1:${address.port}`;
+  return {
+    httpUrl,
+    controls,
+    async close() {
+      webSocketServer.close();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
 
 async function startTestRouter({ clock = undefined, routerOptions = {} } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "router-web-ui-"));

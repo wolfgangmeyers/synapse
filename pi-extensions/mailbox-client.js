@@ -184,14 +184,16 @@ function normalizeModelSummaries(models, maximum = MAX_MODELS) {
 }
 
 const GOAL_OUTCOME_KEYS = ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"];
-const GOAL_STATE_KEYS = [
+const GOAL_STATE_REQUIRED_KEYS = [
   "enabled", "goal", "goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit",
   "snoozeBudgetCapMs", "snoozeRefillYieldMs", "snoozeRefillElapsedMs", "outcomeCounts",
 ];
-const GOAL_SETTINGS_KEYS = [
+const GOAL_SETTINGS_REQUIRED_KEYS = [
   "goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit", "snoozeBudgetCapMs",
   "snoozeRefillYieldMs", "snoozeRefillElapsedMs",
 ];
+const GOAL_STATE_KEYS = [...GOAL_STATE_REQUIRED_KEYS, "blocking"];
+const GOAL_SETTINGS_KEYS = [...GOAL_SETTINGS_REQUIRED_KEYS, "blocking"];
 
 function positiveGoalInteger(value) {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
@@ -199,8 +201,10 @@ function positiveGoalInteger(value) {
 
 function normalizeGoalControlSettings(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)
-    || GOAL_SETTINGS_KEYS.length !== Object.keys(value).length
-    || GOAL_SETTINGS_KEYS.some((key) => !Object.hasOwn(value, key))) return undefined;
+    || Object.keys(value).some((key) => !GOAL_SETTINGS_KEYS.includes(key))
+    || GOAL_SETTINGS_REQUIRED_KEYS.some((key) => !Object.hasOwn(value, key))) return undefined;
+  const blocking = !Object.hasOwn(value, "blocking") || value.blocking === true;
+  if (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean") return undefined;
   const snoozeTurnLimit = value.snoozeTurnLimit === null ? null : positiveGoalInteger(value.snoozeTurnLimit);
   const snoozeBudgetCapMs = value.snoozeBudgetCapMs === null ? null : positiveGoalInteger(value.snoozeBudgetCapMs);
   if (typeof value.goalLockEnabled !== "boolean" || typeof value.snoozeEnabled !== "boolean"
@@ -210,6 +214,7 @@ function normalizeGoalControlSettings(value) {
     || positiveGoalInteger(value.snoozeRefillYieldMs) === undefined
     || positiveGoalInteger(value.snoozeRefillElapsedMs) === undefined) return undefined;
   return {
+    blocking,
     goalLockEnabled: value.goalLockEnabled,
     snoozeEnabled: value.snoozeEnabled,
     snoozeDurationMs: value.snoozeDurationMs,
@@ -222,13 +227,16 @@ function normalizeGoalControlSettings(value) {
 
 function normalizeGoalState(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)
-    || GOAL_STATE_KEYS.length !== Object.keys(value).length
-    || GOAL_STATE_KEYS.some((key) => !Object.hasOwn(value, key))
+    || Object.keys(value).some((key) => !GOAL_STATE_KEYS.includes(key))
+    || GOAL_STATE_REQUIRED_KEYS.some((key) => !Object.hasOwn(value, key))
     || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
     || value.goal.length > MAX_GOAL_CHARS
     || (value.enabled && value.goal.length === 0)
     || (!value.enabled && value.goal !== "")) return undefined;
-  const settings = normalizeGoalControlSettings(Object.fromEntries(GOAL_SETTINGS_KEYS.map((key) => [key, value[key]])));
+  const settings = normalizeGoalControlSettings({
+    ...Object.fromEntries(GOAL_SETTINGS_REQUIRED_KEYS.map((key) => [key, value[key]])),
+    ...(Object.hasOwn(value, "blocking") ? { blocking: value.blocking } : {}),
+  });
   if (settings === undefined || value.outcomeCounts === null || typeof value.outcomeCounts !== "object"
     || Array.isArray(value.outcomeCounts) || Object.keys(value.outcomeCounts).length !== GOAL_OUTCOME_KEYS.length
     || GOAL_OUTCOME_KEYS.some((key) => !Object.hasOwn(value.outcomeCounts, key)
@@ -246,6 +254,7 @@ function defaultGoalState() {
   return {
     enabled: false,
     goal: "",
+    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -257,10 +266,11 @@ function defaultGoalState() {
   };
 }
 
-function goalStateToWire(state) {
+function goalStateToWire(state, { includeBlocking = true } = {}) {
   return {
     enabled: state.enabled,
     goal: state.goal,
+    ...(includeBlocking ? { blocking: state.blocking !== false } : {}),
     goal_lock_enabled: state.goalLockEnabled,
     snooze_enabled: state.snoozeEnabled,
     snooze_duration_ms: state.snoozeDurationMs,
@@ -275,6 +285,7 @@ function goalStateToWire(state) {
 function goalSettingsFromWire(settings) {
   if (settings === null || typeof settings !== "object" || Array.isArray(settings)) return undefined;
   return normalizeGoalControlSettings({
+    blocking: Object.hasOwn(settings, "blocking") ? settings.blocking : true,
     goalLockEnabled: settings.goal_lock_enabled,
     snoozeEnabled: settings.snooze_enabled,
     snoozeDurationMs: settings.snooze_duration_ms,
@@ -408,6 +419,7 @@ export function createMailboxClient({
   let modelCatalogFrameBytes = MAX_MODEL_CATALOG_FRAME_BYTES;
   let lastPublishedModelCatalog;
   let goalControlSupported = false;
+  let goalControlBlockingSupported = false;
   let latestGoalState;
   const modelControlQueue = [];
   let modelControlProcessing = false;
@@ -945,7 +957,7 @@ export function createMailboxClient({
         agent_id: agentId,
         instance_id: instanceId,
         lease_id: leaseId,
-        goal_state: goalStateToWire(state),
+        goal_state: goalStateToWire(state, { includeBlocking: goalControlBlockingSupported }),
       }));
       goalControlTrace("client_goal_state_published", {});
       return true;
@@ -1036,7 +1048,7 @@ export function createMailboxClient({
         revision: frame.revision,
         accepted,
         ...(accepted ? {} : { error_code: errorCode }),
-        goal_state: goalStateToWire(state),
+        goal_state: goalStateToWire(state, { includeBlocking: goalControlBlockingSupported }),
       }));
       goalControlTrace("client_goal_control_result_sent", {
         lease_id: context.leaseId,
@@ -1232,6 +1244,7 @@ export function createMailboxClient({
     lifecycleConnectionDisabled = false;
     modelCatalogSupported = false;
     goalControlSupported = false;
+    goalControlBlockingSupported = false;
     capabilitiesSocket = undefined;
     lifecycleTrace("client_lifecycle_disconnected", { connected: false, error_name: error?.name, phase: kickstartRouter ? "kickstart" : "socket" });
     if (stopped) return;
@@ -1288,7 +1301,12 @@ export function createMailboxClient({
       lifecycleTrace("client_lifecycle_capability_result", { available: lifecycleSupported, ready: response.ok });
       modelCatalogSupported = capabilities?.model_catalog_v1 === true;
       goalControlSupported = capabilities?.goal_control_v1 === true;
-      goalControlTrace("client_goal_control_capability_result", { available: goalControlSupported, ready: response.ok });
+      goalControlBlockingSupported = capabilities?.goal_control_blocking_v1 === true;
+      goalControlTrace("client_goal_control_capability_result", {
+        available: goalControlSupported,
+        blocking: goalControlBlockingSupported,
+        ready: response.ok,
+      });
       const advertisedFrameBytes = capabilities?.model_catalog_limits?.frame_bytes;
       modelCatalogFrameBytes = Number.isSafeInteger(advertisedFrameBytes) && advertisedFrameBytes > 0
         ? Math.min(advertisedFrameBytes, MAX_MODEL_CATALOG_FRAME_BYTES)
@@ -1317,6 +1335,7 @@ export function createMailboxClient({
         lifecycleSupported = false;
         modelCatalogSupported = false;
         goalControlSupported = false;
+        goalControlBlockingSupported = false;
         scheduleCapabilityRetry(currentSocket);
       }
     }

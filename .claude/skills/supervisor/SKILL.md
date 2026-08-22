@@ -507,6 +507,8 @@ A tmux or managed-window listing only proves that a window exists. Inspect the a
 
 - For a durable task with one clear outcome that needs sustained momentum across turns or handoffs, use a worker goal.
 - Set one task-level outcome, not a checklist or parallel set of goals.
+- An explicit concrete goal authorizes the ordinary, bounded, reversible work needed to move toward it. This includes investigation, implementation, tests, review, conflict resolution, rebase, commit, and push when they remain within the recorded scope and requirements. Do not add an authorization gate at a phase boundary or wait for a second approval. Course-correct through the verified mailbox path if execution drifts from the goal, scope, requirements, or evidence plan.
+- Preserve separate approval gates for merging or undrafting a PR, deployment, IAM or ruleset changes, and genuinely irreversible, external, security, legal, credential, or materially out-of-scope actions. Before advancing a scope-sensitive transition, verify the actual artifact or diff and the required evidence.
 - Goals complement—not replace—task state, reminders, check-ins, and explicit handoff instructions.
 - Update the goal only if the objective changes; keep it enabled while the task is active.
 - Use `/goal off` only on explicit user direction, genuine accepted completion, or deliberate defer/stop.
