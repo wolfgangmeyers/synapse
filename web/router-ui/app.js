@@ -1776,6 +1776,7 @@ function goalToggle(id, labelText, pressed, { lock = false } = {}) {
   track.append(thumb);
   const status = document.createElement("span");
   status.className = "goal-toggle-state";
+  if (lock) status.classList.add("goal-toggle-state-hidden");
   const icon = lock ? document.createElement("i") : undefined;
   if (icon) icon.setAttribute("aria-hidden", "true");
   if (lock) thumb.append(icon, status);
