@@ -43,8 +43,29 @@ class RouterAliasTest {
     }
 
     @Test
-    fun connectedStatusDetailUsesAgentDisplayNameAndRouterDisplayName() {
-        assertEquals("Android Qol Parity · Home lab", connectedStatusDetail("android-qol-parity", "Home lab"))
+    fun connectionPresentationMatchesWebUiStates() {
+        assertEquals(ConnectionDisplayState.DISCONNECTED, connectionDisplayState("Add a router to connect", ""))
+        assertEquals("Disconnected", connectionDisplayTitle(ConnectionDisplayState.DISCONNECTED, "", "android"))
+        assertEquals("Open routers to connect.", connectionDisplayDetail(ConnectionDisplayState.DISCONNECTED, "", "", "android", "Home lab"))
+
+        assertEquals(ConnectionDisplayState.CONNECTING, connectionDisplayState("Connecting to your agents…", ""))
+        assertEquals("Connecting", connectionDisplayTitle(ConnectionDisplayState.CONNECTING, "", "android"))
+        assertEquals("Connecting to your agents… · Home lab", connectionDisplayDetail(ConnectionDisplayState.CONNECTING, "", "", "android", "Home lab"))
+
+        assertEquals(ConnectionDisplayState.CONNECTED, connectionDisplayState("Connected as android", ""))
+        assertEquals("Connected as android", connectionDisplayTitle(ConnectionDisplayState.CONNECTED, "", "android"))
+        assertEquals("", connectionDisplayDetail(ConnectionDisplayState.CONNECTED, "", "", "android", "Home lab"))
+
+        assertEquals(ConnectionDisplayState.RECONNECTING, connectionDisplayState("Router connection closed; retrying…", "", hasPeers = true))
+        assertEquals("Reconnecting", connectionDisplayTitle(ConnectionDisplayState.RECONNECTING, "", "android"))
+        assertEquals("Router connection closed; retrying… · Home lab", connectionDisplayDetail(ConnectionDisplayState.RECONNECTING, "Router connection closed; retrying…", "", "android", "Home lab"))
+        assertEquals(ConnectionDisplayState.RECONNECTING, connectionDisplayState("Router unavailable; retrying…", ""))
+
+        assertEquals(ConnectionDisplayState.ERROR, connectionDisplayState("Router rejected this username", ""))
+        assertEquals("Error", connectionDisplayTitle(ConnectionDisplayState.ERROR, "", "android"))
+        assertEquals("Router rejected this username · Home lab", connectionDisplayDetail(ConnectionDisplayState.ERROR, "Router rejected this username", "", "android", "Home lab"))
+        assertEquals(ConnectionDisplayState.ERROR, connectionDisplayState("anything", "Invalid router"))
+        assertEquals("Invalid router · Home lab", connectionDisplayDetail(ConnectionDisplayState.ERROR, "anything", "Invalid router", "android", "Home lab"))
     }
 
     @Test

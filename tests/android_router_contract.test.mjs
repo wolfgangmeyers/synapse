@@ -777,11 +777,11 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
   const images = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/ImageAttachments.kt", import.meta.url), "utf8");
   assert.match(activity, /\.put\("conversation_sync", "v1"\)/);
-  assert.match(activity, /"conversation_message" -> runOnUiThread \{\s*if \(generation == connectionGeneration\) receiveConversationMessage\(frame\)/);
-  assert.match(activity, /"agent_activity" -> runOnUiThread \{\s*if \(generation == connectionGeneration\) receiveAgentActivity\(frame\)/);
+  assert.match(activity, /"conversation_message" -> runOnUiThread[\s\S]*?if \(generation == connectionGeneration\.get\(\)\) receiveConversationMessage\(frame\)/);
+  assert.match(activity, /"agent_activity" -> runOnUiThread[\s\S]*?if \(generation == connectionGeneration\.get\(\)\) receiveAgentActivity\(frame\)/);
   assert.match(activity, /addPathSegments\("v1\/conversations"\)/);
   assert.match(activity, /"history:\$activeRouter:\$agentId:\$peer"/);
-  assert.match(activity, /generation != connectionGeneration \|\| activeRouter != router \|\| agentId != owner \|\| selectedPeer != peer/);
+  assert.match(activity, /generation != connectionGeneration\.get\(\) \|\| activeRouter != router \|\| agentId != owner \|\| selectedPeer != peer/);
   assert.match(activity, /reconcileConversationMessages\(historyFor\(peer\), hydrated, highWaterSequence\)/);
   assert.match(activity, /rememberLauncherForActivityResult\(ActivityResultContracts\.GetMultipleContents\(\)\)/);
   assert.match(activity, /imagePicker\.launch\("image\/\*"\)/);
@@ -804,13 +804,93 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.match(images, /Bitmap\.CompressFormat\.JPEG/);
 });
 
+test("stale Android delayed reconnects cannot replace a newer manual socket", () => {
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  const connect = activity.match(/private fun connect\(expectedGeneration: Int\? = null\)[\s\S]*?\n    }\n\n    private fun invalidateFailedConnection/)?.[0];
+  assert.ok(connect);
+  assert.match(connect, /synchronized\(connectionGenerationLock\)[\s\S]*?scheduledReconnectIsCurrent\(expectedGeneration, connectionGeneration\.get\(\)\)[\s\S]*?return@synchronized null[\s\S]*?connectionGeneration\.incrementAndGet\(\)/);
+  const schedule = activity.match(/private fun scheduleReconnect\(generation: Int\) \{[\s\S]*?\n    }/)?.[0];
+  assert.ok(schedule);
+  assert.match(schedule, /connect\(expectedGeneration = generation\)/);
+  assert.doesNotMatch(schedule, /connectionGeneration\.get\(\)/);
+});
+
+test("failed Android connections clear the live-update fence on the UI thread before reconnecting", () => {
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  const invalidation = activity.match(/private fun invalidateFailedConnection[\s\S]*?\n        }\n\n    private fun scheduleReconnect/);
+  assert.ok(invalidation);
+  assert.doesNotMatch(invalidation[0], /liveUpdatedPeerIds\.clear\(\)/);
+
+  const reconnectCallbacks = activity.match(/override fun on(?:Closing|Failure)\([\s\S]*?scheduleReconnect\(reconnectGeneration\)[\s\S]*?\n                }/g);
+  assert.equal(reconnectCallbacks?.length, 2);
+  for (const callback of reconnectCallbacks ?? []) {
+    assert.match(callback, /runOnUiThread \{[\s\S]*clearModelControlStateForReconnect\(\)[\s\S]*liveUpdatedPeerIds\.clear\(\)[\s\S]*connection =/);
+    assert.match(callback, /liveUpdatedPeerIds\.clear\(\)[\s\S]*scheduleReconnect\(reconnectGeneration\)/);
+  }
+  const reconnectReset = activity.match(/private fun clearModelControlStateForReconnect\(\):?[\s\S]*?\n    }/);
+  assert.ok(reconnectReset);
+  assert.match(reconnectReset[0], /pendingModelControlId = ""/);
+  assert.match(reconnectReset[0], /pendingModelRequestId = ""/);
+  assert.match(reconnectReset[0], /pendingModelPeer = ""/);
+  assert.match(reconnectReset[0], /pendingModelInstanceId = ""/);
+  assert.match(reconnectReset[0], /pendingModel = null/);
+  assert.match(reconnectReset[0], /deferredEmptyModelCatalogs\.clear\(\)/);
+});
+
+test("Android reminder timers guard every callback with the captured dialog session", () => {
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  const open = activity.match(/private fun openReminderDialog\(peer: String\)[\s\S]*?\n    }/)?.[0];
+  assert.ok(open);
+  assert.match(open, /val session = \+\+reminderDialogSession/);
+  assert.match(open, /reminderDialogTimer\?\.cancel\(\)/);
+  assert.match(open, /if \(!reminderDialogCallbackMatchesSession\(session, reminderDialogSession\)\) \{[\s\S]*?timer\.cancel\(\)[\s\S]*?return@runOnUiThread[\s\S]*?reminderDialogTick\+\+/);
+  const close = activity.match(/private fun closeReminderDialog\(\)[\s\S]*?\n    }/)?.[0];
+  assert.ok(close);
+  assert.match(close, /reminderDialogSession\+\+/);
+  assert.match(close, /reminderDialogTimer\?\.cancel\(\)/);
+});
+
+test("Android model-control results use the current peer before accepting or settling", () => {
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  const receive = activity.match(/private fun receiveModelControlResult\(frame: JSONObject\)[\s\S]*?\n    }/)?.[0];
+  assert.ok(receive);
+  const currentPeerIndex = receive.indexOf("val currentPendingPeer = peers.firstOrNull { it.id == pendingModelPeer }");
+  const targetCheckIndex = receive.indexOf("modelControlResultTargetsCurrentPeer(");
+  const settlementIndex = receive.indexOf("modelControlResultSettlement(");
+  assert.ok(currentPeerIndex >= 0);
+  assert.ok(targetCheckIndex > currentPeerIndex);
+  assert.ok(settlementIndex > targetCheckIndex);
+  assert.doesNotMatch(receive.slice(0, targetCheckIndex), /settleModelControl\(/);
+});
+
+test("Android model selection validates the captured lease and target instance before one atomic send", () => {
+  const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  const selection = activity.match(/private fun selectModel\(model: ModelSummary\)[\s\S]*?\n    }\n\n    private fun settleModelControl/);
+  assert.ok(selection);
+  assert.match(selection[0], /val intendedLeaseId = leaseId/);
+  assert.match(selection[0], /val intendedTargetInstanceId = peer\.instanceId/);
+  assert.match(selection[0], /if \(intendedLeaseId\.isBlank\(\) \|\| intendedTargetInstanceId\.isBlank\(\)/);
+  assert.match(selection[0], /synchronized\(connectionGenerationLock\)/);
+  assert.match(selection[0], /currentGeneration = connectionGeneration\.get\(\)/);
+  assert.match(selection[0], /currentSocket = socket/);
+  assert.match(selection[0], /currentLeaseId = leaseId/);
+  assert.match(selection[0], /currentTargetInstanceId = peers\.firstOrNull \{ it\.id == selectedPeer \}.*instanceId/);
+  assert.match(selection[0], /modelControlSendMatches\(/);
+  assert.match(selection[0], /currentSocket\.send\(frame\.toString\(\)\)/);
+});
+
 test("Android home renders only router-discovered connected peers", () => {
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
-  assert.match(activity, /scheduleAtFixedRate\(60_000, 60_000\)[\s\S]*discoverPeers\(generation\)/);
-  assert.match(activity, /val discovered = buildList \{[\s\S]*peerStatusFromJson\(peer, agent, peers\.firstOrNull \{ it\.id == peer \}\)[\s\S]*\}\n\s*runOnUiThread \{ if \(generation == connectionGeneration\) peers = discovered\.sortedBy \{ it\.id \} \}/);
+  assert.match(activity, /private const val AGENT_REFRESH_INTERVAL_MS = 10_000L/);
+  assert.match(activity, /scheduleAtFixedRate\(AGENT_REFRESH_INTERVAL_MS, AGENT_REFRESH_INTERVAL_MS\)[\s\S]*discoverPeers\(generation, router, owner\)/);
+  assert.match(activity, /val discovered = buildList \{[\s\S]*?add\(peer to agent\)/);
+  assert.match(activity, /runOnUiThread \{\s*if \(generation != connectionGeneration\.get\(\) \|\| requestGeneration != peerRequestGeneration\.get\(\)\) return@runOnUiThread/);
+  assert.match(activity, /val nextPeers = discovered\.map \{ \(peer, source\) ->/);
+  assert.match(activity, /mergeDiscoveredPeer\([\s\S]*?peer = peer,[\s\S]*?source = source,[\s\S]*?current = currentPeers\.firstOrNull \{ it\.id == peer \}[\s\S]*?hasLiveUpdate = peer in liveUpdatedPeerIds/);
+  assert.match(activity, /\.sortedBy \{ it\.id \}/);
   assert.match(activity, /private fun receiveAgentActivity\(frame: JSONObject\)/);
   assert.match(activity, /normalizedSubagentSummaries\(source\.optJSONArray\("subagents"\)\)/);
-  assert.match(activity, /current\?\.subagents\?\.size == incomingCount/);
+  assert.match(activity, /countProvided && incomingCount > 0 && base\?\.subagents\?\.size == incomingCount/);
   assert.match(activity, /PeerActivityIndicators\(peer\)/);
   assert.match(activity, /if \(peer\.subagentCount <= 0\) return/);
   assert.doesNotMatch(activity, /Text\(if \(peer\.active\) "Working" else "Available"/);
