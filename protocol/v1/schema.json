@@ -318,6 +318,107 @@
         }
       ]
     },
+    "goalOutcomeCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"],
+      "properties": {
+        "BLOCKED": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "COMPLETED": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "NOT_DONE": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "WAITING_FOR_USER_AUTHORIZATION": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "goalControlSettings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"],
+      "properties": {
+        "goal_lock_enabled": { "type": "boolean" },
+        "snooze_enabled": { "type": "boolean" },
+        "snooze_duration_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "snooze_turn_limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 20 },
+        "snooze_budget_cap_ms": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+        "snooze_refill_yield_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "snooze_refill_elapsed_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "goalState": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "goal", "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms", "outcome_counts"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "goal": { "type": "string", "maxLength": 4000 },
+        "goal_lock_enabled": { "type": "boolean" },
+        "snooze_enabled": { "type": "boolean" },
+        "snooze_duration_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "snooze_turn_limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 20 },
+        "snooze_budget_cap_ms": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+        "snooze_refill_yield_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "snooze_refill_elapsed_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "outcome_counts": { "$ref": "#/$defs/goalOutcomeCounts" }
+      },
+      "allOf": [
+        { "if": { "properties": { "enabled": { "const": true } } }, "then": { "properties": { "goal": { "minLength": 1 } } } },
+        { "if": { "properties": { "enabled": { "const": false } } }, "then": { "properties": { "goal": { "const": "" } } } }
+      ]
+    },
+    "goalControlFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "action", "goal", "settings"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "goal_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "target_agent_id": { "$ref": "#/$defs/agentId" }, "target_instance_id": { "$ref": "#/$defs/instanceId" },
+        "control_id": { "$ref": "#/$defs/frameId" }, "action": { "enum": ["set", "off"] }, "goal": { "type": "string", "maxLength": 4000 }, "settings": { "$ref": "#/$defs/goalControlSettings" }
+      },
+      "allOf": [
+        { "if": { "properties": { "action": { "const": "set" } } }, "then": { "properties": { "goal": { "minLength": 1 } } } },
+        { "if": { "properties": { "action": { "const": "off" } } }, "then": { "properties": { "goal": { "const": "" } } } }
+      ]
+    },
+    "goalControlForwardFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "revision", "action", "goal", "settings", "expires_at"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "goal_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" }, "control_id": { "$ref": "#/$defs/frameId" }, "revision": { "type": "integer", "minimum": 1 },
+        "action": { "enum": ["set", "off"] }, "goal": { "type": "string", "maxLength": 4000 }, "settings": { "$ref": "#/$defs/goalControlSettings" }, "expires_at": { "$ref": "#/$defs/utcMillis" }
+      },
+      "allOf": [
+        { "if": { "properties": { "action": { "const": "set" } } }, "then": { "properties": { "goal": { "minLength": 1 } } } },
+        { "if": { "properties": { "action": { "const": "off" } } }, "then": { "properties": { "goal": { "const": "" } } } }
+      ]
+    },
+    "goalControlResultFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "revision", "accepted", "goal_state"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "goal_control_result" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" }, "control_id": { "$ref": "#/$defs/frameId" }, "revision": { "type": "integer", "minimum": 1 },
+        "accepted": { "type": "boolean" }, "error_code": { "type": "string", "minLength": 1, "maxLength": 128 }, "goal_state": { "$ref": "#/$defs/goalState" }
+      },
+      "oneOf": [
+        { "properties": { "accepted": { "const": true } }, "not": { "required": ["error_code"] } },
+        { "properties": { "accepted": { "const": false } }, "required": ["error_code"] }
+      ]
+    },
+    "goalStateFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "goal_state"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "goal_state" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" }, "goal_state": { "$ref": "#/$defs/goalState" }
+      }
+    },
+    "agentGoalStateFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "goal_state", "generated_at"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "agent_goal_state" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "goal_state": { "$ref": "#/$defs/goalState" }, "generated_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
     "messageArrivalClientFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -551,6 +652,15 @@
         },
         {
           "$ref": "#/$defs/modelControlResultFrame"
+        },
+        {
+          "$ref": "#/$defs/goalControlFrame"
+        },
+        {
+          "$ref": "#/$defs/goalControlResultFrame"
+        },
+        {
+          "$ref": "#/$defs/goalStateFrame"
         },
         {
           "$ref": "#/$defs/messageArrivalClientFrame"
@@ -858,6 +968,9 @@
         { "$ref": "#/$defs/conversationMessageFrame" },
         { "$ref": "#/$defs/modelControlForwardFrame" },
         { "$ref": "#/$defs/modelControlResultFrame" },
+        { "$ref": "#/$defs/goalControlForwardFrame" },
+        { "$ref": "#/$defs/goalControlResultFrame" },
+        { "$ref": "#/$defs/agentGoalStateFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" },
         { "$ref": "#/$defs/agentActivityFrame" },
         { "$ref": "#/$defs/agentModelCatalogFrame" },

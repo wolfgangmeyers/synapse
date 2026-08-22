@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension, { GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/goal.js";
+import goalExtension, { GOAL_CONTROL_STATE_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/goal.js";
 
 function fixture({ sessionId = "worker-session", branch = [], onSend } = {}) {
   const handlers = new Map();
@@ -37,13 +37,47 @@ test("goal publishes cached normalized state and replays it to a late subscriber
   const current = fixture();
   await current.handlers.get("session_start")({}, current.context);
   await current.commands.get("goal").handler("set  ship <the> goal  ", current.context);
-  assert.deepEqual(current.emitted.at(-1), { name: GOAL_STATE_EVENT, data: { enabled: true, goal: "ship <the> goal" } });
+  assert.deepEqual(current.emitted.slice(-2), [
+    { name: GOAL_STATE_EVENT, data: { enabled: true, goal: "ship <the> goal" } },
+    {
+      name: GOAL_CONTROL_STATE_EVENT,
+      data: {
+        enabled: true,
+        goal: "ship <the> goal",
+        goalLockEnabled: false,
+        snoozeEnabled: true,
+        snoozeDurationMs: 60_000,
+        snoozeTurnLimit: null,
+        snoozeBudgetCapMs: null,
+        snoozeRefillYieldMs: 30_000,
+        snoozeRefillElapsedMs: 60_000,
+        outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+      },
+    },
+  ]);
   const replay = [];
   current.events.set(GOAL_STATE_EVENT, (data) => replay.push(data));
   await current.events.get(GOAL_STATE_REQUEST_EVENT)();
   assert.deepEqual(replay, [{ enabled: true, goal: "ship <the> goal" }]);
   await current.commands.get("goal").handler("off", current.context);
-  assert.deepEqual(current.emitted.at(-1), { name: GOAL_STATE_EVENT, data: { enabled: false, goal: "" } });
+  assert.deepEqual(current.emitted.slice(-2), [
+    { name: GOAL_STATE_EVENT, data: { enabled: false, goal: "" } },
+    {
+      name: GOAL_CONTROL_STATE_EVENT,
+      data: {
+        enabled: false,
+        goal: "",
+        goalLockEnabled: false,
+        snoozeEnabled: true,
+        snoozeDurationMs: 60_000,
+        snoozeTurnLimit: null,
+        snoozeBudgetCapMs: null,
+        snoozeRefillYieldMs: 30_000,
+        snoozeRefillElapsedMs: 60_000,
+        outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+      },
+    },
+  ]);
 });
 
 test("goal set persists before one deferred self-wakeup and off does not wake", async () => {
@@ -64,6 +98,6 @@ test("goal wake failure leaves persisted state and does not evaluate", async () 
   await current.commands.get("goal").handler("set keep working", current.context);
   await current.commands.get("goal-snooze").handler("off", current.context);
   await flush();
-  assert.deepEqual(current.entries.at(-1).data, { enabled: true, goal: "keep working", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000 });
+  assert.deepEqual(current.entries.at(-1).data, { enabled: true, goal: "keep working", notDoneWakeups: 0, blockedWakeups: 0, completedThings: 0, goalLockEnabled: false, snoozeEnabled: false, snoozeDurationMs: 60_000, outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 } });
   assert.equal(current.sent.length, 1);
 });

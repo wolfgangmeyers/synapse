@@ -18,6 +18,7 @@ const AGENT_REFRESH_INTERVAL_MS = 10_000;
 // The router owns a 30-second pending-control TTL and sweeps once a second.
 // Keep the browser fallback beyond that authoritative rejection window.
 const MODEL_CONTROL_TIMEOUT_MS = 35_000;
+const GOAL_CONTROL_TIMEOUT_MS = 35_000;
 const CAPABILITY_DISCOVERY_TIMEOUT_MS = 1_000;
 const MAX_PENDING_MODEL_CONTROLS = 100;
 const AGENT_ID = /^(?!.*@)[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -69,6 +70,7 @@ export async function startRouterWebUi({
   defaultAgentId = DEFAULT_AGENT_ID,
   allowedHost = process.env.MECHA_WEB_UI_ALLOWED_HOST,
   modelControlTimeoutMs,
+  goalControlTimeoutMs,
   maxPendingModelControls = MAX_PENDING_MODEL_CONTROLS,
   capabilitiesFetchImpl = fetch,
   capabilityDiscoveryTimeoutMs = CAPABILITY_DISCOVERY_TIMEOUT_MS,
@@ -80,6 +82,10 @@ export async function startRouterWebUi({
   if (modelControlTimeoutMs !== undefined
     && (!Number.isSafeInteger(modelControlTimeoutMs) || modelControlTimeoutMs < 1)) {
     throw new Error("modelControlTimeoutMs must be a positive integer");
+  }
+  if (goalControlTimeoutMs !== undefined
+    && (!Number.isSafeInteger(goalControlTimeoutMs) || goalControlTimeoutMs < 1)) {
+    throw new Error("goalControlTimeoutMs must be a positive integer");
   }
   if (!Number.isSafeInteger(maxPendingModelControls) || maxPendingModelControls < 1) throw new Error("maxPendingModelControls must be a positive integer");
   if (typeof capabilitiesFetchImpl !== "function") throw new Error("capabilitiesFetchImpl must be a function");
@@ -113,6 +119,7 @@ export async function startRouterWebUi({
     const client = createBrowserClient(browser, {
       defaultRouter: router,
       modelControlTimeoutMs,
+      goalControlTimeoutMs,
       maxPendingModelControls,
       capabilitiesFetchImpl,
       capabilityDiscoveryTimeoutMs,
@@ -201,6 +208,7 @@ async function handleRequest(request, response, { router, defaultAgentId }) {
 function createBrowserClient(browser, {
   defaultRouter,
   modelControlTimeoutMs,
+  goalControlTimeoutMs,
   maxPendingModelControls,
   capabilitiesFetchImpl,
   capabilityDiscoveryTimeoutMs,
@@ -215,9 +223,12 @@ function createBrowserClient(browser, {
   let lifecycleVersion = 0;
   let includeModelsInNextRefresh = true;
   let effectiveModelControlTimeoutMs = modelControlTimeoutMs ?? MODEL_CONTROL_TIMEOUT_MS;
+  const effectiveGoalControlTimeoutMs = goalControlTimeoutMs ?? GOAL_CONTROL_TIMEOUT_MS;
   const pendingDeliveries = new Map();
   const pendingControlsByControlId = new Map();
   const pendingControlsByRequestId = new Map();
+  const pendingGoalControlsByControlId = new Map();
+  const pendingGoalControlsByRequestId = new Map();
   let configured = {
     routerUrl: normalizeRouterUrl(defaultRouter),
     agentId: `web-${randomUUID().slice(0, 8)}`,
@@ -252,9 +263,33 @@ function createBrowserClient(browser, {
     });
     return true;
   };
+  const settlePendingGoalControl = (controlId, result) => {
+    const pending = pendingGoalControlsByControlId.get(controlId);
+    if (pending === undefined) return false;
+    pendingGoalControlsByControlId.delete(controlId);
+    pendingGoalControlsByRequestId.delete(pending.requestId);
+    clearTimeout(pending.timer);
+    sendBrowser({
+      type: "goal_control_result",
+      controlId,
+      targetAgentId: pending.targetAgentId,
+      targetInstanceId: pending.targetInstanceId,
+      accepted: result.accepted === true,
+      ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+      ...(result.message === undefined ? {} : { message: result.message }),
+      ...(result.revision === undefined ? {} : { revision: result.revision }),
+      ...(result.goalState === undefined ? {} : { goalState: result.goalState }),
+      agentId: configured.agentId,
+      routerUrl: configured.routerUrl,
+    });
+    return true;
+  };
   const rejectAllPendingControls = (errorCode) => {
     for (const controlId of [...pendingControlsByControlId.keys()]) {
       settlePendingControl(controlId, { accepted: false, errorCode });
+    }
+    for (const controlId of [...pendingGoalControlsByControlId.keys()]) {
+      settlePendingGoalControl(controlId, { accepted: false, errorCode });
     }
   };
   const trackPendingControl = ({ controlId, requestId, targetAgentId }) => {
@@ -270,6 +305,20 @@ function createBrowserClient(browser, {
     pendingControlsByControlId.set(controlId, pending);
     pendingControlsByRequestId.set(requestId, pending);
   };
+  const trackPendingGoalControl = ({ controlId, requestId, targetAgentId, targetInstanceId }) => {
+    if (pendingGoalControlsByControlId.has(controlId)) throw new Error("Goal control ID is already pending");
+    while (pendingGoalControlsByControlId.size >= maxPendingModelControls) {
+      const oldestControlId = pendingGoalControlsByControlId.keys().next().value;
+      settlePendingGoalControl(oldestControlId, { accepted: false, errorCode: "too_many_pending_controls" });
+    }
+    const timer = setTimeout(() => {
+      settlePendingGoalControl(controlId, { accepted: false, errorCode: "control_timeout", message: "The goal change timed out." });
+    }, effectiveGoalControlTimeoutMs);
+    const pending = { controlId, requestId, targetAgentId, targetInstanceId, timer };
+    pendingGoalControlsByControlId.set(controlId, pending);
+    pendingGoalControlsByRequestId.set(requestId, pending);
+  };
+
   const refreshAgents = async () => {
     const generation = ++refreshGeneration;
     const routerUrl = configured.routerUrl;
@@ -367,6 +416,15 @@ function createBrowserClient(browser, {
         return;
       }
       if (frame.type === "error") {
+        const goalPending = pendingGoalControlsByRequestId.get(frame.request_id);
+        if (goalPending !== undefined) {
+          settlePendingGoalControl(goalPending.controlId, {
+            accepted: false,
+            errorCode: frame.code ?? "router_error",
+            message: frame.message,
+          });
+          return;
+        }
         const pending = pendingControlsByRequestId.get(frame.request_id);
         if (pending !== undefined) {
           settlePendingControl(pending.controlId, { accepted: false, errorCode: frame.code ?? "router_error" });
@@ -383,6 +441,18 @@ function createBrowserClient(browser, {
         sendBrowser({
           type: "conversation_message",
           message: messageWithAbsoluteAttachments(frame.message, configured.routerUrl),
+          agentId: configured.agentId,
+          routerUrl: configured.routerUrl,
+        });
+        return;
+      }
+      if (frame.type === "agent_goal_state") {
+        sendBrowser({
+          type: "agent_goal_state",
+          agent: frame.agent_id,
+          instanceId: frame.instance_id,
+          goalState: frame.goal_state,
+          generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
         });
@@ -420,6 +490,20 @@ function createBrowserClient(browser, {
           generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
+        });
+        return;
+      }
+      if (frame.type === "goal_control_result") {
+        const pending = pendingGoalControlsByControlId.get(frame.control_id);
+        if (pending === undefined
+          || pending.targetAgentId !== frame.agent_id
+          || pending.targetInstanceId !== frame.instance_id
+          || frame.source_agent_id !== configured.agentId) return;
+        settlePendingGoalControl(frame.control_id, {
+          accepted: frame.accepted,
+          ...(frame.error_code === undefined ? {} : { errorCode: frame.error_code }),
+          ...(frame.goal_state === undefined ? {} : { goalState: frame.goal_state }),
+          ...(frame.revision === undefined ? {} : { revision: frame.revision }),
         });
         return;
       }
@@ -578,6 +662,34 @@ function createBrowserClient(browser, {
           await sendMessage(command, configured, sendBrowser, refreshAgents);
           return;
         }
+        if (command.type === "goal_control") {
+          const controlId = normalizeControlId(command.controlId ?? "");
+          const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
+          const targetInstanceId = normalizeInstanceId(command.targetInstanceId ?? "");
+          const action = String(command.action ?? "");
+          const goal = String(command.goal ?? "");
+          const settings = normalizeGoalControlSettings(command.settings);
+          if (!['set', 'off'].includes(action)) throw new Error("Goal action is invalid");
+          if (action === "set" && (goal.trim() === "" || [...goal].length > 4000)) throw new Error("A goal description is required");
+          if (routerSocket?.readyState !== WebSocket.OPEN || configured.leaseId === "") throw new Error("Router is not connected");
+          const requestId = `goal-control-${randomUUID()}`;
+          trackPendingGoalControl({ controlId, requestId, targetAgentId, targetInstanceId });
+          routerSocket.send(JSON.stringify({
+            version: "v1",
+            frame_id: requestId,
+            type: "goal_control",
+            agent_id: configured.agentId,
+            instance_id: configured.instanceId,
+            lease_id: configured.leaseId,
+            target_agent_id: targetAgentId,
+            target_instance_id: targetInstanceId,
+            control_id: controlId,
+            action,
+            goal,
+            settings,
+          }));
+          return;
+        }
         if (command.type === "set_model") {
           const controlId = normalizeControlId(command.controlId ?? "");
           const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
@@ -610,6 +722,25 @@ function createBrowserClient(browser, {
           }));
         }
       } catch (error) {
+        const goalControlId = command?.type === "goal_control" && CONTROL_ID.test(command.controlId)
+          ? command.controlId
+          : undefined;
+        if (goalControlId !== undefined) {
+          if (!settlePendingGoalControl(goalControlId, { accepted: false, errorCode: "command_error", message: error.message })) {
+            sendBrowser({
+              type: "goal_control_result",
+              controlId: goalControlId,
+              targetAgentId: String(command.targetAgentId ?? ""),
+              targetInstanceId: String(command.targetInstanceId ?? ""),
+              accepted: false,
+              errorCode: "command_error",
+              message: error.message,
+              agentId: configured.agentId,
+              routerUrl: configured.routerUrl,
+            });
+          }
+          return;
+        }
         const controlId = command?.type === "set_model" && CONTROL_ID.test(command.controlId)
           ? command.controlId
           : undefined;
@@ -644,6 +775,9 @@ function createBrowserClient(browser, {
       for (const pending of pendingControlsByControlId.values()) clearTimeout(pending.timer);
       pendingControlsByControlId.clear();
       pendingControlsByRequestId.clear();
+      for (const pending of pendingGoalControlsByControlId.values()) clearTimeout(pending.timer);
+      pendingGoalControlsByControlId.clear();
+      pendingGoalControlsByRequestId.clear();
       routerSocket?.close(1000, "browser closed");
     },
   };
@@ -776,6 +910,37 @@ function normalizeInstanceId(value) {
   const instanceId = String(value).trim();
   if (!CONTROL_ID.test(instanceId)) throw new Error("Instance ID is invalid");
   return instanceId;
+}
+
+function normalizeGoalControlSettings(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Goal settings are required");
+  const required = [
+    "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit",
+    "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms",
+  ];
+  if (Object.keys(value).length !== required.length || required.some((key) => !Object.hasOwn(value, key))) {
+    throw new Error("Goal settings are incomplete");
+  }
+  if (typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
+    || !positiveInteger(value.snooze_duration_ms) || !positiveInteger(value.snooze_refill_yield_ms)
+    || !positiveInteger(value.snooze_refill_elapsed_ms)
+    || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
+    || !(value.snooze_budget_cap_ms === null || positiveInteger(value.snooze_budget_cap_ms))) {
+    throw new Error("Goal settings are invalid");
+  }
+  return {
+    goal_lock_enabled: value.goal_lock_enabled,
+    snooze_enabled: value.snooze_enabled,
+    snooze_duration_ms: value.snooze_duration_ms,
+    snooze_turn_limit: value.snooze_turn_limit,
+    snooze_budget_cap_ms: value.snooze_budget_cap_ms,
+    snooze_refill_yield_ms: value.snooze_refill_yield_ms,
+    snooze_refill_elapsed_ms: value.snooze_refill_elapsed_ms,
+  };
+}
+
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0;
 }
 
 function normalizeConversationPeer(value) {

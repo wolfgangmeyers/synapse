@@ -4,11 +4,17 @@ const GOAL_UPDATE_TYPE = "goal-update";
 const GOAL_SNOOZE_AVAILABILITY_TYPE = "goal-snooze-availability";
 export const GOAL_STATE_EVENT = "goal:state";
 export const GOAL_STATE_REQUEST_EVENT = "goal:state-request";
+// Remote controls remain a separate typed channel so model selection and goal
+// state cannot be confused by a router or extension that only supports one.
+export const GOAL_CONTROL_REQUEST_EVENT = "goal:control-request";
+export const GOAL_CONTROL_STATE_EVENT = "goal:control-state";
 const MAX_GOAL_CHARS = 4_000;
 const MAX_CONTEXT_MESSAGES = 32;
 const MAX_CONTEXT_CHARS = 24_000;
 const OUTCOMES = new Set(["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"]);
 const GOAL_ACTIONS = new Set(["set", "status", "off"]);
+const GOAL_CONTROL_ACTIONS = new Set(["set", "off"]);
+const OUTCOME_COUNT_KEYS = ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"];
 const GOAL_PARAMETERS = {
   type: "object",
   additionalProperties: false,
@@ -89,6 +95,62 @@ function goalProjection(state) {
     : { enabled: false, goal: "" };
 }
 
+function emptyOutcomeCounts() {
+  return Object.fromEntries(OUTCOME_COUNT_KEYS.map((outcome) => [outcome, 0]));
+}
+
+function restoreOutcomeCounts(value) {
+  const counts = emptyOutcomeCounts();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return counts;
+  for (const outcome of OUTCOME_COUNT_KEYS) {
+    if (Number.isSafeInteger(value[outcome]) && value[outcome] >= 0) counts[outcome] = value[outcome];
+  }
+  return counts;
+}
+
+function restoreAppliedGoalControl(value) {
+  return value && typeof value === "object"
+    && typeof value.instanceId === "string" && value.instanceId.length > 0
+    && Number.isSafeInteger(value.revision) && value.revision > 0
+    ? { instanceId: value.instanceId, revision: value.revision }
+    : undefined;
+}
+
+function positiveSafeInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function normalizeGoalControlSettings(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const expected = [
+    "goalLockEnabled",
+    "snoozeEnabled",
+    "snoozeDurationMs",
+    "snoozeTurnLimit",
+    "snoozeBudgetCapMs",
+    "snoozeRefillYieldMs",
+    "snoozeRefillElapsedMs",
+  ];
+  if (Object.keys(value).length !== expected.length || expected.some((key) => !Object.hasOwn(value, key))) return undefined;
+  const snoozeTurnLimit = value.snoozeTurnLimit === null ? undefined : parseSnoozeTurnLimit(String(value.snoozeTurnLimit));
+  const snoozeBudgetCapMs = value.snoozeBudgetCapMs === null ? undefined : positiveSafeInteger(value.snoozeBudgetCapMs);
+  if (typeof value.goalLockEnabled !== "boolean" || typeof value.snoozeEnabled !== "boolean"
+    || positiveSafeInteger(value.snoozeDurationMs) === undefined
+    || (value.snoozeTurnLimit !== null && snoozeTurnLimit === undefined)
+    || (value.snoozeBudgetCapMs !== null && snoozeBudgetCapMs === undefined)
+    || positiveSafeInteger(value.snoozeRefillYieldMs) === undefined
+    || positiveSafeInteger(value.snoozeRefillElapsedMs) === undefined) return undefined;
+  return {
+    goalLockEnabled: value.goalLockEnabled,
+    snoozeEnabled: value.snoozeEnabled,
+    snoozeDurationMs: value.snoozeDurationMs,
+    snoozeTurnLimit,
+    snoozeBudgetCapMs,
+    snoozeRefillYieldMs: value.snoozeRefillYieldMs,
+    snoozeRefillElapsedMs: value.snoozeRefillElapsedMs,
+  };
+}
+
 function restoreState(ctx) {
   let restored = {
     enabled: false,
@@ -99,11 +161,19 @@ function restoreState(ctx) {
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: DEFAULT_SNOOZE_DURATION_MS,
+    snoozeTurnLimit: undefined,
+    snoozeBudgetCapMs: undefined,
+    snoozeBudgetAvailableMs: 0,
+    snoozeRefillYieldMs: DEFAULT_SNOOZE_REFILL_YIELD_MS,
+    snoozeRefillElapsedMs: DEFAULT_SNOOZE_REFILL_ELAPSED_MS,
+    outcomeCounts: emptyOutcomeCounts(),
+    appliedGoalControl: undefined,
   };
   for (const entry of ctx.sessionManager.getBranch?.() ?? []) {
     if (entry.type !== "custom" || entry.customType !== GOAL_STATE_ENTRY) continue;
     const data = entry.data;
     if (!data || typeof data !== "object") continue;
+    const snoozeBudgetCapMs = positiveSafeInteger(data.snoozeBudgetCapMs);
     restored = {
       enabled: data.enabled === true,
       goal: normalizeGoal(data.goal),
@@ -118,9 +188,17 @@ function restoreState(ctx) {
         : 0,
       goalLockEnabled: data.goalLockEnabled === true,
       snoozeEnabled: !Object.hasOwn(data, "snoozeEnabled") || data.snoozeEnabled === true,
-      snoozeDurationMs: Number.isSafeInteger(data.snoozeDurationMs) && data.snoozeDurationMs > 0
-        ? data.snoozeDurationMs
-        : DEFAULT_SNOOZE_DURATION_MS,
+      snoozeDurationMs: positiveSafeInteger(data.snoozeDurationMs) ?? DEFAULT_SNOOZE_DURATION_MS,
+      snoozeTurnLimit: Number.isInteger(data.snoozeTurnLimit) && data.snoozeTurnLimit >= 1
+        && data.snoozeTurnLimit <= MAX_SNOOZE_TURN_LIMIT ? data.snoozeTurnLimit : undefined,
+      snoozeBudgetCapMs,
+      snoozeBudgetAvailableMs: snoozeBudgetCapMs !== undefined && Number.isFinite(data.snoozeBudgetAvailableMs)
+        ? Math.min(snoozeBudgetCapMs, Math.max(0, data.snoozeBudgetAvailableMs))
+        : snoozeBudgetCapMs ?? 0,
+      snoozeRefillYieldMs: positiveSafeInteger(data.snoozeRefillYieldMs) ?? DEFAULT_SNOOZE_REFILL_YIELD_MS,
+      snoozeRefillElapsedMs: positiveSafeInteger(data.snoozeRefillElapsedMs) ?? DEFAULT_SNOOZE_REFILL_ELAPSED_MS,
+      outcomeCounts: restoreOutcomeCounts(data.outcomeCounts),
+      appliedGoalControl: restoreAppliedGoalControl(data.appliedGoalControl),
     };
   }
   return restored;
@@ -298,6 +376,8 @@ export function createGoalExtension(pi, options = {}) {
   let snoozeBudgetLastAtMs;
   let snoozeRefillYieldMs = DEFAULT_SNOOZE_REFILL_YIELD_MS;
   let snoozeRefillElapsedMs = DEFAULT_SNOOZE_REFILL_ELAPSED_MS;
+  let outcomeCounts = emptyOutcomeCounts();
+  let appliedGoalControl;
   let compactionLifecyclePause = false;
   let lastOwnerGateState = "allowed";
 
@@ -403,6 +483,17 @@ export function createGoalExtension(pi, options = {}) {
     activeAbort = undefined;
   };
 
+  const goalControlState = () => ({
+    ...goalProjection(state),
+    goalLockEnabled,
+    snoozeEnabled,
+    snoozeDurationMs,
+    snoozeTurnLimit: snoozeTurnLimit ?? null,
+    snoozeBudgetCapMs: snoozeBudgetCapMs ?? null,
+    snoozeRefillYieldMs,
+    snoozeRefillElapsedMs,
+    outcomeCounts: { ...outcomeCounts },
+  });
   const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, {
     ...state,
     notDoneWakeups,
@@ -411,9 +502,27 @@ export function createGoalExtension(pi, options = {}) {
     goalLockEnabled,
     snoozeEnabled,
     snoozeDurationMs,
+    ...(snoozeTurnLimit === undefined ? {} : { snoozeTurnLimit }),
+    ...(snoozeBudgetCapMs === undefined ? {} : {
+      snoozeBudgetCapMs,
+      snoozeBudgetAvailableMs,
+    }),
+    ...(snoozeBudgetCapMs !== undefined || snoozeRefillYieldMs !== DEFAULT_SNOOZE_REFILL_YIELD_MS
+      || snoozeRefillElapsedMs !== DEFAULT_SNOOZE_REFILL_ELAPSED_MS
+      ? { snoozeRefillYieldMs, snoozeRefillElapsedMs }
+      : {}),
+    outcomeCounts: { ...outcomeCounts },
+    ...(appliedGoalControl === undefined ? {} : { appliedGoalControl: { ...appliedGoalControl } }),
   });
   const publish = () => {
     try { pi.events?.emit?.(GOAL_STATE_EVENT, goalProjection(state)); } catch { /* optional UI publication is best-effort */ }
+    try { pi.events?.emit?.(GOAL_CONTROL_STATE_EVENT, goalControlState()); } catch { /* optional control publication is best-effort */ }
+  };
+  const recordOutcome = (outcome) => {
+    if (!OUTCOMES.has(outcome)) return;
+    outcomeCounts[outcome] += 1;
+    persist();
+    publish();
   };
   const scheduleSelfWake = (goal, ctx) => {
     if (typeof sessionId !== "string" || sessionId.length === 0) return;
@@ -548,6 +657,7 @@ export function createGoalExtension(pi, options = {}) {
     if (!preservePendingWakeup) cancelSnoozeWakeup();
     if (clearBudget) clearSnoozeBudget();
     persist();
+    publish();
   };
   const configureSnooze = (input, ctx) => {
     if (input === "off") {
@@ -558,6 +668,7 @@ export function createGoalExtension(pi, options = {}) {
     snoozeEnabled = true;
     snoozeDurationMs = snoozeDurationFromInput(input);
     persist();
+    publish();
     if (!wasEnabled && state.enabled && state.goal) scheduleSnoozeAvailability(ctx);
     return "Goal snooze enabled";
   };
@@ -565,16 +676,22 @@ export function createGoalExtension(pi, options = {}) {
     const limit = parseSnoozeTurnLimit(input);
     if (limit === undefined) return { ok: false, message: "Usage: /goal-snooze-turn-limit <1-20>" };
     snoozeTurnLimit = limit;
+    persist();
+    publish();
     return { ok: true, message: `Goal snooze turn limit set: ${limit}` };
   };
   const configureSnoozeBudget = (input) => {
     if (input === "off") {
       clearSnoozeBudget();
+      persist();
+      publish();
       return { ok: true, message: "Goal snooze budget off" };
     }
     const durationMs = parsePositiveDuration(input);
     if (durationMs === undefined) return { ok: false, message: "Usage: /goal-snooze-budget <duration> | /goal-snooze-budget off" };
     setSnoozeBudget(durationMs);
+    persist();
+    publish();
     return { ok: true, message: "Goal snooze budget set" };
   };
   const configureSnoozeRefill = (input) => {
@@ -585,12 +702,15 @@ export function createGoalExtension(pi, options = {}) {
       return { ok: false, message: "Usage: /goal-snooze-budget-refill <yield>/<elapsed>" };
     }
     setSnoozeRefill(yieldMs, elapsedMs);
+    persist();
+    publish();
     return { ok: true, message: "Goal snooze budget refill set" };
   };
   const configureGoalLock = (input) => {
     if (input !== "on" && input !== "off") return { ok: false, message: "Usage: /goal-lock on | /goal-lock off" };
     goalLockEnabled = input === "on";
     persist();
+    publish();
     return { ok: true, message: `Goal lock ${goalLockEnabled ? "on" : "off"}` };
   };
   const currentWakeupLimit = () => snoozeEnabled && snoozeTurnLimit !== undefined
@@ -599,14 +719,12 @@ export function createGoalExtension(pi, options = {}) {
   const statusDetails = (action) => ({
     action,
     ...state,
+    ...goalControlState(),
     evaluatorCalls,
     notDoneWakeups,
     blockedWakeups,
     waitingAuthWakeups,
     completedThings,
-    goalLockEnabled,
-    snoozeEnabled,
-    snoozeDurationMs,
     lastOwnerGateState,
   });
   const ownerActivityState = (ctx) => {
@@ -629,7 +747,7 @@ export function createGoalExtension(pi, options = {}) {
     }
     return lastOwnerGateState;
   };
-  const applyAction = (action, rawGoal, ctx, { programmatic = false } = {}) => {
+  const applyAction = (action, rawGoal, ctx, { programmatic = false, beforePersist } = {}) => {
     if (!GOAL_ACTIONS.has(action)) {
       return { ok: false, message: "Invalid action. Use set, status, or off." };
     }
@@ -648,9 +766,11 @@ export function createGoalExtension(pi, options = {}) {
       blockedWakeups = 0;
       waitingAuthWakeups = 0;
       completedThings = 0;
+      outcomeCounts = emptyOutcomeCounts();
       completedOffAllowance = false;
       lastOwnerGateState = "allowed";
       state = { enabled: true, goal };
+      beforePersist?.();
       persist();
       publish();
       scheduleSelfWake(goal, ctx);
@@ -669,9 +789,53 @@ export function createGoalExtension(pi, options = {}) {
     completedOffAllowance = false;
     state = { ...state, enabled: false };
     if (programmatic && goalLockEnabled) goalLockEnabled = false;
+    beforePersist?.();
     persist();
     publish();
     return { ok: true, message: "Goal off", details: { action, ...state } };
+  };
+  const applyGoalControl = (request, ctx) => {
+    const reject = (errorCode, message) => ({ accepted: false, errorCode, message });
+    if (!request || typeof request !== "object" || !isCurrentSession(undefined, ctx)) {
+      return reject("unavailable", "Goal is unavailable in this session.");
+    }
+    const { action, controlId, targetInstanceId, revision } = request;
+    if (!GOAL_CONTROL_ACTIONS.has(action) || typeof controlId !== "string" || controlId.length === 0
+      || typeof targetInstanceId !== "string" || targetInstanceId.length === 0
+      || !Number.isSafeInteger(revision) || revision < 1) {
+      return reject("invalid_control", "The goal control is invalid.");
+    }
+    if (appliedGoalControl?.instanceId === targetInstanceId) {
+      if (revision < appliedGoalControl.revision) return reject("stale_revision", "The goal control is stale.");
+      if (revision === appliedGoalControl.revision) {
+        return { accepted: true, revision, goalState: goalControlState() };
+      }
+    }
+    const settings = normalizeGoalControlSettings(request.settings);
+    if (!settings) return reject("invalid_settings", "The goal settings are invalid.");
+    if (action === "set" && !normalizeGoal(request.goal)) {
+      return reject("invalid_goal", "A goal description is required.");
+    }
+    const applySettings = () => {
+      const budgetChanged = snoozeBudgetCapMs !== settings.snoozeBudgetCapMs;
+      goalLockEnabled = settings.goalLockEnabled;
+      snoozeEnabled = settings.snoozeEnabled;
+      snoozeDurationMs = settings.snoozeDurationMs;
+      snoozeTurnLimit = settings.snoozeTurnLimit;
+      snoozeBudgetCapMs = settings.snoozeBudgetCapMs;
+      snoozeBudgetAvailableMs = snoozeBudgetCapMs === undefined
+        ? 0
+        : budgetChanged ? snoozeBudgetCapMs : Math.min(snoozeBudgetCapMs, Math.max(0, snoozeBudgetAvailableMs));
+      snoozeBudgetLastAtMs = snoozeBudgetCapMs === undefined ? undefined : clockNow();
+      snoozeRefillYieldMs = settings.snoozeRefillYieldMs;
+      snoozeRefillElapsedMs = settings.snoozeRefillElapsedMs;
+      appliedGoalControl = { instanceId: targetInstanceId, revision };
+    };
+    // A Web UI save is a user interaction. Goal lock still protects programmatic
+    // tool calls, but it cannot prevent the UI from changing the lock itself.
+    const result = applyAction(action, request.goal, ctx, { beforePersist: applySettings });
+    if (!result.ok) return reject("rejected", result.message);
+    return { accepted: true, revision, goalState: goalControlState() };
   };
   const scheduleInjection = (event, ctx, runGeneration, controller, message, beforeSend) => {
     if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx)) return;
@@ -727,6 +891,7 @@ export function createGoalExtension(pi, options = {}) {
           return;
         }
         const { outcome, rationale } = responseEvaluation(response);
+        recordOutcome(outcome);
         completedOffAllowance = outcome === "COMPLETED";
         if (outcome === "COMPLETED") {
           waitingAuthWakeups = 0;
@@ -737,6 +902,7 @@ export function createGoalExtension(pi, options = {}) {
             completedThings = 0;
           }
           persist();
+          publish();
         }
         if (outcome === "NOT_DONE" && notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
         if (outcome === "BLOCKED" && blockedWakeups >= MAX_BLOCKED_WAKEUPS) return;
@@ -779,7 +945,9 @@ export function createGoalExtension(pi, options = {}) {
           deferredEvaluationRequest = pending;
           return;
         }
-        if (runGeneration !== generation || controller.signal.aborted || notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
+        if (runGeneration !== generation || controller.signal.aborted) return;
+        recordOutcome("NOT_DONE");
+        if (notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
           content: goalResultContent(
@@ -811,6 +979,10 @@ export function createGoalExtension(pi, options = {}) {
   };
 
   pi.events?.on?.(GOAL_STATE_REQUEST_EVENT, () => publish());
+  pi.events?.on?.(GOAL_CONTROL_REQUEST_EVENT, (request) => {
+    const result = applyGoalControl(request, request?.context);
+    try { request?.respond?.(result); } catch { /* the router can time out a disconnected source */ }
+  });
 
   pi.on("session_start", async (event, ctx) => {
     if (sessionId === undefined) sessionId = event?.sessionId ?? ctx.sessionManager?.getSessionId?.();
@@ -828,8 +1000,14 @@ export function createGoalExtension(pi, options = {}) {
     completedOffAllowance = false;
     snoozeEnabled = restored.snoozeEnabled;
     snoozeDurationMs = restored.snoozeDurationMs;
-    snoozeTurnLimit = undefined;
-    clearSnoozeBudget();
+    snoozeTurnLimit = restored.snoozeTurnLimit;
+    snoozeBudgetCapMs = restored.snoozeBudgetCapMs;
+    snoozeBudgetAvailableMs = restored.snoozeBudgetAvailableMs;
+    snoozeBudgetLastAtMs = snoozeBudgetCapMs === undefined ? undefined : clockNow();
+    snoozeRefillYieldMs = restored.snoozeRefillYieldMs;
+    snoozeRefillElapsedMs = restored.snoozeRefillElapsedMs;
+    outcomeCounts = restored.outcomeCounts;
+    appliedGoalControl = restored.appliedGoalControl;
     publish();
     if (state.enabled && snoozeEnabled) scheduleSnoozeAvailability(ctx);
   });

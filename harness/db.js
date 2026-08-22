@@ -104,6 +104,10 @@ const migrations = Object.freeze([
     id: "018_subagent_lifecycle_status",
     sql: readFileSync(new URL("./migrations/018_subagent_lifecycle_status.sql", import.meta.url), "utf8"),
   },
+  {
+    id: "019_goal_control_desired_state",
+    sql: readFileSync(new URL("./migrations/019_goal_control_desired_state.sql", import.meta.url), "utf8"),
+  },
 ]);
 
 export class IdempotencyConflictError extends Error {
@@ -175,6 +179,55 @@ export class ReminderValidationError extends Error {
     super(message);
     this.name = "ReminderValidationError";
     this.code = "invalid_reminder";
+  }
+}
+
+const MAX_GOAL_CONTROL_DESIRED_CONFIG_BYTES = 16_384;
+
+function assertGoalControlDesiredIdentity(agentId, instanceId) {
+  if (typeof agentId !== "string" || agentId.length === 0 || agentId.length > 128
+    || typeof instanceId !== "string" || instanceId.length === 0 || instanceId.length > 128) {
+    throw new TypeError("goal control desired state needs an agent and instance identity");
+  }
+}
+
+function assertGoalControlDesiredTimestamp(value, label) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new TypeError(`${label} must be an ISO timestamp`);
+  }
+}
+
+function serializeGoalControlDesiredConfig(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("goal control desired config must be an object");
+  }
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new TypeError("goal control desired config must be serializable");
+  }
+  if (typeof serialized !== "string" || Buffer.byteLength(serialized, "utf8") > MAX_GOAL_CONTROL_DESIRED_CONFIG_BYTES) {
+    throw new TypeError("goal control desired config is too large");
+  }
+  return serialized;
+}
+
+function goalControlDesiredFromRow(row) {
+  if (row === undefined) return undefined;
+  try {
+    const config = JSON.parse(row.config_json);
+    if (!config || typeof config !== "object" || Array.isArray(config)) return undefined;
+    return {
+      agent_id: row.agent_id,
+      instance_id: row.instance_id,
+      revision: row.revision,
+      config,
+      updated_at: row.updated_at,
+      expires_at: row.expires_at,
+    };
+  } catch {
+    return undefined;
   }
 }
 
@@ -825,6 +878,83 @@ class MessageRepository {
       }
       return false;
     });
+  }
+
+  goalControlDesiredFor({ agentId, instanceId }) {
+    assertGoalControlDesiredIdentity(agentId, instanceId);
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const row = this.#database.prepare(`
+        SELECT agent_id, instance_id, revision, config_json, updated_at, expires_at
+        FROM goal_control_desired_state
+        WHERE agent_id = ? AND instance_id = ?
+      `).get(agentId, instanceId);
+      if (row === undefined) return undefined;
+      if (row.expires_at <= now) {
+        this.#database.prepare(`
+          DELETE FROM goal_control_desired_state
+          WHERE agent_id = ? AND instance_id = ? AND expires_at <= ?
+        `).run(agentId, instanceId, now);
+        return undefined;
+      }
+      return goalControlDesiredFromRow(row);
+    });
+  }
+
+  upsertGoalControlDesired({ agentId, instanceId, config, expiresAt }) {
+    assertGoalControlDesiredIdentity(agentId, instanceId);
+    const configJson = serializeGoalControlDesiredConfig(config);
+    assertGoalControlDesiredTimestamp(expiresAt, "expiresAt");
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const existing = this.#database.prepare(`
+        SELECT revision FROM goal_control_desired_state
+        WHERE agent_id = ? AND instance_id = ?
+      `).get(agentId, instanceId);
+      const revision = (existing?.revision ?? 0) + 1;
+      this.#database.prepare(`
+        INSERT INTO goal_control_desired_state (
+          agent_id, instance_id, revision, config_json, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (agent_id, instance_id) DO UPDATE SET
+          revision = excluded.revision,
+          config_json = excluded.config_json,
+          updated_at = excluded.updated_at,
+          expires_at = excluded.expires_at
+      `).run(agentId, instanceId, revision, configJson, now, expiresAt);
+      return goalControlDesiredFromRow(this.#database.prepare(`
+        SELECT agent_id, instance_id, revision, config_json, updated_at, expires_at
+        FROM goal_control_desired_state
+        WHERE agent_id = ? AND instance_id = ?
+      `).get(agentId, instanceId));
+    });
+  }
+
+  deleteGoalControlDesired({ agentId, instanceId }) {
+    assertGoalControlDesiredIdentity(agentId, instanceId);
+    return immediateTransaction(this.#database, this.#databasePath, () => (
+      this.#database.prepare(`
+        DELETE FROM goal_control_desired_state
+        WHERE agent_id = ? AND instance_id = ?
+      `).run(agentId, instanceId).changes
+    ));
+  }
+
+  deleteGoalControlDesiredExcept({ agentId, instanceId }) {
+    assertGoalControlDesiredIdentity(agentId, instanceId);
+    return immediateTransaction(this.#database, this.#databasePath, () => (
+      this.#database.prepare(`
+        DELETE FROM goal_control_desired_state
+        WHERE agent_id = ? AND instance_id != ?
+      `).run(agentId, instanceId).changes
+    ));
+  }
+
+  pruneGoalControlDesired() {
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => (
+      this.#database.prepare(`DELETE FROM goal_control_desired_state WHERE expires_at <= ?`).run(now).changes
+    ));
   }
 
   recoverStaleLeases() {

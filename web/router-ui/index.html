@@ -51,6 +51,7 @@
           <h2 id="peer-name">Pick an agent</h2>
           <p id="peer-detail">Connected agents appear on the left.</p>
         </div>
+        <button id="goal-header-button" class="goal-header-button" type="button" aria-haspopup="dialog" aria-controls="goal-dialog">Set goal</button>
         <div id="model-controls" class="model-controls" hidden>
           <span class="model-label">Model</span>
           <div id="model-picker" class="model-picker">
@@ -147,16 +148,17 @@
     </form>
   </dialog>
 
-  <dialog id="goal-dialog" class="message-dialog" aria-labelledby="goal-dialog-title">
+  <dialog id="goal-dialog" class="message-dialog goal-editor-dialog" aria-labelledby="goal-dialog-title">
     <form method="dialog" class="dialog-shell">
       <header>
         <div>
-          <h2 id="goal-dialog-title">Goal</h2>
-          <p>Current goal for this agent.</p>
+          <h2 id="goal-dialog-title">Edit goal</h2>
+          <p id="goal-dialog-help">Set what this agent should work toward.</p>
         </div>
-        <button value="cancel" aria-label="Close goal"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+        <button value="cancel" aria-label="Close goal editor"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
       </header>
       <div id="goal-dialog-body" class="goal-dialog-body" tabindex="0"></div>
+      <div id="goal-dialog-footer" class="goal-dialog-footer"></div>
     </form>
   </dialog>
   <script src="/vendor/markdown-it.js"></script>

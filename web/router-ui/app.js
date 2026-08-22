@@ -61,6 +61,7 @@ const state = {
   messages: {},
   historyRequests: new Map(),
   pendingModelControls: new Map(),
+  pendingGoalControls: new Map(),
   deferredModelCatalogs: new Map(),
   modelControlUpdatedAtMs: new Map(),
   draftPeers: new Set(),
@@ -77,6 +78,7 @@ const state = {
   reminderDialogTimer: null,
   goalDialogPeer: "",
   goalDialogReturnFocus: null,
+  goalDraft: null,
 };
 let modelPickerPeer = "";
 let modelPickerSearchText = "";
@@ -122,6 +124,8 @@ const elements = {
   goalDialog: document.querySelector("#goal-dialog"),
   goalDialogTitle: document.querySelector("#goal-dialog-title"),
   goalDialogBody: document.querySelector("#goal-dialog-body"),
+  goalDialogFooter: document.querySelector("#goal-dialog-footer"),
+  goalHeaderButton: document.querySelector("#goal-header-button"),
   modelControls: document.querySelector("#model-controls"),
   modelPicker: document.querySelector("#model-picker"),
   modelCurrent: document.querySelector("#model-current"),
@@ -162,6 +166,9 @@ elements.cancelRouterEdit.addEventListener("click", closeRouterEditor);
 elements.addRouter.addEventListener("click", () => {
   void saveRouterEditor();
 });
+elements.goalHeaderButton.addEventListener("click", () => {
+  if (state.selectedPeer) openGoalEditor(state.selectedPeer, elements.goalHeaderButton);
+});
 elements.refresh.addEventListener("click", () => sendCommand({ type: "refresh_agents" }));
 elements.modelCurrent.addEventListener("click", () => {
   setModelPickerOpen(!modelPickerOpen, { focus: !modelPickerOpen });
@@ -197,6 +204,7 @@ elements.goalDialog.addEventListener("close", () => {
   const returnFocus = state.goalDialogReturnFocus;
   state.goalDialogPeer = "";
   state.goalDialogReturnFocus = null;
+  state.goalDraft = null;
   if (returnFocus?.isConnected) returnFocus.focus();
   else [...document.querySelectorAll(".agent-row")].find((row) => row.dataset.agentId === peer)?.querySelector(".goal-indicator")?.focus();
 });
@@ -233,6 +241,7 @@ function connectUiSocket() {
   socket.addEventListener("close", () => {
     if (state.socket !== socket) return;
     clearPendingModelControls();
+    clearPendingGoalControls();
     setStatus("reconnecting", "UI server connection closed; retrying…");
     setTimeout(connectUiSocket, 1000);
   });
@@ -265,7 +274,7 @@ async function handleEvent(event) {
     if (Number.isSafeInteger(event.activitySnapshotVersion)) state.lastLifecycleSnapshotVersion = Math.max(state.lastLifecycleSnapshotVersion, event.activitySnapshotVersion);
     renderAgents();
     renderConversation();
-    if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
+    if (elements.goalDialog?.open && state.goalDialogPeer && state.goalDraft === null) renderGoalDialog(state.goalDialogPeer);
     return;
   }
   if (event.type === "subagent_state_snapshot") {
@@ -280,6 +289,14 @@ async function handleEvent(event) {
     for (const agent of event.updates || []) applyLifecycleUpdateEvent(agent, event.routerVersion, { render: false });
     renderAgents();
     renderConversation();
+    return;
+  }
+  if (event.type === "agent_goal_state") {
+    updateAgentGoalState(event.agent, event.instanceId, event.goalState);
+    return;
+  }
+  if (event.type === "goal_control_result") {
+    handleGoalControlResult(event);
     return;
   }
   if (event.type === "agent_activity") {
@@ -422,6 +439,7 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   closeReminderDialog();
   closeGoalDialog();
   clearPendingModelControls({ render: false });
+  clearPendingGoalControls();
   saveCurrentDraft();
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
@@ -607,7 +625,7 @@ function renderAgents() {
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
     const arrival = state.arrivalsByAgent.get(peer);
     const reminders = state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
-    const goal = normalizeGoalProjection(agent.goal);
+    const goal = normalizeGoalState(agent) ?? normalizeGoalProjection(agent.goal);
     const row = document.createElement("div");
     row.tabIndex = 0;
     row.setAttribute("role", "button");
@@ -673,14 +691,57 @@ function updateAgentActivity(peer, activityState, subagentCount = 0, subagents =
   if (base.activity_state === activityState && (base.subagent_count ?? 0) === normalizedCount && sameSubagents(base.subagents, summaries) && JSON.stringify(base.goal) === JSON.stringify(nextGoal)
     && JSON.stringify(base.current_model) === JSON.stringify(nextModel) && JSON.stringify(base.available_models) === JSON.stringify(nextModels) && base.instance_id === instanceId) return;
   const next = hasDurableLifecycle
-    ? { ...base, activity_state: activityState, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }), ...(nextModel === undefined ? {} : { current_model: nextModel }), available_models: nextModels }
-    : { ...base, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }), ...(nextModel === undefined ? {} : { current_model: nextModel }), available_models: nextModels };
+    ? { ...base, activity_state: activityState, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }), ...(nextGoal === undefined ? {} : { goal_state: mergeGoalProjection(base.goal_state, nextGoal) }), ...(nextModel === undefined ? {} : { current_model: nextModel }), available_models: nextModels }
+    : { ...base, activity_state: activityState, subagent_count: normalizedCount, subagents: summaries, ...(instanceId === undefined ? {} : { instance_id: instanceId }), ...(nextGoal === undefined ? {} : { goal: nextGoal }), ...(nextGoal === undefined ? {} : { goal_state: mergeGoalProjection(base.goal_state, nextGoal) }), ...(nextModel === undefined ? {} : { current_model: nextModel }), available_models: nextModels };
   state.agents = state.agents.some((agent) => agent.agent_id === peer)
     ? state.agents.map((agent) => agent.agent_id === peer ? next : agent)
     : [...state.agents, next];
   renderAgents();
   renderConversation();
-  if (elements.goalDialog?.open && state.goalDialogPeer) renderGoalDialog(state.goalDialogPeer);
+  if (elements.goalDialog?.open && state.goalDialogPeer && state.goalDraft === null) renderGoalDialog(state.goalDialogPeer);
+}
+
+function updateAgentGoalState(peer, instanceId, incoming) {
+  if (!peer || peer === state.agentId) return;
+  const normalized = normalizeGoalStateValue(incoming);
+  if (!normalized) return;
+  const current = state.agents.find((agent) => agent.agent_id === peer);
+  if (current?.instance_id !== undefined && instanceId !== undefined && current.instance_id !== instanceId) {
+    state.agents = state.agents.map((agent) => agent.agent_id === peer
+      ? { ...agent, instance_id: instanceId, goal_state: normalized, goal: normalizeGoalProjection(normalized) }
+      : agent);
+  } else {
+    const next = { ...(current ?? { agent_id: peer, activity_state: "idle" }), ...(instanceId === undefined ? {} : { instance_id: instanceId }), goal_state: normalized, goal: normalizeGoalProjection(normalized) };
+    state.agents = current ? state.agents.map((agent) => agent.agent_id === peer ? next : agent) : [...state.agents, next];
+  }
+  renderAgents();
+  renderConversation();
+  if (elements.goalDialog?.open && state.goalDialogPeer === peer && state.goalDraft === null) renderGoalDialog(peer);
+}
+
+function handleGoalControlResult(event) {
+  const pending = state.pendingGoalControls.get(event.controlId);
+  if (!pending || pending.peer !== event.targetAgentId || pending.instanceId !== event.targetInstanceId) return;
+  state.pendingGoalControls.delete(event.controlId);
+  if (event.accepted === true && event.goalState) updateAgentGoalState(event.targetAgentId, event.targetInstanceId, event.goalState);
+  const message = event.accepted === true ? "Goal saved." : goalControlErrorMessage(event.errorCode, event.message);
+  if (event.accepted === true) closeGoalDialog();
+  else setGoalDialogStatus(message, true);
+}
+
+function goalControlErrorMessage(code, message) {
+  if (message) return String(message);
+  const labels = {
+    target_instance_changed: "That agent restarted. Close this editor and try again.",
+    target_not_connected: "That agent is no longer connected.",
+    goal_control_unavailable: "Goal controls are not available on this router.",
+    invalid_settings: "Check the goal settings and try again.",
+    invalid_goal: "Enter a goal before saving.",
+    control_timeout: "The goal change timed out.",
+    router_disconnected: "The router connection closed before the change was confirmed.",
+    router_reconnecting: "The router is reconnecting.",
+  };
+  return labels[code] || "The goal change was not saved.";
 }
 
 function updateAgentModelCatalog(peer, instanceId, projection, { render = true, replaceInstance = true } = {}) {
@@ -786,10 +847,18 @@ function renderConversation() {
   elements.peerAvatar.textContent = peer ? monogram(peer) : "?";
   elements.peerAvatar.className = `avatar${peer ? "" : " muted"}`;
   const selectedAgent = state.agents.find((agent) => agent.agent_id === peer);
+  const hasGoal = (normalizeGoalState(selectedAgent) ?? normalizeGoalProjection(selectedAgent?.goal))?.enabled === true;
+  elements.goalHeaderButton.disabled = !peer;
+  elements.goalHeaderButton.classList.toggle("has-goal", hasGoal);
+  elements.goalHeaderButton.innerHTML = '<i class="fa-solid fa-flag" aria-hidden="true"></i>';
+  const goalLabel = hasGoal ? `Edit goal for ${humanName(peer)}` : `Set goal for ${humanName(peer)}`;
+  elements.goalHeaderButton.setAttribute("aria-label", peer ? goalLabel : "Select an agent to set a goal");
+  elements.goalHeaderButton.title = peer ? goalLabel : "Select an agent to set a goal";
   renderModelControls(selectedAgent);
   const active = selectedAgent?.activity_state === "active";
   const compacting = selectedAgent?.activity_state === "compacting";
   elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}${compacting ? compactingBadgeMarkup("inline") : ""}` : "Pick an agent";
+  elements.peerName.append(elements.goalHeaderButton);
   const subagents = normalizeSubagents(selectedAgent?.subagents);
   const subagentCount = Math.max(subagents.length, Number.isSafeInteger(selectedAgent?.subagent_count) ? selectedAgent.subagent_count : 0);
   const expanded = subagents.length > 0 && state.expandedSubagents.has(peer);
@@ -1362,8 +1431,15 @@ function mergeAgentSnapshot(agent, snapshotGeneratedAt) {
     state.modelControlUpdatedAtMs.delete(agent.agent_id);
   }
   const projectedAgent = { ...agent, ...modelFields };
-  const normalizedGoal = normalizeGoalProjection(agent.goal);
-  const goalFields = normalizedGoal === undefined ? {} : { goal: normalizedGoal };
+  const incomingGoalState = normalizeGoalStateValue(agent.goal_state);
+  const currentGoalState = normalizeGoalStateValue(current?.goal_state);
+  const sameGoalInstance = current === undefined || agent.instance_id === undefined || current.instance_id === undefined || agent.instance_id === current.instance_id;
+  const goalState = incomingGoalState ?? (sameGoalInstance ? currentGoalState : undefined);
+  const normalizedGoal = goalState ? normalizeGoalProjection(goalState) : normalizeGoalProjection(agent.goal);
+  const goalFields = {
+    ...(normalizedGoal ? { goal: normalizedGoal } : {}),
+    ...(goalState ? { goal_state: goalState } : {}),
+  };
   if (Number.isSafeInteger(current?.subagent_version)
     && (!Number.isSafeInteger(agent.subagent_version)
       || agent.subagent_version < current.subagent_version
@@ -1384,13 +1460,61 @@ function compactingBadgeMarkup(extraClass = "") {
   return `<span class="compacting-indicator${extraClass ? ` ${extraClass}` : ""}" aria-label="Agent is compacting"><span class="compacting-dot"></span><span>Compacting</span></span>`;
 }
 
+const DEFAULT_GOAL_STATE = {
+  enabled: false,
+  goal: "",
+  goal_lock_enabled: false,
+  snooze_enabled: true,
+  snooze_duration_ms: 60_000,
+  snooze_turn_limit: null,
+  snooze_budget_cap_ms: null,
+  snooze_refill_yield_ms: 30_000,
+  snooze_refill_elapsed_ms: 60_000,
+  outcome_counts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+};
+
 function normalizeGoalProjection(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)
     || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
     || value.goal.length > 4000) return undefined;
-  if (!value.enabled && value.goal !== "") return undefined;
   if (value.enabled && value.goal.length === 0) return undefined;
   return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
+}
+
+function normalizeGoalStateValue(value) {
+  const projection = normalizeGoalProjection(value);
+  if (!projection || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
+    || !positiveGoalInteger(value.snooze_duration_ms) || !positiveGoalInteger(value.snooze_refill_yield_ms)
+    || !positiveGoalInteger(value.snooze_refill_elapsed_ms)
+    || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
+    || !(value.snooze_budget_cap_ms === null || positiveGoalInteger(value.snooze_budget_cap_ms))) return undefined;
+  const counts = value.outcome_counts;
+  if (!counts || typeof counts !== "object" || !["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"].every((key) => Number.isSafeInteger(counts[key]) && counts[key] >= 0)) return undefined;
+  return {
+    ...projection,
+    goal_lock_enabled: value.goal_lock_enabled,
+    snooze_enabled: value.snooze_enabled,
+    snooze_duration_ms: value.snooze_duration_ms,
+    snooze_turn_limit: value.snooze_turn_limit,
+    snooze_budget_cap_ms: value.snooze_budget_cap_ms,
+    snooze_refill_yield_ms: value.snooze_refill_yield_ms,
+    snooze_refill_elapsed_ms: value.snooze_refill_elapsed_ms,
+    outcome_counts: { ...DEFAULT_GOAL_STATE.outcome_counts, ...counts },
+  };
+}
+
+function normalizeGoalState(agent) {
+  return normalizeGoalStateValue(agent?.goal_state);
+}
+
+function mergeGoalProjection(current, projection) {
+  if (!projection) return current;
+  const full = normalizeGoalStateValue(current);
+  return full ? { ...full, ...projection } : { ...DEFAULT_GOAL_STATE, ...projection, outcome_counts: { ...DEFAULT_GOAL_STATE.outcome_counts } };
+}
+
+function positiveGoalInteger(value) {
+  return Number.isSafeInteger(value) && value > 0;
 }
 
 function modelKey(model) {
@@ -1443,6 +1567,10 @@ function clearPendingModelControls({ render = true } = {}) {
   state.deferredModelCatalogs.clear();
   modelPickerSelection = undefined;
   if (render) renderModelControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
+}
+
+function clearPendingGoalControls() {
+  state.pendingGoalControls.clear();
 }
 
 function renderModelOptions(models) {
@@ -1520,16 +1648,13 @@ function reminderIndicatorMarkup(reminders, peerName) {
 }
 
 function attachGoalActions(root, goal) {
-  if (!goal?.enabled) return;
+  if (!goal) return;
   const indicator = root.querySelector(".goal-indicator");
   if (!indicator) return;
   const openGoal = (event) => {
     event.stopPropagation();
     event.preventDefault();
-    state.goalDialogPeer = root.dataset.agentId;
-    state.goalDialogReturnFocus = indicator;
-    renderGoalDialog(state.goalDialogPeer);
-    elements.goalDialog.showModal();
+    openGoalEditor(root.dataset.agentId, indicator);
   };
   indicator.addEventListener("click", openGoal);
   indicator.addEventListener("keydown", (event) => {
@@ -1537,23 +1662,195 @@ function attachGoalActions(root, goal) {
   });
 }
 
+function openGoalEditor(peer, returnFocus) {
+  const agent = state.agents.find((candidate) => candidate.agent_id === peer);
+  const source = normalizeGoalState(agent) ?? {
+    ...DEFAULT_GOAL_STATE,
+    ...(normalizeGoalProjection(agent?.goal) ?? {}),
+  };
+  state.goalDialogPeer = peer;
+  state.goalDialogReturnFocus = returnFocus;
+  state.goalDraft = goalDraftFromState(source);
+  renderGoalDialog(peer);
+  elements.goalDialog.showModal();
+  requestAnimationFrame(() => elements.goalDialogBody.querySelector("textarea, input")?.focus());
+}
+
 function closeGoalDialog() {
-  state.goalDialogPeer = "";
   if (elements.goalDialog?.open) elements.goalDialog.close();
+  else {
+    state.goalDialogPeer = "";
+    state.goalDraft = null;
+  }
+}
+
+function goalDraftFromState(stateValue) {
+  return {
+    enabled: stateValue.enabled === true,
+    goal: stateValue.goal || "",
+    goal_lock_enabled: stateValue.goal_lock_enabled === true,
+    snooze_enabled: stateValue.snooze_enabled !== false,
+    snooze_duration_ms: stateValue.snooze_duration_ms || DEFAULT_GOAL_STATE.snooze_duration_ms,
+    snooze_turn_limit: stateValue.snooze_turn_limit ?? null,
+    snooze_budget_cap_ms: stateValue.snooze_budget_cap_ms ?? null,
+    snooze_refill_yield_ms: stateValue.snooze_refill_yield_ms || DEFAULT_GOAL_STATE.snooze_refill_yield_ms,
+    snooze_refill_elapsed_ms: stateValue.snooze_refill_elapsed_ms || DEFAULT_GOAL_STATE.snooze_refill_elapsed_ms,
+    outcome_counts: { ...DEFAULT_GOAL_STATE.outcome_counts, ...(stateValue.outcome_counts || {}) },
+  };
 }
 
 function renderGoalDialog(peer) {
-  const agent = state.agents.find((candidate) => candidate.agent_id === peer);
-  const goal = normalizeGoalProjection(agent?.goal);
-  elements.goalDialogTitle.textContent = goal?.enabled ? `Goal for ${humanName(peer)}` : "Goal";
+  const draft = state.goalDraft;
+  if (!draft || state.goalDialogPeer !== peer) return;
+  elements.goalDialogTitle.textContent = `Goal for ${humanName(peer)}`;
   elements.goalDialogBody.replaceChildren();
-  if (!goal?.enabled) return;
-  const label = document.createElement("p");
-  label.textContent = "Current goal";
-  const text = document.createElement("p");
-  text.className = "goal-dialog-text";
-  text.textContent = goal.goal;
-  elements.goalDialogBody.append(label, text);
+  elements.goalDialogFooter.replaceChildren();
+  const form = document.createElement("div");
+  form.className = "goal-editor-form";
+  form.addEventListener("input", (event) => updateGoalDraftFromInput(event.target));
+  form.append(goalCheckbox("goal-enabled", "Goal on", draft.enabled));
+  const goalLabel = document.createElement("label");
+  goalLabel.textContent = "What should this agent work toward?";
+  const goalText = document.createElement("textarea");
+  goalText.id = "goal-text";
+  goalText.maxLength = 4000;
+  goalText.rows = 10;
+  goalText.placeholder = "Describe the goal in Markdown";
+  goalText.value = draft.goal;
+  goalText.disabled = !draft.enabled;
+  goalLabel.append(goalText);
+  form.append(goalLabel);
+  form.append(goalCheckbox("goal-lock", "Keep this goal locked", draft.goal_lock_enabled));
+  const snoozeFieldset = document.createElement("fieldset");
+  const snoozeLegend = document.createElement("legend");
+  snoozeLegend.textContent = "Snooze settings";
+  snoozeFieldset.append(snoozeLegend, goalCheckbox("snooze-enabled", "Allow snoozing", draft.snooze_enabled));
+  snoozeFieldset.append(numberField("snooze-duration", "Snooze duration (seconds)", draft.snooze_duration_ms / 1000, 1));
+  snoozeFieldset.append(numberField("snooze-turn-limit", "Snooze turn limit (optional)", draft.snooze_turn_limit ?? "", 1, 20));
+  snoozeFieldset.append(numberField("snooze-budget", "Snooze budget (minutes, optional)", draft.snooze_budget_cap_ms === null ? "" : draft.snooze_budget_cap_ms / 60_000, 1));
+  snoozeFieldset.append(numberField("snooze-yield", "Snooze refill yield (seconds)", draft.snooze_refill_yield_ms / 1000, 1));
+  snoozeFieldset.append(numberField("snooze-elapsed", "Snooze refill time (seconds)", draft.snooze_refill_elapsed_ms / 1000, 1));
+  form.append(snoozeFieldset);
+  const counts = document.createElement("p");
+  counts.className = "goal-outcome-counts";
+  counts.textContent = goalOutcomeCountsLabel(draft.outcome_counts);
+  form.append(counts);
+  const status = document.createElement("p");
+  status.id = "goal-editor-status";
+  status.className = "goal-editor-status";
+  const actions = document.createElement("div");
+  actions.className = "goal-editor-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "secondary";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", closeGoalDialog);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.textContent = "Save";
+  save.addEventListener("click", () => sendGoalControl());
+  actions.append(cancel, save);
+  elements.goalDialogBody.append(form);
+  elements.goalDialogFooter.append(status, actions);
+}
+
+function goalCheckbox(id, labelText, checked) {
+  const label = document.createElement("label");
+  label.className = "goal-checkbox";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.id = id;
+  input.checked = checked;
+  label.append(input, document.createTextNode(labelText));
+  return label;
+}
+
+function numberField(id, labelText, value, min, max) {
+  const label = document.createElement("label");
+  label.className = "goal-number-field";
+  label.textContent = labelText;
+  const input = document.createElement("input");
+  input.type = "number";
+  input.id = id;
+  input.min = String(min);
+  if (max !== undefined) input.max = String(max);
+  input.step = "1";
+  input.value = value === "" ? "" : String(value);
+  label.append(input);
+  return label;
+}
+
+function updateGoalDraftFromInput(input) {
+  if (!state.goalDraft || !input?.id) return;
+  const number = (fallback = null) => {
+    if (input.value === "") return fallback;
+    const value = Number(input.value);
+    return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+  };
+  if (input.id === "goal-enabled") state.goalDraft.enabled = input.checked;
+  if (input.id === "goal-text") state.goalDraft.goal = input.value;
+  if (input.id === "goal-lock") state.goalDraft.goal_lock_enabled = input.checked;
+  if (input.id === "snooze-enabled") state.goalDraft.snooze_enabled = input.checked;
+  if (input.id === "snooze-duration") state.goalDraft.snooze_duration_ms = (number(60) || 60) * 1000;
+  if (input.id === "snooze-turn-limit") state.goalDraft.snooze_turn_limit = number(null);
+  if (input.id === "snooze-budget") state.goalDraft.snooze_budget_cap_ms = input.value === "" ? null : (number(null) || 1) * 60_000;
+  if (input.id === "snooze-yield") state.goalDraft.snooze_refill_yield_ms = (number(30) || 30) * 1000;
+  if (input.id === "snooze-elapsed") state.goalDraft.snooze_refill_elapsed_ms = (number(60) || 60) * 1000;
+  if (input.id === "goal-enabled") {
+    const text = elements.goalDialogBody.querySelector("#goal-text");
+    if (text) text.disabled = !input.checked;
+  }
+}
+
+function goalOutcomeCountsLabel(counts) {
+  return `Outcomes: blocked ${counts.BLOCKED || 0}, completed ${counts.COMPLETED || 0}, not done ${counts.NOT_DONE || 0}, waiting ${counts.WAITING_FOR_USER_AUTHORIZATION || 0}`;
+}
+
+function setGoalDialogStatus(message, error = false) {
+  const status = elements.goalDialogFooter.querySelector("#goal-editor-status");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("error", error);
+}
+
+function sendGoalControl() {
+  const peer = state.goalDialogPeer;
+  const draft = state.goalDraft;
+  const action = draft?.enabled ? "set" : "off";
+  const agent = state.agents.find((candidate) => candidate.agent_id === peer);
+  const targetInstanceId = agent?.instance_id;
+  if (!peer || !draft || !targetInstanceId) {
+    setGoalDialogStatus("The agent is not ready for goal changes.", true);
+    return;
+  }
+  if (action === "set" && draft.goal.trim() === "") {
+    setGoalDialogStatus("Turn on the goal and enter a description before saving.", true);
+    return;
+  }
+  const controlId = `goal-control-${crypto.randomUUID()}`;
+  state.pendingGoalControls.set(controlId, { peer, instanceId: targetInstanceId });
+  if (!sendCommand({
+    type: "goal_control",
+    controlId,
+    targetAgentId: peer,
+    targetInstanceId,
+    action,
+    goal: action === "off" ? "" : draft.goal,
+    settings: {
+      goal_lock_enabled: draft.goal_lock_enabled,
+      snooze_enabled: draft.snooze_enabled,
+      snooze_duration_ms: draft.snooze_duration_ms,
+      snooze_turn_limit: draft.snooze_turn_limit,
+      snooze_budget_cap_ms: draft.snooze_budget_cap_ms,
+      snooze_refill_yield_ms: draft.snooze_refill_yield_ms,
+      snooze_refill_elapsed_ms: draft.snooze_refill_elapsed_ms,
+    },
+  })) {
+    state.pendingGoalControls.delete(controlId);
+    setGoalDialogStatus("The router is not connected.", true);
+    return;
+  }
+  setGoalDialogStatus("Saving…");
 }
 
 function attachReminderActions(root, reminders) {

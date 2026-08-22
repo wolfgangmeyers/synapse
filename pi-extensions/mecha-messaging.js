@@ -9,6 +9,12 @@ import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
 import { runRecallEvaluator as evaluateRecall, validateRecallChoice as validateChoice } from "./recall-evaluator.js";
 import { createMemoryCaptureLifecycle } from "./memory-capture.js";
 import { registerOperationalTools } from "./operational-tools.js";
+import {
+  GOAL_CONTROL_REQUEST_EVENT,
+  GOAL_CONTROL_STATE_EVENT,
+  GOAL_STATE_EVENT,
+  GOAL_STATE_REQUEST_EVENT,
+} from "./goal.js";
 export { createRecallState } from "./recall-state.js";
 export { createRecallController } from "./recall-controller.js";
 export { createRecallPipeline } from "./recall-pipeline.js";
@@ -30,9 +36,9 @@ const NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS = 60_000;
 const MAILBOX_SEND_RATE_LIMIT_COUNT = 6;
 const MAILBOX_SEND_RATE_LIMIT_WINDOW_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
-const GOAL_STATE_EVENT = "goal:state";
-const GOAL_STATE_REQUEST_EVENT = "goal:state-request";
 const MAX_GOAL_CHARS = 4_000;
+const GOAL_CONTROL_RESPONSE_TIMEOUT_MS = 1_000;
+const GOAL_OUTCOME_KEYS = ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"];
 
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 
@@ -43,6 +49,60 @@ function normalizeGoalProjection(value) {
   if (!value.enabled && value.goal !== "") return undefined;
   if (value.enabled && value.goal.length === 0) return undefined;
   return { enabled: value.enabled, goal: value.enabled ? value.goal : "" };
+}
+
+function defaultGoalControlState() {
+  return {
+    enabled: false,
+    goal: "",
+    goalLockEnabled: false,
+    snoozeEnabled: true,
+    snoozeDurationMs: 60_000,
+    snoozeTurnLimit: null,
+    snoozeBudgetCapMs: null,
+    snoozeRefillYieldMs: 30_000,
+    snoozeRefillElapsedMs: 60_000,
+    outcomeCounts: Object.fromEntries(GOAL_OUTCOME_KEYS.map((key) => [key, 0])),
+  };
+}
+
+function normalizeGoalControlState(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const projection = normalizeGoalProjection(value);
+  if (projection === undefined
+    || typeof value.goalLockEnabled !== "boolean"
+    || typeof value.snoozeEnabled !== "boolean"
+    || !Number.isSafeInteger(value.snoozeDurationMs) || value.snoozeDurationMs <= 0
+    || (value.snoozeTurnLimit !== null && (!Number.isSafeInteger(value.snoozeTurnLimit) || value.snoozeTurnLimit < 1))
+    || (value.snoozeBudgetCapMs !== null && (!Number.isSafeInteger(value.snoozeBudgetCapMs) || value.snoozeBudgetCapMs < 1))
+    || !Number.isSafeInteger(value.snoozeRefillYieldMs) || value.snoozeRefillYieldMs <= 0
+    || !Number.isSafeInteger(value.snoozeRefillElapsedMs) || value.snoozeRefillElapsedMs <= 0
+    || value.outcomeCounts === null || typeof value.outcomeCounts !== "object" || Array.isArray(value.outcomeCounts)) {
+    return undefined;
+  }
+  const outcomeCounts = {};
+  for (const key of GOAL_OUTCOME_KEYS) {
+    if (!Number.isSafeInteger(value.outcomeCounts[key]) || value.outcomeCounts[key] < 0) return undefined;
+    outcomeCounts[key] = value.outcomeCounts[key];
+  }
+  return {
+    ...projection,
+    goalLockEnabled: value.goalLockEnabled,
+    snoozeEnabled: value.snoozeEnabled,
+    snoozeDurationMs: value.snoozeDurationMs,
+    snoozeTurnLimit: value.snoozeTurnLimit,
+    snoozeBudgetCapMs: value.snoozeBudgetCapMs,
+    snoozeRefillYieldMs: value.snoozeRefillYieldMs,
+    snoozeRefillElapsedMs: value.snoozeRefillElapsedMs,
+    outcomeCounts,
+  };
+}
+
+function cloneGoalControlState(state) {
+  return {
+    ...state,
+    outcomeCounts: { ...state.outcomeCounts },
+  };
 }
 
 function boundedModelString(value, maximum) {
@@ -1247,6 +1307,7 @@ export function createMechaMessagingExtension(pi, {
   createClient = createMailboxClient,
   createSettledScheduler = createSettledNotificationScheduler,
   setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
   nowImpl = Date.now,
@@ -1267,13 +1328,99 @@ export function createMechaMessagingExtension(pi, {
   let coordinator;
   let goalProjection;
   let goalProjectionReceived = false;
+  let goalControlState = defaultGoalControlState();
   const receiveGoalProjection = (value) => {
     const normalized = normalizeGoalProjection(value);
     if (normalized === undefined) return;
     goalProjection = normalized;
     goalProjectionReceived = true;
   };
+  const receiveGoalControlState = (value) => {
+    const normalized = normalizeGoalControlState(value);
+    if (normalized === undefined) return;
+    goalControlState = normalized;
+    publishGoalState();
+  };
+  const publishGoalState = (mailboxClient = client) => {
+    if (mailboxClient === undefined || typeof mailboxClient.sendGoalState !== "function") return false;
+    try {
+      mailboxClient.sendGoalState(cloneGoalControlState(goalControlState));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const safeGoalControlRejection = (errorCode = "unavailable") => ({
+    accepted: false,
+    errorCode,
+    goalState: cloneGoalControlState(goalControlState),
+  });
+  const normalizeGoalControlResult = (result) => {
+    if (result === null || typeof result !== "object" || Array.isArray(result) || typeof result.accepted !== "boolean") {
+      return safeGoalControlRejection("malformed_response");
+    }
+    if (result.accepted === true && result.goalState === undefined) {
+      return safeGoalControlRejection("malformed_response");
+    }
+    const responseState = result.goalState === undefined
+      ? cloneGoalControlState(goalControlState)
+      : normalizeGoalControlState(result.goalState);
+    if (responseState === undefined) return safeGoalControlRejection("malformed_response");
+    goalControlState = responseState;
+    publishGoalState();
+    return {
+      accepted: result.accepted,
+      ...(typeof result.errorCode === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(result.errorCode)
+        ? { errorCode: result.errorCode }
+        : {}),
+      goalState: cloneGoalControlState(responseState),
+    };
+  };
+  const handleGoalControl = async (control) => {
+    const request = control !== null && typeof control === "object" && !Array.isArray(control)
+      ? {
+        correlationId: control.correlationId ?? control.controlId,
+        controlId: control.controlId,
+        sourceAgentId: control.sourceAgentId,
+        targetInstanceId: control.targetInstanceId ?? control.instanceId,
+        revision: control.revision,
+        action: control.action,
+        goal: control.goal,
+        settings: control.settings,
+        context: parentActivityContext,
+      }
+      : undefined;
+    if (request?.controlId === undefined || request?.targetInstanceId === undefined) {
+      return safeGoalControlRejection("invalid_control");
+    }
+    let timer;
+    let response;
+    let responded = false;
+    let resolveResponse;
+    const responsePromise = new Promise((resolve) => { resolveResponse = resolve; });
+    const respond = (value) => {
+      if (responded) return;
+      responded = true;
+      resolveResponse(value);
+    };
+    try {
+      pi.events?.emit?.(GOAL_CONTROL_REQUEST_EVENT, { ...request, respond });
+    } catch {
+      return safeGoalControlRejection("unavailable");
+    }
+    if (!responded) {
+      timer = setTimeoutImpl(() => respond(undefined), GOAL_CONTROL_RESPONSE_TIMEOUT_MS);
+      timer?.unref?.();
+      response = await responsePromise;
+      clearTimeoutImpl(timer);
+    } else {
+      response = await responsePromise;
+    }
+    if (!responded || response === undefined) return safeGoalControlRejection("unavailable");
+    return normalizeGoalControlResult(response);
+  };
   pi.events?.on?.(GOAL_STATE_EVENT, receiveGoalProjection);
+  pi.events?.on?.(GOAL_CONTROL_STATE_EVENT, receiveGoalControlState);
   try { pi.events?.emit?.(GOAL_STATE_REQUEST_EVENT); } catch { /* optional goal bridge is best-effort */ }
   let mailboxPausedForCompaction = false;
   let startupError;
@@ -2632,6 +2779,9 @@ export function createMechaMessagingExtension(pi, {
         onEnvelope: (message, delivery) => { if (!mailboxPausedForCompaction) coordinator?.onEnvelope(message, delivery); },
         onModelControl: handleModelControl,
         onModelControlTrace: ({ event, ...fields }) => traceNativeSubagent(event, fields),
+        onGoalControl: handleGoalControl,
+        onGoalControlTrace: ({ event, ...fields }) => traceNativeSubagent(event, fields),
+        getGoalState: () => cloneGoalControlState(goalControlState),
         getModelCatalog: () => {
           try {
             return projectAvailableModels(parentActivityContext);
@@ -2666,6 +2816,7 @@ export function createMechaMessagingExtension(pi, {
         onConnectionState: ({ state, error }) => {
           if (client !== mailboxClient) return;
           if (state === "connected") {
+            publishGoalState(mailboxClient);
             context.ui.setStatus("mecha-mailbox", "mailbox: connected");
           } else if (state === "connecting" || state === "reconnecting") {
             context.ui.setStatus("mecha-mailbox", "mailbox: reconnecting");
@@ -2677,6 +2828,7 @@ export function createMechaMessagingExtension(pi, {
         log: () => {},
       });
       client = mailboxClient;
+      publishGoalState(mailboxClient);
       coordinator = createMailboxCoordinator(context, mailboxClient);
       ensureActivityHeartbeatTimer();
       void mailboxClient.connect().catch((error) => {
