@@ -68,6 +68,8 @@ const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // an hour is 24 lines a day against a 16 MiB cap, and "no sweep record for over an
 // hour" becomes a usable liveness check.
 const DEFAULT_SWEEP_HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
+// The supervisor must receive this advisory every two hours. Keep the production default
+// here even though tests can inject a shorter interval to exercise the timer.
 const DEFAULT_MECHA_DEVELOPER_UPDATE_REMINDER_INTERVAL_MS = 2 * 60 * 60 * 1000;
 const MECHA_DEVELOPER_REPO_PATH = "/Users/wolfgang/code/mecha-developer";
 const ALLOWED_HOSTS = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
