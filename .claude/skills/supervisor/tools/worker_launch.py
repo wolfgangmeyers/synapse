@@ -33,7 +33,41 @@ TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
 
 sys.path.insert(0, TOOLS_DIR)
 from _sidecar import SIDECAR_SCRIPT_PATH as CLAUDE_SIDECAR_SCRIPT, sidecar_argv
-from _tmux import AGENT_ID, ensure_session, new_window, send_text, send_enter, window_exists
+from _tmux import AGENT_ID
+from _tmux_rest import TmuxRestClient
+
+
+def _tmux_rest():
+    return TmuxRestClient()
+
+
+def ensure_session():
+    # The router owns the tmux inventory. There is no caller-side session to create.
+    return False
+
+
+def new_window(name, session_id=None):
+    if session_id is None:
+        _tmux_rest().provision(name)
+    else:
+        _tmux_rest().provision(name, session_id=session_id)
+
+
+def window_exists(name):
+    return _tmux_rest().exists(name)
+
+
+def send_text(name, text):
+    _tmux_rest().keys(name, "\x1b[200~")
+    _tmux_rest().keys(name, text)
+    _tmux_rest().keys(name, "\x1b[201~")
+
+
+def send_enter(name):
+    # The router's keys operation is literal input (`tmux send-keys -l`), so the
+    # tmux key name "Enter" only types the word into bash. A carriage return is
+    # the terminal submit byte and starts the command in the provisioned window.
+    _tmux_rest().keys(name, "\r")
 from worker_runtime_config import (
     WorkerRuntimeConfigError,
     load_cursor_model,
@@ -770,7 +804,14 @@ def main():
     if created:
         print("Created mecha tmux session.")
 
-    new_window(args.window)
+    # Register the exact Pi session identifier with the router as part of provisioning.
+    # Lifecycle recovery must use this router-owned value rather than caller recovery data.
+    pi_session = None
+    if args.agent == "pi":
+        pi_session = args.resume if args.resume else pi_session_id(work_dir, args.window)
+        new_window(args.window, session_id=pi_session)
+    else:
+        new_window(args.window)
 
     # Change to the worktree and start the agent. Its tmux window name is its identity.
     # For cursor: agent_cmd already contains its authentication export.

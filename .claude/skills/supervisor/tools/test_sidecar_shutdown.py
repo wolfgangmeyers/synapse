@@ -84,6 +84,7 @@ class SidecarTestCase(unittest.TestCase):
         Patching kill_window instead would mock away the chokepoint under test.
         """
         self.tmux_commands = []
+        self.rest_removed = []
 
         def run(args, check=True, capture=True):
             self.tmux_commands.append(list(args))
@@ -92,9 +93,23 @@ class SidecarTestCase(unittest.TestCase):
         active = patch.object(_tmux, "run", run)
         active.start()
         self.addCleanup(active.stop)
+        rest = patch.object(
+            worker_shutdown.TmuxRestClient,
+            "remove",
+            lambda _client, window: self.rest_removed.append(window),
+        )
+        rest.start()
+        self.addCleanup(rest.stop)
+        rest_kill = patch.object(
+            worker_kill.TmuxRestClient,
+            "remove",
+            lambda _client, window: self.rest_removed.append(window),
+        )
+        rest_kill.start()
+        self.addCleanup(rest_kill.stop)
 
     def assert_killed_window(self, window):
-        self.assertIn(["kill-window", "-t", f"mecha:{window}"], self.tmux_commands)
+        self.assertIn(window, self.rest_removed)
 
     def run_tool(self, module, argv):
         out = io.StringIO()

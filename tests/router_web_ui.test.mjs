@@ -11,7 +11,16 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
-import { parseArguments, startRouterWebUi } from "../tools/router_web_ui.mjs";
+import {
+  enumerateTmuxWindows,
+  provisionTmuxWindow,
+  removeTmuxWindow,
+  renameTmuxWindow,
+  sendTmuxKeys,
+  tmuxWindowAction,
+  parseArguments,
+  startRouterWebUi,
+} from "../tools/router_web_ui.mjs";
 import { mergeMessages } from "../web/router-ui/history.js";
 import {
   applyLifecycleSnapshot,
@@ -299,7 +308,66 @@ test("router web UI accepts remote HTTP routers and rejects unsafe router URLs",
   }
 });
 
-test("router HTTP API limits browser CORS to public web UI request routes", async () => {
+test("router web UI relay uses REST for tmux window lifecycle operations", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return new Response(JSON.stringify({ session: "mecha", windows: [{ name: "router-1" }] }), { status: 200, headers: { "content-type": "application/json", "x-correlation-id": "upstream-correlation" } });
+  };
+  const relayOptions = { fetchImpl, headers: { "x-correlation-id": "browser-correlation", "x-request-id": "browser-request" } };
+  const enumeration = await enumerateTmuxWindows("http://router.test:8765", relayOptions);
+  assert.equal(enumeration.status, 200);
+  assert.deepEqual(enumeration.payload, { session: "mecha", windows: [{ name: "router-1" }] });
+  assert.equal(enumeration.correlationId, "upstream-correlation");
+  await provisionTmuxWindow("http://router.test:8765", { name: "new" }, relayOptions);
+  await removeTmuxWindow("http://router.test:8765", "router-1", relayOptions);
+  await renameTmuxWindow("http://router.test:8765", "router-1", "Renamed", relayOptions);
+  await sendTmuxKeys("http://router.test:8765", "router-1", "secret", relayOptions);
+  const actionCalls = ["start", "stop", "resume", "restart"];
+  for (const action of actionCalls) await tmuxWindowAction("http://router.test:8765", "router-1", action, {}, relayOptions);
+  assert.deepEqual(calls[0].options.headers, { "x-correlation-id": "browser-correlation", "x-request-id": "browser-request" });
+  assert.deepEqual(calls.map(({ url, options }) => [url, options.method]), [
+    ["http://router.test:8765/v1/tmux/windows", "GET"],
+    ["http://router.test:8765/v1/tmux/windows", "POST"],
+    ["http://router.test:8765/v1/tmux/windows/router-1", "DELETE"],
+    ["http://router.test:8765/v1/tmux/windows/router-1", "PATCH"],
+    ["http://router.test:8765/v1/tmux/windows/router-1/keys", "POST"],
+    ...actionCalls.map((action) => [`http://router.test:8765/v1/tmux/windows/router-1/${action}`, "POST"]),
+  ]);
+  assert.deepEqual(JSON.parse(calls[1].options.body), { name: "new" });
+  assert.deepEqual(JSON.parse(calls[3].options.body), { name: "Renamed" });
+  assert.deepEqual(JSON.parse(calls[4].options.body), { keys: "secret" });
+});
+
+test("router web UI relays correlation headers and preserves tmux response shape", async () => {
+  const tmuxAdapter = {
+    enumerate: async () => ["private-test-session"],
+    enumerateWindows: async () => [],
+  };
+  const router = await startTestRouter({
+    routerOptions: {
+      tmuxAdapter,
+      startupSession: "private-test-session",
+      startupWindow: "private-test-window",
+      supervisorDirective: null,
+    },
+  });
+  let ui;
+  try {
+    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
+    const response = await fetch(new URL("/ui/tmux/windows", ui.httpUrl), {
+      headers: { "x-request-id": "browser-request" },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-correlation-id"), "browser-request");
+    assert.deepEqual(await response.json(), { session: "private-test-session", windows: [] });
+  } finally {
+    await ui?.close();
+    await router.close();
+  }
+});
+
+test("router HTTP API accepts browser CORS on every route", async () => {
   const router = await startTestRouter();
   try {
     const preflight = await fetch(new URL("/v1/messages", router.httpUrl), {
@@ -316,14 +384,14 @@ test("router HTTP API limits browser CORS to public web UI request routes", asyn
     assert.match(preflight.headers.get("access-control-allow-headers") ?? "", /content-type/);
 
     const agents = await fetch(new URL("/v1/agents", router.httpUrl), { headers: { origin: "https://anywhere.example" } });
-    assert.equal(agents.status, 403);
-    assert.equal(agents.headers.get("access-control-allow-origin"), null);
+    assert.equal(agents.status, 200);
+    assert.equal(agents.headers.get("access-control-allow-origin"), "*");
 
     const history = await fetch(new URL("/v1/conversations?owner=cors-web&peer=cors-peer", router.httpUrl), {
       headers: { origin: "https://untrusted.example" },
     });
-    assert.equal(history.status, 403);
-    assert.equal(history.headers.get("access-control-allow-origin"), null);
+    assert.equal(history.status, 200);
+    assert.equal(history.headers.get("access-control-allow-origin"), "*");
 
     const message = await fetch(new URL("/v1/messages", router.httpUrl), {
       method: "POST",
@@ -337,7 +405,7 @@ test("router HTTP API limits browser CORS to public web UI request routes", asyn
   }
 });
 
-test("router and web UI reject DNS-rebinding authorities", async () => {
+test("router accepts arbitrary Host authorities while web UI and browser origins reject rebinding", async () => {
   const router = await startTestRouter();
   let ui;
   try {
@@ -355,7 +423,7 @@ test("router and web UI reject DNS-rebinding authorities", async () => {
       request.once("error", reject);
       request.end();
     });
-    assert.equal(await requestWithHost(router.httpUrl, "/v1/agents", "rebind.example:8765"), 403);
+    assert.equal(await requestWithHost(router.httpUrl, "/v1/health", "rebind.example:8765"), 200);
 
     ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
     assert.equal(await requestWithHost(ui.httpUrl, "/ui/config", "rebind.example:8787"), 403);

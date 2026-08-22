@@ -11,6 +11,7 @@ const execFileAsync = promisify(execFile);
 
 const ROUTER_PATH = fileURLToPath(new URL("../tools/run_router.mjs", import.meta.url));
 const TOOLS_DIR = dirname(ROUTER_PATH);
+const { ensureStartupTmux } = await import("../tools/run_router.mjs");
 
 // The router is the single point of failure for all mailbox traffic, and its entrypoint
 // check had the same defect the sidecar's did: comparing an unresolved `process.argv[1]`
@@ -48,6 +49,47 @@ test("router CLI runs when invoked through its real tools directory", async () =
 
   assert.match(stdout, /Usage: node tools\/run_router\.mjs/);
   assert.match(stdout, /--host 127\.0\.0\.1\|::1\|0\.0\.0\.0/);
+});
+
+test("startup tmux provisions the session and supervisor window when absent", async () => {
+  const calls = [];
+  let first = true;
+  const run = async (_command, args) => {
+    calls.push(args);
+    if (first) { first = false; const error = new Error("missing"); error.code = 1; throw error; }
+  };
+  assert.deepEqual(await ensureStartupTmux({ session: "missing", window: "supervisor", run }), {
+    session: "missing", window: "supervisor", createdSession: true, createdWindow: true,
+  });
+  assert.deepEqual(calls, [["has-session", "-t", "missing"], ["new-session", "-d", "-s", "missing", "-n", "supervisor"]]);
+});
+
+test("startup tmux selects the first listed session containing literal mecha", async () => {
+  const calls = [];
+  const run = async (_command, args) => {
+    calls.push(args);
+    return { stdout: "worker\nfirst-mecha-session\nsecond-mecha-session\n" };
+  };
+  assert.deepEqual(await ensureStartupTmux({ session: "mecha", window: "ignored", run }), {
+    session: "first-mecha-session", window: "supervisor", createdSession: false, createdWindow: false,
+  });
+  assert.deepEqual(calls, [["list-sessions", "-F", "#{session_name}"]]);
+});
+
+test("startup tmux provisions exactly mecha with supervisor when no match exists", async () => {
+  const calls = [];
+  const run = async (_command, args) => {
+    calls.push(args);
+    if (args[0] === "list-sessions") return { stdout: "worker\n" };
+    return { stdout: "" };
+  };
+  assert.deepEqual(await ensureStartupTmux({ session: "mecha", window: "ignored", run }), {
+    session: "mecha", window: "supervisor", createdSession: true, createdWindow: true,
+  });
+  assert.deepEqual(calls, [
+    ["list-sessions", "-F", "#{session_name}"],
+    ["new-session", "-d", "-s", "mecha", "-n", "supervisor"],
+  ]);
 });
 
 test("importing the router does not start it", async () => {

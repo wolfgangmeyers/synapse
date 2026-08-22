@@ -15,13 +15,55 @@ import tempfile
 import textwrap
 import unittest
 import uuid
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import worker_capture
 import worker_launch
 
 
 class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
+    def test_supported_launchers_do_not_reference_retired_supervisor_start(self):
+        """The router owns supervisor bootstrap and managed worker launch now."""
+        tools_dir = pathlib.Path(__file__).resolve().parent
+        repo_dir = tools_dir.parents[3]
+        live_paths = [
+            path for path in tools_dir.iterdir()
+            if path.is_file() and not path.name.startswith("test_")
+        ]
+        live_paths.extend([
+            repo_dir / "CLAUDE.md",
+            repo_dir / ".claude" / "skills" / "install" / "SKILL.md",
+        ])
+        retired_launcher = "supervisor_" + "start.py"
+        references = [
+            str(path.relative_to(repo_dir))
+            for path in live_paths
+            if retired_launcher in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual([], references)
+
+    def test_router_keys_submit_the_constructed_agent_command(self):
+        client = Mock()
+        with patch.object(worker_launch, "_tmux_rest", return_value=client):
+            worker_launch.new_window("pi-worker")
+            worker_launch.send_text("pi-worker", "cd /tmp && pi --model gpt-5.6-luna")
+            worker_launch.send_enter("pi-worker")
+
+        self.assertEqual(client.method_calls, [
+            call.provision("pi-worker"),
+            call.keys("pi-worker", "\x1b[200~"),
+            call.keys("pi-worker", "cd /tmp && pi --model gpt-5.6-luna"),
+            call.keys("pi-worker", "\x1b[201~"),
+            call.keys("pi-worker", "\r"),
+        ])
+
+    def test_router_provision_receives_the_exact_pi_session_id(self):
+        client = Mock()
+        session_id = "pi-session-1"
+        with patch.object(worker_launch, "_tmux_rest", return_value=client):
+            worker_launch.new_window("pi-worker", session_id=session_id)
+        client.provision.assert_called_once_with("pi-worker", session_id=session_id)
+
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
@@ -259,7 +301,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertNotIn("&", after_group.replace("&&", "").replace("2>&1", ""))
 
     def test_claude_sidecar_argv_carries_the_actual_window_and_router(self):
-        # sidecar_argv is shared with supervisor_start.py via _sidecar.py. Asserting only
+        # sidecar_argv is shared with the supervisor bootstrap via _sidecar.py. Asserting only
         # that the call happened, without checking what it was called WITH, would not catch
         # a regression that always builds the argv for the wrong window or the wrong router
         # — exactly the defect class --agent-id/--window drift is meant to guard against.

@@ -11,13 +11,13 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _state import load_state  # noqa: E402
-from _tmux import list_windows  # noqa: E402
+from _tmux_rest import TmuxRestClient  # noqa: E402
 
 NONTERMINAL = {"active", "blocked", "parked"}
 
 
 def live_window_names() -> set[str]:
-    return {name for _, name in list_windows()}
+    return {window.get("name") for window in TmuxRestClient().list() if isinstance(window, dict) and isinstance(window.get("name"), str)}
 
 
 def summarize(state: dict[str, Any], windows: set[str]) -> dict[str, Any]:
