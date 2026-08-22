@@ -115,16 +115,20 @@ test("goal editor uses accessible ON/OFF switches and a lock state button", asyn
   assert.match(app, /goalToggle\("snooze-enabled", "Allow snoozing", draft\.snooze_enabled\)/);
   assert.match(app, /if \(state\) state\.textContent = lock \? \(pressed \? "LOCKED" : "UNLOCKED"\) : \(pressed \? "ON" : "OFF"\)/);
   assert.match(app, /track\.append\(thumb\);[\s\S]*thumb\.append\(status\);/);
+  assert.match(app, /if \(lock\) status\.classList\.add\("goal-toggle-state-hidden"\);/);
   assert.match(app, /if \(lock\) thumb\.append\(icon, status\);[\s\S]*button\.append\(label, track\);/);
   assert.match(app, /fa-lock-open/);
   assert.doesNotMatch(app, /goalCheckbox|input\.type = "checkbox"/);
-  assert.match(css, /\.goal-toggle-track[\s\S]*width: 76px[\s\S]*background: #101623/);
-  assert.match(css, /\.goal-toggle-thumb[\s\S]*width: calc\(50% - 3px\)/);
-  assert.match(css, /\.goal-toggle-thumb \.goal-toggle-state[\s\S]*text-align: center/);
+  assert.match(css, /\.goal-toggle-track[\s\S]*width: 95px[\s\S]*height: 30px[\s\S]*background: #101623/);
+  assert.match(css, /\.goal-toggle[\s\S]*min-height: 56px[\s\S]*padding: 12px/);
+  assert.match(css, /\.goal-toggle-thumb[\s\S]*width: calc\(50% - 3px\)[\s\S]*height: 26px/);
+  assert.match(css, /\.goal-toggle-label \{ min-width: 0; font-weight: 800; \}/);
+  assert.match(css, /\.goal-toggle-thumb \.goal-toggle-state[\s\S]*font-size: 9px[\s\S]*font-weight: 800[\s\S]*text-align: center/);
+  assert.match(css, /\.goal-toggle-state-hidden[\s\S]*position: absolute[\s\S]*clip: rect\(0, 0, 0, 0\)/);
   assert.match(css, /\.goal-toggle\[aria-pressed="true"\] \.goal-toggle-thumb[\s\S]*transform: translateX\(100%\)/);
   assert.match(css, /\.goal-toggle\[aria-pressed="true"\] \.goal-toggle-thumb \.goal-toggle-state[\s\S]*text-shadow/);
-  assert.match(css, /\.goal-lock-toggle \.goal-toggle-thumb i\s*\{[^}]*color:\s*#101623[^}]*\}/);
-  assert.match(css, /\.goal-lock-toggle \.goal-toggle-thumb \.goal-toggle-state[\s\S]*transform: scaleX\(0\.68\)/);
+  assert.match(css, /\.goal-lock-toggle \.goal-toggle-thumb i\s*\{[^}]*color:\s*#101623[^}]*font-size:\s*9px[^}]*\}/);
+  assert.doesNotMatch(css, /\.goal-lock-toggle \.goal-toggle-thumb \.goal-toggle-state[\s\S]*transform: scaleX/);
   assert.match(css, /\.goal-lock-toggle\[aria-pressed="true"\] \.goal-toggle-thumb[\s\S]*background: var\(--primary\)/);
 });
 
