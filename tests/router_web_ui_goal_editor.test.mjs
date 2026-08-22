@@ -109,18 +109,23 @@ test("goal editor uses accessible ON/OFF switches and a lock state button", asyn
   assert.match(app, /button\.type = "button";/);
   assert.match(app, /button\.setAttribute\("aria-pressed", String\(pressed\)\)/);
   assert.match(app, /goalToggle\("goal-enabled", "Goal", draft\.enabled\)/);
-  assert.match(app, /goalToggle\("goal-blocking", "Block when blocked", draft\.blocking\)/);
+  assert.match(app, /goalToggle\("goal-blocking", "Blocking", draft\.blocking\)/);
   assert.match(app, /goalToggle\("goal-lock", "Goal lock", draft\.goal_lock_enabled, \{ lock: true \}\)/);
   assert.match(app, /goal_control_blocking_unavailable: "This router does not support disabling goal blocking\."/);
   assert.match(app, /goalToggle\("snooze-enabled", "Allow snoozing", draft\.snooze_enabled\)/);
   assert.match(app, /if \(state\) state\.textContent = lock \? \(pressed \? "LOCKED" : "UNLOCKED"\) : \(pressed \? "ON" : "OFF"\)/);
+  assert.match(app, /track\.append\(thumb\);[\s\S]*thumb\.append\(status\);/);
+  assert.match(app, /if \(lock\) thumb\.append\(icon, status\);[\s\S]*button\.append\(label, track\);/);
   assert.match(app, /fa-lock-open/);
   assert.doesNotMatch(app, /goalCheckbox|input\.type = "checkbox"/);
-  assert.match(css, /\.goal-toggle-track[\s\S]*background: #101623/);
-  assert.match(css, /\.goal-toggle-thumb[\s\S]*width: calc\(50% - 4px\)/);
+  assert.match(css, /\.goal-toggle-track[\s\S]*width: 76px[\s\S]*background: #101623/);
+  assert.match(css, /\.goal-toggle-thumb[\s\S]*width: calc\(50% - 3px\)/);
+  assert.match(css, /\.goal-toggle-thumb \.goal-toggle-state[\s\S]*text-align: center/);
   assert.match(css, /\.goal-toggle\[aria-pressed="true"\] \.goal-toggle-thumb[\s\S]*transform: translateX\(100%\)/);
-  assert.match(css, /\.goal-toggle\[aria-pressed="true"\] \.goal-toggle-state[\s\S]*text-shadow/);
-  assert.match(css, /\.goal-lock-toggle i[\s\S]*color: var\(--muted\)/);
+  assert.match(css, /\.goal-toggle\[aria-pressed="true"\] \.goal-toggle-thumb \.goal-toggle-state[\s\S]*text-shadow/);
+  assert.match(css, /\.goal-lock-toggle \.goal-toggle-thumb i\s*\{[^}]*color:\s*#101623[^}]*\}/);
+  assert.match(css, /\.goal-lock-toggle \.goal-toggle-thumb \.goal-toggle-state[\s\S]*transform: scaleX\(0\.68\)/);
+  assert.match(css, /\.goal-lock-toggle\[aria-pressed="true"\] \.goal-toggle-thumb[\s\S]*background: var\(--primary\)/);
 });
 
 test("goal editor sends complete typed goal controls and rejects stale target results", async () => {
