@@ -1725,7 +1725,7 @@ function renderGoalDialog(peer) {
   goalText.disabled = !draft.enabled;
   goalLabel.append(goalText);
   form.append(goalLabel);
-  form.append(goalToggle("goal-blocking", "Block when blocked", draft.blocking));
+  form.append(goalToggle("goal-blocking", "Blocking", draft.blocking));
   form.append(goalToggle("goal-lock", "Goal lock", draft.goal_lock_enabled, { lock: true }));
   const snoozeFieldset = document.createElement("fieldset");
   const snoozeLegend = document.createElement("legend");
@@ -1778,7 +1778,9 @@ function goalToggle(id, labelText, pressed, { lock = false } = {}) {
   status.className = "goal-toggle-state";
   const icon = lock ? document.createElement("i") : undefined;
   if (icon) icon.setAttribute("aria-hidden", "true");
-  button.append(...(icon ? [icon] : []), label, ...(lock ? [] : [track]), status);
+  if (lock) thumb.append(icon, status);
+  else thumb.append(status);
+  button.append(label, track);
   button.addEventListener("click", () => {
     setGoalToggleState(button, button.getAttribute("aria-pressed") !== "true");
     updateGoalDraftFromInput(button);
