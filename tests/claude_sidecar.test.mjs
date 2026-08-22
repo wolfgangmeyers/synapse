@@ -96,7 +96,7 @@ test("tmux injector uses bracketed paste, waits for Claude paste handling, then 
     ["send-keys", "-l", "-t", "mecha:claude-worker", "safe text"],
     ["send-keys", "-t", "mecha:claude-worker", "\x1b[201~"],
     ["sleep", 5_000],
-    ["send-keys", "-t", "mecha:claude-worker", "Enter"],
+    ["send-keys", "-t", "mecha:claude-worker", "\r"],
   ]);
 });
 

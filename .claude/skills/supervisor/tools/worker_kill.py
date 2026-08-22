@@ -17,7 +17,20 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _tmux import kill_window, window_exists
+from _sidecar import cleanup_sidecar
+from _tmux_rest import TmuxRestClient
+
+
+def window_exists(window):
+    return TmuxRestClient().exists(window)
+
+
+def kill_window(window):
+    try:
+        TmuxRestClient().remove(window)
+    except Exception:
+        pass
+    return cleanup_sidecar(window)
 
 
 def main():

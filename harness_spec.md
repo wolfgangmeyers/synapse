@@ -298,7 +298,9 @@ The router records `first_seen_at`, `last_connected_at`, and `disconnected_at` f
 
 Authentication is intentionally out of scope for v1. This is a local development harness running entirely as one macOS user.
 
-The router binds only to `127.0.0.1` and `::1`, rejects non-JSON requests, and accepts no browser-facing CORS origins. Database and state files remain user-only. Any process running as the same user is trusted to post messages and claim a local sender identity.
+The router binds to its configured listen address, rejects non-JSON requests, and accepts arbitrary `Host` header authorities after binding. Its HTTP API accepts browser requests with arbitrary `Origin` values, including preflight requests, and returns the existing wildcard, no-credential CORS headers. The `/v1/agents` WebSocket accepts arbitrary browser `Origin` values as well. These are transport decisions, not authentication: the local router trusts processes running as the same user to post messages and claim sender identities. Database and state files remain user-only.
+
+The separate browser UI retains its host and origin boundary. It serves requests only for loopback or its configured allowed host, accepts `/ui/events` only for the matching same-origin HTTP(S) origin, and keeps the existing REST relay behavior. Browser UI policy must not be inferred from the router API policy.
 
 The `from` field is a claimed local agent/service name or the normalized sender email address. It is diagnostic routing context, not authenticated identity.
 

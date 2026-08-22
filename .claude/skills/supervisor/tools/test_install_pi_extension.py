@@ -1,34 +1,22 @@
 #!/usr/bin/env python3
-"""Tests for the retired Pi extension installer entry point."""
+"""Tests for the Pi extension bundle installer."""
 
-import contextlib
-import io
-from pathlib import Path
 import unittest
 
 import install_pi_extension
 
 
 class InstallPiExtensionTest(unittest.TestCase):
-    def test_retirement_is_explicit_and_fails_closed(self):
-        output = io.StringIO()
-        with contextlib.redirect_stderr(output), self.assertRaisesRegex(
-            SystemExit, "install_pi_extension.py is retired"
-        ) as raised:
-            install_pi_extension.main()
+    def test_bundle_declares_tmux_rest_dependencies(self):
+        self.assertIn("_tmux_rest.py", install_pi_extension.OPERATIONAL_TOOL_MODULES)
+        self.assertIn("tmux-rest-client.js", install_pi_extension.SIDECAR_HARNESS_MODULES)
+        self.assertIn("goal.js", install_pi_extension.EXTENSION_MODULES)
 
-        self.assertEqual(raised.exception.code, install_pi_extension.RETIREMENT_MESSAGE)
-        self.assertEqual(output.getvalue(), "")
-
-    def test_retired_entry_point_has_no_artifact_copy_or_settings_mutation_paths(self):
-        source = Path(install_pi_extension.__file__).read_text(encoding="utf-8")
-
-        self.assertNotIn("shutil", source)
-        self.assertNotIn("atomic_copy", source)
-        self.assertNotIn("settings.json", source)
-        self.assertNotIn("os.replace", source)
-        self.assertIn("preserve the registered checkout ", source)
-        self.assertIn("do not create ~/.mecha-developer/extensions/mecha-messaging.js", source)
+    def test_bundle_dependencies_are_resolved(self):
+        artifacts = install_pi_extension.extension_artifacts()
+        self.assertEqual(install_pi_extension.missing_operational_dependencies(), set())
+        self.assertEqual(install_pi_extension.missing_javascript_dependencies(artifacts), set())
+        self.assertTrue(all(source.is_file() for source, _ in artifacts))
 
 
 if __name__ == "__main__":

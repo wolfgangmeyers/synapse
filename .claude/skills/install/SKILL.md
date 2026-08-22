@@ -18,7 +18,7 @@ Set up mecha-developer by symlinking personas and skills to the user's home dire
 1. **Cleans up** old-style skill symlinks (`.md` files) from `~/.claude/skills/`
 2. **Symlinks personas** to `~/personas/` so they're accessible from any project
 3. **Symlinks skill folders** to `~/.claude/skills/` so they're available globally in Claude Code
-4. **Symlinks CLI scripts** (`ai`, `mecha-supervisor`) to `~/.local/bin/`
+4. **Symlinks the `ai` CLI script** to `~/.local/bin/`
 5. **Validates** the canonical Pi mailbox extension registration for bare Pi sessions
 
 ## Process
@@ -250,18 +250,6 @@ else
   echo "linked: $AI_LINK -> $AI_SRC"
 fi
 
-# mecha-supervisor — launches the supervisor tmux session
-SUP_SRC="$(pwd)/.claude/skills/supervisor/tools/supervisor_start.py"
-SUP_LINK="$HOME/.local/bin/mecha-supervisor"
-if [ -L "$SUP_LINK" ]; then
-  ln -sf "$SUP_SRC" "$SUP_LINK"
-  echo "updated: $SUP_LINK -> $SUP_SRC"
-elif [ -e "$SUP_LINK" ]; then
-  echo "skipped: $SUP_LINK already exists (not a symlink)"
-else
-  ln -s "$SUP_SRC" "$SUP_LINK"
-  echo "linked: $SUP_LINK -> $SUP_SRC"
-fi
 ```
 
 ### Pi mailbox extension (bare Pi)
@@ -581,7 +569,7 @@ ls -la ~/.claude/skills/ 2>/dev/null || echo "none"
 
 echo ""
 echo "=== CLI Scripts ==="
-ls -la ~/.local/bin/ai ~/.local/bin/mecha-supervisor 2>/dev/null || echo "none"
+ls -la ~/.local/bin/ai 2>/dev/null || echo "none"
 
 echo ""
 echo "=== Pi Extension ==="

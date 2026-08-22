@@ -170,6 +170,10 @@ function browserAuthorityIsAllowed(authority, allowedHost) {
 
 async function handleRequest(request, response, { router, defaultAgentId }) {
   const url = new URL(request.url ?? "/", "http://ui.local");
+  if (url.pathname === "/ui/tmux/windows" || url.pathname.startsWith("/ui/tmux/windows/")) {
+    await handleTmuxManagementRequest(request, response, { router, url });
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/ui/config") {
     sendJson(response, 200, { defaultRouter: normalizeRouterUrl(router), defaultAgentId });
     return;
@@ -203,6 +207,86 @@ async function handleRequest(request, response, { router, defaultAgentId }) {
   } catch {
     sendJson(response, 404, { error: "not_found" });
   }
+}
+
+const TMUX_WINDOWS_ROOT = "/v1/tmux/windows";
+const TMUX_UI_ROOT = "/ui/tmux/windows";
+
+async function handleTmuxManagementRequest(request, response, { router, url }) {
+  const selectedRouter = normalizeRouterUrl(url.searchParams.get("router") ?? router);
+  const suffix = url.pathname.slice(TMUX_UI_ROOT.length);
+  let route;
+  try {
+    const match = suffix.match(/^\/?([^/]+)?(?:\/(keys|start|stop|resume|restart))?$/);
+    route = match && match[1] !== undefined ? { name: decodeURIComponent(match[1]), action: match[2] } : match ? { name: undefined, action: undefined } : undefined;
+  } catch { route = undefined; }
+  if (!route) { sendJson(response, 404, { error: "not_found" }); return; }
+  const bodyMethods = new Set(["POST", "PATCH"]);
+  try {
+    const body = bodyMethods.has(request.method) ? await readJsonBody(request) : undefined;
+    const path = route.name === undefined ? TMUX_WINDOWS_ROOT : `${TMUX_WINDOWS_ROOT}/${encodeURIComponent(route.name)}${route.action ? `/${route.action}` : ""}`;
+    const allowed = route.name === undefined ? ["GET", "POST"] : route.action === undefined ? ["PATCH", "DELETE"] : ["POST"];
+    if (!allowed.includes(request.method)) { sendJson(response, 405, { error: "method_not_allowed" }); return; }
+    await relayRouterRest(response, selectedRouter, request.method, path, body, request.headers);
+  } catch (error) {
+    sendJson(response, error instanceof SyntaxError || /body is too large/.test(error.message) ? 400 : 502, { error: error instanceof SyntaxError ? "invalid_request" : "upstream_unavailable" });
+  }
+}
+
+async function relayRouterRest(response, router, method, path, body, incomingHeaders = {}) {
+  const headers = {};
+  for (const name of ["x-correlation-id", "x-request-id"]) {
+    if (incomingHeaders[name] !== undefined) headers[name] = incomingHeaders[name];
+  }
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const upstream = await fetch(new URL(path, router), {
+    method,
+    headers: Object.keys(headers).length === 0 ? undefined : headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const payload = await upstream.text();
+  const responseHeaders = {
+    "cache-control": "no-store",
+    "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+  };
+  const correlationId = upstream.headers.get("x-correlation-id");
+  if (correlationId !== null) responseHeaders["x-correlation-id"] = correlationId;
+  response.writeHead(upstream.status, responseHeaders);
+  response.end(payload);
+}
+
+async function readJsonBody(request) {
+  let body = "";
+  for await (const chunk of request) body += chunk;
+  if (body.length > 1024 * 1024) throw new Error("request body is too large");
+  if (body.trim() === "") return {};
+  return JSON.parse(body);
+}
+
+export const enumerateTmuxWindows = (router, options) => relayRouterRequest(router, "GET", TMUX_WINDOWS_ROOT, undefined, options);
+export const provisionTmuxWindow = (router, body, options) => relayRouterRequest(router, "POST", TMUX_WINDOWS_ROOT, body, options);
+export const removeTmuxWindow = (router, name, options) => relayRouterRequest(router, "DELETE", `${TMUX_WINDOWS_ROOT}/${encodeURIComponent(name)}`, undefined, options);
+export const renameTmuxWindow = (router, name, nextName, options) => relayRouterRequest(router, "PATCH", `${TMUX_WINDOWS_ROOT}/${encodeURIComponent(name)}`, { name: nextName }, options);
+export const sendTmuxKeys = (router, name, keys, options) => relayRouterRequest(router, "POST", `${TMUX_WINDOWS_ROOT}/${encodeURIComponent(name)}/keys`, { keys }, options);
+export const tmuxWindowAction = (router, name, action, body = {}, options) => relayRouterRequest(router, "POST", `${TMUX_WINDOWS_ROOT}/${encodeURIComponent(name)}/${action}`, body, options);
+
+async function relayRouterRequest(router, method, path, body, { fetchImpl = fetch, headers: extraHeaders = {} } = {}) {
+  const headers = { ...extraHeaders };
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const response = await fetchImpl(new URL(path, normalizeRouterUrl(router)), {
+    method,
+    ...(Object.keys(headers).length === 0 ? {} : { headers }),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await response.text();
+  let payload;
+  try { payload = text === "" ? null : JSON.parse(text); } catch { payload = text; }
+  return {
+    status: response.status,
+    ok: response.ok,
+    payload,
+    ...(response.headers.get("x-correlation-id") === null ? {} : { correlationId: response.headers.get("x-correlation-id") }),
+  };
 }
 
 function createBrowserClient(browser, {

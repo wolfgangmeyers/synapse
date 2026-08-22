@@ -26,6 +26,7 @@ import {
 import { registeredServerJobs, serverJobEnvelope } from "./server_jobs.js";
 import { createNanoId } from "./id.js";
 import { RECALL_POLICY, MemoryCatalogError } from "./memory-catalog.js";
+import { createTmuxAdapter } from "./tmux-adapter.js";
 import { createNativeSubagentTrace, summarizeNativeSubagents } from "./native_subagent_trace.js";
 import {
   ABSOLUTE_MAX_BODY_BYTES,
@@ -75,7 +76,7 @@ const MECHA_DEVELOPER_REPO_PATH = "/Users/wolfgang/code/mecha-developer";
 const ALLOWED_HOSTS = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
 const CORS_HEADERS = Object.freeze({
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+  "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
   "access-control-allow-headers": "content-type",
 });
 const HTTP_ERROR_MESSAGES = Object.freeze({
@@ -91,8 +92,10 @@ const HTTP_ERROR_MESSAGES = Object.freeze({
   reminder_not_cancelable: "Reminder is already linked to a delivery.",
   reminder_target_unavailable: "Reminder target has never connected.",
   not_found: "Resource was not found.",
-  browser_origin_rejected: "Browser origins are not accepted.",
   internal_error: "Router could not complete the request.",
+  tmux_unavailable: "The tmux session is unavailable.",
+  tmux_invalid_name: "The tmux session name is invalid.",
+  tmux_operation_failed: "The tmux operation failed.",
 });
 
 export function createAgentRouter({
@@ -129,6 +132,11 @@ export function createAgentRouter({
   onServerJobError = defaultServerJobError,
   memoryCatalog,
   nativeSubagentTrace = createNativeSubagentTrace(),
+  tmuxAdapter = createTmuxAdapter(),
+  startupSession,
+  startupWindow,
+  startupProvision = false,
+  supervisorDirective,
 } = {}) {
   if (repository === undefined
     || typeof repository.enqueue !== "function"
@@ -227,6 +235,20 @@ export function createAgentRouter({
 
   const sessions = new Map();
   const conversationSessions = new Map();
+  let selectedTmuxSession;
+  const piSessionIdByTmuxSession = new Map();
+  const tmuxProvisionals = new Map();
+
+  const tmuxSessionName = (value) => typeof value === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(value) ? value : undefined;
+  const tmuxWindowKey = (session, name) => `${session}\u0000${name}`;
+  async function enumerateTmuxWindows(session) {
+    if (typeof tmuxAdapter.enumerateWindows !== "function") throw new Error("tmux adapter must enumerate windows");
+    return tmuxAdapter.enumerateWindows(session);
+  }
+  const defaultSupervisorDirective = Object.freeze({
+    subject: "router.startup.directive.v1",
+    body: "Load the mailbox and reminder skills, assess the current situation, and set up the sweep reminder.",
+  });
   const requestTimesBySender = new Map();
   const pendingDeliveryOffers = new Map();
   const activityByAgentId = new Map();
@@ -276,18 +298,13 @@ export function createAgentRouter({
       sendHttpError(response, 500, "internal_error");
     });
   });
+  // Router WebSocket authority is transport-only: accept arbitrary Host and Origin
+  // values here. The browser UI has its own host and same-origin boundary.
   const webSocketServer = new WebSocketServer({
     server,
     path,
     maxPayload: maxFrameBytes,
     perMessageDeflate: false,
-    verifyClient: ({ origin }, done) => {
-      if (origin !== undefined) {
-        done(false, 403, "browser origins are not accepted");
-        return;
-      }
-      done(true);
-    },
   });
   webSocketServer.on("error", () => {
     // The HTTP server's listener reports bind failures to router.listen().
@@ -1356,6 +1373,9 @@ export function createAgentRouter({
   return {
     async listen() {
       synchronizeRegisteredServerJobs();
+      if (startupSession !== undefined || startupProvision) {
+        await selectTmuxSession(startupSession, { window: startupWindow, provision: startupProvision, directive: supervisorDirective });
+      }
       server.listen({ host, port });
       await once(server, "listening");
       try {
@@ -1418,6 +1438,143 @@ export function createAgentRouter({
     sweepStaleAgentResources,
     sweepMessageLifecycles,
     sendMechaDeveloperUpdateReminder,
+    selectedTmuxSession: () => selectedTmuxSession,
+  };
+
+  async function selectTmuxSession(name, { window, provision = false, directive = defaultSupervisorDirective } = {}) {
+    const requestedName = name === undefined ? undefined : tmuxSessionName(name);
+    if (name !== undefined && requestedName === undefined) throw new HttpRequestError(400, "tmux_invalid_name");
+    // `mecha` is the startup default, not a required exact match. Keep other
+    // explicitly requested names exact so non-startup callers retain their behavior.
+    const requested = requestedName === "mecha" ? undefined : requestedName;
+    const available = await tmuxAdapter.enumerate();
+    const selected = requested ?? available.find((session) => session.includes("mecha"));
+    const selectedName = selected ?? "mecha";
+    const selectedWindow = tmuxSessionName(window) ?? (requested === undefined ? "supervisor" : selectedName);
+    if (selected === undefined || (requested !== undefined && !available.includes(requested))) {
+      const provisionSession = tmuxAdapter.provisionSession;
+      if (!provision || typeof provisionSession !== "function") throw new HttpRequestError(404, "tmux_unavailable");
+      await provisionSession(selectedName, selectedWindow);
+    }
+    selectedTmuxSession = selectedName;
+    if (directive !== undefined && directive !== null) {
+      const directiveBody = typeof directive === "string" ? directive : directive.body;
+      if (typeof directiveBody !== "string") throw new HttpRequestError(400, "invalid_request");
+      await tmuxAdapter.sendKeys(selectedName, selectedWindow, directiveBody, typeof directive === "string" ? undefined : directive.subject);
+    }
+    return { name: selectedName, selected: true };
+  }
+
+  async function lazilySelectTmuxSession() {
+    if (selectedTmuxSession !== undefined) return selectedTmuxSession;
+    const available = await tmuxAdapter.enumerate();
+    const selected = available.find((session) => session.includes("mecha"));
+    if (selected === undefined) throw new HttpRequestError(404, "tmux_unavailable");
+    // Lazy selection only recovers the existing tmux target after router re-instantiation.
+    // Startup selection retains ownership of provisioning and supervisor directives.
+    selectedTmuxSession = selected;
+    return selected;
+  }
+
+  async function handleTmuxRequest(request, response, requestUrl) {
+    const match = requestUrl.pathname.match(/^\/v1\/tmux\/windows(?:\/([^/]+))?(?:\/(keys|start|stop|restart|resume|rename))?$/);
+    if (match === null) return false;
+    let name;
+    try {
+      name = match[1] === undefined ? undefined : decodeURIComponent(match[1]);
+    } catch {
+      sendHttpError(response, 400, "tmux_invalid_name");
+      return true;
+    }
+    const action = match[2];
+    if (name !== undefined && tmuxSessionName(name) === undefined) {
+      sendHttpError(response, 400, "tmux_invalid_name");
+      return true;
+    }
+    try {
+      if (selectedTmuxSession === undefined) await lazilySelectTmuxSession();
+      if (request.method === "GET" && name === undefined) {
+        const session = selectedTmuxSession;
+        sendHttpJson(response, 200, { session, windows: session === undefined ? [] : await enumerateTmuxWindows(session) });
+      } else if (request.method === "POST" && name === undefined) {
+        const body = await readJsonRequest(request, maxRequestBytes);
+        const selected = selectedTmuxSession;
+        if (selected === undefined) throw new HttpRequestError(404, "tmux_unavailable");
+        const windowName = tmuxSessionName(body?.name);
+        if (windowName === undefined) throw new HttpRequestError(400, "tmux_invalid_name");
+        const requestedSessionId = body?.session_id;
+        if (requestedSessionId !== undefined && (typeof requestedSessionId !== "string" || requestedSessionId.length === 0)) {
+          throw new HttpRequestError(400, "invalid_request");
+        }
+        const provisionKey = tmuxWindowKey(selected, windowName);
+        let provisioning = tmuxProvisionals.get(provisionKey);
+        if (provisioning === undefined) {
+          provisioning = tmuxAdapter.provision(selected, windowName).finally(() => tmuxProvisionals.delete(provisionKey));
+          tmuxProvisionals.set(provisionKey, provisioning);
+        }
+        await provisioning;
+        // The launcher supplies the ID it actually puts in Pi's command. Retain it only
+        // after tmux confirms the window exists, so lifecycle operations have one authority.
+        if (requestedSessionId !== undefined) piSessionIdByTmuxSession.set(provisionKey, requestedSessionId);
+        if (body?.directive !== undefined && body.directive !== null) {
+          const directiveBody = typeof body.directive === "string" ? body.directive : body.directive.body;
+          if (typeof directiveBody !== "string") throw new HttpRequestError(400, "invalid_request");
+          await tmuxAdapter.sendKeys(selected, windowName, directiveBody, typeof body.directive === "string" ? undefined : body.directive.subject);
+        }
+        sendHttpJson(response, 201, {
+          session: { name: windowName, selected: true },
+          ...(piSessionIdByTmuxSession.has(provisionKey) ? { session_id: piSessionIdByTmuxSession.get(provisionKey) } : {}),
+          selected_session: selectedTmuxSession,
+        });
+      } else if (request.method === "DELETE" && name !== undefined && action === undefined) {
+        if (selectedTmuxSession === undefined) throw new HttpRequestError(404, "tmux_unavailable");
+        await tmuxAdapter.remove(selectedTmuxSession, name);
+        piSessionIdByTmuxSession.delete(tmuxWindowKey(selectedTmuxSession, name));
+        response.writeHead(204, { "cache-control": "no-store" }); response.end();
+      } else if ((request.method === "PATCH" || (request.method === "POST" && action === "rename")) && name !== undefined) {
+        const body = await readJsonRequest(request, maxRequestBytes); const nextName = tmuxSessionName(body?.name ?? body?.new_name);
+        if (nextName === undefined) throw new HttpRequestError(400, "tmux_invalid_name");
+        if (selectedTmuxSession === undefined) throw new HttpRequestError(404, "tmux_unavailable");
+        await tmuxAdapter.rename(selectedTmuxSession, name, nextName);
+        const oldKey = tmuxWindowKey(selectedTmuxSession, name);
+        const nextKey = tmuxWindowKey(selectedTmuxSession, nextName);
+        if (piSessionIdByTmuxSession.has(oldKey)) { piSessionIdByTmuxSession.set(nextKey, piSessionIdByTmuxSession.get(oldKey)); piSessionIdByTmuxSession.delete(oldKey); }
+        await tmuxAdapter.sendKeys(selectedTmuxSession, nextName, JSON.stringify({ type: "tmux_window_renamed", old_name: name, new_name: nextName }), "router.tmux.window-renamed.v1");
+        emit("tmux_window_renamed", { session: selectedTmuxSession, old_name: name, new_name: nextName });
+        sendHttpJson(response, 200, { session: { name: nextName }, selected_session: selectedTmuxSession });
+      } else if (request.method === "POST" && name !== undefined && action !== undefined) {
+        const body = await readJsonRequest(request, maxRequestBytes);
+        const windowKey = selectedTmuxSession === undefined ? undefined : tmuxWindowKey(selectedTmuxSession, name);
+        let result;
+        if (action === "keys") {
+          const keys = body?.keys ?? body?.text;
+          if (typeof keys !== "string" || keys.length === 0) throw new HttpRequestError(400, "invalid_request");
+          if (selectedTmuxSession === undefined) throw new HttpRequestError(404, "tmux_unavailable");
+          await tmuxAdapter.sendKeys(selectedTmuxSession, name, keys);
+        }
+        else {
+          if (selectedTmuxSession === undefined) throw new HttpRequestError(404, "tmux_unavailable");
+          const requestedSessionId = piSessionIdByTmuxSession.get(windowKey)
+            ?? (action === "start" ? body?.session_id : undefined);
+          if (action === "resume" && (typeof requestedSessionId !== "string" || requestedSessionId.length === 0)) {
+            throw new HttpRequestError(400, "invalid_request");
+          }
+          if (selectedTmuxSession === undefined) throw new HttpRequestError(404, "tmux_unavailable");
+          result = await tmuxAdapter[action](selectedTmuxSession, name, requestedSessionId);
+          // The adapter owns the external tmux operation. Do not report or retain
+          // an ID until it confirms that operation completed for that ID.
+          if (typeof result?.session_id === "string" && result.session_id.length > 0) {
+            piSessionIdByTmuxSession.set(windowKey, result.session_id);
+          }
+        }
+        sendHttpJson(response, 200, { session: { name }, action, ...(result?.state === undefined ? {} : { state: result.state }), ...(piSessionIdByTmuxSession.has(windowKey) ? { session_id: piSessionIdByTmuxSession.get(windowKey) } : {}), selected_session: selectedTmuxSession });
+      } else { sendHttpError(response, 404, "not_found"); }
+    } catch (error) {
+      if (error instanceof HttpRequestError) sendHttpError(response, error.statusCode, error.code);
+      else if (error?.statusCode === 404) sendHttpError(response, 404, "tmux_unavailable");
+      else { emit("router_error", { error_code: "tmux_operation_failed" }); sendHttpError(response, 500, "tmux_operation_failed"); }
+    }
+    return true;
   };
 
   function sweepMessageLifecycles() {
@@ -2366,13 +2523,13 @@ export function createAgentRouter({
 
   async function handleHttpRequest(request, response) {
     const requestUrl = new URL(request.url ?? "/", "http://router.local");
-    if (request.headers.origin !== undefined && !isBrowserCorsRoute(request.method, requestUrl.pathname)) {
-      sendHttpError(response, 403, "browser_origin_rejected");
-      return;
-    }
-    if (isBrowserCorsRoute(request.method, requestUrl.pathname)) applyCorsHeaders(response);
+    const correlationId = request.headers["x-correlation-id"] ?? request.headers["x-request-id"] ?? generateFrameId();
+    response.setHeader("x-correlation-id", correlationId);
+    // The router has no browser authentication boundary. Accept browser-origin
+    // requests on every API route and expose the same no-credential CORS policy.
+    if (request.headers.origin !== undefined) applyCorsHeaders(response);
     if (request.method === "OPTIONS") {
-      if (isBrowserCorsRoute(request.method, requestUrl.pathname)) {
+      if (request.headers.origin !== undefined) {
         response.writeHead(204, { "cache-control": "no-store" });
         response.end();
       } else {
@@ -2380,6 +2537,7 @@ export function createAgentRouter({
       }
       return;
     }
+    if (await handleTmuxRequest(request, response, requestUrl)) return;
     if (request.method === "GET" && requestUrl.pathname === "/v1/health") {
       sendHttpJson(response, 200, {
         status: "ok",
@@ -3162,12 +3320,6 @@ function sendHttpJson(response, statusCode, payload, headers = {}) {
 
 function applyCorsHeaders(response) {
   for (const [header, value] of Object.entries(CORS_HEADERS)) response.setHeader(header, value);
-}
-
-function isBrowserCorsRoute(method, pathname) {
-  if (method === "OPTIONS") return ["/v1/messages", "/v1/health"].includes(pathname);
-  return (method === "GET" && pathname === "/v1/health")
-    || (method === "POST" && pathname === "/v1/messages");
 }
 
 function sendHttpError(response, statusCode, code, headers = {}) {

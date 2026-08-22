@@ -13,6 +13,12 @@ Skills live under `.claude/skills/<name>/SKILL.md` with optional `tools/` and su
 
 This repo is the home for non-review developer workflow skills.
 
+## Router authority contract
+
+The Mailbox router accepts arbitrary `Host` header authorities after it has bound to its configured listen address. Its HTTP API accepts requests with any browser `Origin`, including preflight requests, and returns the existing wildcard, no-credential CORS headers. Its `/v1/agents` WebSocket accepts any browser `Origin` and any `Host` authority. These are transport decisions, not authentication: the router remains a trusted local development service.
+
+The separate browser UI keeps its existing boundary. It accepts loopback or its configured allowed host, serves the UI only for those hosts, and accepts `/ui/events` only for the matching same-origin HTTP(S) origin. The UI's REST relay continues to forward the request to the router without changing that boundary.
+
 ## Managed worker runtime
 
 `worker_launch.py` uses a machine-local default runtime from `~/.mecha-developer/worker-runtime.json` (or `MECHA_WORKER_RUNTIME_CONFIG`) with this shape:

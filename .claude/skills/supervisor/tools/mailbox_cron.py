@@ -25,12 +25,27 @@ import json
 import logging
 import os
 import sys
+import time
 import fcntl
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _tmux import send_text_and_enter, window_exists
+from _tmux_rest import TmuxRestClient
+
+
+def window_exists(window):
+    return TmuxRestClient().exists(window)
+
+
+def send_text_and_enter(window, text):
+    client = TmuxRestClient()
+    client.keys(window, "\x1b[200~")
+    client.keys(window, text)
+    client.keys(window, "\x1b[201~")
+    time.sleep(5 if len(text) > 500 else 5)
+    # REST keys are literal terminal input; CR sends the submit byte.
+    client.keys(window, "\r")
 
 
 MAILBOX_DIR = os.environ.get(

@@ -8,6 +8,7 @@ import { rotateSizeCappedLog } from "../../../../harness/log_rotation.js";
 import { createMailboxClient, assertAgentId, assertPresenceAgentId, routerHttpUrl } from "../../../../pi-extensions/mailbox-client.js";
 import { createActivityTailer } from "./activity_tail.mjs";
 import { createActivityState } from "./activity_state.mjs";
+import { createTmuxRestClient } from "../../../../harness/tmux-rest-client.js";
 
 export const DEFAULT_LOG_DIR = "~/.mecha-developer/claude-sidecars";
 export const DEFAULT_MAX_LOG_BYTES = 256 * 1024;
@@ -177,10 +178,10 @@ function assertTmuxWindowExists({ tmux, session, window }) {
   tmux(["display-message", "-p", "-t", `${session}:${window}`, "#{pane_id}"]);
 }
 
-export function createTmuxInjector({ tmux = (args) => execFileSync("tmux", args, { stdio: "ignore" }), session = "mecha", enterDelayMs = 5_000, sleep = sleepSync } = {}) {
+export function createTmuxInjector({ tmux, tmuxRest = createTmuxRestClient(), session = "mecha", enterDelayMs = 5_000, sleep = sleepSync } = {}) {
   if (!Number.isSafeInteger(enterDelayMs) || enterDelayMs < 0) throw new TypeError("enterDelayMs must be a non-negative safe integer");
   if (typeof sleep !== "function") throw new TypeError("sleep must be a function");
-  return function inject({ window, text }) {
+  if (typeof tmux === "function") return function inject({ window, text }) {
     assertAgentId(window);
     try {
       assertTmuxWindowExists({ tmux, session, window });
@@ -188,10 +189,21 @@ export function createTmuxInjector({ tmux = (args) => execFileSync("tmux", args,
       tmux(["send-keys", "-l", "-t", `${session}:${window}`, text]);
       tmux(["send-keys", "-t", `${session}:${window}`, "\x1b[201~"]);
       sleep(enterDelayMs);
-      tmux(["send-keys", "-t", `${session}:${window}`, "Enter"]);
-    } catch {
-      throw new Error("tmux_injection_failed");
-    }
+      tmux(["send-keys", "-t", `${session}:${window}`, "\r"]);
+    } catch { throw new Error("tmux_injection_failed"); }
+  };
+  return async function inject({ window, text }) {
+    assertAgentId(window);
+    try {
+      const result = await tmuxRest.list();
+      if (!Array.isArray(result?.windows) || !result.windows.some((item) => item?.name === window)) throw new Error("tmux_unavailable");
+      await tmuxRest.keys(window, "\x1b[200~");
+      await tmuxRest.keys(window, text);
+      await tmuxRest.keys(window, "\x1b[201~");
+      await new Promise((resolve) => setTimeout(resolve, enterDelayMs));
+      // REST keys are literal terminal input; CR preserves Enter/submit semantics.
+      await tmuxRest.keys(window, "\r");
+    } catch { throw new Error("tmux_injection_failed"); }
   };
 }
 
@@ -292,7 +304,7 @@ export function createClaudeSidecar({ agentId, window = agentId, client, inject,
     log("delivery_received", { message_id: message.id, attempt: delivery.attemptNumber, from: message.from, to: message.to });
     client.sendReceipt("injection_requested", delivery);
     const text = claudeMailboxPrompt(message);
-    inject({ window, text });
+    await inject({ window, text });
     client.sendReceipt("ack", delivery);
     log("delivery_acked", { message_id: message.id, attempt: delivery.attemptNumber });
   }
@@ -437,7 +449,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     agentId: args.agentId,
     window: args.window,
     client,
-    inject: createTmuxInjector(),
+    inject: createTmuxInjector({ tmuxRest: createTmuxRestClient({ routerUrl: args.routerUrl }) }),
     log: (event, fields) => logger.write(event, fields),
   });
   const state = createActivityState();

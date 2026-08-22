@@ -18,7 +18,7 @@ SOURCE = Path(__file__).resolve().parents[4] / "pi-extensions" / "mecha-messagin
 SUPERVISOR_TOOLS_SOURCE = Path(__file__).resolve().parent
 TARGET = Path.home() / ".mecha-developer" / "extensions" / "mecha-messaging.js"
 SETTINGS = Path.home() / ".pi" / "agent" / "settings.json"
-EXTENSION_MODULES = ("mailbox-client.js", "memory-capture.js", "operational-tools.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
+EXTENSION_MODULES = ("goal.js", "mailbox-client.js", "memory-capture.js", "operational-tools.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
 OPERATIONAL_TOOL_SCRIPTS = (
     "git_task_status.py",
     "mailbox_send.py",
@@ -39,10 +39,11 @@ OPERATIONAL_TOOL_MODULES = (
     "_sidecar.py",
     "_state.py",
     "_tmux.py",
+    "_tmux_rest.py",
     "worker_runtime_config.py",
 )
 SUPERVISOR_TOOL_JAVASCRIPT = ("claude_sidecar.mjs", "activity_tail.mjs", "activity_state.mjs")
-SIDECAR_HARNESS_MODULES = ("cli_entrypoint.js", "log_rotation.js")
+SIDECAR_HARNESS_MODULES = ("cli_entrypoint.js", "log_rotation.js", "tmux-rest-client.js")
 SIDECAR_EXTENSION_MODULES = ("mailbox-client.js",)
 REGISTERED_EXTENSIONS = (TARGET,)
 PYTHON_STANDARD_MODULES = frozenset({

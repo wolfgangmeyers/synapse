@@ -1,15 +1,53 @@
 #!/usr/bin/env node
 
+import { execFile } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { dirname, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import { DEFAULT_MAX_BATCH_BODY_CHARS, openMessageRepository } from "../harness/db.js";
 import { openMemoryCatalog } from "../harness/memory-catalog.js";
 import { createJsonlLogger } from "../harness/jsonl_logger.js";
 import { createAgentRouter } from "../harness/router.js";
+
+const execFileAsync = promisify(execFile);
+const STARTUP_WINDOW = process.env.MECHA_ROUTER_TMUX_WINDOW ?? "supervisor";
+const STARTUP_DIRECTIVE = Object.freeze({
+  subject: "router.startup.directive.v1",
+  body: "Load the mailbox and reminder skills, assess the current situation, and set up the sweep reminder.",
+});
+
+export async function ensureStartupTmux({ session: requestedSession, window: requestedWindow, run = execFileAsync } = {}) {
+  // `mecha` is the startup default, not a required exact session name. Other
+  // explicitly requested sessions retain their exact-session behavior.
+  if (requestedSession !== undefined && requestedSession !== "mecha") {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(requestedSession) || !/^[A-Za-z0-9._-]{1,64}$/.test(requestedWindow ?? "supervisor")) throw new Error("startup tmux session and window names are invalid");
+    try { await run("tmux", ["has-session", "-t", requestedSession]); }
+    catch (error) {
+      if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
+      await run("tmux", ["new-session", "-d", "-s", requestedSession, "-n", requestedWindow ?? "supervisor"]);
+      return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: true, createdWindow: true };
+    }
+    return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: false, createdWindow: false };
+  }
+  let output;
+  try {
+    ({ stdout: output } = await run("tmux", ["list-sessions", "-F", "#{session_name}"]));
+  } catch (error) {
+    if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
+    output = "";
+  }
+  const sessions = output.trim() === "" ? [] : output.trim().split("\n");
+  const session = sessions.find((candidate) => candidate.includes("mecha")) ?? "mecha";
+  if (session === "mecha" && !sessions.includes("mecha")) {
+    await run("tmux", ["new-session", "-d", "-s", "mecha", "-n", "supervisor"]);
+    return { session: "mecha", window: "supervisor", createdSession: true, createdWindow: true };
+  }
+  return { session, window: "supervisor", createdSession: false, createdWindow: false };
+}
 
 const ALLOWED_HOSTS = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
 
@@ -92,6 +130,10 @@ export async function startRouter({
       port,
       eventLogger,
       imageAttachmentDirectory: `${database}.attachments`,
+      startupSession: undefined,
+      startupWindow: STARTUP_WINDOW,
+      startupProvision: true,
+      supervisorDirective: STARTUP_DIRECTIVE,
     });
     const websocketUrl = await router.listen();
     const httpUrl = websocketUrl.replace(/^ws:/, "http:").replace(/\/v1\/agents$/, "");

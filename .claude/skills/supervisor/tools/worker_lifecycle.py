@@ -17,7 +17,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _state as state_store
 from _sidecar import ProcessTableUnavailable, find_sidecar_pids
-from _tmux import AGENT_ID, window_exists
+from _tmux import AGENT_ID
+from _tmux_rest import TmuxRestClient
 
 TOOLS_DIR = os.path.dirname(os.path.realpath(__file__))
 WORKER_LAUNCH = os.path.join(TOOLS_DIR, "worker_launch.py")
@@ -79,6 +80,10 @@ def run_script(script, arguments):
     if result.returncode != 0:
         raise LifecycleError(script_failure(result))
     return result
+
+
+def window_exists(window):
+    return TmuxRestClient().exists(window)
 
 
 def active_identity(window):

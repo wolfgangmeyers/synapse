@@ -4,6 +4,7 @@ import WebSocket from "ws";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 
 import { openMessageRepository } from "../harness/db.js";
@@ -82,7 +83,7 @@ test("router constructor rejects hosts outside the explicit allowlist", async (t
   }
 });
 
-test("router HTTP requests accept arbitrary Host authorities while rejecting browser origins", async (t) => {
+test("router HTTP requests accept arbitrary Host authorities and browser origins", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "router-host-request-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
@@ -96,13 +97,15 @@ test("router HTTP requests accept arbitrary Host authorities while rejecting bro
     assert.equal(await requestWithHost(httpUrl, host), 200, `expected ${host} to be accepted`);
   }
 
-  const originRejected = await fetch(httpUrl.replace("/v1/health", "/v1/agents"), {
-    headers: { host: arbitraryAuthorities.at(-1), origin: "https://untrusted.example" },
+  const randomOrigin = `https://${randomUUID()}.example`;
+  const originAccepted = await fetch(httpUrl.replace("/v1/health", "/v1/agents"), {
+    headers: { host: arbitraryAuthorities.at(-1), origin: randomOrigin },
   });
-  assert.equal(originRejected.status, 403);
+  assert.equal(originAccepted.status, 200);
+  assert.equal(originAccepted.headers.get("access-control-allow-origin"), "*");
 });
 
-test("router WebSocket upgrades accept arbitrary Host authorities while rejecting browser origins", async (t) => {
+test("router WebSocket upgrades accept arbitrary Host authorities and browser origins", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "router-host-websocket-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
@@ -120,17 +123,16 @@ test("router WebSocket upgrades accept arbitrary Host authorities while rejectin
     });
   }
 
-  const rejected = (options) => new Promise((resolve, reject) => {
-    const socket = new WebSocket(websocketUrl, options);
-    socket.once("unexpected-response", (_request, response) => resolve(response.statusCode));
-    socket.once("open", () => reject(new Error("rejected WebSocket unexpectedly opened")));
-    socket.once("error", () => {});
-  });
-
-  assert.equal(await rejected({
+  const randomOrigin = `https://${randomUUID()}.example`;
+  const browserOrigin = new WebSocket(websocketUrl, {
     headers: { host: arbitraryAuthorities.at(-1) },
-    origin: "https://untrusted.example",
-  }), 403);
+    origin: randomOrigin,
+  });
+  t.after(() => browserOrigin.close());
+  await new Promise((resolve, reject) => {
+    browserOrigin.once("open", resolve);
+    browserOrigin.once("error", reject);
+  });
 });
 
 test("router listens on the LAN wildcard without changing the listen path", async (t) => {

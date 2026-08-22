@@ -15,7 +15,17 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _tmux import session_exists, list_windows
+from _tmux_rest import TmuxRestClient
+
+
+def list_windows():
+    windows = TmuxRestClient().list()
+    return [(str(index), window.get("name")) for index, window in enumerate(windows)
+            if isinstance(window, dict) and isinstance(window.get("name"), str)]
+
+
+def session_exists():
+    return bool(TmuxRestClient().list())
 
 
 def main():

@@ -10,7 +10,8 @@ import sys
 from typing import Iterable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _tmux import capture_pane, list_windows, window_exists  # noqa: E402
+from _tmux import capture_pane  # noqa: E402
+from _tmux_rest import TmuxRestClient  # noqa: E402
 
 NOISE_PATTERNS = [
     re.compile(r"^\s*$"),
@@ -50,7 +51,7 @@ def state_hint(lines: Iterable[str]) -> str:
 
 
 def known_windows() -> list[str]:
-    return [name for _, name in list_windows()]
+    return [window["name"] for window in TmuxRestClient().list() if isinstance(window, dict) and isinstance(window.get("name"), str)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, window in enumerate(windows):
         if index:
             print()
-        if not window_exists(window):
+        if not TmuxRestClient().exists(window):
             print(f"## {window}\nmissing window")
             exit_code = 1
             continue

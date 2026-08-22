@@ -21,7 +21,22 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _state import load_state, find_task_by_window
-from _tmux import current_agent_id, send_text_and_enter, window_exists, window_idle_seconds
+from _tmux import current_agent_id, window_idle_seconds
+from _tmux_rest import TmuxRestClient
+
+
+def window_exists(window):
+    return TmuxRestClient().exists(window)
+
+
+def send_text_and_enter(window, text):
+    client = TmuxRestClient()
+    client.keys(window, "\x1b[200~")
+    client.keys(window, text)
+    client.keys(window, "\x1b[201~")
+    time.sleep(5)
+    # REST keys are literal terminal input; CR preserves Enter/submit semantics.
+    client.keys(window, "\r")
 
 SUPERVISOR_WINDOW = os.environ.get("MECHA_SUPERVISOR_WINDOW", "supervisor")
 SUPERVISOR_MIN_IDLE = 30  # seconds — only notify if supervisor has been quiet this long

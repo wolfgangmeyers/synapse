@@ -102,6 +102,15 @@
 
       <div id="saved-routers" class="saved-routers"></div>
 
+      <section class="router-management" aria-labelledby="router-management-title">
+        <h3 id="router-management-title">Tmux windows</h3>
+        <div class="router-management-actions">
+          <button id="enumerate-tmux-windows" type="button" class="secondary">Refresh windows</button>
+          <button id="provision-tmux-window" type="button">Provision window</button>
+        </div>
+        <div id="tmux-windows" class="managed-routers" aria-live="polite"></div>
+      </section>
+
       <section id="router-setup" class="router-setup" hidden>
         <h3 id="router-form-title">Add router</h3>
         <label>Hostname or URL
