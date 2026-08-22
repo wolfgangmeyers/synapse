@@ -63,6 +63,36 @@ test("router update reminder enqueues only a concise skill pointer", async (t) =
   assert.equal(delivered.body, result.message.body);
 });
 
+test("router installs the required two-hour supervisor advisory timer", async (t) => {
+  const { repository, router } = await withRouter(t);
+  const originalSetInterval = globalThis.setInterval;
+  const intervals = [];
+  globalThis.setInterval = (callback, intervalMs) => {
+    const timer = { callback, intervalMs, unref() {} };
+    intervals.push(timer);
+    return timer;
+  };
+  t.after(() => {
+    globalThis.setInterval = originalSetInterval;
+  });
+
+  await router.listen();
+
+  const reminderTimer = intervals.find(({ intervalMs }) => intervalMs === 2 * 60 * 60 * 1000);
+  assert.ok(reminderTimer, "expected the supervisor advisory timer to be installed");
+  reminderTimer.callback();
+
+  const message = claimSupervisorMessage(repository);
+  assert.ok(message, "expected the advisory timer to enqueue a reminder");
+  assert.equal(message.from, "router-update-reminder");
+  assert.equal(message.to, "supervisor");
+  assert.equal(message.subject, "Check mecha-developer updates");
+  assert.equal(
+    message.body,
+    'mecha-developer update check reminder:\n\nCheck whether /Users/wolfgang/code/mecha-developer has upstream changes available. Follow the supervisor skill section "mecha-developer update reminder"; this router reminder is advisory only.',
+  );
+});
+
 test("router schedules the canned update reminder without needing git access", async (t) => {
   const { repository, router } = await withRouter(t, { mechaDeveloperUpdateReminderIntervalMs: 25 });
   await router.listen();
