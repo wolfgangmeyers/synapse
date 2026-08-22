@@ -122,7 +122,7 @@ function positiveSafeInteger(value) {
 
 function normalizeGoalControlSettings(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const expected = [
+  const required = [
     "goalLockEnabled",
     "snoozeEnabled",
     "snoozeDurationMs",
@@ -131,7 +131,11 @@ function normalizeGoalControlSettings(value) {
     "snoozeRefillYieldMs",
     "snoozeRefillElapsedMs",
   ];
-  if (Object.keys(value).length !== expected.length || expected.some((key) => !Object.hasOwn(value, key))) return undefined;
+  const allowed = [...required, "blocking"];
+  if (Object.keys(value).some((key) => !allowed.includes(key))
+    || required.some((key) => !Object.hasOwn(value, key))) return undefined;
+  const blocking = !Object.hasOwn(value, "blocking") || value.blocking === true;
+  if (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean") return undefined;
   const snoozeTurnLimit = value.snoozeTurnLimit === null ? undefined : parseSnoozeTurnLimit(String(value.snoozeTurnLimit));
   const snoozeBudgetCapMs = value.snoozeBudgetCapMs === null ? undefined : positiveSafeInteger(value.snoozeBudgetCapMs);
   if (typeof value.goalLockEnabled !== "boolean" || typeof value.snoozeEnabled !== "boolean"
@@ -141,6 +145,7 @@ function normalizeGoalControlSettings(value) {
     || positiveSafeInteger(value.snoozeRefillYieldMs) === undefined
     || positiveSafeInteger(value.snoozeRefillElapsedMs) === undefined) return undefined;
   return {
+    blocking,
     goalLockEnabled: value.goalLockEnabled,
     snoozeEnabled: value.snoozeEnabled,
     snoozeDurationMs: value.snoozeDurationMs,
@@ -158,6 +163,7 @@ function restoreState(ctx) {
     notDoneWakeups: 0,
     blockedWakeups: 0,
     completedThings: 0,
+    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: DEFAULT_SNOOZE_DURATION_MS,
@@ -186,6 +192,7 @@ function restoreState(ctx) {
       completedThings: Number.isInteger(data.completedThings) && data.completedThings >= 0
         ? data.completedThings % COMPLETIONS_TO_RESET_WAKEUPS
         : 0,
+      blocking: typeof data.blocking === "boolean" ? data.blocking : true,
       goalLockEnabled: data.goalLockEnabled === true,
       snoozeEnabled: !Object.hasOwn(data, "snoozeEnabled") || data.snoozeEnabled === true,
       snoozeDurationMs: positiveSafeInteger(data.snoozeDurationMs) ?? DEFAULT_SNOOZE_DURATION_MS,
@@ -300,6 +307,7 @@ function waitingAuthorizationWakeup(goal, attempt) {
 }
 
 const supervisorBlockedWakeup = "Goal check: BLOCKED. CONTACT OR BUG THE SUPERVISOR NOW TO GET UNBLOCKED. A special automatic 5-minute wait is starting. I will wake you after 5 minutes to prompt you to contact the supervisor again.";
+const nonBlockingBlockedWakeup = "Goal check: BLOCKED. Continue with the next concrete action and report what is needed.";
 
 function responseOutcome(response) {
   return responseEvaluation(response).outcome;
@@ -366,6 +374,7 @@ export function createGoalExtension(pi, options = {}) {
   let blockedWakeups = 0;
   let waitingAuthWakeups = 0;
   let completedThings = 0;
+  let blocking = true;
   let goalLockEnabled = false;
   let completedOffAllowance = false;
   let snoozeEnabled = true;
@@ -485,6 +494,7 @@ export function createGoalExtension(pi, options = {}) {
 
   const goalControlState = () => ({
     ...goalProjection(state),
+    blocking,
     goalLockEnabled,
     snoozeEnabled,
     snoozeDurationMs,
@@ -499,6 +509,7 @@ export function createGoalExtension(pi, options = {}) {
     notDoneWakeups,
     blockedWakeups,
     completedThings,
+    blocking,
     goalLockEnabled,
     snoozeEnabled,
     snoozeDurationMs,
@@ -818,6 +829,7 @@ export function createGoalExtension(pi, options = {}) {
     }
     const applySettings = () => {
       const budgetChanged = snoozeBudgetCapMs !== settings.snoozeBudgetCapMs;
+      blocking = settings.blocking;
       goalLockEnabled = settings.goalLockEnabled;
       snoozeEnabled = settings.snoozeEnabled;
       snoozeDurationMs = settings.snoozeDurationMs;
@@ -914,7 +926,7 @@ export function createGoalExtension(pi, options = {}) {
             return notDoneWakeup(goal, notDoneWakeups);
           })()
           : outcome === "BLOCKED"
-            ? supervisorBlockedWakeup
+            ? (blocking ? supervisorBlockedWakeup : nonBlockingBlockedWakeup)
             : outcome === "WAITING_FOR_USER_AUTHORIZATION"
               ? (() => {
                 waitingAuthWakeups += 1;
@@ -926,7 +938,9 @@ export function createGoalExtension(pi, options = {}) {
           ? () => {
             blockedWakeups += 1;
             persist();
-            const cancelWait = scheduleSupervisorWakeup(event, goal, ctx, runGeneration);
+            const cancelWait = blocking
+              ? scheduleSupervisorWakeup(event, goal, ctx, runGeneration)
+              : undefined;
             return () => {
               cancelWait?.();
               blockedWakeups = Math.max(0, blockedWakeups - 1);
@@ -996,6 +1010,7 @@ export function createGoalExtension(pi, options = {}) {
     blockedWakeups = restored.blockedWakeups;
     waitingAuthWakeups = 0;
     completedThings = restored.completedThings;
+    blocking = restored.blocking;
     goalLockEnabled = restored.goalLockEnabled;
     completedOffAllowance = false;
     snoozeEnabled = restored.snoozeEnabled;

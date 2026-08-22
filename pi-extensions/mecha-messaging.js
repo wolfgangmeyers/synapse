@@ -55,6 +55,7 @@ function defaultGoalControlState() {
   return {
     enabled: false,
     goal: "",
+    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -70,6 +71,7 @@ function normalizeGoalControlState(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const projection = normalizeGoalProjection(value);
   if (projection === undefined
+    || (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean")
     || typeof value.goalLockEnabled !== "boolean"
     || typeof value.snoozeEnabled !== "boolean"
     || !Number.isSafeInteger(value.snoozeDurationMs) || value.snoozeDurationMs <= 0
@@ -87,6 +89,7 @@ function normalizeGoalControlState(value) {
   }
   return {
     ...projection,
+    blocking: value.blocking !== false,
     goalLockEnabled: value.goalLockEnabled,
     snoozeEnabled: value.snoozeEnabled,
     snoozeDurationMs: value.snoozeDurationMs,
