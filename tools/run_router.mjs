@@ -20,7 +20,12 @@ const STARTUP_DIRECTIVE = Object.freeze({
   body: "Load the mailbox and reminder skills, assess the current situation, and set up the sweep reminder.",
 });
 
-export async function ensureStartupTmux({ session: requestedSession, window: requestedWindow, run = execFileAsync } = {}) {
+export async function ensureStartupTmux({
+  session: requestedSession,
+  window: requestedWindow,
+  env = process.env,
+  run = execFileAsync,
+} = {}) {
   // `mecha` is the startup default, not a required exact session name. Other
   // explicitly requested sessions retain their exact-session behavior.
   if (requestedSession !== undefined && requestedSession !== "mecha") {
@@ -32,6 +37,20 @@ export async function ensureStartupTmux({ session: requestedSession, window: req
       return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: true, createdWindow: true };
     }
     return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: false, createdWindow: false };
+  }
+  if (typeof env?.TMUX === "string" && env.TMUX !== "") {
+    const currentSessionArgs = ["display-message", "-p"];
+    if (/^%\d+$/.test(env.TMUX_PANE ?? "")) currentSessionArgs.push("-t", env.TMUX_PANE);
+    currentSessionArgs.push("#{session_name}");
+    try {
+      const { stdout } = await run("tmux", currentSessionArgs);
+      const currentSession = stdout.trim();
+      if (/^[A-Za-z0-9._-]{1,64}$/.test(currentSession)) {
+        return { session: currentSession, window: "supervisor", createdSession: false, createdWindow: false };
+      }
+    } catch (error) {
+      if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
+    }
   }
   let output;
   try {
@@ -103,6 +122,7 @@ export async function startRouter({
   logPath,
   output = console.log,
   maxBatchChars = DEFAULT_MAX_BATCH_BODY_CHARS,
+  createRouter = createAgentRouter,
 } = {}) {
   if (typeof database !== "string" || database.length === 0) {
     throw new TypeError("database is required");
@@ -123,14 +143,15 @@ export async function startRouter({
     for (const migrationId of repository.migrationIds()) {
       eventLogger("schema_migration", { migration_id: migrationId });
     }
-    router = createAgentRouter({
+    const startupTmux = await ensureStartupTmux({ session: "mecha", window: STARTUP_WINDOW });
+    router = createRouter({
       repository,
       memoryCatalog,
       host,
       port,
       eventLogger,
       imageAttachmentDirectory: `${database}.attachments`,
-      startupSession: undefined,
+      startupSession: startupTmux.session,
       startupWindow: STARTUP_WINDOW,
       startupProvision: true,
       supervisorDirective: STARTUP_DIRECTIVE,
