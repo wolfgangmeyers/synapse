@@ -1,74 +1,110 @@
-# Worker Goal Visibility and Wakeup
+# Task 250: Android Goal-Control Parity
 
-## Behavior
+## Target
 
-- The WebUI agent list shows a distinct goal indicator for each worker that currently has an enabled goal, alongside the existing reminder indicator.
-- The indicator is a compact per-agent control in the agent name line, uses a flag/goal symbol with an accessible label, and is keyboard-activatable with Enter or Space. Activation opens the existing native dialog pattern, showing the worker identity and current goal text; Escape/close returns focus without selecting the row.
-- The existing reminder clock remains teal, and the new goal indicator is pink. Color is supplementary only: accessible labels, symbols, focus-visible styling, and dialog text remain understandable without color, and both treatments meet the existing surface contrast requirements.
-- Workers without an enabled goal do not show the indicator. Goal text is never rendered as HTML.
-- Goal state is refreshed from the router's live agent state. Initial snapshots, live updates, off transitions, and worker replacement clear stale goal text; an update for a new incarnation cannot inherit the previous worker's goal.
-- Setting or updating a goal persists the normalized goal first, then makes exactly one best-effort self-wakeup through the existing deferred `pi.sendMessage` wake mechanism with the current session as target. The wakeup tells the worker the goal was set and prompts it to begin work. `/goal off` does not self-wake. A set/update wakeup does not directly invoke the evaluator or create a second wakeup.
-- Existing `/goal status`, `/goal off`, goal evaluation, reminder behavior, mailbox delivery, and WebUI interactions remain unchanged outside this addition.
+Android must expose the same goal controls as the WebUI at local `origin/main` commit `999e2e0518bf9f66f56ae32287ae147b5bb17443`. Its full repository tree is `d8f671d1ed3e4b1a543b3efe4d95d39a0349bae3`; the WebUI subtree used for parity is `5d8e535c04951f393cc56fe0b340d95f2117d67a`. That WebUI is the source of truth for goal-control states, labels, actions, validation, and result handling.
 
-## Verified transport and ownership
+There is intentional WebUI source drift: Android `HEAD` `3deb7bd15206c0456cdb58719a525a4027d6dfd5` has WebUI tree `37b9b21fe76cb2638bec4b5929d7c343c629607b`, while `origin/main` has the editable source-target WebUI subtree `5d8e535c04951f393cc56fe0b340d95f2117d67a`. HEAD contains the older read-only goal dialog. Use `origin/main` for parity only. Leave all WebUI files untouched.
 
-The existing worker status transport is the Mailbox v2 activity frame emitted by `pi-extensions/mailbox-client.js::activity(activityState, { subagentCount, subagents })`. Its current payload is:
+The Android layout may use Android controls and adapt to narrow screens. It must not change the meaning or remove a WebUI control.
 
-```json
-{
-  "type": "activity",
-  "agent_id": "<worker>",
-  "instance_id": "<incarnation>",
-  "lease_id": "<lease>",
-  "activity_state": "active|settled|compacting",
-  "subagent_count": 0,
-  "subagents": []
-}
-```
+## Supervisor acceptance criteria
 
-The router projects this to the WebUI's `agent_activity` event with `agent`, `activityState`, `subagentCount`, and `subagents`, and includes the corresponding agent object in the initial `/v1/agents` snapshot. No existing goal channel or goal payload was found. The implementation adds one optional `goal` projection to the router's agent record and to activity updates:
+- Preserve PR #28 exactly as found: retain its current ancestry and head. The worker must not rebase, force-push, rewrite history, change the base, or change draft/ready state. The worker must not commit or push.
+- Keep the documented `origin/main` WebUI drift above. The exact error strings and category mapping come from that `origin/main` target, not Android `HEAD` or a paraphrase.
+- Implement the Android-only orbiting border animation in this lane. Do not change WebUI, router, or protocol files.
 
-```json
-{ "goal": { "enabled": true, "goal": "<text>" } }
-```
+## Current gap
 
-The `goal` key is owned by the goal extension; `mecha-messaging` only transports the latest projection. Disabled state is explicit and always clears text: `{ "goal": { "enabled": false, "goal": "" } }`. The router forwards this field in both the activity update and `/v1/agents` snapshot; the WebUI replaces the stored projection rather than merging stale goal text.
+Android receives the compact `goal` projection and shows an enabled-goal flag in a worker row. Its flag opens a read-only dialog. The Android conversation header has no goal button. It does not consume `agent_goal_state` or `goal_control_result`, send `goal_control`, retain a pending goal request, or expose the full goal editor.
 
-The neutral Pi EventBus (`pi.events.on(channel, handler)` / `pi.events.emit(channel, data)`) is the optional bridge. `goal.js` does not import or call `mecha-messaging.js`, access settings, or create a second router connection. `mecha-messaging.js` subscribes to the goal-state channel and adds the projection to its next activity frame. If Mailbox is absent or disconnected, the bridge is inert and goal lifecycle/evaluation/wakeup behavior still works unchanged.
+Android already renders activity, compacting, and subagent status. Keep those indicators and their state wiring unchanged. The working marker remains a solid teal 22dp marker in its existing slot; the new visual is a separate border animation.
 
-## Standalone, bootstrap, and ordering invariants
+## Required behavior
 
-- `goal.js` is fully functional with `mecha-messaging` absent: branch-local persistence, `/goal` commands/tool, evaluator scheduling, owner suppression, and self-wakeup behavior do not depend on a subscriber, a router, or settings. Emitting the optional status event with no listener is a no-op and must not throw.
-- The bridge uses a bounded in-process cache and request/replay handshake. The goal extension maintains its current normalized projection and listens for a neutral state-request event. On goal extension initialization it restores branch state and emits the current projection. A Mailbox subscriber requests the current projection immediately after subscribing; the goal extension replies with the cached projection. On every set/update/off/restore transition, the goal extension updates the cache before emitting. Thus a restored or set goal cannot disappear merely because either extension loaded first, and a newly attached subscriber receives the current enabled or explicit off state.
-- The handshake is source-level only: it does not alter Pi settings, extension registration, router configuration, or Mailbox connection behavior. It is best-effort UI publication; no UI state is treated as authoritative.
-- The goal set/update wake uses the existing deferred `pi.sendMessage` path with `{ deliverAs: "steer", triggerTurn: true }` and the current session as the implicit target. The message is scheduled after persistence; one set/update schedules one wake. If the current session is unavailable or `sendMessage` throws, the persisted goal remains and the command/tool reports the existing operation result; no evaluator call or retry loop is created. `/goal off` never schedules this wake.
+### Goal entry points
 
-## Data validation and incarnation rules
+- The selected worker's Android chat header has one icon-only flag. With no enabled goal it is muted and its accessible label is `Set goal for <worker>`. With an enabled goal it is pink and its label is `Edit goal for <worker>`. No selected worker leaves it disabled with `Select an agent to set a goal`.
+- An enabled worker row has the pink flag with the accessible label and title equivalent `Show goal for <worker>` / `Show goal`. It opens the same editor. A disabled or absent goal has no row flag.
+- Tapping any goal flag must not also select a worker, open a conversation, or invoke a neighboring control.
 
-- The source of truth remains the branch-local `goal-state` entry in `goal.js`.
-- The published projection is either enabled with normalized text or disabled with an empty string; arbitrary fields are ignored.
-- Goal text uses the existing `normalizeGoal` contract: string input, trim, and a maximum of 4,000 characters. The activity/client/router boundary accepts only an object with boolean `enabled` and string `goal` of at most 4,000 characters; unknown fields or malformed/oversized goal objects are rejected/ignored as a goal update without altering `activity_state`, `subagent_count`, or `subagents`.
-- The optional projection is stored as `agent.goal` in the router's agent record and carried as `goal` on activity updates. The goal extension owns its value; Mailbox owns transport; router owns validation and replacement semantics; WebUI owns presentation.
-- Every activity update carries the current `instance_id` through the router's existing lease/incarnation handling. A snapshot or update that replaces an agent must replace the full `agent.goal` projection; off, disconnect, and replacement clear it. Invalid goal input must not clobber a valid existing projection unless a valid explicit off projection arrives.
+### Editor
+
+The Android editor has the same title, labels, values, and actions as the WebUI:
+
+- `Goal` ON/OFF control.
+- `What should this agent work toward?` Markdown text input. It keeps the entered text, has a 4,000-character limit, and is disabled while Goal is OFF.
+- `Blocking` ON/OFF control.
+- `Goal lock` lock/unlock control.
+- `Snooze settings`: `Allow snoozing`; `Snooze duration (seconds)`; `Snooze turn limit (optional)` with a maximum of 20; `Snooze budget (minutes, optional)`; `Snooze refill yield (seconds)`; and `Snooze refill time (seconds)`.
+- The current `Outcomes: blocked …, completed …, not done …, waiting …` line.
+- `Cancel` and `Save` actions. The actions remain usable after the form scrolls on a small screen.
+
+`Cancel` closes without sending or changing confirmed state. Saving Goal OFF sends the typed `off` action and an empty goal. It is not a separate destructive action. Saving Goal ON requires nonblank trimmed goal text. Android must display the WebUI's user-facing messages for unavailable controls, unsupported blocking changes, invalid settings or goal, a timed-out control, a disconnected router, an unready target, and a rejected save. It shows `Saving…` while its own request is pending.
+
+### Router state and control contract
+
+The current router protocol is already the contract. Android must use it directly, with no WebUI relay or new endpoint:
+
+- Read the compact `goal` projection from `/v1/agents` and `agent_activity` for worker-list state.
+- Read full `goal_state` from `agent_goal_state` and `goal_control_result` for editor state and outcome counts.
+- Send a v1 `goal_control` frame using Android's active user-interaction lease, the selected target's current agent and instance IDs, a fresh control ID, the typed `set` or `off` action, and every existing settings field.
+- Accept a result only when all correlation fences match the pending Android request: the result `source_agent_id` equals Android's active `agentId`; the result `agent_id` and `instance_id` equal the captured target; the control ID matches; Android still has its active lease/session; and the result arrived on the current socket and connection generation. A replacement worker, reconnect, router switch, selection change, timeout, lease/session loss, or dialog close clears the pending request. Stale or replaced results cannot mutate confirmed state, compact state, draft state, or editor visibility.
+- On an accepted result, replace the target's full goal state, update its compact projection, close the editor, and let the row/header reflect the new state. On rejection, retain the draft and show the mapped error.
+- Preserve current instance fencing. A new worker incarnation must not inherit a previous full goal state, draft result, activity state, subagent list, model state, or goal flag.
+
+This feature requires a router that advertises `goal_control_v1` and a target worker with the existing goal-control support. Android sends no fallback command when either side lacks that support.
+
+### Activity indicators and border animation
+
+Keep the existing working, compacting, and subagent-count markers, including expanded subagent items, in the connected-worker list and chat header. Preserve their colors, labels, tap behavior, state meanings, and working-state wiring. The working marker remains a solid teal 22dp marker in its existing 26dp slot. Remove the working marker's radial pulse.
+
+When an agent is working, draw a separate roughly quarter-perimeter line segment around the agent list/card border and conversation header border. Move it continuously around the perimeter and fade both ends so it reads as a snake. The border must not replace or resize the old marker. It is active only for the existing working state.
 
 ## High-level design
 
-`goal.js` remains authoritative for persistence, normalization, evaluator lifecycle, and set/update/off behavior. It emits a neutral cached/request-replay Pi EventBus goal-state notification without importing the mailbox extension. `mecha-messaging.js` subscribes to that optional notification, retains the latest projection, and translates it into the optional activity payload without changing its existing lifecycle fields. The router validates/forwards the optional projection with existing agent snapshots and activity updates. The WebUI stores the projection per agent, renders the compact accessible indicator/dialog, and replaces state on each snapshot/update.
+Keep goal state and control ownership in `MainActivity.kt`, where Android already owns router frames, worker projections, dialog state, and model-control correlation.
+
+Add a validated full Android goal-state model alongside the existing compact `GoalProjection`. Normalize full state exactly enough to reject malformed values without erasing a valid state. Use the compact projection for list presence. Use the full state when available, otherwise construct the same WebUI defaults around the compact projection for the editor.
+
+Add a single Compose goal editor state for both entry points. It holds a local draft, target worker and instance, pending control identity, status text, and timeout. It sends the existing WebSocket frame only after the final lease, socket, target, and instance check succeeds. Android's existing model-control fencing is the pattern for correlation and reconnect cleanup.
+
+Render the new working border through one reusable Compose wrapper. Keep marker call sites separate so the wrapper cannot replace, resize, or change their semantics.
 
 ## Alternatives considered
 
-1. **Infer goals from conversation history.** This is ambiguous, stale, cannot reliably represent `/goal off`, and exposes more transcript data than the UI needs.
-2. **Poll each worker directly from the WebUI.** This adds a new per-worker request path, polling load, and race windows, and duplicates the router's existing snapshot/update lifecycle.
-3. **Create a separate goal WebSocket/API channel.** This adds another protocol and lifecycle to keep consistent with worker presence and incarnation state.
-4. **Publish a bounded optional projection through the existing activity path via a cached/request-replay neutral Pi EventBus (chosen).** This reuses the verified snapshot/update transport, supports initial load and live changes, keeps `goal.js` independent of Mailbox implementation, and preserves standalone behavior when no subscriber exists.
+1. Keep Android's read-only goal dialog. It cannot set, edit, turn off, lock, block, or configure snoozing.
+2. Send slash commands as mailbox messages. This bypasses the router's typed control protocol, desired-state replay, target-instance fence, and accepted-result contract.
+3. Add an Android-specific REST endpoint. The router already has a leased WebSocket control path. A second path would split validation and result behavior.
+4. Copy Web HTML or use a WebView. It would not match Android interaction patterns and would add a second client runtime.
+5. Replace the old working marker with the border animation. This loses the established marker and its placement.
+6. Change WebUI, router, protocol, or working-state transport. The border is an Android visual addition only.
 
-The chosen design keeps the extension authoritative while letting the existing Mailbox/router path remain the sole worker-status transport.
+Chosen approach: native Compose controls over the existing WebSocket contract, plus one reusable Android border-animation wrapper alongside the existing markers.
 
-## Acceptance tests
+## Non-goals
 
-- Goal extension standalone: with no EventBus subscriber, restore/set/update/off, evaluator scheduling, and self-wakeup behave as before; the optional emit does not throw or alter results.
-- Bootstrap/order: goal loaded before Mailbox, Mailbox loaded before goal, and a new subscriber after a restored/set/off state all converge to the current enabled or explicit off projection through cache plus request/replay; no state is lost between restore/set and subscription.
-- Goal extension wake: persistence is observable before one deferred `pi.sendMessage` call; set and update each produce exactly one self-wake, off produces none; self-wake failure leaves persisted state and produces no evaluator/duplicate wake.
-- Mailbox transport/router: goal projection is attached to activity frames, preserved in `agent_activity`, stored as `agent.goal` in `/v1/agents`, and cleared on valid off, disconnect, or replacement without changing existing activity fields; malformed, unknown, or oversized goal fields are ignored/rejected without clobbering valid goal or activity fields.
-- WebUI: initial goal projection renders the indicator; missing/disabled projection renders none; live set/update/off/replacement updates replace the row state; clicking and Enter/Space open the dialog with escaped goal text and accessible labeling; close/Escape works without selecting the row.
-- Regression: existing goal, mailbox activity, router snapshot/update, reminder, and WebUI tests continue to pass.
+- No WebUI, router, protocol, Pi extension, migration, permission, or branch-history change.
+- No WebUI, router, protocol, or working-state transport change for the border animation.
+- No new goal setting, evaluation, wakeup, blocking, snooze, or lock semantics.
+- No new Android role, router endpoint, local credential, or test-only production backdoor.
+- No redesign of the worker list, conversation page, reminders, model picker, or activity-state transport.
+- No committed screenshots, placeholder evidence, or claims that an emulator run occurred before it does.
+- No physical-device rollout. The existing API-35 emulator target is sufficient for this task.
+
+## Immutable target assumptions
+
+- `origin/main` at the commit and tree named above is the only WebUI comparison target. If the ref moves, re-read the new commit and revise this spec before implementation.
+- The documented HEAD-to-`origin/main` WebUI drift is expected. It is comparison input only. Web files stay untouched.
+- The current target owns `goal_control`, `goal_control_result`, `agent_goal_state`, `goal_control_v1`, and `goal_control_blocking_v1`. Task 250 consumes those contracts.
+- The target worker remains connected under the exact instance ID shown in discovery while a control is pending.
+- Goal text remains bounded to 4,000 characters. Existing positive-integer and optional-null snooze limits remain authoritative.
+- Before E2E, freshly verify live router ownership: the listener process, working directory, repository HEAD, and migration state through `019_goal_control_desired_state`. Do not call it a disposable router without that evidence.
+- The real emulator uses the documented Pixel 8 API-35 AVD, OpenJDK 17, and ADB reverse to the verified loopback router. Screenshot review covers the active WebUI-parity indicator.
+
+## Required validation and final guard
+
+- Error coverage must assert the exact, user-visible `origin/main` WebUI source strings and their Android mapping for unavailable controls, rejected saves, control timeout, router disconnect, and validation errors (blank/invalid goal and invalid settings). Tests must name the source literal for every category. Broad assertions such as "shows an error" do not meet this requirement.
+- Run the focused Android coverage command: `JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew :app:testDebugUnitTest :app:jacocoDebugUnitTestReport`. Tests must pass. Changed goal/state production lines need meaningful coverage with no blocking gaps; report uncovered changed branches and either cover them or record why they are unreachable.
+- Emulator evidence must record the AVD name, emulator process and device serial, installed application package and process, and the exact `adb reverse` mapping. It must also prove ownership of that runtime. Do not stop, reuse, alter, or claim another task's emulator or app runtime.
+- Before handoff, inspect the final Android-only diff for security and unrelated changes: `AndroidManifest.xml` exported components; cleartext/network configuration and permissions; goal text or identifiers in logs; and dependency changes. There must be no unrelated change or security regression in these areas.

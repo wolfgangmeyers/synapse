@@ -1,5 +1,6 @@
 package life.meyers.mecha
 
+import androidx.compose.ui.graphics.Color
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -167,6 +168,42 @@ class AgentFilterTest {
     }
 
     @Test
+    fun retiredInstanceFenceAcceptsFreshReplacementAndRejectsDelayedOldFrame() {
+        val fence = RetiredPeerInstanceTombstones(maxPeers = 4, maxInstancesPerPeer = 4)
+
+        assertEquals(PeerInstanceDecision.REPLACEMENT, fence.observe("worker", "instance-A", "instance-B"))
+        assertEquals(PeerInstanceDecision.ACCEPT, fence.observe("worker", "instance-B", "instance-B"))
+        assertEquals(PeerInstanceDecision.REJECT, fence.observe("worker", "instance-B", "instance-A"))
+    }
+
+    @Test
+    fun retiredInstanceFenceClearsOnPeerRemovalAndRouterReset() {
+        val fence = RetiredPeerInstanceTombstones(maxPeers = 4, maxInstancesPerPeer = 4)
+        fence.observe("worker", "instance-A", "instance-B")
+        assertEquals(1, fence.tombstoneCount())
+
+        fence.clearPeer("worker")
+        assertEquals(0, fence.tombstoneCount())
+        assertEquals(PeerInstanceDecision.REPLACEMENT, fence.observe("worker", "instance-B", "instance-A"))
+
+        fence.clear()
+        assertEquals(0, fence.tombstoneCount())
+        assertEquals(0, fence.peerCount())
+    }
+
+    @Test
+    fun retiredInstanceFencePrunesPerPeerTombstones() {
+        val fence = RetiredPeerInstanceTombstones(maxPeers = 2, maxInstancesPerPeer = 2)
+        fence.observe("worker", "A", "B")
+        fence.observe("worker", "B", "C")
+        fence.observe("worker", "C", "D")
+
+        assertEquals(2, fence.tombstoneCount())
+        assertEquals(1, fence.peerCount())
+        assertEquals(PeerInstanceDecision.REPLACEMENT, fence.observe("worker", "D", "A"))
+    }
+
+    @Test
     fun livePeerInstanceAcceptsBlankCurrentInstance() {
         assertTrue(acceptsLivePeerInstance("", ""))
     }
@@ -219,6 +256,57 @@ class AgentFilterTest {
         assertEquals(listOf(ModelSummary("openai", "gpt")), peer.availableModels)
         assertEquals(2, peer.modelCatalogTotalCount)
         assertEquals(true, peer.modelCatalogTruncated)
+    }
+
+    @Test
+    fun peerProjectionHydratesFullGoalStateAndDerivesItsCompactProjection() {
+        val peer = peerStatusFromJson(
+            "worker",
+            JSONObject()
+                .put("instance_id", "worker-instance")
+                .put(
+                    "goal_state",
+                    JSONObject()
+                        .put("enabled", true)
+                        .put("goal", "Complete the Android parity work")
+                        .put("blocking", false)
+                        .put("goal_lock_enabled", true)
+                        .put("snooze_enabled", false)
+                        .put("snooze_duration_ms", 90_000)
+                        .put("snooze_turn_limit", 12)
+                        .put("snooze_budget_cap_ms", 600_000)
+                        .put("snooze_refill_yield_ms", 45_000)
+                        .put("snooze_refill_elapsed_ms", 120_000)
+                        .put(
+                            "outcome_counts",
+                            JSONObject()
+                                .put("BLOCKED", 1)
+                                .put("COMPLETED", 2)
+                                .put("NOT_DONE", 3)
+                                .put("WAITING_FOR_USER_AUTHORIZATION", 4),
+                        ),
+                ),
+        )
+
+        val fullState = GoalState(
+            enabled = true,
+            goal = "Complete the Android parity work",
+            blocking = false,
+            goalLockEnabled = true,
+            snoozeEnabled = false,
+            snoozeDurationMs = 90_000,
+            snoozeTurnLimit = 12,
+            snoozeBudgetCapMs = 600_000,
+            snoozeRefillYieldMs = 45_000,
+            snoozeRefillElapsedMs = 120_000,
+            outcomeCounts = GoalOutcomeCounts(1, 2, 3, 4),
+        )
+        assertEquals(fullState, peer.goalState)
+        assertEquals(GoalProjection(true, fullState.goal), peer.goal)
+        assertEquals(1, peer.goalState?.outcomeCounts?.blocked)
+        assertEquals(2, peer.goalState?.outcomeCounts?.completed)
+        assertEquals(3, peer.goalState?.outcomeCounts?.notDone)
+        assertEquals(4, peer.goalState?.outcomeCounts?.waitingForUserAuthorization)
     }
 
     @Test
@@ -514,6 +602,46 @@ class AgentFilterTest {
     }
 
     @Test
+    fun replacementInstanceDoesNotInheritFullGoalStateModelOrSubagents() {
+        val previous = peerStatusFromJson(
+            "worker",
+            JSONObject()
+                .put("instance_id", "old-instance")
+                .put("subagent_count", 1)
+                .put("subagents", JSONArray().put(JSONObject().put("id", "old-child").put("description", "old work")))
+                .put("current_model", JSONObject().put("provider", "openai").put("id", "old-model"))
+                .put(
+                    "goal_state",
+                    JSONObject()
+                        .put("enabled", true)
+                        .put("goal", "old goal")
+                        .put("blocking", false)
+                        .put("goal_lock_enabled", true)
+                        .put("snooze_enabled", false)
+                        .put("snooze_duration_ms", 90_000)
+                        .put("snooze_turn_limit", 12)
+                        .put("snooze_budget_cap_ms", 600_000)
+                        .put("snooze_refill_yield_ms", 45_000)
+                        .put("snooze_refill_elapsed_ms", 120_000)
+                        .put("outcome_counts", JSONObject().put("BLOCKED", 1).put("COMPLETED", 2).put("NOT_DONE", 3).put("WAITING_FOR_USER_AUTHORIZATION", 4)),
+                ),
+        )
+
+        val replacement = peerStatusFromJson(
+            "worker",
+            JSONObject().put("instance_id", "new-instance"),
+            previous,
+        )
+
+        assertEquals("new-instance", replacement.instanceId)
+        assertNull(replacement.goalState)
+        assertNull(replacement.goal)
+        assertNull(replacement.currentModel)
+        assertEquals(0, replacement.subagentCount)
+        assertEquals(emptyList<SubagentSummary>(), replacement.subagents)
+    }
+
+    @Test
     fun staleModelControlResultIsRejectedAfterDiscoveryReplacement() {
         val oldPeer = PeerStatus("worker", instanceId = "old-instance")
         val replacement = mergeDiscoveredPeer(
@@ -746,6 +874,23 @@ class AgentFilterTest {
 
         assertEquals(1_000, remindersFromJson(values).size)
 
+    }
+
+    @Test
+    fun activityOrbitCoversWorkingSubagentAndCompactingStatesWithWebUiColors() {
+        assertEquals(ActivityOrbit.WORKING, activityOrbitFor(PeerStatus("worker", activityState = "active")))
+        assertEquals(
+            ActivityOrbit.SUBAGENT,
+            activityOrbitFor(PeerStatus("worker", subagentCount = 1)),
+        )
+        assertEquals(
+            ActivityOrbit.COMPACTING,
+            activityOrbitFor(PeerStatus("worker", activityState = "compacting", subagentCount = 1)),
+        )
+        assertEquals(null, activityOrbitFor(PeerStatus("worker")))
+        assertEquals(Color(0xFF78E0CD), ActivityOrbit.WORKING.color)
+        assertEquals(Color(0xFF60A5FA), ActivityOrbit.SUBAGENT.color)
+        assertEquals(Color(0xFFC084FC), ActivityOrbit.COMPACTING.color)
     }
 
     @Test

@@ -22,6 +22,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -36,6 +37,7 @@ import androidx.compose.foundation.content.TransferableContent
 import androidx.compose.foundation.content.consume
 import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -50,9 +52,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -62,6 +66,8 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -86,16 +92,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -115,6 +134,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Timer
 import java.util.UUID
+import kotlin.math.PI
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -131,7 +151,11 @@ private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1
 private const val MAX_DRAFTS_PER_ROUTER = 50
 private const val AGENT_REFRESH_INTERVAL_MS = 10_000L
 private const val MODEL_CONTROL_TIMEOUT_MS = 35_000L
+private const val GOAL_CONTROL_TIMEOUT_MS = 35_000L
+private const val MAX_SAFE_GOAL_INTEGER = 9_007_199_254_740_991L
 private const val MAX_LIVE_UPDATED_PEERS = 1_000
+private const val MAX_RETIRED_INSTANCES_PER_PEER = 8
+private const val MAX_RETIRED_INSTANCE_PEERS = 128
 private val AGENT_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]*")
 private val ROUTER_ENDPOINT = Regex("^([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)(?::([0-9]{1,5}))?$")
 private val Ink = Color(0xFF0B0D14)
@@ -164,6 +188,56 @@ internal data class GoalProjection(
     val goal: String,
 )
 
+internal data class GoalOutcomeCounts(
+    val blocked: Int = 0,
+    val completed: Int = 0,
+    val notDone: Int = 0,
+    val waitingForUserAuthorization: Int = 0,
+)
+
+internal data class GoalState(
+    val enabled: Boolean = false,
+    val goal: String = "",
+    val blocking: Boolean = true,
+    val goalLockEnabled: Boolean = false,
+    val snoozeEnabled: Boolean = true,
+    val snoozeDurationMs: Long = 60_000L,
+    val snoozeTurnLimit: Int? = null,
+    val snoozeBudgetCapMs: Long? = null,
+    val snoozeRefillYieldMs: Long = 30_000L,
+    val snoozeRefillElapsedMs: Long = 60_000L,
+    val outcomeCounts: GoalOutcomeCounts = GoalOutcomeCounts(),
+)
+
+internal data class GoalControlPending(
+    val controlId: String,
+    val sourceAgentId: String,
+    val targetAgentId: String,
+    val targetInstanceId: String,
+    val sourceLeaseId: String,
+    val sourceSessionId: String,
+    val connectionGeneration: Int,
+    val requestId: String = controlId,
+)
+
+internal data class GoalControlConnection(
+    val sourceLeaseId: String,
+    val sourceSessionId: String,
+    val connectionGeneration: Int,
+    val socketIsCurrent: Boolean,
+)
+
+internal data class GoalControlUiState(
+    val confirmedState: GoalState,
+    val compactProjection: GoalProjection,
+    val draft: GoalState,
+    val editorPeer: String,
+    val editorInstanceId: String,
+    val editorVisible: Boolean,
+    val pending: GoalControlPending?,
+    val status: String = "",
+)
+
 internal data class ReminderSummary(
     val id: String,
     val target: String,
@@ -179,6 +253,54 @@ internal data class ModelSummary(
     val id: String,
     val name: String = "",
 )
+
+internal enum class PeerInstanceDecision { ACCEPT, REJECT, REPLACEMENT }
+
+/**
+ * Keeps a short, bounded memory of instances retired by a peer replacement.
+ * A delayed frame from one of those instances must not be allowed to replace
+ * the currently displayed peer again.
+ */
+internal class RetiredPeerInstanceTombstones(
+    private val maxPeers: Int = MAX_RETIRED_INSTANCE_PEERS,
+    private val maxInstancesPerPeer: Int = MAX_RETIRED_INSTANCES_PER_PEER,
+) {
+    private val retired = LinkedHashMap<String, LinkedHashSet<String>>()
+
+    fun observe(peer: String, currentInstanceId: String, incomingInstanceId: String): PeerInstanceDecision {
+        val current = currentInstanceId.trim()
+        val incoming = incomingInstanceId.trim()
+        if (peer.isBlank()) return PeerInstanceDecision.REJECT
+        if (incoming.isNotBlank() && retired[peer]?.contains(incoming) == true) return PeerInstanceDecision.REJECT
+        if (current.isBlank()) return PeerInstanceDecision.ACCEPT
+        if (incoming.isBlank() || incoming == current) {
+            return if (incoming.isBlank()) PeerInstanceDecision.REJECT else PeerInstanceDecision.ACCEPT
+        }
+        retire(peer, current)
+        return PeerInstanceDecision.REPLACEMENT
+    }
+
+    fun clearPeer(peer: String) {
+        retired.remove(peer)
+    }
+
+    fun clear() {
+        retired.clear()
+    }
+
+    internal fun tombstoneCount(): Int = retired.values.sumOf { it.size }
+
+    internal fun peerCount(): Int = retired.size
+
+    private fun retire(peer: String, instanceId: String) {
+        if (instanceId.isBlank() || maxPeers <= 0 || maxInstancesPerPeer <= 0) return
+        val instances = retired.getOrPut(peer) { LinkedHashSet() }
+        instances.remove(instanceId)
+        instances += instanceId
+        while (instances.size > maxInstancesPerPeer) instances.remove(instances.first())
+        while (retired.size > maxPeers) retired.remove(retired.keys.first())
+    }
+}
 
 internal fun deliveryGenerationMatches(
     callbackGeneration: Int,
@@ -213,6 +335,53 @@ internal fun leaseRenewalCanSend(
     leaseId: String,
 ): Boolean = callbackGeneration == currentGeneration && socketIsCurrent && leaseId.isNotBlank()
 
+internal fun goalHydrationRequestMatches(
+    requestGeneration: Long,
+    currentGeneration: Long,
+    requestRouter: String,
+    currentRouter: String,
+    requestAgent: String,
+    currentAgent: String,
+    requestPeer: String,
+    currentPeer: String,
+): Boolean = requestGeneration == currentGeneration &&
+    requestRouter == currentRouter &&
+    requestAgent == currentAgent &&
+    requestPeer == currentPeer &&
+    requestPeer.isNotBlank()
+
+internal fun historyHydrationMatchesCurrent(
+    requestGeneration: Long,
+    currentRequestGeneration: Long,
+    callbackGeneration: Int,
+    currentGeneration: Int,
+    capturedRouter: String,
+    currentRouter: String,
+    capturedOwner: String,
+    currentOwner: String,
+    capturedPeer: String,
+    currentPeer: String,
+): Boolean = callbackGeneration == currentGeneration &&
+    goalHydrationRequestMatches(
+        requestGeneration,
+        currentRequestGeneration,
+        capturedRouter,
+        currentRouter,
+        capturedOwner,
+        currentOwner,
+        capturedPeer,
+        currentPeer,
+    )
+
+/**
+ * A goal result carries the target worker's lease. Android has no target lease
+ * captured before sending the request, so the result lease can only be checked
+ * against the result schema here. Source lease/session fencing stays in the
+ * settlement predicate below.
+ */
+internal fun goalControlResultLeaseIsValid(value: Any?): Boolean =
+    (value as? String)?.isNotBlank() == true
+
 internal fun modelControlSendMatches(
     callbackGeneration: Int,
     currentGeneration: Int,
@@ -228,6 +397,57 @@ internal fun modelControlSendMatches(
     intendedTargetInstanceId.isNotBlank() &&
     intendedTargetInstanceId == currentTargetInstanceId
 
+internal fun goalControlSendMatches(
+    callbackGeneration: Int,
+    currentGeneration: Int,
+    socketIsCurrent: Boolean,
+    intendedLeaseId: String,
+    currentLeaseId: String,
+    intendedTargetInstanceId: String,
+    currentTargetInstanceId: String,
+): Boolean = modelControlSendMatches(
+    callbackGeneration,
+    currentGeneration,
+    socketIsCurrent,
+    intendedLeaseId,
+    currentLeaseId,
+    intendedTargetInstanceId,
+    currentTargetInstanceId,
+)
+
+internal fun goalControlErrorMessage(errorCode: String?): String = when (errorCode) {
+    "target_instance_changed" -> "That agent restarted. Close this editor and try again."
+    "target_not_connected" -> "That agent is no longer connected."
+    "goal_control_unavailable" -> "Goal controls are not available on this router."
+    "goal_control_blocking_unavailable" -> "This router does not support disabling goal blocking."
+    "invalid_settings" -> "Check the goal settings and try again."
+    "invalid_goal" -> "Enter a goal before saving."
+    "control_timeout", "goal_control_expired" -> "The goal change timed out."
+    "router_disconnected" -> "The router connection closed before the change was confirmed."
+    "router_reconnecting" -> "The router is reconnecting."
+    else -> "The goal change was not saved."
+}
+
+internal fun goalControlCapabilityMaySend(goalControlAvailable: Boolean?): Boolean = goalControlAvailable == true
+
+internal data class GoalControlCapabilities(
+    val available: Boolean? = null,
+    val blockingAvailable: Boolean? = null,
+)
+
+internal fun goalControlCapabilitiesReset(): GoalControlCapabilities = GoalControlCapabilities()
+
+internal fun goalControlCapabilityError(
+    goalControlAvailable: Boolean?,
+    goalControlBlockingAvailable: Boolean?,
+    blocking: Boolean,
+): String? = when {
+    !goalControlCapabilityMaySend(goalControlAvailable) -> goalControlErrorMessage("goal_control_unavailable")
+    !blocking && goalControlBlockingAvailable != true -> goalControlErrorMessage("goal_control_blocking_unavailable")
+    else -> null
+}
+
+
 internal data class PeerStatus(
     val id: String,
     val activityState: String = "idle",
@@ -235,6 +455,7 @@ internal data class PeerStatus(
     val subagents: List<SubagentSummary> = emptyList(),
     val instanceId: String = "",
     val goal: GoalProjection? = null,
+    val goalState: GoalState? = null,
     val currentModel: ModelSummary? = null,
     val availableModels: List<ModelSummary> = emptyList(),
     val modelCatalogTotalCount: Int = 0,
@@ -242,6 +463,19 @@ internal data class PeerStatus(
 ) {
     val active get() = activityState == "active"
     val compacting get() = activityState == "compacting"
+}
+
+internal enum class ActivityOrbit(val color: Color) {
+    WORKING(Teal),
+    SUBAGENT(Color(0xFF60A5FA)),
+    COMPACTING(Color(0xFFC084FC)),
+}
+
+internal fun activityOrbitFor(peer: PeerStatus): ActivityOrbit? = when {
+    peer.compacting -> ActivityOrbit.COMPACTING
+    peer.active -> ActivityOrbit.WORKING
+    peer.subagentCount > 0 -> ActivityOrbit.SUBAGENT
+    else -> null
 }
 
 private data class HaloPulse(val progress: Float)
@@ -347,9 +581,12 @@ class MainActivity : ComponentActivity() {
     @Volatile private var leaseId = ""
     private val connectionGeneration = AtomicInteger()
     private val peerRequestGeneration = AtomicLong()
+    private val historyRequestGeneration = AtomicLong()
+    private val historyRequestTokens = mutableMapOf<String, Long>()
     private val reminderRequestGeneration = AtomicLong()
     private val liveUpdatedPeerIds = LinkedHashSet<String>()
     private val deferredEmptyModelCatalogs = LinkedHashMap<String, JSONObject>()
+    private val retiredPeerInstances = RetiredPeerInstanceTombstones()
     private val reconnectHandler = Handler(Looper.getMainLooper())
 
     private var agentId by mutableStateOf("")
@@ -369,6 +606,14 @@ class MainActivity : ComponentActivity() {
     private var routerError by mutableStateOf("")
     private var editingRouterEndpoint by mutableStateOf<String?>(null)
     private var goalDialogPeer by mutableStateOf("")
+    private var goalDialogInstanceId by mutableStateOf("")
+    private var goalDraft by mutableStateOf<GoalState?>(null)
+    private var goalDraftDirty = false
+    private var goalControlStatus by mutableStateOf("")
+    private var pendingGoalControl by mutableStateOf<GoalControlPending?>(null)
+    private var goalControlTimeout: Runnable? = null
+    private var goalControlAvailable by mutableStateOf<Boolean?>(null)
+    private var goalControlBlockingAvailable by mutableStateOf<Boolean?>(null)
     private var reminderDialogPeer by mutableStateOf("")
     private var reminderDialogTick by mutableStateOf(0)
     private var reminderDialogTimer: Timer? = null
@@ -440,6 +685,31 @@ class MainActivity : ComponentActivity() {
         if (selectedPeer.isNotBlank()) drafts.save(activeRouter, selectedPeer, normalized)
     }
 
+    private fun nextHistoryRequestToken(peer: String): Long = synchronized(historyLock) {
+        val next = (historyRequestTokens[peer] ?: 0L) + 1L
+        historyRequestTokens[peer] = next
+        next
+    }
+
+    private fun invalidateHistoryRequest(peer: String) {
+        if (peer.isBlank()) return
+        synchronized(historyLock) {
+            historyRequestTokens[peer] = (historyRequestTokens[peer] ?: 0L) + 1L
+        }
+    }
+
+    private fun invalidateAllHistoryRequests() {
+        synchronized(historyLock) {
+            historyRequestTokens.keys.toList().forEach { peer ->
+                historyRequestTokens[peer] = (historyRequestTokens[peer] ?: 0L) + 1L
+            }
+        }
+    }
+
+    private fun currentHistoryRequestToken(peer: String): Long = synchronized(historyLock) {
+        historyRequestTokens[peer] ?: 0L
+    }
+
     private fun knownPeersKey() = "known_peers:$activeRouter"
 
     private fun knownPeers(): Set<String> = prefs().getStringSet(knownPeersKey(), emptySet())?.toSet() ?: emptySet()
@@ -449,6 +719,10 @@ class MainActivity : ComponentActivity() {
         .commit()
 
     private fun connect(expectedGeneration: Int? = null) {
+        historyRequestGeneration.incrementAndGet()
+        invalidateAllHistoryRequests()
+        clearGoalCapabilities()
+        retiredPeerInstances.clear()
         val router = activeRouter
         val owner = agentId
         val replacedSocket = synchronized(connectionGenerationLock) {
@@ -507,6 +781,7 @@ class MainActivity : ComponentActivity() {
                         connection = "Connected as $owner"
                         discoverPeers(generation, router, owner)
                         refreshReminders(generation, router)
+                        refreshGoalCapabilities(generation, router)
                         selectedPeer.takeIf { it.isNotBlank() }?.let { hydrateHistory(it, generation) }
                     }
                     "lease_rejected" -> runOnUiThread {
@@ -517,6 +792,8 @@ class MainActivity : ComponentActivity() {
                         if (generation != connectionGeneration.get()) return@runOnUiThread
                         if (modelControlRequestMatchesPending(pendingModelRequestId, frame.optString("request_id"))) {
                             settleModelControl(null, frame.optString("code", "router_error"))
+                        } else if (goalControlRequestMatchesPending(pendingGoalControl, frame.optString("request_id"))) {
+                            settleGoalControl(false, frame.optString("code"))
                         } else {
                             connection = "Router error; please try again"
                         }
@@ -533,6 +810,12 @@ class MainActivity : ComponentActivity() {
                     "model_control_result" -> runOnUiThread {
                         if (generation == connectionGeneration.get()) receiveModelControlResult(frame)
                     }
+                    "agent_goal_state" -> runOnUiThread {
+                        if (generation == connectionGeneration.get()) receiveAgentGoalState(frame)
+                    }
+                    "goal_control_result" -> runOnUiThread {
+                        if (generation == connectionGeneration.get()) receiveGoalControlResult(frame, webSocket, generation)
+                    }
                     "message" -> settleDelivery(webSocket, generation, frame, owner)
                 }
             }
@@ -542,7 +825,9 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     if (reconnectGeneration != connectionGeneration.get()) return@runOnUiThread
                     clearModelControlStateForReconnect()
+                    clearGoalControlForReconnect()
                     liveUpdatedPeerIds.clear()
+                    retiredPeerInstances.clear()
                     connection = "Router connection closed; retrying…"
                     scheduleReconnect(reconnectGeneration)
                 }
@@ -553,7 +838,9 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     if (reconnectGeneration != connectionGeneration.get()) return@runOnUiThread
                     clearModelControlStateForReconnect()
+                    clearGoalControlForReconnect()
                     liveUpdatedPeerIds.clear()
+                    retiredPeerInstances.clear()
                     connection = "Router unavailable; retrying…"
                     scheduleReconnect(reconnectGeneration)
                 }
@@ -575,6 +862,8 @@ class MainActivity : ComponentActivity() {
         synchronized(connectionGenerationLock) {
             if (generation != connectionGeneration.get()) return@synchronized null
             val reconnectGeneration = connectionGeneration.incrementAndGet()
+            historyRequestGeneration.incrementAndGet()
+            invalidateAllHistoryRequests()
             leaseTimer?.cancel()
             leaseTimer = null
             leaseId = ""
@@ -591,6 +880,8 @@ class MainActivity : ComponentActivity() {
     private fun cancelConnection() {
         val currentSocket = synchronized(connectionGenerationLock) {
             connectionGeneration.incrementAndGet()
+            historyRequestGeneration.incrementAndGet()
+            invalidateAllHistoryRequests()
             leaseTimer?.cancel()
             leaseTimer = null
             leaseId = ""
@@ -598,9 +889,12 @@ class MainActivity : ComponentActivity() {
         }
         currentSocket?.close(1000, "reconnecting")
         liveUpdatedPeerIds.clear()
+        retiredPeerInstances.clear()
         closeGoalDialog()
         closeReminderDialog()
         clearModelControlState()
+        clearGoalControl()
+        clearGoalCapabilities()
     }
 
     private fun startLeaseRenewal(
@@ -676,15 +970,50 @@ class MainActivity : ComponentActivity() {
                     runOnUiThread {
                         if (generation != connectionGeneration.get() || requestGeneration != peerRequestGeneration.get()) return@runOnUiThread
                         val currentPeers = peers
+                        val discoveredPeerIds = discovered.map { it.first }.toSet()
+                        (currentPeers.map { it.id }.toSet() - discoveredPeerIds).forEach(retiredPeerInstances::clearPeer)
+                        val instanceDecisions = discovered.associate { (peer, source) ->
+                            val current = currentPeers.firstOrNull { it.id == peer }
+                            peer to (current?.let {
+                                retiredPeerInstances.observe(
+                                    peer = peer,
+                                    currentInstanceId = it.instanceId,
+                                    incomingInstanceId = (source.opt("instance_id") as? String)?.trim().orEmpty(),
+                                )
+                            } ?: PeerInstanceDecision.ACCEPT)
+                        }
+                        discovered.forEach { (peer, _) ->
+                            val current = currentPeers.firstOrNull { it.id == peer } ?: return@forEach
+                            if (instanceDecisions[peer] == PeerInstanceDecision.REPLACEMENT) {
+                                historyRequestGeneration.incrementAndGet()
+                                invalidateHistoryRequest(peer)
+                                clearGoalControlForPeerReplacement(
+                                    goalControlReplacementCleanup(
+                                        pending = pendingGoalControl,
+                                        editorPeer = goalDialogPeer,
+                                        editorInstanceId = goalDialogInstanceId,
+                                        peer = peer,
+                                        previousInstanceId = current.instanceId,
+                                        incomingInstanceId = discovered.first { it.first == peer }.second.optString("instance_id").trim(),
+                                    ),
+                                )
+                            }
+                        }
                         val pendingControlId = pendingModelControlId
                         val pendingControlPeer = pendingModelPeer
                         val pendingControlInstanceId = pendingModelInstanceId
                         val nextPeers = discovered.map { (peer, source) ->
-                            val sourceInstanceId = (source.opt("instance_id") as? String)?.trim().orEmpty()
+                            val current = currentPeers.firstOrNull { it.id == peer }
+                            val decision = instanceDecisions[peer] ?: PeerInstanceDecision.ACCEPT
+                            if (decision == PeerInstanceDecision.REJECT) {
+                                return@map current ?: peerStatusFromJson(peer, source)
+                            }
+                            if (decision == PeerInstanceDecision.REPLACEMENT) deferredEmptyModelCatalogs.remove(peer)
+                            val sourceInstanceId = source.optString("instance_id").trim()
                             val catalogValues = modelCatalogValuesFromFrame(source)
-                            val deferred = deferredEmptyModelCatalogs[peer]
+                            val deferred = if (decision == PeerInstanceDecision.ACCEPT) deferredEmptyModelCatalogs[peer] else null
                             val matchingDeferred = deferred?.takeIf {
-                                val deferredInstanceId = (it.opt("instance_id") as? String)?.trim().orEmpty()
+                                val deferredInstanceId = it.optString("instance_id").trim()
                                 sourceInstanceId.isNotBlank() &&
                                     deferredInstanceId.isNotBlank() &&
                                     deferredInstanceId == sourceInstanceId &&
@@ -716,7 +1045,7 @@ class MainActivity : ComponentActivity() {
                                 peer = peer,
                                 source = source,
                                 deferredModelCatalogFrame = matchingDeferred,
-                                current = currentPeers.firstOrNull { it.id == peer },
+                                current = current?.takeIf { decision == PeerInstanceDecision.ACCEPT && it.instanceId.isNotBlank() },
                                 hasLiveUpdate = peer in liveUpdatedPeerIds,
                                 pendingControlId = pendingControlId,
                                 pendingControlPeer = pendingControlPeer,
@@ -724,11 +1053,33 @@ class MainActivity : ComponentActivity() {
                             )
                         }.sortedBy { it.id }
                         peers = nextPeers
-                        if (goalDialogShouldClose(goalDialogPeer, nextPeers)) closeGoalDialog()
+                        if (goalEditorTargetMissing(goalDialogPeer, nextPeers)) closeGoalDialog()
                     }
                 }
             } catch (_: Exception) {
                 // The active connection remains usable when discovery is unavailable.
+            }
+        }.start()
+    }
+
+    private fun refreshGoalCapabilities(generation: Int, router: String) {
+        Thread {
+            try {
+                client.newCall(Request.Builder().url("http://$router/v1/capabilities").build()).execute().use { response ->
+                    val capabilities = if (response.isSuccessful) JSONObject(response.body?.string().orEmpty()) else null
+                    runOnUiThread {
+                        if (generation != connectionGeneration.get() || activeRouter != router) return@runOnUiThread
+                        goalControlAvailable = capabilities?.opt("goal_control_v1") as? Boolean ?: false
+                        goalControlBlockingAvailable = capabilities?.opt("goal_control_blocking_v1") as? Boolean ?: false
+                    }
+                }
+            } catch (_: Exception) {
+                runOnUiThread {
+                    if (generation == connectionGeneration.get() && activeRouter == router) {
+                        goalControlAvailable = false
+                        goalControlBlockingAvailable = false
+                    }
+                }
             }
         }.start()
     }
@@ -774,16 +1125,44 @@ class MainActivity : ComponentActivity() {
     private fun receiveAgentActivity(frame: JSONObject) {
         val peer = frame.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: return
         val current = peers.firstOrNull { it.id == peer } ?: return
+        if (replaceLivePeerProjectionForNewInstance(peer, current, frame)) return
         if (!acceptsLivePeerInstance(current.instanceId, frame.optString("instance_id").trim())) return
         markLiveUpdatedPeer(peer)
         val updated = peerStatusFromJson(peer, frame, current)
         peers = peers.map { if (it.id == peer) updated else it }
-        if (goalDialogPeer == peer && updated.goal?.enabled != true) closeGoalDialog()
+    }
+
+    private fun replaceLivePeerProjectionForNewInstance(peer: String, current: PeerStatus, frame: JSONObject): Boolean {
+        val incomingInstanceId = frame.optString("instance_id").trim()
+        return when (retiredPeerInstances.observe(peer, current.instanceId, incomingInstanceId)) {
+            PeerInstanceDecision.REJECT -> true
+            PeerInstanceDecision.ACCEPT -> false
+            PeerInstanceDecision.REPLACEMENT -> {
+                historyRequestGeneration.incrementAndGet()
+                invalidateHistoryRequest(peer)
+                clearGoalControlForPeerReplacement(
+                    goalControlReplacementCleanup(
+                        pending = pendingGoalControl,
+                        editorPeer = goalDialogPeer,
+                        editorInstanceId = goalDialogInstanceId,
+                        peer = peer,
+                        previousInstanceId = current.instanceId,
+                        incomingInstanceId = incomingInstanceId,
+                    ),
+                )
+                deferredEmptyModelCatalogs.remove(peer)
+                markLiveUpdatedPeer(peer)
+                val replacement = peerStatusFromJson(peer, frame)
+                peers = peers.map { if (it.id == peer) replacement else it }
+                true
+            }
+        }
     }
 
     private fun receiveAgentModelCatalog(frame: JSONObject) {
         val peer = frame.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: return
         val current = peers.firstOrNull { it.id == peer } ?: return
+        if (replaceLivePeerProjectionForNewInstance(peer, current, frame)) return
         if (!acceptsLivePeerInstance(current.instanceId, frame.optString("instance_id").trim())) return
         val values = modelCatalogValuesFromFrame(frame) ?: return
         val updated = modelCatalogProjection(
@@ -829,6 +1208,67 @@ class MainActivity : ComponentActivity() {
             liveUpdatedPeerIds.firstOrNull()?.let(liveUpdatedPeerIds::remove)
         }
         liveUpdatedPeerIds += peer
+    }
+
+    private fun receiveAgentGoalState(frame: JSONObject) {
+        val peer = frame.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: return
+        val current = peers.firstOrNull { it.id == peer } ?: return
+        val incomingInstance = frame.optString("instance_id").trim()
+        if (replaceLivePeerProjectionForNewInstance(peer, current, frame)) return
+        if (!acceptsLivePeerInstance(current.instanceId, incomingInstance)) return
+        val state = normalizeGoalState(frame.optJSONObject("goal_state")) ?: return
+        val updated = current.copy(
+            instanceId = incomingInstance.ifBlank { current.instanceId },
+            goal = GoalProjection(state.enabled, state.goal),
+            goalState = state,
+        )
+        peers = peers.map { if (it.id == peer) updated else it }
+        if (goalDraftShouldHydrateFromFullState(
+                editorPeer = goalDialogPeer,
+                editorInstanceId = goalDialogInstanceId,
+                draftDirty = goalDraftDirty,
+                incomingPeer = peer,
+                incomingInstanceId = incomingInstance,
+            )
+        ) {
+            goalDraft = state
+            goalDraftDirty = false
+        }
+    }
+
+    private fun receiveGoalControlResult(frame: JSONObject, webSocket: WebSocket, generation: Int) {
+        val pending = pendingGoalControl ?: return
+        val currentPeer = peers.firstOrNull { it.id == pending.targetAgentId }
+        val connection = synchronized(connectionGenerationLock) {
+            GoalControlConnection(
+                sourceLeaseId = leaseId,
+                sourceSessionId = instanceId,
+                connectionGeneration = connectionGeneration.get(),
+                socketIsCurrent = socket === webSocket,
+            )
+        }
+        val currentState = goalDraft ?: return
+        val confirmed = currentPeer?.goalState ?: goalStateFromCompact(currentPeer?.goal)
+        val ui = GoalControlUiState(
+            confirmedState = confirmed,
+            compactProjection = currentPeer?.goal ?: GoalProjection(confirmed.enabled, confirmed.goal),
+            draft = currentState,
+            editorPeer = goalDialogPeer,
+            editorInstanceId = pending.targetInstanceId,
+            editorVisible = goalDialogPeer == pending.targetAgentId,
+            pending = pending,
+            status = goalControlStatus,
+        )
+        val settled = settleGoalControlResult(ui, frame, connection, currentPeer)
+        if (settled == ui) return
+        if (settled.confirmedState != ui.confirmedState) {
+            peers = peers.map { peer ->
+                if (peer.id == pending.targetAgentId) peer.copy(goal = settled.compactProjection, goalState = settled.confirmedState) else peer
+            }
+        }
+        pendingGoalControl = settled.pending
+        goalControlStatus = settled.status
+        if (!settled.editorVisible) closeGoalDialog(clearPending = false)
     }
 
     private fun receiveModelControlResult(frame: JSONObject) {
@@ -1053,6 +1493,8 @@ class MainActivity : ComponentActivity() {
 
     private fun hydrateHistory(peer: String, generation: Int = connectionGeneration.get()) {
         if (peer.isBlank() || activeRouter.isBlank()) return
+        historyRequestGeneration.incrementAndGet()
+        val requestGeneration = nextHistoryRequestToken(peer)
         val router = activeRouter
         val owner = agentId
         Thread {
@@ -1072,7 +1514,19 @@ class MainActivity : ComponentActivity() {
                     val highWaterSequence = payload.optLong("high_water_sequence")
                     val hydrated = List(snapshot.length()) { index -> chatMessage(snapshot.getJSONObject(index), owner, router) }.filterNotNull()
                     runOnUiThread {
-                        if (generation != connectionGeneration.get() || activeRouter != router || agentId != owner || selectedPeer != peer) return@runOnUiThread
+                        if (!historyHydrationMatchesCurrent(
+                                requestGeneration = requestGeneration,
+                                currentRequestGeneration = currentHistoryRequestToken(peer),
+                                callbackGeneration = generation,
+                                currentGeneration = connectionGeneration.get(),
+                                capturedRouter = router,
+                                currentRouter = activeRouter,
+                                capturedOwner = owner,
+                                currentOwner = agentId,
+                                capturedPeer = peer,
+                                currentPeer = selectedPeer,
+                            )
+                        ) return@runOnUiThread
                         val merged = reconcileConversationMessages(historyFor(peer), hydrated, highWaterSequence)
                         if (persistHistory(peer, merged)) messages = merged
                     }
@@ -1120,6 +1574,8 @@ class MainActivity : ComponentActivity() {
 
     private fun selectPeer(peer: String) {
         if (peer.isBlank()) return
+        historyRequestGeneration.incrementAndGet()
+        invalidateHistoryRequest(selectedPeer)
         closeGoalDialog()
         closeReminderDialog()
         clearModelControlState()
@@ -1133,6 +1589,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun returnHome() {
+        historyRequestGeneration.incrementAndGet()
+        invalidateHistoryRequest(selectedPeer)
         closeGoalDialog()
         closeReminderDialog()
         clearModelControlState()
@@ -1143,7 +1601,124 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openGoalDialog(peer: String) {
-        if (peers.firstOrNull { it.id == peer }?.goal?.enabled == true) goalDialogPeer = peer
+        val target = peers.firstOrNull { it.id == peer } ?: return
+        clearGoalControl()
+        goalDialogPeer = peer
+        goalDialogInstanceId = target.instanceId
+        goalDraft = target.goalState ?: goalStateFromCompact(target.goal)
+        goalDraftDirty = false
+        goalControlStatus = ""
+    }
+
+    private fun updateGoalDraft(next: GoalState) {
+        if (goalDialogPeer.isNotBlank()) {
+            goalDraftDirty = true
+            goalDraft = next
+        }
+    }
+
+    private fun saveGoalControl() {
+        val peer = peers.firstOrNull { it.id == goalDialogPeer }
+        val draft = goalDraft
+        if (peer == null || draft == null || peer.instanceId.isBlank()) {
+            goalControlStatus = goalControlUnavailableTargetMessage()
+            return
+        }
+        goalControlValidationError(draft)?.let { validationError ->
+            goalControlStatus = validationError
+            return
+        }
+        goalControlCapabilityError(goalControlAvailable, goalControlBlockingAvailable, draft.blocking)?.let { capabilityError ->
+            goalControlStatus = capabilityError
+            return
+        }
+        val intendedLease = leaseId
+        val intendedInstance = peer.instanceId
+        val generation = connectionGeneration.get()
+        if (intendedLease.isBlank()) {
+            goalControlStatus = goalControlDisconnectedMessage()
+            return
+        }
+        clearGoalControl()
+        val controlId = "goal-control-${UUID.randomUUID()}"
+        val requestId = "goal-control-request-${UUID.randomUUID()}"
+        val pending = GoalControlPending(
+            controlId = controlId,
+            sourceAgentId = agentId,
+            targetAgentId = peer.id,
+            targetInstanceId = intendedInstance,
+            sourceLeaseId = intendedLease,
+            sourceSessionId = instanceId,
+            connectionGeneration = generation,
+            requestId = requestId,
+        )
+        pendingGoalControl = pending
+        val sent = synchronized(connectionGenerationLock) {
+            val currentSocket = socket
+            val currentTargetInstance = peers.firstOrNull { it.id == goalDialogPeer }?.instanceId.orEmpty()
+            if (currentSocket == null || !goalControlSendMatches(
+                    generation,
+                    connectionGeneration.get(),
+                    currentSocket === socket,
+                    intendedLease,
+                    leaseId,
+                    intendedInstance,
+                    currentTargetInstance,
+                )
+            ) false else currentSocket.send(
+                goalControlFrame(
+                    agentId,
+                    instanceId,
+                    leaseId,
+                    peer.id,
+                    currentTargetInstance,
+                    controlId,
+                    draft,
+                    requestId,
+                ).toString(),
+            )
+        }
+        if (!sent) {
+            settleGoalControl(false, "router_disconnected")
+            return
+        }
+        goalControlStatus = "Saving…"
+        goalControlTimeout = Runnable {
+            if (pendingGoalControl?.controlId == controlId) settleGoalControl(false, "control_timeout")
+        }.also { reconnectHandler.postDelayed(it, GOAL_CONTROL_TIMEOUT_MS) }
+    }
+
+    private fun settleGoalControl(accepted: Boolean, errorCode: String?) {
+        goalControlTimeout?.let(reconnectHandler::removeCallbacks)
+        goalControlTimeout = null
+        pendingGoalControl = null
+        goalControlStatus = if (accepted) "Goal saved." else goalControlErrorMessage(errorCode)
+    }
+
+    private fun clearGoalControl() {
+        goalControlTimeout?.let(reconnectHandler::removeCallbacks)
+        goalControlTimeout = null
+        pendingGoalControl = null
+    }
+
+    private fun clearGoalControlForReconnect() {
+        clearGoalControl()
+        clearGoalCapabilities()
+        if (goalDialogPeer.isNotBlank()) goalControlStatus = goalControlErrorMessage("router_reconnecting")
+    }
+
+    private fun clearGoalCapabilities() {
+        val reset = goalControlCapabilitiesReset()
+        goalControlAvailable = reset.available
+        goalControlBlockingAvailable = reset.blockingAvailable
+    }
+
+    private fun clearGoalControlForPeerReplacement(cleanup: GoalControlReplacementCleanup) {
+        if (cleanup.clearEditor) {
+            closeGoalDialog(clearPending = cleanup.clearPending)
+        } else if (cleanup.clearPending) {
+            clearGoalControl()
+        }
     }
 
     private fun openReminderDialog(peer: String) {
@@ -1165,8 +1740,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun closeGoalDialog() {
+    private fun closeGoalDialog(clearPending: Boolean = true) {
+        if (clearPending) clearGoalControl()
         goalDialogPeer = ""
+        goalDialogInstanceId = ""
+        goalDraft = null
+        goalDraftDirty = false
+        goalControlStatus = ""
     }
 
     private fun closeReminderDialog() {
@@ -1290,6 +1870,7 @@ class MainActivity : ComponentActivity() {
         routerError = ""
         showRouterManager = false
         if (nextActiveRouter != activeRouter) {
+            clearGoalCapabilities()
             activeRouter = nextActiveRouter
             peers = emptyList()
             reminders = emptyList()
@@ -1307,6 +1888,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         prefs().edit().putString("active_router", endpoint).commit()
+        clearGoalCapabilities()
         activeRouter = endpoint
         peers = emptyList()
         reminders = emptyList()
@@ -1450,14 +2032,19 @@ class MainActivity : ComponentActivity() {
                             pendingModel = pendingModel.takeIf { pendingModelPeer == selectedPeer },
                             modelControlStatus = modelControlStatus,
                             onSelectModel = ::selectModel,
+                            onGoal = { openGoalDialog(selectedPeer) },
                         )
                     }
                 }
                 if (goalDialogPeer.isNotBlank()) {
-                    val goal = peers.firstOrNull { it.id == goalDialogPeer }?.goal
-                    if (goal?.enabled == true) {
-                        GoalDialog(goalDialogPeer, goal.goal, ::closeGoalDialog)
-                    }
+                    GoalDialog(
+                        peer = goalDialogPeer,
+                        state = goalDraft ?: GoalState(),
+                        status = goalControlStatus,
+                        onChange = ::updateGoalDraft,
+                        onSave = ::saveGoalControl,
+                        onDismiss = ::closeGoalDialog,
+                    )
                 }
                 if (reminderDialogPeer.isNotBlank()) {
                     ReminderDialog(
@@ -1505,6 +2092,7 @@ private fun PeerHome(
                 Text("Mecha", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text("Your agent network", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
             }
+            GoalHeaderButton(peer = null, onGoal = {})
             IconButton(onRefresh, Modifier.size(48.dp)) {
                 Icon(Icons.Default.Refresh, "Refresh agents", tint = Periwinkle)
             }
@@ -1577,45 +2165,58 @@ private fun PeerRow(
     onReminders: () -> Unit,
 ) {
     val peerId = peer.id
-    Card(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)),
-        colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-        shape = RoundedCornerShape(18.dp),
+    val orbit = activityOrbitFor(peer)
+    OrbitingBorder(
+        active = orbit != null,
+        orbitColor = orbit?.color ?: Teal,
+        label = "peer-card-${peer.id}",
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 18.dp,
     ) {
-        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(
-                Modifier.weight(1f).clickable(onClick = onClick),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Avatar(peerId)
-                Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(humanName(peerId), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (peer.compacting) {
-                            Spacer(Modifier.width(8.dp))
-                            CompactingIndicator(compact = true)
-                        } else if (peer.active) {
-                            Spacer(Modifier.width(8.dp))
-                            WorkingIndicator(compact = true)
+        Card(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)),
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            shape = RoundedCornerShape(18.dp),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.weight(1f).clickable(onClick = onClick),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Avatar(peerId, working = peer.active, compacting = peer.compacting)
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(humanName(peerId), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (peer.compacting) {
+                                Spacer(Modifier.width(8.dp))
+                                CompactingIndicator(compact = true)
+                            } else if (peer.active) {
+                                Spacer(Modifier.width(8.dp))
+                                WorkingIndicator(compact = true)
+                            }
                         }
+                        PeerActivityIndicators(peer)
                     }
-                    PeerActivityIndicators(peer)
                 }
-            }
-            if (peer.goal?.enabled == true) {
-                IconButton(onClick = onGoal, modifier = Modifier.size(38.dp)) {
-                    Icon(Icons.Default.Flag, "Show goal", tint = Color(0xFFF5B2D1))
+                if (peer.goal?.enabled == true) {
+                    IconButton(onClick = onGoal, modifier = Modifier.size(48.dp)) {
+                        Icon(
+                            Icons.Default.Flag,
+                            "Show goal for ${humanName(peerId)}",
+                            tint = Color(0xFFF5B2D1),
+                        )
+                    }
                 }
-            }
-            if (reminders.isNotEmpty()) {
-                IconButton(onClick = onReminders, modifier = Modifier.size(38.dp)) {
-                    Icon(Icons.Default.AccessTime, "Show reminders", tint = Teal)
+                if (reminders.isNotEmpty()) {
+                    IconButton(onClick = onReminders, modifier = Modifier.size(38.dp)) {
+                        Icon(Icons.Default.AccessTime, "Show reminders", tint = Teal)
+                    }
                 }
-            }
-            Spacer(Modifier.width(4.dp))
-            IconButton(onClick = onClick, modifier = Modifier.size(38.dp)) {
-                Icon(Icons.Default.ChevronRight, "Open conversation", tint = TextMuted)
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = onClick, modifier = Modifier.size(38.dp)) {
+                    Icon(Icons.Default.ChevronRight, "Open conversation", tint = TextMuted)
+                }
             }
         }
     }
@@ -1645,7 +2246,13 @@ private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, comp
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PulsingDot(Color(0xFF60A5FA), pulse, if (compact) 6.dp else 7.dp, 8.dp)
+            PulsingDot(
+                Color(0xFF60A5FA),
+                pulse,
+                if (compact) 6.dp else 7.dp,
+                8.dp,
+                gradientColors = listOf(Color(0xFF266AFF), Color(0xFF60A5FA), Color(0xFF266AFF)),
+            )
             Spacer(Modifier.width(6.dp))
             Text(label, style = MaterialTheme.typography.labelSmall, color = Color(0xFFDBE8FF), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (canExpand) {
@@ -1656,7 +2263,13 @@ private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, comp
         if (expanded) {
             subagents.forEach { subagent ->
                 Row(Modifier.padding(start = 13.dp), verticalAlignment = Alignment.CenterVertically) {
-                    PulsingDot(Color(0xFF60A5FA), pulse, 7.dp, 8.dp)
+                    PulsingDot(
+                        Color(0xFF60A5FA),
+                        pulse,
+                        7.dp,
+                        8.dp,
+                        gradientColors = listOf(Color(0xFF266AFF), Color(0xFF60A5FA), Color(0xFF266AFF)),
+                    )
                     Spacer(Modifier.width(7.dp))
                     Text(subagent.description, style = MaterialTheme.typography.labelSmall, color = Color(0xFFDBE8FF), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -1669,7 +2282,13 @@ private fun SubagentIndicator(count: Int, subagents: List<SubagentSummary>, comp
 private fun CompactingIndicator(compact: Boolean = false) {
     if (compact) {
         Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
-            PulsingDot(Periwinkle, synchronizedHaloPulse("compacting-pulse"), 7.dp, 10.dp)
+            PulsingDot(
+                Periwinkle,
+                synchronizedHaloPulse("compacting-pulse"),
+                7.dp,
+                10.dp,
+                gradientColors = listOf(Color(0xFFA855F7), Periwinkle, Color(0xFFA855F7)),
+            )
         }
         return
     }
@@ -1677,7 +2296,13 @@ private fun CompactingIndicator(compact: Boolean = false) {
         Modifier.background(Periwinkle.copy(alpha = 0.18f), RoundedCornerShape(999.dp)).padding(horizontal = 9.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PulsingDot(Periwinkle, synchronizedHaloPulse("compacting-pulse"), 8.dp, 10.dp)
+        PulsingDot(
+            Periwinkle,
+            synchronizedHaloPulse("compacting-pulse"),
+            8.dp,
+            10.dp,
+            gradientColors = listOf(Color(0xFFA855F7), Periwinkle, Color(0xFFA855F7)),
+        )
         Spacer(Modifier.width(6.dp))
         Text("Mailbox is compacting; delivery is queued.", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
     }
@@ -1688,7 +2313,13 @@ private fun WorkingIndicator(compact: Boolean = false) {
     val pulse = synchronizedHaloPulse("working-pulse")
     if (compact) {
         Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
-            PulsingDot(Teal, pulse, 7.dp, 10.dp)
+            PulsingDot(
+                Teal,
+                pulse,
+                7.dp,
+                10.dp,
+                outerGradientColors = listOf(Teal.copy(alpha = 0.24f), Teal.copy(alpha = 0.42f)),
+            )
         }
         return
     }
@@ -1696,9 +2327,85 @@ private fun WorkingIndicator(compact: Boolean = false) {
         Modifier.background(Teal.copy(alpha = 0.18f), RoundedCornerShape(999.dp)).padding(horizontal = 9.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PulsingDot(Teal, pulse, 8.dp, 10.dp)
+        PulsingDot(
+            Teal,
+            pulse,
+            8.dp,
+            10.dp,
+            outerGradientColors = listOf(Teal.copy(alpha = 0.24f), Teal.copy(alpha = 0.42f)),
+        )
         Spacer(Modifier.width(6.dp))
         Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun OrbitingBorder(
+    active: Boolean,
+    orbitColor: Color,
+    label: String,
+    modifier: Modifier = Modifier,
+    cornerRadius: Dp = 18.dp,
+    content: @Composable () -> Unit,
+) {
+    if (!active) {
+        Box(modifier) { content() }
+        return
+    }
+    val transition = rememberInfiniteTransition(label = "$label-orbit")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = tween(900, easing = LinearEasing)),
+        label = "$label-orbit-progress",
+    )
+    Box(
+        modifier.drawWithCache {
+            val strokeWidth = 1.5.dp.toPx()
+            val radius = cornerRadius.toPx()
+            onDrawWithContent {
+                drawContent()
+                drawFeatheredOrbitingBorder(progress, radius, strokeWidth, orbitColor)
+            }
+        },
+    ) { content() }
+}
+
+private fun DrawScope.drawFeatheredOrbitingBorder(
+    progress: Float,
+    cornerRadius: Float,
+    strokeWidth: Float,
+    color: Color,
+) {
+    val inset = strokeWidth / 2f
+    val width = (size.width - strokeWidth).coerceAtLeast(0f)
+    val height = (size.height - strokeWidth).coerceAtLeast(0f)
+    val radius = cornerRadius.coerceAtMost(minOf(width, height) / 2f)
+    val perimeter = (2f * (width - 2f * radius)) + (2f * (height - 2f * radius)) + (2f * PI.toFloat() * radius)
+    if (perimeter <= 0f) return
+    val segment = perimeter * 0.25f
+    val phase = -progress * perimeter
+    val rectSize = androidx.compose.ui.geometry.Size(width, height)
+    val corner = androidx.compose.ui.geometry.CornerRadius(radius, radius)
+
+    // Nested dashes share one start point. Shorter, dimmer layers make both ends fade like a snake.
+    val featherSteps = 7
+    for (index in 0 until featherSteps) {
+        val centerProgress = (index + 1).toFloat() / featherSteps
+        val trim = segment * (1f - centerProgress) * 0.42f + strokeWidth
+        val featheredSegment = (segment - trim * 2f).coerceAtLeast(strokeWidth)
+        val alpha = 0.04f + centerProgress * 0.26f
+        drawRoundRect(
+            color = color.copy(alpha = alpha),
+            topLeft = Offset(inset, inset),
+            size = rectSize,
+            cornerRadius = corner,
+            style = Stroke(
+                width = strokeWidth,
+                cap = StrokeCap.Round,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(featheredSegment, perimeter - featheredSegment), phase + trim),
+            ),
+        )
     }
 }
 
@@ -1715,10 +2422,41 @@ private fun synchronizedHaloPulse(label: String): HaloPulse {
 }
 
 @Composable
-private fun PulsingDot(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp) {
+private fun animatedStatusGradient(label: String, colors: List<Color>): Brush {
+    val transition = rememberInfiniteTransition(label = "$label-gradient")
+    val sweep by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = tween(1_800, easing = LinearOutSlowInEasing)),
+        label = "$label-gradient-sweep",
+    )
+    return Brush.linearGradient(
+        colors = colors,
+        start = Offset(-180f + sweep * 360f, 0f),
+        end = Offset(180f + sweep * 360f, 0f),
+    )
+}
+
+@Composable
+private fun PulsingDot(
+    color: Color,
+    pulse: HaloPulse,
+    size: Dp,
+    haloSpread: Dp,
+    gradientColors: List<Color> = listOf(color.copy(alpha = 0.72f), color, color.copy(alpha = 0.72f)),
+    outerGradientColors: List<Color>? = null,
+) {
     val haloAlpha = (1f - pulse.progress) * 0.58f
     val haloScale = 1f + pulse.progress * ((haloSpread.value * 2f) / size.value)
-    Box(Modifier.size(size + haloSpread * 2), contentAlignment = Alignment.Center) {
+    val gradient = animatedStatusGradient(
+        "status-$color-$size",
+        outerGradientColors ?: gradientColors,
+    )
+    val markerSize = size + haloSpread * 2
+    Box(Modifier.size(markerSize), contentAlignment = Alignment.Center) {
+        if (outerGradientColors != null) {
+            Box(Modifier.size(markerSize).clip(CircleShape).background(gradient))
+        }
         Box(
             Modifier
                 .size(size)
@@ -1730,7 +2468,12 @@ private fun PulsingDot(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp)
                 .clip(CircleShape)
                 .background(color),
         )
-        Box(Modifier.size(size).clip(CircleShape).background(color))
+        // The dot remains visible at the transition's initial frame when animations are disabled.
+        if (outerGradientColors == null) {
+            Box(Modifier.size(size).clip(CircleShape).background(gradient))
+        } else {
+            Box(Modifier.size(size).clip(CircleShape).background(color))
+        }
     }
 }
 
@@ -1749,6 +2492,7 @@ private fun Conversation(
     pendingModel: ModelSummary?,
     modelControlStatus: String,
     onSelectModel: (ModelSummary) -> Unit,
+    onGoal: () -> Unit,
 ) {
     val peer = peerStatus.id
     val transcriptState = rememberLazyListState()
@@ -1769,30 +2513,40 @@ private fun Conversation(
     LaunchedEffect(messages.lastOrNull()?.id) {
         if (messages.isNotEmpty()) transcriptState.animateScrollToItem(messages.lastIndex)
     }
+    val orbit = activityOrbitFor(peerStatus)
     Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().background(SurfaceDark).padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        OrbitingBorder(
+            active = orbit != null,
+            orbitColor = orbit?.color ?: Teal,
+            label = "conversation-header-${peerStatus.id}",
+            modifier = Modifier.fillMaxWidth(),
+            cornerRadius = 0.dp,
         ) {
-            TextButton(onBack, Modifier.height(48.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
-                Spacer(Modifier.width(4.dp))
-                Text("Back")
-            }
-            Avatar(peer, 34.dp)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (peerStatus.compacting) {
-                        Spacer(Modifier.width(8.dp))
-                        CompactingIndicator(compact = false)
-                    } else if (peerStatus.active) {
-                        Spacer(Modifier.width(8.dp))
-                        WorkingIndicator(compact = true)
-                    }
+            Row(
+                Modifier.fillMaxWidth().background(SurfaceDark).padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onBack, Modifier.height(48.dp)) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Back")
                 }
-                PeerActivityIndicators(peerStatus, compact = true)
+                Avatar(peer, 34.dp, working = peerStatus.active, compacting = peerStatus.compacting)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (peerStatus.compacting) {
+                            Spacer(Modifier.width(8.dp))
+                            CompactingIndicator(compact = false)
+                        } else if (peerStatus.active) {
+                            Spacer(Modifier.width(8.dp))
+                            WorkingIndicator(compact = true)
+                        }
+                        GoalHeaderButton(peer = peerStatus, onGoal = onGoal)
+                    }
+                    PeerActivityIndicators(peerStatus, compact = true)
+                }
             }
         }
         HorizontalDivider(color = SurfaceRaised)
@@ -1931,22 +2685,286 @@ private fun ModelPicker(
 }
 
 @Composable
-private fun GoalDialog(peer: String, goal: String, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = SurfaceDark,
-        titleContentColor = TextPrimary,
-        textContentColor = TextPrimary,
-        title = { Text("Goal for ${humanName(peer)}") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Current goal", color = TextMuted)
-                Text(goal)
+private fun GoalHeaderButton(peer: PeerStatus?, onGoal: () -> Unit) {
+    val hasGoal = peer?.goal?.enabled == true
+    val label = peer?.let {
+        if (hasGoal) "Edit goal for ${humanName(it.id)}" else "Set goal for ${humanName(it.id)}"
+    } ?: "Select an agent to set a goal"
+    IconButton(
+        onClick = onGoal,
+        enabled = peer != null && peer.id.isNotBlank(),
+        modifier = Modifier.size(48.dp),
+    ) {
+        Icon(
+            Icons.Default.Flag,
+            label,
+            tint = if (hasGoal) Color(0xFFF5B2D1) else TextMuted,
+        )
+    }
+}
+
+@Composable
+private fun GoalDialog(
+    peer: String,
+    state: GoalState,
+    status: String,
+    onChange: (GoalState) -> Unit,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+) {
+    val draft = state
+    val saving = status == "Saving…"
+    val scrollState = rememberScrollState()
+    val controlsEnabled = !saving
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp),
+            shape = RoundedCornerShape(28.dp),
+            color = SurfaceDark,
+            contentColor = TextPrimary,
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    "Goal for ${humanName(peer)}",
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+                HorizontalDivider(color = SurfaceRaised)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(scrollState)
+                        .padding(horizontal = 24.dp, vertical = 16.dp)
+                        // Keeps the final snooze fields clear of the pinned action row.
+                        .padding(bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Text(
+                        "Set what this agent should work toward.",
+                        color = TextMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    GoalToggle(
+                        label = "Goal",
+                        checked = draft.enabled,
+                        enabled = controlsEnabled,
+                        onCheckedChange = { onChange(draft.copy(enabled = it)) },
+                    )
+                    OutlinedTextField(
+                        value = draft.goal,
+                        onValueChange = { onChange(draft.copy(goal = it.take(4_000))) },
+                        enabled = draft.enabled && controlsEnabled,
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("What should this agent work toward?") },
+                        placeholder = { Text("Describe the goal in Markdown") },
+                        minLines = 4,
+                        maxLines = 10,
+                    )
+                    GoalToggle(
+                        label = "Blocking",
+                        checked = draft.blocking,
+                        enabled = controlsEnabled,
+                        onCheckedChange = { onChange(draft.copy(blocking = it)) },
+                    )
+                    GoalToggle(
+                        label = "Goal lock",
+                        checked = draft.goalLockEnabled,
+                        enabled = controlsEnabled,
+                        locked = true,
+                        onCheckedChange = { onChange(draft.copy(goalLockEnabled = it)) },
+                    )
+                    Column(
+                        Modifier.border(1.dp, SurfaceRaised, RoundedCornerShape(16.dp)).padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text("Snooze settings", color = TextMuted, fontWeight = FontWeight.SemiBold)
+                        GoalToggle(
+                            label = "Allow snoozing",
+                            checked = draft.snoozeEnabled,
+                            enabled = controlsEnabled,
+                            onCheckedChange = { onChange(draft.copy(snoozeEnabled = it)) },
+                        )
+                        GoalNumberField(
+                            label = "Snooze duration (seconds)",
+                            value = (draft.snoozeDurationMs / 1_000L).toString(),
+                            enabled = controlsEnabled,
+                            onValueChange = {
+                                onChange(draft.copy(snoozeDurationMs = goalSecondsInput(it, draft.snoozeDurationMs / 1_000L) * 1_000L))
+                            },
+                        )
+                        GoalNumberField(
+                            label = "Snooze turn limit (optional)",
+                            value = draft.snoozeTurnLimit?.toString().orEmpty(),
+                            enabled = controlsEnabled,
+                            onValueChange = {
+                                onChange(draft.copy(snoozeTurnLimit = goalOptionalInput(it, draft.snoozeTurnLimit?.toLong(), 20)?.toInt()))
+                            },
+                        )
+                        GoalNumberField(
+                            label = "Snooze budget (minutes, optional)",
+                            value = draft.snoozeBudgetCapMs?.div(60_000L)?.toString().orEmpty(),
+                            enabled = controlsEnabled,
+                            onValueChange = {
+                                onChange(draft.copy(snoozeBudgetCapMs = goalOptionalInput(
+                                    it,
+                                    draft.snoozeBudgetCapMs?.div(60_000L),
+                                    MAX_SAFE_GOAL_INTEGER / 60_000L,
+                                )?.times(60_000L)))
+                            },
+                        )
+                        GoalNumberField(
+                            label = "Snooze refill yield (seconds)",
+                            value = (draft.snoozeRefillYieldMs / 1_000L).toString(),
+                            enabled = controlsEnabled,
+                            onValueChange = {
+                                onChange(draft.copy(snoozeRefillYieldMs = goalSecondsInput(it, draft.snoozeRefillYieldMs / 1_000L) * 1_000L))
+                            },
+                        )
+                        GoalNumberField(
+                            label = "Snooze refill time (seconds)",
+                            value = (draft.snoozeRefillElapsedMs / 1_000L).toString(),
+                            enabled = controlsEnabled,
+                            onValueChange = {
+                                onChange(draft.copy(snoozeRefillElapsedMs = goalSecondsInput(it, draft.snoozeRefillElapsedMs / 1_000L) * 1_000L))
+                            },
+                        )
+                    }
+                    Text(goalOutcomeCountsLabel(draft.outcomeCounts), color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                    if (status.isNotBlank()) {
+                        Text(
+                            status,
+                            color = if (status == "Saving…" || status == "Goal saved.") Teal else Color(0xFFFFB4AB),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                HorizontalDivider(color = SurfaceRaised)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text("Cancel") }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = onSave,
+                        enabled = !saving,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Text(if (saving) "Saving…" else "Save")
+                    }
+                }
             }
-        },
-        confirmButton = { TextButton(onDismiss) { Text("Close") } },
+        }
+    }
+}
+
+@Composable
+private fun GoalToggle(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean,
+    locked: Boolean = false,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    val stateText = if (locked) {
+        if (checked) "LOCKED" else "UNLOCKED"
+    } else {
+        if (checked) "ON" else "OFF"
+    }
+    val activeColor = if (locked) Periwinkle else Teal
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+        Box(
+            modifier = Modifier
+                .width(95.dp)
+                .heightIn(min = 48.dp)
+                .toggleable(
+                    value = checked,
+                    enabled = enabled,
+                    role = Role.Switch,
+                    onValueChange = onCheckedChange,
+                )
+                .semantics {
+                    contentDescription = "$label: $stateText"
+                    stateDescription = stateText
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(95.dp)
+                    .height(30.dp)
+                    .clip(CircleShape)
+                    .background(Ink)
+                    .border(1.dp, TextMuted.copy(alpha = 0.22f), CircleShape),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .align(if (checked) Alignment.CenterEnd else Alignment.CenterStart)
+                        .padding(2.dp)
+                        .width(44.dp)
+                        .height(26.dp)
+                        .clip(CircleShape)
+                        .background(if (checked) activeColor else TextMuted),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (locked) {
+                        Icon(
+                            imageVector = if (checked) Icons.Default.Lock else Icons.Default.LockOpen,
+                            contentDescription = null,
+                            tint = Ink,
+                            modifier = Modifier.size(12.dp),
+                        )
+                    } else {
+                        Text(
+                            if (checked) "ON" else "OFF",
+                            color = Ink,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GoalNumberField(
+    label: String,
+    value: String,
+    enabled: Boolean,
+    onValueChange: (String) -> Unit,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text(label) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
     )
 }
+
+internal fun goalSecondsInput(
+    value: String,
+    fallback: Long,
+    maximum: Long = MAX_SAFE_GOAL_INTEGER / 1_000L,
+): Long = value.toLongOrNull()?.takeIf { it > 0L && it <= maximum } ?: fallback
+
+internal fun goalOptionalInput(value: String, fallback: Long?, maximum: Long? = null): Long? = when {
+    value.isBlank() -> null
+    else -> value.toLongOrNull()?.takeIf { it > 0L && (maximum == null || it <= maximum) } ?: fallback
+}
+
+internal fun goalOutcomeCountsLabel(counts: GoalOutcomeCounts): String =
+    "Outcomes: blocked ${counts.blocked}, completed ${counts.completed}, not done ${counts.notDone}, waiting ${counts.waitingForUserAuthorization}"
 
 @Composable
 private fun ReminderDialog(
@@ -2193,10 +3211,20 @@ private fun RouterManagement(
 }
 
 @Composable
-private fun Avatar(id: String, size: androidx.compose.ui.unit.Dp = 44.dp) {
+private fun Avatar(
+    id: String,
+    size: androidx.compose.ui.unit.Dp = 44.dp,
+    working: Boolean = false,
+    compacting: Boolean = false,
+) {
     val palette = listOf(Periwinkle, Teal, Color(0xFFF5B2D1), Color(0xFFFFC57C))
     val color = palette[(id.hashCode().and(0x7fffffff)) % palette.size]
-    Box(Modifier.size(size).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
+    val modifier = when {
+        compacting -> Modifier.background(animatedStatusGradient("compacting-avatar", listOf(Color(0xFFA855F7), Periwinkle)))
+        working -> Modifier.background(animatedStatusGradient("working-avatar", listOf(Periwinkle, Teal, Periwinkle)))
+        else -> Modifier.background(color)
+    }
+    Box(Modifier.size(size).clip(CircleShape).then(modifier), contentAlignment = Alignment.Center) {
         Text(id.firstOrNull()?.uppercase() ?: "?", color = Ink, fontWeight = FontWeight.Bold)
     }
 }
@@ -2347,6 +3375,155 @@ internal fun normalizeGoalProjection(value: JSONObject?): GoalProjection? {
     if (!enabled && goal.isNotEmpty()) return null
     return GoalProjection(enabled, if (enabled) goal else "")
 }
+
+internal fun goalStateFromCompact(compact: GoalProjection?): GoalState = GoalState(
+    enabled = compact?.enabled == true,
+    goal = compact?.takeIf { it.enabled }?.goal.orEmpty(),
+)
+
+internal fun safeGoalInteger(value: Any?, minimum: Long, maximum: Long): Long? {
+    val number = when (value) {
+        is Byte -> value.toLong()
+        is Short -> value.toLong()
+        is Int -> value.toLong()
+        is Long -> value
+        is Float -> value.toDouble()
+        is Double -> value
+        else -> return null
+    }
+    val integer = when (number) {
+        is Long -> number
+        is Double -> if (number.isFinite() && number % 1.0 == 0.0 && number <= MAX_SAFE_GOAL_INTEGER && number >= -MAX_SAFE_GOAL_INTEGER) number.toLong() else return null
+        else -> return null
+    }
+    return integer.takeIf { it in minimum..maximum }
+}
+
+internal fun goalStateSettingsAreValid(state: GoalState): Boolean =
+    safeGoalInteger(state.snoozeDurationMs, 1, MAX_SAFE_GOAL_INTEGER) != null &&
+        (state.snoozeTurnLimit == null || safeGoalInteger(state.snoozeTurnLimit, 1, 20) != null) &&
+        (state.snoozeBudgetCapMs == null || safeGoalInteger(state.snoozeBudgetCapMs, 1, MAX_SAFE_GOAL_INTEGER) != null) &&
+        safeGoalInteger(state.snoozeRefillYieldMs, 1, MAX_SAFE_GOAL_INTEGER) != null &&
+        safeGoalInteger(state.snoozeRefillElapsedMs, 1, MAX_SAFE_GOAL_INTEGER) != null &&
+        listOf(
+            state.outcomeCounts.blocked,
+            state.outcomeCounts.completed,
+            state.outcomeCounts.notDone,
+            state.outcomeCounts.waitingForUserAuthorization,
+        ).all { safeGoalInteger(it, 0, 1_000_000) != null }
+
+internal fun normalizeGoalState(value: Any?): GoalState? {
+    val objectValue = value as? JSONObject ?: return null
+    val projection = normalizeGoalProjection(objectValue) ?: return null
+    val blocking = when {
+        !objectValue.has("blocking") -> true
+        else -> objectValue.opt("blocking") as? Boolean ?: return null
+    }
+    val lock = objectValue.opt("goal_lock_enabled") as? Boolean ?: return null
+    val snoozeEnabled = objectValue.opt("snooze_enabled") as? Boolean ?: return null
+    fun positiveSafeInteger(name: String): Long? = safeGoalInteger(objectValue.opt(name), 1, MAX_SAFE_GOAL_INTEGER)
+    val duration = positiveSafeInteger("snooze_duration_ms") ?: return null
+    val yield = positiveSafeInteger("snooze_refill_yield_ms") ?: return null
+    val elapsed = positiveSafeInteger("snooze_refill_elapsed_ms") ?: return null
+    if (!objectValue.has("snooze_turn_limit") || !objectValue.has("snooze_budget_cap_ms")) return null
+    val turn = if (objectValue.isNull("snooze_turn_limit")) null else safeGoalInteger(objectValue.opt("snooze_turn_limit"), 1, 20)?.toInt() ?: return null
+    val budget = if (objectValue.isNull("snooze_budget_cap_ms")) null else positiveSafeInteger("snooze_budget_cap_ms") ?: return null
+    val counts = objectValue.optJSONObject("outcome_counts") ?: return null
+    fun count(name: String): Int? = safeGoalInteger(counts.opt(name), 0, 1_000_000)?.toInt()
+    return GoalState(
+        enabled = projection.enabled,
+        goal = projection.goal,
+        blocking = blocking,
+        goalLockEnabled = lock,
+        snoozeEnabled = snoozeEnabled,
+        snoozeDurationMs = duration,
+        snoozeTurnLimit = turn,
+        snoozeBudgetCapMs = budget,
+        snoozeRefillYieldMs = yield,
+        snoozeRefillElapsedMs = elapsed,
+        outcomeCounts = GoalOutcomeCounts(
+            blocked = count("BLOCKED") ?: return null,
+            completed = count("COMPLETED") ?: return null,
+            notDone = count("NOT_DONE") ?: return null,
+            waitingForUserAuthorization = count("WAITING_FOR_USER_AUTHORIZATION") ?: return null,
+        ),
+    )
+}
+
+internal fun goalControlValidationError(state: GoalState): String? = when {
+    state.enabled && state.goal.trim().isBlank() -> "Turn on the goal and enter a description before saving."
+    !goalStateSettingsAreValid(state) -> goalControlErrorMessage("invalid_settings")
+    else -> null
+}
+
+internal fun goalControlUnavailableTargetMessage() = "The agent is not ready for goal changes."
+internal fun goalControlDisconnectedMessage() = "The router is not connected."
+
+internal fun goalControlFrame(
+    sourceAgentId: String,
+    sourceInstanceId: String,
+    leaseId: String,
+    targetAgentId: String,
+    targetInstanceId: String,
+    controlId: String,
+    state: GoalState,
+    requestId: String = "goal-control-request-$controlId",
+): JSONObject = JSONObject()
+    .put("version", "v1")
+    .put("frame_id", requestId)
+    .put("type", "goal_control")
+    .put("agent_id", sourceAgentId)
+    .put("instance_id", sourceInstanceId)
+    .put("lease_id", leaseId)
+    .put("target_agent_id", targetAgentId)
+    .put("target_instance_id", targetInstanceId)
+    .put("control_id", controlId)
+    .put("action", if (state.enabled) "set" else "off")
+    .put("goal", if (state.enabled) state.goal else "")
+    .put("settings", JSONObject()
+        .put("blocking", state.blocking)
+        .put("goal_lock_enabled", state.goalLockEnabled)
+        .put("snooze_enabled", state.snoozeEnabled)
+        .put("snooze_duration_ms", state.snoozeDurationMs)
+        .put("snooze_turn_limit", state.snoozeTurnLimit ?: JSONObject.NULL)
+        .put("snooze_budget_cap_ms", state.snoozeBudgetCapMs ?: JSONObject.NULL)
+        .put("snooze_refill_yield_ms", state.snoozeRefillYieldMs)
+        .put("snooze_refill_elapsed_ms", state.snoozeRefillElapsedMs))
+
+internal fun goalControlRequestMatchesPending(pending: GoalControlPending?, requestId: String): Boolean =
+    pending != null && requestId.isNotBlank() && pending.requestId == requestId
+
+internal fun settleGoalControlResult(
+    state: GoalControlUiState,
+    frame: JSONObject,
+    connection: GoalControlConnection,
+    currentPeer: PeerStatus?,
+): GoalControlUiState {
+    val pending = state.pending ?: return state
+    val matches = frame.optString("source_agent_id") == pending.sourceAgentId &&
+        frame.optString("agent_id") == pending.targetAgentId &&
+        frame.optString("instance_id") == pending.targetInstanceId &&
+        frame.optString("control_id") == pending.controlId &&
+        goalControlResultLeaseIsValid(frame.opt("lease_id")) &&
+        connection.sourceLeaseId.isNotBlank() && connection.sourceLeaseId == pending.sourceLeaseId &&
+        connection.sourceSessionId == pending.sourceSessionId &&
+        connection.connectionGeneration == pending.connectionGeneration && connection.socketIsCurrent &&
+        currentPeer?.instanceId == pending.targetInstanceId
+    if (!matches) return state
+    val accepted = frame.opt("accepted") as? Boolean ?: return state
+    if (!accepted) return state.copy(pending = null, status = goalControlErrorMessage(frame.optString("error_code").ifBlank { null }))
+    val confirmed = normalizeGoalState(frame.optJSONObject("goal_state")) ?: return state
+    return state.copy(
+        confirmedState = confirmed,
+        compactProjection = GoalProjection(confirmed.enabled, confirmed.goal),
+        editorVisible = false,
+        pending = null,
+        status = "Goal saved.",
+    )
+}
+
+internal fun timeoutGoalControl(state: GoalControlUiState): GoalControlUiState =
+    if (state.pending == null) state else state.copy(pending = null, status = goalControlErrorMessage("control_timeout"))
 
 internal fun normalizeModelSummary(value: JSONObject?): ModelSummary? {
     if (value == null) return null
@@ -2616,6 +3793,9 @@ internal fun modelControlStatusTitle(
 internal fun acceptsLivePeerInstance(currentInstanceId: String, incomingInstanceId: String): Boolean =
     currentInstanceId.isBlank() || (incomingInstanceId.isNotBlank() && incomingInstanceId == currentInstanceId)
 
+internal fun livePeerInstanceWasReplaced(currentInstanceId: String, incomingInstanceId: String): Boolean =
+    currentInstanceId.isNotBlank() && incomingInstanceId.isNotBlank() && currentInstanceId != incomingInstanceId
+
 internal fun deferredModelCatalogFrameMatchesCurrentPeer(current: PeerStatus, frame: JSONObject): Boolean {
     val currentInstanceId = current.instanceId.trim()
     val frameInstanceId = frame.optString("instance_id").trim()
@@ -2669,6 +3849,59 @@ internal fun mergeDiscoveredPeer(
 internal fun goalDialogShouldClose(openPeer: String, peers: List<PeerStatus>): Boolean =
     openPeer.isNotBlank() && peers.none { it.id == openPeer && it.goal?.enabled == true }
 
+internal fun goalEditorTargetMissing(openPeer: String, peers: List<PeerStatus>): Boolean =
+    openPeer.isNotBlank() && peers.none { it.id == openPeer }
+
+internal fun goalDraftShouldHydrateFromFullState(
+    editorPeer: String,
+    editorInstanceId: String,
+    draftDirty: Boolean,
+    incomingPeer: String,
+    incomingInstanceId: String,
+): Boolean = !draftDirty &&
+    editorPeer.isNotBlank() &&
+    editorPeer == incomingPeer &&
+    editorInstanceId.isNotBlank() &&
+    editorInstanceId == incomingInstanceId
+
+internal data class GoalControlReplacementCleanup(
+    val clearPending: Boolean,
+    val clearEditor: Boolean,
+)
+
+internal fun goalControlReplacementCleanup(
+    pending: GoalControlPending?,
+    editorPeer: String,
+    editorInstanceId: String,
+    peer: String,
+    previousInstanceId: String,
+    incomingInstanceId: String,
+): GoalControlReplacementCleanup {
+    if (!livePeerInstanceWasReplaced(previousInstanceId, incomingInstanceId) || peer.isBlank()) {
+        return GoalControlReplacementCleanup(clearPending = false, clearEditor = false)
+    }
+    return GoalControlReplacementCleanup(
+        clearPending = pending?.targetAgentId == peer && pending.targetInstanceId == previousInstanceId,
+        clearEditor = editorPeer == peer && editorInstanceId == previousInstanceId,
+    )
+}
+
+internal fun goalControlShouldClearForPeerReplacement(
+    pending: GoalControlPending?,
+    editorPeer: String,
+    editorInstanceId: String,
+    peer: String,
+    previousInstanceId: String,
+    incomingInstanceId: String,
+): Boolean = goalControlReplacementCleanup(
+    pending,
+    editorPeer,
+    editorInstanceId,
+    peer,
+    previousInstanceId,
+    incomingInstanceId,
+).let { it.clearPending || it.clearEditor }
+
 internal fun peerStatusFromJson(
     peer: String,
     source: JSONObject,
@@ -2698,7 +3931,14 @@ internal fun peerStatusFromJson(
         else -> projectedSubagents.size
     }
 
-    val goal = if (source.has("goal")) normalizeGoalProjection(source.optJSONObject("goal")) ?: base?.goal else base?.goal
+    val compactGoal = if (source.has("goal")) normalizeGoalProjection(source.optJSONObject("goal")) else null
+    val fullGoal = if (source.has("goal_state")) normalizeGoalState(source.optJSONObject("goal_state")) else null
+    val goalState = fullGoal ?: when {
+        compactGoal != null && base?.goalState != null -> base.goalState.copy(enabled = compactGoal.enabled, goal = compactGoal.goal)
+        compactGoal != null -> goalStateFromCompact(compactGoal)
+        else -> base?.goalState
+    }
+    val goal = goalState?.let { GoalProjection(it.enabled, it.goal) } ?: compactGoal ?: base?.goal
     val currentModel = if (source.has("current_model")) normalizeModelSummary(source.optJSONObject("current_model")) ?: base?.currentModel else base?.currentModel
     val modelValues = modelCatalogValuesFromFrame(source)
     val deferEmptyModelCatalog = modelValues?.isEmpty() == true && modelCatalogUpdateMatchesPending(
@@ -2738,6 +3978,7 @@ internal fun peerStatusFromJson(
         subagents = projectedSubagents,
         instanceId = incomingInstanceId.ifEmpty { base?.instanceId.orEmpty() },
         goal = goal,
+        goalState = goalState,
         currentModel = currentModel,
         availableModels = availableModels,
         modelCatalogTotalCount = modelCatalogTotalCount,

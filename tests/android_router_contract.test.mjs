@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
@@ -8,6 +9,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import WebSocket from "ws";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 
 import { openMessageRepository } from "../harness/db.js";
 import {
@@ -17,6 +20,32 @@ import {
   validateServerFrame,
 } from "../harness/protocol.js";
 import { createAgentRouter } from "../harness/router.js";
+
+const ORIGIN_MAIN_SCHEMA_COMMIT = "999e2e0518bf9f66f56ae32287ae147b5bb17443";
+
+function originMainFrameValidators() {
+  const schema = JSON.parse(execFileSync(
+    "git",
+    ["show", `${ORIGIN_MAIN_SCHEMA_COMMIT}:protocol/v1/schema.json`],
+    { cwd: new URL("..", import.meta.url), encoding: "utf8" },
+  ));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  ajv.compile(schema);
+
+  const validatorFor = (frameType) => {
+    const validate = ajv.compile({ $ref: `${schema.$id}#/$defs/${frameType}` });
+    return (frame) => {
+      if (!validate(frame)) throw new Error(ajv.errorsText(validate.errors));
+      return frame;
+    };
+  };
+  return {
+    schema,
+    validateClientFrame: validatorFor("clientFrame"),
+    validateServerFrame: validatorFor("serverFrame"),
+  };
+}
 
 const register = {
   version: "v1",
@@ -781,7 +810,7 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.match(activity, /"agent_activity" -> runOnUiThread[\s\S]*?if \(generation == connectionGeneration\.get\(\)\) receiveAgentActivity\(frame\)/);
   assert.match(activity, /addPathSegments\("v1\/conversations"\)/);
   assert.match(activity, /"history:\$activeRouter:\$agentId:\$peer"/);
-  assert.match(activity, /generation != connectionGeneration\.get\(\) \|\| activeRouter != router \|\| agentId != owner \|\| selectedPeer != peer/);
+  assert.match(activity, /historyHydrationMatchesCurrent\([\s\S]*?requestGeneration = requestGeneration,[\s\S]*?currentRequestGeneration = currentHistoryRequestToken\(peer\),[\s\S]*?callbackGeneration = generation,[\s\S]*?currentGeneration = connectionGeneration\.get\(\),[\s\S]*?capturedRouter = router,[\s\S]*?currentRouter = activeRouter,[\s\S]*?capturedOwner = owner,[\s\S]*?currentOwner = agentId,[\s\S]*?capturedPeer = peer,[\s\S]*?currentPeer = selectedPeer,[\s\S]*?\)/);
   assert.match(activity, /reconcileConversationMessages\(historyFor\(peer\), hydrated, highWaterSequence\)/);
   assert.match(activity, /rememberLauncherForActivityResult\(ActivityResultContracts\.GetMultipleContents\(\)\)/);
   assert.match(activity, /imagePicker\.launch\("image\/\*"\)/);
@@ -789,8 +818,9 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.doesNotMatch(activity, /Text\("Attach"\)/);
   assert.doesNotMatch(activity, /Text\("Paste"\)/);
   assert.match(activity, /private fun synchronizedHaloPulse\(label: String\): HaloPulse/);
-  assert.match(activity, /private fun PulsingDot\(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp\)/);
-  assert.match(activity, /Box\(Modifier\.size\(size \+ haloSpread \* 2\), contentAlignment = Alignment\.Center\)/);
+  assert.match(activity, /private fun PulsingDot\([\s\S]*?gradientColors: List<Color>/);
+  assert.match(activity, /private fun PulsingDot\([\s\S]*?val markerSize = size \+ haloSpread \* 2[\s\S]*?Box\(Modifier\.size\(markerSize\), contentAlignment = Alignment\.Center\)[\s\S]*?if \(outerGradientColors != null\)[\s\S]*?Box\(Modifier\.size\(markerSize\)\.clip\(CircleShape\)\.background\(gradient\)\)/);
+  assert.match(activity, /private fun PulsingDot\([\s\S]*?if \(outerGradientColors == null\) \{[\s\S]*?Box\(Modifier\.size\(size\)\.clip\(CircleShape\)\.background\(gradient\)\)[\s\S]*?\} else \{[\s\S]*?Box\(Modifier\.size\(size\)\.clip\(CircleShape\)\.background\(color\)\)/);
   assert.doesNotMatch(activity, /synchronizedPulseAlpha/);
   assert.match(activity, /contentReceiver\(receiveImages\)/);
   assert.match(activity, /acceptedImageUri\(item\.uri\?\.toString\(\), item\.intent\?\.data\?\.toString\(\), item\.text\?\.toString\(\)\)/);
@@ -885,10 +915,16 @@ test("Android home renders only router-discovered connected peers", () => {
   assert.match(activity, /scheduleAtFixedRate\(AGENT_REFRESH_INTERVAL_MS, AGENT_REFRESH_INTERVAL_MS\)[\s\S]*discoverPeers\(generation, router, owner\)/);
   assert.match(activity, /val discovered = buildList \{[\s\S]*?add\(peer to agent\)/);
   assert.match(activity, /runOnUiThread \{\s*if \(generation != connectionGeneration\.get\(\) \|\| requestGeneration != peerRequestGeneration\.get\(\)\) return@runOnUiThread/);
-  assert.match(activity, /val nextPeers = discovered\.map \{ \(peer, source\) ->/);
-  assert.match(activity, /mergeDiscoveredPeer\([\s\S]*?peer = peer,[\s\S]*?source = source,[\s\S]*?current = currentPeers\.firstOrNull \{ it\.id == peer \}[\s\S]*?hasLiveUpdate = peer in liveUpdatedPeerIds/);
+  assert.match(activity, /val discoveredPeerIds = discovered\.map \{ it\.first \}\.toSet\(\)/);
+  assert.match(activity, /\(currentPeers\.map \{ it\.id \}\.toSet\(\) - discoveredPeerIds\)\.forEach\(retiredPeerInstances::clearPeer\)/);
+  assert.match(activity, /val instanceDecisions = discovered\.associate[\s\S]*?retiredPeerInstances\.observe\([\s\S]*?currentInstanceId = it\.instanceId[\s\S]*?incomingInstanceId/);
+  assert.match(activity, /if \(instanceDecisions\[peer\] == PeerInstanceDecision\.REPLACEMENT\)[\s\S]*?goalControlReplacementCleanup/);
+  assert.match(activity, /if \(decision == PeerInstanceDecision\.REJECT\) \{[\s\S]*?return@map current \?: peerStatusFromJson\(peer, source\)/);
+  assert.match(activity, /if \(decision == PeerInstanceDecision\.REPLACEMENT\) deferredEmptyModelCatalogs\.remove\(peer\)/);
+  assert.match(activity, /mergeDiscoveredPeer\([\s\S]*?peer = peer,[\s\S]*?source = source,[\s\S]*?current = current\?\.takeIf \{ decision == PeerInstanceDecision\.ACCEPT && it\.instanceId\.isNotBlank\(\) \}[\s\S]*?hasLiveUpdate = peer in liveUpdatedPeerIds/);
   assert.match(activity, /\.sortedBy \{ it\.id \}/);
-  assert.match(activity, /private fun receiveAgentActivity\(frame: JSONObject\)/);
+  assert.match(activity, /class RetiredPeerInstanceTombstones[\s\S]*?fun observe\(peer: String, currentInstanceId: String, incomingInstanceId: String\)[\s\S]*?if \(incoming\.isNotBlank\(\) && retired\[peer\]\?\.contains\(incoming\) == true\) return PeerInstanceDecision\.REJECT[\s\S]*?retire\(peer, current\)/);
+  assert.match(activity, /private fun receiveAgentActivity\(frame: JSONObject\)[\s\S]*?replaceLivePeerProjectionForNewInstance\(peer, current, frame\)\) return[\s\S]*?acceptsLivePeerInstance\(current\.instanceId, frame\.optString\("instance_id"\)\.trim\(\)\)/);
   assert.match(activity, /normalizedSubagentSummaries\(source\.optJSONArray\("subagents"\)\)/);
   assert.match(activity, /countProvided && incomingCount > 0 && base\?\.subagents\?\.size == incomingCount/);
   assert.match(activity, /PeerActivityIndicators\(peer\)/);
@@ -900,6 +936,106 @@ test("Android home renders only router-discovered connected peers", () => {
   assert.doesNotMatch(activity, /addAll\(knownPeers\(\)\.filter/);
   assert.doesNotMatch(activity, /peers = \(peers \+ peer\)\.distinct\(\)\.sorted\(\)/);
   assert.match(activity, /Text\("Connected agents"/);
+});
+
+test("Android goal controls require the complete v1 request and only settle the matching target result", () => {
+  const { schema, validateClientFrame, validateServerFrame } = originMainFrameValidators();
+  assert.deepEqual(schema.$defs.goalControlSettings.required, [
+    "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit",
+    "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms",
+  ]);
+  assert.deepEqual(schema.$defs.goalState.required, [
+    "enabled", "goal", "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms",
+    "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms",
+    "snooze_refill_elapsed_ms", "outcome_counts",
+  ]);
+  const settings = {
+    blocking: false,
+    goal_lock_enabled: true,
+    snooze_enabled: false,
+    snooze_duration_ms: 90_000,
+    snooze_turn_limit: 20,
+    snooze_budget_cap_ms: 900_000,
+    snooze_refill_yield_ms: 45_000,
+    snooze_refill_elapsed_ms: 120_000,
+  };
+  const goalState = {
+    enabled: true,
+    goal: "Finish Android parity",
+    ...settings,
+    outcome_counts: { BLOCKED: 1, COMPLETED: 2, NOT_DONE: 3, WAITING_FOR_USER_AUTHORIZATION: 4 },
+  };
+  const agentGoalState = {
+    version: "v1",
+    frame_id: "android-agent-goal-state-1",
+    type: "agent_goal_state",
+    agent_id: "worker",
+    instance_id: "worker-instance",
+    generated_at: "2026-07-15T06:00:00.000Z",
+    goal_state: goalState,
+  };
+  assert.equal(validateServerFrame(agentGoalState), agentGoalState);
+
+  const request = {
+    version: "v1",
+    frame_id: "android-goal-request-1",
+    type: "goal_control",
+    agent_id: register.agent_id,
+    instance_id: register.instance_id,
+    lease_id: "android-lease",
+    target_agent_id: "worker",
+    target_instance_id: "worker-instance",
+    control_id: "goal-control-1",
+    action: "set",
+    goal: goalState.goal,
+    settings,
+  };
+  assert.equal(validateClientFrame(request), request);
+  for (const field of [
+    "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id",
+    "control_id", "action", "goal", "settings",
+  ]) {
+    const incomplete = { ...request };
+    delete incomplete[field];
+    assert.throws(() => validateClientFrame(incomplete), `${field} is required by origin/main`);
+  }
+
+  const result = {
+    version: "v1",
+    frame_id: "goal-result-1",
+    type: "goal_control_result",
+    agent_id: request.target_agent_id,
+    instance_id: request.target_instance_id,
+    lease_id: "worker-lease",
+    source_agent_id: request.agent_id,
+    control_id: request.control_id,
+    revision: 1,
+    accepted: true,
+    goal_state: goalState,
+  };
+  assert.equal(validateServerFrame(result), result);
+  for (const field of [
+    "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id",
+    "revision", "accepted", "goal_state",
+  ]) {
+    const incomplete = { ...result };
+    delete incomplete[field];
+    assert.throws(() => validateServerFrame(incomplete), `${field} is required by origin/main`);
+  }
+  const matchesPending = (frame) => frame.source_agent_id === request.agent_id
+    && frame.agent_id === request.target_agent_id
+    && frame.instance_id === request.target_instance_id
+    && frame.control_id === request.control_id;
+  assert.equal(matchesPending(result), true);
+  for (const [field, value] of Object.entries({
+    source_agent_id: "other-android",
+    agent_id: "other-worker",
+    instance_id: "replacement-instance",
+    control_id: "other-control",
+  })) assert.equal(matchesPending({ ...result, [field]: value }), false, `${field} fences stale goal results`);
+
+  const off = { ...request, frame_id: "android-goal-request-2", control_id: "goal-control-2", action: "off", goal: "" };
+  assert.equal(validateClientFrame(off), off);
 });
 
 test("discovery exposes only active sessions with role and no lease metadata", async () => {

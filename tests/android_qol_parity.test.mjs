@@ -124,16 +124,144 @@ test("Android connection, registration, and reminder publication stay race-safe"
   assert.match(source, /runOnUiThread \{[\s\S]*?generation != connectionGeneration\.get\(\) \|\| requestGeneration != reminderRequestGeneration\.get\(\)[\s\S]*?val next = reminderRefreshResult\([\s\S]*?current = reminders/);
 });
 
+test("Task 250 wires both Android goal entry points to one complete fenced editor", async () => {
+  const source = await readFile(activityPath, "utf8");
+  for (const label of [
+    "Select an agent to set a goal",
+    "Set what this agent should work toward.",
+    "What should this agent work toward?",
+    "Blocking",
+    "Goal lock",
+    "Snooze settings",
+    "Allow snoozing",
+    "Snooze duration (seconds)",
+    "Snooze turn limit (optional)",
+    "Snooze budget (minutes, optional)",
+    "Snooze refill yield (seconds)",
+    "Snooze refill time (seconds)",
+    "Saving…",
+  ]) assert.ok(source.includes(label), `missing goal-editor label: ${label}`);
+  assert.match(source, /GoalDialog\(/);
+  assert.match(source, /"Show goal for \$\{humanName\(peerId\)\}"/);
+  assert.match(source, /val label = peer\?\.let \{\s*if \(hasGoal\) "Edit goal for \$\{humanName\(it\.id\)\}" else "Set goal for \$\{humanName\(it\.id\)\}"\s*\} \?: "Select an agent to set a goal"/);
+  assert.match(source, /Icon\(\s*Icons\.Default\.Flag,\s*label,\s*tint =/);
+  const peerHome = source.match(/private fun PeerHome\([\s\S]*?\n}\n\n@Composable\nprivate fun PeerRow/)?.[0];
+  const conversation = source.match(/private fun Conversation\([\s\S]*?\n}\n\n@Composable\nprivate fun ModelPicker/)?.[0];
+  assert.ok(peerHome, "PeerHome source should be present");
+  assert.ok(conversation, "Conversation source should be present");
+  assert.match(peerHome, /GoalHeaderButton\(peer = null, onGoal = \{\}\)/);
+  assert.match(conversation, /Row\(verticalAlignment = Alignment\.CenterVertically\) \{[\s\S]*?GoalHeaderButton\(peer = peerStatus, onGoal = onGoal\)[\s\S]*?PeerActivityIndicators/);
+  assert.equal([...conversation.matchAll(/GoalHeaderButton\(peer = peerStatus, onGoal = onGoal\)/g)].length, 1);
+  assert.match(source, /onGoal = ::openGoalDialog/);
+  assert.match(source, /"agent_goal_state" -> runOnUiThread/);
+  assert.match(source, /"goal_control_result" -> runOnUiThread/);
+  assert.match(source, /internal fun goalControlFrame\([\s\S]*?\.put\("type", "goal_control"\)[\s\S]*?\.put\("agent_id", sourceAgentId\)[\s\S]*?\.put\("instance_id", sourceInstanceId\)[\s\S]*?\.put\("lease_id", leaseId\)[\s\S]*?\.put\("target_agent_id", targetAgentId\)[\s\S]*?\.put\("target_instance_id", targetInstanceId\)[\s\S]*?\.put\("control_id", controlId\)[\s\S]*?\.put\("action", if \(state\.enabled\) "set" else "off"\)[\s\S]*?\.put\("goal", if \(state\.enabled\) state\.goal else ""\)[\s\S]*?\.put\("settings",/);
+  assert.match(source, /"blocking"[\s\S]*?"goal_lock_enabled"[\s\S]*?"snooze_enabled"[\s\S]*?"snooze_duration_ms"[\s\S]*?"snooze_turn_limit"[\s\S]*?"snooze_budget_cap_ms"[\s\S]*?"snooze_refill_yield_ms"[\s\S]*?"snooze_refill_elapsed_ms"/);
+  assert.match(source, /internal fun settleGoalControlResult\([\s\S]*?frame\.optString\("source_agent_id"\) == pending\.sourceAgentId[\s\S]*?frame\.optString\("agent_id"\) == pending\.targetAgentId[\s\S]*?frame\.optString\("instance_id"\) == pending\.targetInstanceId[\s\S]*?frame\.optString\("control_id"\) == pending\.controlId/);
+  assert.match(source, /clearGoalControlForReconnect\(\)/);
+});
+
+test("Goal editor keeps its bounded form scroll separate from pinned 48dp actions", async () => {
+  const source = await readFile(activityPath, "utf8");
+  const goalDialog = source.match(/private fun GoalDialog\([\s\S]*?\n}\n\n@Composable\nprivate fun GoalToggle/)?.[0];
+  assert.ok(goalDialog, "GoalDialog source should be present");
+  assert.match(goalDialog, /Dialog\(onDismissRequest = onDismiss\)[\s\S]*?Surface\([\s\S]*?heightIn\(max = 600\.dp\)/);
+  assert.doesNotMatch(goalDialog, /AlertDialog\(/);
+  assert.match(goalDialog, /\.weight\(1f, fill = false\)[\s\S]*?\.verticalScroll\(scrollState\)[\s\S]*?\.padding\(bottom = 24\.dp\)/);
+  assert.match(goalDialog, /HorizontalDivider\(color = SurfaceRaised\)\s+Row\([\s\S]*?TextButton\([\s\S]*?heightIn\(min = 48\.dp\)[\s\S]*?Button\([\s\S]*?heightIn\(min = 48\.dp\)/);
+});
+
+test("Android goal toggles mirror WebUI state labels and lock icons", async () => {
+  const source = await readFile(activityPath, "utf8");
+  const goalToggle = source.match(/private fun GoalToggle\([\s\S]*?\n}\n\n@Composable\nprivate fun GoalNumberField/)?.[0];
+  assert.ok(goalToggle, "GoalToggle source should be present");
+  assert.doesNotMatch(goalToggle, /Switch\(/);
+  assert.match(goalToggle, /\.toggleable\([\s\S]*?value = checked,[\s\S]*?enabled = enabled,[\s\S]*?role = Role\.Switch/);
+  assert.match(goalToggle, /heightIn\(min = 48\.dp\)/);
+  assert.match(goalToggle, /Text\([\s\S]*?if \(checked\) "ON" else "OFF"/);
+  assert.match(goalToggle, /Icons\.Default\.Lock/);
+  assert.match(goalToggle, /Icons\.Default\.LockOpen/);
+  assert.match(goalToggle, /contentDescription = "\$label: \$stateText"/);
+  assert.doesNotMatch(goalToggle, /Text\(stateText/);
+});
+
+test("Task 250 replaces live peer projections before the instance fence and only hydrates clean drafts", async () => {
+  const source = await readFile(activityPath, "utf8");
+  const activity = source.match(/private fun receiveAgentActivity\([\s\S]*?\n    private fun receiveAgentModelCatalog/)?.[0];
+  const modelCatalog = source.match(/private fun receiveAgentModelCatalog\([\s\S]*?\n    private fun applyDeferredEmptyModelCatalogs/)?.[0];
+  const goalState = source.match(/private fun receiveAgentGoalState\([\s\S]*?\n    private fun receiveGoalControlResult/)?.[0];
+  assert.ok(activity, "receiveAgentActivity source should be present");
+  assert.ok(modelCatalog, "receiveAgentModelCatalog source should be present");
+  assert.ok(goalState, "receiveAgentGoalState source should be present");
+  assert.match(activity, /replaceLivePeerProjectionForNewInstance\(peer, current, frame\)\) return[\s\S]*?acceptsLivePeerInstance/);
+  assert.match(modelCatalog, /replaceLivePeerProjectionForNewInstance\(peer, current, frame\)\) return[\s\S]*?acceptsLivePeerInstance/);
+  assert.match(goalState, /replaceLivePeerProjectionForNewInstance\(peer, current, frame\)\) return[\s\S]*?acceptsLivePeerInstance/);
+  assert.match(source, /fun goalControlReplacementCleanup\([\s\S]*?livePeerInstanceWasReplaced\(previousInstanceId, incomingInstanceId\)[\s\S]*?pending\?\.targetAgentId == peer && pending\.targetInstanceId == previousInstanceId[\s\S]*?editorPeer == peer && editorInstanceId == previousInstanceId/);
+  assert.match(goalState, /goalDraftShouldHydrateFromFullState\([\s\S]*?goalDraft = state[\s\S]*?goalDraftDirty = false/);
+  assert.match(source, /private fun updateGoalDraft[\s\S]*?goalDraftDirty = true/);
+  assert.match(source, /private fun closeGoalDialog[\s\S]*?goalDraftDirty = false/);
+});
+
+test("Android goal controls fail closed and status markers use the WebUI gradient sweep", async () => {
+  const source = await readFile(activityPath, "utf8");
+  assert.match(source, /fun goalControlCapabilityMaySend\(goalControlAvailable: Boolean\?\): Boolean = goalControlAvailable == true/);
+  assert.match(source, /fun goalControlCapabilityError\([\s\S]*?!goalControlCapabilityMaySend\(goalControlAvailable\)[\s\S]*?!blocking && goalControlBlockingAvailable != true/);
+  assert.match(source, /goalControlBlockingAvailable != true/);
+  assert.match(source, /private fun clearGoalCapabilities\(\)[\s\S]*?goalControlCapabilitiesReset\(\)[\s\S]*?goalControlAvailable = reset\.available[\s\S]*?goalControlBlockingAvailable = reset\.blockingAvailable/);
+  assert.match(source, /fun goalControlCapabilitiesReset\(\): GoalControlCapabilities = GoalControlCapabilities\(\)/);
+  assert.match(source, /clearGoalControlForReconnect\(\)[\s\S]*?clearGoalCapabilities\(\)/);
+  assert.match(source, /fun goalControlReplacementCleanup\([\s\S]*?clearPending[\s\S]*?clearEditor/);
+  assert.match(source, /fun safeGoalInteger\([\s\S]*?MAX_SAFE_GOAL_INTEGER/);
+  assert.match(source, /"invalid_settings" -> "Check the goal settings and try again\."/);
+  assert.doesNotMatch(source, /"invalid_settings", "invalid_goal_settings"/);
+  assert.match(source, /private fun animatedStatusGradient\(/);
+  assert.match(source, /Brush\.linearGradient\(/);
+  assert.match(source, /working-avatar/);
+  assert.match(source, /private fun OrbitingBorder\(/);
+  assert.match(source, /drawFeatheredOrbitingBorder\(progress, radius, strokeWidth, orbitColor\)/);
+  assert.match(source, /animation = tween\(900, easing = LinearEasing\)/);
+});
+
+test("Android activity status restores the radial pulse and colors the orbit for every active mode", async () => {
+  const source = await readFile(activityPath, "utf8");
+  const working = source.match(/private fun WorkingIndicator\([\s\S]*?\n}\n\n@Composable\nprivate fun OrbitingBorder/)?.[0];
+  const orbit = source.match(/private fun OrbitingBorder\([\s\S]*?\n}\n\nprivate fun DrawScope\.drawFeatheredOrbitingBorder/)?.[0];
+  const peerRow = source.match(/private fun PeerRow\([\s\S]*?\n}\n\n@Composable\nprivate fun PeerActivityIndicators/)?.[0];
+  const conversation = source.match(/private fun Conversation\([\s\S]*?\n}\n\n@Composable\nprivate fun ModelPicker/)?.[0];
+  assert.ok(working, "WorkingIndicator source should be present");
+  assert.ok(orbit, "OrbitingBorder source should be present");
+  assert.ok(peerRow, "PeerRow source should be present");
+  assert.ok(conversation, "Conversation source should be present");
+  assert.match(working, /synchronizedHaloPulse\("working-pulse"\)/);
+  assert.match(working, /PulsingDot\([\s\S]*?Teal,[\s\S]*?7\.dp,[\s\S]*?10\.dp,[\s\S]*?outerGradientColors/);
+  assert.match(source, /Box\(Modifier\.size\(markerSize\), contentAlignment = Alignment\.Center\)/);
+  assert.match(source, /Box\(Modifier\.size\(size\)\.clip\(CircleShape\)\.background\(color\)\)/);
+  assert.match(orbit, /drawWithCache/);
+  assert.match(orbit, /rememberInfiniteTransition/);
+  assert.match(orbit, /animation = tween\(900, easing = LinearEasing\)/);
+  assert.match(source, /val segment = perimeter \* 0\.25f/);
+  assert.match(source, /PathEffect\.dashPathEffect/);
+  assert.match(source, /StrokeCap\.Round/);
+  assert.match(source, /Nested dashes share one start point/);
+  assert.match(source, /val centerProgress = \(index \+ 1\)\.toFloat\(\) \/ featherSteps/);
+  assert.match(source, /val alpha = 0\.04f \+ centerProgress \* 0\.26f/);
+  assert.match(source, /internal enum class ActivityOrbit[\s\S]*?WORKING\(Teal\)[\s\S]*?SUBAGENT\(Color\(0xFF60A5FA\)\)[\s\S]*?COMPACTING\(Color\(0xFFC084FC\)\)/);
+  assert.match(source, /internal fun activityOrbitFor\(peer: PeerStatus\): ActivityOrbit\? = when \{[\s\S]*?peer\.compacting[\s\S]*?peer\.active[\s\S]*?peer\.subagentCount > 0/);
+  assert.match(peerRow, /val orbit = activityOrbitFor\(peer\)[\s\S]*?OrbitingBorder\([\s\S]*?active = orbit != null[\s\S]*?orbitColor = orbit\?\.color/);
+  assert.match(conversation, /val orbit = activityOrbitFor\(peerStatus\)[\s\S]*?OrbitingBorder\([\s\S]*?active = orbit != null[\s\S]*?orbitColor = orbit\?\.color/);
+  assert.match(source, /drawFeatheredOrbitingBorder\([\s\S]*?color: Color[\s\S]*?color = color\.copy\(alpha = alpha\)/);
+});
+
 test("PeerRow keeps peer selection separate from indicator and chevron controls", async () => {
   const source = await readFile(activityPath, "utf8");
   const peerRow = source.match(/private fun PeerRow\([\s\S]*?\n}\n\n@Composable\nprivate fun PeerActivityIndicators/)?.[0];
   assert.ok(peerRow, "PeerRow source should be present");
   assert.doesNotMatch(peerRow, /Card\(\s*modifier = Modifier[^\n]*clickable/);
   assert.match(peerRow, /Row\(\s*Modifier\.weight\(1f\)\.clickable\(onClick = onClick\)/);
-  assert.match(peerRow, /IconButton\(onClick = onGoal, modifier = Modifier\.size\(38\.dp\)\)/);
+  assert.match(peerRow, /IconButton\(onClick = onGoal, modifier = Modifier\.size\(48\.dp\)\)/);
   assert.match(peerRow, /IconButton\(onClick = onReminders, modifier = Modifier\.size\(38\.dp\)\)/);
   assert.match(peerRow, /IconButton\(onClick = onClick, modifier = Modifier\.size\(38\.dp\)\)/);
-  assert.match(peerRow, /Icon\(Icons\.Default\.Flag, "Show goal", tint = Color\(0xFFF5B2D1\)\)/);
+  assert.match(peerRow, /Icons\.Default\.Flag,[\s\S]*?"Show goal for \$\{humanName\(peerId\)\}",[\s\S]*?tint = Color\(0xFFF5B2D1\)/);
   assert.match(peerRow, /Icon\(Icons\.Default\.AccessTime, "Show reminders", tint = Teal\)/);
   assert.match(peerRow, /Icon\(Icons\.Default\.ChevronRight, "Open conversation"/);
 });
