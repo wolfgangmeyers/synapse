@@ -1292,6 +1292,56 @@ test("mecha_mailbox_send is registered with the recipient, body, and subject sch
   assert.equal(tool.parameters.properties.recipient.type, "string");
   assert.equal(tool.parameters.properties.body.type, "string");
   assert.equal(tool.parameters.properties.subject.type, "string");
+  assert.equal(Object.hasOwn(tool.parameters.properties, "from"), false);
+});
+
+test("mecha_mailbox_send rejects a caller-supplied sender before using the Mailbox client", async () => {
+  const calls = [];
+  const fixture = createMessagingFixture({
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async (message) => { calls.push(message); return { id: "message-1", state: "queued" }; },
+    },
+  });
+  await sessionStart(fixture);
+
+  const result = await fixture.tools.get("mecha_mailbox_send").execute(
+    "call-1",
+    { recipient: "worker", body: "hello", from: "spoofed-sender" },
+    undefined,
+    undefined,
+    fixture.context,
+  );
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /sender is derived from the current tmux window/i);
+  assert.deepEqual(calls, []);
+});
+
+test("mecha_mailbox_send rejects an inherited caller-supplied sender before using the Mailbox client", async () => {
+  const calls = [];
+  const fixture = createMessagingFixture({
+    client: {
+      connect: async () => {}, close() {}, sendReceipt() {}, sendActivity() {},
+      sendReply: async (message) => { calls.push(message); return { id: "message-1", state: "queued" }; },
+    },
+  });
+  await sessionStart(fixture);
+  const input = Object.create({ from: "prototype-spoofed-sender" });
+  input.recipient = "worker";
+  input.body = "hello";
+
+  const result = await fixture.tools.get("mecha_mailbox_send").execute(
+    "call-1",
+    input,
+    undefined,
+    undefined,
+    fixture.context,
+  );
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /sender is derived from the current tmux window/i);
+  assert.deepEqual(calls, []);
 });
 
 test("mecha_mailbox_send validates input before using the Mailbox client", async () => {

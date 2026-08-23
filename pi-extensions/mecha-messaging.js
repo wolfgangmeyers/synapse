@@ -1925,7 +1925,8 @@ export function createMechaMessagingExtension(pi, {
         sentAtMs: nowMs,
       };
       return true;
-    } catch {
+    } catch(e) {
+      console.error(e);
       // Activity is an ephemeral UI hint; mailbox delivery and reconnect behavior own real work.
       return false;
     }
@@ -2341,6 +2342,9 @@ export function createMechaMessagingExtension(pi, {
     },
     async execute(_toolCallId, input, _signal, _onUpdate, toolContext) {
       try {
+        if (input !== null && typeof input === "object" && "from" in input) {
+          throw new Error("the mailbox sender is derived from the current tmux window");
+        }
         const recipient = input?.recipient;
         const body = input?.body;
         const subject = input?.subject;
