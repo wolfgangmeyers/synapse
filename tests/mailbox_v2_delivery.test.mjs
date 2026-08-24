@@ -2495,10 +2495,14 @@ test("context monitor injects direct threshold notifications and resets after co
   const handlers = new Map();
   const sent = [];
   const tools = new Map();
+  let hardAbortCalls = 0;
+  let hardCompactCalls = 0;
   const context = {
     sessionManager: { getSessionId: () => "parent-session" },
     ui: { notify() {}, setStatus() {} },
-    getContextUsage: () => ({ tokens: 510_000, contextWindow: 1_000_000, percent: 51 }),
+    getContextUsage: () => ({ tokens: 410_000, contextWindow: 1_000_000, percent: 41 }),
+    abort: () => { hardAbortCalls += 1; },
+    compact: () => { hardCompactCalls += 1; },
   };
   const pi = {
     events: { on() {} },
@@ -2516,19 +2520,96 @@ test("context monitor injects direct threshold notifications and resets after co
     resolveCurrentAgentId: () => "worker",
     createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
   });
+  const thresholdMessages = () => sent.filter(([message]) => message.customType === "mecha-context-threshold");
   for (const handler of handlers.get("session_start")) handler({}, context);
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.equal(hardAbortCalls, 0);
+  assert.equal(hardCompactCalls, 0);
   for (const handler of handlers.get("agent_settled")) await handler({}, context);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0][0].customType, "mecha-context-threshold");
-  assert.equal(sent[0][0].details.threshold_percent, 45);
-  assert.equal(sent[0][0].details.tier_max_context_tokens, 1_000_000);
-  assert.deepEqual(sent[0][1], { deliverAs: "followUp", triggerTurn: true });
+  assert.equal(thresholdMessages().length, 1);
+  assert.equal(thresholdMessages()[0][0].details.threshold_percent, 40);
+  assert.equal(thresholdMessages()[0][0].details.tier_max_context_tokens, 1_000_000);
+  assert.deepEqual(thresholdMessages()[0][1], { deliverAs: "followUp", triggerTurn: true });
 
   for (const handler of handlers.get("agent_settled")) await handler({}, context);
-  assert.equal(sent.length, 1);
+  assert.equal(thresholdMessages().length, 1);
   for (const handler of handlers.get("session_compact")) handler({}, context);
   for (const handler of handlers.get("agent_settled")) await handler({}, context);
-  assert.equal(sent.length, 2);
+  assert.equal(thresholdMessages().length, 2);
+});
+
+test("mandatory context guard aborts, blocks tools, and waits for its compaction callback", async (t) => {
+  isolateCompactionEnvironment(t);
+  process.env.MECHA_PI_COMPACTION_POLICY = JSON.stringify({
+    levels: [40, { percent: 50, mandatory: true }],
+  });
+  const handlers = new Map();
+  const sent = [];
+  const tools = new Map();
+  const compactCalls = [];
+  const notifications = [];
+  let abortCalls = 0;
+  const context = {
+    sessionManager: { getSessionId: () => "parent-session" },
+    ui: { notify: (...args) => notifications.push(args), setStatus() {} },
+    model: { provider: "openai-codex", id: "test-model" },
+    getContextUsage: () => ({ tokens: 600, contextWindow: 1_000, percent: 60 }),
+    abort: () => { abortCalls += 1; },
+    compact: (options) => compactCalls.push(options),
+  };
+  const pi = {
+    events: { on() {} },
+    on(type, handler) {
+      const list = handlers.get(type) ?? [];
+      list.push(handler);
+      handlers.set(type, list);
+    },
+    registerCommand() {},
+    registerTool(tool) { tools.set(tool.name, tool); },
+    sendMessage: (...args) => sent.push(args),
+    exec: async () => ({ code: 0, stderr: "" }),
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "worker",
+    createClient: () => ({ connect: () => Promise.resolve(), close() {}, sendReply: async () => ({}), sendReceipt() {} }),
+  });
+  for (const handler of handlers.get("session_start")) await handler({}, context);
+
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.equal(abortCalls, 1);
+  assert.equal(compactCalls.length, 1);
+  assert.equal((await handlers.get("tool_call")[0]({ toolName: "read" }, context))?.block, true);
+
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.equal(abortCalls, 2);
+  assert.equal(compactCalls.length, 1);
+
+  for (const handler of handlers.get("agent_settled")) await handler({}, context);
+  assert.equal(sent.some(([, options]) => options?.deliverAs === "followUp" && options?.triggerTurn === true), false);
+
+  compactCalls[0].onComplete({});
+  assert.equal(await handlers.get("tool_call")[0]({ toolName: "read" }, context), undefined);
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.equal(compactCalls.length, 2);
+
+  compactCalls[1].onError(new Error("compaction canceled"));
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.equal(compactCalls.length, 3);
+
+  compactCalls[2].onComplete({});
+  context.compact = () => { throw new Error("boom"); };
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.deepEqual(notifications.at(-1), ["Hard context compaction failed: boom", "error"]);
+  assert.equal(await handlers.get("tool_call")[0]({ toolName: "read" }, context), undefined);
+
+  delete context.compact;
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.deepEqual(notifications.at(-1), ["Pi context limit reached, but compaction is unavailable.", "error"]);
+  assert.equal(await handlers.get("tool_call")[0]({ toolName: "read" }, context), undefined);
+
+  context.compact = (options) => compactCalls.push(options);
+  for (const handler of handlers.get("context")) await handler({ messages: [] }, context);
+  assert.equal(compactCalls.length, 4);
 });
 
 test("mecha_context tool sets policy and defers self-compaction until agent_settled", async (t) => {

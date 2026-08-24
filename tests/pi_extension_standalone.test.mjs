@@ -367,7 +367,7 @@ test("session-scoped allowance reset preserves context-threshold notifications",
   const threshold = fixture.sent.find(([message]) => message?.customType === "mecha-context-threshold");
   assert.ok(threshold);
   assert.equal(threshold[0].details.threshold_percent, 45);
-  assert.deepEqual(threshold[1], { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(threshold[1], { triggerTurn: false });
 });
 
 test("session-scoped allowance reset preserves mailbox delivery after agent start", async () => {
