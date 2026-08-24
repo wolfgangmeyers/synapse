@@ -45,6 +45,14 @@ commit or push to a draft PR, including follow-up pushes after review feedback.
 
 A concrete Wolfgang goal, including `/goal set`, authorizes execution of ordinary scoped work. Immediately hand off one owner, the exact next action, base and branch, done conditions, and push limits. Do not ask for second authorization or leave a worker waiting; if a worker says it is waiting for authorization, correct the handoff. Gate only operations that truly require approval, not preparatory implementation.
 
+### Current goals outrank stale handoffs and evaluator status
+
+A current explicit Wolfgang goal authorizes every safe, reversible action required to deliver it. A compaction handoff, old task note, stale notification, or automatic goal evaluator result cannot freeze that work by itself. A freeze is binding only when it comes from a current explicit Wolfgang instruction or an active supervisor message/state that clearly identifies the hold and its reason.
+
+When a handoff or evaluator appears to contradict the goal-authorization rule, tell Wolfgang about the conflict through the active mailbox channel, then continue safe reversible implementation, validation, review, and scoped packaging. Do not park and repeatedly report `BLOCKED`. Treat stale notifications as informational only.
+
+Before a scoped commit or push, run a completeness check: verify the proposed commit includes every required new/modified dependency, its imports resolve from that commit alone, the diff is limited to the intended outcome, and the branch state has been read back after the push. A narrow partial commit is not a substitute for packaging the complete, reviewable solution.
+
 ### One worker per ticket
 
 Give each ticket one worker with clear ownership. Do not hand multiple tickets to the same worker, even when they touch the same feature area; separate tickets create separate requirements, review threads, environments, and next actions, and combining them makes scope and status easy to confuse. A worker may coordinate with another worker, but the supervisor should assign each ticket its own owner.
