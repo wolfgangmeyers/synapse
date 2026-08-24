@@ -53,7 +53,6 @@ const state = {
   routers: loadRouters(),
   routerAliases: loadRouterAliases(),
   routerEditor: null,
-  tmuxWindows: [],
   agents: [],
   reminders: [],
   selectedPeer: "",
@@ -94,9 +93,6 @@ const elements = {
   routerSelector: document.querySelector("#router-selector"),
   routerDialog: document.querySelector("#router-dialog"),
   savedRouters: document.querySelector("#saved-routers"),
-  enumerateTmuxWindows: document.querySelector("#enumerate-tmux-windows"),
-  provisionTmuxWindow: document.querySelector("#provision-tmux-window"),
-  tmuxWindows: document.querySelector("#tmux-windows"),
   openAddRouter: document.querySelector("#open-add-router"),
   routerSetup: document.querySelector("#router-setup"),
   routerFormTitle: document.querySelector("#router-form-title"),
@@ -166,8 +162,6 @@ elements.routerSelector.addEventListener("click", () => {
   elements.routerDialog.showModal();
 });
 elements.openAddRouter.addEventListener("click", () => openRouterEditor("add"));
-elements.enumerateTmuxWindows.addEventListener("click", () => { void enumerateTmuxWindows(); });
-elements.provisionTmuxWindow.addEventListener("click", () => { void provisionTmuxWindow(); });
 elements.cancelRouterEdit.addEventListener("click", closeRouterEditor);
 elements.addRouter.addEventListener("click", () => {
   void saveRouterEditor();
@@ -450,7 +444,6 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.routerUrl = routerUrl;
   state.agentId = agentIdForRouter(routerUrl, state.defaultAgentId);
   state.agents = [];
-  state.tmuxWindows = [];
   state.modelControlUpdatedAtMs.clear();
   state.reminders = [];
   state.expandedSubagents.clear();
@@ -574,59 +567,6 @@ function renderRouters() {
     row.append(label, actions);
     return row;
   }));
-  elements.tmuxWindows.replaceChildren(...state.tmuxWindows.map((windowInfo) => {
-    const name = typeof windowInfo === "string" ? windowInfo : windowInfo.name;
-    const row = document.createElement("div");
-    row.className = "managed-router-row";
-    const label = document.createElement("strong");
-    label.textContent = name || "Unnamed window";
-    const actions = document.createElement("span");
-    const action = (text, callback, className = "secondary") => { const button = document.createElement("button"); button.type = "button"; button.className = className; button.textContent = text; button.addEventListener("click", callback); return button; };
-    actions.append(
-      action("Rename", () => { const nextName = window.prompt("Window name", name); if (nextName) void renameTmuxWindow(name, nextName); }),
-      action("Keys", () => { const keys = window.prompt("Keys to send"); if (keys) void sendTmuxKeys(name, keys); }),
-      action("Start", () => { void tmuxWindowAction(name, "start"); }),
-      action("Stop", () => { void tmuxWindowAction(name, "stop"); }),
-      action("Resume", () => { void tmuxWindowAction(name, "resume"); }),
-      action("Restart", () => { void tmuxWindowAction(name, "restart"); }),
-      action("Remove", () => { if (window.confirm("Remove this window?")) void removeTmuxWindow(name); }, "danger"),
-    );
-    row.append(label, actions);
-    return row;
-  }));
-}
-
-async function managementRequest(path, options = {}) {
-  const response = await fetch(`/ui/tmux/windows${path}?router=${encodeURIComponent(state.routerUrl)}`, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error?.message || payload.error || `Tmux window request failed (${response.status})`);
-  return payload;
-}
-async function enumerateTmuxWindows() {
-  try { const payload = await managementRequest(""); state.tmuxWindows = Array.isArray(payload.windows) ? payload.windows : []; renderRouters(); }
-  catch (error) { setStatus("error", error.message); }
-}
-async function provisionTmuxWindow() {
-  const name = window.prompt("Tmux window name");
-  if (!name) return;
-  try { await managementRequest("", { method: "POST", body: JSON.stringify({ name, directive: null }) }); await enumerateTmuxWindows(); }
-  catch (error) { setStatus("error", error.message); }
-}
-async function renameTmuxWindow(name, nextName) {
-  try { await managementRequest(`/${encodeURIComponent(name)}`, { method: "PATCH", body: JSON.stringify({ name: nextName }) }); await enumerateTmuxWindows(); }
-  catch (error) { setStatus("error", error.message); }
-}
-async function removeTmuxWindow(name) {
-  try { await managementRequest(`/${encodeURIComponent(name)}`, { method: "DELETE" }); await enumerateTmuxWindows(); }
-  catch (error) { setStatus("error", error.message); }
-}
-async function sendTmuxKeys(name, keys) {
-  try { await managementRequest(`/${encodeURIComponent(name)}/keys`, { method: "POST", body: JSON.stringify({ keys }) }); setStatus("connected", "Keys sent"); }
-  catch (error) { setStatus("error", error.message); }
-}
-async function tmuxWindowAction(name, action) {
-  try { await managementRequest(`/${encodeURIComponent(name)}/${action}`, { method: "POST", body: JSON.stringify({}) }); await enumerateTmuxWindows(); }
-  catch (error) { setStatus("error", error.message); }
 }
 
 function openRouterEditor(mode, routerUrl = "") {
