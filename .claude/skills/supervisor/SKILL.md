@@ -83,18 +83,16 @@ In the primary mecha-developer checkout, dirty tracked changes are not acceptabl
 
 ## mecha-developer update reminder
 
-When the router sends the canned `mecha-developer update check reminder`, treat it as advisory only. The reminder is a short pointer to this section, not authorization to auto-pull, auto-restart, deploy, or mutate external services blindly.
+When the router sends the canned `mecha-developer update check reminder`, treat it as an advisory update reminder. It means: fetch upstream, verify the checkout is clean, and fast-forward local `main` to `origin/main` when possible. It does not authorize pulling across local changes, merging, rebasing, or overwriting dirty work.
 
 Update procedure:
 
-1. Check whether `/Users/wolfgang/code/mecha-developer` has upstream updates available. A `git fetch` that updates remote refs is acceptable; do not touch the working tree before inspecting local state.
-2. Inspect dirty state before pulling. If local files are dirty, identify whether they are intentional task work, unrelated local changes, or safe generated state before deciding to pull.
-3. Send a mailbox/user-facing notice to any connected user that a local update/restart window is starting before disrupting router, web UI, supervisor, or agent processes.
-4. Pull safely only when appropriate. Keep the action local and advisory; no deploys and no external-service mutations.
-5. Decide intelligently what needs restarting from the actual diff and runtime state: router, web UI, affected agents/workers, or the supervisor itself. If router or web UI files changed, or impact is unclear, include those local processes in the restart consideration.
-6. Do not restart agents/workers blindly. Identify the affected agents/workers, send stop or safe-stopping instructions, wait for them to reach a good stopping point or settle, independently confirm they are stopped/settled, and only then restart them.
-7. If the supervisor itself needs restarting, ask watchdog to help verify continuity. Watchdog must confirm the supervisor starts back up with the same session.
-8. Avoid voluntary compaction during the update/restart window, including agent stop/restart, router/web UI restart, and supervisor-continuity handoff. Compact only if forced by the harness or after reaching a clear safe checkpoint where state has been recorded and the next actor can continue safely.
+1. Inspect `/Users/wolfgang/code/mecha-developer` before changing it. If the working tree is dirty, do not update it; report the dirty paths and stop.
+2. Fetch `origin/main` so the upstream ref is current.
+3. Verify the working tree is still clean and the checkout is local `main`.
+4. If local `main` can be fast-forwarded to `origin/main`, use fast-forward-only update. Do not pull across local changes, merge, rebase, or overwrite dirty work.
+5. If the checkout is dirty, not on local `main`, or has diverged from `origin/main`, leave it unchanged and report the exact blocker or divergence.
+6. Report the before and after commit IDs and any blocker. Keep the reminder advisory and local; do not deploy, restart services, or mutate external services as part of it.
 
 
 **Inline work prohibition**: NEVER use Edit, Write, or Bash to modify project files or run project commands directly. Only acceptable inline operations: reading state files, running supervisor tools (`mailbox_send.py`, `worker_capture.py`, `state_*`), and read-only diagnostic commands. Everything else → worker or subagent.
