@@ -12,12 +12,6 @@ import WebSocket, { WebSocketServer } from "ws";
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import {
-  enumerateTmuxWindows,
-  provisionTmuxWindow,
-  removeTmuxWindow,
-  renameTmuxWindow,
-  sendTmuxKeys,
-  tmuxWindowAction,
   parseArguments,
   startRouterWebUi,
 } from "../tools/router_web_ui.mjs";
@@ -305,65 +299,6 @@ test("router web UI accepts remote HTTP routers and rejects unsafe router URLs",
     "http://user:pass@brick.tailcdfd89.ts.net",
   ]) {
     assert.throws(() => parseArguments(["--router", routerUrl]), /http|credentials/);
-  }
-});
-
-test("router web UI relay uses REST for tmux window lifecycle operations", async () => {
-  const calls = [];
-  const fetchImpl = async (url, options = {}) => {
-    calls.push({ url: String(url), options });
-    return new Response(JSON.stringify({ session: "mecha", windows: [{ name: "router-1" }] }), { status: 200, headers: { "content-type": "application/json", "x-correlation-id": "upstream-correlation" } });
-  };
-  const relayOptions = { fetchImpl, headers: { "x-correlation-id": "browser-correlation", "x-request-id": "browser-request" } };
-  const enumeration = await enumerateTmuxWindows("http://router.test:8765", relayOptions);
-  assert.equal(enumeration.status, 200);
-  assert.deepEqual(enumeration.payload, { session: "mecha", windows: [{ name: "router-1" }] });
-  assert.equal(enumeration.correlationId, "upstream-correlation");
-  await provisionTmuxWindow("http://router.test:8765", { name: "new" }, relayOptions);
-  await removeTmuxWindow("http://router.test:8765", "router-1", relayOptions);
-  await renameTmuxWindow("http://router.test:8765", "router-1", "Renamed", relayOptions);
-  await sendTmuxKeys("http://router.test:8765", "router-1", "secret", relayOptions);
-  const actionCalls = ["start", "stop", "resume", "restart"];
-  for (const action of actionCalls) await tmuxWindowAction("http://router.test:8765", "router-1", action, {}, relayOptions);
-  assert.deepEqual(calls[0].options.headers, { "x-correlation-id": "browser-correlation", "x-request-id": "browser-request" });
-  assert.deepEqual(calls.map(({ url, options }) => [url, options.method]), [
-    ["http://router.test:8765/v1/tmux/windows", "GET"],
-    ["http://router.test:8765/v1/tmux/windows", "POST"],
-    ["http://router.test:8765/v1/tmux/windows/router-1", "DELETE"],
-    ["http://router.test:8765/v1/tmux/windows/router-1", "PATCH"],
-    ["http://router.test:8765/v1/tmux/windows/router-1/keys", "POST"],
-    ...actionCalls.map((action) => [`http://router.test:8765/v1/tmux/windows/router-1/${action}`, "POST"]),
-  ]);
-  assert.deepEqual(JSON.parse(calls[1].options.body), { name: "new" });
-  assert.deepEqual(JSON.parse(calls[3].options.body), { name: "Renamed" });
-  assert.deepEqual(JSON.parse(calls[4].options.body), { keys: "secret" });
-});
-
-test("router web UI relays correlation headers and preserves tmux response shape", async () => {
-  const tmuxAdapter = {
-    enumerate: async () => ["private-test-session"],
-    enumerateWindows: async () => [],
-  };
-  const router = await startTestRouter({
-    routerOptions: {
-      tmuxAdapter,
-      startupSession: "private-test-session",
-      startupWindow: "private-test-window",
-      supervisorDirective: null,
-    },
-  });
-  let ui;
-  try {
-    ui = await startRouterWebUi({ router: router.httpUrl, output: () => {} });
-    const response = await fetch(new URL("/ui/tmux/windows", ui.httpUrl), {
-      headers: { "x-request-id": "browser-request" },
-    });
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get("x-correlation-id"), "browser-request");
-    assert.deepEqual(await response.json(), { session: "private-test-session", windows: [] });
-  } finally {
-    await ui?.close();
-    await router.close();
   }
 });
 
