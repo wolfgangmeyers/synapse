@@ -434,6 +434,13 @@ export function nextCompactionThreshold(policy, usageOrPercent, alreadyNotifiedP
   return level === undefined ? undefined : { ...level, tier };
 }
 
+function hardCompactionThreshold(policy, usage, modelOrKeys, environment = process.env) {
+  if (usage === null || typeof usage !== "object" || !Number.isFinite(usage.percent)) return undefined;
+  const tier = selectCompactionTier(policy, usage.contextWindow, usage.model ?? modelOrKeys, environment);
+  const level = tier.levels.find((candidate) => candidate.mandatory === true && usage.percent >= candidate.percent);
+  return level === undefined ? undefined : { ...level, tier };
+}
+
 export function postCompactionNotificationMessage(note, result = {}) {
   const fields = [];
   if (Number.isFinite(result.tokensBefore)) fields.push(`tokens before: ${result.tokensBefore.toLocaleString()}`);
@@ -1511,6 +1518,7 @@ export function createMechaMessagingExtension(pi, {
   try { compactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { compactionPolicyError = error; compactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
   let notifiedCompactionPercent = 0;
   let pendingSelfCompaction;
+  let pendingHardCompaction;
 
   function normalizeSubagentMetadata(event, startedAtMs = nowImpl()) {
     const id = typeof event?.id === "string" ? event.id.trim().slice(0, 128) : "";
@@ -2093,6 +2101,47 @@ export function createMechaMessagingExtension(pi, {
     });
   }
 
+  function enforceHardCompaction(context) {
+    if (pendingHardCompaction !== undefined) {
+      context.abort?.();
+      return true;
+    }
+    const usage = context.getContextUsage?.();
+    const threshold = hardCompactionThreshold(compactionPolicy, { ...usage, model: context.model });
+    if (threshold === undefined) return false;
+    if (typeof context.compact !== "function") {
+      context.abort?.();
+      context.ui?.notify("Pi context limit reached, but compaction is unavailable.", "error");
+      return true;
+    }
+
+    const request = { thresholdPercent: threshold.percent };
+    pendingHardCompaction = request;
+    // Pi sends this abort signal to the provider and running tools, but custom
+    // implementations can ignore it and delay the idle boundary for compaction.
+    context.abort?.();
+    try {
+      context.compact({
+        onComplete: () => {
+          if (pendingHardCompaction !== request) return;
+          pendingHardCompaction = undefined;
+          resumeMailboxAfterCompaction(context);
+        },
+        onError: (error) => {
+          if (pendingHardCompaction !== request) return;
+          pendingHardCompaction = undefined;
+          resumeMailboxAfterCompaction(context);
+          context.ui?.notify(`Hard context compaction failed: ${error.message}`, "error");
+        },
+      });
+    } catch (error) {
+      if (pendingHardCompaction === request) pendingHardCompaction = undefined;
+      const message = error instanceof Error ? error.message : String(error);
+      context.ui?.notify(`Hard context compaction failed: ${message}`, "error");
+    }
+    return true;
+  }
+
   function monitorContextThreshold(context) {
     if (children.has(context.sessionManager.getSessionId())) return;
     const usage = context.getContextUsage?.();
@@ -2112,7 +2161,9 @@ export function createMechaMessagingExtension(pi, {
         tier_max_context_tokens: level.tier.maxContextTokens,
         mandatory: level.mandatory === true,
       },
-    }, { deliverAs: "followUp", triggerTurn: true });
+    }, level.mandatory === true
+      ? { triggerTurn: false }
+      : { deliverAs: "followUp", triggerTurn: true });
   }
   try {
     settledNotificationRecipient = assertAgentId(process.env.MECHA_PI_NOTIFY_ON_SETTLED);
@@ -2598,6 +2649,13 @@ export function createMechaMessagingExtension(pi, {
     // Suppress only native subagent children recorded by lifecycle events. Do not use the generic
     // parentSession header here: ordinary /fork and /clone sessions carry it but are still top-level agents.
     if (children.has(context?.sessionManager?.getSessionId?.())) return undefined;
+    if (pendingHardCompaction !== undefined) {
+      return {
+        block: true,
+        reason: "Pi context compaction is pending; tool work resumes after it settles.",
+        terminate: true,
+      };
+    }
     return inlineToolPolicy.evaluate(_event?.toolName);
   });
 
@@ -2613,6 +2671,8 @@ export function createMechaMessagingExtension(pi, {
     return undefined;
   });
   pi.on("context", (event, context) => {
+    if (!children.has(context.sessionManager.getSessionId())) enforceHardCompaction(context);
+
     // First quarantine malformed tool calls (invalid names)
     const { messages: validMessages, malformed } = quarantineMalformedToolCalls(event.messages);
     if (malformed.length > 0) {
