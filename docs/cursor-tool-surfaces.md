@@ -60,7 +60,7 @@ MECHA_ROUTER_URL=http://127.0.0.1:8765 \
 pi --model cursor/composer-2-5
 ```
 
-`mecha-messaging.js` imports and registers the operational tools. `MECHA_PI_MAILBOX_EXTENSION` is worker-launcher configuration; it does not load an extension into Pi.
+`mecha-messaging.js` imports and registers the operational tools. Pi uses its registered default extensions; `MECHA_PI_MAILBOX_EXTENSION` is not used by the worker launcher and does not load an extension into Pi.
 
 Inside pi:
 

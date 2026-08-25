@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shlex
 import sys
 import tempfile
 import unittest
@@ -178,6 +179,8 @@ class SupervisorToolCallRecoveryTests(unittest.TestCase):
         self.assertIn("--provider openai-codex", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn("MECHA_PI_MODEL_KEY=openai-codex/gpt-5.6-terra", command)
+        argv = shlex.split(command)
+        self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(argv))
 
     def test_dry_run_does_not_write_recovery_state(self):
         evidence = {"session_path": "/tmp/corrupt.jsonl", "call_id": "call_broken"}

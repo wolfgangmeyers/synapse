@@ -13,15 +13,17 @@ This is a polling substitute for review-bot intake, not an external communicatio
 
 The watcher is a one-scan program. Pi receives durable router wakeups and invokes it; do not use `--loop` or a direct polling process.
 
-Launch the deterministic Pi service with the stable Mailbox V2 extension:
+Launch the deterministic Pi service with Pi's default configured extensions:
 
 ```bash
 # Run this in a tmux window named pr-watch.
-REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
 MECHA_ROUTER_URL=http://127.0.0.1:8765 \
-pi --provider openai-codex --model gpt-5.6-terra \
-  --extension "$REPO_ROOT/pi-extensions/mecha-messaging.js"
+pi --provider openai-codex --model gpt-5.6-terra
 ```
+
+Normal Pi launches pass neither `--extension` nor `--no-extensions`/`-ne`; those
+flags are reserved for deliberate extension-test tools. The Mailbox V2 extension
+remains available through Pi settings.
 
 ### Service startup contract
 

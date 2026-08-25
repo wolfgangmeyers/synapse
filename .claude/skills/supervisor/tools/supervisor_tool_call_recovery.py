@@ -24,7 +24,6 @@ RECOVERY_LOG = Path("~/.mecha-developer/supervisor-tool-call-recovery.log").expa
 RECOVERY_DEBOUNCE_SECONDS = 10 * 60
 SUPERVISOR_WINDOW = "supervisor"
 TOOLS = Path(__file__).resolve().parent
-PI_MAILBOX_EXTENSION_PATH = TOOLS.parents[3] / "pi-extensions" / "mecha-messaging.js"
 PI_PROVIDER = "openai-codex"
 PI_MODEL = "gpt-5.6-terra"
 
@@ -199,7 +198,6 @@ def recovery_tmux_command(
     evidence: dict, work_dir: str = "/Users/wolfgang/code/mecha-developer"
 ) -> str:
     prompt = recovery_handoff_prompt(evidence)
-    extension = os.environ.get("MECHA_PI_MAILBOX_EXTENSION", str(PI_MAILBOX_EXTENSION_PATH))
     router_url = os.environ.get("MECHA_ROUTER_URL", "http://127.0.0.1:8765").rstrip("/")
     model_key = f"{PI_PROVIDER}/{PI_MODEL}"
     pi_command = " ".join([
@@ -207,7 +205,6 @@ def recovery_tmux_command(
         "--provider", PI_PROVIDER,
         "--model", PI_MODEL,
         "--name", SUPERVISOR_WINDOW,
-        "--extension", shlex.quote(extension),
         "--approve", shlex.quote(prompt),
     ])
     return (

@@ -11,7 +11,7 @@ Use this skill from the supervisor when a task needs a durable managed worker or
 
 When a Pi worker needs to send a message, call `mecha_mailbox_send({ recipient, body, subject? })`; the result includes the accepted message ID and state. The native tool is send-only and cannot execute shell commands. Keep the script examples below for launcher-side fallback sends.
 
-- Launch and restore workers only through `~/.claude/skills/supervisor/tools/worker_launch.py`.
+- Launch and restore workers only through `~/.claude/skills/supervisor/tools/worker_launch.py`. Normal Pi launches use Pi's default configured extensions and pass neither `--extension` nor `--no-extensions`/`-ne`; those flags are reserved for deliberate extension-test tools.
 - Coordinate through Mailbox V2. In Pi sessions with the Mailbox extension, use the native top-level `mecha_mailbox_send` tool first. Use `mailbox_send.py` as the fallback for Claude sidecars, bare Codex, older Pi sessions, or supervisor tooling that must run outside the model session. Bare Codex and Cursor launched by `worker_launch.py` do not have launcher-provided Mailbox delivery; use Pi/Claude or install and verify a separate bridge. Do not type into worker terminals or tmux panes.
 - Use `worker_park.py`, `worker_shutdown.py`, and `worker_kill.py` for lifecycle actions. Do not send ad hoc park/exit text.
 - Keep `TASK.md` task-specific. Generic worker behavior belongs in `worker/SKILL.md`, not in each task.

@@ -97,9 +97,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertNotIn("--- Reminders ---", output)
 
     def test_main_defaults_to_pinned_pi_gpt_5_6_terra(self):
-        extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, output = self._run_main("pi-worker", agent=None)
@@ -108,15 +106,13 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertEqual(command[command.index("--provider") + 1], "openai-codex")
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
         self.assertIn(f"export {worker_launch.PI_MODEL_KEY_ENV}=openai-codex/gpt-5.6-terra", commands[0])
-        self.assertNotIn("--extension", command)
-        self.assertNotIn("--no-extensions", command)
+        self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(command))
         session_id = command[command.index("--session-id") + 1]
         self.assertEqual(session_id, worker_launch.pi_session_id(self.tmpdir.name, "pi-worker"))
         self.assertEqual(str(uuid.UUID(session_id)), session_id)
         self.assertIn(f"--session {session_id}", output)
 
     def test_explicit_pi_model_updates_command_and_exported_model_key(self):
-        extension = self._pi_mailbox_extension()
         model = "gpt-5.6 Luna"
         # This model is not meant to resolve to a real provider entry, so the store is
         # pinned to a path that cannot exist rather than left to read whatever
@@ -124,7 +120,6 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         missing_store = self.tmp_path / "no-such-models-store.json"
         with patch.object(worker_launch, "PI_MODELS_STORE_PATH", str(missing_store)), \
              patch.dict(os.environ, {
-                 worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
                  worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
              }, clear=False):
             commands, _ = self._run_main("pi-worker", "--model", model, agent="pi")
@@ -211,14 +206,12 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         then fail its first real message with "Provider is not configured: openai-codex"
         because openai-codex was never the provider hosting zai.glm-5.
         """
-        extension = self._pi_mailbox_extension()
         store = self._write_models_store({
             "openai-codex": ["gpt-5.5"],
             "amazon-bedrock": ["zai.glm-5"],
         })
         with patch.object(worker_launch, "PI_MODELS_STORE_PATH", str(store)), \
              patch.dict(os.environ, {
-                 worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
                  worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
              }, clear=False):
             commands, _ = self._run_main("pi-worker", "--model", "zai.glm-5", agent="pi")
@@ -317,12 +310,10 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         )
 
     def test_explicit_agent_overrides_machine_default_runtime(self):
-        extension = self._pi_mailbox_extension()
         config = self.tmp_path / "worker-runtime.json"
         config.write_text(json.dumps({"default_agent": "claude"}), encoding="utf-8")
         with patch.dict(os.environ, {
             "MECHA_WORKER_RUNTIME_CONFIG": str(config),
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", agent="pi")
@@ -474,26 +465,16 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         new_window.assert_not_called()
 
     def test_managed_pi_command_uses_installed_default_extensions(self):
-        extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", agent="pi")
 
         command = shlex.split(commands[0])
-        extensions = [
-            command[index + 1]
-            for index, part in enumerate(command)
-            if part == "--extension"
-        ]
-        self.assertEqual(extensions, [])
-        self.assertNotIn("--no-extensions", command)
+        self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(command))
 
-    def test_main_maps_resume_to_pi_session(self):
-        extension = self._pi_mailbox_extension()
+    def test_main_maps_resume_to_pi_session_without_extension_flags(self):
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", "--resume", "session-123", agent="pi")
@@ -501,11 +482,10 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         command = shlex.split(commands[0])
         self.assertEqual(command[command.index("--session") + 1], "session-123")
         self.assertNotIn("resume", command)
+        self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(command))
 
     def test_pi_launch_exports_router_configuration_but_not_identity_or_settled_recipient_by_default(self):
-        extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", agent="pi")
@@ -517,9 +497,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertNotIn("MECHA_WORKER_WINDOW", commands[0])
 
     def test_pi_launch_exports_validated_settled_recipient(self):
-        extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main(
@@ -530,10 +508,8 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn("export MECHA_PI_NOTIFY_ON_SETTLED=supervisor", commands[0])
 
     def test_pi_launch_exports_validated_compaction_policy(self):
-        extension = self._pi_mailbox_extension()
         policy = '{"postCompactionNotification":"resume after compact","levels":[40,50,90],"models":{"openai-codex/custom-model":{"levels":[20,30,{"percent":45,"mandatory":true}]}}}'
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main(
@@ -545,13 +521,11 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn(shlex.quote(policy), commands[0])
 
     def test_compaction_policy_rejects_invalid_values_before_launch(self):
-        extension = self._pi_mailbox_extension()
         argv = [
             "worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name,
             "--agent", "pi", "--compaction-policy", '{"tiers":[{"maxContextTokens":1000000,"levels":[40,100]}]}',
         ]
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=True), patch.object(worker_launch.sys, "argv", argv), \
              patch.object(worker_launch, "window_exists") as window_exists, \
@@ -579,14 +553,12 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         window_exists.assert_not_called()
 
     def test_settled_recipient_rejects_non_mailbox_ids_before_launch(self):
-        extension = self._pi_mailbox_extension()
         for recipient in ("", "bad recipient", "bad@recipient"):
             argv = [
                 "worker_launch.py", "--window", "pi-worker", "--dir", self.tmpdir.name,
                 "--agent", "pi", "--notify-on-settled", recipient,
             ]
             with self.subTest(recipient=recipient), patch.dict(os.environ, {
-                worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
                 worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
             }, clear=True), \
                  patch.object(worker_launch.sys, "argv", argv), \
@@ -687,20 +659,6 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         command = shlex.split(launched["command"].replace("(", " ").replace(")", " "))
         self.assertIn(sidecar, command)
         self.assertNotIn(str(symlinked_tools / "claude_sidecar.mjs"), launched["command"])
-
-    def test_pi_launch_ignores_explicit_extension_configuration(self):
-        with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: "",
-            worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
-        }, clear=False):
-            commands, _ = self._run_main("pi-worker", agent="pi")
-
-        self.assertNotIn("--extension", shlex.split(commands[0]))
-
-    def _pi_mailbox_extension(self):
-        extension = self.tmp_path / "mecha-messaging.js"
-        extension.write_text("export default () => {};\n", encoding="utf-8")
-        return extension
 
     def _run_main(self, window, *extra_args, agent="claude", home=None):
         """Run main() without letting it write anything into the developer's home.
@@ -899,9 +857,7 @@ class WorkerLaunchMailboxGuidanceTest(unittest.TestCase):
         self.assertIn(shlex.quote(resume_id), commands[0])
 
     def test_every_other_runtime_leaves_the_claude_config_and_command_line_alone(self):
-        extension = self._pi_mailbox_extension()
         with patch.dict(os.environ, {
-            worker_launch.PI_MAILBOX_EXTENSION_ENV: str(extension),
             worker_launch.PI_ROUTER_URL_ENV: "http://127.0.0.1:8765",
         }, clear=False):
             commands, _ = self._run_main("pi-worker", agent="pi")
