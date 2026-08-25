@@ -1,5 +1,6 @@
 import { createMailboxClient, createNanoId, assertAgentId, routerHttpUrl } from "./mailbox-client.js";
 export { createMailboxClient } from "./mailbox-client.js";
+import { randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -1351,6 +1352,7 @@ export function createMechaMessagingExtension(pi, {
   let goalProjection;
   let goalProjectionReceived = false;
   let meaningfulActivityRevision = 0;
+  const activityProducerEpoch = randomUUID();
   const meaningfulActivityIds = new Set();
   let goalControlState = defaultGoalControlState();
   const receiveGoalProjection = (value) => {
@@ -1370,7 +1372,7 @@ export function createMechaMessagingExtension(pi, {
     const sessionId = contextSessionId(context);
     if (typeof workerId !== "string" || workerId.length === 0 || typeof sessionId !== "string" || sessionId.length === 0) return;
     try {
-      pi.events?.emit?.(GOAL_WORKER_ID_EVENT, { workerId, sessionId });
+      pi.events?.emit?.(GOAL_WORKER_ID_EVENT, { workerId, sessionId, producerEpoch: activityProducerEpoch });
     } catch {
       // The goal extension is optional; an unavailable local bridge must not block startup.
     }
@@ -1395,6 +1397,7 @@ export function createMechaMessagingExtension(pi, {
         revision,
         sessionId,
         workerId: parentAgentId,
+        producerEpoch: activityProducerEpoch,
         goal: { ...goalProjection },
       });
     } catch {
@@ -2717,9 +2720,12 @@ export function createMechaMessagingExtension(pi, {
   const recordToolCompletion = (_event, context) => {
     if (children.has(context?.sessionManager?.getSessionId?.())) return;
     const result = _event?.result ?? _event;
-    if (_event?.isError === true || result?.isError === true
+    const explicitlySuccessful = _event?.isError === false || result?.isError === false;
+    if (!explicitlySuccessful
       || _event?.cancelled === true || _event?.canceled === true || _event?.aborted === true
       || result?.cancelled === true || result?.canceled === true || result?.aborted === true
+      || _event?.details?.cancelled === true || _event?.details?.canceled === true
+      || result?.details?.cancelled === true || result?.details?.canceled === true
       || _event?.error !== undefined || result?.error !== undefined) return;
     const toolName = _event?.toolName ?? result?.toolName;
     if (!isConcreteGoalTool(toolName)) return;

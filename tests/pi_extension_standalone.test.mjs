@@ -445,7 +445,10 @@ test("goal progress bridge counts only successful concrete actions with provenan
   await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "read-1", isError: false });
   const first = fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT);
   assert.equal(first.length, 1);
-  assert.deepEqual(first[0].data, {
+  assert.match(first[0].data.producerEpoch, /^[0-9a-f-]{36}$/);
+  const firstData = { ...first[0].data };
+  delete firstData.producerEpoch;
+  assert.deepEqual(firstData, {
     activityId: "tool-completed:read-1",
     kind: "tool-completed",
     revision: 1,
@@ -458,17 +461,23 @@ test("goal progress bridge counts only successful concrete actions with provenan
   await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "read-1", isError: false });
   // Failed work and control-plane tools are never progress events.
   await runHandlers(fixture, "tool_result", { toolName: "edit", toolCallId: "edit-1", isError: true });
+  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "ambiguous-1" });
+  await runHandlers(fixture, "tool_execution_end", { toolName: "read", toolCallId: "failed-end", isError: true });
+  await runHandlers(fixture, "tool_execution_end", { toolName: "read", toolCallId: "successful-end", isError: false });
   for (const toolName of ["goal", "goal_snooze", "mecha_mailbox_send", "mecha_reminder", "mecha_worker"]) {
     await runHandlers(fixture, "tool_result", { toolName, toolCallId: `${toolName}-1`, isError: false });
   }
-  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 1);
+  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 2);
 
   await fixture.childHandlers.get("subagents:started")({ id: "child-1", type: "general-purpose", description: "Concrete child" });
   const activity = fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT);
-  assert.equal(activity.length, 2);
-  assert.equal(activity[1].data.kind, "native-subagent-launch");
-  assert.equal(activity[1].data.activityId, "native-subagent-launch:child-1");
+  assert.equal(activity.length, 3);
+  assert.equal(activity[1].data.kind, "tool-completed");
+  assert.equal(activity[1].data.activityId, "tool-completed:successful-end");
   assert.equal(activity[1].data.revision, 2);
+  assert.equal(activity[2].data.kind, "native-subagent-launch");
+  assert.equal(activity[2].data.activityId, "native-subagent-launch:child-1");
+  assert.equal(activity[2].data.revision, 3);
 
   // The goal consumer rejects malformed/stale/foreign provenance even if another local caller
   // tries to impersonate a meaningful event. This is not a transport or liveness signal.
@@ -476,7 +485,28 @@ test("goal progress bridge counts only successful concrete actions with provenan
   consume({ activityId: "foreign-worker", kind: "tool-completed", revision: 3, sessionId: "parent-session", workerId: "other-worker", goal: { enabled: true, goal: "ship the bridge" } });
   consume({ activityId: "foreign-goal", kind: "tool-completed", revision: 4, sessionId: "parent-session", workerId: "worker", goal: { enabled: true, goal: "other goal" } });
   consume({ activityId: "stale-check", kind: "goal-check", revision: 5, sessionId: "parent-session", workerId: "worker", goal: { enabled: true, goal: "ship the bridge" } });
-  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 2, "foreign/stale consumer injections do not create bridge emissions");
+  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 3, "foreign/stale consumer injections do not create bridge emissions");
+
+  const goalResults = () => fixture.sent.filter(([message]) => message?.customType === "goal-result");
+  const settleAndFlush = async () => {
+    await runHandlers(fixture, "agent_settled");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  for (let attempt = 0; attempt < 10; attempt += 1) await settleAndFlush();
+  assert.equal(goalResults().length, 10, "the first ten NOT_DONE attempts are delivered");
+  for (let action = 1; action <= 2; action += 1) {
+    await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: `rearm-${action}`, isError: false });
+    await settleAndFlush();
+    assert.equal(goalResults().length, 10, `${action} concrete action(s) do not rearm early`);
+  }
+  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "rearm-3", isError: false });
+  await settleAndFlush();
+  assert.equal(goalResults().length, 11, "the third producer action re-arms the next delivery");
+  for (let attempt = 0; attempt < 9; attempt += 1) await settleAndFlush();
+  assert.equal(goalResults().length, 20, "the re-armed cycle delivers nine more attempts");
+  await settleAndFlush();
+  assert.equal(goalResults().length, 20, "the second cycle is capped at ten attempts");
 });
 
 test("activity broadcasts current model metadata without recurring catalog payloads", async () => {
