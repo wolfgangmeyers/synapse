@@ -9,6 +9,8 @@ Run a read-only polling watcher for PRs that may need Wolfgang's attention while
 
 This is a polling substitute for review-bot intake, not an external communication mechanism. It does not review PRs by itself and does not post to GitHub, Slack, or any other external channel.
 
+Review disposition guardrail: all findings are `COMMENT`-only, regardless of severity. Never use `REQUEST_CHANGES`; do not post a blocking review state. Preserve existing approvals and keep every concern non-blocking.
+
 ## Start The Watcher
 
 The watcher is a one-scan program. Pi receives durable router wakeups and invokes it; do not use `--loop` or a direct polling process.

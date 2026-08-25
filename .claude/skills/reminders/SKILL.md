@@ -28,7 +28,7 @@ loopback HTTP(S) base URL.
 
 Use this reusable message when setting a PR sweep reminder:
 
-> Sweep every repository in the relevant GitHub organization. Include every PR where the target reviewer previously posted a review and the current head differs from the head reviewed, regardless of current review-request assignment, other reviewers, stack or cross-PR comments, replacement PR numbers, or whether the PR is open, closed, or re-pushed. Treat review-request metadata as additional signal, not a gate.
+> Sweep every repository in the relevant GitHub organization. Include every PR where the target reviewer previously posted a review and the current head differs from the head reviewed, regardless of current review-request assignment, other reviewers, stack or cross-PR comments, replacement PR numbers, or whether the PR is open, closed, or re-pushed. Treat review-request metadata as additional signal, not a gate. All findings are `COMMENT`-only, regardless of severity: never use `REQUEST_CHANGES` or any blocking review state.
 
 ## Recurring reminders
 
