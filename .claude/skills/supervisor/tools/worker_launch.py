@@ -87,11 +87,6 @@ PI_MODEL = "gpt-5.6-terra"
 PI_MODELS_STORE_PATH = os.path.expanduser("~/.pi/agent/models-store.json")
 CURSOR_MODEL = "glm-5.2"
 CURSOR_MODEL_ENV = "MECHA_CURSOR_MODEL"
-# Retained only for compatibility with callers that still export it. Pi extension
-# selection comes from Pi's installed defaults, not this launcher's command line.
-# Retained only for compatibility with callers that still export it. Pi extension
-# selection comes from Pi's installed defaults, not this launcher's command line.
-PI_MAILBOX_EXTENSION_ENV = "MECHA_PI_MAILBOX_EXTENSION"
 PI_ROUTER_URL_ENV = "MECHA_ROUTER_URL"
 DEFAULT_ROUTER_URL = "http://127.0.0.1:8765"
 PI_NOTIFY_ON_SETTLED_ENV = "MECHA_PI_NOTIFY_ON_SETTLED"

@@ -296,10 +296,11 @@ node --test "$REPO_ROOT/tests/pi_extension_silent.test.mjs"
 node --check "$SOURCE"
 ```
 
-Global registration is for bare Pi only. New supervisor and worker processes
-preserve Pi's default configured extensions and add this source path rather than
-using `--no-extensions`. If an existing bare Pi process needs the updated
-source, reload it after the authorized source change.
+Global registration keeps the extension available through Pi settings. Normal
+Pi supervisor, worker, and service launches use Pi's default configured
+extensions and pass neither `--extension` nor `--no-extensions`/`-ne`; those
+flags are reserved for deliberate extension-test tools. If an existing bare Pi
+process needs the updated source, reload it after the authorized source change.
 
 ### 8. Symlink Hooks
 

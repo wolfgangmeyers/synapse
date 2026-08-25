@@ -75,16 +75,11 @@ or restore an old installed artifact. Existing bare Pi processes need a reload
 after an authorized source change; do not claim the new source is active before
 that reload and a controlled wakeup check.
 
-Managed workers use Pi's default configured extensions and add the checkout
-source explicitly when their launch contract requires it:
-
-```bash
-pi --extension "$REPO_ROOT/pi-extensions/mecha-messaging.js"
-```
-
-Keep the managed launch's provider, model, router environment, and default
-extensions unchanged. Do not add `--no-extensions` except for explicit
-extension diagnostics.
+Registration keeps the checkout source available through Pi settings. Normal
+Pi supervisor, worker, service, and recovery launches use Pi's default
+configured extensions and pass neither `--extension` nor `--no-extensions`/`-ne`;
+those flags are reserved for deliberate extension-test tools. Keep the managed
+launch's provider, model, router environment, and default extensions unchanged.
 
 ## Uninstall
 
