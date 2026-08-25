@@ -11,6 +11,10 @@ This is a polling substitute for review-bot intake, not an external communicatio
 
 Review disposition guardrail: all findings are `COMMENT`-only, regardless of severity. Never use `REQUEST_CHANGES`; do not post a blocking review state. Preserve existing approvals and keep every concern non-blocking.
 
+## Reuse The Canonical Service
+
+The durable service identity and tmux window are both exactly lowercase `pr-watch`. When this skill is invoked, first find and reuse an existing canonical `pr-watch` worker/service. Invoking the skill is not a request to provision another worker. Do not create a new worker, especially one named `PR Watch`, merely because someone asked to use this skill. Provision `pr-watch` only when the canonical worker/service is genuinely absent and a durable watcher is explicitly needed.
+
 ## Start The Watcher
 
 The watcher is a one-scan program. Pi receives durable router wakeups and invokes it; do not use `--loop` or a direct polling process.
@@ -37,17 +41,19 @@ python3 ~/.claude/skills/reminders/tools/reminders.py \
   reconcile-pr-watch --router-url http://127.0.0.1:8765
 ```
 
-This creates or reconciles exactly one **scheduled** V2 recurrence with target
-`pr-watch`, creator `pr-watch`, subject `PR watch wakeup`, and interval
-`1800000` milliseconds (30 minutes). It is not a router job: the router only
+This creates or reconciles exactly one **scheduled** V2 recurrence. Its target
+(the worker that receives the wakeup) is `pr-watch`; its creator (the service
+that owns the recurrence) is also `pr-watch`. The subject is `PR watch wakeup`,
+and the interval is `1800000` milliseconds (30 minutes). It is not a router job: the router only
 persists and delivers visible wakeup envelopes. The Pi agent, not its
 extension, performs the watcher scan after receiving one.
 
 Reconciliation is fail-closed. It first lists the canonical router state. One
 matching scheduled recurrence is retained; duplicate or stale *scheduled*
 records owned by this service are canceled before a replacement is created.
-Ownership is target `pr-watch` plus creator `pr-watch`, so a legacy recurrence
-with a different subject is retired rather than repeatedly waking the watcher.
+Ownership is the exact pair target `pr-watch` plus creator `pr-watch`, so a legacy recurrence
+with a different subject is retired rather than repeatedly waking the watcher. Do not use the
+requester's identity, `supervisor`, or a display-name variant such as `PR Watch` for either field.
 A due, linked, failed, or otherwise non-scheduled owned record is never
 canceled and no replacement is created, because that could overlap a delivery.
 A failed or dead-letter record also sends `PR watch error` to `supervisor` for
