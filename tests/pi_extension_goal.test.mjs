@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension, { GOAL_CONTROL_REQUEST_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT, responseEvaluation } from "../pi-extensions/goal.js";
+import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_CONTROL_REQUEST_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT, GOAL_WORKER_ID_EVENT, responseEvaluation } from "../pi-extensions/goal.js";
 
 const GOAL_ENTRY = "goal-state";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
@@ -773,7 +773,7 @@ test("BLOCKED wait expires independently of the custom snooze turn limit and bud
   assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 1, "the blocker cap is independent of snooze controls");
 });
 
-test("BLOCKED escalation resets after three completions and a new goal", async () => {
+test("BLOCKED escalation does not reset from evaluator completions and a new goal still clears it", async () => {
   const runtime = fakeTimer();
   const outcomes = ["BLOCKED", "COMPLETED", "COMPLETED", "COMPLETED", "BLOCKED"];
   const current = fixture({
@@ -806,12 +806,12 @@ test("BLOCKED escalation resets after three completions and a new goal", async (
     await flushEvaluation();
   }
   assert.equal(resultWakeups().filter(({ message }) => message.details.outcome === "COMPLETED").length, 3);
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 0);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 1, "evaluator output is not a meaningful worker activity event");
 
   await settle(current);
   await flushEvaluation();
   assert.equal(resultWakeups().at(-1).message.details.outcome, "BLOCKED");
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 1);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 2);
 
   await setGoal(current, "finish the replacement goal");
   assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 0);
@@ -1863,4 +1863,65 @@ test("legacy goal state defaults snooze to enabled with the standard duration", 
   assert.equal(status.details.snoozeEnabled, true);
   assert.equal(status.details.snoozeDurationMs, 60_000);
   assert.equal(status.details.blocking, true);
+});
+
+test("NOT_DONE cap re-arms only after three new scoped concrete activities and caps again", async () => {
+  const current = fixture({
+    sessionId: "worker-session",
+    response: { content: [{ type: "text", text: "VERDICT: NOT_DONE\\nREASON: Work remains." }] },
+  });
+  await setGoal(current, "ship the recovery proof");
+  await current.commands.get("goal-snooze").handler("off", current.context);
+  current.eventHandlers.get(GOAL_WORKER_ID_EVENT)({ sessionId: "worker-session", workerId: "worker" });
+  const runEvaluation = async () => {
+    await settle(current);
+    await flushDeferred();
+    await flushDeferred();
+  };
+  const results = () => current.sent.filter(({ message }) => message.customType === "goal-result");
+  for (let attempt = 0; attempt < 10; attempt += 1) await runEvaluation();
+  assert.equal(results().length, 10);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.notDoneWakeups, 10);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.rearmActivityCount, 0);
+  assert.equal(current.entries.at(-1).data.rearmActive, true);
+
+  const activity = current.eventHandlers.get(GOAL_ACTIVITY_EVENT);
+  const event = (activityId, revision, overrides = {}) => activity({
+    activityId,
+    kind: "tool-completed",
+    revision,
+    sessionId: "worker-session",
+    workerId: "worker",
+    goal: { enabled: true, goal: "ship the recovery proof" },
+    ...overrides,
+  });
+  // Transport/control noise and foreign scopes do not consume a meaningful event.
+  event("heartbeat", 1, { kind: "heartbeat" });
+  event("foreign-worker", 1, { workerId: "other-worker" });
+  event("foreign-goal", 1, { goal: { enabled: true, goal: "other goal" } });
+  event("stale-goal-check", 1, { kind: "goal-check" });
+  event("action-1", 1);
+  event("action-1", 2);
+  event("action-2", 2);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.notDoneWakeups, 10);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.rearmActivityCount, 2);
+  assert.equal(current.entries.at(-1).data.rearmActivityCount, 2, "partial recovery is persisted");
+
+  // A settled/evaluator boundary cannot consume or reset the partial recovery state.
+  await runEvaluation();
+  assert.equal(results().length, 10);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.rearmActivityCount, 2);
+  event("action-3", 3);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.notDoneWakeups, 0);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.rearmActive, undefined);
+  assert.equal(current.entries.at(-1).data.rearmActive, undefined);
+
+  await runEvaluation();
+  assert.equal(results().length, 11, "the next eligible settle delivers the first re-armed attempt");
+  assert.equal((await callGoalTool(current, { action: "status" })).details.notDoneWakeups, 1);
+  for (let attempt = 0; attempt < 9; attempt += 1) await runEvaluation();
+  assert.equal(results().length, 20);
+  assert.equal((await callGoalTool(current, { action: "status" })).details.notDoneWakeups, 10);
+  await runEvaluation();
+  assert.equal(results().length, 20, "the second cycle is capped at ten deliveries");
 });
