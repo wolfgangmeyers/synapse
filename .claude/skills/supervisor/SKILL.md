@@ -478,13 +478,13 @@ The project's dev-env skill handles mechanics; the supervisor handles access sch
 
 ## Worker Tasks
 
-**Worktree prerequisite:** Before every `worker_launch.py` call, create an isolated worktree or assign an existing task worktree and record the exact project, branch, and worktree in supervisor state. Never launch a worker with missing worktree state; the supervisor checkout is not an implementation worktree.
+**Worktree prerequisite:** Before every `worker_launch.py` call, create an isolated worktree or assign an existing task worktree and record the exact project, branch, and worktree in supervisor state. Never launch a worker with missing worktree state; the supervisor checkout is not an implementation worktree. Do not run separate managed workers concurrently in the same worktree. A worker may use scoped subagents, including concurrent editors when their ownership is disjoint.
 
 For all managed worker launch, import, resume/relaunch, follow-up handoff, parking, shutdown, existing-PR fix, and worker lifecycle details, read `../worker-launch/SKILL.md` before acting. That skill is the canonical worker-lifecycle guide; this supervisor skill keeps only the mandatory supervisor-facing obligations.
 
 Mandatory obligations that remain here:
 
-- Use managed workers for durable implementation lanes and runtime ownership. Use bounded subagents only for short read-only checks or review/triage work.
+- Use managed workers for durable implementation lanes and runtime ownership. Workers may use scoped subagents for implementation slices, exploration, validation, and review/triage; concurrent editors need disjoint ownership. Keep separate managed workers in separate worktrees.
 - Launch and restore workers through `worker_launch.py`; never type task instructions, corrections, auth, or handoffs into a worker terminal.
 - Deliver worker instructions, redirects, questions, and follow-ups through Mailbox V2 only when the runtime has verified delivery. Bare Codex/Cursor need a verified delivery bridge or another proven context path.
 - Record worker `agent`, `window`, `branch`, `worktree`, `session` when available, requirements, purpose, and status in supervisor state. State must match reality after every launch, redirect, park, shutdown, or relaunch.

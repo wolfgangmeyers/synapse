@@ -57,6 +57,8 @@ Before a scoped commit or push, run a completeness check: verify the proposed co
 
 Give each ticket one worker with clear ownership. Do not hand multiple tickets to the same worker, even when they touch the same feature area; separate tickets create separate requirements, review threads, environments, and next actions, and combining them makes scope and status easy to confuse. A worker may coordinate with another worker, but the supervisor should assign each ticket its own owner.
 
+Do not run separate managed workers concurrently in the same worktree. A worker may use scoped subagents, including concurrent editors when their ownership is disjoint.
+
 Active authorized priorities with independent owners and resources must continue in parallel. Prioritizing one task changes supervisor attention and order; it never permits parking another viable task. Pause work only for an explicit hold, shared-resource conflict, genuine blocker, or capacity limit. If capacity is the limit, reassign or delegate; do not silently park. Parking EMR-1133 because EMR-1203 was prioritized was counterproductive.
 
 ### A question is a question, not a work order
