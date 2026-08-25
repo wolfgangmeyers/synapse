@@ -19,6 +19,7 @@ import {
   createNativeSubagentTrace,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging.js";
+import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/goal.js";
 import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
 
 function createMessagingFixture({
@@ -34,10 +35,14 @@ function createMessagingFixture({
   availableModels = [model],
   setModel = () => true,
   updateContextModel = true,
+  complete = async () => ({ content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] }),
 } = {}) {
   const handlers = new Map();
   const childHandlers = new Map();
   const tools = new Map();
+  const commands = new Map();
+  const branch = [];
+  const emittedEvents = [];
   const sent = [];
   const modelSwitches = [];
   const mailboxClients = [];
@@ -45,25 +50,36 @@ function createMessagingFixture({
     sessionManager: {
       getSessionId: () => currentSessionId,
       getHeader: () => header,
-      getBranch: () => [],
+      getBranch: () => branch,
       isPersisted: () => true,
       getSessionFile: () => `/tmp/${currentSessionId}.jsonl`,
     },
     ...(contextUsage === undefined ? {} : { getContextUsage: contextUsage }),
     model,
-    modelRegistry: { getAvailable: () => availableModels },
+    modelRegistry: { getAvailable: () => availableModels, complete },
     ui: { notify() {}, setStatus() {} },
   });
   const context = createContext();
   const pi = {
-    events: { on(type, handler) { childHandlers.set(type, handler); } },
+    getSessionId: () => sessionId,
+    events: {
+      on(type, handler) { childHandlers.set(type, handler); },
+      emit(type, data) {
+        emittedEvents.push({ type, data });
+        childHandlers.get(type)?.(data);
+      },
+    },
     on(type, handler) {
       const bucket = handlers.get(type) ?? [];
       bucket.push(handler);
       handlers.set(type, bucket);
     },
-    registerCommand() {},
+    registerCommand(name, command) { commands.set(name, command); },
     registerTool(tool) { tools.set(tool.name, tool); },
+    appendEntry(customType, data) {
+      const entry = { type: "custom", customType, data };
+      branch.push(entry);
+    },
     setModel(nextModel) {
       modelSwitches.push(nextModel);
       const switched = setModel(nextModel, context);
@@ -99,7 +115,7 @@ function createMessagingFixture({
       dispose() {},
     }),
   });
-  return { childHandlers, context, createContext, handlers, mailboxClients, modelSwitches, pi, sent, tools };
+  return { childHandlers, commands, context, createContext, emittedEvents, handlers, mailboxClients, modelSwitches, pi, sent, tools };
 }
 
 async function emitToolCalls(fixture, toolNames, context = fixture.context) {
@@ -391,6 +407,10 @@ async function sessionStart(fixture, context = fixture.context) {
   for (const handler of fixture.handlers.get("session_start") ?? []) await handler({}, context);
 }
 
+async function runHandlers(fixture, eventName, event = {}, context = fixture.context) {
+  for (const handler of fixture.handlers.get(eventName) ?? []) await handler(event, context);
+}
+
 test("managed workers receive their tmux identity on startup and resume", async () => {
   for (const [reason, agentId] of [["startup", "worker-start"], ["resume", "worker-resumed"]]) {
     const fixture = createMessagingFixture({ resolveCurrentAgentId: () => agentId });
@@ -408,6 +428,55 @@ test("managed workers receive their tmux identity on startup and resume", async 
       triggerTurn: false,
     }]], reason);
   }
+});
+
+test("goal progress bridge counts only successful concrete actions with provenance", async () => {
+  const fixture = createMessagingFixture({ sessionId: "parent-session" });
+  goalExtension(fixture.pi);
+  // The goal extension is installed after messaging in this fixture, so replay the optional
+  // state request once to establish the bridge before the goal is set.
+  fixture.pi.events.emit(GOAL_STATE_REQUEST_EVENT);
+  await sessionStart(fixture);
+  const goal = fixture.tools.get("goal");
+  const set = await goal.execute("goal-set", { action: "set", goal: "ship the bridge" }, undefined, undefined, fixture.context);
+  assert.equal(set.isError, undefined);
+  await fixture.commands.get("goal-snooze").handler("off", fixture.context);
+
+  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "read-1", isError: false });
+  const first = fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT);
+  assert.equal(first.length, 1);
+  assert.deepEqual(first[0].data, {
+    activityId: "tool-completed:read-1",
+    kind: "tool-completed",
+    revision: 1,
+    sessionId: "parent-session",
+    workerId: "worker",
+    goal: { enabled: true, goal: "ship the bridge" },
+  });
+
+  // A replayed provider result is not a new worker action.
+  await runHandlers(fixture, "tool_result", { toolName: "read", toolCallId: "read-1", isError: false });
+  // Failed work and control-plane tools are never progress events.
+  await runHandlers(fixture, "tool_result", { toolName: "edit", toolCallId: "edit-1", isError: true });
+  for (const toolName of ["goal", "goal_snooze", "mecha_mailbox_send", "mecha_reminder", "mecha_worker"]) {
+    await runHandlers(fixture, "tool_result", { toolName, toolCallId: `${toolName}-1`, isError: false });
+  }
+  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 1);
+
+  await fixture.childHandlers.get("subagents:started")({ id: "child-1", type: "general-purpose", description: "Concrete child" });
+  const activity = fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT);
+  assert.equal(activity.length, 2);
+  assert.equal(activity[1].data.kind, "native-subagent-launch");
+  assert.equal(activity[1].data.activityId, "native-subagent-launch:child-1");
+  assert.equal(activity[1].data.revision, 2);
+
+  // The goal consumer rejects malformed/stale/foreign provenance even if another local caller
+  // tries to impersonate a meaningful event. This is not a transport or liveness signal.
+  const consume = fixture.childHandlers.get(GOAL_ACTIVITY_EVENT);
+  consume({ activityId: "foreign-worker", kind: "tool-completed", revision: 3, sessionId: "parent-session", workerId: "other-worker", goal: { enabled: true, goal: "ship the bridge" } });
+  consume({ activityId: "foreign-goal", kind: "tool-completed", revision: 4, sessionId: "parent-session", workerId: "worker", goal: { enabled: true, goal: "other goal" } });
+  consume({ activityId: "stale-check", kind: "goal-check", revision: 5, sessionId: "parent-session", workerId: "worker", goal: { enabled: true, goal: "ship the bridge" } });
+  assert.equal(fixture.emittedEvents.filter(({ type }) => type === GOAL_ACTIVITY_EVENT).length, 2, "foreign/stale consumer injections do not create bridge emissions");
 });
 
 test("activity broadcasts current model metadata without recurring catalog payloads", async () => {

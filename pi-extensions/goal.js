@@ -4,6 +4,11 @@ const GOAL_UPDATE_TYPE = "goal-update";
 const GOAL_SNOOZE_AVAILABILITY_TYPE = "goal-snooze-availability";
 export const GOAL_STATE_EVENT = "goal:state";
 export const GOAL_STATE_REQUEST_EVENT = "goal:state-request";
+// Progress recovery is a separate local bridge. Mailbox liveness and evaluator output
+// are deliberately not activity signals: only the messaging extension's authoritative,
+// uniquely identified lifecycle revisions may advance this state machine.
+export const GOAL_ACTIVITY_EVENT = "goal:meaningful-activity";
+export const GOAL_WORKER_ID_EVENT = "goal:worker-id";
 // Remote controls remain a separate typed channel so model selection and goal
 // state cannot be confused by a router or extension that only supports one.
 export const GOAL_CONTROL_REQUEST_EVENT = "goal:control-request";
@@ -31,6 +36,9 @@ const MAX_NOT_DONE_WAKEUPS = 10;
 const MAX_BLOCKED_WAKEUPS = 10;
 const MAX_WAITING_AUTHORIZATION_WAKEUPS = 3;
 const MAX_SNOOZE_TURN_LIMIT = 20;
+const MEANINGFUL_ACTIVITY_EVENTS_TO_REARM = 3;
+const MEANINGFUL_ACTIVITY_KINDS = new Set(["tool-completed", "native-subagent-launch"]);
+const MAX_SEEN_ACTIVITY_IDS = 512;
 const COMPLETIONS_TO_RESET_WAKEUPS = 3;
 const DEFAULT_SNOOZE_DURATION_MS = 60_000;
 const DEFAULT_SNOOZE_REFILL_YIELD_MS = 30_000;
@@ -116,6 +124,22 @@ function restoreAppliedGoalControl(value) {
     : undefined;
 }
 
+function restoreRearmScope(value) {
+  if (!value || typeof value !== "object"
+    || typeof value.sessionId !== "string" || value.sessionId.length === 0
+    || typeof value.goal !== "string" || normalizeGoal(value.goal).length === 0
+    || !Number.isSafeInteger(value.activityBaselineRevision) || value.activityBaselineRevision < 0
+    || (value.workerId !== undefined && (typeof value.workerId !== "string" || value.workerId.length === 0))) {
+    return undefined;
+  }
+  return {
+    sessionId: value.sessionId,
+    goal: normalizeGoal(value.goal),
+    activityBaselineRevision: value.activityBaselineRevision,
+    ...(value.workerId === undefined ? {} : { workerId: value.workerId }),
+  };
+}
+
 function positiveSafeInteger(value) {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
@@ -173,6 +197,9 @@ function restoreState(ctx) {
     snoozeRefillYieldMs: DEFAULT_SNOOZE_REFILL_YIELD_MS,
     snoozeRefillElapsedMs: DEFAULT_SNOOZE_REFILL_ELAPSED_MS,
     outcomeCounts: emptyOutcomeCounts(),
+    rearmActive: false,
+    rearmActivityCount: 0,
+    rearmScope: undefined,
     appliedGoalControl: undefined,
   };
   for (const entry of ctx.sessionManager.getBranch?.() ?? []) {
@@ -205,6 +232,11 @@ function restoreState(ctx) {
       snoozeRefillYieldMs: positiveSafeInteger(data.snoozeRefillYieldMs) ?? DEFAULT_SNOOZE_REFILL_YIELD_MS,
       snoozeRefillElapsedMs: positiveSafeInteger(data.snoozeRefillElapsedMs) ?? DEFAULT_SNOOZE_REFILL_ELAPSED_MS,
       outcomeCounts: restoreOutcomeCounts(data.outcomeCounts),
+      rearmActive: data.rearmActive === true,
+      rearmActivityCount: Number.isInteger(data.rearmActivityCount) && data.rearmActivityCount >= 0
+        ? Math.min(data.rearmActivityCount, MEANINGFUL_ACTIVITY_EVENTS_TO_REARM - 1)
+        : 0,
+      rearmScope: restoreRearmScope(data.rearmScope),
       appliedGoalControl: restoreAppliedGoalControl(data.appliedGoalControl),
     };
   }
@@ -387,6 +419,12 @@ export function createGoalExtension(pi, options = {}) {
   let snoozeRefillElapsedMs = DEFAULT_SNOOZE_REFILL_ELAPSED_MS;
   let outcomeCounts = emptyOutcomeCounts();
   let appliedGoalControl;
+  let rearmActive = false;
+  let rearmActivityCount = 0;
+  let rearmScope;
+  let currentWorkerId;
+  let latestActivityRevision = 0;
+  const seenActivityIds = new Set();
   let compactionLifecyclePause = false;
   let lastOwnerGateState = "allowed";
 
@@ -504,6 +542,28 @@ export function createGoalExtension(pi, options = {}) {
     snoozeRefillElapsedMs,
     outcomeCounts: { ...outcomeCounts },
   });
+  const rememberActivityId = (activityId) => {
+    seenActivityIds.delete(activityId);
+    seenActivityIds.add(activityId);
+    while (seenActivityIds.size > MAX_SEEN_ACTIVITY_IDS) {
+      seenActivityIds.delete(seenActivityIds.keys().next().value);
+    }
+  };
+  const clearRearmState = () => {
+    rearmActive = false;
+    rearmActivityCount = 0;
+    rearmScope = undefined;
+  };
+  const armRearmState = () => {
+    rearmActive = true;
+    rearmActivityCount = 0;
+    rearmScope = {
+      sessionId: typeof sessionId === "string" ? sessionId : "",
+      goal: state.goal,
+      activityBaselineRevision: latestActivityRevision,
+      ...(currentWorkerId === undefined ? {} : { workerId: currentWorkerId }),
+    };
+  };
   const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, {
     ...state,
     notDoneWakeups,
@@ -523,6 +583,11 @@ export function createGoalExtension(pi, options = {}) {
       ? { snoozeRefillYieldMs, snoozeRefillElapsedMs }
       : {}),
     outcomeCounts: { ...outcomeCounts },
+    ...(rearmActive ? {
+      rearmActive: true,
+      rearmActivityCount,
+      rearmScope: { ...rearmScope },
+    } : {}),
     ...(appliedGoalControl === undefined ? {} : { appliedGoalControl: { ...appliedGoalControl } }),
   });
   const publish = () => {
@@ -532,6 +597,40 @@ export function createGoalExtension(pi, options = {}) {
   const recordOutcome = (outcome) => {
     if (!OUTCOMES.has(outcome)) return;
     outcomeCounts[outcome] += 1;
+    persist();
+    publish();
+  };
+  const recordMeaningfulActivity = (activity) => {
+    if (!activity || typeof activity !== "object" || Array.isArray(activity)) return;
+    const activityId = typeof activity.activityId === "string" ? activity.activityId : "";
+    const session = typeof activity.sessionId === "string" ? activity.sessionId : "";
+    const worker = typeof activity.workerId === "string" ? activity.workerId : undefined;
+    const revision = activity.revision;
+    const activityGoal = activity.goal;
+    if (!MEANINGFUL_ACTIVITY_KINDS.has(activity.kind)
+      || activityId.length === 0 || session.length === 0 || !Number.isSafeInteger(revision) || revision < 1
+      || session !== sessionId
+      || seenActivityIds.has(activityId)
+      || !activityGoal || activityGoal.enabled !== true || normalizeGoal(activityGoal.goal) !== state.goal
+      || (rearmActive && rearmScope?.workerId !== undefined && worker !== rearmScope.workerId)) return;
+    latestActivityRevision = Math.max(latestActivityRevision, revision);
+    rememberActivityId(activityId);
+    if (!rearmActive || !state.enabled || !state.goal || !rearmScope
+      || rearmScope.sessionId !== session || rearmScope.goal !== state.goal
+      || (rearmScope.workerId !== undefined && worker !== rearmScope.workerId)) return;
+    if (rearmScope.workerId === undefined && worker !== undefined) rearmScope.workerId = worker;
+    rearmActivityCount += 1;
+    if (rearmActivityCount < MEANINGFUL_ACTIVITY_EVENTS_TO_REARM) {
+      persist();
+      publish();
+      return;
+    }
+    // The third new action re-arms delivery, but does not itself schedule a goal check.
+    // The next real settled boundary owns the first post-cap attempt.
+    notDoneWakeups = 0;
+    blockedWakeups = 0;
+    waitingAuthWakeups = 0;
+    clearRearmState();
     persist();
     publish();
   };
@@ -727,6 +826,17 @@ export function createGoalExtension(pi, options = {}) {
   const currentWakeupLimit = () => snoozeEnabled && snoozeTurnLimit !== undefined
     ? snoozeTurnLimit
     : MAX_NOT_DONE_WAKEUPS;
+  const attemptCapReached = () => notDoneWakeups >= currentWakeupLimit() || blockedWakeups >= MAX_BLOCKED_WAKEUPS;
+  const recordNotDoneWakeup = () => {
+    notDoneWakeups += 1;
+    if (attemptCapReached()) armRearmState();
+    persist();
+    return () => {
+      notDoneWakeups = Math.max(0, notDoneWakeups - 1);
+      if (rearmActive && !attemptCapReached()) clearRearmState();
+      persist();
+    };
+  };
   const statusDetails = (action) => ({
     action,
     ...state,
@@ -736,6 +846,11 @@ export function createGoalExtension(pi, options = {}) {
     blockedWakeups,
     waitingAuthWakeups,
     completedThings,
+    ...(rearmActive ? {
+      rearmActive: true,
+      rearmActivityCount,
+      rearmRequired: MEANINGFUL_ACTIVITY_EVENTS_TO_REARM,
+    } : {}),
     lastOwnerGateState,
   });
   const ownerActivityState = (ctx) => {
@@ -777,6 +892,7 @@ export function createGoalExtension(pi, options = {}) {
       blockedWakeups = 0;
       waitingAuthWakeups = 0;
       completedThings = 0;
+      clearRearmState();
       outcomeCounts = emptyOutcomeCounts();
       completedOffAllowance = false;
       lastOwnerGateState = "allowed";
@@ -797,6 +913,7 @@ export function createGoalExtension(pi, options = {}) {
     }
     cancel();
     waitingAuthWakeups = 0;
+    clearRearmState();
     completedOffAllowance = false;
     state = { ...state, enabled: false };
     if (programmatic && goalLockEnabled) goalLockEnabled = false;
@@ -905,24 +1022,20 @@ export function createGoalExtension(pi, options = {}) {
         const { outcome, rationale } = responseEvaluation(response);
         recordOutcome(outcome);
         completedOffAllowance = outcome === "COMPLETED";
-        if (outcome === "COMPLETED") {
+          if (outcome === "COMPLETED") {
           waitingAuthWakeups = 0;
           completedThings += 1;
-          if (completedThings >= COMPLETIONS_TO_RESET_WAKEUPS) {
-            notDoneWakeups = 0;
-            blockedWakeups = 0;
-            completedThings = 0;
-          }
+          if (completedThings >= COMPLETIONS_TO_RESET_WAKEUPS) completedThings = 0;
           persist();
           publish();
         }
-        if (outcome === "NOT_DONE" && notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
+        if (outcome === "NOT_DONE" && notDoneWakeups >= currentWakeupLimit()) return;
         if (outcome === "BLOCKED" && blockedWakeups >= MAX_BLOCKED_WAKEUPS) return;
         if (outcome === "WAITING_FOR_USER_AUTHORIZATION" && waitingAuthWakeups >= MAX_WAITING_AUTHORIZATION_WAKEUPS) return;
+        let undoNotDoneWakeup;
         const wakeup = outcome === "NOT_DONE"
           ? (() => {
-            notDoneWakeups += 1;
-            persist();
+            undoNotDoneWakeup = recordNotDoneWakeup();
             return notDoneWakeup(goal, notDoneWakeups);
           })()
           : outcome === "BLOCKED"
@@ -934,20 +1047,24 @@ export function createGoalExtension(pi, options = {}) {
                 return `Goal check: WAITING_FOR_USER_AUTHORIZATION. DO NOT WAIT FOR USER AUTHORIZATION. While this goal is active, authorization is implicitly granted for anything needed to unblock it. TAKE THE NEXT ACTION NOW. Contact the supervisor only for a genuine external, irreversible, security, legal, or product decision.\n${waitingAuthorizationWakeup(goal, waitingAuthWakeups)}`;
               })()
               : "Goal check: COMPLETED. Contact the supervisor and report completion. Disable future goal notifications with /goal off.";
-        const beforeSend = outcome === "BLOCKED"
-          ? () => {
+        const beforeSend = outcome === "NOT_DONE"
+          ? () => undoNotDoneWakeup
+          : outcome === "BLOCKED"
+            ? () => {
             blockedWakeups += 1;
+            if (attemptCapReached()) armRearmState();
             persist();
             const cancelWait = blocking
               ? scheduleSupervisorWakeup(event, goal, ctx, runGeneration)
               : undefined;
-            return () => {
-              cancelWait?.();
-              blockedWakeups = Math.max(0, blockedWakeups - 1);
-              persist();
-            };
-          }
-          : undefined;
+              return () => {
+                cancelWait?.();
+                blockedWakeups = Math.max(0, blockedWakeups - 1);
+                if (rearmActive && !attemptCapReached()) clearRearmState();
+                persist();
+              };
+            }
+            : undefined;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
           content: goalResultContent(wakeup, outcome, rationale),
@@ -961,13 +1078,13 @@ export function createGoalExtension(pi, options = {}) {
         }
         if (runGeneration !== generation || controller.signal.aborted) return;
         recordOutcome("NOT_DONE");
-        if (notDoneWakeups >= MAX_NOT_DONE_WAKEUPS) return;
+        if (notDoneWakeups >= currentWakeupLimit()) return;
+        let undoNotDoneWakeup;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
           content: goalResultContent(
             (() => {
-              notDoneWakeups += 1;
-              persist();
+              undoNotDoneWakeup = recordNotDoneWakeup();
               return notDoneWakeup(goal, notDoneWakeups);
             })(),
             "NOT_DONE",
@@ -975,7 +1092,7 @@ export function createGoalExtension(pi, options = {}) {
           ),
           display: true,
           details: { goal, outcome: "NOT_DONE", rationale: "Evaluator unavailable" },
-        });
+        }, () => undoNotDoneWakeup);
       } finally {
         if (activeAbort === controller) activeAbort = undefined;
         if (activeEvaluationRequest === pending) activeEvaluationRequest = undefined;
@@ -993,6 +1110,28 @@ export function createGoalExtension(pi, options = {}) {
   };
 
   pi.events?.on?.(GOAL_STATE_REQUEST_EVENT, () => publish());
+  pi.events?.on?.(GOAL_WORKER_ID_EVENT, (identity) => {
+    if (!identity || typeof identity !== "object" || Array.isArray(identity)
+      || (identity.sessionId !== undefined && identity.sessionId !== sessionId)
+      || typeof identity.workerId !== "string" || identity.workerId.length === 0) return;
+    const changed = currentWorkerId !== identity.workerId;
+    currentWorkerId = identity.workerId;
+    if (!rearmActive || !rearmScope) return;
+    if (rearmScope.workerId !== undefined && rearmScope.workerId !== currentWorkerId) {
+      rearmActivityCount = 0;
+      rearmScope = {
+        ...rearmScope,
+        workerId: currentWorkerId,
+        activityBaselineRevision: latestActivityRevision,
+      };
+      persist();
+      publish();
+    } else if (rearmScope.workerId === undefined && changed) {
+      rearmScope.workerId = currentWorkerId;
+      persist();
+    }
+  });
+  pi.events?.on?.(GOAL_ACTIVITY_EVENT, recordMeaningfulActivity);
   pi.events?.on?.(GOAL_CONTROL_REQUEST_EVENT, (request) => {
     const result = applyGoalControl(request, request?.context);
     try { request?.respond?.(result); } catch { /* the router can time out a disconnected source */ }
@@ -1023,6 +1162,17 @@ export function createGoalExtension(pi, options = {}) {
     snoozeRefillElapsedMs = restored.snoozeRefillElapsedMs;
     outcomeCounts = restored.outcomeCounts;
     appliedGoalControl = restored.appliedGoalControl;
+    rearmActive = restored.rearmActive === true && restored.rearmScope !== undefined;
+    rearmActivityCount = rearmActive ? restored.rearmActivityCount : 0;
+    rearmScope = rearmActive ? restored.rearmScope : undefined;
+    latestActivityRevision = rearmScope?.activityBaselineRevision ?? 0;
+    seenActivityIds.clear();
+    currentWorkerId = rearmScope?.workerId;
+    if (rearmActive && rearmScope.sessionId !== sessionId) {
+      currentWorkerId = undefined;
+      clearRearmState();
+    }
+    if (!rearmActive && attemptCapReached()) armRearmState();
     publish();
     if (state.enabled && snoozeEnabled) scheduleSnoozeAvailability(ctx);
   });
@@ -1121,7 +1271,7 @@ export function createGoalExtension(pi, options = {}) {
       scheduleSnooze(snoozeDurationMs, _signal, (waited) => {
         if (!waited || runGeneration !== generation || !snoozeEnabled || !state.enabled || state.goal !== goal) return;
         if (notDoneWakeups >= currentWakeupLimit()) return;
-        notDoneWakeups += 1;
+        recordNotDoneWakeup();
         const reachedCustomLimit = snoozeTurnLimit !== undefined && notDoneWakeups >= snoozeTurnLimit;
         const exhaustedBudget = snoozeBudgetCapMs !== undefined
           && snoozeBudgetAvailableMs <= 0

@@ -10,10 +10,12 @@ import { runRecallEvaluator as evaluateRecall, validateRecallChoice as validateC
 import { createMemoryCaptureLifecycle } from "./memory-capture.js";
 import { registerOperationalTools } from "./operational-tools.js";
 import {
+  GOAL_ACTIVITY_EVENT,
   GOAL_CONTROL_REQUEST_EVENT,
   GOAL_CONTROL_STATE_EVENT,
   GOAL_STATE_EVENT,
   GOAL_STATE_REQUEST_EVENT,
+  GOAL_WORKER_ID_EVENT,
 } from "./goal.js";
 export { createRecallState } from "./recall-state.js";
 export { createRecallController } from "./recall-controller.js";
@@ -39,6 +41,14 @@ const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const MAX_GOAL_CHARS = 4_000;
 const GOAL_CONTROL_RESPONSE_TIMEOUT_MS = 1_000;
 const GOAL_OUTCOME_KEYS = ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"];
+const MAX_MEANINGFUL_ACTIVITY_IDS = 1_024;
+// These tools change Mecha/control-plane state or move messages; their successful completion
+// is not proof that the worker advanced its standing goal. Real work tools remain eligible.
+const GOAL_ACTIVITY_EXCLUDED_TOOLS = new Set([
+  "goal", "goal_snooze", "mecha_parent_message", "mecha_mailbox_send", "mecha_request_inline_tool_allowance",
+  "mecha_recall", "mecha_settled_notifications", "mecha_context", "mecha_state", "mecha_priority",
+  "mecha_verification_handoff", "mecha_reminder", "mecha_worker", "mecha_pr", "mecha_git", "mecha_router",
+]);
 
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 
@@ -1336,20 +1346,63 @@ export function createMechaMessagingExtension(pi, {
   const currentSubagentsServiceAccessor = getSubagentsService;
   let client;
   let coordinator;
+  let parentAgentId;
+  let parentActivityContext;
   let goalProjection;
   let goalProjectionReceived = false;
+  let meaningfulActivityRevision = 0;
+  const meaningfulActivityIds = new Set();
   let goalControlState = defaultGoalControlState();
   const receiveGoalProjection = (value) => {
     const normalized = normalizeGoalProjection(value);
     if (normalized === undefined) return;
     goalProjection = normalized;
     goalProjectionReceived = true;
+    if (parentAgentId !== undefined) emitWorkerIdentity(parentActivityContext, parentAgentId);
   };
   const receiveGoalControlState = (value) => {
     const normalized = normalizeGoalControlState(value);
     if (normalized === undefined) return;
     goalControlState = normalized;
     publishGoalState();
+  };
+  const emitWorkerIdentity = (context, workerId) => {
+    const sessionId = contextSessionId(context);
+    if (typeof workerId !== "string" || workerId.length === 0 || typeof sessionId !== "string" || sessionId.length === 0) return;
+    try {
+      pi.events?.emit?.(GOAL_WORKER_ID_EVENT, { workerId, sessionId });
+    } catch {
+      // The goal extension is optional; an unavailable local bridge must not block startup.
+    }
+  };
+  const emitMeaningfulActivity = (kind, rawActivityId, context) => {
+    if (!goalProjectionReceived || goalProjection?.enabled !== true) return;
+    const activityId = typeof rawActivityId === "string" ? rawActivityId.trim() : "";
+    const sessionId = contextSessionId(context) ?? contextSessionId(parentActivityContext);
+    if (activityId.length === 0 || typeof sessionId !== "string" || sessionId.length === 0
+      || typeof parentAgentId !== "string" || parentAgentId.length === 0
+      || meaningfulActivityIds.has(`${kind}:${activityId}`)) return;
+    const key = `${kind}:${activityId}`;
+    meaningfulActivityIds.add(key);
+    while (meaningfulActivityIds.size > MAX_MEANINGFUL_ACTIVITY_IDS) {
+      meaningfulActivityIds.delete(meaningfulActivityIds.keys().next().value);
+    }
+    const revision = ++meaningfulActivityRevision;
+    try {
+      pi.events?.emit?.(GOAL_ACTIVITY_EVENT, {
+        activityId: key,
+        kind,
+        revision,
+        sessionId,
+        workerId: parentAgentId,
+        goal: { ...goalProjection },
+      });
+    } catch {
+      // Progress observation is best-effort and cannot change the worker action outcome.
+    }
+  };
+  const isConcreteGoalTool = (toolName) => {
+    return typeof toolName === "string" && toolName.length > 0 && !GOAL_ACTIVITY_EXCLUDED_TOOLS.has(toolName);
   };
   const publishGoalState = (mailboxClient = client) => {
     if (mailboxClient === undefined || typeof mailboxClient.sendGoalState !== "function") return false;
@@ -1480,7 +1533,6 @@ export function createMechaMessagingExtension(pi, {
   let settledNotificationPending = false;
   let activityHeartbeatTimer;
   let activityHeartbeatActive = false;
-  let parentActivityContext;
   // Extension event contexts expose the model as a read-only snapshot. Keep a
   // short-lived per-session override so a successful remote switch is
   // published immediately even if the next event has not supplied a fresh
@@ -2174,7 +2226,6 @@ export function createMechaMessagingExtension(pi, {
   const settledNotifications = createSettledScheduler();
   const childReplyClients = new Map();
   const childReplyClientAgentIds = new Map();
-  let parentAgentId;
   const inlineToolPolicy = createInlineToolPolicy({ now: nowImpl });
   const mailboxSendRateLimits = new Map();
 
@@ -2482,6 +2533,9 @@ export function createMechaMessagingExtension(pi, {
   });
 
   pi.events.on("subagents:started", (event) => {
+    // A launch is a concrete worker action. This signal is intentionally emitted from the
+    // launch event itself, never inferred from lifecycle polling or liveness refreshes.
+    emitMeaningfulActivity("native-subagent-launch", event?.id, parentActivityContext);
     // Native lifecycle visibility is timer-driven. Keep this hook only for settled
     // notifications, which do not publish router lifecycle state.
     if (lifecycleSnapshotSubagentService() !== undefined) {
@@ -2658,6 +2712,22 @@ export function createMechaMessagingExtension(pi, {
     }
     return inlineToolPolicy.evaluate(_event?.toolName);
   });
+  // These completion hooks are the local action boundary. Count only successful, uniquely
+  // identified real tools; intent, output text, failures, and control-plane completions are not progress.
+  const recordToolCompletion = (_event, context) => {
+    if (children.has(context?.sessionManager?.getSessionId?.())) return;
+    const result = _event?.result ?? _event;
+    if (_event?.isError === true || result?.isError === true
+      || _event?.cancelled === true || _event?.canceled === true || _event?.aborted === true
+      || result?.cancelled === true || result?.canceled === true || result?.aborted === true
+      || _event?.error !== undefined || result?.error !== undefined) return;
+    const toolName = _event?.toolName ?? result?.toolName;
+    if (!isConcreteGoalTool(toolName)) return;
+    const toolCallId = _event?.toolCallId ?? _event?.tool_call_id ?? _event?.id ?? result?.toolCallId;
+    emitMeaningfulActivity("tool-completed", toolCallId, context);
+  };
+  pi.on("tool_result", recordToolCompletion);
+  pi.on("tool_execution_end", recordToolCompletion);
 
   pi.on("session_before_compact", async (event, context) => {
     if (children.has(context.sessionManager.getSessionId())) return undefined;
@@ -2799,6 +2869,7 @@ export function createMechaMessagingExtension(pi, {
       const agentId = resolveCurrentAgentId();
       if (agentId === undefined) return;
       parentAgentId = agentId;
+      emitWorkerIdentity(context, agentId);
       pi.sendMessage({
         customType: "mecha-worker-identity",
         content: `Your managed worker identity is ${agentId}.`,
