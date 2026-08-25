@@ -96,9 +96,10 @@ The parent accepts a step only when its contract is met, the evidence covers the
 condition, and the change stayed within scope. Read the cited source or artifact yourself. Do not
 accept a clean check over a scratch file when the shipped artifact is assembled elsewhere.
 
-For mutations, use exact paths and a rollback method. Avoid overlapping writers. Commit before
-reviewing or handing off a mutation when a stable target is needed. Reviewers and validators should
-use that immutable commit or diff, not a mutable working tree.
+For mutations, use exact paths and a rollback method. Scoped subagents may edit concurrently
+when their ownership is disjoint; do not run separate managed workers concurrently in the same
+worktree. Commit before reviewing or handing off a mutation when a stable target is needed.
+Reviewers and validators should use that immutable commit or diff, not a mutable working tree.
 
 If a check can be made to pass without testing the behavior, fix the check or add the missing
 assertion. For important tests, prove the test fails when its assertion or relevant behavior is
