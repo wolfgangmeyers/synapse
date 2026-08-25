@@ -62,6 +62,7 @@ class WorkerRelaunchTest(unittest.TestCase):
         self.assertEqual(launch[launch.index("--agent") + 1], "pi")
         self.assertEqual(launch[launch.index("--resume") + 1], "pi-session-123")
         self.assertEqual(launch[launch.index("--notify-on-settled") + 1], "supervisor")
+        self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(launch))
         self.assertEqual(mailbox[mailbox.index("--to") + 1], "pi-worker")
 
     def test_relaunch_without_session_leaves_window_running(self):

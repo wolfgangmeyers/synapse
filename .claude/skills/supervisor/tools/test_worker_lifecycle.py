@@ -59,13 +59,15 @@ class WorkerLifecycleTest(unittest.TestCase):
         ) as run_script:
             worker_lifecycle.launch("worker-7")
 
-        run_script.assert_called_once_with(worker_lifecycle.WORKER_LAUNCH, [
+        launch_argv = [
             "--window", "worker-7",
             "--dir", self.worktree,
             "--agent", "pi",
             "--resume", "session-7",
             "--notify-on-settled", "supervisor",
-        ])
+        ]
+        run_script.assert_called_once_with(worker_lifecycle.WORKER_LAUNCH, launch_argv)
+        self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(launch_argv))
         saved = self.read_tasks()[0]
         self.assertEqual(saved["window"], "worker-7")
         self.assertEqual(saved["worktree"], self.worktree)
