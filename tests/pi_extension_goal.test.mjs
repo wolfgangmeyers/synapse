@@ -1925,3 +1925,63 @@ test("NOT_DONE cap re-arms only after three new scoped concrete activities and c
   await runEvaluation();
   assert.equal(results().length, 20, "the second cycle is capped at ten deliveries");
 });
+
+test("fresh activity producer epochs reject stale events while preserving the NOT_DONE cap", async () => {
+  const current = fixture({
+    sessionId: "worker-session",
+    response: { content: [{ type: "text", text: "VERDICT: NOT_DONE\\nREASON: Work remains." }] },
+  });
+  await setGoal(current, "fence stale recovery events");
+  await current.commands.get("goal-snooze").handler("off", current.context);
+  current.eventHandlers.get(GOAL_WORKER_ID_EVENT)({
+    sessionId: "worker-session", workerId: "worker", producerEpoch: "epoch-old",
+  });
+  const runEvaluation = async () => {
+    await settle(current);
+    await flushDeferred();
+    await flushDeferred();
+  };
+  for (let attempt = 0; attempt < 10; attempt += 1) await runEvaluation();
+  const activity = current.eventHandlers.get(GOAL_ACTIVITY_EVENT);
+  const event = (activityId, revision, producerEpoch) => activity({
+    activityId,
+    kind: "tool-completed",
+    revision,
+    sessionId: "worker-session",
+    workerId: "worker",
+    producerEpoch,
+    goal: { enabled: true, goal: "fence stale recovery events" },
+  });
+  event("old-action", 1, "epoch-old");
+  assert.equal((await callGoalTool(current, { action: "status" })).details.rearmActivityCount, 1);
+  assert.equal(current.entries.at(-1).data.rearmScope.producerEpoch, "epoch-old");
+
+  const restored = fixture({
+    sessionId: "worker-session",
+    response: { content: [{ type: "text", text: "VERDICT: NOT_DONE\\nREASON: Work remains." }] },
+  });
+  restored.branch.push(...current.branch);
+  await restored.handlers.get("session_start")({ sessionId: "worker-session" }, restored.context);
+  restored.eventHandlers.get(GOAL_WORKER_ID_EVENT)({
+    sessionId: "worker-session", workerId: "worker", producerEpoch: "epoch-new",
+  });
+  assert.equal((await callGoalTool(restored, { action: "status" })).details.rearmActivityCount, 0);
+  const restoredActivity = restored.eventHandlers.get(GOAL_ACTIVITY_EVENT);
+  const restoredEvent = (activityId, revision, producerEpoch) => restoredActivity({
+    activityId,
+    kind: "tool-completed",
+    revision,
+    sessionId: "worker-session",
+    workerId: "worker",
+    producerEpoch,
+    goal: { enabled: true, goal: "fence stale recovery events" },
+  });
+  restoredEvent("replayed-old-action", 1, "epoch-old");
+  assert.equal((await callGoalTool(restored, { action: "status" })).details.rearmActivityCount, 0);
+  restoredEvent("new-action-1", 1, "epoch-new");
+  restoredEvent("new-action-2", 2, "epoch-new");
+  assert.equal((await callGoalTool(restored, { action: "status" })).details.rearmActivityCount, 2);
+  restoredEvent("new-action-3", 3, "epoch-new");
+  assert.equal((await callGoalTool(restored, { action: "status" })).details.rearmActivityCount, undefined);
+  assert.equal((await callGoalTool(restored, { action: "status" })).details.notDoneWakeups, 0);
+});

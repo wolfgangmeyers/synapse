@@ -129,7 +129,8 @@ function restoreRearmScope(value) {
     || typeof value.sessionId !== "string" || value.sessionId.length === 0
     || typeof value.goal !== "string" || normalizeGoal(value.goal).length === 0
     || !Number.isSafeInteger(value.activityBaselineRevision) || value.activityBaselineRevision < 0
-    || (value.workerId !== undefined && (typeof value.workerId !== "string" || value.workerId.length === 0))) {
+    || (value.workerId !== undefined && (typeof value.workerId !== "string" || value.workerId.length === 0))
+    || (value.producerEpoch !== undefined && (typeof value.producerEpoch !== "string" || value.producerEpoch.length === 0))) {
     return undefined;
   }
   return {
@@ -137,6 +138,7 @@ function restoreRearmScope(value) {
     goal: normalizeGoal(value.goal),
     activityBaselineRevision: value.activityBaselineRevision,
     ...(value.workerId === undefined ? {} : { workerId: value.workerId }),
+    ...(value.producerEpoch === undefined ? {} : { producerEpoch: value.producerEpoch }),
   };
 }
 
@@ -423,6 +425,7 @@ export function createGoalExtension(pi, options = {}) {
   let rearmActivityCount = 0;
   let rearmScope;
   let currentWorkerId;
+  let currentActivityProducerEpoch;
   let latestActivityRevision = 0;
   const seenActivityIds = new Set();
   let compactionLifecyclePause = false;
@@ -562,6 +565,7 @@ export function createGoalExtension(pi, options = {}) {
       goal: state.goal,
       activityBaselineRevision: latestActivityRevision,
       ...(currentWorkerId === undefined ? {} : { workerId: currentWorkerId }),
+      ...(currentActivityProducerEpoch === undefined ? {} : { producerEpoch: currentActivityProducerEpoch }),
     };
   };
   const persist = () => pi.appendEntry(GOAL_STATE_ENTRY, {
@@ -605,6 +609,7 @@ export function createGoalExtension(pi, options = {}) {
     const activityId = typeof activity.activityId === "string" ? activity.activityId : "";
     const session = typeof activity.sessionId === "string" ? activity.sessionId : "";
     const worker = typeof activity.workerId === "string" ? activity.workerId : undefined;
+    const producerEpoch = typeof activity.producerEpoch === "string" ? activity.producerEpoch : undefined;
     const revision = activity.revision;
     const activityGoal = activity.goal;
     if (!MEANINGFUL_ACTIVITY_KINDS.has(activity.kind)
@@ -617,8 +622,10 @@ export function createGoalExtension(pi, options = {}) {
     rememberActivityId(activityId);
     if (!rearmActive || !state.enabled || !state.goal || !rearmScope
       || rearmScope.sessionId !== session || rearmScope.goal !== state.goal
-      || (rearmScope.workerId !== undefined && worker !== rearmScope.workerId)) return;
+      || (rearmScope.workerId !== undefined && worker !== rearmScope.workerId)
+      || (rearmScope.producerEpoch !== undefined && producerEpoch !== rearmScope.producerEpoch)) return;
     if (rearmScope.workerId === undefined && worker !== undefined) rearmScope.workerId = worker;
+    if (rearmScope.producerEpoch === undefined && producerEpoch !== undefined) rearmScope.producerEpoch = producerEpoch;
     rearmActivityCount += 1;
     if (rearmActivityCount < MEANINGFUL_ACTIVITY_EVENTS_TO_REARM) {
       persist();
@@ -628,8 +635,6 @@ export function createGoalExtension(pi, options = {}) {
     // The third new action re-arms delivery, but does not itself schedule a goal check.
     // The next real settled boundary owns the first post-cap attempt.
     notDoneWakeups = 0;
-    blockedWakeups = 0;
-    waitingAuthWakeups = 0;
     clearRearmState();
     persist();
     publish();
@@ -826,7 +831,7 @@ export function createGoalExtension(pi, options = {}) {
   const currentWakeupLimit = () => snoozeEnabled && snoozeTurnLimit !== undefined
     ? snoozeTurnLimit
     : MAX_NOT_DONE_WAKEUPS;
-  const attemptCapReached = () => notDoneWakeups >= currentWakeupLimit() || blockedWakeups >= MAX_BLOCKED_WAKEUPS;
+  const attemptCapReached = () => notDoneWakeups >= currentWakeupLimit();
   const recordNotDoneWakeup = () => {
     notDoneWakeups += 1;
     if (attemptCapReached()) armRearmState();
@@ -1052,7 +1057,6 @@ export function createGoalExtension(pi, options = {}) {
           : outcome === "BLOCKED"
             ? () => {
             blockedWakeups += 1;
-            if (attemptCapReached()) armRearmState();
             persist();
             const cancelWait = blocking
               ? scheduleSupervisorWakeup(event, goal, ctx, runGeneration)
@@ -1060,7 +1064,6 @@ export function createGoalExtension(pi, options = {}) {
               return () => {
                 cancelWait?.();
                 blockedWakeups = Math.max(0, blockedWakeups - 1);
-                if (rearmActive && !attemptCapReached()) clearRearmState();
                 persist();
               };
             }
@@ -1114,20 +1117,29 @@ export function createGoalExtension(pi, options = {}) {
     if (!identity || typeof identity !== "object" || Array.isArray(identity)
       || (identity.sessionId !== undefined && identity.sessionId !== sessionId)
       || typeof identity.workerId !== "string" || identity.workerId.length === 0) return;
-    const changed = currentWorkerId !== identity.workerId;
+    const producerEpoch = typeof identity.producerEpoch === "string" && identity.producerEpoch.length > 0
+      ? identity.producerEpoch
+      : undefined;
+    const workerChanged = currentWorkerId !== identity.workerId;
+    const producerChanged = currentActivityProducerEpoch !== producerEpoch;
     currentWorkerId = identity.workerId;
+    currentActivityProducerEpoch = producerEpoch;
     if (!rearmActive || !rearmScope) return;
-    if (rearmScope.workerId !== undefined && rearmScope.workerId !== currentWorkerId) {
+    if ((rearmScope.workerId !== undefined && rearmScope.workerId !== currentWorkerId)
+      || (rearmScope.producerEpoch !== undefined && rearmScope.producerEpoch !== producerEpoch)) {
       rearmActivityCount = 0;
       rearmScope = {
         ...rearmScope,
         workerId: currentWorkerId,
         activityBaselineRevision: latestActivityRevision,
+        ...(producerEpoch === undefined ? {} : { producerEpoch }),
       };
       persist();
       publish();
-    } else if (rearmScope.workerId === undefined && changed) {
+    } else if ((rearmScope.workerId === undefined && workerChanged)
+      || (rearmScope.producerEpoch === undefined && producerChanged && producerEpoch !== undefined)) {
       rearmScope.workerId = currentWorkerId;
+      if (producerEpoch !== undefined) rearmScope.producerEpoch = producerEpoch;
       persist();
     }
   });
@@ -1168,6 +1180,7 @@ export function createGoalExtension(pi, options = {}) {
     latestActivityRevision = rearmScope?.activityBaselineRevision ?? 0;
     seenActivityIds.clear();
     currentWorkerId = rearmScope?.workerId;
+    currentActivityProducerEpoch = rearmScope?.producerEpoch;
     if (rearmActive && rearmScope.sessionId !== sessionId) {
       currentWorkerId = undefined;
       clearRearmState();
