@@ -29,6 +29,7 @@ class WorkerRecoveryTest(unittest.TestCase):
         self.assertEqual(command[command.index("--agent") + 1], "pi")
         self.assertEqual(command[command.index("--resume") + 1], "pi-session-123")
         self.assertEqual(command[command.index("--notify-on-settled") + 1], "supervisor")
+        self.assertTrue({"--extension", "--no-extensions", "-ne"}.isdisjoint(command))
 
     def test_recovery_refuses_unrecorded_session(self):
         task = {
