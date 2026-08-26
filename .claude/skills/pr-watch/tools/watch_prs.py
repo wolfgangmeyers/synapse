@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only GitHub PR watcher for the toggleglobal organization."""
+"""Read-only GitHub PR watcher for the GitHub organization configured in ~/AGENTS.md."""
 
 from __future__ import annotations
 
@@ -16,7 +16,27 @@ from pathlib import Path
 from typing import Any
 
 
-WATCH_ORG = "toggleglobal"
+def configured_github_org(agents_path: Path | None = None) -> str:
+    path = agents_path or (Path.home() / "AGENTS.md")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            "PR watch requires the GitHub org configured in ~/AGENTS.md"
+        ) from exc
+    match = re.search(
+        r"only ever include PRs from the `([^`]+)` GitHub organization\.",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        raise RuntimeError(
+            "PR watch requires the GitHub org configured in ~/AGENTS.md"
+        )
+    return match.group(1)
+
+
+WATCH_ORG = configured_github_org()
 FRONTEND_REPOS = {
     f"{WATCH_ORG}/web-app",
     f"{WATCH_ORG}/web-app-lseg",
@@ -51,7 +71,13 @@ def validate_repos(repos: list[str]) -> list[str]:
     validated = []
     for repo in repos:
         owner, separator, name = repo.partition("/")
-        if separator != "/" or not owner or not name or "/" in name or owner.lower() != WATCH_ORG:
+        if (
+            separator != "/"
+            or not owner
+            or not name
+            or "/" in name
+            or owner.lower() != WATCH_ORG.lower()
+        ):
             raise ValueError(
                 f"PR watch repositories must be in {WATCH_ORG}: {repo!r}"
             )
@@ -396,7 +422,9 @@ def fetch_requested_org_prs_query(page_size: int) -> list[dict[str, Any]]:
             return nodes
         cursor = page_info.get("endCursor")
         if not cursor:
-            raise RuntimeError("toggleglobal search returned a paginated PR page without an end cursor")
+            raise RuntimeError(
+                f"{WATCH_ORG} search returned a paginated PR page without an end cursor"
+            )
 
 
 def fetch_requested_org_prs() -> list[dict[str, Any]]:
@@ -411,7 +439,9 @@ def fetch_requested_org_prs() -> list[dict[str, Any]]:
     for pr in nodes:
         repo = ((pr.get("repository") or {}).get("nameWithOwner") or "")
         if not repo:
-            raise RuntimeError("toggleglobal search returned a pull request without a repository")
+            raise RuntimeError(
+                f"{WATCH_ORG} search returned a pull request without a repository"
+            )
         prs.append(normalize_pr(pr, validate_repos([repo])[0]))
     return prs
 

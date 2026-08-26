@@ -17,12 +17,16 @@ from pathlib import Path
 import watch_prs
 
 
+def repo(name: str) -> str:
+    return f"{watch_prs.WATCH_ORG}/{name}"
+
+
 def base_pr(**overrides):
     pr = {
-        "repo": "toggleglobal/backend-service",
+        "repo": repo("backend-service"),
         "number": 123,
         "title": "Test PR",
-        "url": "https://github.com/toggleglobal/backend-service/pull/123",
+        "url": f"https://github.com/{repo('backend-service')}/pull/123",
         "author_login": "jmelloy",
         "author": {"login": "jmelloy"},
         "createdAt": "2026-06-10T15:00:00Z",
@@ -95,19 +99,29 @@ class MailboxV2SenderTest(unittest.TestCase):
 
 
 class OrganizationScopeTest(unittest.TestCase):
+    def test_reads_the_organization_from_agents_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agents_path = Path(directory) / "AGENTS.md"
+            agents_path.write_text(
+                "Only ever include PRs from the `example-org` GitHub organization.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual("example-org", watch_prs.configured_github_org(agents_path))
+
     def test_explicit_repositories_must_belong_to_the_watched_organization(self):
+        configured_repo = repo("backend-service")
         self.assertEqual(
-            ["toggleglobal/backend-service"],
-            watch_prs.validate_repos(["toggleglobal/backend-service"]),
+            [configured_repo],
+            watch_prs.validate_repos([configured_repo]),
         )
-        with self.assertRaisesRegex(ValueError, "toggleglobal"):
+        with self.assertRaisesRegex(ValueError, watch_prs.WATCH_ORG):
             watch_prs.validate_repos(["other-org/backend-service"])
 
     def test_environment_repository_override_rejects_an_outside_organization(self):
         original = os.environ.get("PR_WATCH_REPOS")
         try:
             os.environ["PR_WATCH_REPOS"] = "other-org/backend-service"
-            with self.assertRaisesRegex(ValueError, "toggleglobal"):
+            with self.assertRaisesRegex(ValueError, watch_prs.WATCH_ORG):
                 watch_prs.env_repos()
         finally:
             if original is None:
@@ -126,7 +140,7 @@ class OrganizationScopeTest(unittest.TestCase):
             mail_from=None,
             router_url=None,
         )
-        with self.assertRaisesRegex(ValueError, "toggleglobal"):
+        with self.assertRaisesRegex(ValueError, watch_prs.WATCH_ORG):
             watch_prs.apply_args(args)
 
     def test_capacity_failure_restarts_at_twenty_and_paginates(self):
@@ -170,7 +184,7 @@ class OrganizationScopeTest(unittest.TestCase):
         finally:
             watch_prs.gh_json = old_gh_json
 
-    def test_default_discovery_queries_requested_reviews_in_toggleglobal(self):
+    def test_default_discovery_queries_requested_reviews_in_configured_organization(self):
         calls = []
         pages = [
             {"data": {"search": {"nodes": [{
@@ -178,7 +192,7 @@ class OrganizationScopeTest(unittest.TestCase):
                 "author": {"login": "author-one"}, "updatedAt": "2026-06-10T16:00:00Z",
                 "createdAt": "2026-06-10T15:00:00Z", "headRefOid": "head-one",
                 "mergeStateStatus": "CLEAN", "reviewDecision": "REVIEW_REQUIRED", "isDraft": False,
-                "repository": {"nameWithOwner": "toggleglobal/backend-service"},
+                "repository": {"nameWithOwner": repo("backend-service")},
                 "statusCheckRollup": {"contexts": {"nodes": []}}, "latestReviews": {"nodes": []},
                 "reviewRequests": {"nodes": []},
             }], "pageInfo": {"hasNextPage": True, "endCursor": "page-two"}}}},
@@ -194,14 +208,14 @@ class OrganizationScopeTest(unittest.TestCase):
             watch_prs.gh_json = old_gh_json
             watch_prs.comment_meta = old_comment_meta
 
-        self.assertEqual(["toggleglobal/backend-service"], [pr["repo"] for pr in prs])
+        self.assertEqual([repo("backend-service")], [pr["repo"] for pr in prs])
         self.assertEqual(2, len(calls))
         self.assertIn("cursor=page-two", calls[1])
         query = next(value for value in calls[0] if value.startswith("searchQuery="))
-        self.assertIn("org:toggleglobal", query)
+        self.assertIn(f"org:{watch_prs.WATCH_ORG}", query)
         self.assertIn(f"review-requested:{watch_prs.VIEWER}", query)
-        self.assertIn("-repo:toggleglobal/web-app", query)
-        self.assertIn("-repo:toggleglobal/web-app-lseg", query)
+        self.assertIn(f"-repo:{repo('web-app')}", query)
+        self.assertIn(f"-repo:{repo('web-app-lseg')}", query)
 
 
 class FetchRepoPaginationTest(unittest.TestCase):
@@ -266,7 +280,7 @@ class FetchRepoPaginationTest(unittest.TestCase):
         try:
             watch_prs.gh_json = lambda args: calls.append(args) or pages.pop(0)
             watch_prs.comment_meta = lambda _repo, _number: ([], [])
-            prs = watch_prs.fetch_repo("Identity-Digital/dnsid")
+            prs = watch_prs.fetch_repo(repo("backend-service"))
         finally:
             watch_prs.gh_json = old_gh_json
             watch_prs.comment_meta = old_comment_meta
@@ -357,7 +371,7 @@ class RetryAndErrorDedupeTest(unittest.TestCase):
         old_state_dir = watch_prs.STATE_DIR
         sent = []
         try:
-            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.REPOS = [repo("backend-service")]
             watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
             with tempfile.TemporaryDirectory() as directory:
                 watch_prs.configure_paths(Path(directory))
@@ -400,7 +414,7 @@ class RetryAndErrorDedupeTest(unittest.TestCase):
         old_state_dir = watch_prs.STATE_DIR
         sent = []
         try:
-            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.REPOS = [repo("backend-service")]
             watch_prs.fetch_repo = lambda _repo: (_ for _ in ()).throw(RuntimeError("outage"))
             watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
             with tempfile.TemporaryDirectory() as directory:
@@ -427,7 +441,7 @@ class PassOnceDeliveryTest(unittest.TestCase):
         old_state_dir = watch_prs.STATE_DIR
         sent = []
         try:
-            watch_prs.REPOS = ["toggleglobal/backend-service"]
+            watch_prs.REPOS = [repo("backend-service")]
             watch_prs.MAILBOX_TO = "supervisor"
             watch_prs.fetch_repo = lambda _repo: [base_pr(
                 reviews=[],
@@ -461,14 +475,14 @@ class PassOnceDeliveryTest(unittest.TestCase):
         body = watch_prs.mail_body(
             [
                 {
-                    "repo": "toggleglobal/backend-service",
+                    "repo": repo("backend-service"),
                     "number": 101,
                     "reasons": ["Wolfgang is requested and has not reviewed"],
                     "head_sha": first_sha,
                     "action": "run review-pr workflow",
                 },
                 {
-                    "repo": "toggleglobal/another-backend-service",
+                    "repo": repo("another-backend-service"),
                     "number": 102,
                     "reasons": ["head changed after Wolfgang's latest review"],
                     "head_sha": second_sha,
@@ -489,7 +503,7 @@ class PassOnceDeliveryTest(unittest.TestCase):
     def test_all_discovery_failures_preserve_state_and_report_incomplete(self):
         old_repos, old_fetch, old_sender, old_state_dir = watch_prs.REPOS, watch_prs.fetch_requested_org_prs, watch_prs.try_send_mail, watch_prs.STATE_DIR
         sent = []
-        previous = {"prs": {"toggleglobal/backend-service#123": {"headRefOid": "old"}}, "last_report": "old", "error_signature": "old"}
+        previous = {"prs": {f"{repo('backend-service')}#123": {"headRefOid": "old"}}, "last_report": "old", "error_signature": "old"}
         try:
             watch_prs.REPOS = []
             watch_prs.fetch_requested_org_prs = lambda: (_ for _ in ()).throw(RuntimeError("HTTP 503"))
@@ -517,7 +531,7 @@ class PassOnceDeliveryTest(unittest.TestCase):
         old_state_dir = watch_prs.STATE_DIR
         sent = []
         try:
-            watch_prs.REPOS = ["toggleglobal/backend-service"]
+            watch_prs.REPOS = [repo("backend-service")]
             watch_prs.fetch_repo = lambda _repo: []
             watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
             with tempfile.TemporaryDirectory() as directory:
