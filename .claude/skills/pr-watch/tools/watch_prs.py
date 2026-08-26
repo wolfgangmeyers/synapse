@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -241,8 +242,8 @@ query($owner: String!, $name: String!, $cursor: String = null) {
 
 
 ORG_REVIEW_REQUESTED_QUERY = """
-query($searchQuery: String!, $cursor: String = null) {
-  search(query: $searchQuery, type: ISSUE, first: 100, after: $cursor) {
+query($searchQuery: String!, $pageSize: Int!, $cursor: String = null) {
+  search(query: $searchQuery, type: ISSUE, first: $pageSize, after: $cursor) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
@@ -338,33 +339,66 @@ def fetch_repo(repo: str) -> list[dict[str, Any]]:
             raise RuntimeError(f"{repo}: GitHub returned a paginated PR page without an end cursor")
 
 
-def fetch_requested_org_prs() -> list[dict[str, Any]]:
+CAPACITY_FAILURE_STATUS_CODES = ("502", "503", "504")
+RESOURCE_LIMIT_FAILURE_MARKERS = (
+    "resource limit",
+    "resource-limit",
+    "resource_limit",
+    "resource exhausted",
+)
+
+
+def is_capacity_failure(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        re.search(r"\b(?:" + "|".join(CAPACITY_FAILURE_STATUS_CODES) + r")\b", message)
+        is not None
+        or any(marker in message for marker in RESOURCE_LIMIT_FAILURE_MARKERS)
+    )
+
+
+def fetch_requested_org_prs_query(page_size: int) -> list[dict[str, Any]]:
     query = (
         f"org:{WATCH_ORG} is:pr is:open review-requested:{VIEWER} "
         f"-repo:{WATCH_ORG}/web-app -repo:{WATCH_ORG}/web-app-lseg"
     )
-    prs = []
+    nodes = []
     cursor = None
     while True:
         args = [
             "api", "graphql", "-f", f"query={ORG_REVIEW_REQUESTED_QUERY}",
-            "-f", f"searchQuery={query}",
+            "-f", f"searchQuery={query}", "-f", f"pageSize={page_size}",
         ]
         if cursor:
             args.extend(["-f", f"cursor={cursor}"])
         response = gh_json(args)
         page = response["data"]["search"]
-        for pr in page.get("nodes") or []:
-            repo = ((pr.get("repository") or {}).get("nameWithOwner") or "")
-            if not repo:
-                raise RuntimeError("toggleglobal search returned a pull request without a repository")
-            prs.append(normalize_pr(pr, validate_repos([repo])[0]))
+        nodes.extend(page.get("nodes") or [])
         page_info = page.get("pageInfo") or {}
         if not page_info.get("hasNextPage"):
-            return prs
+            return nodes
         cursor = page_info.get("endCursor")
         if not cursor:
             raise RuntimeError("toggleglobal search returned a paginated PR page without an end cursor")
+
+
+def fetch_requested_org_prs() -> list[dict[str, Any]]:
+    try:
+        nodes = fetch_requested_org_prs_query(100)
+    except Exception as exc:
+        if not is_capacity_failure(exc):
+            raise
+        # Restarting avoids combining pages from the failed high-capacity search
+        # with a lower-capacity retry that may observe a different result set.
+        nodes = fetch_requested_org_prs_query(20)
+
+    prs = []
+    for pr in nodes:
+        repo = ((pr.get("repository") or {}).get("nameWithOwner") or "")
+        if not repo:
+            raise RuntimeError("toggleglobal search returned a pull request without a repository")
+        prs.append(normalize_pr(pr, validate_repos([repo])[0]))
+    return prs
 
 
 def should_fetch_detail(pr: dict[str, Any]) -> bool:
@@ -573,7 +607,11 @@ def classify(pr: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def render_report(
-    findings: list[dict[str, Any]], all_prs: list[dict[str, Any]], errors: list[str], now: str
+    findings: list[dict[str, Any]],
+    all_prs: list[dict[str, Any]],
+    errors: list[str],
+    now: str,
+    discovery_incomplete: bool = False,
 ) -> str:
     lines = [
         "# PR Watch Report",
@@ -604,7 +642,12 @@ def render_report(
                 ]
             )
     else:
-        lines.extend(["## Findings", "", "No actionable PRs in this pass.", ""])
+        finding_status = (
+            "Discovery incomplete; actionable PRs are unknown."
+            if discovery_incomplete
+            else "No actionable PRs in this pass."
+        )
+        lines.extend(["## Findings", "", finding_status, ""])
 
     lines.extend(["## Open PR Inventory", ""])
     for pr in sorted(all_prs, key=lambda item: (item["repo"], int(item["number"]))):
@@ -711,14 +754,19 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
             findings.append(finding)
         next_prs[key] = signature(pr)
 
-    report = render_report(findings, all_prs, errors, now)
+    all_discovery_failed = bool(failed_repos) and (
+        (bool(REPOS) and failed_repos == set(REPOS))
+        or (not REPOS and WATCH_ORG in failed_repos)
+    )
+    report = render_report(findings, all_prs, errors, now, all_discovery_failed)
     report_path = None if dry_run else write_report(report, now)
 
-    quiet = False
-    if not findings and heartbeat_due(state, now):
-        quiet = True
+    quiet = not findings and not errors and heartbeat_due(state, now)
 
-    if not dry_run:
+    # A failed complete discovery cannot safely prune stale PR history or claim a
+    # successful pass. Leave the state untouched so the next successful scan has
+    # the prior audit context and the error report remains the only new artifact.
+    if not dry_run and not all_discovery_failed:
         state["last_pass_at"] = now
         state["prs"] = next_prs
         if findings or quiet:
