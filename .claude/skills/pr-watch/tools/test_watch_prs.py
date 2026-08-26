@@ -7,6 +7,7 @@ import io
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -176,6 +177,105 @@ class MainOneScanTest(unittest.TestCase):
             watch_prs.pass_once = old_pass_once
 
         self.assertEqual([{"send": True, "dry_run": False}], calls)
+
+
+class RetryAndErrorDedupeTest(unittest.TestCase):
+    def test_gh_json_retries_only_transient_http_errors(self):
+        calls = []
+        failures = [
+            RuntimeError("command failed: gh api\nstderr: HTTP 502 Bad Gateway"),
+            RuntimeError("command failed: gh api\nstderr: HTTP 503 Service Unavailable"),
+        ]
+        old_run = watch_prs.run
+        try:
+            def fake_run(command):
+                calls.append(command)
+                if failures:
+                    raise failures.pop(0)
+                return '{"ok": true}'
+
+            watch_prs.run = fake_run
+            with patch.object(watch_prs.time, "sleep") as sleep:
+                self.assertEqual({"ok": True}, watch_prs.gh_json(["api"]))
+                self.assertEqual(2, sleep.call_count)
+            self.assertEqual(3, len(calls))
+        finally:
+            watch_prs.run = old_run
+
+    def test_gh_json_does_not_retry_non_transient_errors(self):
+        old_run = watch_prs.run
+        try:
+            watch_prs.run = lambda _command: (_ for _ in ()).throw(
+                RuntimeError("command failed: gh api\\nstderr: HTTP 500 Internal Server Error")
+            )
+            with patch.object(watch_prs.time, "sleep") as sleep:
+                with self.assertRaises(RuntimeError):
+                    watch_prs.gh_json(["api"])
+                sleep.assert_not_called()
+        finally:
+            watch_prs.run = old_run
+
+    def test_error_mail_is_deduped_until_signature_changes_and_success_clears_it(self):
+        old_repos = watch_prs.REPOS
+        old_fetch_repo = watch_prs.fetch_repo
+        old_try_send_mail = watch_prs.try_send_mail
+        old_state_dir = watch_prs.STATE_DIR
+        sent = []
+        try:
+            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
+            with tempfile.TemporaryDirectory() as directory:
+                watch_prs.configure_paths(Path(directory))
+                watch_prs.fetch_repo = lambda _repo: (_ for _ in ()).throw(
+                    RuntimeError("command failed: gh api\\nstderr: HTTP 503 outage")
+                )
+                with redirect_stdout(io.StringIO()):
+                    watch_prs.pass_once()
+                    watch_prs.pass_once()
+                state = watch_prs.load_state()
+                self.assertEqual(1, len(sent))
+                self.assertTrue(state["error_signature"])
+
+                watch_prs.fetch_repo = lambda _repo: (_ for _ in ()).throw(
+                    RuntimeError("command failed: gh api\\nstderr: HTTP 502 outage")
+                )
+                with redirect_stdout(io.StringIO()):
+                    watch_prs.pass_once()
+                self.assertEqual(2, len(sent))
+
+                watch_prs.fetch_repo = lambda _repo: []
+                with redirect_stdout(io.StringIO()):
+                    watch_prs.pass_once()
+                self.assertNotIn("error_signature", watch_prs.load_state())
+        finally:
+            watch_prs.REPOS = old_repos
+            watch_prs.fetch_repo = old_fetch_repo
+            watch_prs.try_send_mail = old_try_send_mail
+            watch_prs.configure_paths(old_state_dir)
+
+    def test_dry_run_does_not_write_state_or_send_error_mail(self):
+        old_repos = watch_prs.REPOS
+        old_fetch_repo = watch_prs.fetch_repo
+        old_try_send_mail = watch_prs.try_send_mail
+        old_state_dir = watch_prs.STATE_DIR
+        sent = []
+        try:
+            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.fetch_repo = lambda _repo: (_ for _ in ()).throw(RuntimeError("outage"))
+            watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
+            with tempfile.TemporaryDirectory() as directory:
+                watch_prs.configure_paths(Path(directory))
+                with redirect_stdout(io.StringIO()):
+                    findings, report_path = watch_prs.pass_once(dry_run=True)
+                self.assertEqual([], findings)
+                self.assertIsNone(report_path)
+                self.assertFalse((Path(directory) / "watch-state.json").exists())
+                self.assertEqual([], sent)
+        finally:
+            watch_prs.REPOS = old_repos
+            watch_prs.fetch_repo = old_fetch_repo
+            watch_prs.try_send_mail = old_try_send_mail
+            watch_prs.configure_paths(old_state_dir)
 
 
 class PassOnceDeliveryTest(unittest.TestCase):
