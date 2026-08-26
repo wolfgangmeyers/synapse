@@ -7,6 +7,8 @@ description: "Watch assigned GitHub pull requests and run the required review wo
 
 This skill runs in the dedicated agent that watches PRs and reviews them.
 
+`watch_prs.py` owns selection and report generation. It cannot execute an agent review or post a review. The receiving agent must run `review-pr` for every backend PR selected in the report. It does not route `toggleglobal/web-app` or `toggleglobal/web-app-lseg` for review.
+
 ## Scan
 
 Run one scan when this agent receives a PR watch wakeup:
@@ -45,14 +47,15 @@ metadata.
 
 ## What It Watches
 
-Default repositories:
+By default, discovery is one paginated GitHub search scoped to
+`toggleglobal`: open pull requests with `review-requested:<viewer>`. The query
+excludes `toggleglobal/web-app` and `toggleglobal/web-app-lseg`, so frontend
+pull requests never enter backend review routing.
 
-- `Roger-Labs-Inc/roger-emr`
-- `Roger-Labs-Inc/Roger-Docs-API`
-- `Roger-Labs-Inc/steve-bot`
-- `Roger-Labs-Inc/App`
-- `Roger-Labs-Inc/interview-mobile-eng`
-- `Roger-Labs-Inc/arq-ui`
+An explicit `--repo` value or `PR_WATCH_REPOS` value must be an
+`owner/name` repository in `toggleglobal`. The watcher rejects other owners.
+Explicit repositories are scanned directly, but the same two frontend
+repositories remain excluded from routing.
 
 A PR is selected only when Wolfgang did not author it, Dependabot did not
 author it, Wolfgang is explicitly requested as a reviewer, and he has not
@@ -62,18 +65,19 @@ State is audit evidence. It does not control selection.
 
 ## Tuning
 
-Override repositories for one scan:
+Override default organization discovery for one explicit scan. Every
+repository must be in `toggleglobal`:
 
 ```bash
 python3 ~/.claude/skills/pr-watch/tools/watch_prs.py \
-  --repo Roger-Labs-Inc/roger-emr \
-  --repo Roger-Labs-Inc/arq-ui
+  --repo toggleglobal/backend-service \
+  --repo toggleglobal/another-backend-service
 ```
 
 Environment alternatives:
 
 ```bash
-PR_WATCH_REPOS=Roger-Labs-Inc/roger-emr,Roger-Labs-Inc/arq-ui
+PR_WATCH_REPOS=toggleglobal/backend-service,toggleglobal/another-backend-service
 PR_WATCH_STATE_DIR=~/.mecha-developer/pr-watch
 PR_WATCH_VIEWER=wolfgangmeyers
 PR_WATCH_MAIL_TO=supervisor
