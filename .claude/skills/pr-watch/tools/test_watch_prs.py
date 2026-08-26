@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import argparse
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -16,10 +18,10 @@ import watch_prs
 
 def base_pr(**overrides):
     pr = {
-        "repo": "Identity-Digital/dnsid",
+        "repo": "toggleglobal/backend-service",
         "number": 123,
         "title": "Test PR",
-        "url": "https://github.com/Identity-Digital/dnsid/pull/123",
+        "url": "https://github.com/toggleglobal/backend-service/pull/123",
         "author_login": "jmelloy",
         "author": {"login": "jmelloy"},
         "createdAt": "2026-06-10T15:00:00Z",
@@ -85,6 +87,75 @@ class MailboxV2SenderTest(unittest.TestCase):
             ]],
             commands,
         )
+
+
+class OrganizationScopeTest(unittest.TestCase):
+    def test_explicit_repositories_must_belong_to_the_watched_organization(self):
+        self.assertEqual(
+            ["toggleglobal/backend-service"],
+            watch_prs.validate_repos(["toggleglobal/backend-service"]),
+        )
+        with self.assertRaisesRegex(ValueError, "toggleglobal"):
+            watch_prs.validate_repos(["other-org/backend-service"])
+
+    def test_environment_repository_override_rejects_an_outside_organization(self):
+        original = os.environ.get("PR_WATCH_REPOS")
+        try:
+            os.environ["PR_WATCH_REPOS"] = "other-org/backend-service"
+            with self.assertRaisesRegex(ValueError, "toggleglobal"):
+                watch_prs.env_repos()
+        finally:
+            if original is None:
+                os.environ.pop("PR_WATCH_REPOS", None)
+            else:
+                os.environ["PR_WATCH_REPOS"] = original
+
+    def test_cli_repository_override_rejects_an_outside_organization(self):
+        args = argparse.Namespace(
+            repo=["other-org/backend-service"],
+            cadence_seconds=None,
+            heartbeat_seconds=None,
+            state_dir=None,
+            viewer=None,
+            mail_to=None,
+            mail_from=None,
+            router_url=None,
+        )
+        with self.assertRaisesRegex(ValueError, "toggleglobal"):
+            watch_prs.apply_args(args)
+
+    def test_default_discovery_queries_requested_reviews_in_toggleglobal(self):
+        calls = []
+        pages = [
+            {"data": {"search": {"nodes": [{
+                "number": 1, "title": "First", "url": "https://example.test/1",
+                "author": {"login": "author-one"}, "updatedAt": "2026-06-10T16:00:00Z",
+                "createdAt": "2026-06-10T15:00:00Z", "headRefOid": "head-one",
+                "mergeStateStatus": "CLEAN", "reviewDecision": "REVIEW_REQUIRED", "isDraft": False,
+                "repository": {"nameWithOwner": "toggleglobal/backend-service"},
+                "statusCheckRollup": {"contexts": {"nodes": []}}, "latestReviews": {"nodes": []},
+                "reviewRequests": {"nodes": []},
+            }], "pageInfo": {"hasNextPage": True, "endCursor": "page-two"}}}},
+            {"data": {"search": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}},
+        ]
+        old_gh_json = watch_prs.gh_json
+        old_comment_meta = watch_prs.comment_meta
+        try:
+            watch_prs.gh_json = lambda args: calls.append(args) or pages.pop(0)
+            watch_prs.comment_meta = lambda _repo, _number: ([], [])
+            prs = watch_prs.fetch_requested_org_prs()
+        finally:
+            watch_prs.gh_json = old_gh_json
+            watch_prs.comment_meta = old_comment_meta
+
+        self.assertEqual(["toggleglobal/backend-service"], [pr["repo"] for pr in prs])
+        self.assertEqual(2, len(calls))
+        self.assertIn("cursor=page-two", calls[1])
+        query = next(value for value in calls[0] if value.startswith("searchQuery="))
+        self.assertIn("org:toggleglobal", query)
+        self.assertIn(f"review-requested:{watch_prs.VIEWER}", query)
+        self.assertIn("-repo:toggleglobal/web-app", query)
+        self.assertIn("-repo:toggleglobal/web-app-lseg", query)
 
 
 class FetchRepoPaginationTest(unittest.TestCase):
@@ -292,7 +363,7 @@ class PassOnceDeliveryTest(unittest.TestCase):
         old_state_dir = watch_prs.STATE_DIR
         sent = []
         try:
-            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.REPOS = ["toggleglobal/backend-service"]
             watch_prs.MAILBOX_TO = "supervisor"
             watch_prs.fetch_repo = lambda _repo: [base_pr(
                 reviews=[],
@@ -326,14 +397,14 @@ class PassOnceDeliveryTest(unittest.TestCase):
         body = watch_prs.mail_body(
             [
                 {
-                    "repo": "Identity-Digital/dnsid",
+                    "repo": "toggleglobal/backend-service",
                     "number": 101,
                     "reasons": ["Wolfgang is requested and has not reviewed"],
                     "head_sha": first_sha,
                     "action": "run review-pr workflow",
                 },
                 {
-                    "repo": "Identity-Digital/dnsid-go",
+                    "repo": "toggleglobal/another-backend-service",
                     "number": 102,
                     "reasons": ["head changed after Wolfgang's latest review"],
                     "head_sha": second_sha,
@@ -345,9 +416,9 @@ class PassOnceDeliveryTest(unittest.TestCase):
             "2026-06-10T16:00:00Z",
         )
 
-        self.assertIn("dnsid#101: Wolfgang is requested and has not reviewed", body)
+        self.assertIn("backend-service#101: Wolfgang is requested and has not reviewed", body)
         self.assertIn(first_sha, body)
-        self.assertIn("dnsid-go#102: head changed after Wolfgang's latest review", body)
+        self.assertIn("another-backend-service#102: head changed after Wolfgang's latest review", body)
         self.assertIn(second_sha, body)
         self.assertEqual(2, body.count("run review-pr workflow"))
 
@@ -358,7 +429,7 @@ class PassOnceDeliveryTest(unittest.TestCase):
         old_state_dir = watch_prs.STATE_DIR
         sent = []
         try:
-            watch_prs.REPOS = ["Identity-Digital/dnsid"]
+            watch_prs.REPOS = ["toggleglobal/backend-service"]
             watch_prs.fetch_repo = lambda _repo: []
             watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
             with tempfile.TemporaryDirectory() as directory:
@@ -481,6 +552,15 @@ class ClassifyReviewEligibilityTest(unittest.TestCase):
 
     def test_unrequested_pr_is_not_actionable(self):
         self.assertIsNone(watch_prs.classify(base_pr(reviews=[])))
+
+    def test_frontend_repositories_are_not_routed_for_review(self):
+        for repo in watch_prs.FRONTEND_REPOS:
+            with self.subTest(repo=repo):
+                self.assertIsNone(
+                    watch_prs.classify(
+                        base_pr(repo=repo, review_requests=[watch_prs.VIEWER])
+                    )
+                )
 
     def test_wolfgang_authored_pr_is_not_actionable(self):
         self.assertIsNone(
