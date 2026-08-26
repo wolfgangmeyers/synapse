@@ -376,7 +376,16 @@ def fetch_requested_org_prs_query(page_size: int) -> list[dict[str, Any]]:
     nodes = []
     cursor = None
     while True:
-        args = ["api", "graphql", "-f", f"query={ORG_REVIEW_REQUESTED_QUERY}", "-f", f"searchQuery={query}", "-f", f"pageSize={page_size}"]
+        args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={ORG_REVIEW_REQUESTED_QUERY}",
+            "-f",
+            f"searchQuery={query}",
+            "-F",
+            f"pageSize={page_size}",
+        ]
         if cursor:
             args.extend(["-f", f"cursor={cursor}"])
         response = gh_json(args)

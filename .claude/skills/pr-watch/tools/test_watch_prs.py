@@ -146,9 +146,9 @@ class OrganizationScopeTest(unittest.TestCase):
             self.assertEqual([], watch_prs.fetch_requested_org_prs())
         finally:
             watch_prs.gh_json = old_gh_json
-        self.assertIn("pageSize=100", calls[0])
-        self.assertIn("pageSize=20", calls[1])
-        self.assertIn("pageSize=20", calls[2])
+        self.assertEqual("-F", calls[0][calls[0].index("pageSize=100") - 1])
+        self.assertEqual("-F", calls[1][calls[1].index("pageSize=20") - 1])
+        self.assertEqual("-F", calls[2][calls[2].index("pageSize=20") - 1])
         self.assertNotIn("cursor=next", calls[1])
         self.assertIn("cursor=next", calls[2])
 
@@ -163,7 +163,7 @@ class OrganizationScopeTest(unittest.TestCase):
                 return {"data": {"search": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}
             watch_prs.gh_json = resource_limited
             self.assertEqual([], watch_prs.fetch_requested_org_prs())
-            self.assertIn("pageSize=20", calls[1])
+            self.assertEqual("-F", calls[1][calls[1].index("pageSize=20") - 1])
             watch_prs.gh_json = lambda _args: (_ for _ in ()).throw(RuntimeError("HTTP 401"))
             with self.assertRaisesRegex(RuntimeError, "401"):
                 watch_prs.fetch_requested_org_prs()
