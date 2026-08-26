@@ -99,10 +99,12 @@ proves the envelope was delivered to Pi; it does not run the watcher behind the
 agent's back.
 
 During each routed review, use only mecha-review personas for `robot-review`.
-Give each persona two or three related focus areas. A different persona must
-validate every finding before it is included in the review. Never submit
-`REQUEST_CHANGES`; submit `APPROVE` when the evidence supports it, otherwise
-submit `COMMENT`.
+Select only focus areas relevant to the PR, and give each persona two or three
+related areas. In the focus split ledger, document a concrete PR-specific
+justification for every candidate area that is skipped. Include an area when no
+such justification exists. A different persona must validate every finding
+before it is included in the review. Never submit `REQUEST_CHANGES`; submit
+`APPROVE` when the evidence supports it, otherwise submit `COMMENT`.
 
 ### Scan reporting contract
 
