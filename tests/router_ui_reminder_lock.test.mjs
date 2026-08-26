@@ -188,21 +188,33 @@ test("reminder controls remain separate from normal CRUD and creation", async ()
     readFile(new URL("../web/router-ui/index.html", import.meta.url), "utf8"),
     readFile(new URL("../web/router-ui/styles.css", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /textContent = action === "set" \? "Set lock" : "Clear lock"/);
+  assert.match(app, /goalToggle\(`reminder-lock-toggle-\$\{encodeURIComponent\(peer\)\}-\$\{encodeURIComponent\(reminder\.id\)\}`, "Reminder lock", lock\?\.locked === true, \{ lock: true \}\)/);
+  assert.match(app, /button\.setAttribute\("aria-pressed", String\(pressed\)\)/);
+  assert.match(app, /const action = lockToggle\.getAttribute\("aria-pressed"\) === "true" \? "set" : "clear"/);
   assert.match(app, /type: "reminder_lock_control", controlId, targetAgentId: peer, targetInstanceId, reminderId: reminder\.id, action/);
   assert.match(app, /state\.reminders = Array\.isArray\(event\.reminders\)/);
   assert.match(app, /formatReminderCountdown\(reminder\.next_due_at\)/);
   assert.match(app, /reminderRecurrenceLabel\(reminder\.interval_ms\)/);
-  assert.match(app, /button\.disabled = pending \|\| \(action === "clear" && lock\?\.locked !== true\)/);
+  assert.match(app, /lockToggle\.disabled = pending/);
   assert.match(app, /current\?\.instance_id !== undefined[\s\S]*clearReminderLockState\(agent\.agent_id\)/);
   assert.match(app, /const incomingAgentIds = new Set\(incomingAgents\.map\(\(agent\) => agent\.agent_id\)\);[\s\S]*current\.agent_id !== state\.agentId && !incomingAgentIds\.has\(current\.agent_id\)[\s\S]*clearReminderLockState\(current\.agent_id\)/);
-  assert.match(app, /: \{ locked: false, error: reminderLockErrorMessage\(event\.errorCode\) \}/);
+  assert.match(app, /event\.accepted === true[\s\S]{0,80}pending\.action === "set"/);
+  assert.match(app, /clearPendingReminderLockControls\(\{ peer, errorCode: "target_not_connected" \}\)/);
+  assert.match(app, /pending\.afterCreate[\s\S]*Reminder created, but lock setup failed/);
+  assert.doesNotMatch(app, /textContent = action === "set" \? "Set lock" : "Clear lock"/);
   assert.doesNotMatch(app, /locked.*reminder\.id|reminder\.locked/);
   assert.doesNotMatch(app, /reminder_lock_control[\s\S]{0,300}action:\s*["']create["']/);
+  assert.match(app, /goalToggle\("reminder-lock-create", "Reminder lock", false, \{ lock: true \}\)/);
+  assert.match(app, /createPayloadId: operation === "create" \? payload\?\.id : undefined/);
+  assert.match(app, /event\.reminderId \|\| event\.body\?\.reminder\?\.id \|\| pending\.createPayloadId/);
+  assert.match(app, /sendReminderLockControl\(pending\.peer, \{ id: createdReminderId \}, "set", \{ afterCreate: true \}\)/);
+  assert.match(app, /type: "reminder_crud", requestId, operation,[\s\S]*payload/);
+  assert.match(app, /if \(pending\.lockAfterCreate\)[\s\S]*sendReminderLockControl/);
+  assert.match(styles, /\.goal-toggle:focus-visible/);
   assert.match(server, /load\("\/v1\/reminders"\)/);
   assert.match(html, /id="reminder-header-button"[^>]*aria-controls="reminders-dialog"/);
   assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton, elements\.goalHeaderButton\)/);
-  assert.doesNotMatch(app, /reminderIndicatorMarkup/);
+  assert.match(app, /reminderIndicatorMarkup\(hasReminders, humanName\(peer\)\)/);
   assert.match(styles, /\.reminder-indicator/);
   assert.match(styles, /\.reminder-list-item/);
 });

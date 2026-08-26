@@ -38,7 +38,12 @@ test("the selected-agent header owns the reminder button", async () => {
   assert.match(app, /openReminderDialog\(state\.selectedPeer, reminderRowsForPeer\(state\.selectedPeer\)\.length === 0 \? "create" : "list", elements\.reminderHeaderButton\)/);
   assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton, elements\.goalHeaderButton\)/);
   assert.doesNotMatch(app, /attachReminderActions\(row/);
-  assert.doesNotMatch(app, /function reminderIndicatorMarkup/);
+  assert.doesNotMatch(app, /function attachReminderActions/);
+  assert.match(app, /const hasReminders = reminderRowsForPeer\(peer\)\.length > 0/);
+  assert.match(app, /reminderIndicatorMarkup\(hasReminders, humanName\(peer\)\)/);
+  assert.match(app, /function reminderIndicatorMarkup\(hasReminders, peerName\)/);
+  assert.match(app, /class="reminder-row-indicator"[^>]*aria-label="Has active reminders/);
+  assert.match(app, /reminder\.enabled !== false/);
 });
 
 test("WebUI reminder CRUD uses normal router POST and PATCH without lock actions", async () => {
@@ -50,6 +55,9 @@ test("WebUI reminder CRUD uses normal router POST and PATCH without lock actions
   assert.equal(app.includes('form.querySelector("#reminder-recurring")?.getAttribute("aria-pressed") === "true"'), true);
   assert.equal(app.includes('recurring.type = "checkbox"'), false);
   assert.equal(app.includes('goalToggle("reminder-recurring", "Repeat every delay interval", false)'), true);
+  assert.equal(app.includes('goalToggle("reminder-lock-create", "Reminder lock", false, { lock: true })'), true);
+  assert.match(app, /type: "reminder_crud", requestId, operation,\s*\.\.\.\(reminderId/);
+  assert.doesNotMatch(app, /type: "reminder_crud"[^\n]*lock/);
   assert.equal(app.includes('sendReminderCrud(peer, "update"'), true);
   assert.equal(app.includes('{ body, subject: subject || null }'), true);
   assert.equal(app.includes('type: "reminder_crud", controlId'), false);
@@ -100,7 +108,7 @@ test("reminder dialog redraws from current active reminders after a state transi
   const app = await appSource();
   assert.match(app, /renderReminderDialog\(state\.reminderDialogPeer\);/);
   assert.match(app, /renderReminderDialog\(peer\);\n    \}, 1000\);/);
-  assert.match(app, /function renderReminderDialog\(peer\) \{[\s\S]*state\.reminders\.filter\([\s\S]*\["scheduled", "due", "message_queued"\]/);
+  assert.match(app, /function renderReminderDialog\(peer\) \{[\s\S]*const reminders = reminderRowsForPeer\(peer\);/);
   assert.doesNotMatch(app, /renderReminderDialog\([^)]*, reminders\)/);
   assert.doesNotMatch(app, /const visible = reminders\.length > 0 \? reminders : fallback/);
 });
