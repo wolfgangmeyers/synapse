@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only GitHub PR watcher for the DNSid repositories."""
+"""Read-only GitHub PR watcher for Roger Labs repositories."""
 
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ from typing import Any
 
 
 DEFAULT_REPOS = [
-    "Identity-Digital/dnsid",
-    "Identity-Digital/dnsid-infra",
-    "Identity-Digital/dnsid-cookbook",
-    "Identity-Digital/dnsid-go",
-    "Identity-Digital/dnsid-py",
-    "Identity-Digital/dnsid-ts",
+    "Roger-Labs-Inc/roger-emr",
+    "Roger-Labs-Inc/Roger-Docs-API",
+    "Roger-Labs-Inc/steve-bot",
+    "Roger-Labs-Inc/App",
+    "Roger-Labs-Inc/interview-mobile-eng",
+    "Roger-Labs-Inc/arq-ui",
 ]
 
 DEFAULT_STATE_DIR = Path.home() / ".mecha-developer" / "pr-watch"

@@ -47,12 +47,12 @@ metadata.
 
 Default repositories:
 
-- `Identity-Digital/dnsid`
-- `Identity-Digital/dnsid-infra`
-- `Identity-Digital/dnsid-cookbook`
-- `Identity-Digital/dnsid-go`
-- `Identity-Digital/dnsid-py`
-- `Identity-Digital/dnsid-ts`
+- `Roger-Labs-Inc/roger-emr`
+- `Roger-Labs-Inc/Roger-Docs-API`
+- `Roger-Labs-Inc/steve-bot`
+- `Roger-Labs-Inc/App`
+- `Roger-Labs-Inc/interview-mobile-eng`
+- `Roger-Labs-Inc/arq-ui`
 
 A PR is selected only when Wolfgang did not author it, Dependabot did not
 author it, Wolfgang is explicitly requested as a reviewer, and he has not
@@ -66,14 +66,14 @@ Override repositories for one scan:
 
 ```bash
 python3 ~/.claude/skills/pr-watch/tools/watch_prs.py \
-  --repo Identity-Digital/dnsid \
-  --repo Identity-Digital/dnsid-go
+  --repo Roger-Labs-Inc/roger-emr \
+  --repo Roger-Labs-Inc/arq-ui
 ```
 
 Environment alternatives:
 
 ```bash
-PR_WATCH_REPOS=Identity-Digital/dnsid,Identity-Digital/dnsid-go
+PR_WATCH_REPOS=Roger-Labs-Inc/roger-emr,Roger-Labs-Inc/arq-ui
 PR_WATCH_STATE_DIR=~/.mecha-developer/pr-watch
 PR_WATCH_VIEWER=wolfgangmeyers
 PR_WATCH_MAIL_TO=supervisor
