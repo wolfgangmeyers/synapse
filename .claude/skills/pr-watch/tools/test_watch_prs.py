@@ -70,21 +70,25 @@ class MailboxV2SenderTest(unittest.TestCase):
         old_run = watch_prs.run
         old_to = watch_prs.MAILBOX_TO
         old_from = watch_prs.MAILBOX_FROM
+        old_router_url = watch_prs.ROUTER_URL
         try:
             watch_prs.run = lambda command: commands.append(command) or ""
             watch_prs.MAILBOX_TO = "supervisor"
             watch_prs.MAILBOX_FROM = "pr-watch"
+            watch_prs.ROUTER_URL = "http://127.0.0.1:8765"
 
             watch_prs.send_mail("PR watch findings", "one finding")
         finally:
             watch_prs.run = old_run
             watch_prs.MAILBOX_TO = old_to
             watch_prs.MAILBOX_FROM = old_from
+            watch_prs.ROUTER_URL = old_router_url
 
         self.assertEqual(
             [[
                 "python3", str(watch_prs.MAILBOX_SEND_V2), "--to", "supervisor",
                 "--from", "pr-watch", "--subject", "PR watch findings", "--body", "one finding",
+                "--router-url", "http://127.0.0.1:8765",
             ]],
             commands,
         )
@@ -276,6 +280,24 @@ class FetchRepoPaginationTest(unittest.TestCase):
 
 
 class MainOneScanTest(unittest.TestCase):
+    def test_router_url_cli_option_is_accepted_and_configures_mail_delivery(self):
+        calls = []
+        old_argv = sys.argv
+        old_pass_once = watch_prs.pass_once
+        old_router_url = watch_prs.ROUTER_URL
+        try:
+            sys.argv = ["watch_prs.py", "--router-url", "http://127.0.0.1:8765"]
+            watch_prs.pass_once = lambda **kwargs: calls.append(kwargs) or ([], None)
+
+            self.assertEqual(0, watch_prs.main())
+            self.assertEqual("http://127.0.0.1:8765", watch_prs.ROUTER_URL)
+        finally:
+            sys.argv = old_argv
+            watch_prs.pass_once = old_pass_once
+            watch_prs.ROUTER_URL = old_router_url
+
+        self.assertEqual([{"send": True, "dry_run": False}], calls)
+
     def test_normal_invocation_runs_one_scan(self):
         calls = []
         old_argv = sys.argv
