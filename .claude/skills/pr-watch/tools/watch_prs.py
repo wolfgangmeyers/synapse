@@ -7,8 +7,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -89,8 +91,25 @@ def run(cmd: list[str]) -> str:
     return proc.stdout
 
 
+TRANSIENT_GH_HTTP_CODES = ("502", "503", "504")
+RETRY_DELAYS_SECONDS = (0.2, 0.4)
+
+
+def is_transient_gh_error(exc: Exception) -> bool:
+    message = str(exc)
+    codes = "|".join(TRANSIENT_GH_HTTP_CODES)
+    return "gh" in message and bool(re.search(rf"\b(?:{codes})\b", message))
+
+
 def gh_json(args: list[str]) -> Any:
-    return json.loads(run(["gh", *args]))
+    for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
+        try:
+            return json.loads(run(["gh", *args]))
+        except Exception as exc:  # noqa: BLE001 - retry only known transient gh outages.
+            if not is_transient_gh_error(exc) or attempt == len(RETRY_DELAYS_SECONDS):
+                raise
+            time.sleep(RETRY_DELAYS_SECONDS[attempt])
+    raise AssertionError("unreachable")
 
 
 def load_state() -> dict[str, Any]:
@@ -98,6 +117,11 @@ def load_state() -> dict[str, Any]:
         return {"prs": {}}
     with STATE_PATH.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def normalize_error_signature(errors: list[str]) -> str:
+    normalized = [re.sub(r"\s+", " ", error).strip() for error in errors]
+    return "\n".join(sorted(normalized))
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -585,15 +609,21 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
     report = render_report(findings, all_prs, errors, now)
     report_path = None if dry_run else write_report(report, now)
 
+    error_signature = normalize_error_signature(errors) if errors else ""
+    prior_error_signature = state.get("error_signature") or ""
     if not dry_run:
         state["last_pass_at"] = now
         state["prs"] = next_prs
         state["last_report"] = str(report_path)
+        if error_signature:
+            state["error_signature"] = error_signature
+        else:
+            state.pop("error_signature", None)
         save_state(state)
 
     if send and not dry_run and report_path and findings:
         try_send_mail("PR watch findings", mail_body(findings, errors, report_path, now))
-    if send and not dry_run and errors:
+    if send and not dry_run and errors and error_signature != prior_error_signature:
         try_send_mail("PR watch error", "; ".join(errors)[:900])
 
     print(report, end="")
