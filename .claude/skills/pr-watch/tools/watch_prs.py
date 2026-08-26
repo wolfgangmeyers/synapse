@@ -47,15 +47,6 @@ SECURITY_KEYWORDS = (
 )
 
 
-def env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if not value:
-        return default
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
-
 
 def env_repos() -> list[str]:
     raw = os.environ.get("PR_WATCH_REPOS")
@@ -66,12 +57,9 @@ def env_repos() -> list[str]:
 
 
 REPOS = env_repos()
-CADENCE_SECONDS = env_int("PR_WATCH_CADENCE_SECONDS", 15 * 60)
-HEARTBEAT_SECONDS = env_int("PR_WATCH_HEARTBEAT_SECONDS", 60 * 60)
 VIEWER = os.environ.get("PR_WATCH_VIEWER", "wolfgangmeyers")
 MAILBOX_TO = os.environ.get("PR_WATCH_MAIL_TO", "supervisor")
 MAILBOX_FROM = os.environ.get("PR_WATCH_MAIL_FROM", "pr-watch")
-ROUTER_URL = os.environ.get("MECHA_ROUTER_URL")
 
 STATE_DIR = Path(os.environ.get("PR_WATCH_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser()
 STATE_PATH = STATE_DIR / "watch-state.json"
@@ -107,7 +95,7 @@ def gh_json(args: list[str]) -> Any:
 
 def load_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
-        return {"prs": {}, "last_heartbeat_at": None}
+        return {"prs": {}}
     with STATE_PATH.open("r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -539,13 +527,10 @@ def write_report(report: str, now: str) -> Path:
 
 
 def send_mail(subject: str, body: str) -> None:
-    command = [
+    run([
         "python3", str(MAILBOX_SEND_V2), "--to", MAILBOX_TO,
         "--from", MAILBOX_FROM, "--subject", subject, "--body", body,
-    ]
-    if ROUTER_URL:
-        command.extend(["--router-url", ROUTER_URL])
-    run(command)
+    ])
 
 
 def try_send_mail(subject: str, body: str) -> None:
@@ -555,14 +540,7 @@ def try_send_mail(subject: str, body: str) -> None:
         print(f"PR watch mail send failed: {exc}", file=sys.stderr)
 
 
-def mail_body(findings: list[dict[str, Any]], errors: list[str], path: Path, now: str, quiet: bool) -> str:
-    if quiet:
-        error_note = "" if not errors else f"; {len(errors)} repo check error(s)"
-        return (
-            f"PR watch quiet heartbeat: checked {len(REPOS)} repos at {now}; "
-            f"no actionable PR changes{error_note}. Report: {path}"
-        )
-
+def mail_body(findings: list[dict[str, Any]], errors: list[str], path: Path, now: str) -> str:
     evidence = []
     for item in findings:
         evidence.append(
@@ -574,14 +552,6 @@ def mail_body(findings: list[dict[str, Any]], errors: list[str], path: Path, now
         f"{' | '.join(evidence)}. Report: {path}"
     )
 
-
-def heartbeat_due(state: dict[str, Any], now: str) -> bool:
-    last = state.get("last_heartbeat_at")
-    if not last:
-        return True
-    last_ts = datetime.fromisoformat(last.replace("Z", "+00:00")).timestamp()
-    now_ts = datetime.fromisoformat(now.replace("Z", "+00:00")).timestamp()
-    return now_ts - last_ts >= HEARTBEAT_SECONDS
 
 
 def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, Any]], Path | None]:
@@ -615,40 +585,27 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
     report = render_report(findings, all_prs, errors, now)
     report_path = None if dry_run else write_report(report, now)
 
-    quiet = False
-    if not findings and heartbeat_due(state, now):
-        quiet = True
-
     if not dry_run:
         state["last_pass_at"] = now
         state["prs"] = next_prs
-        if findings or quiet:
-            state["last_heartbeat_at"] = now
         state["last_report"] = str(report_path)
         save_state(state)
 
     if send and not dry_run and report_path and findings:
-        try_send_mail("PR watch findings", mail_body(findings, errors, report_path, now, quiet))
+        try_send_mail("PR watch findings", mail_body(findings, errors, report_path, now))
     if send and not dry_run and errors:
         try_send_mail("PR watch error", "; ".join(errors)[:900])
 
-    if dry_run:
-        print(report)
-    else:
-        print(f"{now}: {len(findings)} actionable finding(s); report={report_path}")
+    print(report, end="")
 
     return findings, report_path
 
 
 def apply_args(args: argparse.Namespace) -> None:
-    global REPOS, CADENCE_SECONDS, HEARTBEAT_SECONDS, VIEWER, MAILBOX_TO, MAILBOX_FROM, ROUTER_URL
+    global REPOS, VIEWER, MAILBOX_TO, MAILBOX_FROM
 
     if args.repo:
         REPOS = args.repo
-    if args.cadence_seconds is not None:
-        CADENCE_SECONDS = args.cadence_seconds
-    if args.heartbeat_seconds is not None:
-        HEARTBEAT_SECONDS = args.heartbeat_seconds
     if args.state_dir:
         configure_paths(Path(args.state_dir))
     if args.viewer:
@@ -657,8 +614,6 @@ def apply_args(args: argparse.Namespace) -> None:
         MAILBOX_TO = args.mail_to
     if args.mail_from:
         MAILBOX_FROM = args.mail_from
-    if args.router_url:
-        ROUTER_URL = args.router_url
 
 
 def main() -> int:
@@ -666,13 +621,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="print report without writing state or mail")
     parser.add_argument("--no-mail", action="store_true", help="write state/report without sending mail")
     parser.add_argument("--repo", action="append", help="owner/name repo to watch; repeat to override defaults")
-    parser.add_argument("--cadence-seconds", type=int, help="seconds between loop passes")
-    parser.add_argument("--heartbeat-seconds", type=int, help="seconds between quiet heartbeat messages")
     parser.add_argument("--state-dir", help="directory for watch-state.json and reports")
     parser.add_argument("--viewer", help="GitHub login whose review attention is being watched")
     parser.add_argument("--mail-to", help="mailbox recipient agent ID")
     parser.add_argument("--mail-from", help="explicit V2 sender agent ID")
-    parser.add_argument("--router-url", help="loopback HTTP(S) Mailbox V2 router base URL")
     args = parser.parse_args()
     apply_args(args)
 
