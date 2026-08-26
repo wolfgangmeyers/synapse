@@ -215,7 +215,7 @@ class RetryAndErrorDedupeTest(unittest.TestCase):
         finally:
             watch_prs.run = old_run
 
-    def test_error_mail_is_deduped_until_signature_changes_and_success_clears_it(self):
+    def test_5xx_error_mail_is_deduped_while_reports_keep_detail(self):
         old_repos = watch_prs.REPOS
         old_fetch_repo = watch_prs.fetch_repo
         old_try_send_mail = watch_prs.try_send_mail
@@ -227,21 +227,26 @@ class RetryAndErrorDedupeTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 watch_prs.configure_paths(Path(directory))
                 watch_prs.fetch_repo = lambda _repo: (_ for _ in ()).throw(
-                    RuntimeError("command failed: gh api\\nstderr: HTTP 503 outage")
+                    RuntimeError("command failed: gh api\\nstderr: HTTP 502 Bad Gateway")
                 )
-                with redirect_stdout(io.StringIO()):
-                    watch_prs.pass_once()
-                    watch_prs.pass_once()
+                with patch.object(
+                    watch_prs,
+                    "utc_now",
+                    side_effect=["2026-08-26T04:43:01Z", "2026-08-26T04:43:02Z"],
+                ):
+                    with redirect_stdout(io.StringIO()):
+                        _findings, first_report = watch_prs.pass_once()
+                    watch_prs.fetch_repo = lambda _repo: (_ for _ in ()).throw(
+                        RuntimeError("command failed: gh api\\nstderr: HTTP 504 Gateway Timeout")
+                    )
+                    with redirect_stdout(io.StringIO()):
+                        _findings, second_report = watch_prs.pass_once()
                 state = watch_prs.load_state()
                 self.assertEqual(1, len(sent))
                 self.assertTrue(state["error_signature"])
-
-                watch_prs.fetch_repo = lambda _repo: (_ for _ in ()).throw(
-                    RuntimeError("command failed: gh api\\nstderr: HTTP 502 outage")
-                )
-                with redirect_stdout(io.StringIO()):
-                    watch_prs.pass_once()
-                self.assertEqual(2, len(sent))
+                self.assertIn("HTTP 502 Bad Gateway", first_report.read_text())
+                self.assertIn("HTTP 504 Gateway Timeout", second_report.read_text())
+                self.assertIn("HTTP 502 Bad Gateway", sent[0][1])
 
                 watch_prs.fetch_repo = lambda _repo: []
                 with redirect_stdout(io.StringIO()):

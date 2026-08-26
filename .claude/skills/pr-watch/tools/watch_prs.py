@@ -120,7 +120,14 @@ def load_state() -> dict[str, Any]:
 
 
 def normalize_error_signature(errors: list[str]) -> str:
-    normalized = [re.sub(r"\s+", " ", error).strip() for error in errors]
+    normalized = []
+    for error in errors:
+        compact = re.sub(r"\s+", " ", error).strip()
+        if "gh" in compact and re.search(r"\bHTTP 5(?:02|03|04)\b", compact):
+            repo, separator, _detail = compact.partition(": ")
+            if separator:
+                compact = f"{repo}: gh request failed (HTTP 5xx)"
+        normalized.append(compact)
     return "\n".join(sorted(normalized))
 
 
