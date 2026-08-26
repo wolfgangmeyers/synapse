@@ -44,6 +44,7 @@
     },
     "deliveryReceiptMode": { "type": "string", "const": "delivery_items_v1" },
     "messageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "reminderId": { "type": "string", "minLength": 1, "maxLength": 99, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,98}$" },
     "attachmentId": { "type": "string", "minLength": 1, "maxLength": 192, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "messageIncarnationId": { "type": "string", "minLength": 36, "maxLength": 36, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 },
@@ -405,6 +406,41 @@
         { "properties": { "accepted": { "const": false } }, "required": ["error_code"] }
       ]
     },
+    "reminderLockControlFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "reminder_id", "action"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "reminder_lock_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "target_agent_id": { "$ref": "#/$defs/agentId" }, "target_instance_id": { "$ref": "#/$defs/instanceId" },
+        "control_id": { "$ref": "#/$defs/frameId" }, "reminder_id": { "$ref": "#/$defs/reminderId" }, "action": { "enum": ["set", "clear"] }
+      }
+    },
+    "reminderLockControlForwardFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "reminder_id", "action", "expires_at"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "reminder_lock_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" }, "control_id": { "$ref": "#/$defs/frameId" },
+        "reminder_id": { "$ref": "#/$defs/reminderId" }, "action": { "enum": ["set", "clear"] }, "expires_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
+    "reminderLockControlResultFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "reminder_id", "accepted"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "reminder_lock_control_result" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" }, "control_id": { "$ref": "#/$defs/frameId" },
+        "reminder_id": { "$ref": "#/$defs/reminderId" }, "accepted": { "type": "boolean" },
+        "error_code": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "oneOf": [
+        { "properties": { "accepted": { "const": true } }, "not": { "required": ["error_code"] } },
+        { "properties": { "accepted": { "const": false } }, "required": ["error_code"] }
+      ]
+    },
     "goalStateFrame": {
       "type": "object", "additionalProperties": false,
       "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "goal_state"],
@@ -660,6 +696,12 @@
         },
         {
           "$ref": "#/$defs/goalControlResultFrame"
+        },
+        {
+          "$ref": "#/$defs/reminderLockControlFrame"
+        },
+        {
+          "$ref": "#/$defs/reminderLockControlResultFrame"
         },
         {
           "$ref": "#/$defs/goalStateFrame"
@@ -972,6 +1014,8 @@
         { "$ref": "#/$defs/modelControlResultFrame" },
         { "$ref": "#/$defs/goalControlForwardFrame" },
         { "$ref": "#/$defs/goalControlResultFrame" },
+        { "$ref": "#/$defs/reminderLockControlForwardFrame" },
+        { "$ref": "#/$defs/reminderLockControlResultFrame" },
         { "$ref": "#/$defs/agentGoalStateFrame" },
         { "$ref": "#/$defs/deliveryAcknowledgedFrame" },
         { "$ref": "#/$defs/agentActivityFrame" },
