@@ -7,7 +7,7 @@ description: "Run and maintain the polling GitHub PR watcher that deterministica
 
 Run a polling watcher that deterministically routes eligible PRs into Wolfgang's required review workflow while the GitHub webhook review bot is not in use.
 
-`watch_prs.py` owns selection and report generation. It cannot execute an agent review or post a review. The receiving agent must run `review-pr` for every PR selected in the report.
+`watch_prs.py` owns selection and report generation. It cannot execute an agent review or post a review. The receiving agent must run `review-pr` for every backend PR selected in the report. It does not route `toggleglobal/web-app` or `toggleglobal/web-app-lseg` for review.
 
 Review disposition guardrail: never use `REQUEST_CHANGES`. Approve when the review evidence supports approval; otherwise post a `COMMENT` review.
 
@@ -135,16 +135,17 @@ python3 ~/.claude/skills/pr-watch/tools/watch_prs.py --dry-run
 
 ## What It Watches
 
-Default repositories:
+By default, discovery is one paginated GitHub search scoped to
+`toggleglobal`: open pull requests with `review-requested:<viewer>`. The query
+excludes `toggleglobal/web-app` and `toggleglobal/web-app-lseg`, so frontend
+pull requests never enter backend review routing.
 
-- `Identity-Digital/dnsid`
-- `Identity-Digital/dnsid-infra`
-- `Identity-Digital/dnsid-cookbook`
-- `Identity-Digital/dnsid-go`
-- `Identity-Digital/dnsid-py`
-- `Identity-Digital/dnsid-ts`
+An explicit `--repo` value or `PR_WATCH_REPOS` value must be an
+`owner/name` repository in `toggleglobal`. The watcher rejects other owners.
+Explicit repositories are scanned directly, but the same two frontend
+repositories remain excluded from routing.
 
-For every open PR, `watch_prs.py` applies one current-state eligibility
+For every discovered PR, `watch_prs.py` applies one current-state eligibility
 predicate. It selects a PR only when all of these are true:
 
 - Wolfgang did not author it.
@@ -198,18 +199,19 @@ The state file records each open PR's last seen head SHA, review request state, 
 
 ## Tuning
 
-Override the repo list for one explicit scan:
+Override default organization discovery for one explicit scan. Every
+repository must be in `toggleglobal`:
 
 ```bash
 python3 ~/.claude/skills/pr-watch/tools/watch_prs.py \
-  --repo Identity-Digital/dnsid \
-  --repo Identity-Digital/dnsid-go
+  --repo toggleglobal/backend-service \
+  --repo toggleglobal/another-backend-service
 ```
 
 Environment alternatives:
 
 ```bash
-PR_WATCH_REPOS=Identity-Digital/dnsid,Identity-Digital/dnsid-go
+PR_WATCH_REPOS=toggleglobal/backend-service,toggleglobal/another-backend-service
 PR_WATCH_CADENCE_SECONDS=900
 PR_WATCH_HEARTBEAT_SECONDS=3600
 PR_WATCH_STATE_DIR=~/.mecha-developer/pr-watch
