@@ -10,6 +10,7 @@ import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
 import { runRecallEvaluator as evaluateRecall, validateRecallChoice as validateChoice } from "./recall-evaluator.js";
 import { createMemoryCaptureLifecycle } from "./memory-capture.js";
 import { registerOperationalTools } from "./operational-tools.js";
+import { createReminderLockState, createRouterReminderReader } from "./reminder-lock.js";
 import {
   GOAL_ACTIVITY_EVENT,
   GOAL_CONTROL_REQUEST_EVENT,
@@ -1336,7 +1337,21 @@ export function createMechaMessagingExtension(pi, {
   nativeSubagentTrace = createNativeSubagentTrace(),
   operationalTools = {},
 } = {}) {
-  registerOperationalTools(pi, operationalTools);
+  let client;
+  const configuredReminderLock = operationalTools.reminderLock;
+  const reminderLock = configuredReminderLock ?? createReminderLockState({
+    getCurrentReminder: operationalTools.getCurrentReminder ?? createRouterReminderReader({
+      fetchImpl: operationalTools.fetchImpl ?? globalThis.fetch,
+      routerUrl: operationalTools.environment?.MECHA_ROUTER_URL ?? process.env.MECHA_ROUTER_URL ?? "http://127.0.0.1:8765",
+    }),
+    getCurrentTarget: () => {
+      let agentId;
+      try { agentId = resolveCurrentAgentId(); } catch { agentId = undefined; }
+      return { agentId, instanceId: client?.instanceId, leaseId: client?.currentLeaseId?.() };
+    },
+    now: nowImpl,
+  });
+  registerOperationalTools(pi, { ...operationalTools, reminderLock });
   if (nativeSubagentTrace === undefined || typeof nativeSubagentTrace.record !== "function") {
     throw new TypeError("nativeSubagentTrace must provide record");
   }
@@ -1345,7 +1360,6 @@ export function createMechaMessagingExtension(pi, {
     registry_available: typeof globalThis[PI_SUBAGENTS_SERVICE_REGISTRY]?.services?.get === "function",
   });
   const currentSubagentsServiceAccessor = getSubagentsService;
-  let client;
   let coordinator;
   let parentAgentId;
   let parentActivityContext;
@@ -1442,6 +1456,7 @@ export function createMechaMessagingExtension(pi, {
       goalState: cloneGoalControlState(responseState),
     };
   };
+  const handleReminderLockControl = async (control) => reminderLock.control(control);
   const handleGoalControl = async (control) => {
     const request = control !== null && typeof control === "object" && !Array.isArray(control)
       ? {
@@ -2867,6 +2882,7 @@ export function createMechaMessagingExtension(pi, {
       return;
     }
     mailboxSendRateLimits.clear();
+    reminderLock.clear();
     modelSwitchOverride = undefined;
     // Keep allowance state across agent runs; a parent session owns one pool for its lifetime.
     inlineToolPolicy.reset();
@@ -2925,6 +2941,8 @@ export function createMechaMessagingExtension(pi, {
         onModelControlTrace: ({ event, ...fields }) => traceNativeSubagent(event, fields),
         onGoalControl: handleGoalControl,
         onGoalControlTrace: ({ event, ...fields }) => traceNativeSubagent(event, fields),
+        onReminderLockControl: handleReminderLockControl,
+        onReminderLockReset: () => reminderLock.clear(),
         getGoalState: () => cloneGoalControlState(goalControlState),
         getModelCatalog: () => {
           try {
@@ -2965,6 +2983,7 @@ export function createMechaMessagingExtension(pi, {
           } else if (state === "connecting" || state === "reconnecting") {
             context.ui.setStatus("mecha-mailbox", "mailbox: reconnecting");
           } else if (state === "disconnected") {
+            reminderLock.clear();
             context.ui.setStatus("mecha-mailbox", "mailbox: disconnected");
             if (error !== undefined) context.ui.notify(`Mailbox v2 reconnecting: ${error.message}`, "error");
           }

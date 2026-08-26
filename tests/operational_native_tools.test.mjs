@@ -12,6 +12,7 @@ import {
   resolveSupervisorTools,
 } from "../pi-extensions/operational-tools.js";
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging.js";
+import { createReminderLockState, createRouterReminderReader } from "../pi-extensions/reminder-lock.js";
 
 function fakeRunner(result = { stdout: "ok" }) {
   const calls = [];
@@ -124,12 +125,109 @@ test("matches the approved actions exactly", () => {
     mecha_state: ["query", "create", "update"],
     mecha_priority: ["create", "update", "status"],
     mecha_verification_handoff: ["record"],
-    mecha_reminder: ["list", "create", "delete"],
+    mecha_reminder: ["list", "create", "update", "delete"],
     mecha_worker: ["list", "launch", "cleanup", "send"],
     mecha_pr: ["status"],
     mecha_git: ["status"],
     mecha_router: ["health", "retry", "dismiss"],
   });
+});
+
+test("guards native reminder updates before PATCH and fails open after clear or stale rows", async () => {
+  let current = {
+    id: "reminder-1",
+    target: "worker",
+    creator: "supervisor",
+    created_at: "2030-01-01T00:00:00.000Z",
+  };
+  let target = { agentId: "worker", instanceId: "instance-1", leaseId: "lease-1" };
+  const requests = [];
+  const fetchImpl = async (url, request = {}) => {
+    requests.push({ url, request });
+    if ((request.method ?? "GET") === "GET") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ reminder: { ...current } }),
+        headers: { get: (name) => name === "x-reminder-incarnation" ? "incarnation-a" : null },
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ id: "reminder-1" }) };
+  };
+  const readReminder = createRouterReminderReader({ fetchImpl, routerUrl: "http://127.0.0.1:8765" });
+  const lock = createReminderLockState({
+    getCurrentReminder: readReminder,
+    getCurrentTarget: () => target,
+    now: () => Date.parse("2030-01-01T00:00:00.000Z"),
+  });
+  const tools = registered({
+    reminderLock: lock,
+    fetchImpl,
+    environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765" },
+    now: () => new Date("2030-01-01T00:00:00.000Z"),
+  });
+  const update = (message) => execute(tools.get("mecha_reminder"), {
+    action: "update", reminderId: "reminder-1", message,
+  });
+
+  const unlocked = await update("unlocked");
+  assert.equal(unlocked.isError, undefined);
+  assert.equal(requests.at(-1).request.method, "PATCH");
+
+  const control = (action) => lock.control({
+    targetAgentId: "worker",
+    targetInstanceId: "instance-1",
+    leaseId: "lease-1",
+    reminderId: "reminder-1",
+    action,
+    expiresAt: "2030-01-01T00:01:00.000Z",
+    isCurrent: () => true,
+  });
+  await control("set");
+  const requestCountBeforeLocked = requests.length;
+  const locked = await update("locked");
+  assert.equal(locked.isError, true);
+  assert.equal(locked.content[0].text, "reminder_locked");
+  assert.equal(locked.details.error_code, "reminder_locked");
+  assert.equal(requests.length, requestCountBeforeLocked + 1);
+  assert.equal(requests.at(-1).request.method ?? "GET", "GET");
+
+  const requestCountBeforeLockedDelete = requests.length;
+  const lockedDelete = await execute(tools.get("mecha_reminder"), { action: "delete", reminderId: "reminder-1" });
+  assert.equal(lockedDelete.isError, true);
+  assert.equal(lockedDelete.content[0].text, "reminder_locked");
+  assert.equal(lockedDelete.details.error_code, "reminder_locked");
+  assert.deepEqual(requests.slice(requestCountBeforeLockedDelete).map(({ request }) => request.method ?? "GET"), ["GET"]);
+
+  await control("clear");
+  const cleared = await update("cleared");
+  assert.equal(cleared.isError, undefined);
+  assert.equal(requests.at(-1).request.method, "PATCH");
+
+  await control("set");
+  current = { ...current, created_at: "2030-01-01T00:02:00.000Z" };
+  const stale = await update("stale");
+  assert.equal(stale.isError, undefined);
+  assert.equal(requests.at(-1).request.method, "PATCH");
+});
+
+test("fails open when reminder reads fail and preserves native PATCH and DELETE", async () => {
+  const requests = [];
+  const tools = registered({
+    reminderLock: { guard: async () => ({ locked: true }), clear() {} },
+    fetchImpl: async (url, request = {}) => {
+      requests.push({ url, request });
+      if ((request.method ?? "GET") === "GET") throw new Error("router read failed");
+      return { ok: true, status: 200, json: async () => ({ id: "reminder-1" }) };
+    },
+    environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765" },
+  });
+  const reminder = tools.get("mecha_reminder");
+  const updated = await execute(reminder, { action: "update", reminderId: "reminder-1", message: "updated" });
+  const deleted = await execute(reminder, { action: "delete", reminderId: "reminder-1" });
+  assert.equal(updated.isError, undefined);
+  assert.equal(deleted.isError, undefined);
+  assert.deepEqual(requests.map(({ request }) => request.method ?? "GET"), ["GET", "PATCH", "GET", "DELETE"]);
 });
 
 test("rejects unknown actions, missing fields, wrong types, and extras before adapters", async () => {

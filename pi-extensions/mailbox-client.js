@@ -33,6 +33,7 @@ const MAX_GOAL_CHARS = 4_000;
 const MAX_MODELS = 1_000;
 const MAX_QUEUED_MODEL_CONTROLS = 256;
 const MAX_QUEUED_GOAL_CONTROLS = 256;
+const MAX_QUEUED_REMINDER_LOCK_CONTROLS = 256;
 const DEFAULT_MODEL_CONTROL_TTL_MS = 30_000;
 const DEFAULT_GOAL_CONTROL_TTL_MS = 30_000;
 const CAPABILITY_RETRY_INITIAL_DELAY_MS = 1_000;
@@ -371,6 +372,8 @@ export function createMailboxClient({
   onGoalControlTrace = () => {},
   onGoalControl = async () => ({ accepted: false, errorCode: "unsupported" }),
   getGoalState = defaultGoalState,
+  onReminderLockControl = async () => ({ accepted: false, errorCode: "unsupported" }),
+  onReminderLockReset = () => {},
 } = {}) {
   assertIdentity(agentId);
   if (typeof onEnvelope !== "function") throw new TypeError("onEnvelope is required");
@@ -391,6 +394,8 @@ export function createMailboxClient({
   if (typeof onGoalControlTrace !== "function") throw new TypeError("onGoalControlTrace must be a function");
   if (typeof onGoalControl !== "function") throw new TypeError("onGoalControl must be a function");
   if (typeof getGoalState !== "function") throw new TypeError("getGoalState must be a function");
+  if (typeof onReminderLockControl !== "function") throw new TypeError("onReminderLockControl must be a function");
+  if (typeof onReminderLockReset !== "function") throw new TypeError("onReminderLockReset must be a function");
   if (typeof parentSessionId !== "string" || parentSessionId.length === 0 || typeof producerEpoch !== "string" || !/^[0-9a-fA-F-]{36}$/.test(producerEpoch)) throw new TypeError("valid lifecycle identity is required");
   validateReconnectOptions(reconnectInitialDelayMs, reconnectMaxDelayMs);
   routerHttpUrl(routerUrl);
@@ -425,6 +430,8 @@ export function createMailboxClient({
   let modelControlProcessing = false;
   const goalControlQueue = [];
   let goalControlProcessing = false;
+  const reminderLockControlQueue = [];
+  let reminderLockControlProcessing = false;
   // The newest full assertion is retained separately from the retry journal. A reconnect must
   // lead with it, because a replacement lease is fenced until the router accepts a snapshot.
   let lifecycleSnapshotChildren = [];
@@ -978,6 +985,89 @@ export function createMailboxClient({
       && context.expiresAtMs > now();
   }
 
+  function reminderLockControlContextIsCurrent(frame, context) {
+    return context.leaseId !== undefined
+      && frame.agent_id === agentId
+      && frame.instance_id === instanceId
+      && frame.lease_id === context.leaseId
+      && socket === context.socket
+      && leaseId === context.leaseId
+      && socketOpen(context.socket)
+      && context.expiresAtMs > now();
+  }
+
+  async function receiveReminderLockControl(frame, context) {
+    if (!reminderLockControlContextIsCurrent(frame, context)) return;
+    let result;
+    try {
+      result = await onReminderLockControl({
+        controlId: frame.control_id,
+        sourceAgentId: frame.source_agent_id,
+        targetAgentId: frame.agent_id,
+        targetInstanceId: frame.instance_id,
+        leaseId: frame.lease_id,
+        reminderId: frame.reminder_id,
+        action: frame.action,
+        expiresAt: frame.expires_at,
+        isCurrent: () => reminderLockControlContextIsCurrent(frame, context),
+      });
+    } catch {
+      result = { accepted: false, errorCode: "reminder_lock_failed" };
+    }
+    if (!reminderLockControlContextIsCurrent(frame, context)) return;
+    const accepted = result?.accepted === true;
+    const errorCode = typeof result?.errorCode === "string"
+      && /^[a-z][a-z0-9_]{0,127}$/.test(result.errorCode)
+      ? result.errorCode
+      : "reminder_lock_failed";
+    try {
+      context.socket.send(JSON.stringify({
+        version: "v1",
+        frame_id: generateId(),
+        type: "reminder_lock_control_result",
+        agent_id: agentId,
+        instance_id: instanceId,
+        lease_id: context.leaseId,
+        source_agent_id: frame.source_agent_id,
+        control_id: frame.control_id,
+        reminder_id: frame.reminder_id,
+        accepted,
+        ...(accepted ? {} : { error_code: errorCode }),
+      }));
+    } catch {
+      // A lost connection fences the result and the router can discard the control.
+    }
+  }
+
+  async function drainReminderLockControlQueue() {
+    if (reminderLockControlProcessing) return;
+    reminderLockControlProcessing = true;
+    try {
+      while (reminderLockControlQueue.length > 0) {
+        const pending = reminderLockControlQueue.shift();
+        await receiveReminderLockControl(pending.frame, pending.context);
+      }
+    } finally {
+      reminderLockControlProcessing = false;
+      if (reminderLockControlQueue.length > 0) void drainReminderLockControlQueue();
+    }
+  }
+
+  function enqueueReminderLockControl(frame) {
+    const parsedExpiry = Date.parse(frame.expires_at);
+    const context = { socket, leaseId, expiresAtMs: Number.isFinite(parsedExpiry) ? parsedExpiry : 0 };
+    if (!reminderLockControlContextIsCurrent(frame, context)
+      || reminderLockControlQueue.length >= MAX_QUEUED_REMINDER_LOCK_CONTROLS) return;
+    reminderLockControlQueue.push({ frame, context });
+    void drainReminderLockControlQueue();
+  }
+
+  function dropQueuedReminderLockControls(currentSocket) {
+    for (let index = reminderLockControlQueue.length - 1; index >= 0; index -= 1) {
+      if (reminderLockControlQueue[index].context.socket === currentSocket) reminderLockControlQueue.splice(index, 1);
+    }
+  }
+
   async function receiveGoalControl(frame, context) {
     if (!goalControlContextIsCurrent(context)) {
       goalControlTrace("client_goal_control_dropped", {
@@ -1230,6 +1320,8 @@ export function createMailboxClient({
     if (socket !== currentSocket) return;
     dropQueuedModelControls(currentSocket, "disconnected");
     dropQueuedGoalControls(currentSocket, "disconnected");
+    dropQueuedReminderLockControls(currentSocket);
+    try { onReminderLockReset(); } catch { /* local lock cleanup cannot alter reconnect behavior */ }
     clearIntervalImpl(renewTimer);
     renewTimer = undefined;
     clearIntervalImpl(modelCatalogTimer);
@@ -1411,6 +1503,10 @@ export function createMailboxClient({
       enqueueGoalControl(frame);
       return;
     }
+    if (frame.type === "reminder_lock_control") {
+      enqueueReminderLockControl(frame);
+      return;
+    }
     if (frame.type !== "message") {
       if (frame.type === "error" || frame.type === "lease_rejected") {
         log(`MECHA_V2_FRAME ${frame.type} agent=${agentId} code=${frame.code ?? "unknown"}`);
@@ -1542,6 +1638,7 @@ export function createMailboxClient({
       return true;
     },
     lifecycleStatus() { return { supported: lifecycleSupported, ready: lifecycleReady, routerVersion: lifecycleRouterVersion, pending: lifecycleJournal.size, bytes: journalBytes() }; },
+    currentLeaseId() { return leaseId; },
     sendMessageArrival: messageArrival,
     pause() {
       if (stopped || paused) return;
@@ -1551,9 +1648,11 @@ export function createMailboxClient({
       if (currentSocket !== undefined) {
         dropQueuedModelControls(currentSocket, "paused");
         dropQueuedGoalControls(currentSocket, "paused");
+        dropQueuedReminderLockControls(currentSocket);
       }
       socket = undefined;
       leaseId = undefined;
+      try { onReminderLockReset(); } catch { /* local lock cleanup cannot alter pause behavior */ }
       if (currentSocket !== undefined) closeSocket(currentSocket);
     },
     resume() {
@@ -1594,9 +1693,11 @@ export function createMailboxClient({
       if (currentSocket !== undefined) {
         dropQueuedModelControls(currentSocket, "closed");
         dropQueuedGoalControls(currentSocket, "closed");
+        dropQueuedReminderLockControls(currentSocket);
       }
       socket = undefined;
       leaseId = undefined;
+      try { onReminderLockReset(); } catch { /* local lock cleanup cannot alter shutdown behavior */ }
       if (rejectInitialConnection !== undefined) {
         rejectInitialConnection(new Error("Mailbox v2 client closed before connecting"));
         resolveInitialConnection = undefined;
