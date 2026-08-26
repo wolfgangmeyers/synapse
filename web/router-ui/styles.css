@@ -335,10 +335,20 @@ p:empty { display: none; }
   justify-content: center;
   flex: 0 0 24px;
   width: 24px;
-  color: #78e0cd;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 1px solid rgba(120,224,205,0.58);
+  border-radius: 999px;
+  background: rgba(36,132,120,0.34);
+  color: #b9f5e7;
   font-size: 11px;
+  font-weight: 800;
   line-height: 1;
 }
+.reminder-row-indicator:focus-visible { outline: 2px solid #b9f5e7; outline-offset: 2px; }
+.reminder-row-indicator:hover { filter: brightness(1.12); }
 .goal-indicator {
   display: inline-flex;
   align-items: center;

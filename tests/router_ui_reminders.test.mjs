@@ -37,13 +37,22 @@ test("the selected-agent header owns the reminder button", async () => {
   assert.match(app, /elements\.reminderHeaderButton\.classList\.toggle\("empty", reminders\.length === 0\)/);
   assert.match(app, /openReminderDialog\(state\.selectedPeer, reminderRowsForPeer\(state\.selectedPeer\)\.length === 0 \? "create" : "list", elements\.reminderHeaderButton\)/);
   assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton, elements\.goalHeaderButton\)/);
-  assert.doesNotMatch(app, /attachReminderActions\(row/);
-  assert.doesNotMatch(app, /function attachReminderActions/);
+  assert.match(app, /attachReminderActions\(row, peer\)/);
+  assert.match(app, /function attachReminderActions\(root, peer\)[\s\S]*event\.stopPropagation\(\);[\s\S]*event\.preventDefault\(\);[\s\S]*openReminderDialog\(peer, "list", indicator\)/);
+  assert.match(app, /class="reminder-row-indicator" type="button" aria-haspopup="dialog" aria-controls="reminders-dialog"/);
+  assert.match(app, /indicator\.addEventListener\("keydown", \(event\) => \{[\s\S]*event\.key === "Enter" \|\| event\.key === " "/);
   assert.match(app, /const hasReminders = reminderRowsForPeer\(peer\)\.length > 0/);
   assert.match(app, /reminderIndicatorMarkup\(hasReminders, humanName\(peer\)\)/);
   assert.match(app, /function reminderIndicatorMarkup\(hasReminders, peerName\)/);
-  assert.match(app, /class="reminder-row-indicator"[^>]*aria-label="Has active reminders/);
+  assert.match(app, /class="reminder-row-indicator"[^>]*aria-label="Show reminders for/);
   assert.match(app, /reminder\.enabled !== false/);
+});
+
+test("agent-list reminder indicators retain the circular reminder control styling", async () => {
+  const styles = await readFile(new URL("../web/router-ui/styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.reminder-row-indicator \{[\s\S]*width: 24px;[\s\S]*height: 24px;[\s\S]*border: 1px solid rgba\(120,224,205,0\.58\);[\s\S]*border-radius: 999px;[\s\S]*background: rgba\(36,132,120,0\.34\);/);
+  assert.match(styles, /\.reminder-row-indicator:focus-visible[\s\S]*outline: 2px solid #b9f5e7/);
+  assert.match(styles, /\.reminder-row-indicator:hover[\s\S]*filter: brightness\(1\.12\)/);
 });
 
 test("WebUI reminder CRUD uses normal router POST and PATCH without lock actions", async () => {

@@ -678,6 +678,7 @@ function renderAgents() {
     });
     attachSubagentToggle(row, peer, canExpandSubagents, renderAgents);
     attachGoalActions(row, goal);
+    attachReminderActions(row, peer);
     attachArrivalActions(row, arrival);
     return row;
   }));
@@ -1769,7 +1770,21 @@ function goalIndicatorMarkup(goal, peerName) {
 
 function reminderIndicatorMarkup(hasReminders, peerName) {
   if (!hasReminders) return "";
-  return `<span class="reminder-row-indicator" aria-label="Has active reminders for ${escapeHtml(peerName)}" title="Has active reminders"><i class="fa-solid fa-clock" aria-hidden="true"></i></span>`;
+  return `<button class="reminder-row-indicator" type="button" aria-haspopup="dialog" aria-controls="reminders-dialog" aria-label="Show reminders for ${escapeHtml(peerName)}" title="Show reminders"><i class="fa-solid fa-clock" aria-hidden="true"></i></button>`;
+}
+
+function attachReminderActions(root, peer) {
+  const indicator = root.querySelector(".reminder-row-indicator");
+  if (!indicator) return;
+  const openReminders = (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    openReminderDialog(peer, "list", indicator);
+  };
+  indicator.addEventListener("click", openReminders);
+  indicator.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") openReminders(event);
+  });
 }
 
 function attachGoalActions(root, goal) {
