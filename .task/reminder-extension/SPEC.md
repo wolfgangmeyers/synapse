@@ -4,11 +4,11 @@
 
 The router remains the sole owner of reminder records, CRUD, scheduling, one-shot and recurring behavior, delay, interval, next-due calculation, delivery, retry, the reminder CLI, and the HTTP API. The WebUI uses those router-owned APIs for reminder creation and editing. It does not create a second browser store or scheduler.
 
-Creating a reminder always uses the existing normal POST flow. It does not set or require a lock. Editing body and, when shown, subject uses the existing PATCH flow. A lock is a separate `set` or `clear` action on an existing reminder.
+Creating a reminder always uses the existing normal POST flow. The create form has an optional default-off lock toggle, but POST carries no lock field or action. After an accepted POST, the WebUI sends a separate `set` control when requested. If that control fails, the reminder remains created and the UI reports the lock failure. Editing body and, when shown, subject uses the existing PATCH flow. A lock is a separate `set` or `clear` action on an existing reminder.
 
-The selected-agent conversation header owns the reminder button, matching the existing goal flag placement. With no selected agent it is disabled. With no active reminders it uses a gray/muted clock and opens the create flow; with active reminders it opens the reminder list/editor. The control remains keyboard accessible.
+The selected-agent conversation header owns the reminder button, matching the existing goal flag placement. With no selected agent it is disabled. With no active reminders it uses a gray/muted clock and opens the create flow; with active reminders it opens the reminder list/editor. Each agent-list row has a display-only clock indicator when that agent has active, enabled reminders. The row indicator has no action. The header control remains keyboard accessible.
 
-The target extension owns only an in-memory lock guard for native update and delete. The guard disappears on extension restart or reconnect. It is not reminder state, database state, a migration, an import, a creation attribute, or router authority.
+The target extension owns only an ephemeral, in-memory lock guard for native update and delete. The guard disappears on extension restart or reconnect and remains separate from reminder creation and router-owned reminder state. It is not database state, a migration, an import, a creation attribute, or router authority.
 
 Router-backed WebUI/API create, update, and delete remain permitted while the target extension has a lock. Native update and delete are rejected only while the current target extension has the matching lock. Native create, list, and unrelated operations retain current behavior.
 
@@ -91,8 +91,8 @@ Use goal control's exact source/target validation, role check, lease check, pend
 
 Keep the router-backed reminder UI and add normal CRUD plus independent lock controls:
 
-- The selected-agent conversation header has a reminder icon button beside the goal flag. With active reminders it opens the reminder list. With none it is muted gray and opens a simple create form. It is disabled when no agent is selected.
-- The create form submits a normal one-shot or recurring reminder to `POST /v1/reminders`. It includes the router's existing target, body, optional subject, `created_at`, `next_due_at`/delay, and `interval_ms` contract. Creation never sends a lock action or lock field.
+- The selected-agent conversation header has a reminder icon button beside the goal flag. With active reminders it opens the reminder list. With none it is muted gray and opens a simple create form. It is disabled when no agent is selected. Agent-list rows show a display-only clock indicator for active, enabled reminders; the indicator does not open or change anything.
+- The create form has an optional default-off lock toggle. It submits a normal one-shot or recurring reminder to `POST /v1/reminders`, including the router's existing target, body, optional subject, `created_at`, `next_due_at`/delay, and `interval_ms` contract. POST carries no lock field or action. An accepted POST is followed by a separate `set` control when selected; a failed control leaves the reminder created and reports the failure.
 - Existing reminders can edit body and optional subject through `PATCH /v1/reminders/:id`. The WebUI preserves router responses and errors, shows pending state, and leaves schedule fields under the existing router contract.
 - Render current router rows, including one-shot/recurring labels and `next_due_at` countdowns through `formatReminderCountdown` and `reminderRecurrenceLabel`. The browser does not schedule, persist, or synthesize reminder state.
 - Add set/clear controls to each existing reminder. They call only the lock relay and leave the reminder visible. Native ephemeral locks never gate WebUI POST, PATCH, or DELETE.
@@ -113,8 +113,8 @@ Use focused cases in the existing reminder/control suites: `tests/router_ui_remi
 Acceptance must prove:
 
 1. Separate WebUI set and clear use server-bound `user_interaction` identity, exact target agent/instance/lease, bounded frames, unique control IDs, expiry, disconnect cleanup, delayed-result fencing, and correlated results.
-2. The selected-agent conversation header has one keyboard-accessible reminder button beside the goal flag; it is disabled with no selected agent, muted gray with no active reminders, and opens create/list as appropriate.
-3. Normal one-shot and recurring WebUI creation sends the existing POST payload without a lock action or lock field and retains current success, validation, conflict, not-found, and error behavior.
+2. The selected-agent conversation header has one keyboard-accessible reminder button beside the goal flag; it is disabled with no selected agent, muted gray with no active reminders, and opens create/list as appropriate. Agent-list rows show a display-only clock for active, enabled reminders and provide no reminder action.
+3. Normal one-shot and recurring WebUI creation has a default-off optional lock toggle, sends the existing POST payload without a lock action or lock field, and retains current success, validation, conflict, not-found, and error behavior. An accepted POST is followed by a separate `set`; a failed `set` leaves the reminder created and reports failure.
 4. WebUI text editing sends body and optional subject through existing PATCH, retains pending/error handling, and succeeds while the target extension lock is set. Delete remains available through existing DELETE. Cover delay, interval, `next_due_at`, recurring rearm, scheduler, delivery, retry, CLI, and HTTP paths.
 5. Existing router-backed WebUI/API POST, PATCH, and DELETE paths succeed while the target extension lock is set. HTTP/WebUI API PATCH and DELETE bypass the native guard. This includes content, schedule, and target updates and delete/recreate with the same ID.
 6. Native update/delete return `reminder_locked` only for the current matching lock. Clear releases both. Native create, list, and unrelated operations remain unchanged.

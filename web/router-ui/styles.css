@@ -304,7 +304,7 @@ p:empty { display: none; }
 .goal-editor-status { min-height: 1.4em; color: var(--muted); font-size: 13px; }
 .goal-editor-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .goal-editor-actions .secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
-.goal-editor-form button:focus-visible, .goal-header-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.goal-editor-form button:focus-visible, .goal-toggle:focus-visible, .goal-header-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .reminder-indicator {
   display: inline-flex;
   align-items: center;
@@ -329,6 +329,16 @@ p:empty { display: none; }
 .reminder-indicator.empty { border-color: rgba(181,188,208,0.34); background: rgba(181,188,208,0.10); color: var(--muted); }
 .reminder-indicator.empty i { color: var(--muted); }
 .reminder-indicator:not(:disabled):hover { filter: brightness(1.12); }
+.reminder-row-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  color: #78e0cd;
+  font-size: 11px;
+  line-height: 1;
+}
 .goal-indicator {
   display: inline-flex;
   align-items: center;

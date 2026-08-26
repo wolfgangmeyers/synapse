@@ -661,13 +661,14 @@ function renderAgents() {
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
     const arrival = state.arrivalsByAgent.get(peer);
     const goal = normalizeGoalState(agent) ?? normalizeGoalProjection(agent.goal);
+    const hasReminders = reminderRowsForPeer(peer).length > 0;
     const row = document.createElement("div");
     row.tabIndex = 0;
     row.setAttribute("role", "button");
     row.dataset.agentId = peer;
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${arrival ? " has-arrival" : ""}${expanded ? " expanded" : ""}`;
     const badge = compacting ? compactingBadgeMarkup() : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
-    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><span class="agent-name-line">${goalIndicatorMarkup(goal, humanName(peer))}<strong>${escapeHtml(humanName(peer))}</strong></span>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><span class="agent-name-line">${goalIndicatorMarkup(goal, humanName(peer))}${reminderIndicatorMarkup(hasReminders, humanName(peer))}<strong>${escapeHtml(humanName(peer))}</strong></span>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -1620,8 +1621,18 @@ function clearPendingGoalControls() {
   state.pendingGoalControls.clear();
 }
 
-function clearPendingReminderLockControls() {
-  state.pendingReminderLockControls.clear();
+function clearPendingReminderLockControls({ peer, errorCode = "router_reconnecting" } = {}) {
+  const afterCreate = [];
+  for (const [controlId, pending] of state.pendingReminderLockControls) {
+    if (peer !== undefined && pending.peer !== peer) continue;
+    if (pending.afterCreate) afterCreate.push(pending);
+    state.pendingReminderLockControls.delete(controlId);
+  }
+  if (afterCreate.length === 0) return;
+  const failed = afterCreate[afterCreate.length - 1];
+  const error = reminderLockErrorMessage(errorCode);
+  setReminderDialogStatus(`Reminder created, but lock setup failed: ${error}`, true);
+  if (elements.remindersDialog?.open && state.reminderDialogPeer === failed.peer) renderReminderDialog(failed.peer);
 }
 
 function handleReminderCrudResult(event) {
@@ -1632,6 +1643,17 @@ function handleReminderCrudResult(event) {
     state.reminderDialogMode = "list";
     clearReminderDialogStatus();
     sendCommand({ type: "refresh_agents" });
+    const createdReminderId = pending.operation === "create"
+      ? event.reminderId || event.body?.reminder?.id || pending.createPayloadId
+      : undefined;
+    if (pending.lockAfterCreate) {
+      if (createdReminderId) {
+        setReminderDialogStatus("Reminder created. Setting lock…");
+        sendReminderLockControl(pending.peer, { id: createdReminderId }, "set", { afterCreate: true });
+      } else {
+        setReminderDialogStatus("Reminder created, but lock setup failed because its ID was missing.", true);
+      }
+    }
     if (elements.remindersDialog?.open) renderReminderDialog(pending.peer);
     return;
   }
@@ -1644,9 +1666,7 @@ function clearReminderLockState(peer) {
   for (const key of state.reminderLockStates.keys()) {
     if (key.startsWith(prefix)) state.reminderLockStates.delete(key);
   }
-  for (const [controlId, pending] of state.pendingReminderLockControls) {
-    if (pending.peer === peer) state.pendingReminderLockControls.delete(controlId);
-  }
+  clearPendingReminderLockControls({ peer, errorCode: "target_not_connected" });
 }
 
 function reminderLockKey(peer, reminderId) {
@@ -1658,9 +1678,13 @@ function handleReminderLockControlResult(event) {
   if (!pending || pending.peer !== event.targetAgentId || pending.instanceId !== event.targetInstanceId || pending.reminderId !== event.reminderId) return;
   state.pendingReminderLockControls.delete(event.controlId);
   const key = reminderLockKey(pending.peer, pending.reminderId);
+  const error = reminderLockErrorMessage(event.errorCode);
   state.reminderLockStates.set(key, event.accepted === true
     ? { locked: pending.action === "set", message: pending.action === "set" ? "Native edits blocked." : "Unlocked." }
-    : { locked: false, error: reminderLockErrorMessage(event.errorCode) });
+    : { locked: false, error });
+  if (pending.afterCreate) {
+    setReminderDialogStatus(event.accepted === true ? "Reminder created and locked." : `Reminder created, but lock setup failed: ${error}`, event.accepted !== true);
+  }
   if (elements.remindersDialog?.open && state.reminderDialogPeer) renderReminderDialog(state.reminderDialogPeer);
 }
 
@@ -1741,6 +1765,11 @@ function renderModelControls(agent) {
 function goalIndicatorMarkup(goal, peerName) {
   if (!goal?.enabled) return "";
   return `<button class="goal-indicator" type="button" aria-haspopup="dialog" aria-controls="goal-dialog" aria-label="Show goal for ${escapeHtml(peerName)}" title="Show goal"><i class="fa-solid fa-flag" aria-hidden="true"></i></button>`;
+}
+
+function reminderIndicatorMarkup(hasReminders, peerName) {
+  if (!hasReminders) return "";
+  return `<span class="reminder-row-indicator" aria-label="Has active reminders for ${escapeHtml(peerName)}" title="Has active reminders"><i class="fa-solid fa-clock" aria-hidden="true"></i></span>`;
 }
 
 function attachGoalActions(root, goal) {
@@ -2020,11 +2049,11 @@ function closeReminderDialog() {
 }
 
 function reminderRowsForPeer(peer) {
-  return state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
+  return state.reminders.filter((reminder) => reminder.target === peer && reminder.enabled !== false && ["scheduled", "due", "message_queued"].includes(reminder.state));
 }
 
 function renderReminderDialog(peer) {
-  const reminders = state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
+  const reminders = reminderRowsForPeer(peer);
   elements.remindersDialogBody.replaceChildren();
   if (state.reminderDialogMode === "create") {
     renderReminderEditor(peer);
@@ -2072,17 +2101,14 @@ function renderReminderItem(peer, reminder) {
   remove.textContent = "Delete";
   remove.disabled = pendingCrud;
   remove.addEventListener("click", () => sendReminderCrud(peer, "delete", reminder.id));
-  actions.append(edit, remove);
   const pending = [...state.pendingReminderLockControls.values()].some((control) => reminderLockKey(control.peer, control.reminderId) === key);
-  for (const action of ["set", "clear"]) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = action === "clear" ? "secondary" : "";
-    button.textContent = action === "set" ? "Set lock" : "Clear lock";
-    button.disabled = pending || (action === "clear" && lock?.locked !== true);
-    button.addEventListener("click", () => sendReminderLockControl(peer, reminder, action));
-    actions.append(button);
-  }
+  const lockToggle = goalToggle(`reminder-lock-toggle-${encodeURIComponent(peer)}-${encodeURIComponent(reminder.id)}`, "Reminder lock", lock?.locked === true, { lock: true });
+  lockToggle.disabled = pending;
+  lockToggle.addEventListener("click", () => {
+    const action = lockToggle.getAttribute("aria-pressed") === "true" ? "set" : "clear";
+    sendReminderLockControl(peer, reminder, action);
+  });
+  actions.append(edit, remove, lockToggle);
   item.append(status, actions);
   return item;
 }
@@ -2101,8 +2127,9 @@ function renderReminderEditor(peer) {
       const now = new Date();
       const delayMinutes = Number(form.elements.namedItem("delayMinutes").value);
       const recurring = form.querySelector("#reminder-recurring")?.getAttribute("aria-pressed") === "true";
+      const lockAfterCreate = form.querySelector("#reminder-lock-create")?.getAttribute("aria-pressed") === "true";
       if (!Number.isSafeInteger(delayMinutes) || delayMinutes < 1 || delayMinutes > 10080) { setReminderDialogStatus("Enter a delay from 1 to 10080 minutes.", true); return; }
-      sendReminderCrud(peer, "create", undefined, { id: `reminder-${crypto.randomUUID()}`, target: peer, creator: state.agentId, body, ...(subject ? { subject } : {}), created_at: now.toISOString(), next_due_at: new Date(now.getTime() + delayMinutes * 60_000).toISOString(), interval_ms: recurring ? delayMinutes * 60_000 : null });
+      sendReminderCrud(peer, "create", undefined, { id: `reminder-${crypto.randomUUID()}`, target: peer, creator: state.agentId, body, ...(subject ? { subject } : {}), created_at: now.toISOString(), next_due_at: new Date(now.getTime() + delayMinutes * 60_000).toISOString(), interval_ms: recurring ? delayMinutes * 60_000 : null }, { lockAfterCreate });
     }
   });
   form.append(reminderField("subject", "Subject", reminder?.subject || "", "Optional"));
@@ -2110,6 +2137,7 @@ function renderReminderEditor(peer) {
   if (!reminder) {
     form.append(reminderField("delayMinutes", "Send after (minutes)", "1", "1"));
     form.append(goalToggle("reminder-recurring", "Repeat every delay interval", false));
+    form.append(goalToggle("reminder-lock-create", "Reminder lock", false, { lock: true }));
   }
   const actions = document.createElement("div"); actions.className = "reminder-lock-actions";
   const save = document.createElement("button"); save.type = "submit"; save.textContent = reminder ? "Save changes" : "Create reminder";
@@ -2150,10 +2178,16 @@ function setReminderDialogStatus(message, error = false) {
   }
 }
 
-function sendReminderCrud(peer, operation, reminderId, payload) {
+function sendReminderCrud(peer, operation, reminderId, payload, { lockAfterCreate = false } = {}) {
   const requestId = `reminder-crud-${crypto.randomUUID()}`;
   clearReminderDialogStatus();
-  state.pendingReminderCrud.set(requestId, { peer, operation, reminderId });
+  state.pendingReminderCrud.set(requestId, {
+    peer,
+    operation,
+    reminderId,
+    lockAfterCreate,
+    createPayloadId: operation === "create" ? payload?.id : undefined,
+  });
   if (!sendCommand({ type: "reminder_crud", requestId, operation, ...(reminderId === undefined ? {} : { reminderId }), ...(payload === undefined ? {} : { payload }) })) {
     state.pendingReminderCrud.delete(requestId);
     setReminderDialogStatus("The router is not connected.", true);
@@ -2164,20 +2198,27 @@ function sendReminderCrud(peer, operation, reminderId, payload) {
   renderReminderDialog(peer);
 }
 
-function sendReminderLockControl(peer, reminder, action) {
+function sendReminderLockControl(peer, reminder, action, { afterCreate = false } = {}) {
   const targetInstanceId = state.agents.find((agent) => agent.agent_id === peer)?.instance_id;
   if (!targetInstanceId) {
-    state.reminderLockStates.set(reminderLockKey(peer, reminder.id), { error: "That agent is not ready for lock changes." });
+    const error = "That agent is not ready for lock changes.";
+    state.reminderLockStates.set(reminderLockKey(peer, reminder.id), { error });
+    if (afterCreate) setReminderDialogStatus(`Reminder created, but lock setup failed: ${error}`, true);
     renderReminderDialog(peer);
-    return;
+    return false;
   }
   const controlId = `reminder-lock-${crypto.randomUUID()}`;
-  state.pendingReminderLockControls.set(controlId, { peer, instanceId: targetInstanceId, reminderId: reminder.id, action });
+  state.pendingReminderLockControls.set(controlId, { peer, instanceId: targetInstanceId, reminderId: reminder.id, action, afterCreate });
   if (!sendCommand({ type: "reminder_lock_control", controlId, targetAgentId: peer, targetInstanceId, reminderId: reminder.id, action })) {
     state.pendingReminderLockControls.delete(controlId);
-    state.reminderLockStates.set(reminderLockKey(peer, reminder.id), { error: "The router is not connected." });
+    const error = "The router is not connected.";
+    state.reminderLockStates.set(reminderLockKey(peer, reminder.id), { error });
+    if (afterCreate) setReminderDialogStatus(`Reminder created, but lock setup failed: ${error}`, true);
+    renderReminderDialog(peer);
+    return false;
   }
   renderReminderDialog(peer);
+  return true;
 }
 
 function arrivalIndicatorMarkup(arrival, extraClass = "") {
