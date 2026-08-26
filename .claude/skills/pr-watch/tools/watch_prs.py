@@ -26,7 +26,7 @@ DEFAULT_REPOS = [
 DEFAULT_STATE_DIR = Path.home() / ".mecha-developer" / "pr-watch"
 MAILBOX_SEND_V2 = Path(__file__).resolve().parents[2] / "supervisor" / "tools" / "mailbox_send.py"
 
-QUIET_BOT_AUTHORS = {"app/dependabot", "dependabot[bot]"}
+QUIET_BOT_AUTHORS = {"app/dependabot", "dependabot", "dependabot[bot]"}
 SECURITY_KEYWORDS = (
     "auth",
     "oidc",
@@ -189,50 +189,97 @@ def comment_meta(repo: str, number: int) -> tuple[list[dict[str, str]], list[str
     return comments, [file.get("path") or "" for file in detail.get("files") or []]
 
 
+PULL_REQUEST_PAGE_QUERY = """
+query($owner: String!, $name: String!, $cursor: String = null) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        url
+        author { login }
+        updatedAt
+        createdAt
+        headRefOid
+        mergeStateStatus
+        reviewDecision
+        isDraft
+        statusCheckRollup {
+          contexts(first: 100) {
+            nodes {
+              ... on CheckRun { name status conclusion completedAt }
+              ... on StatusContext { name: context status: state }
+            }
+          }
+        }
+        latestReviews(first: 100) {
+          nodes { author { login } state submittedAt commit { oid } }
+        }
+        reviewRequests(first: 100) {
+          nodes {
+            requestedReviewer {
+              ... on User { login }
+              ... on Team { slug name }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def connection_nodes(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return value.get("nodes") or []
+    return value or []
+
+
 def fetch_repo(repo: str) -> list[dict[str, Any]]:
-    prs = gh_json(
-        [
-            "pr",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "open",
-            "--limit",
-            "100",
-            "--json",
-            ",".join(
-                [
-                    "number",
-                    "title",
-                    "url",
-                    "author",
-                    "updatedAt",
-                    "createdAt",
-                    "headRefOid",
-                    "mergeStateStatus",
-                    "reviewDecision",
-                    "isDraft",
-                    "statusCheckRollup",
-                    "latestReviews",
-                    "reviewRequests",
-                ]
-            ),
+    owner, name = repo.split("/", 1)
+    prs = []
+    cursor = None
+    while True:
+        args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={PULL_REQUEST_PAGE_QUERY}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
         ]
-    )
-    for pr in prs:
-        pr["repo"] = repo
-        pr["author_login"] = (pr.get("author") or {}).get("login") or ""
-        if should_fetch_detail(pr):
-            comments, files = comment_meta(repo, int(pr["number"]))
-        else:
-            comments, files = [], []
-        pr["comments_meta"] = comments
-        pr["files"] = files
-        pr["checks"] = check_summary(pr)
-        pr["reviews"] = review_summary(pr)
-        pr["review_requests"] = review_requests(pr)
-    return prs
+        if cursor:
+            args.extend(["-f", f"cursor={cursor}"])
+        response = gh_json(args)
+        page = response["data"]["repository"]["pullRequests"]
+        for pr in page.get("nodes") or []:
+            status_rollup = pr.get("statusCheckRollup") or {}
+            pr["statusCheckRollup"] = connection_nodes(status_rollup.get("contexts"))
+            pr["latestReviews"] = connection_nodes(pr.get("latestReviews"))
+            pr["reviewRequests"] = connection_nodes(pr.get("reviewRequests"))
+            pr["repo"] = repo
+            pr["author_login"] = (pr.get("author") or {}).get("login") or ""
+            if should_fetch_detail(pr):
+                comments, files = comment_meta(repo, int(pr["number"]))
+            else:
+                comments, files = [], []
+            pr["comments_meta"] = comments
+            pr["files"] = files
+            pr["checks"] = check_summary(pr)
+            pr["reviews"] = review_summary(pr)
+            pr["review_requests"] = review_requests(pr)
+            prs.append(pr)
+
+        page_info = page.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            return prs
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            raise RuntimeError(f"{repo}: GitHub returned a paginated PR page without an end cursor")
 
 
 def should_fetch_detail(pr: dict[str, Any]) -> bool:
@@ -241,7 +288,7 @@ def should_fetch_detail(pr: dict[str, Any]) -> bool:
         return False
     if pr.get("isDraft"):
         return has_bad_checks(pr)
-    if author in QUIET_BOT_AUTHORS and not has_bad_checks(pr):
+    if author in QUIET_BOT_AUTHORS:
         return False
     return True
 
@@ -404,62 +451,23 @@ def head_changed_after_viewer_review(pr: dict[str, Any], prior: dict[str, Any] |
     return (viewer_review.get("submittedAt") or "") <= prior_review_at
 
 
-def classify(pr: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any] | None:
+def classify(pr: dict[str, Any]) -> dict[str, Any] | None:
+    """Select only PRs Wolfgang is currently expected to review."""
     author = pr.get("author_login") or ""
-    if author == VIEWER:
+    if author == VIEWER or author in QUIET_BOT_AUTHORS:
+        return None
+    if VIEWER not in pr.get("review_requests", []):
         return None
 
-    checks = bad_checks(pr)
-    notes = change_notes(pr, prior)
-    if author in QUIET_BOT_AUTHORS and not checks and not keyword_hit(pr):
+    viewer_review = latest_review(pr.get("reviews") or [], VIEWER)
+    if viewer_review is None:
+        reason = "Wolfgang is requested and has not reviewed"
+    elif not viewer_review.get("commitOid"):
+        # A review without its commit cannot prove that the current head is stale.
         return None
-    if pr.get("isDraft") and not checks:
-        return None
-
-    reasons = []
-    action = "launch review-pr workflow"
-    wolfgang_current = wolfgang_is_current(pr)
-
-    if VIEWER in pr.get("review_requests", []) and not wolfgang_current:
-        reasons.append("Wolfgang is explicitly requested for review")
-
-    if pr.get("reviewDecision") == "REVIEW_REQUIRED" and not pr.get("isDraft") and not wolfgang_current:
-        reasons.append("review is required")
-
-    if checks:
-        reasons.append("checks need attention: " + ", ".join(checks[:3]))
-        action = "inspect failing checks; re-review if the failure is product-relevant"
-
-    if head_changed_after_viewer_review(pr, prior):
-        reasons.append("head changed after Wolfgang's latest review")
-        if not checks:
-            action = "re-review updated head"
-
-    if any(review["author"] == "greptile-apps" for review in external_items(pr.get("reviews") or [])) and not wolfgang_current:
-        reasons.append("Greptile has reviewed/commented")
-
-    kw = keyword_hit(pr)
-    if kw and not wolfgang_current:
-        reasons.append("touches watched area: " + ", ".join(kw[:5]))
-
-    latest_wolfgang = latest_wolfgang_activity(pr)
-    latest_author_comment = latest_time(pr.get("comments_meta") or [], author)
-    if latest_wolfgang and latest_author_comment and latest_author_comment > latest_wolfgang:
-        reasons.append("author replied after Wolfgang's last comment")
-        action = "respond to feedback or re-review existing PR"
-
-    if (
-        pr.get("reviewDecision") == "APPROVED"
-        and not checks
-        and latest_author_comment <= latest_wolfgang
-        and not reasons
-    ):
-        return None
-
-    if not reasons:
-        return None
-
-    if not notes:
+    elif viewer_review["commitOid"] != (pr.get("headRefOid") or ""):
+        reason = "head changed after Wolfgang's latest review"
+    else:
         return None
 
     return {
@@ -468,9 +476,10 @@ def classify(pr: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any]
         "title": pr["title"],
         "url": pr["url"],
         "author": author,
-        "change": "; ".join(notes),
-        "reasons": reasons,
-        "action": action,
+        "change": f"head {short_sha(pr.get('headRefOid'))}, updated {pr.get('updatedAt')}",
+        "head_sha": pr.get("headRefOid") or "",
+        "reasons": [reason],
+        "action": "run review-pr workflow",
     }
 
 
@@ -554,13 +563,15 @@ def mail_body(findings: list[dict[str, Any]], errors: list[str], path: Path, now
             f"no actionable PR changes{error_note}. Report: {path}"
         )
 
-    top = []
-    for item in findings[:6]:
-        top.append(f"{item['repo'].split('/')[-1]}#{item['number']}: {item['action']}")
-    more = "" if len(findings) <= 6 else f"; +{len(findings) - 6} more"
+    evidence = []
+    for item in findings:
+        evidence.append(
+            f"{item['repo'].split('/')[-1]}#{item['number']}: "
+            f"{'; '.join(item['reasons'])}; head {item['head_sha']}; {item['action']}"
+        )
     return (
         f"PR watch findings: {len(findings)} actionable PR(s) at {now}. "
-        f"{'; '.join(top)}{more}. Report: {path}"
+        f"{' | '.join(evidence)}. Report: {path}"
     )
 
 
@@ -596,8 +607,7 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
     }
     for pr in all_prs:
         key = f"{pr['repo']}#{pr['number']}"
-        prior = previous.get(key)
-        finding = classify(pr, prior)
+        finding = classify(pr)
         if finding:
             findings.append(finding)
         next_prs[key] = signature(pr)
@@ -617,9 +627,10 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
         state["last_report"] = str(report_path)
         save_state(state)
 
-    if send and not dry_run and report_path and (findings or (errors and quiet)):
-        subject = "PR watch findings" if findings else "PR watch quiet"
-        try_send_mail(subject, mail_body(findings, errors, report_path, now, quiet))
+    if send and not dry_run and report_path and findings:
+        try_send_mail("PR watch findings", mail_body(findings, errors, report_path, now, quiet))
+    if send and not dry_run and errors:
+        try_send_mail("PR watch error", "; ".join(errors)[:900])
 
     if dry_run:
         print(report)

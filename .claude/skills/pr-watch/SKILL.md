@@ -1,15 +1,15 @@
 ---
 name: pr-watch
-description: "Run and maintain the read-only polling GitHub PR watcher used as a lightweight substitute for the webhook PR review bot. Use when the supervisor needs PR watch triage, PR polling, or maintenance of the watcher."
+description: "Run and maintain the polling GitHub PR watcher that deterministically routes assigned PRs into the review workflow. Use when the supervisor needs PR watch triage, PR polling, or maintenance of the watcher."
 ---
 
 # PR Watch Skill
 
-Run a read-only polling watcher for PRs that may need Wolfgang's attention while the GitHub webhook review bot is not in use.
+Run a polling watcher that deterministically routes eligible PRs into Wolfgang's required review workflow while the GitHub webhook review bot is not in use.
 
-This is a polling substitute for review-bot intake, not an external communication mechanism. It does not review PRs by itself and does not post to GitHub, Slack, or any other external channel.
+`watch_prs.py` owns selection and report generation. It cannot execute an agent review or post a review. The receiving agent must run `review-pr` for every PR selected in the report.
 
-Review disposition guardrail: all findings are `COMMENT`-only, regardless of severity. Never use `REQUEST_CHANGES`; do not post a blocking review state. Preserve existing approvals and keep every concern non-blocking.
+Review disposition guardrail: never use `REQUEST_CHANGES`. Approve when the review evidence supports approval; otherwise post a `COMMENT` review.
 
 ## Reuse The Canonical Service
 
@@ -33,27 +33,37 @@ remains available through Pi settings.
 
 ### Service startup contract
 
-The running `pr-watch` Pi service owns its single durable recurrence. Its initial
-prompt must first make it read and use this skill, then run exactly:
+Under normal provisioning, the running `pr-watch` Pi service owns its single
+durable recurrence. Its initial prompt must first make it read and use this
+skill, then run exactly:
 
 ```bash
 python3 ~/.claude/skills/reminders/tools/reminders.py \
   reconcile-pr-watch --router-url http://127.0.0.1:8765
 ```
 
-This creates or reconciles exactly one **scheduled** V2 recurrence. Its target
-(the worker that receives the wakeup) is `pr-watch`; its creator (the service
-that owns the recurrence) is also `pr-watch`. The subject is `PR watch wakeup`,
-and the interval is `1800000` milliseconds (30 minutes). It is not a router job: the router only
-persists and delivers visible wakeup envelopes. The Pi agent, not its
-extension, performs the watcher scan after receiving one.
+This creates or reconciles exactly one **scheduled** V2 recurrence. Under
+normal provisioning, its target (the worker that receives the wakeup) is
+`pr-watch`; its creator (the service that owns the recurrence) is also
+`pr-watch`. The subject is `PR watch wakeup`, and the interval is `1800000`
+milliseconds (30 minutes). It is not a router job: the router only persists and
+delivers visible wakeup envelopes. The Pi agent, not its extension, performs
+the watcher scan after receiving one.
+
+Wolfgang may instead explicitly designate an existing review-agent window to
+own the recurrence. In that case, do not create a `pr-watch` worker: the
+designated window reconciles the recurrence and dispatches `PR watch wakeup`
+to its own configured agent identity as both target and creator.
 
 Reconciliation is fail-closed. It first lists the canonical router state. One
 matching scheduled recurrence is retained; duplicate or stale *scheduled*
 records owned by this service are canceled before a replacement is created.
-Ownership is the exact pair target `pr-watch` plus creator `pr-watch`, so a legacy recurrence
-with a different subject is retired rather than repeatedly waking the watcher. Do not use the
-requester's identity, `supervisor`, or a display-name variant such as `PR Watch` for either field.
+Under normal provisioning, ownership is the exact pair target `pr-watch` plus
+creator `pr-watch`, so a legacy recurrence with a different subject is retired
+rather than repeatedly waking the watcher. For an explicitly designated
+existing review-agent window, use that window's configured agent identity for
+both fields. Do not use the requester's identity, `supervisor`, or a
+display-name variant such as `PR Watch` for either field.
 A due, linked, failed, or otherwise non-scheduled owned record is never
 canceled and no replacement is created, because that could overlap a delivery.
 A failed or dead-letter record also sends `PR watch error` to `supervisor` for
@@ -70,8 +80,10 @@ reminder in response to a wakeup; startup reconciliation above is the sole
 recurrence-management step. Do not use V1 reminders, cron, `worker_send.py`,
 or terminal injection.
 
-When this Pi window visibly receives a Mailbox envelope addressed to
-`pr-watch` with subject exactly `PR watch wakeup`, treat it as one instruction:
+When the canonical `pr-watch` service visibly receives a Mailbox envelope
+addressed to `pr-watch`, or an explicitly designated existing review-agent
+window visibly receives one addressed to its own configured agent identity,
+with subject exactly `PR watch wakeup`, treat it as one instruction:
 
 ```bash
 python3 ~/.claude/skills/pr-watch/tools/watch_prs.py \
@@ -80,10 +92,17 @@ python3 ~/.claude/skills/pr-watch/tools/watch_prs.py \
 
 Run that command exactly once for that envelope. Do not run a dry-run first,
 start a loop, retry it by launching another scan, or scan again merely to
-summarize the result. Do not run `watch_prs.py` for any other Mailbox envelope,
-including an operational instruction to read this skill. Normal Mailbox
-injection/ACK only proves the envelope was delivered to Pi; it does not run the
-watcher behind the agent's back.
+summarize the result. Then read that scan's report and run `review-pr` for every
+selected PR. Do not run `watch_prs.py` for any other Mailbox envelope, including
+an operational instruction to read this skill. Normal Mailbox injection/ACK only
+proves the envelope was delivered to Pi; it does not run the watcher behind the
+agent's back.
+
+During each routed review, use only mecha-review personas for `robot-review`.
+Give each persona two or three related focus areas. A different persona must
+validate every finding before it is included in the review. Never submit
+`REQUEST_CHANGES`; submit `APPROVE` when the evidence supports it, otherwise
+submit `COMMENT`.
 
 ### Scan reporting contract
 
@@ -123,16 +142,18 @@ Default repositories:
 - `Identity-Digital/dnsid-py`
 - `Identity-Digital/dnsid-ts`
 
-The watcher flags PRs that look actionable for Wolfgang:
+For every open PR, `watch_prs.py` applies one current-state eligibility
+predicate. It selects a PR only when all of these are true:
 
-- open PRs by other authors that are ready for review or changed since prior state
-- PRs where Wolfgang is requested for review
-- PRs where Wolfgang commented/reviewed and the author later responded
-- failing checks that look review-relevant
-- Greptile or other reviewer activity needing follow-up
-- security, auth, OIDC, DNSid SDK, workflow, release, infrastructure, or cookbook changes
+- Wolfgang did not author it.
+- Dependabot did not author it.
+- Wolfgang is explicitly requested as a reviewer.
+- Wolfgang has not submitted a review, or the current head SHA differs from the
+  commit SHA of his latest review.
 
-It suppresses closed/merged PRs, Wolfgang-authored PRs, same-lane agent PRs when known, ordinary draft PRs, and quiet Dependabot churn unless checks fail or watched areas are touched.
+Prior scan state does not gate selection. State is retained only as auditable
+report history. The report records each selected PR and its precise eligibility
+reason.
 
 ## Mail Behavior
 
@@ -142,14 +163,23 @@ The watcher mails only the supervisor mailbox:
 - Subject `PR watch error` if the loop itself hits an unhandled exception.
 - Do not send quiet, scan-heartbeat, or throttle-status messages.
 
-Messages include the repo/PR, why it is actionable, what changed, and the recommended next action such as launching the review-pr workflow, re-reviewing an existing PR, responding to feedback, or continuing to monitor. For Claude Code workers, the workflow may be invoked as `/review-pr`. For Codex workers, send a plain-language instruction to read `~/code/mecha-review/.claude/skills/review-pr/SKILL.md` and execute that workflow for the PR URL; do not send slash commands to Codex.
+Messages include the repo/PR, the precise eligibility reason, current head SHA,
+and the required next action: run `review-pr` for that PR. The receiving agent
+must review every selected PR. For Claude Code workers, the workflow may be
+invoked as `/review-pr`. For Codex workers, send a plain-language instruction to
+read `~/code/mecha-review/.claude/skills/review-pr/SKILL.md` and execute that
+workflow for the PR URL; do not send slash commands to Codex.
+
+The script routes PRs through mailbox findings; it cannot execute the required
+agent review. The receiving agent follows the review disposition guardrail:
+never `REQUEST_CHANGES`, `APPROVE` when evidence supports it, otherwise
+`COMMENT`.
 
 Standing-order safety:
 
 - Do not post to Slack.
-- Do not post GitHub comments, approvals, change requests, commits, pushes, or merges.
 - Keep all external communications technical-only.
-- Use mailbox findings to route supervisor action; do not treat this watcher as user-facing notification infrastructure.
+- Use mailbox findings to route review work; do not treat this watcher as user-facing notification infrastructure.
 
 ## State And Reports
 
@@ -162,7 +192,7 @@ By default, runtime files are written under:
   reports/pr-watch-*.md
 ```
 
-The state file records each open PR's last seen head SHA, review request state, failing-check summary, and external comment/review metadata so repeated passes can distinguish new actionable changes from already-reported ones.
+The state file records each open PR's last seen head SHA, review request state, and review metadata as auditable report history. It does not determine eligibility.
 
 ## Tuning
 
