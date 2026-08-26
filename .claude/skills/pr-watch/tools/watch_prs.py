@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only GitHub PR watcher for Roger Labs repositories."""
+"""Read-only GitHub PR watcher for the toggleglobal organization."""
 
 from __future__ import annotations
 
@@ -16,14 +16,11 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_REPOS = [
-    "Roger-Labs-Inc/roger-emr",
-    "Roger-Labs-Inc/Roger-Docs-API",
-    "Roger-Labs-Inc/steve-bot",
-    "Roger-Labs-Inc/App",
-    "Roger-Labs-Inc/interview-mobile-eng",
-    "Roger-Labs-Inc/arq-ui",
-]
+WATCH_ORG = "toggleglobal"
+FRONTEND_REPOS = {
+    f"{WATCH_ORG}/web-app",
+    f"{WATCH_ORG}/web-app-lseg",
+}
 
 DEFAULT_STATE_DIR = Path.home() / ".mecha-developer" / "pr-watch"
 MAILBOX_SEND_V2 = Path(__file__).resolve().parents[2] / "supervisor" / "tools" / "mailbox_send.py"
@@ -50,12 +47,24 @@ SECURITY_KEYWORDS = (
 
 
 
+def validate_repos(repos: list[str]) -> list[str]:
+    validated = []
+    for repo in repos:
+        owner, separator, name = repo.partition("/")
+        if separator != "/" or not owner or not name or "/" in name or owner.lower() != WATCH_ORG:
+            raise ValueError(
+                f"PR watch repositories must be in {WATCH_ORG}: {repo!r}"
+            )
+        validated.append(f"{WATCH_ORG}/{name}")
+    return validated
+
+
 def env_repos() -> list[str]:
     raw = os.environ.get("PR_WATCH_REPOS")
     if not raw:
-        return DEFAULT_REPOS.copy()
+        return []
     repos = [repo.strip() for repo in raw.split(",") if repo.strip()]
-    return repos or DEFAULT_REPOS.copy()
+    return validate_repos(repos)
 
 
 REPOS = env_repos()
@@ -250,10 +259,72 @@ query($owner: String!, $name: String!, $cursor: String = null) {
 """
 
 
+ORG_REVIEW_REQUESTED_QUERY = """
+query($searchQuery: String!, $cursor: String = null) {
+  search(query: $searchQuery, type: ISSUE, first: 100, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number
+        title
+        url
+        author { login }
+        updatedAt
+        createdAt
+        headRefOid
+        mergeStateStatus
+        reviewDecision
+        isDraft
+        repository { nameWithOwner }
+        statusCheckRollup {
+          contexts(first: 100) {
+            nodes {
+              ... on CheckRun { name status conclusion completedAt }
+              ... on StatusContext { name: context status: state }
+            }
+          }
+        }
+        latestReviews(first: 100) {
+          nodes { author { login } state submittedAt commit { oid } }
+        }
+        reviewRequests(first: 100) {
+          nodes {
+            requestedReviewer {
+              ... on User { login }
+              ... on Team { slug name }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
 def connection_nodes(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, dict):
         return value.get("nodes") or []
     return value or []
+
+
+def normalize_pr(pr: dict[str, Any], repo: str) -> dict[str, Any]:
+    status_rollup = pr.get("statusCheckRollup") or {}
+    pr["statusCheckRollup"] = connection_nodes(status_rollup.get("contexts"))
+    pr["latestReviews"] = connection_nodes(pr.get("latestReviews"))
+    pr["reviewRequests"] = connection_nodes(pr.get("reviewRequests"))
+    pr["repo"] = repo
+    pr["author_login"] = (pr.get("author") or {}).get("login") or ""
+    if should_fetch_detail(pr):
+        comments, files = comment_meta(repo, int(pr["number"]))
+    else:
+        comments, files = [], []
+    pr["comments_meta"] = comments
+    pr["files"] = files
+    pr["checks"] = check_summary(pr)
+    pr["reviews"] = review_summary(pr)
+    pr["review_requests"] = review_requests(pr)
+    return pr
 
 
 def fetch_repo(repo: str) -> list[dict[str, Any]]:
@@ -276,22 +347,7 @@ def fetch_repo(repo: str) -> list[dict[str, Any]]:
         response = gh_json(args)
         page = response["data"]["repository"]["pullRequests"]
         for pr in page.get("nodes") or []:
-            status_rollup = pr.get("statusCheckRollup") or {}
-            pr["statusCheckRollup"] = connection_nodes(status_rollup.get("contexts"))
-            pr["latestReviews"] = connection_nodes(pr.get("latestReviews"))
-            pr["reviewRequests"] = connection_nodes(pr.get("reviewRequests"))
-            pr["repo"] = repo
-            pr["author_login"] = (pr.get("author") or {}).get("login") or ""
-            if should_fetch_detail(pr):
-                comments, files = comment_meta(repo, int(pr["number"]))
-            else:
-                comments, files = [], []
-            pr["comments_meta"] = comments
-            pr["files"] = files
-            pr["checks"] = check_summary(pr)
-            pr["reviews"] = review_summary(pr)
-            pr["review_requests"] = review_requests(pr)
-            prs.append(pr)
+            prs.append(normalize_pr(pr, repo))
 
         page_info = page.get("pageInfo") or {}
         if not page_info.get("hasNextPage"):
@@ -299,6 +355,35 @@ def fetch_repo(repo: str) -> list[dict[str, Any]]:
         cursor = page_info.get("endCursor")
         if not cursor:
             raise RuntimeError(f"{repo}: GitHub returned a paginated PR page without an end cursor")
+
+
+def fetch_requested_org_prs() -> list[dict[str, Any]]:
+    query = (
+        f"org:{WATCH_ORG} is:pr is:open review-requested:{VIEWER} "
+        f"-repo:{WATCH_ORG}/web-app -repo:{WATCH_ORG}/web-app-lseg"
+    )
+    prs = []
+    cursor = None
+    while True:
+        args = [
+            "api", "graphql", "-f", f"query={ORG_REVIEW_REQUESTED_QUERY}",
+            "-f", f"searchQuery={query}",
+        ]
+        if cursor:
+            args.extend(["-f", f"cursor={cursor}"])
+        response = gh_json(args)
+        page = response["data"]["search"]
+        for pr in page.get("nodes") or []:
+            repo = ((pr.get("repository") or {}).get("nameWithOwner") or "")
+            if not repo:
+                raise RuntimeError("toggleglobal search returned a pull request without a repository")
+            prs.append(normalize_pr(pr, validate_repos([repo])[0]))
+        page_info = page.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            return prs
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            raise RuntimeError("toggleglobal search returned a paginated PR page without an end cursor")
 
 
 def should_fetch_detail(pr: dict[str, Any]) -> bool:
@@ -473,7 +558,11 @@ def head_changed_after_viewer_review(pr: dict[str, Any], prior: dict[str, Any] |
 def classify(pr: dict[str, Any]) -> dict[str, Any] | None:
     """Select only PRs Wolfgang is currently expected to review."""
     author = pr.get("author_login") or ""
-    if author == VIEWER or author in QUIET_BOT_AUTHORS:
+    if (
+        (pr.get("repo") or "").lower() in FRONTEND_REPOS
+        or author == VIEWER
+        or author in QUIET_BOT_AUTHORS
+    ):
         return None
     if VIEWER not in pr.get("review_requests", []):
         return None
@@ -509,7 +598,7 @@ def render_report(
         "# PR Watch Report",
         "",
         f"Generated: {now}",
-        f"Repos checked: {', '.join(REPOS)}",
+        f"Scope: {', '.join(REPOS) if REPOS else f'{WATCH_ORG} requested reviews'}",
         f"Open PRs seen: {len(all_prs)}",
         f"Actionable findings: {len(findings)}",
         "",
@@ -593,18 +682,28 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
     errors = []
     failed_repos = set()
 
-    for repo in REPOS:
+    if REPOS:
+        for repo in REPOS:
+            try:
+                all_prs.extend(fetch_repo(repo))
+            except Exception as exc:  # noqa: BLE001 - keep loop alive and report the repo failure.
+                errors.append(f"{repo}: {exc}")
+                failed_repos.add(repo)
+    else:
         try:
-            all_prs.extend(fetch_repo(repo))
-        except Exception as exc:  # noqa: BLE001 - keep loop alive and report the repo failure.
-            errors.append(f"{repo}: {exc}")
-            failed_repos.add(repo)
+            all_prs.extend(fetch_requested_org_prs())
+        except Exception as exc:  # noqa: BLE001 - keep loop alive and report the scope failure.
+            errors.append(f"{WATCH_ORG}: {exc}")
+            failed_repos.add(WATCH_ORG)
 
     findings = []
     next_prs = {
         key: value
         for key, value in previous.items()
-        if key.split("#", 1)[0] in failed_repos
+        if (
+            key.split("#", 1)[0] in failed_repos
+            or (WATCH_ORG in failed_repos and key.startswith(f"{WATCH_ORG}/"))
+        )
     }
     for pr in all_prs:
         key = f"{pr['repo']}#{pr['number']}"
@@ -642,7 +741,7 @@ def apply_args(args: argparse.Namespace) -> None:
     global REPOS, VIEWER, MAILBOX_TO, MAILBOX_FROM
 
     if args.repo:
-        REPOS = args.repo
+        REPOS = validate_repos(args.repo)
     if args.state_dir:
         configure_paths(Path(args.state_dir))
     if args.viewer:
