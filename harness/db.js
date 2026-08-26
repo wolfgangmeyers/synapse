@@ -284,6 +284,7 @@ class MessageRepository {
   #maxQueuedMessages;
   #maxQueuedBytes;
   #maxBatchBodyChars;
+  #reminderIncarnations = new Map();
 
   constructor(database, clock, databasePath, { maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars }) {
     this.#database = database;
@@ -296,6 +297,7 @@ class MessageRepository {
   }
 
   close() {
+    this.#reminderIncarnations.clear();
     this.#database.close();
   }
 
@@ -355,6 +357,7 @@ class MessageRepository {
         if (!sameReminder(existing, candidate)) {
           throw new ReminderIdempotencyConflictError(candidate.id);
         }
+        if (!this.#reminderIncarnations.has(candidate.id)) this.#reminderIncarnations.set(candidate.id, randomUUID());
         return { created: false, reminder: existing };
       }
       this.#database.prepare(`
@@ -379,12 +382,26 @@ class MessageRepository {
         candidate.interval_ms,
         candidate.sentinel === undefined ? null : JSON.stringify(candidate.sentinel),
       );
+      this.#reminderIncarnations.set(candidate.id, randomUUID());
       return { created: true, reminder: selectReminder(this.#database, candidate.id) };
     });
   }
 
   reminderFor(reminderId) {
     return selectReminder(this.#database, reminderId);
+  }
+
+  reminderIncarnationFor(reminderId) {
+    if (selectReminder(this.#database, reminderId) === undefined) {
+      this.#reminderIncarnations.delete(reminderId);
+      return undefined;
+    }
+    let incarnation = this.#reminderIncarnations.get(reminderId);
+    if (incarnation === undefined) {
+      incarnation = randomUUID();
+      this.#reminderIncarnations.set(reminderId, incarnation);
+    }
+    return incarnation;
   }
 
   reminders() {
@@ -439,6 +456,7 @@ class MessageRepository {
           current.linked_message_state,
         );
       }
+      this.#reminderIncarnations.delete(reminderId);
       return { canceled: true, reminder };
     });
   }
@@ -464,10 +482,16 @@ class MessageRepository {
           linked.linked_message_state,
         );
       }
+      const canceledIds = this.#database.prepare(`
+        SELECT id
+        FROM reminders
+        WHERE state = 'failed' OR (state = 'scheduled' AND linked_message_id IS NULL)
+      `).all().map(({ id }) => id);
       const result = this.#database.prepare(`
         DELETE FROM reminders
         WHERE state = 'failed' OR (state = 'scheduled' AND linked_message_id IS NULL)
       `).run();
+      for (const reminderId of canceledIds) this.#reminderIncarnations.delete(reminderId);
       return { canceled: result.changes };
     });
   }
@@ -1135,7 +1159,7 @@ class MessageRepository {
           SET state = 'acknowledged'
           WHERE id = ?
         `).run(delivery.message_id);
-        completeLinkedReminder(this.#database, delivery.message_id);
+        completeLinkedReminder(this.#database, delivery.message_id, this.#reminderIncarnations);
         this.#database.prepare("DELETE FROM messages WHERE id = ?").run(delivery.message_id);
       }
       return {
@@ -1239,7 +1263,7 @@ class MessageRepository {
         ORDER BY enqueue_sequence ASC
       `).all(now).map(({ id }) => id);
       for (const id of expired) {
-        completeLinkedReminder(this.#database, id);
+        completeLinkedReminder(this.#database, id, this.#reminderIncarnations);
         this.#database.prepare(`
           DELETE FROM messages
           WHERE id = ?
@@ -1282,10 +1306,16 @@ class MessageRepository {
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const message = selectMessage(this.#database, messageId);
       if (message === undefined || message.state !== "dead_letter") return false;
+      const failedReminderIds = this.#database.prepare(`
+        SELECT id
+        FROM reminders
+        WHERE linked_message_id = ? AND state = 'failed'
+      `).all(messageId).map(({ id }) => id);
       this.#database.prepare(`
         DELETE FROM reminders
         WHERE linked_message_id = ? AND state = 'failed'
       `).run(messageId);
+      for (const reminderId of failedReminderIds) this.#reminderIncarnations.delete(reminderId);
       const result = this.#database.prepare(`
         DELETE FROM messages
         WHERE id = ? AND state = 'dead_letter'
@@ -2682,13 +2712,21 @@ function fireDueRecurringReminder(database, reminder, now, limits) {
   };
 }
 
-function completeLinkedReminder(database, messageId) {
+function completeLinkedReminder(database, messageId, reminderIncarnations) {
+  const completedReminderIds = database.prepare(`
+    SELECT id
+    FROM reminders
+    WHERE linked_message_id = ?
+      AND interval_ms IS NULL
+      AND state = 'message_queued'
+  `).all(messageId).map(({ id }) => id);
   database.prepare(`
     DELETE FROM reminders
     WHERE linked_message_id = ?
       AND interval_ms IS NULL
       AND state = 'message_queued'
   `).run(messageId);
+  for (const reminderId of completedReminderIds) reminderIncarnations.delete(reminderId);
   database.prepare(`
     UPDATE reminders
     SET state = 'scheduled', linked_message_id = NULL
