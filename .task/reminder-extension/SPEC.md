@@ -6,7 +6,7 @@ The router remains the sole owner of reminder records, CRUD, scheduling, one-sho
 
 Creating a reminder always uses the existing normal POST flow. It does not set or require a lock. Editing body and, when shown, subject uses the existing PATCH flow. A lock is a separate `set` or `clear` action on an existing reminder.
 
-Wolfgang's corrected direction overrides the earlier read-only WebUI wording in this task: every agent row always shows a reminder button. Rows with no active reminders use a gray/muted icon, and that button opens the create flow. Rows with reminders use the existing reminder affordance and open the reminder list/editor. The control remains a discoverable, keyboard-accessible button in both states.
+The selected-agent conversation header owns the reminder button, matching the existing goal flag placement. With no selected agent it is disabled. With no active reminders it uses a gray/muted clock and opens the create flow; with active reminders it opens the reminder list/editor. The control remains keyboard accessible.
 
 The target extension owns only an in-memory lock guard for native update and delete. The guard disappears on extension restart or reconnect. It is not reminder state, database state, a migration, an import, a creation attribute, or router authority.
 
@@ -91,7 +91,7 @@ Use goal control's exact source/target validation, role check, lease check, pend
 
 Keep the router-backed reminder UI and add normal CRUD plus independent lock controls:
 
-- Every connected agent row has a reminder icon button. With active reminders it opens the reminder list. With none it is muted gray and opens a simple create form.
+- The selected-agent conversation header has a reminder icon button beside the goal flag. With active reminders it opens the reminder list. With none it is muted gray and opens a simple create form. It is disabled when no agent is selected.
 - The create form submits a normal one-shot or recurring reminder to `POST /v1/reminders`. It includes the router's existing target, body, optional subject, `created_at`, `next_due_at`/delay, and `interval_ms` contract. Creation never sends a lock action or lock field.
 - Existing reminders can edit body and optional subject through `PATCH /v1/reminders/:id`. The WebUI preserves router responses and errors, shows pending state, and leaves schedule fields under the existing router contract.
 - Render current router rows, including one-shot/recurring labels and `next_due_at` countdowns through `formatReminderCountdown` and `reminderRecurrenceLabel`. The browser does not schedule, persist, or synthesize reminder state.
@@ -113,7 +113,7 @@ Use focused cases in the existing reminder/control suites: `tests/router_ui_remi
 Acceptance must prove:
 
 1. Separate WebUI set and clear use server-bound `user_interaction` identity, exact target agent/instance/lease, bounded frames, unique control IDs, expiry, disconnect cleanup, delayed-result fencing, and correlated results.
-2. Every agent row has a reminder button, including a muted empty-state button, and clicking it is discoverable and keyboard accessible.
+2. The selected-agent conversation header has one keyboard-accessible reminder button beside the goal flag; it is disabled with no selected agent, muted gray with no active reminders, and opens create/list as appropriate.
 3. Normal one-shot and recurring WebUI creation sends the existing POST payload without a lock action or lock field and retains current success, validation, conflict, not-found, and error behavior.
 4. WebUI text editing sends body and optional subject through existing PATCH, retains pending/error handling, and succeeds while the target extension lock is set. Delete remains available through existing DELETE. Cover delay, interval, `next_due_at`, recurring rearm, scheduler, delivery, retry, CLI, and HTTP paths.
 5. Existing router-backed WebUI/API POST, PATCH, and DELETE paths succeed while the target extension lock is set. HTTP/WebUI API PATCH and DELETE bypass the native guard. This includes content, schedule, and target updates and delete/recreate with the same ID.

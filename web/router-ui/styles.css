@@ -324,10 +324,11 @@ p:empty { display: none; }
   line-height: 1;
 }
 .reminder-indicator:focus-visible { outline: 2px solid #b9f5e7; outline-offset: 2px; }
+.reminder-indicator:disabled { opacity: 0.55; cursor: default; }
 .reminder-indicator i { color: #78e0cd; }
 .reminder-indicator.empty { border-color: rgba(181,188,208,0.34); background: rgba(181,188,208,0.10); color: var(--muted); }
 .reminder-indicator.empty i { color: var(--muted); }
-.reminder-indicator:hover { filter: brightness(1.12); }
+.reminder-indicator:not(:disabled):hover { filter: brightness(1.12); }
 .goal-indicator {
   display: inline-flex;
   align-items: center;

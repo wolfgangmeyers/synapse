@@ -131,6 +131,7 @@ const elements = {
   goalDialogBody: document.querySelector("#goal-dialog-body"),
   goalDialogFooter: document.querySelector("#goal-dialog-footer"),
   goalHeaderButton: document.querySelector("#goal-header-button"),
+  reminderHeaderButton: document.querySelector("#reminder-header-button"),
   modelControls: document.querySelector("#model-controls"),
   modelPicker: document.querySelector("#model-picker"),
   modelCurrent: document.querySelector("#model-current"),
@@ -173,6 +174,9 @@ elements.addRouter.addEventListener("click", () => {
 });
 elements.goalHeaderButton.addEventListener("click", () => {
   if (state.selectedPeer) openGoalEditor(state.selectedPeer, elements.goalHeaderButton);
+});
+elements.reminderHeaderButton.addEventListener("click", () => {
+  if (state.selectedPeer) openReminderDialog(state.selectedPeer, reminderRowsForPeer(state.selectedPeer).length === 0 ? "create" : "list", elements.reminderHeaderButton);
 });
 elements.refresh.addEventListener("click", () => sendCommand({ type: "refresh_agents" }));
 elements.modelCurrent.addEventListener("click", () => {
@@ -273,6 +277,7 @@ async function handleEvent(event) {
   if (event.type === "reminders") {
     state.reminders = Array.isArray(event.reminders) ? event.reminders : [];
     renderAgents();
+    renderConversation();
     if (elements.remindersDialog?.open && state.reminderDialogPeer) renderReminderDialog(state.reminderDialogPeer);
     return;
   }
@@ -655,7 +660,6 @@ function renderAgents() {
     const canExpandSubagents = subagents.length > 0;
     const expanded = canExpandSubagents && state.expandedSubagents.has(peer);
     const arrival = state.arrivalsByAgent.get(peer);
-    const reminders = state.reminders.filter((reminder) => reminder.target === peer && ["scheduled", "due", "message_queued"].includes(reminder.state));
     const goal = normalizeGoalState(agent) ?? normalizeGoalProjection(agent.goal);
     const row = document.createElement("div");
     row.tabIndex = 0;
@@ -663,7 +667,7 @@ function renderAgents() {
     row.dataset.agentId = peer;
     row.className = `agent-row${peer === state.selectedPeer ? " active" : ""}${active ? " working" : ""}${compacting ? " compacting" : ""}${subagentCount > 0 ? " has-subagents" : ""}${arrival ? " has-arrival" : ""}${expanded ? " expanded" : ""}`;
     const badge = compacting ? compactingBadgeMarkup() : subagentBadgeMarkup(peer, subagentCount, subagents, expanded, "row");
-    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><span class="agent-name-line">${reminderIndicatorMarkup(reminders, humanName(peer))}${goalIndicatorMarkup(goal, humanName(peer))}<strong>${escapeHtml(humanName(peer))}</strong></span>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
+    row.innerHTML = `<span class="avatar${compacting ? " compacting" : ""}">${escapeHtml(monogram(peer))}</span><span class="agent-row-text"><span class="agent-name-line">${goalIndicatorMarkup(goal, humanName(peer))}<strong>${escapeHtml(humanName(peer))}</strong></span>${badge}${arrivalIndicatorMarkup(arrival)}</span>${active ? '<span class="working-indicator" aria-label="Agent is working"><span></span></span>' : ""}`;
     row.addEventListener("click", () => selectPeer(peer));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -672,7 +676,6 @@ function renderAgents() {
       }
     });
     attachSubagentToggle(row, peer, canExpandSubagents, renderAgents);
-    attachReminderActions(row, reminders);
     attachGoalActions(row, goal);
     attachArrivalActions(row, arrival);
     return row;
@@ -880,17 +883,26 @@ function renderConversation() {
   elements.peerAvatar.className = `avatar${peer ? "" : " muted"}`;
   const selectedAgent = state.agents.find((agent) => agent.agent_id === peer);
   const hasGoal = (normalizeGoalState(selectedAgent) ?? normalizeGoalProjection(selectedAgent?.goal))?.enabled === true;
+  const reminders = reminderRowsForPeer(peer);
   elements.goalHeaderButton.disabled = !peer;
   elements.goalHeaderButton.classList.toggle("has-goal", hasGoal);
   elements.goalHeaderButton.innerHTML = '<i class="fa-solid fa-flag" aria-hidden="true"></i>';
   const goalLabel = hasGoal ? `Edit goal for ${humanName(peer)}` : `Set goal for ${humanName(peer)}`;
   elements.goalHeaderButton.setAttribute("aria-label", peer ? goalLabel : "Select an agent to set a goal");
   elements.goalHeaderButton.title = peer ? goalLabel : "Select an agent to set a goal";
+  elements.reminderHeaderButton.disabled = !peer;
+  elements.reminderHeaderButton.classList.toggle("empty", reminders.length === 0);
+  const reminderLabel = peer
+    ? (reminders.length === 0 ? `Add a reminder for ${humanName(peer)}` : `Show ${reminders.length} active reminder${reminders.length === 1 ? "" : "s"} for ${humanName(peer)}`)
+    : "Select an agent to add a reminder";
+  elements.reminderHeaderButton.setAttribute("aria-label", reminderLabel);
+  elements.reminderHeaderButton.title = reminderLabel;
+  elements.reminderHeaderButton.innerHTML = '<i class="fa-solid fa-clock" aria-hidden="true"></i>';
   renderModelControls(selectedAgent);
   const active = selectedAgent?.activity_state === "active";
   const compacting = selectedAgent?.activity_state === "compacting";
   elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}${compacting ? compactingBadgeMarkup("inline") : ""}` : "Pick an agent";
-  elements.peerName.append(elements.goalHeaderButton);
+  elements.peerName.append(elements.reminderHeaderButton, elements.goalHeaderButton);
   const subagents = normalizeSubagents(selectedAgent?.subagents);
   const subagentCount = Math.max(subagents.length, Number.isSafeInteger(selectedAgent?.subagent_count) ? selectedAgent.subagent_count : 0);
   const expanded = subagents.length > 0 && state.expandedSubagents.has(peer);
@@ -1731,12 +1743,6 @@ function goalIndicatorMarkup(goal, peerName) {
   return `<button class="goal-indicator" type="button" aria-haspopup="dialog" aria-controls="goal-dialog" aria-label="Show goal for ${escapeHtml(peerName)}" title="Show goal"><i class="fa-solid fa-flag" aria-hidden="true"></i></button>`;
 }
 
-function reminderIndicatorMarkup(reminders, peerName) {
-  const empty = reminders.length === 0;
-  const reminderLabel = empty ? `Add a reminder for ${peerName}` : `Show ${reminders.length} active reminder${reminders.length === 1 ? "" : "s"} for ${peerName}`;
-  return `<button class="reminder-indicator${empty ? " empty" : ""}" type="button" aria-haspopup="dialog" aria-controls="reminders-dialog" aria-label="${escapeHtml(reminderLabel)}" title="${escapeHtml(reminderLabel)}"><i class="fa-solid fa-clock" aria-hidden="true"></i></button>`;
-}
-
 function attachGoalActions(root, goal) {
   if (!goal) return;
   const indicator = root.querySelector(".goal-indicator");
@@ -1980,22 +1986,6 @@ function sendGoalControl() {
   setGoalDialogStatus("Saving…");
 }
 
-function attachReminderActions(root, reminders) {
-  const indicator = root.querySelector(".reminder-indicator");
-  if (!indicator) return;
-  const openReminder = (event) => {
-    event.stopPropagation();
-    event.preventDefault();
-    const peer = root.dataset.agentId;
-    openReminderDialog(peer, reminders.length === 0 ? "create" : "list", indicator);
-  };
-  indicator.addEventListener("click", openReminder);
-  indicator.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    openReminder(event);
-  });
-}
-
 function openReminderDialog(peer, mode, returnFocus) {
   clearReminderDialogStatus();
   state.reminderDialogPeer = peer;
@@ -2110,7 +2100,7 @@ function renderReminderEditor(peer) {
     else {
       const now = new Date();
       const delayMinutes = Number(form.elements.namedItem("delayMinutes").value);
-      const recurring = form.elements.namedItem("recurring").checked;
+      const recurring = form.querySelector("#reminder-recurring")?.getAttribute("aria-pressed") === "true";
       if (!Number.isSafeInteger(delayMinutes) || delayMinutes < 1 || delayMinutes > 10080) { setReminderDialogStatus("Enter a delay from 1 to 10080 minutes.", true); return; }
       sendReminderCrud(peer, "create", undefined, { id: `reminder-${crypto.randomUUID()}`, target: peer, creator: state.agentId, body, ...(subject ? { subject } : {}), created_at: now.toISOString(), next_due_at: new Date(now.getTime() + delayMinutes * 60_000).toISOString(), interval_ms: recurring ? delayMinutes * 60_000 : null });
     }
@@ -2119,11 +2109,7 @@ function renderReminderEditor(peer) {
   form.append(reminderField("body", "Reminder", reminder?.body || "", "What should be sent?", "textarea"));
   if (!reminder) {
     form.append(reminderField("delayMinutes", "Send after (minutes)", "1", "1"));
-    const label = document.createElement("label");
-    const recurring = document.createElement("input");
-    recurring.type = "checkbox"; recurring.name = "recurring";
-    label.append(recurring, document.createTextNode(" Repeat every delay interval"));
-    form.append(label);
+    form.append(goalToggle("reminder-recurring", "Repeat every delay interval", false));
   }
   const actions = document.createElement("div"); actions.className = "reminder-lock-actions";
   const save = document.createElement("button"); save.type = "submit"; save.textContent = reminder ? "Save changes" : "Create reminder";
