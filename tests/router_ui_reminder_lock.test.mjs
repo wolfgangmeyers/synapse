@@ -200,7 +200,10 @@ test("reminder controls remain separate from normal CRUD and creation", async ()
   assert.doesNotMatch(app, /locked.*reminder\.id|reminder\.locked/);
   assert.doesNotMatch(app, /reminder_lock_control[\s\S]{0,300}action:\s*["']create["']/);
   assert.match(server, /load\("\/v1\/reminders"\)/);
-  assert.match(html, /id="reminders-dialog-body"/);
+  assert.match(html, /id="reminder-header-button"[^>]*aria-controls="reminders-dialog"/);
+  assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton, elements\.goalHeaderButton\)/);
+  assert.doesNotMatch(app, /reminderIndicatorMarkup/);
+  assert.match(styles, /\.reminder-indicator/);
   assert.match(styles, /\.reminder-list-item/);
 });
 

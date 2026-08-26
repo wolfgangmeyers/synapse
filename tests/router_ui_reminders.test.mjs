@@ -28,13 +28,17 @@ test("reminder dialog markup uses countdown and recurrence labels", async () => 
   assert.doesNotMatch(app, /<small>\$\{escapeHtml\(reminder\.next_due_at \|\| ""\)\}<\/small>/);
 });
 
-test("every reminder indicator is a muted empty-state button with keyboard activation", async () => {
+test("the selected-agent header owns the reminder button", async () => {
   const app = await appSource();
-  assert.match(app, /const empty = reminders\.length === 0;/);
-  assert.equal(app.includes('class="reminder-indicator${empty ? " empty" : ""}'), true);
-  assert.equal(app.includes('indicator.addEventListener("click", openReminder);'), true);
-  assert.equal(app.includes('event.key !== "Enter" && event.key !== " "'), true);
-  assert.equal(app.includes('openReminderDialog(peer, reminders.length === 0 ? "create" : "list", indicator)'), true);
+  const html = await readFile(new URL("../web/router-ui/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="reminder-header-button"[^>]*aria-controls="reminders-dialog"[^>]*disabled/);
+  assert.match(app, /reminderHeaderButton: document\.querySelector\("#reminder-header-button"\)/);
+  assert.match(app, /elements\.reminderHeaderButton\.disabled = !peer/);
+  assert.match(app, /elements\.reminderHeaderButton\.classList\.toggle\("empty", reminders\.length === 0\)/);
+  assert.match(app, /openReminderDialog\(state\.selectedPeer, reminderRowsForPeer\(state\.selectedPeer\)\.length === 0 \? "create" : "list", elements\.reminderHeaderButton\)/);
+  assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton, elements\.goalHeaderButton\)/);
+  assert.doesNotMatch(app, /attachReminderActions\(row/);
+  assert.doesNotMatch(app, /function reminderIndicatorMarkup/);
 });
 
 test("WebUI reminder CRUD uses normal router POST and PATCH without lock actions", async () => {
@@ -43,6 +47,9 @@ test("WebUI reminder CRUD uses normal router POST and PATCH without lock actions
   assert.equal(app.includes('type: "reminder_crud"'), true);
   assert.equal(app.includes('sendReminderCrud(peer, "create"'), true);
   assert.equal(app.includes('interval_ms: recurring ? delayMinutes * 60_000 : null'), true);
+  assert.equal(app.includes('form.querySelector("#reminder-recurring")?.getAttribute("aria-pressed") === "true"'), true);
+  assert.equal(app.includes('recurring.type = "checkbox"'), false);
+  assert.equal(app.includes('goalToggle("reminder-recurring", "Repeat every delay interval", false)'), true);
   assert.equal(app.includes('sendReminderCrud(peer, "update"'), true);
   assert.equal(app.includes('{ body, subject: subject || null }'), true);
   assert.equal(app.includes('type: "reminder_crud", controlId'), false);
@@ -80,6 +87,13 @@ test("reminder CRUD status is dialog-level and survives list redraws", async () 
   assert.match(app, /setReminderDialogStatus\(event\.body\?\.error\?\.message[\s\S]*renderReminderDialog\(pending\.peer\)/);
   assert.match(app, /elements\.remindersDialog\.addEventListener\("close",[\s\S]*clearReminderDialogStatus\(\)/);
   assert.match(app, /function sendReminderCrud\([\s\S]*clearReminderDialogStatus\(\)/);
+});
+
+test("received reminders events redraw agents and the selected conversation", async () => {
+  const app = await appSource();
+  const remindersEvent = app.slice(app.indexOf('if (event.type === "reminders") {'), app.indexOf('if (event.type === "reminders") {') + 400);
+  assert.match(remindersEvent, /renderAgents\(\);/);
+  assert.match(remindersEvent, /renderConversation\(\);/);
 });
 
 test("reminder dialog redraws from current active reminders after a state transition", async () => {
