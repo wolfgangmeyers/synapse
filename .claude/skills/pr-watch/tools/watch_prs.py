@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -45,15 +46,6 @@ SECURITY_KEYWORDS = (
 )
 
 
-def env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if not value:
-        return default
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
-
 
 def validate_repos(repos: list[str]) -> list[str]:
     validated = []
@@ -76,12 +68,9 @@ def env_repos() -> list[str]:
 
 
 REPOS = env_repos()
-CADENCE_SECONDS = env_int("PR_WATCH_CADENCE_SECONDS", 15 * 60)
-HEARTBEAT_SECONDS = env_int("PR_WATCH_HEARTBEAT_SECONDS", 60 * 60)
 VIEWER = os.environ.get("PR_WATCH_VIEWER", "wolfgangmeyers")
 MAILBOX_TO = os.environ.get("PR_WATCH_MAIL_TO", "supervisor")
 MAILBOX_FROM = os.environ.get("PR_WATCH_MAIL_FROM", "pr-watch")
-ROUTER_URL = os.environ.get("MECHA_ROUTER_URL")
 
 STATE_DIR = Path(os.environ.get("PR_WATCH_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser()
 STATE_PATH = STATE_DIR / "watch-state.json"
@@ -111,15 +100,44 @@ def run(cmd: list[str]) -> str:
     return proc.stdout
 
 
+TRANSIENT_GH_HTTP_CODES = ("502", "503", "504")
+RETRY_DELAYS_SECONDS = (0.2, 0.4)
+
+
+def is_transient_gh_error(exc: Exception) -> bool:
+    message = str(exc)
+    codes = "|".join(TRANSIENT_GH_HTTP_CODES)
+    return "gh" in message and bool(re.search(rf"\b(?:{codes})\b", message))
+
+
 def gh_json(args: list[str]) -> Any:
-    return json.loads(run(["gh", *args]))
+    for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
+        try:
+            return json.loads(run(["gh", *args]))
+        except Exception as exc:  # noqa: BLE001 - retry only known transient gh outages.
+            if not is_transient_gh_error(exc) or attempt == len(RETRY_DELAYS_SECONDS):
+                raise
+            time.sleep(RETRY_DELAYS_SECONDS[attempt])
+    raise AssertionError("unreachable")
 
 
 def load_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
-        return {"prs": {}, "last_heartbeat_at": None}
+        return {"prs": {}}
     with STATE_PATH.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def normalize_error_signature(errors: list[str]) -> str:
+    normalized = []
+    for error in errors:
+        compact = re.sub(r"\s+", " ", error).strip()
+        if "gh" in compact and re.search(r"\bHTTP 5(?:02|03|04)\b", compact):
+            repo, separator, _detail = compact.partition(": ")
+            if separator:
+                compact = f"{repo}: gh request failed (HTTP 5xx)"
+        normalized.append(compact)
+    return "\n".join(sorted(normalized))
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -339,21 +357,13 @@ def fetch_repo(repo: str) -> list[dict[str, Any]]:
             raise RuntimeError(f"{repo}: GitHub returned a paginated PR page without an end cursor")
 
 
-CAPACITY_FAILURE_STATUS_CODES = ("502", "503", "504")
-RESOURCE_LIMIT_FAILURE_MARKERS = (
-    "resource limit",
-    "resource-limit",
-    "resource_limit",
-    "resource exhausted",
-)
+RESOURCE_LIMIT_FAILURE_MARKERS = ("resource limit", "resource-limit", "resource_limit", "resource exhausted")
 
 
 def is_capacity_failure(exc: Exception) -> bool:
     message = str(exc).lower()
-    return (
-        re.search(r"\b(?:" + "|".join(CAPACITY_FAILURE_STATUS_CODES) + r")\b", message)
-        is not None
-        or any(marker in message for marker in RESOURCE_LIMIT_FAILURE_MARKERS)
+    return bool(re.search(r"\b(?:502|503|504)\b", message)) or any(
+        marker in message for marker in RESOURCE_LIMIT_FAILURE_MARKERS
     )
 
 
@@ -365,10 +375,7 @@ def fetch_requested_org_prs_query(page_size: int) -> list[dict[str, Any]]:
     nodes = []
     cursor = None
     while True:
-        args = [
-            "api", "graphql", "-f", f"query={ORG_REVIEW_REQUESTED_QUERY}",
-            "-f", f"searchQuery={query}", "-f", f"pageSize={page_size}",
-        ]
+        args = ["api", "graphql", "-f", f"query={ORG_REVIEW_REQUESTED_QUERY}", "-f", f"searchQuery={query}", "-f", f"pageSize={page_size}"]
         if cursor:
             args.extend(["-f", f"cursor={cursor}"])
         response = gh_json(args)
@@ -388,10 +395,8 @@ def fetch_requested_org_prs() -> list[dict[str, Any]]:
     except Exception as exc:
         if not is_capacity_failure(exc):
             raise
-        # Restarting avoids combining pages from the failed high-capacity search
-        # with a lower-capacity retry that may observe a different result set.
+        # Restart from the first cursor to keep the fallback result set consistent.
         nodes = fetch_requested_org_prs_query(20)
-
     prs = []
     for pr in nodes:
         repo = ((pr.get("repository") or {}).get("nameWithOwner") or "")
@@ -607,10 +612,7 @@ def classify(pr: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def render_report(
-    findings: list[dict[str, Any]],
-    all_prs: list[dict[str, Any]],
-    errors: list[str],
-    now: str,
+    findings: list[dict[str, Any]], all_prs: list[dict[str, Any]], errors: list[str], now: str,
     discovery_incomplete: bool = False,
 ) -> str:
     lines = [
@@ -642,12 +644,8 @@ def render_report(
                 ]
             )
     else:
-        finding_status = (
-            "Discovery incomplete; actionable PRs are unknown."
-            if discovery_incomplete
-            else "No actionable PRs in this pass."
-        )
-        lines.extend(["## Findings", "", finding_status, ""])
+        status = "Discovery incomplete; actionable PRs are unknown." if discovery_incomplete else "No actionable PRs in this pass."
+        lines.extend(["## Findings", "", status, ""])
 
     lines.extend(["## Open PR Inventory", ""])
     for pr in sorted(all_prs, key=lambda item: (item["repo"], int(item["number"]))):
@@ -671,13 +669,10 @@ def write_report(report: str, now: str) -> Path:
 
 
 def send_mail(subject: str, body: str) -> None:
-    command = [
+    run([
         "python3", str(MAILBOX_SEND_V2), "--to", MAILBOX_TO,
         "--from", MAILBOX_FROM, "--subject", subject, "--body", body,
-    ]
-    if ROUTER_URL:
-        command.extend(["--router-url", ROUTER_URL])
-    run(command)
+    ])
 
 
 def try_send_mail(subject: str, body: str) -> None:
@@ -687,14 +682,7 @@ def try_send_mail(subject: str, body: str) -> None:
         print(f"PR watch mail send failed: {exc}", file=sys.stderr)
 
 
-def mail_body(findings: list[dict[str, Any]], errors: list[str], path: Path, now: str, quiet: bool) -> str:
-    if quiet:
-        error_note = "" if not errors else f"; {len(errors)} repo check error(s)"
-        return (
-            f"PR watch quiet heartbeat: checked {', '.join(REPOS) if REPOS else WATCH_ORG} at {now}; "
-            f"no actionable PR changes{error_note}. Report: {path}"
-        )
-
+def mail_body(findings: list[dict[str, Any]], errors: list[str], path: Path, now: str) -> str:
     evidence = []
     for item in findings:
         evidence.append(
@@ -706,14 +694,6 @@ def mail_body(findings: list[dict[str, Any]], errors: list[str], path: Path, now
         f"{' | '.join(evidence)}. Report: {path}"
     )
 
-
-def heartbeat_due(state: dict[str, Any], now: str) -> bool:
-    last = state.get("last_heartbeat_at")
-    if not last:
-        return True
-    last_ts = datetime.fromisoformat(last.replace("Z", "+00:00")).timestamp()
-    now_ts = datetime.fromisoformat(now.replace("Z", "+00:00")).timestamp()
-    return now_ts - last_ts >= HEARTBEAT_SECONDS
 
 
 def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, Any]], Path | None]:
@@ -761,41 +741,39 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
     report = render_report(findings, all_prs, errors, now, all_discovery_failed)
     report_path = None if dry_run else write_report(report, now)
 
-    quiet = not findings and not errors and heartbeat_due(state, now)
-
-    # A failed complete discovery cannot safely prune stale PR history or claim a
-    # successful pass. Leave the state untouched so the next successful scan has
-    # the prior audit context and the error report remains the only new artifact.
-    if not dry_run and not all_discovery_failed:
-        state["last_pass_at"] = now
-        state["prs"] = next_prs
-        if findings or quiet:
-            state["last_heartbeat_at"] = now
-        state["last_report"] = str(report_path)
+    error_signature = normalize_error_signature(errors) if errors else ""
+    prior_error_signature = state.get("error_signature") or ""
+    # Do not overwrite audit state with a pass that discovered no repositories.
+    if not dry_run:
+        if all_discovery_failed:
+            # Keep the prior inventory and success timestamps, but remember this
+            # error signature so an outage does not mail on every wakeup.
+            state["error_signature"] = error_signature
+        else:
+            state["last_pass_at"] = now
+            state["prs"] = next_prs
+            state["last_report"] = str(report_path)
+            if error_signature:
+                state["error_signature"] = error_signature
+            else:
+                state.pop("error_signature", None)
         save_state(state)
 
     if send and not dry_run and report_path and findings:
-        try_send_mail("PR watch findings", mail_body(findings, errors, report_path, now, quiet))
-    if send and not dry_run and errors:
+        try_send_mail("PR watch findings", mail_body(findings, errors, report_path, now))
+    if send and not dry_run and errors and error_signature != prior_error_signature:
         try_send_mail("PR watch error", "; ".join(errors)[:900])
 
-    if dry_run:
-        print(report)
-    else:
-        print(f"{now}: {len(findings)} actionable finding(s); report={report_path}")
+    print(report, end="")
 
     return findings, report_path
 
 
 def apply_args(args: argparse.Namespace) -> None:
-    global REPOS, CADENCE_SECONDS, HEARTBEAT_SECONDS, VIEWER, MAILBOX_TO, MAILBOX_FROM, ROUTER_URL
+    global REPOS, VIEWER, MAILBOX_TO, MAILBOX_FROM
 
     if args.repo:
         REPOS = validate_repos(args.repo)
-    if args.cadence_seconds is not None:
-        CADENCE_SECONDS = args.cadence_seconds
-    if args.heartbeat_seconds is not None:
-        HEARTBEAT_SECONDS = args.heartbeat_seconds
     if args.state_dir:
         configure_paths(Path(args.state_dir))
     if args.viewer:
@@ -804,8 +782,6 @@ def apply_args(args: argparse.Namespace) -> None:
         MAILBOX_TO = args.mail_to
     if args.mail_from:
         MAILBOX_FROM = args.mail_from
-    if args.router_url:
-        ROUTER_URL = args.router_url
 
 
 def main() -> int:
@@ -813,13 +789,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="print report without writing state or mail")
     parser.add_argument("--no-mail", action="store_true", help="write state/report without sending mail")
     parser.add_argument("--repo", action="append", help="owner/name repo to watch; repeat to override defaults")
-    parser.add_argument("--cadence-seconds", type=int, help="seconds between loop passes")
-    parser.add_argument("--heartbeat-seconds", type=int, help="seconds between quiet heartbeat messages")
     parser.add_argument("--state-dir", help="directory for watch-state.json and reports")
     parser.add_argument("--viewer", help="GitHub login whose review attention is being watched")
     parser.add_argument("--mail-to", help="mailbox recipient agent ID")
     parser.add_argument("--mail-from", help="explicit V2 sender agent ID")
-    parser.add_argument("--router-url", help="loopback HTTP(S) Mailbox V2 router base URL")
     args = parser.parse_args()
     apply_args(args)
 

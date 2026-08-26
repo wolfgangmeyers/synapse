@@ -230,6 +230,8 @@ function createBrowserClient(browser, {
   const pendingControlsByRequestId = new Map();
   const pendingGoalControlsByControlId = new Map();
   const pendingGoalControlsByRequestId = new Map();
+  const pendingReminderLockControlsByControlId = new Map();
+  const pendingReminderLockControlsByRequestId = new Map();
   let configured = {
     routerUrl: normalizeRouterUrl(defaultRouter),
     agentId: `web-${randomUUID().slice(0, 8)}`,
@@ -285,12 +287,36 @@ function createBrowserClient(browser, {
     });
     return true;
   };
+  const settlePendingReminderLockControl = (controlId, result) => {
+    const pending = pendingReminderLockControlsByControlId.get(controlId);
+    if (pending === undefined) return false;
+    pendingReminderLockControlsByControlId.delete(controlId);
+    pendingReminderLockControlsByRequestId.delete(pending.requestId);
+    clearTimeout(pending.timer);
+    sendBrowser({
+      type: "reminder_lock_control_result",
+      controlId,
+      targetAgentId: pending.targetAgentId,
+      targetInstanceId: pending.targetInstanceId,
+      ...(result.leaseId === undefined ? {} : { targetLeaseId: result.leaseId }),
+      reminderId: pending.reminderId,
+      action: pending.action,
+      accepted: result.accepted === true,
+      ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+      agentId: configured.agentId,
+      routerUrl: configured.routerUrl,
+    });
+    return true;
+  };
   const rejectAllPendingControls = (errorCode) => {
     for (const controlId of [...pendingControlsByControlId.keys()]) {
       settlePendingControl(controlId, { accepted: false, errorCode });
     }
     for (const controlId of [...pendingGoalControlsByControlId.keys()]) {
       settlePendingGoalControl(controlId, { accepted: false, errorCode });
+    }
+    for (const controlId of [...pendingReminderLockControlsByControlId.keys()]) {
+      settlePendingReminderLockControl(controlId, { accepted: false, errorCode });
     }
   };
   const trackPendingControl = ({ controlId, requestId, targetAgentId }) => {
@@ -318,6 +344,19 @@ function createBrowserClient(browser, {
     const pending = { controlId, requestId, targetAgentId, targetInstanceId, timer };
     pendingGoalControlsByControlId.set(controlId, pending);
     pendingGoalControlsByRequestId.set(requestId, pending);
+  };
+  const trackPendingReminderLockControl = ({ controlId, requestId, targetAgentId, targetInstanceId, reminderId, action }) => {
+    if (pendingReminderLockControlsByControlId.has(controlId)) throw new Error("Reminder lock control ID is already pending");
+    while (pendingReminderLockControlsByControlId.size >= maxPendingModelControls) {
+      const oldestControlId = pendingReminderLockControlsByControlId.keys().next().value;
+      settlePendingReminderLockControl(oldestControlId, { accepted: false, errorCode: "too_many_pending_controls" });
+    }
+    const timer = setTimeout(() => {
+      settlePendingReminderLockControl(controlId, { accepted: false, errorCode: "control_timeout" });
+    }, effectiveModelControlTimeoutMs);
+    const pending = { controlId, requestId, targetAgentId, targetInstanceId, reminderId, action, timer };
+    pendingReminderLockControlsByControlId.set(controlId, pending);
+    pendingReminderLockControlsByRequestId.set(requestId, pending);
   };
 
   const refreshAgents = async () => {
@@ -429,6 +468,11 @@ function createBrowserClient(browser, {
           });
           return;
         }
+        const pendingReminderLock = pendingReminderLockControlsByRequestId.get(frame.request_id);
+        if (pendingReminderLock !== undefined) {
+          settlePendingReminderLockControl(pendingReminderLock.controlId, { accepted: false, errorCode: frame.code ?? "router_error" });
+          return;
+        }
         const pending = pendingControlsByRequestId.get(frame.request_id);
         if (pending !== undefined) {
           settlePendingControl(pending.controlId, { accepted: false, errorCode: frame.code ?? "router_error" });
@@ -494,6 +538,20 @@ function createBrowserClient(browser, {
           generatedAt: frame.generated_at,
           agentId: configured.agentId,
           routerUrl: configured.routerUrl,
+        });
+        return;
+      }
+      if (frame.type === "reminder_lock_control_result") {
+        const pending = pendingReminderLockControlsByControlId.get(frame.control_id);
+        if (pending === undefined
+          || pending.targetAgentId !== frame.agent_id
+          || pending.targetInstanceId !== frame.instance_id
+          || pending.reminderId !== frame.reminder_id
+          || frame.source_agent_id !== configured.agentId) return;
+        settlePendingReminderLockControl(frame.control_id, {
+          accepted: frame.accepted,
+          ...(frame.error_code === undefined ? {} : { errorCode: frame.error_code }),
+          ...(frame.lease_id === undefined ? {} : { leaseId: frame.lease_id }),
         });
         return;
       }
@@ -666,6 +724,10 @@ function createBrowserClient(browser, {
           await sendMessage(command, configured, sendBrowser, refreshAgents);
           return;
         }
+        if (command.type === "reminder_crud") {
+          await sendReminderCrud(command, configured, sendBrowser);
+          return;
+        }
         if (command.type === "goal_control") {
           const controlId = normalizeControlId(command.controlId ?? "");
           const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
@@ -697,6 +759,31 @@ function createBrowserClient(browser, {
             action,
             goal,
             settings: goalControlBlockingSupported ? settings : legacySettings,
+          }));
+          return;
+        }
+        if (command.type === "reminder_lock_control") {
+          const controlId = normalizeControlId(command.controlId ?? "");
+          const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
+          const targetInstanceId = normalizeInstanceId(command.targetInstanceId ?? "");
+          const reminderId = normalizeReminderId(command.reminderId ?? "");
+          const action = String(command.action ?? "");
+          if (!["set", "clear"].includes(action)) throw new Error("Reminder lock action is invalid");
+          if (routerSocket?.readyState !== WebSocket.OPEN || configured.leaseId === "") throw new Error("Router is not connected");
+          const requestId = `reminder-lock-control-${randomUUID()}`;
+          trackPendingReminderLockControl({ controlId, requestId, targetAgentId, targetInstanceId, reminderId, action });
+          routerSocket.send(JSON.stringify({
+            version: "v1",
+            frame_id: requestId,
+            type: "reminder_lock_control",
+            agent_id: configured.agentId,
+            instance_id: configured.instanceId,
+            lease_id: configured.leaseId,
+            target_agent_id: targetAgentId,
+            target_instance_id: targetInstanceId,
+            control_id: controlId,
+            reminder_id: reminderId,
+            action,
           }));
           return;
         }
@@ -754,6 +841,43 @@ function createBrowserClient(browser, {
           }
           return;
         }
+        const reminderCrudRequestId = command?.type === "reminder_crud" && CONTROL_ID.test(command.requestId)
+          ? command.requestId
+          : undefined;
+        if (reminderCrudRequestId !== undefined) {
+          sendBrowser({
+            type: "reminder_crud_result",
+            requestId: reminderCrudRequestId,
+            operation: String(command.operation ?? ""),
+            reminderId: String(command.reminderId ?? ""),
+            accepted: false,
+            status: 0,
+            body: { error: { code: "request_failed", message: error.message } },
+            agentId: configured.agentId,
+            routerUrl: configured.routerUrl,
+          });
+          return;
+        }
+        const reminderLockControlId = command?.type === "reminder_lock_control" && CONTROL_ID.test(command.controlId)
+          ? command.controlId
+          : undefined;
+        if (reminderLockControlId !== undefined) {
+          if (!settlePendingReminderLockControl(reminderLockControlId, { accepted: false, errorCode: "command_error" })) {
+            sendBrowser({
+              type: "reminder_lock_control_result",
+              controlId: reminderLockControlId,
+              targetAgentId: String(command.targetAgentId ?? ""),
+              targetInstanceId: String(command.targetInstanceId ?? ""),
+              reminderId: String(command.reminderId ?? ""),
+              action: String(command.action ?? ""),
+              accepted: false,
+              errorCode: "command_error",
+              agentId: configured.agentId,
+              routerUrl: configured.routerUrl,
+            });
+          }
+          return;
+        }
         const controlId = command?.type === "set_model" && CONTROL_ID.test(command.controlId)
           ? command.controlId
           : undefined;
@@ -791,9 +915,40 @@ function createBrowserClient(browser, {
       for (const pending of pendingGoalControlsByControlId.values()) clearTimeout(pending.timer);
       pendingGoalControlsByControlId.clear();
       pendingGoalControlsByRequestId.clear();
+      for (const pending of pendingReminderLockControlsByControlId.values()) clearTimeout(pending.timer);
+      pendingReminderLockControlsByControlId.clear();
+      pendingReminderLockControlsByRequestId.clear();
       routerSocket?.close(1000, "browser closed");
     },
   };
+}
+
+async function sendReminderCrud(command, configured, sendBrowser) {
+  const requestId = normalizeControlId(command.requestId ?? "");
+  const operation = String(command.operation ?? "");
+  const methodByOperation = { create: "POST", update: "PATCH", delete: "DELETE" };
+  const method = methodByOperation[operation];
+  if (method === undefined) throw new Error("Reminder operation is invalid");
+  const reminderId = method === "POST" ? "" : normalizeReminderId(command.reminderId ?? "");
+  const url = new URL(method === "POST" ? "/v1/reminders" : `/v1/reminders/${encodeURIComponent(reminderId)}`, configured.routerUrl);
+  const options = { method, headers: { "content-type": "application/json" } };
+  if (method !== "DELETE") {
+    if (command.payload === null || typeof command.payload !== "object" || Array.isArray(command.payload)) throw new Error("Reminder payload is invalid");
+    options.body = JSON.stringify(command.payload);
+  }
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  sendBrowser({
+    type: "reminder_crud_result",
+    requestId,
+    operation,
+    reminderId: reminderId || body.reminder?.id,
+    accepted: response.ok,
+    status: response.status,
+    body,
+    agentId: configured.agentId,
+    routerUrl: configured.routerUrl,
+  });
 }
 
 async function fetchHistory(command, configured, sendBrowser) {
@@ -923,6 +1078,12 @@ function normalizeInstanceId(value) {
   const instanceId = String(value).trim();
   if (!CONTROL_ID.test(instanceId)) throw new Error("Instance ID is invalid");
   return instanceId;
+}
+
+function normalizeReminderId(value) {
+  const reminderId = String(value).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,98}$/.test(reminderId)) throw new Error("Reminder ID is invalid");
+  return reminderId;
 }
 
 function normalizeGoalControlSettings(value) {

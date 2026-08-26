@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRouterReminderReader, lockedReminderResult } from "./reminder-lock.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -73,6 +74,27 @@ function processOutput(stdout, stderr) {
     .map((value) => String(value ?? "").trim())
     .filter(Boolean)
     .join("\n");
+}
+
+export async function guardedReminderMutation({ reminderId, readReminder, reminderLock, mutate }) {
+  if (typeof mutate !== "function") throw new TypeError("mutate must be a function");
+  if (reminderLock?.guard !== undefined) {
+    let current;
+    try {
+      current = typeof readReminder === "function" ? await readReminder(reminderId) : undefined;
+    } catch {
+      reminderLock.clear?.(reminderId);
+      return mutate();
+    }
+    try {
+      const result = await reminderLock.guard(reminderId, current);
+      if (result?.locked === true) return lockedReminderResult();
+    } catch {
+      reminderLock.clear?.(reminderId);
+      return mutate();
+    }
+  }
+  return mutate();
 }
 
 function defaultRunFile(file, args, options = {}) {
@@ -389,9 +411,9 @@ const CURSOR_TOOL_METADATA = Object.freeze({
     ],
   },
   mecha_reminder: {
-    promptSnippet: "List, create, or delete Mailbox verification reminders",
+    promptSnippet: "List, create, update, or delete Mailbox verification reminders",
     promptGuidelines: [
-      "Use mecha_reminder with action list, create, or delete for supervisor reminders.",
+      "Use mecha_reminder with action list, create, update, or delete for supervisor reminders.",
       "Call pi__mecha_reminder through the Cursor pi bridge.",
     ],
   },
@@ -471,6 +493,7 @@ export function createOperationalToolDefinitions({
   environment = process.env,
   now = () => new Date(),
   generateId = randomUUID,
+  reminderLock,
 } = {}) {
   if (typeof runFile !== "function") throw new TypeError("runFile must be a function");
   if (typeof now !== "function") throw new TypeError("now must be a function");
@@ -502,6 +525,21 @@ export function createOperationalToolDefinitions({
     if (!response.ok) throw new OperationalActionError(payload?.error?.message || `router request failed (${response.status})`);
     return payload;
   }
+
+  async function readReminder(reminderId) {
+    const reader = createRouterReminderReader({
+      fetchImpl,
+      routerUrl: loopbackRouterUrl(environment),
+    });
+    return reader(reminderId);
+  }
+
+  const guardedMutation = (reminderId, mutate) => guardedReminderMutation({
+    reminderId,
+    readReminder,
+    reminderLock,
+    mutate,
+  });
 
   const task = { type: "string", minLength: 1, maxLength: 120, pattern: ID_PATTERN };
   const workerAlias = { type: "string", minLength: 1, maxLength: 120, pattern: WORKER_ID_PATTERN };
@@ -630,11 +668,13 @@ export function createOperationalToolDefinitions({
     descriptor("mecha_reminder", "Mailbox reminder", [
       variant("list"),
       variant("create", { target: task, message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["target", "message", "delayMinutes"]),
+      variant("update", { reminderId: task, target: task, message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["reminderId"]),
       variant("delete", { reminderId: task }, ["reminderId"]),
     ], async (input) => {
       const definitions = {
         list: { properties: {}, required: [] },
         create: { properties: { target: true, message: true, subject: true, delayMinutes: true }, required: ["target", "message", "delayMinutes"] },
+        update: { properties: { reminderId: true, target: true, message: true, subject: true, delayMinutes: true }, required: ["reminderId"] },
         delete: { properties: { reminderId: true }, required: ["reminderId"] },
       };
       validateAction(input, definitions);
@@ -643,8 +683,36 @@ export function createOperationalToolDefinitions({
         return success(JSON.stringify(payload), payload);
       }
       if (input.action === "delete") {
-        await request(`/v1/reminders/${encodeURIComponent(id(input.reminderId, "reminderId"))}`, { method: "DELETE" });
-        return success("Reminder canceled.");
+        const reminderId = id(input.reminderId, "reminderId");
+        return guardedMutation(reminderId, async () => {
+          await request(`/v1/reminders/${encodeURIComponent(reminderId)}`, { method: "DELETE" });
+          return success("Reminder canceled.");
+        });
+      }
+      if (input.action === "update") {
+        const reminderId = id(input.reminderId, "reminderId");
+        const patch = {};
+        if (input.target !== undefined) patch.target = id(input.target, "target");
+        if (input.message !== undefined) patch.body = text(input.message, "message");
+        if (input.subject !== undefined) patch.subject = text(input.subject, "subject", 200);
+        const minutes = input.delayMinutes === undefined
+          ? undefined
+          : integer(input.delayMinutes, "delayMinutes", 1, 10_080);
+        if (Object.keys(patch).length === 0 && minutes === undefined) {
+          throw new OperationalInputError("update requires at least one field to change");
+        }
+        return guardedMutation(reminderId, async () => {
+          if (minutes !== undefined) {
+            const updated = now();
+            if (!(updated instanceof Date) || Number.isNaN(updated.getTime())) {
+              throw new OperationalActionError("Operational clock is unavailable.");
+            }
+            patch.next_due_at = new Date(updated.getTime() + minutes * 60_000).toISOString();
+            patch.interval_ms = null;
+          }
+          const result = await request(`/v1/reminders/${encodeURIComponent(reminderId)}`, { method: "PATCH", body: patch });
+          return success("Reminder updated.", result);
+        });
       }
       const minutes = integer(input.delayMinutes, "delayMinutes", 1, 10_080);
       const created = now();

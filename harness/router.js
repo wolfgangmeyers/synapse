@@ -259,6 +259,7 @@ export function createAgentRouter({
   // remain connected. TTL and capacity limits bound targets that never reply.
   const pendingModelControls = new Map();
   const pendingGoalControls = new Map();
+  const pendingReminderLockControls = new Map();
   // Keep desired controls in SQLite so a temporary socket loss can replay to
   // the same process instance. A different instance deletes the old record.
   const goalControlV1Available = typeof repository.migrationIds === "function"
@@ -358,6 +359,14 @@ export function createAgentRouter({
           receiveGoalControlResult(socket, frame);
           return;
         }
+        if (frame.type === "reminder_lock_control") {
+          receiveReminderLockControl(socket, frame);
+          return;
+        }
+        if (frame.type === "reminder_lock_control_result") {
+          receiveReminderLockControlResult(socket, frame);
+          return;
+        }
         if (frame.type === "goal_state") {
           receiveGoalState(socket, frame);
           return;
@@ -407,6 +416,7 @@ export function createAgentRouter({
       if (session === undefined) return;
       removePendingModelControlsForSession(session);
       removePendingGoalControlsForSession(session);
+      removePendingReminderLockControlsForSession(session);
       if (session.conversationSync === "v1") {
         const subscribers = conversationSessions.get(session.agentId);
         if (subscribers?.get(session.instanceId) === session) subscribers.delete(session.instanceId);
@@ -1148,6 +1158,131 @@ export function createAgentRouter({
       });
     }
 
+    function receiveReminderLockControl(currentSocket, frame) {
+      if (!matchesSessionLease(frame)) {
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      if (session.agentRole !== "user_interaction") {
+        sendError(currentSocket, generateFrameId, "reminder_lock_control_not_allowed", frame.frame_id);
+        return;
+      }
+      const reminder = repository.reminderFor(frame.reminder_id);
+      if (reminder === undefined) {
+        sendError(currentSocket, generateFrameId, "reminder_not_found", frame.frame_id);
+        return;
+      }
+      if (reminder.target !== frame.target_agent_id) {
+        sendError(currentSocket, generateFrameId, "reminder_target_mismatch", frame.frame_id);
+        return;
+      }
+      const target = sessions.get(frame.target_agent_id);
+      if (target === undefined
+        || target.instanceId !== frame.target_instance_id
+        || target.socket.readyState !== WebSocket.OPEN
+        || !sessionHasActiveLease(target)) {
+        sendError(
+          currentSocket,
+          generateFrameId,
+          target !== undefined && target.instanceId !== frame.target_instance_id
+            ? "target_instance_changed"
+            : "target_not_connected",
+          frame.frame_id,
+        );
+        return;
+      }
+      pruneExpiredPendingReminderLockControls();
+      const key = pendingModelControlKey(session.agentId, frame.control_id);
+      if (pendingReminderLockControls.has(key)) {
+        sendError(currentSocket, generateFrameId, "reminder_lock_control_already_pending", frame.frame_id);
+        return;
+      }
+      let sourcePendingCount = 0;
+      for (const pending of pendingReminderLockControls.values()) {
+        if (pending.sourceSession === session) sourcePendingCount += 1;
+      }
+      if (pendingReminderLockControls.size >= maxPendingModelControls
+        || sourcePendingCount >= maxPendingModelControlsPerSource) {
+        sendError(currentSocket, generateFrameId, "reminder_lock_control_capacity_exceeded", frame.frame_id);
+        return;
+      }
+      const expiresAtMs = currentTimeMs(clock) + pendingModelControlTtlMs;
+      pendingReminderLockControls.set(key, {
+        controlId: frame.control_id,
+        requestFrameId: frame.frame_id,
+        reminderId: frame.reminder_id,
+        sourceSession: session,
+        sourceAgentId: session.agentId,
+        sourceInstanceId: session.instanceId,
+        sourceLeaseId: session.leaseId,
+        targetSession: target,
+        targetAgentId: target.agentId,
+        targetInstanceId: target.instanceId,
+        targetLeaseId: target.leaseId,
+        expiresAtMs,
+      });
+      let forwarded = false;
+      try {
+        forwarded = sendFrame(target.socket, generateFrameId, {
+          type: "reminder_lock_control",
+          agent_id: target.agentId,
+          instance_id: target.instanceId,
+          lease_id: target.leaseId,
+          source_agent_id: session.agentId,
+          control_id: frame.control_id,
+          reminder_id: frame.reminder_id,
+          action: frame.action,
+          expires_at: new Date(expiresAtMs).toISOString(),
+        });
+      } catch {
+        // A synchronous WebSocket send failure is a failed forward.
+      }
+      if (!forwarded) {
+        pendingReminderLockControls.delete(key);
+        sendError(currentSocket, generateFrameId, "target_send_failed", frame.frame_id);
+      }
+    }
+
+    function receiveReminderLockControlResult(currentSocket, frame) {
+      if (!matchesSessionLease(frame)) {
+        sendError(currentSocket, generateFrameId, "lease_not_active", frame.frame_id);
+        closeSocket(currentSocket, 4003, "lease not active");
+        return;
+      }
+      pruneExpiredPendingReminderLockControls();
+      const key = pendingModelControlKey(frame.source_agent_id, frame.control_id);
+      const pending = pendingReminderLockControls.get(key);
+      if (pending === undefined
+        || pending.sourceAgentId !== frame.source_agent_id
+        || pending.targetSession !== session
+        || pending.targetAgentId !== frame.agent_id
+        || pending.targetInstanceId !== frame.instance_id
+        || pending.targetLeaseId !== frame.lease_id
+        || pending.reminderId !== frame.reminder_id) {
+        sendError(currentSocket, generateFrameId, "reminder_lock_control_result_not_pending", frame.frame_id);
+        return;
+      }
+      pendingReminderLockControls.delete(key);
+      const source = pending.sourceSession;
+      if (source.agentId !== pending.sourceAgentId
+        || source.instanceId !== pending.sourceInstanceId
+        || source.leaseId !== pending.sourceLeaseId
+        || source.socket.readyState !== WebSocket.OPEN
+        || !sessionHasActiveLease(source)) return;
+      sendFrame(source.socket, generateFrameId, {
+        type: "reminder_lock_control_result",
+        agent_id: session.agentId,
+        instance_id: session.instanceId,
+        lease_id: session.leaseId,
+        source_agent_id: frame.source_agent_id,
+        control_id: frame.control_id,
+        reminder_id: frame.reminder_id,
+        accepted: frame.accepted,
+        ...(frame.error_code === undefined ? {} : { error_code: frame.error_code }),
+      });
+    }
+
     function receiveGoalControlResult(currentSocket, frame) {
       if (!goalControlV1Available) {
         sendError(currentSocket, generateFrameId, "goal_control_unavailable", frame.frame_id);
@@ -1415,6 +1550,7 @@ export function createAgentRouter({
       pendingDeliveryOffers.clear();
       pendingModelControls.clear();
       pendingGoalControls.clear();
+      pendingReminderLockControls.clear();
       for (const socket of webSocketServer.clients) {
         socket.terminate();
       }
@@ -1581,6 +1717,7 @@ export function createAgentRouter({
     pruneExpiredRateLimitEntries(currentTimeMs(clock));
     pruneExpiredPendingModelControls();
     pruneExpiredPendingGoalControls();
+    pruneExpiredPendingReminderLockControls();
     const goalControls = goalControlV1Available ? repository.pruneGoalControlDesired() : 0;
     const staleAgents = sweepStaleAgentResources();
     const expired = sweepExpiredUnclaimedMessages();
@@ -1963,6 +2100,16 @@ export function createAgentRouter({
     }
   }
 
+  function pruneExpiredPendingReminderLockControls(nowMs = currentTimeMs(clock)) {
+    for (const [key, pending] of pendingReminderLockControls.entries()) {
+      if (pending.expiresAtMs > nowMs) continue;
+      pendingReminderLockControls.delete(key);
+      if (pending.sourceSession.socket.readyState === WebSocket.OPEN && sessionHasActiveLease(pending.sourceSession)) {
+        sendError(pending.sourceSession.socket, generateFrameId, "reminder_lock_control_expired", pending.requestFrameId);
+      }
+    }
+  }
+
   function pruneExpiredPendingGoalControls(nowMs = currentTimeMs(clock)) {
     for (const [key, pending] of pendingGoalControls.entries()) {
       if (pending.expiresAtMs > nowMs) continue;
@@ -1979,6 +2126,21 @@ export function createAgentRouter({
       // Desired state stays durable through a socket drop. The next connection
       // of the same instance receives it; a replacement deletes it on register.
       pendingGoalControls.delete(key);
+    }
+  }
+
+  function removePendingReminderLockControlsForSession(disconnectedSession) {
+    for (const [key, pending] of pendingReminderLockControls.entries()) {
+      const sourceDisconnected = pending.sourceSession === disconnectedSession;
+      const targetDisconnected = pending.targetSession === disconnectedSession;
+      if (!sourceDisconnected && !targetDisconnected) continue;
+      pendingReminderLockControls.delete(key);
+      if (targetDisconnected
+        && !sourceDisconnected
+        && pending.sourceSession.socket.readyState === WebSocket.OPEN
+        && sessionHasActiveLease(pending.sourceSession)) {
+        sendError(pending.sourceSession.socket, generateFrameId, "target_not_connected", pending.requestFrameId);
+      }
     }
   }
 
@@ -2750,6 +2912,17 @@ export function createAgentRouter({
   }
 
   async function handleReminderItem(request, response, reminderId) {
+    if (request.method === "GET") {
+      const reminder = repository.reminderFor(reminderId);
+      if (reminder === undefined) {
+        sendHttpError(response, 404, "not_found");
+      } else {
+        sendHttpJson(response, 200, { reminder }, {
+          "x-reminder-incarnation": repository.reminderIncarnationFor(reminderId),
+        });
+      }
+      return;
+    }
     if (request.method === "PATCH") {
       if (!isJsonContentType(request.headers["content-type"])) {
         sendHttpError(response, 400, "invalid_request");
