@@ -71,6 +71,7 @@ REPOS = env_repos()
 VIEWER = os.environ.get("PR_WATCH_VIEWER", "wolfgangmeyers")
 MAILBOX_TO = os.environ.get("PR_WATCH_MAIL_TO", "supervisor")
 MAILBOX_FROM = os.environ.get("PR_WATCH_MAIL_FROM", "pr-watch")
+ROUTER_URL = os.environ.get("MECHA_ROUTER_URL")
 
 STATE_DIR = Path(os.environ.get("PR_WATCH_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser()
 STATE_PATH = STATE_DIR / "watch-state.json"
@@ -669,10 +670,13 @@ def write_report(report: str, now: str) -> Path:
 
 
 def send_mail(subject: str, body: str) -> None:
-    run([
+    command = [
         "python3", str(MAILBOX_SEND_V2), "--to", MAILBOX_TO,
         "--from", MAILBOX_FROM, "--subject", subject, "--body", body,
-    ])
+    ]
+    if ROUTER_URL:
+        command.extend(["--router-url", ROUTER_URL])
+    run(command)
 
 
 def try_send_mail(subject: str, body: str) -> None:
@@ -770,7 +774,7 @@ def pass_once(send: bool = True, dry_run: bool = False) -> tuple[list[dict[str, 
 
 
 def apply_args(args: argparse.Namespace) -> None:
-    global REPOS, VIEWER, MAILBOX_TO, MAILBOX_FROM
+    global REPOS, VIEWER, MAILBOX_TO, MAILBOX_FROM, ROUTER_URL
 
     if args.repo:
         REPOS = validate_repos(args.repo)
@@ -782,6 +786,8 @@ def apply_args(args: argparse.Namespace) -> None:
         MAILBOX_TO = args.mail_to
     if args.mail_from:
         MAILBOX_FROM = args.mail_from
+    if args.router_url:
+        ROUTER_URL = args.router_url
 
 
 def main() -> int:
@@ -793,6 +799,7 @@ def main() -> int:
     parser.add_argument("--viewer", help="GitHub login whose review attention is being watched")
     parser.add_argument("--mail-to", help="mailbox recipient agent ID")
     parser.add_argument("--mail-from", help="explicit V2 sender agent ID")
+    parser.add_argument("--router-url", help="loopback HTTP(S) Mailbox V2 router base URL")
     args = parser.parse_args()
     apply_args(args)
 
