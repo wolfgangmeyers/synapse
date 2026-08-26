@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import watch_prs
@@ -59,30 +61,26 @@ def prior_state(**overrides):
 
 
 class MailboxV2SenderTest(unittest.TestCase):
-    def test_send_mail_uses_the_canonical_v2_sender_once(self):
+    def test_send_mail_uses_the_canonical_v2_sender_default_router(self):
         commands = []
         old_run = watch_prs.run
         old_to = watch_prs.MAILBOX_TO
         old_from = watch_prs.MAILBOX_FROM
-        old_router_url = watch_prs.ROUTER_URL
         try:
             watch_prs.run = lambda command: commands.append(command) or ""
             watch_prs.MAILBOX_TO = "supervisor"
             watch_prs.MAILBOX_FROM = "pr-watch"
-            watch_prs.ROUTER_URL = "http://127.0.0.1:8765"
 
             watch_prs.send_mail("PR watch findings", "one finding")
         finally:
             watch_prs.run = old_run
             watch_prs.MAILBOX_TO = old_to
             watch_prs.MAILBOX_FROM = old_from
-            watch_prs.ROUTER_URL = old_router_url
 
         self.assertEqual(
             [[
                 "python3", str(watch_prs.MAILBOX_SEND_V2), "--to", "supervisor",
                 "--from", "pr-watch", "--subject", "PR watch findings", "--body", "one finding",
-                "--router-url", "http://127.0.0.1:8765",
             ]],
             commands,
         )
@@ -169,7 +167,7 @@ class MainOneScanTest(unittest.TestCase):
         old_argv = sys.argv
         old_pass_once = watch_prs.pass_once
         try:
-            sys.argv = ["watch_prs.py", "--router-url", "http://127.0.0.1:8765"]
+            sys.argv = ["watch_prs.py"]
             watch_prs.pass_once = lambda **kwargs: calls.append(kwargs) or ([], None)
 
             self.assertEqual(0, watch_prs.main())
@@ -198,7 +196,13 @@ class PassOnceDeliveryTest(unittest.TestCase):
             watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
             with tempfile.TemporaryDirectory() as directory:
                 watch_prs.configure_paths(Path(directory))
-                findings, _ = watch_prs.pass_once()
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    findings, report_path = watch_prs.pass_once()
+                self.assertTrue(report_path.exists())
+                self.assertEqual(report_path.read_text(encoding="utf-8"), output.getvalue())
+                self.assertIn("## Findings", output.getvalue())
+                self.assertIn("Test PR", output.getvalue())
         finally:
             watch_prs.REPOS = old_repos
             watch_prs.MAILBOX_TO = old_to
@@ -234,7 +238,6 @@ class PassOnceDeliveryTest(unittest.TestCase):
             [],
             Path("/tmp/pr-watch-report.md"),
             "2026-06-10T16:00:00Z",
-            False,
         )
 
         self.assertIn("dnsid#101: Wolfgang is requested and has not reviewed", body)
@@ -255,8 +258,12 @@ class PassOnceDeliveryTest(unittest.TestCase):
             watch_prs.try_send_mail = lambda subject, body: sent.append((subject, body))
             with tempfile.TemporaryDirectory() as directory:
                 watch_prs.configure_paths(Path(directory))
-                findings, report_path = watch_prs.pass_once()
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    findings, report_path = watch_prs.pass_once()
                 self.assertTrue(report_path.exists())
+                self.assertEqual(report_path.read_text(encoding="utf-8"), output.getvalue())
+                self.assertIn("No actionable PRs in this pass.", output.getvalue())
         finally:
             watch_prs.REPOS = old_repos
             watch_prs.fetch_repo = old_fetch_repo
