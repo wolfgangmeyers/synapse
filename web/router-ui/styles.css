@@ -325,6 +325,9 @@ p:empty { display: none; }
 }
 .reminder-indicator:focus-visible { outline: 2px solid #b9f5e7; outline-offset: 2px; }
 .reminder-indicator i { color: #78e0cd; }
+.reminder-indicator.empty { border-color: rgba(181,188,208,0.34); background: rgba(181,188,208,0.10); color: var(--muted); }
+.reminder-indicator.empty i { color: var(--muted); }
+.reminder-indicator:hover { filter: brightness(1.12); }
 .goal-indicator {
   display: inline-flex;
   align-items: center;
@@ -348,8 +351,16 @@ p:empty { display: none; }
 .agent-name-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .agent-name-line strong { flex: 1 1 auto; }
 .reminder-list-item { padding: 12px 14px; border-radius: 16px; background: var(--canvas); }
+.reminder-editor-form { display: grid; gap: 12px; }
+.reminder-editor-form label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
+.reminder-editor-form textarea { resize: vertical; min-height: 120px; }
+.reminder-editor-status { min-height: 1.4em; color: var(--muted); }
 .reminder-list-item strong { display: block; }
 .reminder-list-item small { display: block; margin-top: 3px; }
+.reminder-lock-status.error { color: var(--danger); }
+.reminder-lock-actions { display: flex; gap: 8px; margin-top: 10px; }
+.reminder-lock-actions button { min-height: 34px; padding: 6px 10px; }
+.reminder-lock-actions button.secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
 .message-dialog-label { color: var(--yellow); font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; }
 .message-dialog-body { max-height: min(52vh, 520px); overflow: auto; word-break: break-word; padding: 16px; border-radius: 18px; background: var(--canvas); color: var(--text); }
 .dialog-shell { padding: 22px; }

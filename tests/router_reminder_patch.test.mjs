@@ -137,6 +137,50 @@ test("updateReminder respects an explicit next_due_at over the interval recomput
   assert.equal(reminder.next_due_at, "2030-02-01T00:00:00.000Z");
 });
 
+test("GET /v1/reminders/:id returns the reminder and incarnation header", async (t) => {
+  const { repository, router } = await withRouter(t);
+  repository.createReminder(baseReminder());
+  const url = new URL(await router.listen());
+  url.protocol = "http:";
+
+  const response = await fetch(`${url.origin}/v1/reminders/patch-target`);
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("x-reminder-incarnation"), /^[0-9a-f-]{36}$/);
+  assert.deepEqual((await response.json()).reminder, repository.reminderFor("patch-target"));
+});
+
+test("GET /v1/reminders/:id returns 404 for an unknown reminder", async (t) => {
+  const { router } = await withRouter(t);
+  const url = new URL(await router.listen());
+  url.protocol = "http:";
+
+  const response = await fetch(`${url.origin}/v1/reminders/missing`);
+
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("x-reminder-incarnation"), null);
+});
+
+test("deleting and recreating an identical reminder gets a new incarnation", async (t) => {
+  const { repository, router } = await withRouter(t);
+  const reminder = baseReminder();
+  repository.createReminder(reminder);
+  const url = new URL(await router.listen());
+  url.protocol = "http:";
+  const first = await fetch(`${url.origin}/v1/reminders/patch-target`);
+  const firstBody = await first.json();
+  const firstIncarnation = first.headers.get("x-reminder-incarnation");
+
+  const deletion = await fetch(`${url.origin}/v1/reminders/patch-target`, { method: "DELETE" });
+  assert.equal(deletion.status, 204);
+  repository.createReminder(reminder);
+
+  const second = await fetch(`${url.origin}/v1/reminders/patch-target`);
+  assert.equal(second.status, 200);
+  assert.deepEqual((await second.json()).reminder, firstBody.reminder);
+  assert.notEqual(second.headers.get("x-reminder-incarnation"), firstIncarnation);
+});
+
 test("PATCH /v1/reminders/:id updates the interval and returns the reminder", async (t) => {
   const { repository, router } = await withRouter(t);
   repository.createReminder(baseReminder());
