@@ -625,6 +625,8 @@ There is a canonical `dev-loop` workflow and it is the source of truth. Do not p
 
 Four phases: a spec the supervisor reviews, a plan reviewed by `robot-review` and iterated until every reviewer signs off, implementation by TDD, then coverage and review. `pr-validate` runs on each reviewer's output **using a different persona than produced the review**, which is the part most easily lost.
 
+**Implementation order is mandatory:** first make the scoped behavior work and directly validate the primary path. Only then run code review on the stable, validated target. Do not expand repair scope from review before the primary behavior works.
+
 A worker-generated `SPEC.md` is planning evidence, not an authoritative product requirement. The ticket, Wolfgang's current direction, and established current behavior win. When a generated spec invents an unsupported field, workflow, or requirement, correct the spec and continue with the smallest ticket-consistent implementation. Escalate only a real ambiguity in the ticket/product decision; never let a spec hallucination become a delivery blocker.
 
 **Re-review follows material evidence, not a ritual after every fix.** Keep the review target immutable: preserve the exact commit or diff under review, and never treat a changed target as covered by an earlier review. A behavior, contract, state, or test-evidence change requires focused independent re-review of the affected target; a wording-only or demonstrably non-material change needs only the checks it can affect. Scale the re-review to the evidence, but do not accept an author's assertion as verification.
