@@ -228,9 +228,9 @@ Follow every always-read link on that page. Then read `/Users/wolfgang/.mecha-de
 
 ## Workflow
 
-This is the **default workflow**. Follow it unless you have sufficient, clear, and legitimate justification to deviate. Where you deviate, state the justification explicitly.
+For production-code work, load the `workflows` skill and fetch `dev-loop` with `get_workflow.py dev-loop` before substantive implementation. The canonical dev-loop is the source of truth for phase ordering and exit gates; these local mechanics supplement it and do not override it. Keep specification and plan review early. Before implementation review, directly validate the scoped primary behavior on the exact target; robot-review validates that working candidate and does not replace behavior proof.
 
-### Phase 1: Plan
+### Local planning mechanics (after canonical Phase 1 approval)
 
 1. Receive task and requirements. Read `start-here.md` and its always-read links first, then break into todos.
 2. **Consider alternatives before committing to an approach.** For non-trivial design decisions (architecture, data model, API shape, abstraction boundaries), generate 2-3 alternative approaches, briefly evaluate each against the requirements and constraints, then proceed with the strongest option — or hybridize the best elements. Don't default to the first idea that works. Document the chosen approach and why in the plan.
@@ -248,11 +248,12 @@ This is the **default workflow**. Follow it unless you have sufficient, clear, a
 7. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
 8. Delete the plan file before moving to Phase 2 — do not commit plan artifacts.
 
-### Phase 2: Implement (TDD)
+### Local implementation mechanics (within canonical Phases 3 and 4)
 
 1. For each independent todo, prefer a background subagent when it can work safely from a precise brief: implement with TDD where appropriate (write tests first, then make them pass), or inspect/triage/validate a bounded area while you continue other work. Review the subagent's diff/evidence yourself before marking the todo complete. For tiny serial edits, direct work is fine; for non-code changes (docs, config, workflows), skip TDD with a brief note.
-2. **Run robot-review as a skill, not a command.** As in Phase 1: read the robot-review `SKILL.md` and spawn one persona-reviewer subagent per focus area, giving each the base branch to diff against and the requirements (when applicable). The focus-area → persona mappings below say *which reviewers to spawn for which areas* — they are not CLI flags.
-3. **Assess implementation complexity** and decompose review:
+2. **Directly validate the scoped primary behavior before implementation review.** Run the focused behavior tests and the real integration, endpoint, browser, or other runtime proof the task requires against the exact target. Do not begin implementation robot-review while the requested behavior is unimplemented, failing, or unproven.
+3. **Run robot-review as a skill, not a command.** As in the planning mechanics: read the robot-review `SKILL.md` and spawn one persona-reviewer subagent per focus area, giving each the base branch to diff against and the requirements (when applicable). The focus-area → persona mappings below say *which reviewers to spawn for which areas* — they are not CLI flags.
+4. **Assess implementation complexity** and decompose review:
    - For simple implementations (small bug fix, single feature, docs): 1-2 review batches total, ~2 reviewers each
      - Example: focus areas comments-and-docs + conventions → wolfgang + conrad
    - For moderate implementations (feature with tests, multi-file change): 2-3 review batches
@@ -263,13 +264,13 @@ This is the **default workflow**. Follow it unless you have sufficient, clear, a
      - Example batch 2: focus area security → jason + evan
      - Example batch 3: focus areas test-coverage + error-handling → wolfgang + michaelk
    > **Important**: a robot-review pass on the `test-coverage` focus area (a reviewer reading the diff) is NOT the same as running the `test-coverage` skill (which runs `go test -coverprofile` and produces real per-function line coverage data). If the dev-loop workflow requires `test-coverage`, you must run that skill as a separate step — a robot-review focus pass does not satisfy that requirement.
-4. **Run focused review batches** on the implementation. For each batch:
+5. **Run focused review batches** on the implementation. For each batch:
    - Spawn one reviewer subagent per focus area, diffing against the base branch (give them the requirements if applicable)
    - **Cross-validate** blocking/should-address findings: spawn a subagent with a *different* reviewer persona with relevant expertise to verify each finding. Discard false positives.
    - Apply validated feedback from the batch
-5. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
-6. Run pre-commit checklist (below).
-7. Signal ready for human review. State what was done, what the reviewers found, and that the pre-commit checklist passes. Then **wait** — do not commit, push, or create a PR until explicitly told to.
+6. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
+7. Run pre-commit checklist (below).
+8. Signal ready for human review. State what was done, what the reviewers found, and that the pre-commit checklist passes. Then **wait** — do not commit, push, or create a PR until explicitly told to.
 
 ### Pre-commit Checklist
 
@@ -288,7 +289,7 @@ If you are running as a Codex worker:
 
 - **No slash commands**: You cannot invoke skills via slash prefix. Read skill files directly from `~/.agents/skills/<name>/SKILL.md` and execute the workflow manually.
 - **Subagents**: If `multi_agent = true` is enabled in `~/.codex/config.toml`, you can spawn subagents for review, exploration, and other parallel tasks. Use them the same way Claude Code workers use the Task tool — one subagent per reviewer persona, etc.
-- **If subagents are NOT available**: Follow the shortened workflow — implement → test → lint → commit → mail supervisor. The supervisor will run robot-review on your behalf and send findings back.
+- **If subagents are NOT available**: Follow the canonical dev-loop through implementation and direct primary-behavior validation. The supervisor will run the required implementation robot-review on the stable candidate and send findings back.
 - **Reference skills by plain name**: Say "run robot-review" not slash-prefixed in your workflow.
 - **Do not push**: Mail the supervisor when ready. The supervisor pushes after verifying.
 
