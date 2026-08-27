@@ -108,6 +108,10 @@ const migrations = Object.freeze([
     id: "019_goal_control_desired_state",
     sql: readFileSync(new URL("./migrations/019_goal_control_desired_state.sql", import.meta.url), "utf8"),
   },
+  {
+    id: "020_prompt_templates",
+    sql: readFileSync(new URL("./migrations/020_prompt_templates.sql", import.meta.url), "utf8"),
+  },
 ]);
 
 export class IdempotencyConflictError extends Error {
@@ -182,6 +186,33 @@ export class ReminderValidationError extends Error {
   }
 }
 
+export class PromptTemplateValidationError extends Error {
+  constructor(message = "invalid prompt template") {
+    super(message);
+    this.name = "PromptTemplateValidationError";
+    this.code = "invalid_prompt_template";
+  }
+}
+
+export class PromptTemplateNameConflictError extends Error {
+  constructor(name) {
+    super(`prompt template name ${name} already exists`);
+    this.name = "PromptTemplateNameConflictError";
+    this.code = "prompt_template_name_conflict";
+  }
+}
+
+export class PromptTemplateCapacityError extends Error {
+  constructor() {
+    super("prompt template collection is full");
+    this.name = "PromptTemplateCapacityError";
+    this.code = "prompt_template_capacity_exceeded";
+  }
+}
+
+const PROMPT_TEMPLATE_MAX_NAME_BYTES = 128;
+const PROMPT_TEMPLATE_MAX_BODY_BYTES = 64 * 1024;
+const MAX_PROMPT_TEMPLATES = 100;
 const MAX_GOAL_CONTROL_DESIRED_CONFIG_BYTES = 16_384;
 
 function assertGoalControlDesiredIdentity(agentId, instanceId) {
@@ -389,6 +420,67 @@ class MessageRepository {
 
   reminderFor(reminderId) {
     return selectReminder(this.#database, reminderId);
+  }
+
+  promptTemplates() {
+    return this.#database.prepare(`
+      SELECT id, name, body, created_at, updated_at
+      FROM prompt_templates
+      ORDER BY created_at ASC, id ASC
+    `).all().map(toPromptTemplate);
+  }
+
+  promptTemplateFor(promptTemplateId) {
+    return selectPromptTemplate(this.#database, promptTemplateId);
+  }
+
+  createPromptTemplate(promptTemplate) {
+    const candidate = validatePromptTemplate(promptTemplate);
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const existing = this.#database.prepare(`
+        SELECT id
+        FROM prompt_templates
+        WHERE name = ?
+      `).get(candidate.name);
+      if (existing !== undefined) throw new PromptTemplateNameConflictError(candidate.name);
+      const count = this.#database.prepare("SELECT COUNT(*) AS count FROM prompt_templates").get().count;
+      if (count >= MAX_PROMPT_TEMPLATES) throw new PromptTemplateCapacityError();
+      const id = randomUUID();
+      this.#database.prepare(`
+        INSERT INTO prompt_templates (id, name, body, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(id, candidate.name, candidate.body, now, now);
+      return { created: true, prompt_template: selectPromptTemplate(this.#database, id) };
+    });
+  }
+
+  updatePromptTemplate(promptTemplateId, patch) {
+    const candidatePatch = validatePromptTemplatePatch(patch);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const existing = selectPromptTemplate(this.#database, promptTemplateId);
+      if (existing === undefined) return undefined;
+      const candidate = { ...existing, ...candidatePatch };
+      validatePromptTemplate({ name: candidate.name, body: candidate.body });
+      const conflict = this.#database.prepare(`
+        SELECT id
+        FROM prompt_templates
+        WHERE name = ? AND id <> ?
+      `).get(candidate.name, promptTemplateId);
+      if (conflict !== undefined) throw new PromptTemplateNameConflictError(candidate.name);
+      this.#database.prepare(`
+        UPDATE prompt_templates
+        SET name = ?, body = ?, updated_at = ?
+        WHERE id = ?
+      `).run(candidate.name, candidate.body, clockTimestamp(this.#clock), promptTemplateId);
+      return { prompt_template: selectPromptTemplate(this.#database, promptTemplateId) };
+    });
+  }
+
+  deletePromptTemplate(promptTemplateId) {
+    return immediateTransaction(this.#database, this.#databasePath, () => (
+      this.#database.prepare("DELETE FROM prompt_templates WHERE id = ?").run(promptTemplateId).changes === 1
+    ));
   }
 
   reminderIncarnationFor(reminderId) {
@@ -2505,6 +2597,48 @@ function selectLiveDuplicateMessage(database, candidate) {
   return row === undefined ? undefined : selectMessage(database, row.id);
 }
 
+function validatePromptTemplate(promptTemplate) {
+  if (promptTemplate === null || typeof promptTemplate !== "object" || Array.isArray(promptTemplate)) {
+    throw new PromptTemplateValidationError();
+  }
+  const expectedKeys = new Set(["name", "body"]);
+  if (Object.keys(promptTemplate).some((key) => !expectedKeys.has(key))
+    || typeof promptTemplate.name !== "string"
+    || promptTemplate.name.includes("\u0000")
+    || promptTemplate.name.trim() === ""
+    || Buffer.byteLength(promptTemplate.name, "utf8") > PROMPT_TEMPLATE_MAX_NAME_BYTES
+    || typeof promptTemplate.body !== "string"
+    || promptTemplate.body.includes("\u0000")
+    || promptTemplate.body.trim() === ""
+    || Buffer.byteLength(promptTemplate.body, "utf8") > PROMPT_TEMPLATE_MAX_BODY_BYTES) {
+    throw new PromptTemplateValidationError();
+  }
+  return { name: promptTemplate.name, body: promptTemplate.body };
+}
+
+function validatePromptTemplatePatch(patch) {
+  if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new PromptTemplateValidationError();
+  }
+  const patchKeys = Object.keys(patch);
+  if (patchKeys.length === 0 || patchKeys.some((key) => !["name", "body"].includes(key))) {
+    throw new PromptTemplateValidationError();
+  }
+  if (Object.hasOwn(patch, "name") && (typeof patch.name !== "string"
+    || patch.name.includes("\u0000")
+    || patch.name.trim() === ""
+    || Buffer.byteLength(patch.name, "utf8") > PROMPT_TEMPLATE_MAX_NAME_BYTES)) {
+    throw new PromptTemplateValidationError();
+  }
+  if (Object.hasOwn(patch, "body") && (typeof patch.body !== "string"
+    || patch.body.includes("\u0000")
+    || patch.body.trim() === ""
+    || Buffer.byteLength(patch.body, "utf8") > PROMPT_TEMPLATE_MAX_BODY_BYTES)) {
+    throw new PromptTemplateValidationError();
+  }
+  return { ...patch };
+}
+
 export function validateReminder(reminder, { maxBodyBytes = DEFAULT_MAX_BODY_BYTES } = {}) {
   assertPositiveLimit(maxBodyBytes, "maxBodyBytes", ABSOLUTE_MAX_BODY_BYTES);
   if (reminder === null || typeof reminder !== "object" || Array.isArray(reminder)) {
@@ -2734,6 +2868,15 @@ function completeLinkedReminder(database, messageId, reminderIncarnations) {
       AND interval_ms IS NOT NULL
       AND state IN ('scheduled', 'message_queued')
   `).run(messageId);
+}
+
+function selectPromptTemplate(database, promptTemplateId) {
+  const promptTemplate = database.prepare(`
+    SELECT id, name, body, created_at, updated_at
+    FROM prompt_templates
+    WHERE id = ?
+  `).get(promptTemplateId);
+  return promptTemplate === undefined ? undefined : toPromptTemplate(promptTemplate);
 }
 
 function selectReminder(database, reminderId) {
@@ -3393,6 +3536,16 @@ function toMessage(row) {
     state: row.state,
     ...(row.sentinel_json === null ? {} : { sentinel: JSON.parse(row.sentinel_json) }),
     source: { kind: row.source_kind ?? "unknown" },
+  };
+}
+
+function toPromptTemplate(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    body: row.body,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
