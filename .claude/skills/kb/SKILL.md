@@ -178,6 +178,7 @@ Suggest `/kb reorganize` when any of these are true:
 
 ## Principles
 
+- **Owner-directed local retention**: Default to minimization and exclude sensitive data. A specific explicit Wolfgang instruction to retain a local artifact or sensitive test context overrides that default: retain it only in the named local topic, record the approval and scope without echoing sensitive values in reports, and do not remove it in general cleanup without a new explicit owner decision.
 - **Flat-first**: Start with flat files. Directories emerge from observed clustering during reorganization, not upfront guessing.
 - **Distill, don't dump**: Every piece of ingested content must be synthesized. Raw data goes in collapsed blocks if needed. The KB contains knowledge, not transcripts.
 - **Standard markdown links**: Cross-references use `[text](relative-path.md)`. No wiki-style links, no tag indexes, no resolution layers.
