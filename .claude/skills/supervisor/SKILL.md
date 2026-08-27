@@ -499,6 +499,19 @@ Mandatory obligations that remain here:
 - Keep `TASK.md` task-specific and use the exact four-section contract from `worker-launch`: `Context`, `Task`, `Completion Protocol`, and `If Compacted`. Generic worker rules belong in `worker/SKILL.md`.
 - On worker completion, park first with `worker_park.py`, then interrogate missing evidence by mail, verify requirements, evidence, diff scope, review/coverage gates, and the mandatory background explain overview pass from `worker-launch` before accepting completion.
 - Follow `worker-launch` for Codex launch/session/config details and the supervisor-owned review fallback when Codex subagents are unavailable.
+
+### Validated Intake Mailbox handoffs
+
+When a validated Intake Mailbox handoff arrives, read the complete validated requirement packet before dispatching anything. Do not act on an excerpt or summary. Treat its requirements, acceptance criteria, solution-shape constraints, and non-goals as the target task contract.
+
+1. Dispatch exactly one normal target worker through the established supervisor workflow in `../worker-launch/SKILL.md`: record the target's state, worktree, branch, and runtime; use the managed launcher; deliver the full packet and acceptance criteria through verified Mailbox; and verify that the target received it.
+2. After the target is dispatched, launch exactly one companion in that same recorded worktree, named `<target>-anxiety`. This is the explicit same-worktree monitoring exception to the separate-worker rule. Do not launch a second anxiety companion or any other writer there.
+3. Send `<target>-anxiety` the entire packet, not a summary. Instruct it to read `~/.agents/skills/anxiety/SKILL.md`, monitor the target against every requirement, and create its own recurring 10-minute reminder. The reminder must carry the full packet and the companion's monitoring instructions. Verify the companion launch and delivery through the normal Mailbox/tmux checks.
+
+The anxiety companion is strictly read-only. It may inspect the target's tmux window, worktree evidence, diffs, logs, and Mailbox reports, and may send requirement-tracing questions about progress, blockers, and next action. It may report concrete drift to the supervisor. It must not edit or create files, change code or `TASK.md`, commit, push, alter branches, launch or stop workers, run services, mutate runtime state, update supervisor state, change the target's reminders, or spawn workers/subagents. Its only reminder exception is creating and later cancelling its own 10-minute monitoring reminder. The target remains the sole writer in the shared worktree, and the supervisor remains the sole dispatcher and state owner.
+
+When the companion reports concrete requirement drift or says the supervisor is the blocker, inspect the evidence yourself: reread the packet and check the target's live pane, worktree, diff, and recorded state. Correct the target's direction or blocker through verified Mailbox, including the next executable action. Do not send an acknowledgement or generic status reply. Send one substantive disposition when action is needed, then stay quiet until new evidence, a blocker, or a meaningful state change arrives; avoid acknowledgement and status loops.
+
 - Follow `worker-launch` for abandonment. Never remove a worker worktree until the PR is merged/closed, Wolfgang explicitly authorizes teardown, or the task is explicitly abandoned after dirty work classification.
 
 ### Troubleshooting worker launches

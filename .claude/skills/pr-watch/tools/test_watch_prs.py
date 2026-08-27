@@ -108,6 +108,15 @@ class OrganizationScopeTest(unittest.TestCase):
             )
             self.assertEqual("example-org", watch_prs.configured_github_org(agents_path))
 
+    def test_resolves_roger_scope_to_the_github_organization_slug(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agents_path = Path(directory) / "AGENTS.md"
+            agents_path.write_text(
+                "Only ever include PRs from the `roger` GitHub organization.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual("Roger-Labs-Inc", watch_prs.configured_github_org(agents_path))
+
     def test_reads_toggle_reflexivity_machine_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             agents_path = Path(directory) / "AGENTS.md"

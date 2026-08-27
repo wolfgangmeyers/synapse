@@ -40,10 +40,12 @@ could affect files, external communication, or destructive operations.
 | Skill | Description |
 |-------|-------------|
 | `augment-persona` | Analyze a persona file for gaps, generate targeted scenario-based questions, and integrate answers back into the persona. Use for improving existing personas, not generating new ones. |
+| `anxiety` | Monitor a target worker against a validated requirement packet from the same worktree, using read-only evidence and concrete escalation. |
 | `decompose` | Break large tasks into phased dev-loop iterations with clear boundaries, ordering, and inter-phase contracts. |
 | `generate-persona` | Generate a behavioral persona from any data source (chat logs, PR reviews, text files, git history), guided by intended use case. Replaces `generate-reviewer-persona` and `generate-supervisor-persona`. |
 | `generate-supervisor-persona` | **Deprecated** — thin wrapper that redirects to `generate-persona` with `--use supervision --source chat-logs`. |
 | `install` | Set up or reinstall mecha-developer by symlinking personas, skills, and hooks to the home directory. One-time setup utility. |
+| `intake` | Turn an idea into a validated requirement packet and hand it to the supervisor for target-worker dispatch and read-only anxiety monitoring. |
 | `kb` | Manage the persistent markdown knowledge base at `~/.mecha-developer/kb/`. For persistent, reusable knowledge worth keeping across sessions. |
 | `mailbox` | Mecha-wolfgang async mailbox — Mailbox V2 router delivery formats and mandatory pre-read state-update rules. **Load with supervisor** so runtime-delivered mail is handled correctly. |
 | `pi-extension-maintenance` | Safely inspect, install, update, uninstall, and diagnose the registered checkout-source Mailbox V2 Pi extension without relocating, copying, symlinking, or restoring an installed artifact. |
