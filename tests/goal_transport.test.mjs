@@ -80,7 +80,6 @@ test("protocol validates typed goal control, confirmation, and full-state frames
   const goalState = {
     enabled: true,
     goal: "ship the goal editor",
-    blocking: true,
     goal_lock_enabled: true,
     snooze_enabled: true,
     snooze_duration_ms: 120_000,
@@ -88,10 +87,9 @@ test("protocol validates typed goal control, confirmation, and full-state frames
     snooze_budget_cap_ms: 300_000,
     snooze_refill_yield_ms: 30_000,
     snooze_refill_elapsed_ms: 60_000,
-    outcome_counts: { BLOCKED: 2, COMPLETED: 3, NOT_DONE: 4, WAITING_FOR_USER_AUTHORIZATION: 1 },
+    outcome_counts: { COMPLETED: 3, NOT_DONE: 4 },
   };
   const settings = {
-    blocking: goalState.blocking,
     goal_lock_enabled: goalState.goal_lock_enabled,
     snooze_enabled: goalState.snooze_enabled,
     snooze_duration_ms: goalState.snooze_duration_ms,
@@ -107,8 +105,7 @@ test("protocol validates typed goal control, confirmation, and full-state frames
     control_id: "goal-control-1", action: "set", goal: goalState.goal, settings,
   };
   assert.deepEqual(validateClientFrame(control).settings, settings);
-  assert.deepEqual(validateClientFrame({ ...control, settings: Object.fromEntries(Object.entries(settings).filter(([key]) => key !== "blocking")) }).settings.blocking, undefined);
-  assert.throws(() => validateClientFrame({ ...control, settings: { ...settings, blocking: "yes" } }));
+  assert.throws(() => validateClientFrame({ ...control, settings: { ...settings, blocking: true } }));
   assert.throws(() => validateClientFrame({ ...control, settings: { ...settings, snooze_duration_ms: 0 } }));
   assert.throws(() => validateClientFrame({ ...control, action: "off", goal: "must be blank" }));
 
@@ -141,6 +138,106 @@ test("protocol validates typed goal control, confirmation, and full-state frames
     agent_id: "worker", instance_id: "worker-instance", goal_state: goalState,
     generated_at: "2030-01-01T00:00:00.000Z",
   }).goal_state, goalState);
+});
+
+test("router ignores unknown client fields but still validates known fields", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "unknown-client-fields-router-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  const sockets = [];
+  try {
+    const wsUrl = await router.listen();
+    const reader = await register(wsUrl, "reader", "reader-instance");
+    const worker = await register(wsUrl, "worker", "worker-instance");
+    sockets.push(reader.socket, worker.socket);
+
+    const activityEvent = nextFrame(reader.socket, (frame) => frame.type === "agent_activity" && frame.agent_id === "worker");
+    worker.socket.send(JSON.stringify({
+      version: "v1", frame_id: "activity-with-future-fields", type: "activity",
+      agent_id: "worker", instance_id: "worker-instance", lease_id: worker.registered.lease_id,
+      activity_state: "active",
+      future_frame_field: { ignored: true },
+      goal: { enabled: true, goal: "ship it", future_goal_field: "ignored" },
+    }));
+    const event = await activityEvent;
+    assert.deepEqual(event.goal, { enabled: true, goal: "ship it" });
+    assert.equal(event.future_frame_field, undefined);
+
+    const invalidFrame = nextFrame(worker.socket, (frame) => frame.type === "error" && frame.code === "invalid_frame");
+    worker.socket.send(JSON.stringify({
+      version: "v1", frame_id: "invalid-known-field", type: "activity",
+      agent_id: "worker", instance_id: "worker-instance", lease_id: worker.registered.lease_id,
+      activity_state: "not-a-known-state", future_frame_field: "still ignored",
+    }));
+    assert.equal((await invalidFrame).code, "invalid_frame");
+    assert.equal(worker.socket.readyState, WebSocket.OPEN);
+  } finally {
+    for (const socket of sockets) socket.close();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("router normalizes retired goal fields before transport validation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "goal-retired-fields-router-"));
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
+  const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
+  const sockets = [];
+  const goalState = {
+    enabled: true,
+    goal: "ship the goal editor",
+    goal_lock_enabled: false,
+    snooze_enabled: true,
+    snooze_duration_ms: 60_000,
+    snooze_turn_limit: null,
+    snooze_budget_cap_ms: null,
+    snooze_refill_yield_ms: 30_000,
+    snooze_refill_elapsed_ms: 60_000,
+    outcome_counts: {
+      COMPLETED: 3,
+      NOT_DONE: 4,
+      BLOCKED: 2,
+      WAITING_FOR_USER_AUTHORIZATION: 1,
+    },
+    blocking: true,
+  };
+  const legacyStateFrame = {
+    version: "v1", frame_id: "legacy-goal-state", type: "goal_state",
+    agent_id: "worker", instance_id: "worker-instance", lease_id: "worker-lease",
+    goal_state: goalState,
+  };
+  try {
+    assert.throws(() => validateClientFrame(legacyStateFrame));
+    assert.throws(() => validateServerFrame({
+      version: "v1", frame_id: "legacy-agent-goal-state", type: "agent_goal_state",
+      agent_id: "worker", instance_id: "worker-instance", goal_state: goalState,
+      generated_at: "2030-01-01T00:00:00.000Z",
+    }));
+
+    const wsUrl = await router.listen();
+    const reader = await register(wsUrl, "reader", "reader-instance");
+    const worker = await register(wsUrl, "worker", "worker-instance");
+    sockets.push(reader.socket, worker.socket);
+    const normalizedEvent = nextFrame(reader.socket, (frame) => frame.type === "agent_goal_state" && frame.agent_id === "worker");
+    worker.socket.send(JSON.stringify({
+      ...legacyStateFrame,
+      lease_id: worker.registered.lease_id,
+    }));
+
+    const event = await normalizedEvent;
+    const expectedGoalState = structuredClone(goalState);
+    delete expectedGoalState.blocking;
+    delete expectedGoalState.outcome_counts.BLOCKED;
+    delete expectedGoalState.outcome_counts.WAITING_FOR_USER_AUTHORIZATION;
+    assert.deepEqual(event.goal_state, expectedGoalState);
+    assert.equal(worker.socket.readyState, WebSocket.OPEN);
+  } finally {
+    for (const socket of sockets) socket.close();
+    await router.close();
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("goal desired state is exact-instance, durable, revisioned, and bounded", async () => {
@@ -203,7 +300,6 @@ test("router forwards exact-instance goal controls and projects confirmed goal s
     const worker = await register(wsUrl, "worker", "worker-instance");
     sockets.push(web.socket, worker.socket);
     const settings = {
-      blocking: true,
       goal_lock_enabled: false,
       snooze_enabled: true,
       snooze_duration_ms: 60_000,
@@ -245,7 +341,7 @@ test("router forwards exact-instance goal controls and projects confirmed goal s
         enabled: true,
         goal: "stale goal",
         ...settings,
-        outcome_counts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+        outcome_counts: { COMPLETED: 0, NOT_DONE: 0 },
       },
     }));
     assert.equal((await staleError).code, "goal_control_result_not_pending");
@@ -256,7 +352,7 @@ test("router forwards exact-instance goal controls and projects confirmed goal s
       enabled: true,
       goal: "ship the newer goal",
       ...settings,
-      outcome_counts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+      outcome_counts: { COMPLETED: 0, NOT_DONE: 0 },
     };
     const result = nextFrame(web.socket, (frame) => frame.type === "goal_control_result");
     worker.socket.send(JSON.stringify({
@@ -407,7 +503,6 @@ test("goal controls require an interaction source and keep pending controls boun
   });
   const sockets = [];
   const settings = {
-    blocking: true,
     goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 60_000,
@@ -487,7 +582,6 @@ test("router projects goal state through activity, snapshot, off, and replacemen
     const goalState = {
       enabled: true,
       goal: "ship the goal",
-      blocking: true,
       goal_lock_enabled: false,
       snooze_enabled: true,
       snooze_duration_ms: 60_000,
@@ -495,7 +589,7 @@ test("router projects goal state through activity, snapshot, off, and replacemen
       snooze_budget_cap_ms: null,
       snooze_refill_yield_ms: 30_000,
       snooze_refill_elapsed_ms: 60_000,
-      outcome_counts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+      outcome_counts: { COMPLETED: 0, NOT_DONE: 0 },
     };
     const stateEvent = nextFrame(reader.socket, (frame) => frame.type === "agent_goal_state" && frame.agent_id === "worker");
     worker.socket.send(JSON.stringify({
@@ -636,7 +730,6 @@ test("typed WebUI goal control reaches goal.js and returns correlated live and s
   let resolveWorkerConnected;
   const workerConnected = new Promise((resolve) => { resolveWorkerConnected = resolve; });
   const settings = {
-    blocking: true,
     goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 60_000,
@@ -649,7 +742,6 @@ test("typed WebUI goal control reaches goal.js and returns correlated live and s
   const expectedGoalState = {
     enabled: true,
     goal,
-    blocking: true,
     goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 60_000,
@@ -657,7 +749,7 @@ test("typed WebUI goal control reaches goal.js and returns correlated live and s
     snooze_budget_cap_ms: null,
     snooze_refill_yield_ms: 30_000,
     snooze_refill_elapsed_ms: 60_000,
-    outcome_counts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+    outcome_counts: { COMPLETED: 0, NOT_DONE: 0 },
   };
   const handlers = new Map();
   const events = new Map();
