@@ -577,6 +577,10 @@ So, concretely:
 - **The fix for a flourish is where the next flourish appears.** "Thinner than it sounds" was replaced with "does less than its name implies," which is the same construction. Reread the repair, not just the original.
 - If the repo has a written standard for this, point the worker at it *and* restate the rules. Both.
 
+### PR descriptions link the Jira ticket
+
+Every agent-authored PR description must include the direct Jira ticket link, not merely the ticket key, so Jira automation can transition the ticket. Never put internal task numbers in PR descriptions; use ticket numbers only.
+
 ### Name every ticket
 
 **Updates on active work carry ticket numbers.** "The RFC is waiting on review" makes him go looking. The ticket number does not. Same for PR numbers alongside them.
