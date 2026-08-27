@@ -108,6 +108,15 @@ class OrganizationScopeTest(unittest.TestCase):
             )
             self.assertEqual("example-org", watch_prs.configured_github_org(agents_path))
 
+    def test_reads_toggle_reflexivity_machine_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agents_path = Path(directory) / "AGENTS.md"
+            agents_path.write_text(
+                "Limit `pr-watch` and agent-driven PR-review sweeps to the Toggle Inc / Reflexivity organization.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual("toggleglobal", watch_prs.configured_github_org(agents_path))
+
     def test_explicit_repositories_must_belong_to_the_watched_organization(self):
         configured_repo = repo("backend-service")
         self.assertEqual(
