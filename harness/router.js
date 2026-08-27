@@ -18,6 +18,9 @@ import {
   IdempotencyConflictError,
   LeaseNotActiveError,
   QueueLimitError,
+  PromptTemplateCapacityError,
+  PromptTemplateNameConflictError,
+  PromptTemplateValidationError,
   ReminderCancellationConflictError,
   ReminderIdempotencyConflictError,
   ReminderValidationError,
@@ -88,6 +91,9 @@ const HTTP_ERROR_MESSAGES = Object.freeze({
   idempotency_conflict: "Message ID already belongs to a different request.",
   dead_letter_required: "Message is not a dead letter.",
   invalid_reminder: "Reminder request is invalid.",
+  prompt_template_capacity_exceeded: "Prompt template collection is full.",
+  prompt_template_name_conflict: "Prompt template name already exists.",
+  invalid_prompt_template: "Prompt template request is invalid.",
   reminder_idempotency_conflict: "Reminder ID already belongs to a different request.",
   reminder_not_cancelable: "Reminder is already linked to a delivery.",
   reminder_target_unavailable: "Reminder target has never connected.",
@@ -2784,10 +2790,19 @@ export function createAgentRouter({
       await handleReminderCollection(request, response);
       return;
     }
+    if (requestUrl.pathname === "/v1/prompt-templates") {
+      await handlePromptTemplateCollection(request, response);
+      return;
+    }
 
     const reminderRoute = matchReminderRoute(requestUrl.pathname);
     if (reminderRoute !== undefined) {
       await handleReminderItem(request, response, reminderRoute);
+      return;
+    }
+    const promptTemplateRoute = matchPromptTemplateRoute(requestUrl.pathname);
+    if (promptTemplateRoute !== undefined) {
+      await handlePromptTemplateItem(request, response, promptTemplateRoute);
       return;
     }
 
@@ -2848,6 +2863,70 @@ export function createAgentRouter({
       if (error instanceof HttpRequestError || error instanceof MemoryCatalogError) sendHttpError(response, error.statusCode ?? 400, "invalid_request");
       else throw error;
     }
+  }
+
+  async function handlePromptTemplateCollection(request, response) {
+    if (request.method === "GET") {
+      sendHttpJson(response, 200, { prompt_templates: repository.promptTemplates() });
+      return;
+    }
+    if (request.method !== "POST") {
+      sendHttpError(response, 404, "not_found");
+      return;
+    }
+    if (!isJsonContentType(request.headers["content-type"])) {
+      sendHttpError(response, 400, "invalid_request");
+      return;
+    }
+    try {
+      const result = repository.createPromptTemplate(await readJsonRequest(request, maxRequestBytes));
+      sendHttpJson(response, 201, { prompt_template: result.prompt_template });
+    } catch (error) {
+      if (error instanceof HttpRequestError) sendHttpError(response, error.statusCode, error.code);
+      else if (error instanceof PromptTemplateValidationError) sendHttpError(response, 400, error.code);
+      else if (error instanceof PromptTemplateNameConflictError
+        || error instanceof PromptTemplateCapacityError) sendHttpError(response, 409, error.code);
+      else throw error;
+    }
+  }
+
+  async function handlePromptTemplateItem(request, response, promptTemplateId) {
+    if (request.method === "GET") {
+      const promptTemplate = repository.promptTemplateFor(promptTemplateId);
+      if (promptTemplate === undefined) sendHttpError(response, 404, "not_found");
+      else sendHttpJson(response, 200, { prompt_template: promptTemplate });
+      return;
+    }
+    if (request.method === "PATCH") {
+      if (!isJsonContentType(request.headers["content-type"])) {
+        sendHttpError(response, 400, "invalid_request");
+        return;
+      }
+      try {
+        const result = repository.updatePromptTemplate(
+          promptTemplateId,
+          await readJsonRequest(request, maxRequestBytes),
+        );
+        if (result === undefined) sendHttpError(response, 404, "not_found");
+        else sendHttpJson(response, 200, { prompt_template: result.prompt_template });
+      } catch (error) {
+        if (error instanceof HttpRequestError) sendHttpError(response, error.statusCode, error.code);
+        else if (error instanceof PromptTemplateValidationError) sendHttpError(response, 400, error.code);
+        else if (error instanceof PromptTemplateNameConflictError) sendHttpError(response, 409, error.code);
+        else throw error;
+      }
+      return;
+    }
+    if (request.method !== "DELETE") {
+      sendHttpError(response, 404, "not_found");
+      return;
+    }
+    if (!repository.deletePromptTemplate(promptTemplateId)) {
+      sendHttpError(response, 404, "not_found");
+      return;
+    }
+    response.writeHead(204, { "cache-control": "no-store" });
+    response.end();
   }
 
   async function handleReminderCollection(request, response) {
@@ -3304,6 +3383,16 @@ function matchMessageRoute(pathname) {
 
 function matchAttachmentRoute(pathname) {
   const match = /^\/v1\/attachments\/([^/]+)$/.exec(pathname);
+  if (match === null) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function matchPromptTemplateRoute(pathname) {
+  const match = /^\/v1\/prompt-templates\/([^/]+)$/.exec(pathname);
   if (match === null) return undefined;
   try {
     return decodeURIComponent(match[1]);

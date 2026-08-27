@@ -728,6 +728,10 @@ function createBrowserClient(browser, {
           await sendReminderCrud(command, configured, sendBrowser);
           return;
         }
+        if (command.type === "prompt_template_crud") {
+          await sendPromptTemplateCrud(command, configured, sendBrowser);
+          return;
+        }
         if (command.type === "goal_control") {
           const controlId = normalizeControlId(command.controlId ?? "");
           const targetAgentId = normalizeAgentId(command.targetAgentId ?? "");
@@ -858,6 +862,23 @@ function createBrowserClient(browser, {
           });
           return;
         }
+        const promptTemplateCrudRequestId = command?.type === "prompt_template_crud" && CONTROL_ID.test(command.requestId)
+          ? command.requestId
+          : undefined;
+        if (promptTemplateCrudRequestId !== undefined) {
+          sendBrowser({
+            type: "prompt_template_crud_result",
+            requestId: promptTemplateCrudRequestId,
+            operation: String(command.operation ?? ""),
+            promptTemplateId: String(command.promptTemplateId ?? ""),
+            accepted: false,
+            status: 0,
+            body: { error: { code: "request_failed", message: error.message } },
+            agentId: configured.agentId,
+            routerUrl: configured.routerUrl,
+          });
+          return;
+        }
         const reminderLockControlId = command?.type === "reminder_lock_control" && CONTROL_ID.test(command.controlId)
           ? command.controlId
           : undefined;
@@ -921,6 +942,43 @@ function createBrowserClient(browser, {
       routerSocket?.close(1000, "browser closed");
     },
   };
+}
+
+export async function sendPromptTemplateCrud(command, configured, sendBrowser) {
+  const requestId = normalizeControlId(command.requestId ?? "");
+  const operation = String(command.operation ?? "");
+  const methodByOperation = { list: "GET", create: "POST", update: "PATCH", delete: "DELETE" };
+  const method = methodByOperation[operation];
+  if (method === undefined) throw new Error("Prompt template operation is invalid");
+  const promptTemplateId = method === "GET" || method === "POST" ? "" : normalizePromptTemplateId(command.promptTemplateId ?? "");
+  const url = new URL(method === "GET" || method === "POST"
+    ? "/v1/prompt-templates"
+    : `/v1/prompt-templates/${encodeURIComponent(promptTemplateId)}`, configured.routerUrl);
+  const options = { method, headers: { "content-type": "application/json" } };
+  if (method === "POST" || method === "PATCH") options.body = JSON.stringify(normalizePromptTemplatePayload(command.payload));
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  sendBrowser({
+    type: "prompt_template_crud_result",
+    requestId,
+    operation,
+    promptTemplateId: promptTemplateId || body.prompt_template?.id || body.template?.id || "",
+    accepted: response.ok,
+    status: response.status,
+    body,
+    agentId: configured.agentId,
+    routerUrl: configured.routerUrl,
+  });
+}
+
+function normalizePromptTemplatePayload(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Prompt template payload is invalid");
+  const keys = Object.keys(value);
+  if (keys.some((key) => !["name", "body"].includes(key))
+    || typeof value.name !== "string" || typeof value.body !== "string") {
+    throw new Error("Prompt template payload must contain only name and body");
+  }
+  return { name: value.name, body: value.body };
 }
 
 async function sendReminderCrud(command, configured, sendBrowser) {
@@ -1084,6 +1142,12 @@ function normalizeReminderId(value) {
   const reminderId = String(value).trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,98}$/.test(reminderId)) throw new Error("Reminder ID is invalid");
   return reminderId;
+}
+
+function normalizePromptTemplateId(value) {
+  const promptTemplateId = String(value).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(promptTemplateId)) throw new Error("Prompt template ID is invalid");
+  return promptTemplateId;
 }
 
 function normalizeGoalControlSettings(value) {

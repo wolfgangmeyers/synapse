@@ -51,6 +51,21 @@
           <h2 id="peer-name">Pick an agent</h2>
           <p id="peer-detail">Connected agents appear on the left.</p>
         </div>
+        <div id="prompt-controls" class="prompt-controls" hidden>
+          <div class="prompt-picker-group">
+            <span class="model-label">Prompt</span>
+            <div id="prompt-picker" class="model-picker">
+              <button id="prompt-current" class="model-current" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="prompt-menu">
+                <span id="prompt-current-label">Select prompt</span>
+                <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
+              </button>
+              <div id="prompt-menu" class="model-menu" role="dialog" aria-label="Choose prompt template" hidden>
+                <div id="prompt-options" class="model-options" role="listbox"></div>
+              </div>
+            </div>
+          </div>
+          <button id="prompt-manage" class="prompt-manage-button" type="button" aria-haspopup="dialog" aria-controls="prompt-templates-dialog" aria-label="Manage prompt templates" title="Manage prompt templates"><i class="fa-solid fa-gear" aria-hidden="true"></i></button>
+        </div>
         <button id="goal-header-button" class="goal-header-button" type="button" aria-haspopup="dialog" aria-controls="goal-dialog">Set goal</button>
         <button id="reminder-header-button" class="reminder-indicator" type="button" aria-haspopup="dialog" aria-controls="reminders-dialog" disabled aria-label="Select an agent to add a reminder" title="Select an agent to add a reminder"><i class="fa-solid fa-clock" aria-hidden="true"></i></button>
         <div id="model-controls" class="model-controls" hidden>
@@ -160,6 +175,32 @@
       </header>
       <div id="goal-dialog-body" class="goal-dialog-body" tabindex="0"></div>
       <div id="goal-dialog-footer" class="goal-dialog-footer"></div>
+    </form>
+  </dialog>
+
+  <dialog id="prompt-templates-dialog" class="message-dialog prompt-dialog" aria-labelledby="prompt-templates-dialog-title">
+    <form method="dialog" class="dialog-shell">
+      <header>
+        <div>
+          <h2 id="prompt-templates-dialog-title">Prompt templates</h2>
+          <p>Save prompts you use often.</p>
+        </div>
+        <button value="cancel" aria-label="Close prompt template manager"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div id="prompt-templates-dialog-body" class="prompt-dialog-body" tabindex="0"></div>
+    </form>
+  </dialog>
+
+  <dialog id="prompt-use-dialog" class="message-dialog prompt-dialog" aria-labelledby="prompt-use-dialog-title">
+    <form method="dialog" class="dialog-shell">
+      <header>
+        <div>
+          <h2 id="prompt-use-dialog-title">Use prompt template</h2>
+          <p id="prompt-use-dialog-help"></p>
+        </div>
+        <button value="cancel" aria-label="Close prompt template"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </header>
+      <div id="prompt-use-dialog-body" class="prompt-dialog-body" tabindex="0"></div>
     </form>
   </dialog>
   <script src="/vendor/markdown-it.js"></script>

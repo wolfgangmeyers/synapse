@@ -147,7 +147,7 @@ test("migration 013 upgrades schema 012 without disturbing queued data", async (
     }
     repository = openMessageRepository({ databasePath });
     assert.equal(repository.messageFor("before-conversations").body, "queued");
-    assert.equal(repository.migrationIds().at(-1), "018_subagent_lifecycle_status");
+    assert.equal(repository.migrationIds().at(-1), "020_prompt_templates");
     repository.enqueue({ id: "after-conversations", from: "sender", to: "peer", body: "recorded", created_at: at(1, 1) });
     assert.equal(repository.conversationHistory({ owner: "peer", peer: "sender" })[0].id, "after-conversations");
   } finally {

@@ -22,6 +22,7 @@ import {
 } from "./state.js";
 import { renderMarkdownBody, textWithoutMarkdownImages } from "./markdown.js";
 import { formatReminderCountdown, reminderRecurrenceLabel } from "./reminders.js";
+import { parsePromptTemplateTokens, renderPromptTemplate } from "./prompt-templates.js";
 
 localStorage.removeItem("mecha.web.messages");
 localStorage.removeItem("mecha.web.conversations");
@@ -55,6 +56,16 @@ const state = {
   routerEditor: null,
   agents: [],
   reminders: [],
+  promptTemplates: [],
+  promptTemplatesLoaded: false,
+  promptTemplateListGeneration: 0,
+  promptTemplateListDirty: false,
+  pendingPromptTemplateCrud: new Map(),
+  promptTemplateDialogMode: "list",
+  promptTemplateDraft: null,
+  promptTemplateDeleteId: "",
+  promptTemplateUse: null,
+  promptTemplateSelection: null,
   selectedPeer: "",
   agentFilter: "",
   images: [],
@@ -84,11 +95,13 @@ const state = {
   goalDialogPeer: "",
   goalDialogReturnFocus: null,
   goalDraft: null,
+  promptTemplateDialogStatus: null,
 };
 let modelPickerPeer = "";
 let modelPickerSearchText = "";
 let modelPickerOpen = false;
 let modelPickerSelection;
+let promptPickerOpen = false;
 
 const elements = {
   statusDot: document.querySelector("#status-dot"),
@@ -132,6 +145,18 @@ const elements = {
   goalDialogFooter: document.querySelector("#goal-dialog-footer"),
   goalHeaderButton: document.querySelector("#goal-header-button"),
   reminderHeaderButton: document.querySelector("#reminder-header-button"),
+  promptControls: document.querySelector("#prompt-controls"),
+  promptCurrent: document.querySelector("#prompt-current"),
+  promptCurrentLabel: document.querySelector("#prompt-current-label"),
+  promptMenu: document.querySelector("#prompt-menu"),
+  promptOptions: document.querySelector("#prompt-options"),
+  promptManage: document.querySelector("#prompt-manage"),
+  promptTemplatesDialog: document.querySelector("#prompt-templates-dialog"),
+  promptTemplatesDialogBody: document.querySelector("#prompt-templates-dialog-body"),
+  promptTemplatesDialogTitle: document.querySelector("#prompt-templates-dialog-title"),
+  promptUseDialog: document.querySelector("#prompt-use-dialog"),
+  promptUseDialogBody: document.querySelector("#prompt-use-dialog-body"),
+  promptUseDialogHelp: document.querySelector("#prompt-use-dialog-help"),
   modelControls: document.querySelector("#model-controls"),
   modelPicker: document.querySelector("#model-picker"),
   modelCurrent: document.querySelector("#model-current"),
@@ -178,6 +203,14 @@ elements.goalHeaderButton.addEventListener("click", () => {
 elements.reminderHeaderButton.addEventListener("click", () => {
   if (state.selectedPeer) openReminderDialog(state.selectedPeer, reminderRowsForPeer(state.selectedPeer).length === 0 ? "create" : "list", elements.reminderHeaderButton);
 });
+elements.promptCurrent.addEventListener("mousedown", capturePromptSelection);
+elements.promptCurrent.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") capturePromptSelection();
+});
+elements.promptCurrent.addEventListener("click", () => setPromptPickerOpen(!promptPickerOpen));
+elements.promptManage.addEventListener("click", () => {
+  if (state.selectedPeer) openPromptTemplateManager(elements.promptManage);
+});
 elements.refresh.addEventListener("click", () => sendCommand({ type: "refresh_agents" }));
 elements.modelCurrent.addEventListener("click", () => {
   setModelPickerOpen(!modelPickerOpen, { focus: !modelPickerOpen });
@@ -188,9 +221,11 @@ elements.modelSearch.addEventListener("input", () => {
 });
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-picker")) setModelPickerOpen(false);
+  if (!event.target.closest("#prompt-picker")) setPromptPickerOpen(false);
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && modelPickerOpen) setModelPickerOpen(false);
+  if (event.key === "Escape" && promptPickerOpen) setPromptPickerOpen(false);
 });
 elements.agentFilter.addEventListener("input", () => {
   state.agentFilter = elements.agentFilter.value;
@@ -217,6 +252,15 @@ elements.goalDialog.addEventListener("close", () => {
   state.goalDraft = null;
   if (returnFocus?.isConnected) returnFocus.focus();
   else [...document.querySelectorAll(".agent-row")].find((row) => row.dataset.agentId === peer)?.querySelector(".goal-indicator")?.focus();
+});
+elements.promptTemplatesDialog.addEventListener("close", () => {
+  state.promptTemplateDialogMode = "list";
+  state.promptTemplateDraft = null;
+  state.promptTemplateDeleteId = "";
+  state.promptTemplateDialogStatus = null;
+});
+elements.promptUseDialog.addEventListener("close", () => {
+  state.promptTemplateUse = null;
 });
 elements.composer.addEventListener("dragover", (event) => {
   if (!hasImageFiles(event.dataTransfer?.items)) return;
@@ -254,6 +298,7 @@ function connectUiSocket() {
     clearPendingGoalControls();
     clearPendingReminderLockControls();
     state.pendingReminderCrud.clear();
+    state.pendingPromptTemplateCrud.clear();
     state.reminderLockStates.clear();
     setStatus("reconnecting", "UI server connection closed; retrying…");
     setTimeout(connectUiSocket, 1000);
@@ -271,7 +316,10 @@ async function handleEvent(event) {
   if (!matchesActiveScope(event, state)) return;
   if (event.type === "status") {
     setStatus(event.state, event.detail, event.agentId, event.routerUrl);
-    if (event.state === "connected") backfillSelectedConversation();
+    if (event.state === "connected") {
+      backfillSelectedConversation();
+      requestPromptTemplates();
+    }
     return;
   }
   if (event.type === "reminders") {
@@ -330,6 +378,10 @@ async function handleEvent(event) {
   }
   if (event.type === "reminder_crud_result") {
     handleReminderCrudResult(event);
+    return;
+  }
+  if (event.type === "prompt_template_crud_result") {
+    handlePromptTemplateCrudResult(event);
     return;
   }
   if (event.type === "agent_activity") {
@@ -471,6 +523,8 @@ function showArrivedMessageDialog(arrival) {
 async function switchRouter(routerUrl, { connect = false } = {}) {
   closeReminderDialog();
   closeGoalDialog();
+  closePromptTemplateManager();
+  closePromptTemplateUseDialog();
   clearPendingModelControls({ render: false });
   clearPendingGoalControls();
   clearPendingReminderLockControls();
@@ -482,6 +536,12 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.agents = [];
   state.modelControlUpdatedAtMs.clear();
   state.reminders = [];
+  state.promptTemplates = [];
+  state.promptTemplatesLoaded = false;
+  state.promptTemplateListGeneration = 0;
+  state.promptTemplateListDirty = false;
+  state.pendingPromptTemplateCrud.clear();
+  clearPromptTemplateSelection();
   state.expandedSubagents.clear();
   state.lastLifecycleSnapshotVersion = 0;
   state.selectedPeer = loadSelectedPeer(routerUrl, state.agentId);
@@ -688,6 +748,7 @@ function renderAgents() {
 function selectPeer(peer) {
   closeReminderDialog();
   closeGoalDialog();
+  clearPromptTemplateSelection();
   state.agentFilter = "";
   elements.agentFilter.value = "";
   if (peer === state.selectedPeer) {
@@ -901,6 +962,7 @@ function renderConversation() {
   elements.reminderHeaderButton.title = reminderLabel;
   elements.reminderHeaderButton.innerHTML = '<i class="fa-solid fa-clock" aria-hidden="true"></i>';
   renderModelControls(selectedAgent);
+  renderPromptControls(selectedAgent);
   const active = selectedAgent?.activity_state === "active";
   const compacting = selectedAgent?.activity_state === "compacting";
   elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}${compacting ? compactingBadgeMarkup("inline") : ""}` : "Pick an agent";
@@ -1332,6 +1394,7 @@ function loadDraftPeers(routerUrl, agentId) {
   return new Set(Object.entries(loadDrafts()).filter(([key, draft]) => key.startsWith(prefix) && draft.body).map(([key]) => key.slice(prefix.length)));
 }
 function saveCurrentDraft() {
+  clearPromptTemplateSelection();
   const key = draftScope(state.routerUrl, state.agentId, state.selectedPeer);
   if (!key) return;
   const drafts = loadDrafts();
@@ -1342,6 +1405,7 @@ function saveCurrentDraft() {
   state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
 }
 function clearCurrentDraft() {
+  clearPromptTemplateSelection();
   const key = draftScope(state.routerUrl, state.agentId, state.selectedPeer);
   if (!key) return;
   const drafts = loadDrafts();
@@ -1350,6 +1414,7 @@ function clearCurrentDraft() {
   state.draftPeers = loadDraftPeers(state.routerUrl, state.agentId);
 }
 function restoreDraftForSelectedPeer({ focus = false } = {}) {
+  clearPromptTemplateSelection();
   const key = draftScope(state.routerUrl, state.agentId, state.selectedPeer);
   elements.draft.value = key ? loadDrafts()[key]?.body || "" : "";
   if (focus && key) focusDraftAtEnd();
@@ -1761,6 +1826,393 @@ function renderModelControls(agent) {
     : currentModel;
   elements.modelCurrentLabel.textContent = current === undefined ? "Select model" : modelKey(current);
   if (modelPickerOpen) renderModelOptions(models);
+}
+
+function setPromptPickerOpen(open) {
+  promptPickerOpen = open;
+  elements.promptMenu.hidden = !open;
+  elements.promptCurrent.setAttribute("aria-expanded", String(open));
+  if (open) renderPromptOptions();
+}
+
+function clearPromptTemplateSelection() {
+  state.promptTemplateSelection = null;
+}
+
+function capturePromptSelection() {
+  if (!state.selectedPeer) return;
+  state.promptTemplateSelection = {
+    start: elements.draft.selectionStart ?? elements.draft.value.length,
+    end: elements.draft.selectionEnd ?? elements.draft.value.length,
+  };
+}
+
+function renderPromptControls(agent) {
+  const peer = state.selectedPeer;
+  elements.promptControls.hidden = !peer;
+  elements.promptManage.disabled = !peer;
+  if (!peer) {
+    setPromptPickerOpen(false);
+    elements.promptCurrentLabel.textContent = "Select prompt";
+    elements.promptOptions.replaceChildren();
+    return;
+  }
+  renderPromptOptions();
+}
+
+function renderPromptOptions() {
+  if (!state.selectedPeer) return;
+  if (!state.promptTemplatesLoaded) {
+    const loading = document.createElement("p");
+    loading.className = "model-options-empty";
+    loading.textContent = "Loading prompt templates…";
+    elements.promptOptions.replaceChildren(loading);
+    return;
+  }
+  if (state.promptTemplates.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "model-options-empty";
+    empty.textContent = "No saved prompt templates";
+    elements.promptOptions.replaceChildren(empty);
+    return;
+  }
+  elements.promptOptions.replaceChildren(...state.promptTemplates.map((template) => {
+    const option = document.createElement("button");
+    option.className = "model-option";
+    option.type = "button";
+    option.role = "option";
+    option.setAttribute("aria-label", `Use prompt template ${template.name}`);
+    const name = document.createElement("strong");
+    name.textContent = template.name;
+    const preview = document.createElement("small");
+    preview.textContent = template.body;
+    option.append(name, preview);
+    option.addEventListener("click", () => selectPromptTemplate(template));
+    return option;
+  }));
+}
+
+function selectPromptTemplate(template) {
+  setPromptPickerOpen(false);
+  state.promptTemplateUse = { template, values: {} };
+  renderPromptUseDialog();
+  elements.promptUseDialog.showModal();
+  requestAnimationFrame(() => elements.promptUseDialogBody.querySelector("input, button")?.focus());
+}
+
+function openPromptTemplateManager() {
+  setPromptPickerOpen(false);
+  state.promptTemplateDialogMode = "list";
+  state.promptTemplateDraft = null;
+  state.promptTemplateDeleteId = "";
+  state.promptTemplateDialogStatus = null;
+  renderPromptTemplateDialog();
+  elements.promptTemplatesDialog.showModal();
+  requestPromptTemplates();
+  requestAnimationFrame(() => elements.promptTemplatesDialogBody.querySelector("input, button")?.focus());
+}
+
+function closePromptTemplateManager() {
+  if (elements.promptTemplatesDialog?.open) elements.promptTemplatesDialog.close();
+  else {
+    state.promptTemplateDialogMode = "list";
+    state.promptTemplateDraft = null;
+    state.promptTemplateDeleteId = "";
+  }
+}
+
+function closePromptTemplateUseDialog() {
+  if (elements.promptUseDialog?.open) elements.promptUseDialog.close();
+  else state.promptTemplateUse = null;
+}
+
+function requestPromptTemplates() {
+  if ([...state.pendingPromptTemplateCrud.values()].some((request) => request.operation === "list")) return false;
+  const requested = sendPromptTemplateCrud("list");
+  if (requested) state.promptTemplateListDirty = false;
+  return requested;
+}
+
+function sendPromptTemplateCrud(operation, promptTemplateId, payload) {
+  const requestId = `prompt-template-crud-${crypto.randomUUID()}`;
+  state.pendingPromptTemplateCrud.set(requestId, {
+    operation,
+    promptTemplateId,
+    ...(operation === "list" ? { listGeneration: state.promptTemplateListGeneration } : {}),
+  });
+  const command = {
+    type: "prompt_template_crud",
+    requestId,
+    operation,
+    ...(promptTemplateId === undefined ? {} : { promptTemplateId }),
+    ...(payload === undefined ? {} : { payload }),
+  };
+  if (!sendCommand(command)) {
+    state.pendingPromptTemplateCrud.delete(requestId);
+    setPromptTemplateDialogStatus("The router is not connected.", true);
+    renderPromptTemplateDialog();
+    return false;
+  }
+  setPromptTemplateDialogStatus(operation === "list" ? "Loading…" : "Saving…");
+  renderPromptTemplateDialog();
+  return true;
+}
+
+function handlePromptTemplateCrudResult(event) {
+  const pending = state.pendingPromptTemplateCrud.get(event.requestId);
+  if (!pending) return;
+  state.pendingPromptTemplateCrud.delete(event.requestId);
+  const currentList = pending.operation !== "list"
+    || (pending.listGeneration === state.promptTemplateListGeneration && !state.promptTemplateListDirty);
+  if (event.accepted !== true) {
+    setPromptTemplateDialogStatus(event.body?.error?.message || event.body?.error?.code || `Prompt template request failed (${event.status || "unknown"})`, true);
+    renderPromptTemplateDialog();
+    if (pending.operation === "list" && !currentList) requestPromptTemplates();
+    return;
+  }
+  if (pending.operation === "list") {
+    if (!currentList) {
+      requestPromptTemplates();
+      return;
+    }
+    const bodyTemplates = Array.isArray(event.body) ? event.body : (event.body?.prompt_templates ?? event.body?.templates ?? event.body?.promptTemplates ?? []);
+    state.promptTemplates = normalizePromptTemplates(bodyTemplates);
+    state.promptTemplatesLoaded = true;
+    state.promptTemplateDialogStatus = null;
+    renderPromptControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
+    if (elements.promptTemplatesDialog?.open) renderPromptTemplateDialog();
+    return;
+  }
+  state.promptTemplateDialogMode = "list";
+  state.promptTemplateDraft = null;
+  state.promptTemplateDeleteId = "";
+  state.promptTemplateDialogStatus = pending.operation === "delete" ? "Template deleted." : "Template saved.";
+  state.promptTemplateListGeneration += 1;
+  state.promptTemplateListDirty = true;
+  requestPromptTemplates();
+  renderPromptTemplateDialog();
+}
+
+function normalizePromptTemplates(templates) {
+  return (Array.isArray(templates) ? templates : []).flatMap((template) => {
+    if (!template || typeof template !== "object" || template.id === undefined) return [];
+    return [{ id: String(template.id), name: String(template.name ?? ""), body: String(template.body ?? "") }];
+  });
+}
+
+function renderPromptTemplateDialog() {
+  elements.promptTemplatesDialogBody.replaceChildren();
+  elements.promptTemplatesDialogTitle.textContent = state.promptTemplateDialogMode === "editor"
+    ? (state.promptTemplateDraft?.id ? "Edit prompt template" : "New prompt template")
+    : "Prompt templates";
+  if (state.promptTemplateDialogMode === "editor") {
+    renderPromptTemplateEditor();
+    return;
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "icon-button prompt-dialog-add";
+  add.setAttribute("aria-label", "New template");
+  add.title = "New template";
+  add.append(icon("fa-plus"));
+  add.addEventListener("click", () => {
+    state.promptTemplateDialogMode = "editor";
+    state.promptTemplateDraft = { name: "", body: "" };
+    state.promptTemplateDialogStatus = null;
+    renderPromptTemplateDialog();
+  });
+  elements.promptTemplatesDialogBody.append(add);
+  if (!state.promptTemplatesLoaded) {
+    const loading = document.createElement("p");
+    loading.className = "prompt-dialog-empty";
+    loading.textContent = "Loading prompt templates…";
+    elements.promptTemplatesDialogBody.append(loading);
+  } else if (state.promptTemplates.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "prompt-dialog-empty";
+    empty.textContent = "No saved prompt templates.";
+    elements.promptTemplatesDialogBody.append(empty);
+  } else {
+    for (const template of state.promptTemplates) elements.promptTemplatesDialogBody.append(renderPromptTemplateItem(template));
+  }
+  renderPromptTemplateDialogStatus();
+}
+
+function renderPromptTemplateItem(template) {
+  const item = document.createElement("article");
+  item.className = "prompt-template-item";
+  const name = document.createElement("strong");
+  name.textContent = template.name;
+  const body = document.createElement("pre");
+  body.textContent = template.body;
+  item.append(name, body);
+  if (state.promptTemplateDeleteId === template.id) {
+    const confirmation = document.createElement("p");
+    confirmation.className = "prompt-delete-confirmation";
+    confirmation.textContent = "Delete this template?";
+    const actions = document.createElement("div");
+    actions.className = "prompt-template-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => {
+      state.promptTemplateDeleteId = "";
+      renderPromptTemplateDialog();
+    });
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "danger-button";
+    confirm.textContent = "Delete";
+    confirm.addEventListener("click", () => sendPromptTemplateCrud("delete", template.id));
+    actions.append(cancel, confirm);
+    item.append(confirmation, actions);
+    return item;
+  }
+  const actions = document.createElement("div");
+  actions.className = "prompt-template-actions";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "secondary";
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => {
+    state.promptTemplateDialogMode = "editor";
+    state.promptTemplateDraft = { ...template };
+    state.promptTemplateDialogStatus = null;
+    renderPromptTemplateDialog();
+  });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "secondary";
+  remove.textContent = "Delete";
+  remove.addEventListener("click", () => {
+    state.promptTemplateDeleteId = template.id;
+    renderPromptTemplateDialog();
+  });
+  actions.append(edit, remove);
+  item.append(actions);
+  return item;
+}
+
+function renderPromptTemplateEditor() {
+  const draft = state.promptTemplateDraft;
+  const form = document.createElement("form");
+  form.className = "prompt-template-editor-form";
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = form.elements.namedItem("name").value.trim();
+    const body = form.elements.namedItem("body").value;
+    if (!name) {
+      setPromptTemplateDialogStatus("Enter a template name.", true);
+      return;
+    }
+    sendPromptTemplateCrud(draft.id ? "update" : "create", draft.id, { name, body });
+  });
+  form.append(promptTemplateField("name", "Template name", draft.name, "For example, Review pull request"));
+  form.append(promptTemplateField("body", "Prompt body", draft.body, "Write the prompt text or Markdown", "textarea"));
+  const actions = document.createElement("div");
+  actions.className = "prompt-template-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "secondary";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => {
+    state.promptTemplateDialogMode = "list";
+    state.promptTemplateDraft = null;
+    state.promptTemplateDialogStatus = null;
+    renderPromptTemplateDialog();
+  });
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = draft.id ? "Save changes" : "Create template";
+  actions.append(cancel, save);
+  form.append(actions);
+  elements.promptTemplatesDialogBody.append(form);
+  renderPromptTemplateDialogStatus();
+}
+
+function promptTemplateField(name, labelText, value, placeholder, type = "input") {
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  const field = document.createElement(type === "textarea" ? "textarea" : "input");
+  field.name = name;
+  field.value = value;
+  field.placeholder = placeholder;
+  if (type === "textarea") field.rows = 10;
+  label.append(field);
+  return label;
+}
+
+function renderPromptTemplateDialogStatus() {
+  const { message, error } = state.promptTemplateDialogStatus || {};
+  if (!message) return;
+  const status = document.createElement("p");
+  status.id = "prompt-template-dialog-status";
+  status.className = `prompt-template-dialog-status${error ? " error" : ""}`;
+  status.textContent = message;
+  elements.promptTemplatesDialogBody.append(status);
+}
+
+function setPromptTemplateDialogStatus(message, error = false) {
+  state.promptTemplateDialogStatus = { message, error };
+  const status = elements.promptTemplatesDialogBody.querySelector("#prompt-template-dialog-status");
+  if (status) {
+    status.textContent = message;
+    status.classList.toggle("error", error);
+  }
+}
+
+function renderPromptUseDialog() {
+  const use = state.promptTemplateUse;
+  if (!use) return;
+  const tokens = parsePromptTemplateTokens(use.template.body);
+  elements.promptUseDialogHelp.textContent = tokens.length === 0
+    ? "Paste this prompt into the composer."
+    : "Fill in the values before pasting this prompt.";
+  elements.promptUseDialogBody.replaceChildren();
+  const form = document.createElement("form");
+  form.className = "prompt-use-form";
+  for (const token of tokens) {
+    const label = document.createElement("label");
+    label.textContent = token;
+    const input = document.createElement("input");
+    input.name = token;
+    input.value = use.values[token] ?? "";
+    input.addEventListener("input", () => { use.values[token] = input.value; });
+    label.append(input);
+    form.append(label);
+  }
+  const preview = document.createElement("pre");
+  preview.className = "prompt-template-preview";
+  preview.textContent = renderPromptTemplate(use.template.body, use.values);
+  form.addEventListener("input", () => { preview.textContent = renderPromptTemplate(use.template.body, use.values); });
+  const actions = document.createElement("div");
+  actions.className = "prompt-template-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "secondary";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", closePromptTemplateUseDialog);
+  const paste = document.createElement("button");
+  paste.type = "button";
+  paste.textContent = "Paste";
+  paste.addEventListener("click", () => pastePromptTemplate(use));
+  actions.append(cancel, paste);
+  form.append(preview, actions);
+  elements.promptUseDialogBody.append(form);
+}
+
+function pastePromptTemplate(use) {
+  const value = renderPromptTemplate(use.template.body, use.values);
+  const draft = elements.draft.value;
+  const start = Math.max(0, Math.min(state.promptTemplateSelection?.start ?? draft.length, draft.length));
+  const end = Math.max(start, Math.min(state.promptTemplateSelection?.end ?? start, draft.length));
+  elements.draft.value = `${draft.slice(0, start)}${value}${draft.slice(end)}`;
+  const caret = start + value.length;
+  elements.draft.setSelectionRange(caret, caret);
+  saveCurrentDraft();
+  updateSendState();
+  closePromptTemplateUseDialog();
 }
 
 function goalIndicatorMarkup(goal, peerName) {
