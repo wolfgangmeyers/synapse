@@ -44,7 +44,7 @@ const DEFAULT_SNOOZE_DURATION_MS = 60_000;
 const DEFAULT_SNOOZE_REFILL_YIELD_MS = 30_000;
 const DEFAULT_SNOOZE_REFILL_ELAPSED_MS = 60_000;
 const SUPERVISOR_WAIT_DURATION_MS = 5 * 60_000;
-const EVALUATOR_PROMPT = "goal: <goal description> - supervisor-dependent blocking is BLOCKED; return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE|WAITING_FOR_USER_AUTHORIZATION and REASON: <concise rationale>";
+const EVALUATOR_PROMPT = "goal: <goal description> - If the agent truly cannot proceed due to a blocking issue and there is no workaround, use BLOCKED; in almost all cases if the goal is not done the response should be NOT_DONE. Do not return BLOCKED if the agent can make progress towards the goal. If the agent has stopped due to the need for user authorization, use WAITING_FOR_USER_AUTHORIZATION. return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE|WAITING_FOR_USER_AUTHORIZATION and REASON: <concise rationale>";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 
 function normalizeGoal(value) {
