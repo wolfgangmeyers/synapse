@@ -577,10 +577,6 @@ So, concretely:
 - **The fix for a flourish is where the next flourish appears.** "Thinner than it sounds" was replaced with "does less than its name implies," which is the same construction. Reread the repair, not just the original.
 - If the repo has a written standard for this, point the worker at it *and* restate the rules. Both.
 
-### PR descriptions link the Jira ticket
-
-Every agent-authored PR description must include the direct Jira ticket link, not merely the ticket key, so Jira automation can transition the ticket. Never put internal task numbers in PR descriptions; use ticket numbers only.
-
 ### Name every ticket
 
 **Updates on active work carry ticket numbers.** "The RFC is waiting on review" makes him go looking. The ticket number does not. Same for PR numbers alongside them.
@@ -606,6 +602,7 @@ On tone: write like a person talking, not a system reporting. Say "the web UI is
 - Workers should also use their own background subagents when available for bounded research, planning checks, implementation slices, test triage, validation, and review. Keep the main worker thread focused on orchestration, integration decisions, and concise handoffs rather than accumulating all investigation and test output inline.
 - Top-level agents run subagents in the background unless there is a specific reason to block for the result. Never block the session waiting on a subagent. Start it, then poll, so Wolfgang can always reach you mid-task. Use the launcher’s configured runtime and explicitly set the required model when its default would be wrong. Confirm that the subagent actually started and returned evidence before relying on it; an immediate empty result is a failed delegation, not a completed check.
 - Tool allowances are exceptional. Do not request inline tool credits as a workaround for work that should go to a worker or subagent. Use an allowance only when the specific inline action is genuinely necessary, scoped, and faster than spinning up delegation, and expect those credits to become scarcer if they are abused.
+- Never request or use a top-level inline tool allowance to sleep, wait, probe, poll, or otherwise avoid subagent-based work; while subagents are active, wait for completion notifications and continue only separate useful delegated work.
 - Before delegation, name the smallest observable outcome and explicit non-goals. Keep the delegated investigation or implementation in the subagent. The parent handles integration, decisions, and final validation instead of repeating the same repo exploration inline.
 - Before modifying any repository for a ticket or other change, supervisors and workers must have read-only subagents investigate relevant existing code patterns. The implementation brief must cite the patterns, repositories or services, and reference files or symbols that guide the change, and explain any deliberate deviation. Do not begin repository changes until this gate is satisfied. An unexplained deviation from a relevant established pattern is a blocker until the owner provides the rationale.
 - Supervisors own routing, state, reminders, status, and authorization gates. Workers own implementation, local validation, evidence, and reporting.

@@ -30,7 +30,10 @@ def configured_github_org(agents_path: Path | None = None) -> str:
         re.IGNORECASE,
     )
     if match:
-        return match.group(1)
+        configured_org = match.group(1)
+        if configured_org.casefold() == "roger":
+            return "Roger-Labs-Inc"
+        return configured_org
     if re.search(
         r"Limit `pr-watch` and agent-driven PR-review sweeps to the Toggle Inc / Reflexivity organization\.",
         text,
@@ -627,7 +630,8 @@ def classify(pr: dict[str, Any]) -> dict[str, Any] | None:
     """Select only PRs Wolfgang is currently expected to review."""
     author = pr.get("author_login") or ""
     if (
-        (pr.get("repo") or "").lower() in FRONTEND_REPOS
+        (pr.get("repo") or "").casefold()
+        in {frontend_repo.casefold() for frontend_repo in FRONTEND_REPOS}
         or author == VIEWER
         or author in QUIET_BOT_AUTHORS
     ):
