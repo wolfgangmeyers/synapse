@@ -35,6 +35,7 @@ import {
   ABSOLUTE_MAX_BODY_BYTES,
   DEFAULT_MAX_BODY_BYTES,
   ProtocolValidationError,
+  stripUnknownClientFrameFields,
   validateClientFrame,
   validateEnvelope,
   validateServerFrame,
@@ -271,9 +272,6 @@ export function createAgentRouter({
   const goalControlV1Available = typeof repository.migrationIds === "function"
     && repository.migrationIds().includes("019_goal_control_desired_state")
     && ["goalControlDesiredFor", "upsertGoalControlDesired", "deleteGoalControlDesiredExcept", "pruneGoalControlDesired"].every((method) => typeof repository[method] === "function");
-  // Blocking is an optional extension to goal_control_v1. Keep its capability separate so
-  // clients can omit the field for older routers whose strict schemas reject it.
-  const goalControlBlockingV1Available = goalControlV1Available;
   // V2 is deliberately unavailable instead of silently becoming a second
   // process-local lifecycle store when a router starts against a pre-017 DB.
   const lifecycleV2Available = typeof repository.migrationIds === "function"
@@ -327,7 +325,7 @@ export function createAgentRouter({
       try {
         if (isBinary) throw new ProtocolValidationError();
         parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
-        const frame = validateClientFrame(parsed);
+        const frame = validateClientFrame(stripUnknownClientFrameFields(parsed));
         if (isLifecycleFrameType(frame.type)) traceLifecycle("router_lifecycle_validated", lifecycleTraceFields(frame));
         if (frame.type === "register") {
           if (session !== undefined) {
@@ -2301,23 +2299,20 @@ export function createAgentRouter({
       "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit",
       "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms",
     ];
-    const allowed = [...required, "blocking"];
-    if (Object.keys(value).some((key) => !allowed.includes(key))
+    if (Object.keys(value).some((key) => !required.includes(key))
       || required.some((key) => !Object.hasOwn(value, key))
-      || (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean")
       || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
       || !Number.isSafeInteger(value.snooze_duration_ms) || value.snooze_duration_ms < 1
       || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
       || !(value.snooze_budget_cap_ms === null || (Number.isSafeInteger(value.snooze_budget_cap_ms) && value.snooze_budget_cap_ms >= 1))
       || !Number.isSafeInteger(value.snooze_refill_yield_ms) || value.snooze_refill_yield_ms < 1
       || !Number.isSafeInteger(value.snooze_refill_elapsed_ms) || value.snooze_refill_elapsed_ms < 1) return undefined;
-    return { blocking: value.blocking !== false, ...value };
+    return value;
   }
 
   function normalizeGoalState(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)
       || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
-      || (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean")
       || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
       || !Number.isSafeInteger(value.snooze_duration_ms) || value.snooze_duration_ms < 1
       || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
@@ -2326,14 +2321,13 @@ export function createAgentRouter({
       || !Number.isSafeInteger(value.snooze_refill_elapsed_ms) || value.snooze_refill_elapsed_ms < 1
       || !value.outcome_counts || typeof value.outcome_counts !== "object") return undefined;
     const counts = value.outcome_counts;
-    if (!["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"].every(
+    if (!["COMPLETED", "NOT_DONE"].every(
       (outcome) => Number.isSafeInteger(counts[outcome]) && counts[outcome] >= 0,
     )) return undefined;
     const goal = normalizeGoalProjection(value);
     if (goal === undefined) return undefined;
     return {
       ...goal,
-      blocking: value.blocking !== false,
       goal_lock_enabled: value.goal_lock_enabled,
       snooze_enabled: value.snooze_enabled,
       snooze_duration_ms: value.snooze_duration_ms,
@@ -2342,10 +2336,8 @@ export function createAgentRouter({
       snooze_refill_yield_ms: value.snooze_refill_yield_ms,
       snooze_refill_elapsed_ms: value.snooze_refill_elapsed_ms,
       outcome_counts: {
-        BLOCKED: counts.BLOCKED,
         COMPLETED: counts.COMPLETED,
         NOT_DONE: counts.NOT_DONE,
-        WAITING_FOR_USER_AUTHORIZATION: counts.WAITING_FOR_USER_AUTHORIZATION,
       },
     };
   }
@@ -2720,7 +2712,6 @@ export function createAgentRouter({
         model_catalog_limits: { frame_bytes: Math.min(MODEL_CATALOG_MAX_FRAME_BYTES, maxFrameBytes) },
         model_control_limits: { pending_ttl_ms: pendingModelControlTtlMs },
         goal_control_v1: goalControlV1Available,
-        goal_control_blocking_v1: goalControlBlockingV1Available,
         ...(goalControlV1Available
           ? { goal_control_limits: { desired_ttl_ms: goalControlDesiredTtlMs } }
           : { goal_control_error: "migration_019_required" }),

@@ -56,6 +56,82 @@ export function validateClientFrame(frame) {
   return frame;
 }
 
+// Client frames are sent by independently upgraded extensions. Keep strict
+// validation for every known field, but remove fields this router version does
+// not understand before validation so an additive client change cannot evict a
+// healthy connection. Server frames remain strictly validated as before.
+export function stripUnknownClientFrameFields(frame) {
+  if (frame === null || typeof frame !== "object" || Array.isArray(frame)) return frame;
+  const candidates = schema.$defs.clientFrame.oneOf.filter((candidate) => {
+    const resolved = resolveSchema(candidate);
+    return resolved?.properties?.type?.const === undefined
+      || resolved.properties.type.const === frame.type;
+  });
+  return sanitizeClientValue(frame, candidates.length === 0 ? schema.$defs.clientFrame.oneOf : candidates);
+}
+
+function resolveSchema(definition) {
+  if (definition?.$ref?.startsWith("#/$defs/")) {
+    return schema.$defs[definition.$ref.slice("#/$defs/".length)];
+  }
+  return definition;
+}
+
+function schemaBranches(definitions, value) {
+  const branches = [];
+  for (const definition of definitions) {
+    const resolved = resolveSchema(definition);
+    if (Array.isArray(resolved?.oneOf)) {
+      // Keep the base properties declared next to a conditional oneOf. Goal
+      // result frames declare their payload there and use oneOf only for the
+      // accepted/error relationship.
+      branches.push(resolved);
+      branches.push(...schemaBranches(resolved.oneOf, value));
+      continue;
+    }
+    if (Array.isArray(resolved?.allOf)) {
+      // Keep the base object properties alongside conditional branches. The
+      // goal projection/state schemas put their required fields on the base
+      // schema and only repeat conditional constraints in allOf.
+      branches.push(resolved);
+      branches.push(...schemaBranches(resolved.allOf, value));
+      continue;
+    }
+    branches.push(resolved);
+  }
+  const matching = branches.filter((branch) => branch?.properties?.type?.const === undefined
+    || branch.properties.type.const === value?.type);
+  return matching.length === 0 ? branches : matching;
+}
+
+function sanitizeClientValue(value, definitions) {
+  if (value === null || typeof value !== "object") return value;
+  const branches = schemaBranches(definitions, value);
+  if (Array.isArray(value)) {
+    const itemSchemas = branches.map((branch) => branch?.items).filter(Boolean);
+    return itemSchemas.length === 0
+      ? []
+      : value.map((item) => sanitizeClientValue(item, itemSchemas));
+  }
+
+  const properties = new Map();
+  for (const branch of branches) {
+    for (const [key, property] of Object.entries(branch?.properties ?? {})) {
+      const existing = properties.get(key) ?? [];
+      existing.push(property);
+      properties.set(key, existing);
+    }
+  }
+  const sanitized = {};
+  for (const [key, member] of Object.entries(value)) {
+    const propertySchemas = properties.get(key);
+    if (propertySchemas !== undefined) {
+      sanitized[key] = sanitizeClientValue(member, propertySchemas);
+    }
+  }
+  return sanitized;
+}
+
 export function validateServerFrame(frame) {
   if (!hasOnlyUnicodeScalars(frame) || !validateServerSchema(frame)) throw new ProtocolValidationError();
   for (const timestamp of ["expires_at", "delivery_expires_at", "generated_at", "created_at"]) {
