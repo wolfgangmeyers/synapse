@@ -20,53 +20,53 @@ const STARTUP_DIRECTIVE = Object.freeze({
   body: "Load the mailbox and reminder skills, assess the current situation, and set up the sweep reminder.",
 });
 
-export async function ensureStartupTmux({
-  session: requestedSession,
-  window: requestedWindow,
-  env = process.env,
-  run = execFileAsync,
-} = {}) {
-  // `mecha` is the startup default, not a required exact session name. Other
-  // explicitly requested sessions retain their exact-session behavior.
-  if (requestedSession !== undefined && requestedSession !== "mecha") {
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(requestedSession) || !/^[A-Za-z0-9._-]{1,64}$/.test(requestedWindow ?? "supervisor")) throw new Error("startup tmux session and window names are invalid");
-    try { await run("tmux", ["has-session", "-t", requestedSession]); }
-    catch (error) {
-      if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
-      await run("tmux", ["new-session", "-d", "-s", requestedSession, "-n", requestedWindow ?? "supervisor"]);
-      return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: true, createdWindow: true };
-    }
-    return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: false, createdWindow: false };
-  }
-  if (typeof env?.TMUX === "string" && env.TMUX !== "") {
-    const currentSessionArgs = ["display-message", "-p"];
-    if (/^%\d+$/.test(env.TMUX_PANE ?? "")) currentSessionArgs.push("-t", env.TMUX_PANE);
-    currentSessionArgs.push("#{session_name}");
-    try {
-      const { stdout } = await run("tmux", currentSessionArgs);
-      const currentSession = stdout.trim();
-      if (/^[A-Za-z0-9._-]{1,64}$/.test(currentSession)) {
-        return { session: currentSession, window: "supervisor", createdSession: false, createdWindow: false };
-      }
-    } catch (error) {
-      if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
-    }
-  }
-  let output;
-  try {
-    ({ stdout: output } = await run("tmux", ["list-sessions", "-F", "#{session_name}"]));
-  } catch (error) {
-    if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
-    output = "";
-  }
-  const sessions = output.trim() === "" ? [] : output.trim().split("\n");
-  const session = sessions.find((candidate) => candidate.includes("mecha")) ?? "mecha";
-  if (session === "mecha" && !sessions.includes("mecha")) {
-    await run("tmux", ["new-session", "-d", "-s", "mecha", "-n", "supervisor"]);
-    return { session: "mecha", window: "supervisor", createdSession: true, createdWindow: true };
-  }
-  return { session, window: "supervisor", createdSession: false, createdWindow: false };
-}
+// export async function ensureStartupTmux({
+//   session: requestedSession,
+//   window: requestedWindow,
+//   env = process.env,
+//   run = execFileAsync,
+// } = {}) {
+//   // `mecha` is the startup default, not a required exact session name. Other
+//   // explicitly requested sessions retain their exact-session behavior.
+//   if (requestedSession !== undefined && requestedSession !== "mecha") {
+//     if (!/^[A-Za-z0-9._-]{1,64}$/.test(requestedSession) || !/^[A-Za-z0-9._-]{1,64}$/.test(requestedWindow ?? "supervisor")) throw new Error("startup tmux session and window names are invalid");
+//     try { await run("tmux", ["has-session", "-t", requestedSession]); }
+//     catch (error) {
+//       if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
+//       await run("tmux", ["new-session", "-d", "-s", requestedSession, "-n", requestedWindow ?? "supervisor"]);
+//       return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: true, createdWindow: true };
+//     }
+//     return { session: requestedSession, window: requestedWindow ?? "supervisor", createdSession: false, createdWindow: false };
+//   }
+//   if (typeof env?.TMUX === "string" && env.TMUX !== "") {
+//     const currentSessionArgs = ["display-message", "-p"];
+//     if (/^%\d+$/.test(env.TMUX_PANE ?? "")) currentSessionArgs.push("-t", env.TMUX_PANE);
+//     currentSessionArgs.push("#{session_name}");
+//     try {
+//       const { stdout } = await run("tmux", currentSessionArgs);
+//       const currentSession = stdout.trim();
+//       if (/^[A-Za-z0-9._-]{1,64}$/.test(currentSession)) {
+//         return { session: currentSession, window: "supervisor", createdSession: false, createdWindow: false };
+//       }
+//     } catch (error) {
+//       if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
+//     }
+//   }
+//   let output;
+//   try {
+//     ({ stdout: output } = await run("tmux", ["list-sessions", "-F", "#{session_name}"]));
+//   } catch (error) {
+//     if (error?.code !== 1) throw new Error(`tmux session discovery failed: ${error.message}`);
+//     output = "";
+//   }
+//   const sessions = output.trim() === "" ? [] : output.trim().split("\n");
+//   const session = sessions.find((candidate) => candidate.includes("mecha")) ?? "mecha";
+//   if (session === "mecha" && !sessions.includes("mecha")) {
+//     await run("tmux", ["new-session", "-d", "-s", "mecha", "-n", "supervisor"]);
+//     return { session: "mecha", window: "supervisor", createdSession: true, createdWindow: true };
+//   }
+//   return { session, window: "supervisor", createdSession: false, createdWindow: false };
+// }
 
 const ALLOWED_HOSTS = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
 
@@ -143,7 +143,7 @@ export async function startRouter({
     for (const migrationId of repository.migrationIds()) {
       eventLogger("schema_migration", { migration_id: migrationId });
     }
-    const startupTmux = await ensureStartupTmux({ session: "mecha", window: STARTUP_WINDOW });
+    // const startupTmux = await ensureStartupTmux({ session: "mecha", window: STARTUP_WINDOW });
     router = createRouter({
       repository,
       memoryCatalog,
@@ -151,7 +151,7 @@ export async function startRouter({
       port,
       eventLogger,
       imageAttachmentDirectory: `${database}.attachments`,
-      startupSession: startupTmux.session,
+      // startupSession: startupTmux.session,
       startupWindow: STARTUP_WINDOW,
       startupProvision: true,
       supervisorDirective: STARTUP_DIRECTIVE,

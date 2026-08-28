@@ -140,7 +140,6 @@ export function createAgentRouter({
   memoryCatalog,
   nativeSubagentTrace = createNativeSubagentTrace(),
   tmuxAdapter = createTmuxAdapter(),
-  startupSession,
   startupWindow,
   startupProvision = false,
   supervisorDirective,
@@ -1512,9 +1511,6 @@ export function createAgentRouter({
   return {
     async listen() {
       synchronizeRegisteredServerJobs();
-      if (startupSession !== undefined || startupProvision) {
-        await selectTmuxSession(startupSession, { window: startupWindow, provision: startupProvision, directive: supervisorDirective });
-      }
       server.listen({ host, port });
       await once(server, "listening");
       try {
