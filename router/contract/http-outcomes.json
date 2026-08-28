@@ -1,0 +1,30 @@
+{
+  "version": "v1",
+  "status": "scaffold",
+  "manifest": "manifest.json",
+  "cases": [
+    {
+      "id": "cors-origin-api",
+      "method": "OPTIONS",
+      "path": "/v1/health",
+      "status": "oracle_pending",
+      "reason": "The Node source and existing model-catalog expectation disagree about Origin-bearing API requests."
+    },
+    {
+      "id": "cors-origin-agents",
+      "method": "OPTIONS",
+      "path": "/v1/agents",
+      "status": "oracle_pending",
+      "reason": "Do not resolve the existing CORS source/test conflict in this seam."
+    }
+  ],
+  "route_outcomes": [],
+  "outcome_shape": {
+    "success_status": "integer",
+    "error_status": "integer",
+    "error_code": "string",
+    "error_message": "string",
+    "response_headers": "object",
+    "request_validation": "object"
+  }
+}

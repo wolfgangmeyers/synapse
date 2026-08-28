@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "v1",
+  "status": "scaffold",
+  "source": {
+    "http": "harness/router.js",
+    "protocol": "protocol/v1/schema.json",
+    "database": ["harness/db.js", "harness/migrations/001_initial.sql", "harness/migrations/020_prompt_templates.sql"],
+    "launcher": "tools/run_router.mjs"
+  },
+  "cors": {
+    "status": "oracle_pending",
+    "recorded": true,
+    "source_behavior": "Origin-bearing API requests receive wildcard CORS headers.",
+    "test_conflict": "tests/model_catalog_transport.test.mjs:683",
+    "go_implementation": "deferred"
+  },
+  "http": [
+    {"methods": ["OPTIONS"], "path": "/*", "source": "handleHttpRequest", "cors": "oracle_pending"},
+    {"methods": ["GET"], "path": "/v1/health", "source": "handleHttpRequest"},
+    {"methods": ["GET"], "path": "/v1/capabilities", "source": "handleHttpRequest"},
+    {"methods": ["GET"], "path": "/v1/memory/policy", "source": "handleHttpRequest"},
+    {"methods": ["POST"], "path": "/v1/memory/rebuild", "source": "handleMemoryRequest"},
+    {"methods": ["POST"], "path": "/v1/memory/lookup", "source": "handleMemoryRequest"},
+    {"methods": ["POST"], "path": "/v1/memory/expand", "source": "handleMemoryRequest"},
+    {"methods": ["POST"], "path": "/v1/memory/apply", "source": "handleMemoryRequest"},
+    {"methods": ["POST"], "path": "/v1/memory/touch", "source": "handleMemoryRequest"},
+    {"methods": ["GET"], "path": "/v1/agents", "source": "handleHttpRequest", "cors": "oracle_pending"},
+    {"methods": ["GET"], "path": "/v1/conversations", "source": "handleHttpRequest"},
+    {"methods": ["GET"], "path": "/v1/attachments/{attachment_id}", "source": "serveImageAttachment"},
+    {"methods": ["POST"], "path": "/v1/messages", "source": "enqueueHttpMessage"},
+    {"methods": ["GET", "POST", "DELETE"], "path": "/v1/reminders", "source": "handleReminderCollection"},
+    {"methods": ["GET", "PATCH", "DELETE"], "path": "/v1/reminders/{reminder_id}", "source": "handleReminderItem"},
+    {"methods": ["GET", "POST"], "path": "/v1/prompt-templates", "source": "handlePromptTemplateCollection"},
+    {"methods": ["GET", "PATCH", "DELETE"], "path": "/v1/prompt-templates/{template_id}", "source": "handlePromptTemplateItem"},
+    {"methods": ["GET"], "path": "/v1/messages/{message_id}", "source": "handleHttpRequest"},
+    {"methods": ["POST"], "path": "/v1/messages/{message_id}/retry", "source": "handleHttpRequest"},
+    {"methods": ["DELETE"], "path": "/v1/messages/{message_id}", "source": "handleHttpRequest"},
+    {"methods": ["GET", "POST"], "path": "/v1/tmux/windows", "source": "handleTmuxRequest"},
+    {"methods": ["DELETE", "PATCH"], "path": "/v1/tmux/windows/{window}", "source": "handleTmuxRequest"},
+    {"methods": ["POST"], "path": "/v1/tmux/windows/{window}/{action}", "actions": ["keys", "start", "stop", "restart", "resume", "rename"], "source": "handleTmuxRequest"}
+  ],
+  "websocket": {
+    "path": "/v1/agents",
+    "client_frames": [
+      "register", "lease_renew", "activity", "model_catalog", "model_control", "model_control_result",
+      "goal_control", "goal_control_result", "reminder_lock_control", "reminder_lock_control_result",
+      "goal_state", "message_arrival", "injection_requested", "ack", "nack", "ping",
+      "subagent_sync_enable", "subagent_lifecycle_snapshot", "subagent_lifecycle_event", "subagent_state_resync"
+    ],
+    "server_frames": [
+      "registered", "lease_rejected", "error", "pong", "message", "conversation_message",
+      "model_control", "model_control_result", "goal_control", "goal_control_result",
+      "reminder_lock_control", "reminder_lock_control_result", "agent_goal_state", "delivery_acknowledged",
+      "agent_activity", "agent_model_catalog", "message_arrival", "subagent_state_snapshot",
+      "subagent_state_update", "subagent_state_replay", "subagent_lifecycle_acknowledged"
+    ],
+    "schema": "protocol/v1/schema.json"
+  },
+  "fixtures": {
+    "http_outcomes": "http-outcomes.json",
+    "frame_cases": "frame-cases.json",
+    "generated_fields": "generated-fields.json"
+  }
+}
