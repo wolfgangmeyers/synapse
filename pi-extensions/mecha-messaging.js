@@ -2001,7 +2001,7 @@ export function createMechaMessagingExtension(pi, {
       };
       return true;
     } catch(e) {
-      console.error(e);
+      // console.error(e);
       // Activity is an ephemeral UI hint; mailbox delivery and reconnect behavior own real work.
       return false;
     }
