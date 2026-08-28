@@ -321,19 +321,16 @@
     },
     "goalOutcomeCounts": {
       "type": "object", "additionalProperties": false,
-      "required": ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"],
+      "required": ["COMPLETED", "NOT_DONE"],
       "properties": {
-        "BLOCKED": { "type": "integer", "minimum": 0, "maximum": 1000000 },
         "COMPLETED": { "type": "integer", "minimum": 0, "maximum": 1000000 },
-        "NOT_DONE": { "type": "integer", "minimum": 0, "maximum": 1000000 },
-        "WAITING_FOR_USER_AUTHORIZATION": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+        "NOT_DONE": { "type": "integer", "minimum": 0, "maximum": 1000000 }
       }
     },
     "goalControlSettings": {
       "type": "object", "additionalProperties": false,
       "required": ["goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"],
       "properties": {
-        "blocking": { "type": "boolean" },
         "goal_lock_enabled": { "type": "boolean" },
         "snooze_enabled": { "type": "boolean" },
         "snooze_duration_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
@@ -349,7 +346,6 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "goal": { "type": "string", "maxLength": 4000 },
-        "blocking": { "type": "boolean" },
         "goal_lock_enabled": { "type": "boolean" },
         "snooze_enabled": { "type": "boolean" },
         "snooze_duration_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },

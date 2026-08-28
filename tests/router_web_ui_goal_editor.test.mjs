@@ -90,7 +90,7 @@ test("goal editor has a small left-aligned muted or pink flag with one shared op
 test("header keeps the goal flag in the identity row above the subagent badge", async () => {
   const app = await read("web/router-ui/app.js");
   const css = await read("web/router-ui/styles.css");
-  const renderConversation = app.slice(app.indexOf("function renderConversation()"), app.indexOf("function renderConversation()") + 2600);
+  const renderConversation = app.slice(app.indexOf("function renderConversation()"), app.indexOf("function renderConversation()") + 3000);
   assert.match(renderConversation, /elements\.peerName\.innerHTML[\s\S]*elements\.peerName\.append\(elements\.goalHeaderButton\)/);
   assert.match(renderConversation, /elements\.peerName\.append\(elements\.goalHeaderButton\)[\s\S]*elements\.peerDetail\.className/);
   assert.match(renderConversation, /elements\.peerDetail\.innerHTML = peer \? \[[\s\S]*subagentBadgeMarkup\(peer, subagentCount, subagents, expanded, "header"\)/);
@@ -124,9 +124,7 @@ test("goal editor uses accessible ON/OFF switches and a lock state button", asyn
   assert.match(app, /button\.type = "button";/);
   assert.match(app, /button\.setAttribute\("aria-pressed", String\(pressed\)\)/);
   assert.match(app, /goalToggle\("goal-enabled", "Goal", draft\.enabled\)/);
-  assert.match(app, /goalToggle\("goal-blocking", "Blocking", draft\.blocking\)/);
   assert.match(app, /goalToggle\("goal-lock", "Goal lock", draft\.goal_lock_enabled, \{ lock: true \}\)/);
-  assert.match(app, /goal_control_blocking_unavailable: "This router does not support disabling goal blocking\."/);
   assert.match(app, /goalToggle\("snooze-enabled", "Allow snoozing", draft\.snooze_enabled\)/);
   assert.match(app, /if \(state\) state\.textContent = lock \? \(pressed \? "LOCKED" : "UNLOCKED"\) : \(pressed \? "ON" : "OFF"\)/);
   assert.match(app, /track\.append\(thumb\);[\s\S]*thumb\.append\(status\);/);
@@ -153,7 +151,7 @@ test("goal editor sends complete typed goal controls and rejects stale target re
   const relay = await read("tools/router_web_ui.mjs");
   assert.match(app, /type: "goal_control"/);
   for (const key of [
-    "blocking", "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit",
+    "goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit",
     "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms",
   ]) assert.match(app, new RegExp(key));
   assert.match(app, /action === "off" \? "" : draft\.goal/);

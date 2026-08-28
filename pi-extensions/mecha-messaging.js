@@ -42,7 +42,7 @@ const MAILBOX_SEND_RATE_LIMIT_WINDOW_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const MAX_GOAL_CHARS = 4_000;
 const GOAL_CONTROL_RESPONSE_TIMEOUT_MS = 1_000;
-const GOAL_OUTCOME_KEYS = ["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"];
+const GOAL_OUTCOME_KEYS = ["COMPLETED", "NOT_DONE"];
 const MAX_MEANINGFUL_ACTIVITY_IDS = 1_024;
 // These tools change Mecha/control-plane state or move messages; their successful completion
 // is not proof that the worker advanced its standing goal. Real work tools remain eligible.
@@ -67,7 +67,6 @@ function defaultGoalControlState() {
   return {
     enabled: false,
     goal: "",
-    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -83,7 +82,6 @@ function normalizeGoalControlState(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const projection = normalizeGoalProjection(value);
   if (projection === undefined
-    || (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean")
     || typeof value.goalLockEnabled !== "boolean"
     || typeof value.snoozeEnabled !== "boolean"
     || !Number.isSafeInteger(value.snoozeDurationMs) || value.snoozeDurationMs <= 0
@@ -101,7 +99,6 @@ function normalizeGoalControlState(value) {
   }
   return {
     ...projection,
-    blocking: value.blocking !== false,
     goalLockEnabled: value.goalLockEnabled,
     snoozeEnabled: value.snoozeEnabled,
     snoozeDurationMs: value.snoozeDurationMs,
