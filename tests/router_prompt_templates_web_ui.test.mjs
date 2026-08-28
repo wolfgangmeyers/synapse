@@ -24,7 +24,7 @@ const browserScriptTimeoutMs = 15_000;
 test("router WebUI manages and uses shared prompt templates", { concurrency: false }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "router-prompt-templates-web-ui-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
-  const router = createAgentRouter({
+  let router = createAgentRouter({
     repository,
     host: "127.0.0.1",
     port: 0,
@@ -66,6 +66,38 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
 
     await browser.evaluate("(() => document.querySelector('#prompt-templates-dialog-body > button')?.click())()");
     await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-editor-form")));
+    const unsavedTemplateName = "Draft template";
+    const unsavedTemplateBody = "Draft body ${File}";
+    await browser.evaluate(`(() => {
+      const form = document.querySelector('.prompt-template-editor-form');
+      const values = ${JSON.stringify({ name: unsavedTemplateName, body: unsavedTemplateBody })};
+      for (const [name, value] of Object.entries(values)) {
+        const field = form.elements.namedItem(name);
+        field.value = value;
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    })()`);
+    const routerPort = Number(new URL(routerHttpUrl).port);
+    await router.close();
+    await waitForDom(browser, () => document.querySelector("#status-title")?.textContent === "Reconnecting");
+    router = createAgentRouter({
+      repository,
+      host: "127.0.0.1",
+      port: routerPort,
+      timeoutSweepIntervalMs: 60_000,
+    });
+    const restartedRouterWsUrl = await router.listen();
+    await connectRouterAgent(restartedRouterWsUrl, agentId, sockets);
+    await waitForDom(browser, () => document.querySelector("#status-title")?.textContent.startsWith("Connected as"));
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const unsavedValuesAfterReconnect = await browser.evaluate(`(() => {
+      const form = document.querySelector('.prompt-template-editor-form');
+      return {
+        name: form?.elements.namedItem('name')?.value,
+        body: form?.elements.namedItem('body')?.value,
+      };
+    })()`);
+    assert.deepEqual(unsavedValuesAfterReconnect, { name: unsavedTemplateName, body: unsavedTemplateBody });
     await fillTemplateEditor(browser, templateName, templateBody);
     await waitForPromptTemplate(browser, templateName, templateBody);
 

@@ -2110,6 +2110,10 @@ function renderPromptTemplateEditor() {
   });
   form.append(promptTemplateField("name", "Template name", draft.name, "For example, Review pull request"));
   form.append(promptTemplateField("body", "Prompt body", draft.body, "Write the prompt text or Markdown", "textarea"));
+  const nameInput = form.elements.namedItem("name");
+  const bodyInput = form.elements.namedItem("body");
+  nameInput.addEventListener("input", () => { draft.name = nameInput.value; });
+  bodyInput.addEventListener("input", () => { draft.body = bodyInput.value; });
   const actions = document.createElement("div");
   actions.className = "prompt-template-actions";
   const cancel = document.createElement("button");
