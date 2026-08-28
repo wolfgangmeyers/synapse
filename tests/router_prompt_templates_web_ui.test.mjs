@@ -77,6 +77,11 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
         field.dispatchEvent(new Event('input', { bubbles: true }));
       }
     })()`);
+    await browser.evaluate(`(() => {
+      const body = document.querySelector('.prompt-template-editor-form')?.elements.namedItem('body');
+      body?.focus();
+      body?.setSelectionRange(6, 10);
+    })()`);
     const routerPort = Number(new URL(routerHttpUrl).port);
     await router.close();
     await waitForDom(browser, () => document.querySelector("#status-title")?.textContent === "Reconnecting");
@@ -92,12 +97,22 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     const unsavedValuesAfterReconnect = await browser.evaluate(`(() => {
       const form = document.querySelector('.prompt-template-editor-form');
+      const active = document.activeElement;
       return {
         name: form?.elements.namedItem('name')?.value,
         body: form?.elements.namedItem('body')?.value,
+        focusedField: active?.name,
+        selectionStart: active?.selectionStart,
+        selectionEnd: active?.selectionEnd,
       };
     })()`);
-    assert.deepEqual(unsavedValuesAfterReconnect, { name: unsavedTemplateName, body: unsavedTemplateBody });
+    assert.deepEqual(unsavedValuesAfterReconnect, {
+      name: unsavedTemplateName,
+      body: unsavedTemplateBody,
+      focusedField: "body",
+      selectionStart: 6,
+      selectionEnd: 10,
+    });
     await fillTemplateEditor(browser, templateName, templateBody);
     await waitForPromptTemplate(browser, templateName, templateBody);
 
