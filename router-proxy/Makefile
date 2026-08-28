@@ -1,0 +1,16 @@
+.PHONY: build test check
+
+build:
+	go build ./...
+
+test:
+	go test ./...
+
+check:
+	test -z "$$(gofmt -l .)"
+	go vet ./...
+	go test ./...
+
+coverage:
+	go test -coverprofile=/tmp/mecha-router-proxy-coverage.out -covermode=atomic ./...
+	go tool cover -func=/tmp/mecha-router-proxy-coverage.out
