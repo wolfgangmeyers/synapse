@@ -2000,13 +2000,36 @@ function normalizePromptTemplates(templates) {
   });
 }
 
+function capturePromptTemplateEditorFocus() {
+  const active = document.activeElement;
+  if (!active || !elements.promptTemplatesDialogBody.contains(active) || !["name", "body"].includes(active.name)) return null;
+  return {
+    name: active.name,
+    selectionStart: typeof active.selectionStart === "number" ? active.selectionStart : null,
+    selectionEnd: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+  };
+}
+
+function restorePromptTemplateEditorFocus(focus) {
+  if (!focus) return;
+  const form = elements.promptTemplatesDialogBody.querySelector(".prompt-template-editor-form");
+  const field = form?.elements.namedItem(focus.name);
+  if (!field || typeof field.focus !== "function") return;
+  field.focus({ preventScroll: true });
+  if (focus.selectionStart !== null && focus.selectionEnd !== null && typeof field.setSelectionRange === "function") {
+    field.setSelectionRange(focus.selectionStart, focus.selectionEnd);
+  }
+}
+
 function renderPromptTemplateDialog() {
+  const focus = capturePromptTemplateEditorFocus();
   elements.promptTemplatesDialogBody.replaceChildren();
   elements.promptTemplatesDialogTitle.textContent = state.promptTemplateDialogMode === "editor"
     ? (state.promptTemplateDraft?.id ? "Edit prompt template" : "New prompt template")
     : "Prompt templates";
   if (state.promptTemplateDialogMode === "editor") {
     renderPromptTemplateEditor();
+    restorePromptTemplateEditorFocus(focus);
     return;
   }
   const add = document.createElement("button");
