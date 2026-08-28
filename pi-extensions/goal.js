@@ -293,7 +293,6 @@ function goalResultContent(wakeup, outcome, rationale) {
 }
 
 function notDoneWakeup(goal, attempt) {
-  if (attempt > mesages.length) attempt = messages.length;
   const messages = [
     `NOT_DONE: Review ${goal} and take the next concrete action now.`,
     `NOT_DONE: Continue ${goal} by completing its next actionable step now.`,
@@ -316,6 +315,7 @@ function notDoneWakeup(goal, attempt) {
     `NOT_DONE: TAKE OWNERSHIP of ${goal} immediately—finish the highest-priority remaining step and verify it NOW!`,
     `NOT_DONE: ${goal} IS NOT COMPLETE. ACT NOW, DELIVER THE NEXT VERIFIED RESULT, AND ACCOUNT FOR THE REMAINING WORK!`,
   ];
+  if (attempt > messages.length) attempt = messages.length;
   return messages[attempt - 1];
 }
 
