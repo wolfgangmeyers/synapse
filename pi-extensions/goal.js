@@ -32,7 +32,7 @@ const GOAL_PARAMETERS = {
 
 const MAX_RATIONALE_CHARS = 240;
 const MAX_EVALUATOR_CALLS = 1_000_000;
-const MAX_NOT_DONE_WAKEUPS = 10;
+const MAX_NOT_DONE_WAKEUPS = 1000;
 const MAX_SNOOZE_TURN_LIMIT = 20;
 const MEANINGFUL_ACTIVITY_EVENTS_TO_REARM = 3;
 const MEANINGFUL_ACTIVITY_KINDS = new Set(["tool-completed", "native-subagent-launch"]);
@@ -293,6 +293,7 @@ function goalResultContent(wakeup, outcome, rationale) {
 }
 
 function notDoneWakeup(goal, attempt) {
+  if (attempt > mesages.length) attempt = messages.length;
   const messages = [
     `NOT_DONE: Review ${goal} and take the next concrete action now.`,
     `NOT_DONE: Continue ${goal} by completing its next actionable step now.`,
@@ -650,7 +651,7 @@ export function createGoalExtension(pi, options = {}) {
       try {
         pi.sendMessage({
           customType: GOAL_SNOOZE_AVAILABILITY_TYPE,
-          content: "Goal snooze is available. Use goal_snooze to deliberately wait before the next goal wakeup.",
+          content: "Goal snooze is available. goal_snooze can be used to deliberately wait before the next goal wakeup. Only use this if you need to wait for something, otherwise continue working toward the goal.",
           display: true,
           details: { goal: state.goal, durationMs: snoozeDurationMs },
         }, { deliverAs: "steer", triggerTurn: true });
