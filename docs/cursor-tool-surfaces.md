@@ -16,7 +16,7 @@ Call exposed `pi__*` MCP names from Cursor. Do not treat pi history names, repla
 
 ## Mecha native tools on the bridge
 
-Operational tools (composed into `pi-extensions/mecha-messaging/index.ts`):
+Operational tools (registered by `pi-extensions/mecha-messaging/index.ts`):
 
 - `pi__mecha_state`
 - `pi__mecha_priority`
@@ -36,7 +36,7 @@ Messaging/control tools (`pi-extensions/mecha-messaging/`):
 - `pi__mecha_settled_notifications`
 - `pi__mecha_context`
 
-Goal tool (composed once by `pi-extensions/mecha-messaging/index.ts`):
+Goal tool (registered by `pi-extensions/mecha-goal/index.ts`):
 
 - `pi__goal`
 
@@ -49,7 +49,7 @@ Operational tools use a flat `action` object schema (not top-level JSON Schema `
 Prerequisites:
 
 - `pi install npm:pi-cursor-sdk` (already present in Wolfgang's global pi install)
-- the checkout package `pi-extensions/mecha-messaging/` registered once in `~/.pi/agent/settings.json` under `packages`; its `index.ts` composes the goal extension
+- two checkout packages registered in `~/.pi/agent/settings.json` under `packages`, in Goal-first order: `pi-extensions/mecha-goal/`, then `pi-extensions/mecha-messaging/`; each is registered exactly once
 - router running on loopback (`MECHA_ROUTER_URL=http://127.0.0.1:8765`)
 
 Pi discovers installed extensions. Run a Cursor-model session from this repo:
@@ -60,9 +60,9 @@ MECHA_ROUTER_URL=http://127.0.0.1:8765 \
 pi --model cursor/composer-2-5
 ```
 
-`pi-extensions/mecha-messaging/index.ts` composes and registers the operational and goal tools once. Pi uses its registered default package; `MECHA_PI_MAILBOX_EXTENSION` is not used by the worker launcher and does not load an extension into Pi.
+The Goal package registers Goal tools. The Messaging package registers messaging and operational tools. Pi uses the two registered checkout packages in Goal-first order; `MECHA_PI_MAILBOX_EXTENSION` is not used by the worker launcher and does not load an extension into Pi. Standalone `goal.js`, `mecha-messaging.js`, and other flat legacy entries are rejected.
 
-The package's `mailbox-client.ts` generates `pi-extensions/mecha-messaging/mailbox-client.js` for plain-Node consumers. The installer copies that generated client to `~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js` and verifies the copy byte-for-byte. If installation is interrupted, the next run restores the complete previous support root and Pi settings from the transaction backups before retrying.
+Messaging's `mailbox-client.ts` generates `pi-extensions/mecha-messaging/mailbox-client.js` for plain-Node consumers. The installer copies that generated client to `~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js` and verifies the copy byte-for-byte. If installation is interrupted, the next run restores the complete previous support root and Pi settings from the transaction backups before retrying.
 
 Inside pi:
 

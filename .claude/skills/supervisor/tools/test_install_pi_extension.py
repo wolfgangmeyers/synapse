@@ -64,6 +64,11 @@ class InstallPiExtensionTest(unittest.TestCase):
                 str(installer.SOURCE),
                 str(installer.LEGACY_CHECKOUT_REGISTRATIONS[1]),
                 str(installer.TARGET),
+                str(installer.INSTALLED_SUPPORT_ROOT / "goal.js"),
+                str(installer.GOAL_PACKAGE),
+                str(installer.GOAL_PACKAGE.parent / "mecha-goal" / ".." / "mecha-goal"),
+                str(installer.CHECKOUT_PACKAGE),
+                str(installer.CHECKOUT_PACKAGE.parent / "mecha-messaging" / ".." / "mecha-messaging"),
                 "/some/other/package",
             ],
         }), encoding="utf-8")
@@ -86,7 +91,7 @@ class InstallPiExtensionTest(unittest.TestCase):
     def test_manifest_uses_checkout_package_and_generated_client_support_copy(self):
         installer = self.installer
         artifacts = installer.extension_artifacts()
-        self.assertEqual(installer.REGISTERED_EXTENSIONS, (installer.CHECKOUT_PACKAGE,))
+        self.assertEqual(installer.REGISTERED_EXTENSIONS, (installer.GOAL_PACKAGE, installer.CHECKOUT_PACKAGE))
         self.assertEqual(artifacts[0][0], installer.CHECKOUT_PACKAGE / "mailbox-client.js")
         self.assertEqual(
             artifacts[0][1],
@@ -102,7 +107,56 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.assertEqual(installer.missing_javascript_dependencies(artifacts), set())
         self.assertTrue(all(source.is_file() for source, _ in artifacts))
 
-    def test_success_preserves_unrelated_support_and_registers_only_checkout_package(self):
+    def test_build_settings_registers_ordered_packages_and_deduplicates_both_paths(self):
+        installer = self.installer
+        settings = {
+            "theme": "preserve",
+            "packages": [
+                "/some/other/package",
+                "/unrelated/extension.js",
+                "/arbitrary/old-copy/goal.js",
+                "/arbitrary/old-copy/mecha-messaging.js",
+                str(installer.CHECKOUT_PACKAGE),
+                str(installer.GOAL_PACKAGE),
+                str(installer.GOAL_PACKAGE.parent / "mecha-goal" / ".." / "mecha-goal"),
+                str(installer.CHECKOUT_PACKAGE.parent / "mecha-messaging" / ".." / "mecha-messaging"),
+            ],
+        }
+
+        built = installer.build_settings(settings)
+
+        self.assertEqual(built["packages"], [
+            "/some/other/package",
+            "/unrelated/extension.js",
+            str(installer.GOAL_PACKAGE),
+            str(installer.CHECKOUT_PACKAGE),
+        ])
+        self.assertEqual(settings["packages"][0], "/some/other/package")
+
+    def test_rejects_missing_or_symlinked_checkout_package(self):
+        installer = self.installer
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            goal = root / "mecha-goal"
+            messaging = root / "mecha-messaging"
+            goal.mkdir()
+            messaging.mkdir()
+
+            with mock.patch.object(installer, "CHECKOUT_PACKAGES", (goal, root / "missing")):
+                with self.assertRaises(SystemExit) as raised:
+                    installer.main()
+                self.assertIn("checkout package", str(raised.exception))
+
+            link_target = root / "real-messaging"
+            link_target.mkdir()
+            symlink = root / "mecha-messaging-link"
+            symlink.symlink_to(link_target, target_is_directory=True)
+            with mock.patch.object(installer, "CHECKOUT_PACKAGES", (goal, symlink)):
+                with self.assertRaises(SystemExit) as raised:
+                    installer.main()
+                self.assertIn("checkout package", str(raised.exception))
+
+    def test_success_preserves_unrelated_support_and_registers_only_checkout_packages(self):
         self.seed_old_install()
         installer = self.installer
         unrelated_before = self.snapshot_tree(installer.INSTALLED_SUPPORT_ROOT / "unrelated")
@@ -123,10 +177,15 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.assertEqual(generated_support_copy, generated_source)
         settings = json.loads(installer.SETTINGS.read_text(encoding="utf-8"))
         self.assertEqual(settings["theme"], "preserve")
-        self.assertEqual(settings["packages"].count(str(installer.CHECKOUT_PACKAGE)), 1)
+        self.assertEqual(settings["packages"], [
+            "/some/other/package",
+            str(installer.GOAL_PACKAGE),
+            str(installer.CHECKOUT_PACKAGE),
+        ])
         self.assertNotIn(str(installer.TARGET), settings["packages"])
         self.assertNotIn(str(installer.SOURCE), settings["packages"])
         self.assertNotIn(str(installer.LEGACY_CHECKOUT_REGISTRATIONS[1]), settings["packages"])
+        self.assertNotIn(str(installer.INSTALLED_SUPPORT_ROOT / "goal.js"), settings["packages"])
         self.assertFalse(installer.TRANSACTION_MARKER.exists())
         self.assertFalse(installer.SUPPORT_BACKUP.exists())
         self.assertFalse(installer.SETTINGS_BACKUP.exists())
@@ -144,6 +203,13 @@ class InstallPiExtensionTest(unittest.TestCase):
                     installer.main()
                 self.assertIn("retry to recover", str(raised.exception))
                 self.assertTrue(installer.TRANSACTION_MARKER.is_file())
+                marker = json.loads(installer.TRANSACTION_MARKER.read_text(encoding="utf-8"))
+                self.assertEqual(marker["version"], 2)
+                self.assertEqual(marker["registered_packages"], [
+                    str(installer.GOAL_PACKAGE),
+                    str(installer.CHECKOUT_PACKAGE),
+                ])
+                self.assertEqual(marker["intended_settings"]["packages"][-2:], marker["registered_packages"])
 
                 # Import after HOME is set, as the real retry process does.
                 recovered = self._load_installer()
@@ -155,6 +221,33 @@ class InstallPiExtensionTest(unittest.TestCase):
                 self.assertFalse(recovered.SETTINGS_BACKUP.exists())
                 os.environ.pop("MECHA_MESSAGING_INSTALL_FAIL_PHASE", None)
                 self.assertEqual(recovered.main(), 0)
+
+    def test_recovery_accepts_version_one_marker_after_schema_upgrade(self):
+        self.seed_old_install()
+        installer = self.installer
+        old_support = self.snapshot_tree(installer.INSTALLED_SUPPORT_ROOT)
+        old_settings = installer.SETTINGS.read_bytes()
+
+        os.environ["MECHA_MESSAGING_INSTALL_FAIL_PHASE"] = "after_support_replacement"
+        try:
+            with self.assertRaises(SystemExit):
+                installer.main()
+        finally:
+            os.environ.pop("MECHA_MESSAGING_INSTALL_FAIL_PHASE", None)
+
+        marker = json.loads(installer.TRANSACTION_MARKER.read_text(encoding="utf-8"))
+        marker["version"] = 1
+        marker.pop("registered_packages")
+        marker["intended_settings"] = {"packages": [str(installer.CHECKOUT_PACKAGE)]}
+        installer.TRANSACTION_MARKER.write_text(json.dumps(marker), encoding="utf-8")
+
+        recovered = self._load_installer()
+        recovered.recover_transaction()
+        self.assertEqual(self.snapshot_tree(recovered.INSTALLED_SUPPORT_ROOT), old_support)
+        self.assertEqual(recovered.SETTINGS.read_bytes(), old_settings)
+        self.assertFalse(recovered.TRANSACTION_MARKER.exists())
+        self.assertFalse(recovered.SUPPORT_BACKUP.exists())
+        self.assertFalse(recovered.SETTINGS_BACKUP.exists())
 
     def test_recovery_retries_after_interruption_between_restore_phases(self):
         self.seed_old_install()
@@ -250,15 +343,16 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.assertEqual(installer.TRANSACTION_MARKER.read_bytes(), marker_before)
 
         unsafe_marker = {
-            "version": 1,
+            "version": 2,
             "phase": "recorded",
             "support_backup": str(installer.SUPPORT_BACKUP),
             "settings_backup": str(installer.SETTINGS_BACKUP),
             "staged_support_root": str(installer.INSTALLED_SUPPORT_ROOT.parent.parent / "unsafe-stage"),
             "had_support_root": True,
             "had_settings": True,
-            "intended_settings": {},
+            "intended_settings": {"packages": [str(path) for path in installer.CHECKOUT_PACKAGES]},
             "manifest": [str(target.relative_to(installer.INSTALLED_SUPPORT_ROOT)) for _, target in installer.extension_artifacts()],
+            "registered_packages": [str(path) for path in installer.CHECKOUT_PACKAGES],
         }
         installer.TRANSACTION_MARKER.write_text(json.dumps(unsafe_marker), encoding="utf-8")
         marker_before = installer.TRANSACTION_MARKER.read_bytes()

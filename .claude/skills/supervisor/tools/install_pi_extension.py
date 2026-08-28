@@ -16,7 +16,9 @@ import subprocess
 import tempfile
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+GOAL_PACKAGE = REPOSITORY_ROOT / "pi-extensions" / "mecha-goal"
 CHECKOUT_PACKAGE = REPOSITORY_ROOT / "pi-extensions" / "mecha-messaging"
+CHECKOUT_PACKAGES = (GOAL_PACKAGE, CHECKOUT_PACKAGE)
 GENERATED_CLIENT_SOURCE = CHECKOUT_PACKAGE / "mailbox-client.js"
 SUPERVISOR_TOOLS_SOURCE = Path(__file__).resolve().parent
 INSTALLED_SUPPORT_ROOT = Path.home() / ".mecha-developer" / "extensions"
@@ -54,8 +56,10 @@ OPERATIONAL_TOOL_MODULES = (
 )
 SUPERVISOR_TOOL_JAVASCRIPT = ("claude_sidecar.mjs", "activity_tail.mjs", "activity_state.mjs")
 SIDECAR_HARNESS_MODULES = ("cli_entrypoint.js", "log_rotation.js", "tmux-rest-client.js")
-REGISTERED_EXTENSIONS = (CHECKOUT_PACKAGE,)
+REGISTERED_EXTENSIONS = CHECKOUT_PACKAGES
+LEGACY_FLAT_REGISTRATION_NAMES = frozenset({"goal.js", "mecha-messaging.js"})
 LEGACY_CHECKOUT_REGISTRATIONS = (SOURCE, REPOSITORY_ROOT / "pi-extensions" / "goal.js")
+LEGACY_INSTALLED_REGISTRATIONS = (TARGET, INSTALLED_SUPPORT_ROOT / "goal.js")
 LEGACY_SUPPORT_FILES = tuple(EXTENSION_MODULES) + (
     "pi-extensions/mailbox-client.js",
     "pi-extensions/mecha-messaging.js",
@@ -102,8 +106,8 @@ MAILBOX_CLIENT_GENERATOR = ("npm", "run", "generate:mailbox-client")
 def extension_artifacts() -> tuple[tuple[Path, Path], ...]:
     """Return only support files copied under the installed support root.
 
-    The TypeScript package itself stays in the checkout and is the sole settings
-    registration. Only the generated client crosses this installation boundary.
+    Both TypeScript packages stay in the checkout as the settings registrations.
+    Only the generated client crosses this installation boundary.
     """
     installed_supervisor_tools = INSTALLED_SUPPORT_ROOT / ".claude" / "skills" / "supervisor" / "tools"
     return (
@@ -490,16 +494,30 @@ def _resolved_registration(value: object) -> Path | None:
     return path.resolve()
 
 
+def _is_legacy_flat_registration(value: object) -> bool:
+    """Recognize old flat Goal/Messaging entrypoints wherever they were installed."""
+    if not isinstance(value, str):
+        return False
+    path = Path(value)
+    if not path.is_absolute():
+        path = SETTINGS.parent / path
+    return path.name in LEGACY_FLAT_REGISTRATION_NAMES or path.resolve().name in LEGACY_FLAT_REGISTRATION_NAMES
+
+
 def build_settings(settings: dict) -> dict:
-    """Replace this graph's old registrations while retaining other packages."""
-    retired = {path.resolve() for path in (*LEGACY_CHECKOUT_REGISTRATIONS, TARGET)}
+    """Replace old and duplicate registrations while retaining other packages."""
+    retired = {
+        path.resolve()
+        for path in (*LEGACY_CHECKOUT_REGISTRATIONS, *LEGACY_INSTALLED_REGISTRATIONS)
+    }
+    registered = {path.resolve() for path in CHECKOUT_PACKAGES}
     packages = [
         entry for entry in settings.get("packages", [])
-        if _resolved_registration(entry) not in retired
-        and _resolved_registration(entry) != CHECKOUT_PACKAGE.resolve()
+        if not _is_legacy_flat_registration(entry)
+        and _resolved_registration(entry) not in retired | registered
     ]
     result = dict(settings)
-    result["packages"] = [*packages, str(CHECKOUT_PACKAGE)]
+    result["packages"] = [*packages, *(str(path) for path in CHECKOUT_PACKAGES)]
     return result
 
 
@@ -565,13 +583,15 @@ def _marker_data() -> dict:
         marker = json.loads(TRANSACTION_MARKER.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError(f"invalid installer transaction marker: {error}") from error
-    required = {
+    base_fields = {
         "version", "phase", "support_backup", "settings_backup", "staged_support_root",
         "had_support_root", "had_settings", "intended_settings", "manifest",
     }
+    version = marker.get("version") if isinstance(marker, dict) else None
+    required = base_fields | ({"registered_packages"} if version == 2 else set())
     if not isinstance(marker, dict) or set(marker) != required:
         raise RuntimeError("invalid installer transaction marker schema")
-    if type(marker["version"]) is not int or marker["version"] != 1:
+    if type(version) is not int or version not in {1, 2}:
         raise RuntimeError("unsupported installer transaction marker version")
     if not isinstance(marker["phase"], str) or marker["phase"] not in {"recorded", "support_replaced", "settings_replaced", "completed", "restored"}:
         raise RuntimeError("invalid installer transaction marker phase")
@@ -583,6 +603,17 @@ def _marker_data() -> dict:
         raise RuntimeError("invalid installer transaction marker state")
     if not isinstance(marker["intended_settings"], dict) or not isinstance(marker["manifest"], list):
         raise RuntimeError("invalid installer transaction marker payload")
+    if version == 2:
+        expected_packages = [str(path) for path in CHECKOUT_PACKAGES]
+        if marker["registered_packages"] != expected_packages or any(not isinstance(item, str) for item in marker["registered_packages"]):
+            raise RuntimeError("invalid installer transaction package registrations")
+        intended_packages = marker["intended_settings"].get("packages")
+        if (
+            not isinstance(intended_packages, list)
+            or intended_packages[-len(expected_packages):] != expected_packages
+            or any(intended_packages.count(package) != 1 for package in expected_packages)
+        ):
+            raise RuntimeError("invalid installer transaction settings registrations")
     expected_manifest = [str(target.relative_to(INSTALLED_SUPPORT_ROOT)) for _, target in extension_artifacts()]
     if marker["manifest"] != expected_manifest or any(not isinstance(item, str) for item in marker["manifest"]):
         raise RuntimeError("invalid installer transaction marker manifest")
@@ -695,6 +726,13 @@ def replace_support_root(staged: Path) -> None:
             remove_path(displaced)
 
 
+def validate_checkout_packages() -> None:
+    """Require both registered package sources to be real checkout directories."""
+    for package in CHECKOUT_PACKAGES:
+        if not package.is_dir() or package.is_symlink():
+            raise RuntimeError(f"checkout package must be a directory, not a symlink: {package}")
+
+
 def main() -> int:
     try:
         # Settings writes must stay below the real home directory. Check this
@@ -704,6 +742,12 @@ def main() -> int:
         recover_transaction()
     except Exception as error:
         raise SystemExit(f"Installer recovery failed; refusing new work: {error}") from error
+    try:
+        validate_checkout_packages()
+    except OSError as error:
+        raise SystemExit(f"Invalid canonical extension package: {error}") from error
+    except RuntimeError as error:
+        raise SystemExit(f"Invalid canonical extension package: {error}") from error
     artifacts = extension_artifacts()
     if any(not is_regular_file(source) for source, _ in artifacts):
         raise SystemExit("Invalid canonical extension bundle source")
@@ -737,7 +781,7 @@ def main() -> int:
         if had_settings:
             atomic_copy(SETTINGS, SETTINGS_BACKUP, ".settings-backup.")
         marker = {
-            "version": 1,
+            "version": 2,
             "phase": "recorded",
             "support_backup": str(SUPPORT_BACKUP),
             "settings_backup": str(SETTINGS_BACKUP),
@@ -746,6 +790,7 @@ def main() -> int:
             "had_settings": had_settings,
             "intended_settings": intended_settings,
             "manifest": [str(target.relative_to(INSTALLED_SUPPORT_ROOT)) for _, target in artifacts],
+            "registered_packages": [str(path) for path in CHECKOUT_PACKAGES],
         }
         write_transaction(marker)
     except Exception as error:

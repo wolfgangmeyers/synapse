@@ -9,6 +9,7 @@ import test from "node:test";
 import packageExtension, * as packageExports from "../pi-extensions/mecha-messaging/index.ts";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../pi-extensions/mecha-messaging");
+const GOAL_PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../pi-extensions/mecha-goal");
 const EXPECTED_EXPORTS = [
   "DEFAULT_COMPACTION_POLICY",
   "INLINE_TOOL_ALLOWANCE_TOOL_NAME",
@@ -87,10 +88,9 @@ test("the TypeScript package exposes the Mecha Messaging export surface", () => 
   assert.deepEqual(Object.keys(packageExports).sort(), EXPECTED_EXPORTS);
 });
 
-test("the package directory is a self-contained discovery graph", async () => {
+test("the Messaging package dependency graph stays within Messaging and extracted Goal packages", async () => {
   const files = (await readdir(PACKAGE_ROOT)).filter((file) => /\.(?:ts|js)$/.test(file)).sort();
   assert.deepEqual(files, [
-    "goal.ts",
     "index.ts",
     "mailbox-client.js",
     "mailbox-client.ts",
@@ -107,7 +107,10 @@ test("the package directory is a self-contained discovery graph", async () => {
     const source = await readFile(join(PACKAGE_ROOT, file), "utf8");
     for (const specifier of source.matchAll(/from\s+["'](\.[^"']+)["']/g)) {
       const target = resolve(PACKAGE_ROOT, dirname(file), specifier[1]);
-      assert.ok(target.startsWith(`${PACKAGE_ROOT}/`), `${file} escapes the package: ${specifier[1]}`);
+      assert.ok(
+        target.startsWith(`${PACKAGE_ROOT}/`) || target.startsWith(`${GOAL_PACKAGE_ROOT}/`),
+        `${file} escapes the package graph: ${specifier[1]}`,
+      );
     }
   }
 
@@ -125,7 +128,7 @@ test("the package directory is a self-contained discovery graph", async () => {
   }
 });
 
-test("Pi discovers the package and composes its goal surface from temporary settings", async (t) => {
+test("Pi discovers the Messaging package without registering Goal from temporary settings", async (t) => {
   const piEntry = process.env.PI_CODING_AGENT_ENTRY
     ?? "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
   let piCore: {
@@ -159,41 +162,24 @@ test("Pi discovers the package and composes its goal surface from temporary sett
     assert.deepEqual(loaded.errors, []);
     assert.equal(loaded.extensions.length, 1);
     assert.equal(loaded.extensions[0].resolvedPath, join(PACKAGE_ROOT, "index.ts"));
-    assert.deepEqual([...loaded.extensions[0].tools.keys()].filter((name) => ["goal", "goal_snooze"].includes(name)), ["goal", "goal_snooze"]);
-    assert.deepEqual([...loaded.extensions[0].commands.keys()].filter((name) => name.startsWith("goal")), [
-      "goal",
-      "goal-lock",
-      "goal-snooze",
-      "goal-snooze-turn-limit",
-      "goal-snooze-budget",
-      "goal-snooze-budget-refill",
-    ]);
+    assert.deepEqual([...loaded.extensions[0].tools.keys()].filter((name) => name === "goal" || name.startsWith("goal_")), []);
+    assert.deepEqual([...loaded.extensions[0].commands.keys()].filter((name) => name === "goal" || name.startsWith("goal-")), []);
     assert.equal(await readFile(settingsPath, "utf8"), settingsText);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("package discovery composes every goal command and tool exactly once", () => {
+test("Messaging package discovery does not register Goal commands or tools", () => {
   const pi = extensionPi();
   packageExtension(pi);
-  const goalTools = ["goal", "goal_snooze"];
-  const goalCommands = [
-    "goal",
-    "goal-lock",
-    "goal-snooze",
-    "goal-snooze-turn-limit",
-    "goal-snooze-budget",
-    "goal-snooze-budget-refill",
-  ];
-
   const isGoalTool = (name: string) => name === "goal" || name.startsWith("goal_");
   const isGoalCommand = (name: string) => name === "goal" || name.startsWith("goal-");
-  assert.deepEqual(pi.toolRegistrations.filter(isGoalTool), goalTools);
-  assert.deepEqual([...pi.tools.keys()].filter(isGoalTool), goalTools);
-  assert.deepEqual(pi.commandRegistrations.filter(isGoalCommand), goalCommands);
-  assert.deepEqual([...pi.commands.keys()].filter(isGoalCommand), goalCommands);
-  assert.equal(pi.handlers.get("session_start")?.length, 2);
+  assert.deepEqual(pi.toolRegistrations.filter(isGoalTool), []);
+  assert.deepEqual([...pi.tools.keys()].filter(isGoalTool), []);
+  assert.deepEqual(pi.commandRegistrations.filter(isGoalCommand), []);
+  assert.deepEqual([...pi.commands.keys()].filter(isGoalCommand), []);
+  assert.equal(pi.handlers.get("session_start")?.length, 1);
 });
 
 test("history quarantine ignores null and malformed content blocks", () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension, { GOAL_CONTROL_STATE_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/mecha-messaging/goal.ts";
+import goalExtension, { GOAL_CONTROL_STATE_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/mecha-goal/index.ts";
 
 function fixture({ sessionId = "worker-session", branch = [], onSend } = {}) {
   const handlers = new Map();

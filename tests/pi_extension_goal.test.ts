@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_CONTROL_REQUEST_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT, GOAL_WORKER_ID_EVENT, responseEvaluation } from "../pi-extensions/mecha-messaging/goal.ts";
+import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_CONTROL_REQUEST_EVENT, GOAL_STATE_EVENT, GOAL_STATE_REQUEST_EVENT, GOAL_WORKER_ID_EVENT, responseEvaluation } from "../pi-extensions/mecha-goal/index.ts";
 
 const GOAL_ENTRY = "goal-state";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");

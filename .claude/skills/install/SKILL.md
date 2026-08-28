@@ -252,15 +252,21 @@ fi
 
 ```
 
-### Pi mailbox package (bare Pi)
+### Pi checkout packages (bare Pi)
 
-The active package stays at `$REPO_ROOT/pi-extensions/mecha-messaging/`. Pi registers
-that checkout directory and discovers its `index.ts` entrypoint. The package composes
-the goal extension, so it is the sole registration for this extension graph. Do not
-copy, move, symlink, or restore the package under `~/.mecha-developer` or another
+The intended package split has exactly two checkout registrations, in this order:
+
+1. `$REPO_ROOT/pi-extensions/mecha-goal/` — Goal, discovered through `index.ts`
+2. `$REPO_ROOT/pi-extensions/mecha-messaging/` — Messaging, discovered through
+   `index.ts`, with the generated `mailbox-client.js` retained for plain-Node
+   consumers
+
+Reject standalone `goal.js`, `mecha-messaging.js`, and every other flat legacy
+entry. Do not keep a legacy entry beside either checkout package. Do not copy,
+move, symlink, or restore either package under `~/.mecha-developer` or another
 installed-artifact path.
 
-The package's `mailbox-client.ts` is the source of truth for plain-Node consumers.
+Messaging's `mailbox-client.ts` is the source of truth for plain-Node consumers.
 Generate its checkout artifact before activation:
 
 ```bash
@@ -269,19 +275,22 @@ Generate its checkout artifact before activation:
 
 The installer copies only that generated `mailbox-client.js` into
 `~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js` for the Claude
-sidecar and harness. It verifies the copy byte-for-byte. Keep the settings
-registration pointed at the checkout package, and validate it before launching Pi. The check rejects standalone `goal.js` and both old flat `goal.js`/`mecha-messaging.js` registrations, even when the package registration is also present:
+sidecar and harness. It verifies the copy byte-for-byte. Keep both settings registrations pointed at the checkout packages in Goal-first
+order, and validate them before launching Pi. The check rejects standalone
+`goal.js`, `mecha-messaging.js`, and any other flat legacy registration, even when
+both checkout registrations are also present:
 
 ```bash
 REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
-SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
+GOAL_SOURCE="$REPO_ROOT/pi-extensions/mecha-goal"
+MESSAGING_SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
 SETTINGS="$HOME/.pi/agent/settings.json"
 
-if [ -d "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
-  python3 - "$SOURCE" "$SETTINGS" <<'PY'
+if [ -d "$GOAL_SOURCE" ] && [ ! -L "$GOAL_SOURCE" ] && [ -d "$MESSAGING_SOURCE" ] && [ ! -L "$MESSAGING_SOURCE" ] && [ -f "$SETTINGS" ]; then
+  python3 - "$GOAL_SOURCE" "$MESSAGING_SOURCE" "$SETTINGS" <<'PY'
 import json, pathlib, sys
-source, settings = map(pathlib.Path, sys.argv[1:])
-source = source.resolve()
+goal_source, messaging_source, settings = map(pathlib.Path, sys.argv[1:])
+expected = [goal_source.resolve(), messaging_source.resolve()]
 data = json.loads(settings.read_text())
 packages = data.get("packages", [])
 if not isinstance(packages, list):
@@ -296,13 +305,13 @@ for package in packages:
         resolved = path.resolve()
         if resolved.name in {"goal.js", "mecha-messaging.js"}:
             legacy.append(package)
-        if resolved == source:
-            registrations.append(package)
+        if resolved in expected:
+            registrations.append(resolved)
 if legacy:
     raise SystemExit(f"reject standalone or old flat Pi registration(s): {', '.join(legacy)}")
-if len(registrations) != 1:
-    raise SystemExit(f"expected exactly one Pi package registration resolving to {source}, found {len(registrations)}")
-print(f"ok: one Pi package registration resolves to {source}")
+if registrations != expected:
+    raise SystemExit("expected exactly one Goal and Messaging checkout package registration in Goal-first order")
+print("ok: one Goal and one Messaging checkout package registration in Goal-first order")
 PY
 else
   echo "MISSING: checkout Pi package or Pi settings"
@@ -591,12 +600,13 @@ echo "=== CLI Scripts ==="
 ls -la ~/.local/bin/ai 2>/dev/null || echo "none"
 
 echo ""
-echo "=== Pi Package ==="
+echo "=== Pi Packages ==="
 REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
-SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
+GOAL_SOURCE="$REPO_ROOT/pi-extensions/mecha-goal"
+MESSAGING_SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
 SETTINGS="$HOME/.pi/agent/settings.json"
-if [ -d "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
-  echo "Pi package and settings are present; run the read-only registration check above."
+if [ -d "$GOAL_SOURCE" ] && [ ! -L "$GOAL_SOURCE" ] && [ -d "$MESSAGING_SOURCE" ] && [ ! -L "$MESSAGING_SOURCE" ] && [ -f "$SETTINGS" ]; then
+  echo "Goal and Messaging packages plus settings are present; run the read-only registration check above."
 else
   echo "MISSING: checkout Pi package or Pi settings"
 fi
