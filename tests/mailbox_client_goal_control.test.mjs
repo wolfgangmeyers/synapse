@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
+import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 
 const state = {
   enabled: true,
@@ -48,7 +48,7 @@ function socketFixture(sent) {
   return socket;
 }
 
-async function registeredClient({ capabilities, getGoalState = () => state, onGoalControl, onGoalControlTrace, webSocketFactory, now } = {}) {
+async function registeredClient({ capabilities, getGoalState = () => state, onGoalControl, onGoalControlTrace, onModelControl, onReminderLockControl, assertIdentity, webSocketFactory, now } = {}) {
   const sent = [];
   const sockets = [];
   const timers = [];
@@ -58,6 +58,9 @@ async function registeredClient({ capabilities, getGoalState = () => state, onGo
     getGoalState,
     ...(onGoalControl === undefined ? {} : { onGoalControl }),
     ...(onGoalControlTrace === undefined ? {} : { onGoalControlTrace }),
+    ...(onModelControl === undefined ? {} : { onModelControl }),
+    ...(onReminderLockControl === undefined ? {} : { onReminderLockControl }),
+    ...(assertIdentity === undefined ? {} : { assertIdentity }),
     ...(now === undefined ? {} : { now }),
     webSocketFactory: webSocketFactory ?? (() => {
       const socket = socketFixture(sent);
@@ -182,6 +185,67 @@ test("incoming goal control maps the request and returns correlated full state",
     goal_state: wireState(),
   });
 
+  fixture.client.close();
+});
+
+test("model controls without expires_at use the default TTL", async () => {
+  const controls = [];
+  const fixture = await registeredClient({
+    now: () => 1_000,
+    onModelControl: async (control) => {
+      controls.push(control);
+      return { accepted: true };
+    },
+  });
+  fixture.socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "model_control",
+    source_agent_id: "controller",
+    control_id: "control-1",
+    action: "set",
+    model: { provider: "openai-codex", id: "gpt-5.5" },
+  }) }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(controls, [{
+    controlId: "control-1",
+    sourceAgentId: "controller",
+    action: "set",
+    model: { provider: "openai-codex", id: "gpt-5.5" },
+  }]);
+  assert.equal(fixture.sent.filter((frame) => frame.type === "model_control_result").at(-1).accepted, true);
+  fixture.client.close();
+});
+
+test("reminder lock controls do not require a goal revision", async () => {
+  const controls = [];
+  const fixture = await registeredClient({
+    onReminderLockControl: async (control) => {
+      controls.push(control);
+      return { accepted: true };
+    },
+  });
+  fixture.socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "reminder_lock_control",
+    agent_id: "worker",
+    instance_id: fixture.client.instanceId,
+    lease_id: "lease-1",
+    source_agent_id: "controller",
+    control_id: "control-1",
+    reminder_id: "reminder-1",
+    action: "set",
+    expires_at: new Date(Date.now() + 30_000).toISOString(),
+  }) }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controls.length, 1);
+  assert.equal(controls[0].reminderId, "reminder-1");
+  assert.equal(Object.hasOwn(controls[0], "revision"), false);
+  assert.equal(fixture.sent.filter((frame) => frame.type === "reminder_lock_control_result").at(-1).accepted, true);
+  fixture.client.close();
+});
+
+test("custom identity validators validate without replacing the legacy agent id", async () => {
+  const fixture = await registeredClient({ assertIdentity: () => "rewritten-agent-id" });
+  const register = fixture.sent.find((frame) => frame.type === "register");
+  assert.equal(register.agent_id, "worker");
   fixture.client.close();
 });
 

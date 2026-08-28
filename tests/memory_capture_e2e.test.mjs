@@ -7,7 +7,7 @@ import test from "node:test";
 import { openMessageRepository } from "../harness/db.js";
 import { RECALL_POLICY, openMemoryCatalog } from "../harness/memory-catalog.js";
 import { createAgentRouter } from "../harness/router.js";
-import { createMemoryCaptureLifecycle, runMemoryExtractor } from "../pi-extensions/memory-capture.js";
+import { createMemoryCaptureLifecycle, runMemoryExtractor } from "../pi-extensions/mecha-messaging/memory-capture.ts";
 
 const policy = { capture: { ...RECALL_POLICY.capture, source_max_bytes: 4096, source_message_max_bytes: 1024 } };
 const source = [{ id: "compact-tool", type: "message", message: { role: "toolResult", content: [{ type: "text", text: "Use the signed production workflow." }], isError: false } }];

@@ -7,7 +7,7 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { assertAgentId, assertPresenceAgentId } from "../pi-extensions/mailbox-client.js";
+import { assertAgentId, assertPresenceAgentId } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 import { isCliEntrypoint } from "../harness/cli_entrypoint.js";
 import WebSocket from "ws";
 
@@ -312,7 +312,7 @@ test("assertAgentId rejects the dotted ids used by self-registered sessions", ()
 // The sidecar has two jobs and they are not equally important. runCli parks on a promise that
 // never resolves, so an uncaught throw in the activity timer ends the process and takes mail
 // delivery with it. sendActivity genuinely throws when the socket is between reconnects
-// (pi-extensions/mailbox-client.js:157), so this is a reachable path and not defensive coding.
+// (pi-extensions/mecha-messaging/mailbox-client.js:157), so this is a reachable path and not defensive coding.
 test("a failing activity send never stops mail delivery", async () => {
   const receipts = [];
   const injected = [];

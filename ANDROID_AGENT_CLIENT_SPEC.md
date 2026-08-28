@@ -43,7 +43,7 @@ The following are requirements, not open design questions:
 
 ## 3. Existing router analysis
 
-This section describes the current implementation in `harness/router.js`, `harness/db.js`, `protocol/v1/schema.json`, and `pi-extensions/mecha-messaging.js`. It is the integration baseline.
+This section describes the current implementation in `harness/router.js`, `harness/db.js`, `protocol/v1/schema.json`, and `pi-extensions/mecha-messaging/index.ts`. It is the integration baseline.
 
 ### 3.1 Current transport and endpoints
 
@@ -1169,7 +1169,7 @@ The fixed identity and fake repository are allowed only in test-source-set deter
 ### 15.3 Live two-Pi setup and functional flow
 
 1. Start a disposable persistent router database on `127.0.0.1:8765` from the exact revision containing registration/discovery, negotiated ACK confirmation, strict scalar validation, `005_message_incarnation`, GET incarnation recovery, and server-enqueue expiry changes.
-2. Start two real Pi sessions in distinct tmux windows with unique valid IDs, the same validated `mecha-messaging.js`, and the exact router base. Record the two IDs in the test artifact instead of assuming a stale worker. Verify each reaches `registered` through router events and appears in discovery as role `agent`.
+2. Start two real Pi sessions in distinct tmux windows with unique valid IDs, the same validated `pi-extensions/mecha-messaging/index.ts`, and the exact router base. Record the two IDs in the test artifact instead of assuming a stale worker. Verify each reaches `registered` through router events and appears in discovery as role `agent`.
 3. Start `mecha_client_api35`, install the debug app, and run `~/Library/Android/sdk/platform-tools/adb reverse tcp:8765 tcp:8765`.
 4. Wipe app data so the app generates a fresh install-scoped ID. Record it, grant notification permission through the product flow, and start the approved foreground service.
 5. Verify discovery lists both Pi IDs and filters the mobile ID.

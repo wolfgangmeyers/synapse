@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { RECALL_POLICY } from "../harness/memory-catalog.js";
-import { createMemoryCaptureLifecycle, runMemoryExtractor, sanitizeCaptureSource, validateCaptureResult } from "../pi-extensions/memory-capture.js";
+import { createMemoryCaptureLifecycle, runMemoryExtractor, sanitizeCaptureSource, validateCaptureResult } from "../pi-extensions/mecha-messaging/memory-capture.ts";
 
 const policy = { capture: { compaction_deadline_ms: 30_000, shutdown_deadline_ms: 10_000, source_max_bytes: 4096, source_message_max_bytes: 1024, maximum_records: 6, maximum_title_bytes: 256, maximum_body_bytes_per_record: 16384, maximum_total_body_bytes: 32768, maximum_related_ids_per_record: 24 } };
 const source = [{ id: "tool-1", role: "toolResult", content: "Use the signed production workflow. Verify /health before announcing completion." }];

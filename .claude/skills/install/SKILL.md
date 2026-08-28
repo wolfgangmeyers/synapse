@@ -5,7 +5,7 @@ description: "Set up or reinstall mecha-developer by symlinking personas, skills
 
 # Install Skill
 
-Set up mecha-developer by symlinking personas and skills to the user's home directory, and by validating the Pi mailbox extension registered from this checkout. The extension must not be relocated, copied, symlinked, or restored as an installed artifact.
+Set up mecha-developer by symlinking personas and skills to the user's home directory, and by validating the Pi mailbox package registered from this checkout. The package must not be relocated, copied, symlinked, or restored as an installed artifact.
 
 ## Usage
 
@@ -19,7 +19,7 @@ Set up mecha-developer by symlinking personas and skills to the user's home dire
 2. **Symlinks personas** to `~/personas/` so they're accessible from any project
 3. **Symlinks skill folders** to `~/.claude/skills/` so they're available globally in Claude Code
 4. **Symlinks the `ai` CLI script** to `~/.local/bin/`
-5. **Validates** the canonical Pi mailbox extension registration for bare Pi sessions
+5. **Validates** the canonical Pi mailbox package registration for bare Pi sessions
 
 ## Process
 
@@ -252,20 +252,32 @@ fi
 
 ```
 
-### Pi mailbox extension (bare Pi)
+### Pi mailbox package (bare Pi)
 
-The active extension stays at `$REPO_ROOT/pi-extensions/mecha-messaging.js` and
-Pi registers that repository source path. Do not copy, move, symlink, or restore
-the extension under `~/.mecha-developer` or another installed-artifact path.
-Keep the existing settings registration pointed at the source, and validate it
-before launching Pi:
+The active package stays at `$REPO_ROOT/pi-extensions/mecha-messaging/`. Pi registers
+that checkout directory and discovers its `index.ts` entrypoint. The package composes
+the goal extension, so it is the sole registration for this extension graph. Do not
+copy, move, symlink, or restore the package under `~/.mecha-developer` or another
+installed-artifact path.
+
+The package's `mailbox-client.ts` is the source of truth for plain-Node consumers.
+Generate its checkout artifact before activation:
+
+```bash
+(cd "$REPO_ROOT/pi-extensions/mecha-messaging" && npm run generate:mailbox-client)
+```
+
+The installer copies only that generated `mailbox-client.js` into
+`~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js` for the Claude
+sidecar and harness. It verifies the copy byte-for-byte. Keep the settings
+registration pointed at the checkout package, and validate it before launching Pi. The check rejects standalone `goal.js` and both old flat `goal.js`/`mecha-messaging.js` registrations, even when the package registration is also present:
 
 ```bash
 REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
-SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging.js"
+SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
 SETTINGS="$HOME/.pi/agent/settings.json"
 
-if [ -f "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
+if [ -d "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
   python3 - "$SOURCE" "$SETTINGS" <<'PY'
 import json, pathlib, sys
 source, settings = map(pathlib.Path, sys.argv[1:])
@@ -275,32 +287,38 @@ packages = data.get("packages", [])
 if not isinstance(packages, list):
     raise SystemExit("Pi settings packages must be a list")
 registrations = []
+legacy = []
 for package in packages:
     if isinstance(package, str):
         path = pathlib.Path(package)
         if not path.is_absolute():
             path = settings.parent / path
-        if path.resolve() == source:
+        resolved = path.resolve()
+        if resolved.name in {"goal.js", "mecha-messaging.js"}:
+            legacy.append(package)
+        if resolved == source:
             registrations.append(package)
+if legacy:
+    raise SystemExit(f"reject standalone or old flat Pi registration(s): {', '.join(legacy)}")
 if len(registrations) != 1:
-    raise SystemExit(f"expected exactly one Pi extension registration resolving to {source}, found {len(registrations)}")
-print(f"ok: one Pi extension registration resolves to {source}")
+    raise SystemExit(f"expected exactly one Pi package registration resolving to {source}, found {len(registrations)}")
+print(f"ok: one Pi package registration resolves to {source}")
 PY
 else
-  echo "MISSING: checkout Pi extension source or Pi settings"
+  echo "MISSING: checkout Pi package or Pi settings"
   exit 1
 fi
 
-test -f "$REPO_ROOT/tests/pi_extension_silent.test.mjs"
-node --test "$REPO_ROOT/tests/pi_extension_silent.test.mjs"
-node --check "$SOURCE"
+(cd "$REPO_ROOT/pi-extensions/mecha-messaging" && npm run test:mecha-messaging)
+test -f "$REPO_ROOT/pi-extensions/mecha-messaging/mailbox-client.js"
+(cd "$REPO_ROOT/pi-extensions/mecha-messaging" && npm run check:mailbox-client-drift)
 ```
 
-Global registration keeps the extension available through Pi settings. Normal
-Pi supervisor, worker, and service launches use Pi's default configured
-extensions and pass neither `--extension` nor `--no-extensions`/`-ne`; those
-flags are reserved for deliberate extension-test tools. If an existing bare Pi
-process needs the updated source, reload it after the authorized source change.
+Global registration keeps the package available through Pi settings. Normal Pi
+supervisor, worker, and service launches use Pi's default configured extensions and
+pass neither `--extension` nor `--no-extensions`/`-ne`; those flags are reserved for
+deliberate extension-test tools. If an existing bare Pi process needs the updated
+package, reload it after the authorized source change.
 
 ### 8. Symlink Hooks
 
@@ -311,7 +329,7 @@ Symlink hook scripts from the skills directory into `~/.claude/hooks/`:
 mkdir -p ~/.claude/hooks
 
 # Retired Mailbox hook: Mailbox V2 delivery now comes from the runtime's
-# verified integration (Pi extension, Claude sidecar, or another bridge). Remove
+# verified integration (Pi package, Claude sidecar, or another bridge). Remove
 # only a symlink at the legacy path; preserve non-symlink files for manual review.
 HOOK_LINK="$HOME/.claude/hooks/mailbox-deliver.py"
 if [ -L "$HOOK_LINK" ]; then
@@ -573,14 +591,14 @@ echo "=== CLI Scripts ==="
 ls -la ~/.local/bin/ai 2>/dev/null || echo "none"
 
 echo ""
-echo "=== Pi Extension ==="
+echo "=== Pi Package ==="
 REPO_ROOT="$(git -C "$(pwd)" rev-parse --show-toplevel)"
-SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging.js"
+SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
 SETTINGS="$HOME/.pi/agent/settings.json"
-if [ -f "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
-  echo "Pi source and settings are present; run the read-only registration check above."
+if [ -d "$SOURCE" ] && [ ! -L "$SOURCE" ] && [ -f "$SETTINGS" ]; then
+  echo "Pi package and settings are present; run the read-only registration check above."
 else
-  echo "MISSING: checkout Pi extension source or Pi settings"
+  echo "MISSING: checkout Pi package or Pi settings"
 fi
 
 echo ""
