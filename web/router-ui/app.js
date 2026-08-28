@@ -22,7 +22,12 @@ import {
 } from "./state.js";
 import { renderMarkdownBody, textWithoutMarkdownImages } from "./markdown.js";
 import { formatReminderCountdown, reminderRecurrenceLabel } from "./reminders.js";
-import { parsePromptTemplateTokens, renderPromptTemplate } from "./prompt-templates.js";
+import {
+  parsePromptTemplateImport,
+  parsePromptTemplateTokens,
+  promptTemplateExportPayload,
+  renderPromptTemplate,
+} from "./prompt-templates.js";
 
 localStorage.removeItem("mecha.web.messages");
 localStorage.removeItem("mecha.web.conversations");
@@ -43,6 +48,7 @@ const HISTORY_IMAGE_QUALITY = 0.88;
 const MESSAGE_BOTTOM_THRESHOLD_PX = 80;
 const ARRIVED_MESSAGE_VISIBLE_MS = 60_000;
 const WEB_DEFAULT_AGENT_ID = "wolfgang-web";
+const PROMPT_TEMPLATE_IMPORT_TIMEOUT_MS = 15_000;
 
 const initialRouter = localStorage.getItem("mecha.web.activeRouter") || "http://127.0.0.1:8765";
 const state = {
@@ -64,6 +70,8 @@ const state = {
   promptTemplateDialogMode: "list",
   promptTemplateDraft: null,
   promptTemplateDeleteId: "",
+  promptTemplateImport: null,
+  promptTemplateImportNotice: null,
   promptTemplateUse: null,
   promptTemplateSelection: null,
   selectedPeer: "",
@@ -152,6 +160,7 @@ const elements = {
   promptOptions: document.querySelector("#prompt-options"),
   promptManage: document.querySelector("#prompt-manage"),
   promptTemplatesDialog: document.querySelector("#prompt-templates-dialog"),
+  promptTemplatesDialogClose: document.querySelector("#close-prompt-templates-dialog"),
   promptTemplatesDialogBody: document.querySelector("#prompt-templates-dialog-body"),
   promptTemplatesDialogTitle: document.querySelector("#prompt-templates-dialog-title"),
   promptUseDialog: document.querySelector("#prompt-use-dialog"),
@@ -253,7 +262,12 @@ elements.goalDialog.addEventListener("close", () => {
   if (returnFocus?.isConnected) returnFocus.focus();
   else [...document.querySelectorAll(".agent-row")].find((row) => row.dataset.agentId === peer)?.querySelector(".goal-indicator")?.focus();
 });
+elements.promptTemplatesDialog.addEventListener("cancel", (event) => {
+  if (["refreshing", "running"].includes(state.promptTemplateImport?.phase)) event.preventDefault();
+});
 elements.promptTemplatesDialog.addEventListener("close", () => {
+  state.promptTemplateImport = null;
+  state.promptTemplateImportNotice = null;
   state.promptTemplateDialogMode = "list";
   state.promptTemplateDraft = null;
   state.promptTemplateDeleteId = "";
@@ -294,10 +308,14 @@ function connectUiSocket() {
   socket.addEventListener("message", (event) => { void handleEvent(JSON.parse(event.data)); });
   socket.addEventListener("close", () => {
     if (state.socket !== socket) return;
+    if (["refreshing", "running"].includes(state.promptTemplateImport?.phase)) {
+      stopPromptTemplateImport("The UI connection closed. Remaining templates were not retried.");
+    }
     clearPendingModelControls();
     clearPendingGoalControls();
     clearPendingReminderLockControls();
     state.pendingReminderCrud.clear();
+    for (const pending of state.pendingPromptTemplateCrud.values()) clearPromptTemplateCrudTimeout(pending);
     state.pendingPromptTemplateCrud.clear();
     state.reminderLockStates.clear();
     setStatus("reconnecting", "UI server connection closed; retrying…");
@@ -540,6 +558,8 @@ async function switchRouter(routerUrl, { connect = false } = {}) {
   state.promptTemplatesLoaded = false;
   state.promptTemplateListGeneration = 0;
   state.promptTemplateListDirty = false;
+  state.promptTemplateImport = null;
+  state.promptTemplateImportNotice = null;
   state.pendingPromptTemplateCrud.clear();
   clearPromptTemplateSelection();
   state.expandedSubagents.clear();
@@ -1903,6 +1923,8 @@ function openPromptTemplateManager() {
   state.promptTemplateDialogMode = "list";
   state.promptTemplateDraft = null;
   state.promptTemplateDeleteId = "";
+  state.promptTemplateImport = null;
+  state.promptTemplateImportNotice = null;
   state.promptTemplateDialogStatus = null;
   renderPromptTemplateDialog();
   elements.promptTemplatesDialog.showModal();
@@ -1916,6 +1938,8 @@ function closePromptTemplateManager() {
     state.promptTemplateDialogMode = "list";
     state.promptTemplateDraft = null;
     state.promptTemplateDeleteId = "";
+    state.promptTemplateImport = null;
+    state.promptTemplateImportNotice = null;
   }
 }
 
@@ -1931,13 +1955,15 @@ function requestPromptTemplates() {
   return requested;
 }
 
-function sendPromptTemplateCrud(operation, promptTemplateId, payload) {
+function sendPromptTemplateCrud(operation, promptTemplateId, payload, metadata = {}) {
   const requestId = `prompt-template-crud-${crypto.randomUUID()}`;
-  state.pendingPromptTemplateCrud.set(requestId, {
+  const pending = {
     operation,
     promptTemplateId,
+    ...metadata,
     ...(operation === "list" ? { listGeneration: state.promptTemplateListGeneration } : {}),
-  });
+  };
+  state.pendingPromptTemplateCrud.set(requestId, pending);
   const command = {
     type: "prompt_template_crud",
     requestId,
@@ -1951,18 +1977,49 @@ function sendPromptTemplateCrud(operation, promptTemplateId, payload) {
     renderPromptTemplateDialog();
     return false;
   }
-  setPromptTemplateDialogStatus(operation === "list" ? "Loading…" : "Saving…");
+  if (metadata.promptTemplateImportId !== undefined) {
+    pending.timeoutId = setTimeout(() => handlePromptTemplateImportTimeout(requestId), PROMPT_TEMPLATE_IMPORT_TIMEOUT_MS);
+  }
+  const status = pendingPromptTemplateImportStatus(metadata);
+  setPromptTemplateDialogStatus(status || (operation === "list" ? "Loading…" : "Saving…"));
   renderPromptTemplateDialog();
   return true;
+}
+
+function clearPromptTemplateCrudTimeout(pending) {
+  if (pending?.timeoutId === undefined) return;
+  clearTimeout(pending.timeoutId);
+  pending.timeoutId = undefined;
+}
+
+function handlePromptTemplateImportTimeout(requestId) {
+  const pending = state.pendingPromptTemplateCrud.get(requestId);
+  if (!pending || pending.promptTemplateImportId === undefined) return;
+  state.pendingPromptTemplateCrud.delete(requestId);
+  clearPromptTemplateCrudTimeout(pending);
+  if (state.promptTemplateImport?.id !== pending.promptTemplateImportId) return;
+  stopPromptTemplateImport("The import request timed out after 15 seconds.", { refresh: true });
+}
+
+function pendingPromptTemplateImportStatus(metadata) {
+  if (!Number.isSafeInteger(metadata.promptTemplateImportIndex)
+    || !Number.isSafeInteger(metadata.promptTemplateImportCount)) return "";
+  return `Importing template ${metadata.promptTemplateImportIndex + 1} of ${metadata.promptTemplateImportCount}…`;
 }
 
 function handlePromptTemplateCrudResult(event) {
   const pending = state.pendingPromptTemplateCrud.get(event.requestId);
   if (!pending) return;
   state.pendingPromptTemplateCrud.delete(event.requestId);
+  clearPromptTemplateCrudTimeout(pending);
+  if (pending.promptTemplateImportId !== undefined) {
+    handlePromptTemplateImportResult(event, pending);
+    return;
+  }
   const currentList = pending.operation !== "list"
     || (pending.listGeneration === state.promptTemplateListGeneration && !state.promptTemplateListDirty);
   if (event.accepted !== true) {
+    if (pending.operation === "list" && state.promptTemplateImport?.phase === "refreshing") state.promptTemplateImport = null;
     setPromptTemplateDialogStatus(event.body?.error?.message || event.body?.error?.code || `Prompt template request failed (${event.status || "unknown"})`, true);
     renderPromptTemplateDialog();
     if (pending.operation === "list" && !currentList) requestPromptTemplates();
@@ -1976,7 +2033,27 @@ function handlePromptTemplateCrudResult(event) {
     const bodyTemplates = Array.isArray(event.body) ? event.body : (event.body?.prompt_templates ?? event.body?.templates ?? event.body?.promptTemplates ?? []);
     state.promptTemplates = normalizePromptTemplates(bodyTemplates);
     state.promptTemplatesLoaded = true;
-    state.promptTemplateDialogStatus = null;
+    const importState = state.promptTemplateImport;
+    if (importState?.phase === "refreshing") {
+      const confirmedNames = new Set(importState.confirmedConflictNames);
+      importState.conflicts = importState.templates.filter((template) => state.promptTemplates.some((candidate) => candidate.name === template.name));
+      const newlyConflicted = importState.conflicts.some((template) => !confirmedNames.has(template.name));
+      if (newlyConflicted) {
+        importState.phase = "confirm";
+        importState.confirmedConflictNames = [];
+        state.promptTemplateDialogStatus = null;
+        renderPromptTemplateDialog();
+      } else {
+        importState.phase = "running";
+        importState.index = 0;
+        importState.completed = 0;
+        sendNextPromptTemplateImport();
+      }
+      return;
+    }
+    const notice = state.promptTemplateImportNotice;
+    state.promptTemplateImportNotice = null;
+    state.promptTemplateDialogStatus = notice;
     renderPromptControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
     if (elements.promptTemplatesDialog?.open) renderPromptTemplateDialog();
     return;
@@ -1989,6 +2066,95 @@ function handlePromptTemplateCrudResult(event) {
   state.promptTemplateListDirty = true;
   requestPromptTemplates();
   renderPromptTemplateDialog();
+}
+
+function stopPromptTemplateImport(reason, { refresh = false, failure = false } = {}) {
+  const importState = state.promptTemplateImport;
+  if (!importState || !["refreshing", "running"].includes(importState.phase)) return false;
+  const completed = importState.completed;
+  const total = importState.templates.length;
+  const notice = {
+    message: failure
+      ? (completed === 0
+        ? `Import failed: ${reason}`
+        : `Imported ${completed} of ${total} templates before the failure: ${reason}`)
+      : `Import stopped after ${completed} of ${total} templates: ${reason}`,
+    error: true,
+  };
+  state.promptTemplateImport = null;
+  state.promptTemplateImportNotice = notice;
+  state.promptTemplateListGeneration += 1;
+  state.promptTemplateListDirty = true;
+  if (refresh) requestPromptTemplates();
+  state.promptTemplateDialogStatus = notice;
+  renderPromptTemplateDialog();
+  return true;
+}
+
+function startPromptTemplateImport() {
+  const importState = state.promptTemplateImport;
+  if (!importState || importState.phase !== "confirm") return;
+  importState.phase = "refreshing";
+  importState.confirmedConflictNames = importState.conflicts.map((template) => template.name);
+  state.promptTemplateListGeneration += 1;
+  state.promptTemplateListDirty = true;
+  if (!requestPromptTemplates()) {
+    state.promptTemplateDialogStatus = { message: "Checking current templates…", error: false };
+    renderPromptTemplateDialog();
+  }
+}
+
+function sendNextPromptTemplateImport() {
+  const importState = state.promptTemplateImport;
+  if (!importState || importState.phase !== "running") return;
+  const template = importState.templates[importState.index];
+  if (!template) return;
+  const existing = state.promptTemplates.find((candidate) => candidate.name === template.name);
+  const requested = sendPromptTemplateCrud(
+    existing === undefined ? "create" : "update",
+    existing?.id,
+    template,
+    {
+      promptTemplateImportId: importState.id,
+      promptTemplateImportIndex: importState.index,
+      promptTemplateImportCount: importState.templates.length,
+    },
+  );
+  if (!requested) stopPromptTemplateImport("The router is not connected. Remaining templates were not retried.");
+}
+
+function handlePromptTemplateImportResult(event, pending) {
+  const importState = state.promptTemplateImport;
+  if (!importState || importState.id !== pending.promptTemplateImportId
+    || importState.phase !== "running" || importState.index !== pending.promptTemplateImportIndex) return;
+  if (event.accepted !== true) {
+    const failure = event.body?.error?.message || event.body?.error?.code || `Import failed (${event.status || "unknown"})`;
+    stopPromptTemplateImport(failure, { refresh: true, failure: true });
+    return;
+  }
+  const saved = normalizePromptTemplates([event.body?.prompt_template])[0];
+  if (saved) {
+    const existingIndex = state.promptTemplates.findIndex((template) => template.id === saved.id);
+    if (existingIndex === -1) state.promptTemplates.push(saved);
+    else state.promptTemplates[existingIndex] = saved;
+    state.promptTemplatesLoaded = true;
+    renderPromptControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
+  }
+  importState.index += 1;
+  importState.completed += 1;
+  if (importState.index < importState.templates.length) {
+    sendNextPromptTemplateImport();
+    return;
+  }
+  const importedCount = importState.completed;
+  state.promptTemplateImport = null;
+  state.promptTemplateImportNotice = {
+    message: `Imported ${importedCount} template${importedCount === 1 ? "" : "s"}.`,
+    error: false,
+  };
+  state.promptTemplateListGeneration += 1;
+  state.promptTemplateListDirty = true;
+  if (!requestPromptTemplates()) renderPromptTemplateDialog();
 }
 
 function normalizePromptTemplates(templates) {
@@ -2025,24 +2191,14 @@ function renderPromptTemplateDialog() {
   elements.promptTemplatesDialogTitle.textContent = state.promptTemplateDialogMode === "editor"
     ? (state.promptTemplateDraft?.id ? "Edit prompt template" : "New prompt template")
     : "Prompt templates";
+  elements.promptTemplatesDialogClose.disabled = ["refreshing", "running"].includes(state.promptTemplateImport?.phase);
   if (state.promptTemplateDialogMode === "editor") {
     renderPromptTemplateEditor();
     restorePromptTemplateEditorFocus(focus);
     return;
   }
-  const add = document.createElement("button");
-  add.type = "button";
-  add.className = "icon-button prompt-dialog-add";
-  add.setAttribute("aria-label", "New template");
-  add.title = "New template";
-  add.append(icon("fa-plus"));
-  add.addEventListener("click", () => {
-    state.promptTemplateDialogMode = "editor";
-    state.promptTemplateDraft = { name: "", body: "" };
-    state.promptTemplateDialogStatus = null;
-    renderPromptTemplateDialog();
-  });
-  elements.promptTemplatesDialogBody.append(add);
+  renderPromptTemplateToolbar();
+  if (state.promptTemplateImport) renderPromptTemplateImportConfirmation();
   if (!state.promptTemplatesLoaded) {
     const loading = document.createElement("p");
     loading.className = "prompt-dialog-empty";
@@ -2057,6 +2213,151 @@ function renderPromptTemplateDialog() {
     for (const template of state.promptTemplates) elements.promptTemplatesDialogBody.append(renderPromptTemplateItem(template));
   }
   renderPromptTemplateDialogStatus();
+}
+
+function renderPromptTemplateToolbar() {
+  const toolbar = document.createElement("div");
+  toolbar.className = "prompt-dialog-toolbar";
+  const importing = state.promptTemplateImport !== null;
+  const importInput = document.createElement("input");
+  importInput.id = "prompt-template-import-input";
+  importInput.type = "file";
+  importInput.accept = ".json,application/json";
+  importInput.hidden = true;
+  importInput.addEventListener("change", () => {
+    const file = importInput.files?.[0];
+    importInput.value = "";
+    if (file) void handlePromptTemplateImportFile(file);
+  });
+  const importButton = document.createElement("button");
+  importButton.type = "button";
+  importButton.dataset.action = "import";
+  importButton.textContent = "Import";
+  importButton.disabled = importing || !state.promptTemplatesLoaded;
+  importButton.addEventListener("click", () => importInput.click());
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.dataset.action = "export";
+  exportButton.className = "secondary";
+  exportButton.textContent = "Export";
+  exportButton.disabled = importing || !state.promptTemplatesLoaded;
+  exportButton.addEventListener("click", exportPromptTemplates);
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "icon-button prompt-dialog-add";
+  add.dataset.action = "new";
+  add.setAttribute("aria-label", "New template");
+  add.title = "New template";
+  add.disabled = importing;
+  add.append(icon("fa-plus"));
+  add.addEventListener("click", () => {
+    state.promptTemplateDialogMode = "editor";
+    state.promptTemplateDraft = { name: "", body: "" };
+    state.promptTemplateDialogStatus = null;
+    renderPromptTemplateDialog();
+  });
+  toolbar.append(importButton, exportButton, add, importInput);
+  elements.promptTemplatesDialogBody.append(toolbar);
+}
+
+function exportPromptTemplates() {
+  try {
+    const content = `${JSON.stringify(promptTemplateExportPayload(state.promptTemplates), null, 2)}\n`;
+    const blob = new Blob([content], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "prompt-templates.json";
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    setPromptTemplateDialogStatus("Templates exported.");
+  } catch {
+    setPromptTemplateDialogStatus("Unable to export prompt templates.", true);
+  }
+}
+
+async function handlePromptTemplateImportFile(file) {
+  try {
+    const templates = parsePromptTemplateImport(await file.text());
+    if (templates.length === 0) {
+      state.promptTemplateDialogStatus = { message: "The file contains no templates.", error: false };
+      renderPromptTemplateDialog();
+      return;
+    }
+    const conflicts = templates.filter((template) => state.promptTemplates.some((candidate) => candidate.name === template.name));
+    const newCount = templates.length - conflicts.length;
+    if (state.promptTemplates.length + newCount > 100) {
+      throw new Error("Import would exceed the 100-template limit.");
+    }
+    state.promptTemplateImport = {
+      id: crypto.randomUUID(),
+      templates,
+      conflicts,
+      confirmedConflictNames: [],
+      phase: "confirm",
+      index: 0,
+      completed: 0,
+    };
+    state.promptTemplateDialogStatus = null;
+    renderPromptTemplateDialog();
+  } catch (error) {
+    state.promptTemplateImport = null;
+    state.promptTemplateDialogStatus = {
+      message: error instanceof Error ? error.message : "Unable to read the prompt template file.",
+      error: true,
+    };
+    renderPromptTemplateDialog();
+  }
+}
+
+function renderPromptTemplateImportConfirmation() {
+  const importState = state.promptTemplateImport;
+  if (!importState) return;
+  const section = document.createElement("section");
+  section.className = "prompt-template-import-confirmation";
+  section.setAttribute("aria-live", "polite");
+  const heading = document.createElement("h3");
+  const total = importState.templates.length;
+  if (importState.phase === "refreshing") {
+    heading.textContent = "Checking templates";
+    const progress = document.createElement("p");
+    progress.textContent = "Checking for changes before import…";
+    section.append(heading, progress);
+  } else if (importState.phase === "running") {
+    heading.textContent = "Importing templates";
+    const progress = document.createElement("p");
+    progress.textContent = `Importing template ${Math.min(importState.index + 1, total)} of ${total}…`;
+    section.append(heading, progress);
+  } else {
+    heading.textContent = `Import ${total} template${total === 1 ? "" : "s"}?`;
+    const description = document.createElement("p");
+    description.textContent = importState.conflicts.length === 0
+      ? "No existing templates will be changed."
+      : `These existing templates will be overwritten: ${importState.conflicts.map((template) => template.name).join(", ")}.`;
+    const actions = document.createElement("div");
+    actions.className = "prompt-template-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.dataset.action = "cancel-import";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => {
+      state.promptTemplateImport = null;
+      state.promptTemplateDialogStatus = null;
+      renderPromptTemplateDialog();
+    });
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.dataset.action = "confirm-import";
+    confirm.textContent = importState.conflicts.length === 0 ? "Import" : "Import and overwrite";
+    confirm.addEventListener("click", startPromptTemplateImport);
+    actions.append(cancel, confirm);
+    section.append(heading, description, actions);
+  }
+  elements.promptTemplatesDialogBody.append(section);
 }
 
 function renderPromptTemplateItem(template) {
@@ -2096,6 +2397,7 @@ function renderPromptTemplateItem(template) {
   edit.type = "button";
   edit.className = "secondary";
   edit.textContent = "Edit";
+  edit.disabled = state.promptTemplateImport !== null;
   edit.addEventListener("click", () => {
     state.promptTemplateDialogMode = "editor";
     state.promptTemplateDraft = { ...template };
@@ -2106,6 +2408,7 @@ function renderPromptTemplateItem(template) {
   remove.type = "button";
   remove.className = "secondary";
   remove.textContent = "Delete";
+  remove.disabled = state.promptTemplateImport !== null;
   remove.addEventListener("click", () => {
     state.promptTemplateDeleteId = template.id;
     renderPromptTemplateDialog();
@@ -2174,6 +2477,8 @@ function renderPromptTemplateDialogStatus() {
   const status = document.createElement("p");
   status.id = "prompt-template-dialog-status";
   status.className = `prompt-template-dialog-status${error ? " error" : ""}`;
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", error ? "assertive" : "polite");
   status.textContent = message;
   elements.promptTemplatesDialogBody.append(status);
 }

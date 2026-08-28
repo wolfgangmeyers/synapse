@@ -64,7 +64,7 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
       return Boolean(dialog?.open && dialog.querySelector(".prompt-dialog-empty")?.textContent.trim() === "No saved prompt templates.");
     });
 
-    await browser.evaluate("(() => document.querySelector('#prompt-templates-dialog-body > button')?.click())()");
+    await browser.evaluate("(() => document.querySelector('#prompt-templates-dialog [data-action=\"new\"]')?.click())()");
     await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-editor-form")));
     const unsavedTemplateName = "Draft template";
     const unsavedTemplateBody = "Draft body ${File}";
@@ -244,6 +244,100 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
         && dialog.querySelector(".prompt-dialog-empty")?.textContent.trim() === "No saved prompt templates.");
     });
     await waitForPromptTemplate(browser, updatedTemplateName, updatedTemplateBody, false);
+
+    await setPromptTemplateImportFile(browser, {
+      format: "mecha-prompt-templates",
+      version: 1,
+      templates: [],
+    });
+    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "The file contains no templates.");
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-dialog-empty")));
+    assert.equal(await browser.evaluate("(() => document.querySelectorAll('.prompt-template-item').length)()"), 0);
+
+    const importedTemplateName = "Imported review prompt";
+    const importedTemplateBody = "Imported body ${File}";
+    const firstImport = {
+      format: "mecha-prompt-templates",
+      version: 1,
+      templates: [{ name: importedTemplateName, body: importedTemplateBody }],
+    };
+    await setPromptTemplateImportFile(browser, firstImport);
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
+    assert.match(
+      await browser.evaluate("(() => document.querySelector('.prompt-template-import-confirmation')?.textContent)()"),
+      /No existing templates will be changed/,
+    );
+    await browser.evaluate(`(() => document.querySelector('[data-action="cancel-import"]')?.click())()`);
+    await waitForDom(browser, () => !document.querySelector(".prompt-template-import-confirmation"));
+    await waitForPromptTemplate(browser, importedTemplateName, importedTemplateBody, false);
+
+    await setPromptTemplateImportFile(browser, firstImport);
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
+    await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
+    await waitForPromptTemplate(browser, importedTemplateName, importedTemplateBody);
+
+    const overriddenTemplateBody = "Overridden body ${File}";
+    await setPromptTemplateImportFile(browser, {
+      ...firstImport,
+      templates: [{ name: importedTemplateName, body: overriddenTemplateBody }],
+    });
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
+    assert.match(
+      await browser.evaluate("(() => document.querySelector('.prompt-template-import-confirmation')?.textContent)()"),
+      /will be overwritten/,
+    );
+    await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
+    await waitForPromptTemplate(browser, importedTemplateName, overriddenTemplateBody);
+
+    await installPromptTemplateDownloadCapture(browser);
+    await browser.evaluate(`(() => document.querySelector('[data-action="export"]')?.click())()`);
+    assert.deepEqual(await readPromptTemplateDownload(browser), {
+      download: "prompt-templates.json",
+      payload: {
+        format: "mecha-prompt-templates",
+        version: 1,
+        templates: [{ name: importedTemplateName, body: overriddenTemplateBody }],
+      },
+    });
+    await restorePromptTemplateDownloadCapture(browser);
+
+    const multiImportTemplates = [
+      { name: "Imported schedule prompt", body: "Schedule body ${File}" },
+      { name: "Imported diagnosis prompt", body: "Diagnosis body ${File}" },
+    ];
+    await setPromptTemplateImportFile(browser, {
+      format: "mecha-prompt-templates",
+      version: 1,
+      templates: multiImportTemplates,
+    });
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
+    await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
+    await waitForPromptTemplate(browser, multiImportTemplates[0].name, multiImportTemplates[0].body);
+    await waitForPromptTemplate(browser, multiImportTemplates[1].name, multiImportTemplates[1].body);
+    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 2 templates.");
+
+    for (const template of multiImportTemplates) {
+      await browser.evaluate(`(() => {
+        const item = [...document.querySelectorAll('.prompt-template-item')]
+          .find((candidate) => candidate.querySelector('strong')?.textContent === ${JSON.stringify(template.name)});
+        [...(item?.querySelectorAll('button') ?? [])].find((button) => button.textContent.trim() === 'Delete')?.click();
+      })()`);
+      await waitForDom(browser, () => document.querySelector(".prompt-delete-confirmation")?.textContent.trim() === "Delete this template?");
+      await browser.evaluate(`(() => [...document.querySelectorAll('.prompt-template-actions button')]
+        .find((button) => button.classList.contains('danger-button') && button.textContent.trim() === 'Delete')?.click())()`);
+      await waitForPromptTemplate(browser, template.name, template.body, false);
+    }
+    assert.equal((await webSocketSendTypes(browser, pasteCommandStart)).includes("send_message"), false);
+
+    await browser.evaluate(`(() => {
+      const item = [...document.querySelectorAll('.prompt-template-item')]
+        .find((candidate) => candidate.querySelector('strong')?.textContent === ${JSON.stringify(importedTemplateName)});
+      [...(item?.querySelectorAll('button') ?? [])].find((button) => button.textContent.trim() === 'Delete')?.click();
+    })()`);
+    await waitForDom(browser, () => document.querySelector(".prompt-delete-confirmation")?.textContent.trim() === "Delete this template?");
+    await browser.evaluate(`(() => [...document.querySelectorAll('.prompt-template-actions button')]
+      .find((button) => button.classList.contains('danger-button') && button.textContent.trim() === 'Delete')?.click())()`);
+    await waitForPromptTemplate(browser, importedTemplateName, overriddenTemplateBody, false);
     assert.equal((await webSocketSendTypes(browser, pasteCommandStart)).includes("send_message"), false);
   } finally {
     if (browser && webSocketSendSpyInstalled) {
@@ -269,6 +363,56 @@ async function fillTemplateEditor(browser, name, body, submitLabel = "Create tem
     form.elements.namedItem('body').value = ${JSON.stringify(body)};
     [...form.querySelectorAll('button')].find((button) => button.textContent.trim() === ${JSON.stringify(submitLabel)})?.click();
   })()`);
+}
+
+async function setPromptTemplateImportFile(browser, payload) {
+  const serializedPayload = JSON.stringify(JSON.stringify(payload));
+  await browser.evaluate(`(() => {
+    const input = document.querySelector('#prompt-template-import-input');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([${serializedPayload}], 'prompt-templates.json', { type: 'application/json' }));
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+}
+
+async function installPromptTemplateDownloadCapture(browser) {
+  await browser.evaluate(`(() => {
+    const key = "__promptTemplateDownloadCapture";
+    const capture = { blob: null, download: "", href: "" };
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = (blob) => {
+      capture.blob = blob;
+      return "blob:prompt-template-export";
+    };
+    HTMLAnchorElement.prototype.click = function click() {
+      capture.download = this.download;
+      capture.href = this.href;
+    };
+    globalThis[key] = {
+      capture,
+      restore() {
+        URL.createObjectURL = originalCreateObjectURL;
+        HTMLAnchorElement.prototype.click = originalAnchorClick;
+        delete globalThis[key];
+      },
+    };
+  })()`);
+}
+
+async function readPromptTemplateDownload(browser) {
+  return browser.evaluate(`(async () => {
+    const capture = globalThis.__promptTemplateDownloadCapture?.capture;
+    return {
+      download: capture?.download,
+      payload: JSON.parse(await capture?.blob?.text()),
+    };
+  })()`);
+}
+
+async function restorePromptTemplateDownloadCapture(browser) {
+  await browser.evaluate("(() => globalThis.__promptTemplateDownloadCapture?.restore())()");
 }
 
 async function preparePromptPicker(browser, draftValue) {
