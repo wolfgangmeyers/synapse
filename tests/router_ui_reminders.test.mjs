@@ -36,7 +36,7 @@ test("the selected-agent header owns the reminder button", async () => {
   assert.match(app, /elements\.reminderHeaderButton\.disabled = !peer/);
   assert.match(app, /elements\.reminderHeaderButton\.classList\.toggle\("empty", reminders\.length === 0\)/);
   assert.match(app, /openReminderDialog\(state\.selectedPeer, reminderRowsForPeer\(state\.selectedPeer\)\.length === 0 \? "create" : "list", elements\.reminderHeaderButton\)/);
-  assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton, elements\.goalHeaderButton\)/);
+  assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton\);[\s\S]*elements\.peerName\.append\(elements\.goalHeaderButton\)/);
   assert.match(app, /attachReminderActions\(row, peer\)/);
   assert.match(app, /function attachReminderActions\(root, peer\)[\s\S]*event\.stopPropagation\(\);[\s\S]*event\.preventDefault\(\);[\s\S]*openReminderDialog\(peer, "list", indicator\)/);
   assert.match(app, /class="reminder-row-indicator" type="button" aria-haspopup="dialog" aria-controls="reminders-dialog"/);
