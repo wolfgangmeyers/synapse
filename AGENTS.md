@@ -110,6 +110,12 @@ Wolfgang has authorized all ordinary scoped work in the current task. A concrete
 
 For any production-code implementation or change, the canonical `dev-loop` workflow is mandatory. The worker or implementing agent must load the `workflows` skill and fetch the source-of-truth workflow with `get_workflow.py dev-loop` before substantive implementation. Do not authorize production code, mark it complete, or open/advance a PR without dev-loop evidence for specification/plan, implementation, validation, coverage, and review.
 
+## TypeScript Type Safety
+
+In `pi-extensions/mecha-messaging`, TypeScript code must preserve type safety. Do not use `as any`, `as unknown as`, or assertion/casting escape hatches to silence or evade a type error. Use runtime validation and narrowing at external or untyped boundaries. An assertion is allowed only when a documented, narrow boundary-validation case is absolutely necessary: keep it at that boundary, validate the value first, and add a nearby comment naming the boundary and the validation that makes the assertion sound. Do not weaken the compiler or linter to make an unsafe assertion pass.
+
+Run `npm run lint:mecha-messaging` (or `npm --prefix pi-extensions/mecha-messaging run lint`) for the enforced checks. The package linter enables `@typescript-eslint/no-explicit-any` and `@typescript-eslint/no-unsafe-type-assertion`; this rule does not enable global TypeScript strict mode or change migration, runtime, settings, installer, or test behavior.
+
 ## Delegation and Review Discipline
 
 **MUST HAVE: Never request review from someone on a PR while CI is not green. Getting CI green is the highest priority for a PR.**

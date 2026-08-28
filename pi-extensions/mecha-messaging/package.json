@@ -1,0 +1,18 @@
+{
+  "name": "@mecha/messaging-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint . --max-warnings 0",
+    "generate:mailbox-client": "tsc -p tsconfig.build.json",
+    "check:mailbox-client-drift": "npm run generate:mailbox-client && git diff --exit-code -- mailbox-client.js",
+    "test:mecha-messaging": "cd ../.. && tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "eslint": "9.39.2",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.4"
+  }
+}

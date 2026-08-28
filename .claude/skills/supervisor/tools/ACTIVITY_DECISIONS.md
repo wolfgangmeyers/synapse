@@ -235,7 +235,7 @@ so a fresh sidecar that has not identified its transcript cannot settle an agent
 **Every activity callback catches at its own top.** `runCli` parks on `await new Promise(() => {})`
 (`claude_sidecar.mjs:181`), so an uncaught throw in a timer callback ends the process and takes mail
 delivery with it. `sendActivity` throws when the socket is between reconnects
-(`pi-extensions/mailbox-client.js:157`) and on an unsupported state (`:164`), so this is reachable.
+(the generated support client at `~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js`), so this is reachable.
 
 ## Installing
 
@@ -361,7 +361,7 @@ presence sidecar holding it removes it on the way out. The reason is not that tw
 cannot share a pane. They can, and the residual that follows is on the known-issues page.
 
 **Presence is read off the agent id, not carried as a separate flag.** A presence id is dotted and a
-worker id cannot be, and the two validators in `pi-extensions/mailbox-client.js` are complements, so
+worker id cannot be, and the two validators in the generated support client at `~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js` are complements, so
 this is enforced rather than a convention. The inbox rule in `stop()` already read it that way. A
 flag alongside it would have been a second axis for one fact, and a caller that forgot to pass it
 would have made a managed sidecar yield its own marker with every test still green.

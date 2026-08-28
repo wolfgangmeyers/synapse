@@ -12,13 +12,23 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 
-SOURCE = Path(__file__).resolve().parents[4] / "pi-extensions" / "mecha-messaging.js"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+CHECKOUT_PACKAGE = REPOSITORY_ROOT / "pi-extensions" / "mecha-messaging"
+GENERATED_CLIENT_SOURCE = CHECKOUT_PACKAGE / "mailbox-client.js"
 SUPERVISOR_TOOLS_SOURCE = Path(__file__).resolve().parent
-TARGET = Path.home() / ".mecha-developer" / "extensions" / "mecha-messaging.js"
+INSTALLED_SUPPORT_ROOT = Path.home() / ".mecha-developer" / "extensions"
 SETTINGS = Path.home() / ".pi" / "agent" / "settings.json"
-EXTENSION_MODULES = ("goal.js", "mailbox-client.js", "memory-capture.js", "operational-tools.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js")
+# Kept as a named legacy path so migration tests can prove that it is neither
+# copied nor registered. The active entrypoint is CHECKOUT_PACKAGE.
+SOURCE = REPOSITORY_ROOT / "pi-extensions" / "mecha-messaging.js"
+TARGET = INSTALLED_SUPPORT_ROOT / "mecha-messaging.js"
+TRANSACTION_MARKER = INSTALLED_SUPPORT_ROOT.with_name("extensions.mecha-messaging.transaction.json")
+SUPPORT_BACKUP = INSTALLED_SUPPORT_ROOT.with_name("extensions.mecha-messaging.rollback")
+SETTINGS_BACKUP = SETTINGS.with_name(SETTINGS.name + ".mecha-messaging.rollback")
+EXTENSION_MODULES = ("goal.js", "mailbox-client.js", "memory-capture.js", "operational-tools.js", "recall-state.js", "recall-controller.js", "recall-evaluator.js", "recall-pipeline.js", "reminder-lock.js")
 OPERATIONAL_TOOL_SCRIPTS = (
     "git_task_status.py",
     "mailbox_send.py",
@@ -44,8 +54,13 @@ OPERATIONAL_TOOL_MODULES = (
 )
 SUPERVISOR_TOOL_JAVASCRIPT = ("claude_sidecar.mjs", "activity_tail.mjs", "activity_state.mjs")
 SIDECAR_HARNESS_MODULES = ("cli_entrypoint.js", "log_rotation.js", "tmux-rest-client.js")
-SIDECAR_EXTENSION_MODULES = ("mailbox-client.js",)
-REGISTERED_EXTENSIONS = (TARGET,)
+REGISTERED_EXTENSIONS = (CHECKOUT_PACKAGE,)
+LEGACY_CHECKOUT_REGISTRATIONS = (SOURCE, REPOSITORY_ROOT / "pi-extensions" / "goal.js")
+LEGACY_SUPPORT_FILES = tuple(EXTENSION_MODULES) + (
+    "pi-extensions/mailbox-client.js",
+    "pi-extensions/mecha-messaging.js",
+    "pi-extensions/goal.js",
+)
 PYTHON_STANDARD_MODULES = frozenset({
     "__future__",
     "argparse",
@@ -81,21 +96,22 @@ NODE_BUILTIN_MODULES = frozenset({
 # Pi resolves this optional peer from its registered package extensions. It is
 # intentionally not copied into Mailbox's self-contained operational bundle.
 PI_EXTENSION_RUNTIME_PACKAGES = frozenset({"@gotgenes/pi-subagents"})
+MAILBOX_CLIENT_GENERATOR = ("npm", "run", "generate:mailbox-client")
 
 
 def extension_artifacts() -> tuple[tuple[Path, Path], ...]:
-    installed_root = TARGET.parent
-    installed_supervisor_tools = installed_root / ".claude" / "skills" / "supervisor" / "tools"
-    repository_root = SUPERVISOR_TOOLS_SOURCE.parents[3]
+    """Return only support files copied under the installed support root.
+
+    The TypeScript package itself stays in the checkout and is the sole settings
+    registration. Only the generated client crosses this installation boundary.
+    """
+    installed_supervisor_tools = INSTALLED_SUPPORT_ROOT / ".claude" / "skills" / "supervisor" / "tools"
     return (
-        (SOURCE, TARGET),
-        *((SOURCE.with_name(name), TARGET.with_name(name)) for name in EXTENSION_MODULES),
+        (GENERATED_CLIENT_SOURCE, INSTALLED_SUPPORT_ROOT / "pi-extensions" / "mecha-messaging" / "mailbox-client.js"),
         *((SUPERVISOR_TOOLS_SOURCE / name, installed_supervisor_tools / name)
           for name in (*OPERATIONAL_TOOL_SCRIPTS, *OPERATIONAL_TOOL_MODULES, *SUPERVISOR_TOOL_JAVASCRIPT)),
-        *((repository_root / "harness" / name, installed_root / "harness" / name)
+        *((REPOSITORY_ROOT / "harness" / name, INSTALLED_SUPPORT_ROOT / "harness" / name)
           for name in SIDECAR_HARNESS_MODULES),
-        *((repository_root / "pi-extensions" / name, installed_root / "pi-extensions" / name)
-          for name in SIDECAR_EXTENSION_MODULES),
     )
 
 
@@ -317,7 +333,7 @@ def javascript_module_references(source: Path) -> set[str]:
 
 def missing_javascript_dependencies(artifacts: tuple[tuple[Path, Path], ...]) -> set[str]:
     """Find module references unavailable from a clean installed target."""
-    targets = {(source.resolve(), target.resolve()) for source, target in artifacts}
+    targets = {target.resolve() for _, target in artifacts}
     missing = set()
     for source, target in artifacts:
         if source.suffix not in {".js", ".mjs"}:
@@ -328,9 +344,10 @@ def missing_javascript_dependencies(artifacts: tuple[tuple[Path, Path], ...]) ->
             if not reference.startswith(".") or "?" in reference or "#" in reference:
                 missing.add(f"{source.name} -> {reference}")
                 continue
-            dependency_source = (source.parent / reference).resolve()
             dependency_target = (target.parent / reference).resolve()
-            if (dependency_source, dependency_target) not in targets:
+            # Consumers retain their checkout-relative imports. The target path
+            # is the authoritative graph after they are copied into support root.
+            if dependency_target not in targets:
                 missing.add(f"{source.name} -> {reference}")
     return missing
 
@@ -339,7 +356,82 @@ def is_regular_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
 
 
+def validate_generated_client() -> None:
+    """Reject a checked-in client that differs from the package generator output."""
+    if not is_regular_file(CHECKOUT_PACKAGE / "mailbox-client.ts"):
+        raise RuntimeError("mailbox-client.ts is missing")
+    if not is_regular_file(GENERATED_CLIENT_SOURCE):
+        raise RuntimeError("generated mailbox-client.js is missing")
+    with tempfile.TemporaryDirectory(prefix=".mailbox-client-generate-") as output:
+        result = subprocess.run(
+            [*MAILBOX_CLIENT_GENERATOR, "--", "--outDir", output],
+            cwd=CHECKOUT_PACKAGE,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise RuntimeError(f"mailbox-client generator failed: {detail}")
+        generated = Path(output) / "mailbox-client.js"
+        if not is_regular_file(generated):
+            raise RuntimeError("mailbox-client generator did not produce mailbox-client.js")
+        if generated.read_bytes() != GENERATED_CLIENT_SOURCE.read_bytes():
+            raise RuntimeError(
+                "generated mailbox-client.js is stale; run "
+                "npm run generate:mailbox-client in pi-extensions/mecha-messaging"
+            )
+
+
+def assert_no_symlinked_components(path: Path, base: Path | None = None) -> None:
+    """Reject symlinks from a managed base through an absolute path."""
+    absolute = Path(os.path.abspath(path))
+    managed_base = Path(os.path.abspath(base or path))
+    try:
+        relative = absolute.relative_to(managed_base)
+    except ValueError as error:
+        raise RuntimeError(f"managed support path escapes its base: {path}") from error
+    current = managed_base
+    if current.is_symlink():
+        raise RuntimeError(f"managed support path contains a symlinked component: {current}")
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise RuntimeError(f"managed support path contains a symlinked component: {current}")
+
+
+def fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fsync_tree(path: Path) -> None:
+    if path.is_symlink():
+        return
+    if path.is_dir():
+        for child in path.iterdir():
+            fsync_tree(child)
+        fsync_directory(path)
+    elif path.is_file():
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
 def atomic_copy(source: Path, target: Path, prefix: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
     fd, staged_name = tempfile.mkstemp(prefix=prefix, dir=target.parent)
     os.close(fd)
     staged = Path(staged_name)
@@ -347,13 +439,20 @@ def atomic_copy(source: Path, target: Path, prefix: str) -> None:
         shutil.copy2(source, staged)
         if not is_regular_file(staged) or staged.read_bytes() != source.read_bytes():
             raise RuntimeError(f"staged copy validation failed: {source}")
+        fd = os.open(staged, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         os.replace(staged, target)
+        fsync_directory(target.parent)
     except Exception:
         staged.unlink(missing_ok=True)
         raise
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, staged_name = tempfile.mkstemp(prefix=".settings.", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as staged:
@@ -362,6 +461,7 @@ def atomic_write_json(path: Path, data: dict) -> None:
             staged.flush()
             os.fsync(staged.fileno())
         os.replace(staged_name, path)
+        fsync_directory(path.parent)
     except Exception:
         Path(staged_name).unlink(missing_ok=True)
         raise
@@ -381,14 +481,237 @@ def load_settings() -> tuple[dict, bool]:
     return data, True
 
 
+def _resolved_registration(value: object) -> Path | None:
+    if not isinstance(value, str):
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = SETTINGS.parent / path
+    return path.resolve()
+
+
+def build_settings(settings: dict) -> dict:
+    """Replace this graph's old registrations while retaining other packages."""
+    retired = {path.resolve() for path in (*LEGACY_CHECKOUT_REGISTRATIONS, TARGET)}
+    packages = [
+        entry for entry in settings.get("packages", [])
+        if _resolved_registration(entry) not in retired
+        and _resolved_registration(entry) != CHECKOUT_PACKAGE.resolve()
+    ]
+    result = dict(settings)
+    result["packages"] = [*packages, str(CHECKOUT_PACKAGE)]
+    return result
+
+
+def verify_manifest(artifacts: tuple[tuple[Path, Path], ...], root: Path) -> None:
+    """Check staged support files before they can become visible."""
+    for source, target in artifacts:
+        relative = target.relative_to(INSTALLED_SUPPORT_ROOT)
+        staged = root / relative
+        if not is_regular_file(source) or not is_regular_file(staged):
+            raise RuntimeError(f"support manifest contains a non-file: {relative}")
+        if staged.read_bytes() != source.read_bytes():
+            raise RuntimeError(f"support manifest mismatch: {relative}")
+
+
+def stage_support_root(artifacts: tuple[tuple[Path, Path], ...]) -> Path:
+    parent = INSTALLED_SUPPORT_ROOT.parent
+    assert_no_symlinked_components(parent)
+    for _, target in artifacts:
+        assert_no_symlinked_components(target.parent, base=parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=".mecha-messaging-stage-", dir=parent))
+    try:
+        if INSTALLED_SUPPORT_ROOT.exists() or INSTALLED_SUPPORT_ROOT.is_symlink():
+            if not INSTALLED_SUPPORT_ROOT.is_dir() or INSTALLED_SUPPORT_ROOT.is_symlink():
+                raise RuntimeError(f"installed support root must be a directory: {INSTALLED_SUPPORT_ROOT}")
+            shutil.copytree(INSTALLED_SUPPORT_ROOT, staged, dirs_exist_ok=True, symlinks=True)
+        for relative in LEGACY_SUPPORT_FILES:
+            remove_path(staged / relative)
+        for source, target in artifacts:
+            relative = target.relative_to(INSTALLED_SUPPORT_ROOT)
+            assert_no_symlinked_components((staged / relative).parent, base=staged)
+            atomic_copy(source, staged / relative, ".mecha-messaging-stage-file.")
+        verify_manifest(artifacts, staged)
+        fsync_tree(staged)
+        fsync_directory(parent)
+        return staged
+    except Exception:
+        remove_path(staged)
+        raise
+
+
+def copy_support_backup(had_support: bool) -> None:
+    if not had_support:
+        return
+    shutil.copytree(INSTALLED_SUPPORT_ROOT, SUPPORT_BACKUP, symlinks=True)
+    fsync_tree(SUPPORT_BACKUP)
+    fsync_directory(SUPPORT_BACKUP.parent)
+
+
+def failure_injection(point: str) -> None:
+    if os.environ.get("MECHA_MESSAGING_INSTALL_FAIL_PHASE") == point:
+        raise RuntimeError(f"injected installer failure: {point}")
+
+
+def write_transaction(marker: dict) -> None:
+    atomic_write_json(TRANSACTION_MARKER, marker)
+
+
+def _marker_data() -> dict:
+    if not is_regular_file(TRANSACTION_MARKER):
+        raise RuntimeError(f"invalid installer transaction marker: {TRANSACTION_MARKER}")
+    try:
+        marker = json.loads(TRANSACTION_MARKER.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid installer transaction marker: {error}") from error
+    required = {
+        "version", "phase", "support_backup", "settings_backup", "staged_support_root",
+        "had_support_root", "had_settings", "intended_settings", "manifest",
+    }
+    if not isinstance(marker, dict) or set(marker) != required:
+        raise RuntimeError("invalid installer transaction marker schema")
+    if type(marker["version"]) is not int or marker["version"] != 1:
+        raise RuntimeError("unsupported installer transaction marker version")
+    if not isinstance(marker["phase"], str) or marker["phase"] not in {"recorded", "support_replaced", "settings_replaced", "completed", "restored"}:
+        raise RuntimeError("invalid installer transaction marker phase")
+    if any(not isinstance(marker[field], str) for field in ("support_backup", "settings_backup", "staged_support_root")):
+        raise RuntimeError("invalid installer transaction marker paths")
+    if marker["support_backup"] != str(SUPPORT_BACKUP) or marker["settings_backup"] != str(SETTINGS_BACKUP):
+        raise RuntimeError("installer transaction marker backup path is unsafe")
+    if type(marker["had_support_root"]) is not bool or type(marker["had_settings"]) is not bool:
+        raise RuntimeError("invalid installer transaction marker state")
+    if not isinstance(marker["intended_settings"], dict) or not isinstance(marker["manifest"], list):
+        raise RuntimeError("invalid installer transaction marker payload")
+    expected_manifest = [str(target.relative_to(INSTALLED_SUPPORT_ROOT)) for _, target in extension_artifacts()]
+    if marker["manifest"] != expected_manifest or any(not isinstance(item, str) for item in marker["manifest"]):
+        raise RuntimeError("invalid installer transaction marker manifest")
+
+    staged = Path(marker["staged_support_root"])
+    parent = INSTALLED_SUPPORT_ROOT.parent.resolve(strict=False)
+    staged_resolved = staged.resolve(strict=False)
+    if not staged.is_absolute():
+        raise RuntimeError("installer transaction marker staged path is unsafe")
+    try:
+        relative = staged_resolved.relative_to(parent)
+    except ValueError as error:
+        raise RuntimeError("installer transaction marker staged path escapes its directory") from error
+    if len(relative.parts) != 1 or not staged.name.startswith(".mecha-messaging-stage-"):
+        raise RuntimeError("installer transaction marker staged path is unsafe")
+    assert_no_symlinked_components(staged_resolved, base=parent)
+    if staged.exists() and (not staged.is_dir() or staged.is_symlink()):
+        raise RuntimeError("installer transaction marker staged path is not a directory")
+    return marker
+
+
+def clear_transaction(marker: dict) -> None:
+    staged = Path(marker.get("staged_support_root", ""))
+    if staged and staged != Path(".") and (staged.exists() or staged.is_symlink()):
+        remove_path(staged)
+    if SUPPORT_BACKUP.exists() or SUPPORT_BACKUP.is_symlink():
+        remove_path(SUPPORT_BACKUP)
+    SETTINGS_BACKUP.unlink(missing_ok=True)
+    # Keep the marker until both rollback copies are gone so cleanup can resume
+    # safely if the process stops partway through it.
+    TRANSACTION_MARKER.unlink(missing_ok=True)
+    fsync_directory(TRANSACTION_MARKER.parent)
+    fsync_directory(SETTINGS.parent)
+
+
+def restore_support_backup() -> None:
+    """Restore a copy while retaining the rollback source for the next phase."""
+    restored = Path(tempfile.mkdtemp(prefix=".mecha-messaging-recover-", dir=INSTALLED_SUPPORT_ROOT.parent))
+    remove_path(restored)
+    try:
+        shutil.copytree(SUPPORT_BACKUP, restored, symlinks=True)
+        fsync_tree(restored)
+        fsync_directory(restored.parent)
+        replace_support_root(restored)
+    except Exception:
+        if restored.exists() or restored.is_symlink():
+            remove_path(restored)
+        raise
+
+
+def restore_transaction(marker: dict) -> None:
+    """Restore both complete old roots before a retry does any new work."""
+    had_support = bool(marker.get("had_support_root"))
+    had_settings = bool(marker.get("had_settings"))
+    if had_support and (SUPPORT_BACKUP.is_symlink() or not SUPPORT_BACKUP.is_dir()):
+        raise RuntimeError("support-root backup is missing")
+    if had_settings and not is_regular_file(SETTINGS_BACKUP):
+        raise RuntimeError("settings backup is missing")
+    assert_no_symlinked_components(INSTALLED_SUPPORT_ROOT.parent)
+    if had_support:
+        restore_support_backup()
+    elif INSTALLED_SUPPORT_ROOT.exists() or INSTALLED_SUPPORT_ROOT.is_symlink():
+        remove_path(INSTALLED_SUPPORT_ROOT)
+    # The support backup remains in place until the settings restore succeeds.
+    failure_injection("during_recovery_after_support")
+    if had_settings:
+        atomic_copy(SETTINGS_BACKUP, SETTINGS, ".settings-recover.")
+    else:
+        SETTINGS.unlink(missing_ok=True)
+    fsync_directory(INSTALLED_SUPPORT_ROOT.parent)
+    fsync_directory(SETTINGS.parent)
+    marker["phase"] = "restored"
+    write_transaction(marker)
+    clear_transaction(marker)
+
+
+def recover_transaction() -> None:
+    # Keep the recovery entrypoint safe when called directly as well as through
+    # main(), before it reads or restores settings.
+    assert_no_symlinked_components(SETTINGS.parent, base=Path.home())
+    if not TRANSACTION_MARKER.exists() and not TRANSACTION_MARKER.is_symlink():
+        if SUPPORT_BACKUP.exists() or SETTINGS_BACKUP.exists():
+            raise RuntimeError("installer rollback copies exist without a transaction marker")
+        return
+    marker = _marker_data()
+    if marker.get("phase") in {"completed", "restored"}:
+        clear_transaction(marker)
+    else:
+        restore_transaction(marker)
+
+
+def replace_support_root(staged: Path) -> None:
+    assert_no_symlinked_components(INSTALLED_SUPPORT_ROOT.parent)
+    displaced = Path(tempfile.mkdtemp(prefix=".mecha-messaging-old-", dir=INSTALLED_SUPPORT_ROOT.parent))
+    remove_path(displaced)
+    had_root = INSTALLED_SUPPORT_ROOT.exists() or INSTALLED_SUPPORT_ROOT.is_symlink()
+    try:
+        if had_root:
+            os.replace(INSTALLED_SUPPORT_ROOT, displaced)
+        os.replace(staged, INSTALLED_SUPPORT_ROOT)
+        fsync_directory(INSTALLED_SUPPORT_ROOT.parent)
+    except Exception:
+        if INSTALLED_SUPPORT_ROOT.exists() or INSTALLED_SUPPORT_ROOT.is_symlink():
+            remove_path(INSTALLED_SUPPORT_ROOT)
+        if had_root and displaced.exists():
+            os.replace(displaced, INSTALLED_SUPPORT_ROOT)
+        raise
+    finally:
+        if displaced.exists() or displaced.is_symlink():
+            remove_path(displaced)
+
+
 def main() -> int:
+    try:
+        # Settings writes must stay below the real home directory. Check this
+        # before recovery or loading settings so a symlinked parent cannot
+        # redirect either operation outside the managed path.
+        assert_no_symlinked_components(SETTINGS.parent, base=Path.home())
+        recover_transaction()
+    except Exception as error:
+        raise SystemExit(f"Installer recovery failed; refusing new work: {error}") from error
     artifacts = extension_artifacts()
     if any(not is_regular_file(source) for source, _ in artifacts):
         raise SystemExit("Invalid canonical extension bundle source")
     try:
+        validate_generated_client()
         missing_dependencies = missing_operational_dependencies()
         missing_javascript = missing_javascript_dependencies(artifacts)
-    except (OSError, SyntaxError, ValueError) as error:
+    except (OSError, RuntimeError, SyntaxError, ValueError) as error:
         raise SystemExit(f"Invalid extension bundle source: {error}") from error
     if missing_dependencies or missing_javascript:
         missing = ", ".join(sorted(missing_dependencies | missing_javascript))
@@ -397,51 +720,65 @@ def main() -> int:
         settings, had_settings = load_settings()
     except ValueError as error:
         raise SystemExit(f"Error: {error}") from error
-    if any((target.exists() or target.is_symlink()) and not is_regular_file(target) for _, target in artifacts):
-        raise SystemExit("Installed extension bundle must contain only regular, non-symlink files")
-
-    TARGET.parent.mkdir(parents=True, exist_ok=True)
-    for _, target in artifacts:
-        target.parent.mkdir(parents=True, exist_ok=True)
+    intended_settings = build_settings(settings)
+    # Recovery must be able to fsync this directory even when the first install
+    # creates settings from scratch.
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    artifact_backups = {target: target.with_name(target.name + ".rollback") for _, target in artifacts}
-    settings_backup = SETTINGS.with_name(SETTINGS.name + ".mecha-messaging.rollback")
-    if any(path.exists() or path.is_symlink() for path in (*artifact_backups.values(), settings_backup)):
-        raise SystemExit("Existing Pi extension rollback copies need verification or recovery before updating")
-
-    had_targets = {target: target.exists() for _, target in artifacts}
+    had_support = INSTALLED_SUPPORT_ROOT.exists() or INSTALLED_SUPPORT_ROOT.is_symlink()
+    if had_support and (not INSTALLED_SUPPORT_ROOT.is_dir() or INSTALLED_SUPPORT_ROOT.is_symlink()):
+        raise SystemExit("Installed support root must be a regular directory")
     try:
+        assert_no_symlinked_components(INSTALLED_SUPPORT_ROOT.parent)
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+    try:
+        staged = stage_support_root(artifacts)
+        copy_support_backup(had_support)
         if had_settings:
-            atomic_copy(SETTINGS, settings_backup, ".settings-backup.")
-        for _, target in artifacts:
-            if had_targets[target]:
-                atomic_copy(target, artifact_backups[target], ".mecha-messaging-backup.")
-        for source, target in artifacts:
-            atomic_copy(source, target, ".mecha-messaging.")
-        registered_paths = {str(target) for target in REGISTERED_EXTENSIONS}
-        packages = [entry for entry in settings.get("packages", []) if entry not in registered_paths]
-        packages.extend(str(target) for target in REGISTERED_EXTENSIONS)
-        settings["packages"] = packages
-        atomic_write_json(SETTINGS, settings)
-        verified_settings, _ = load_settings()
-        if (any(not is_regular_file(target) or target.read_bytes() != source.read_bytes() for source, target in artifacts)
-                or any(verified_settings["packages"].count(str(target)) != 1 for target in REGISTERED_EXTENSIONS)):
-            raise RuntimeError("post-install verification failed")
+            atomic_copy(SETTINGS, SETTINGS_BACKUP, ".settings-backup.")
+        marker = {
+            "version": 1,
+            "phase": "recorded",
+            "support_backup": str(SUPPORT_BACKUP),
+            "settings_backup": str(SETTINGS_BACKUP),
+            "staged_support_root": str(staged),
+            "had_support_root": had_support,
+            "had_settings": had_settings,
+            "intended_settings": intended_settings,
+            "manifest": [str(target.relative_to(INSTALLED_SUPPORT_ROOT)) for _, target in artifacts],
+        }
+        write_transaction(marker)
     except Exception as error:
-        if had_settings and settings_backup.exists():
-            os.replace(settings_backup, SETTINGS)
-        elif not had_settings:
-            SETTINGS.unlink(missing_ok=True)
-        for _, target in artifacts:
-            if had_targets[target] and artifact_backups[target].exists():
-                os.replace(artifact_backups[target], target)
-            elif not had_targets[target]:
-                target.unlink(missing_ok=True)
-        raise SystemExit(f"Pi extension install failed and was rolled back: {error}") from error
+        if 'staged' in locals() and staged.exists():
+            remove_path(staged)
+        if SUPPORT_BACKUP.exists() or SUPPORT_BACKUP.is_symlink():
+            remove_path(SUPPORT_BACKUP)
+        SETTINGS_BACKUP.unlink(missing_ok=True)
+        raise SystemExit(f"Pi extension staging failed: {error}") from error
+    try:
+        failure_injection("after_recording")
+        replace_support_root(staged)
+        marker["phase"] = "support_replaced"
+        write_transaction(marker)
+        failure_injection("after_support_replacement")
+        atomic_write_json(SETTINGS, intended_settings)
+        marker["phase"] = "settings_replaced"
+        write_transaction(marker)
+        failure_injection("after_settings_replacement")
+        verify_manifest(artifacts, INSTALLED_SUPPORT_ROOT)
+        verified_settings, _ = load_settings()
+        if verified_settings != intended_settings:
+            raise RuntimeError("post-install settings verification failed")
+        marker["phase"] = "completed"
+        write_transaction(marker)
+        clear_transaction(marker)
+    except Exception as error:
+        # Leave the marker and complete backups in place. The next invocation
+        # restores them before validating or staging any new bundle.
+        raise SystemExit(f"Pi extension install interrupted; retry to recover: {error}") from error
 
-    print(f"Pi extension installed: {TARGET} (source: {SOURCE})")
-    print(f"Bare Pi registration: {SETTINGS}")
-    print("Rollback copies retained until final status verification passes.")
+    print(f"Pi extension support installed under {INSTALLED_SUPPORT_ROOT} (source: {CHECKOUT_PACKAGE})")
+    print(f"Pi registration: {SETTINGS}")
     return 0
 
 

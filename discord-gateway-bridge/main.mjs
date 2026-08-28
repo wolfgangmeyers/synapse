@@ -2,7 +2,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
-import { assertAgentId, createMailboxClient, routerHttpUrl } from "../harness/mailbox-client.js";
+import { assertAgentId, createMailboxClient, routerHttpUrl } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 import { createBridge } from "./bridge.js";
 import { createDiscordGateway, createDiscordRest } from "./discord.js";
 import { openBridgeState } from "./state.js";

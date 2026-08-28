@@ -347,13 +347,13 @@ test("validates router and checkout-source client rollout in an isolated home", 
   const updatedCapabilities = await (await fetch(new URL("/v1/capabilities", updated.httpUrl))).json();
   assert.equal(updatedCapabilities.subagent_lifecycle_v2, true);
 
-  const registeredExtension = join(process.cwd(), "pi-extensions", "mecha-messaging.js");
-  const registeredClient = join(process.cwd(), "pi-extensions", "mailbox-client.js");
+  const registeredExtension = join(process.cwd(), "pi-extensions", "mecha-messaging");
+  const registeredClient = join(registeredExtension, "mailbox-client.js");
   await mkdir(join(home, ".pi", "agent"), { recursive: true });
   await writeFile(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ packages: [registeredExtension] }));
   const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
   assert.deepEqual(settings.packages, [registeredExtension]);
-  assert.ok(readFileSync(registeredExtension).length > 0);
+  assert.ok(readFileSync(join(registeredExtension, "index.ts")).length > 0);
   assert.ok(readFileSync(registeredClient).length > 0);
   assert.equal(existsSync(join(home, ".mecha-developer", "extensions")), false);
   assert.deepEqual(capturedStart, {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { isCliEntrypoint } from "../../../../harness/cli_entrypoint.js";
 import { rotateSizeCappedLog } from "../../../../harness/log_rotation.js";
-import { createMailboxClient, assertAgentId, assertPresenceAgentId, routerHttpUrl } from "../../../../pi-extensions/mailbox-client.js";
+import { createMailboxClient, assertAgentId, assertPresenceAgentId, routerHttpUrl } from "../../../../pi-extensions/mecha-messaging/mailbox-client.js";
 import { createActivityTailer } from "./activity_tail.mjs";
 import { createActivityState } from "./activity_state.mjs";
 import { createTmuxRestClient } from "../../../../harness/tmux-rest-client.js";
@@ -316,7 +316,8 @@ export function createClaudeSidecar({ agentId, window = agentId, client, inject,
 //
 // Every callback here is isolated. runCli parks on a promise that never resolves, so an uncaught
 // throw in a timer ends the process and takes mail delivery with it, and sendActivity does throw
-// when the socket is between reconnects (pi-extensions/mailbox-client.js:157). Activity is the
+// when the socket is between reconnects (the generated support client at
+// ~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js). Activity is the
 // less important of the sidecar's two jobs and must never be able to stop the other one.
 export function createActivityReporter({
   client,
@@ -334,7 +335,7 @@ export function createActivityReporter({
     const activityState = state.state === "idle" ? "settled" : state.state;
     const subagents = state.subagents();
     const signature = `${activityState}|${state.subagentCount}|${JSON.stringify(subagents)}`;
-    // Same suppression the Pi extension uses (mecha-messaging.js:1039-1046): skip an identical
+    // Same suppression the Pi package uses (pi-extensions/mecha-messaging/index.ts): skip an identical
     // frame unless it is old enough that the router's 15s expiry would otherwise lapse.
     if (!force && signature === lastSignature && now() - lastSentAtMs < minResendMs) return;
     client.sendActivity(activityState, { subagentCount: state.subagentCount, subagents });

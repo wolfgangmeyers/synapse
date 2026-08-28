@@ -9,7 +9,7 @@ import WebSocket from "ws";
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { validateClientFrame, validateServerFrame } from "../harness/protocol.js";
-import { createMailboxClient } from "../pi-extensions/mailbox-client.js";
+import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 
 function nextFrame(socket, predicate = () => true, timeoutMs = 1_000) {
   return new Promise((resolve, reject) => {
