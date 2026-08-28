@@ -5,7 +5,6 @@ import goalExtension, { GOAL_CONTROL_REQUEST_EVENT } from "../pi-extensions/goal
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging.js";
 
 const settings = {
-  blocking: true,
   goalLockEnabled: true,
   snoozeEnabled: true,
   snoozeDurationMs: 120_000,
@@ -99,7 +98,6 @@ test("bridges complete goal state and typed parent controls through the EventBus
   assert.deepEqual(options.getGoalState(), {
     enabled: false,
     goal: "",
-    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -107,7 +105,7 @@ test("bridges complete goal state and typed parent controls through the EventBus
     snoozeBudgetCapMs: null,
     snoozeRefillYieldMs: 30_000,
     snoozeRefillElapsedMs: 60_000,
-    outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+    outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 },
   });
   assert.deepEqual(current.published.at(-1), options.getGoalState());
 
@@ -138,10 +136,8 @@ test("bridges complete goal state and typed parent controls through the EventBus
   assert.equal(result.goalState.enabled, true);
   assert.equal(result.goalState.goal, "ship the bridge");
   assert.deepEqual(result.goalState.outcomeCounts, {
-    BLOCKED: 0,
     COMPLETED: 0,
     NOT_DONE: 0,
-    WAITING_FOR_USER_AUTHORIZATION: 0,
   });
   assert.deepEqual(options.getGoalState(), result.goalState);
   assert.deepEqual(current.published.at(-1), result.goalState);

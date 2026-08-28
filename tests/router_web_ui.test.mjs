@@ -878,27 +878,24 @@ test("router web UI removes an expired lifecycle child from a v2 update and reco
   }
 });
 
-test("current routers advertise goal control blocking capability", async () => {
+test("current routers advertise only the supported goal control capability", async () => {
   const router = await startTestRouter();
   try {
     const response = await fetch(new URL("/v1/capabilities", router.httpUrl));
     assert.equal(response.status, 200);
     const capabilities = await response.json();
     assert.equal(capabilities.goal_control_v1, true);
-    assert.equal(capabilities.goal_control_blocking_v1, true);
   } finally {
     await router.close();
   }
 });
 
-test("router WebUI gates blocking controls by the router capability", async () => {
-  const router = await startGoalControlTestRouter({ getCapabilities: () => capabilities });
+test("router WebUI forwards the strict goal control settings contract", async () => {
+  const router = await startGoalControlTestRouter({ getCapabilities: () => ({ goal_control_v1: true }) });
   const sockets = [];
   let ui;
   let browser;
-  let capabilities = { goal_control_v1: true };
   const settings = {
-    blocking: true,
     goal_lock_enabled: false,
     snooze_enabled: true,
     snooze_duration_ms: 60_000,
@@ -913,49 +910,30 @@ test("router WebUI gates blocking controls by the router capability", async () =
 
     browser.send(JSON.stringify({
       type: "goal_control",
-      controlId: "legacy-blocking-control",
-      targetAgentId: "blocking-capability-peer",
-      targetInstanceId: "blocking-capability-peer-instance",
+      controlId: "strict-goal-control",
+      targetAgentId: "goal-peer",
+      targetInstanceId: "goal-peer-instance",
       action: "set",
-      goal: "keep blocking",
+      goal: "keep moving",
       settings,
     }));
     await waitFor(() => router.controls.length === 1);
-    const legacyFrame = router.controls[0];
-    assert.equal(Object.hasOwn(legacyFrame.settings, "blocking"), false);
+    assert.deepEqual(router.controls[0].settings, settings);
 
-    const rejected = waitForEvent(browser, (event) => event.type === "goal_control_result" && event.controlId === "legacy-disabled-control");
+    const rejected = waitForEvent(browser, (event) => event.type === "goal_control_result" && event.controlId === "invalid-goal-control");
     browser.send(JSON.stringify({
       type: "goal_control",
-      controlId: "legacy-disabled-control",
-      targetAgentId: "blocking-capability-peer",
-      targetInstanceId: "blocking-capability-peer-instance",
+      controlId: "invalid-goal-control",
+      targetAgentId: "goal-peer",
+      targetInstanceId: "goal-peer-instance",
       action: "set",
-      goal: "disable blocking",
-      settings: { ...settings, blocking: false },
+      goal: "invalid settings",
+      settings: { ...settings, legacy_setting: false },
     }));
     const rejection = await rejected;
     assert.equal(rejection.accepted, false);
-    assert.equal(rejection.errorCode, "goal_control_blocking_unavailable");
-    assert.equal(rejection.message, "This router does not support disabling goal blocking.");
-
-    capabilities = { goal_control_v1: true, goal_control_blocking_v1: true };
-    const reconnected = waitForEvent(browser, (event) => event.type === "status" && event.state === "connected");
-    browser.send(JSON.stringify({ type: "connect", routerUrl: router.httpUrl, agentId: webAgentId }));
-    await reconnected;
-
-    browser.send(JSON.stringify({
-      type: "goal_control",
-      controlId: "current-blocking-control",
-      targetAgentId: "blocking-capability-peer",
-      targetInstanceId: "blocking-capability-peer-instance",
-      action: "set",
-      goal: "disable blocking on a new router",
-      settings: { ...settings, blocking: false },
-    }));
-    await waitFor(() => router.controls.length === 2);
-    const currentFrame = router.controls[1];
-    assert.equal(currentFrame.settings.blocking, false);
+    assert.equal(rejection.errorCode, "command_error");
+    assert.equal(router.controls.length, 1);
   } finally {
     browser?.close();
     await ui?.close();
@@ -979,7 +957,7 @@ test("router WebUI ignores stale capability responses", async () => {
       capabilitiesFetchImpl: async () => {
         capabilityCalls += 1;
         if (capabilityCalls === 1) return oldCapabilityResponse;
-        return { ok: true, json: async () => ({ goal_control_v1: true, goal_control_blocking_v1: true }) };
+        return { ok: true, json: async () => ({ goal_control_v1: true }) };
       },
       output: () => {},
     });
@@ -1002,9 +980,8 @@ test("router WebUI ignores stale capability responses", async () => {
       targetAgentId: "stale-capability-peer",
       targetInstanceId: "stale-capability-peer-instance",
       action: "set",
-      goal: "keep blocking disabled",
+      goal: "keep current",
       settings: {
-        blocking: false,
         goal_lock_enabled: false,
         snooze_enabled: true,
         snooze_duration_ms: 60_000,
@@ -1014,7 +991,15 @@ test("router WebUI ignores stale capability responses", async () => {
         snooze_refill_elapsed_ms: 60_000,
       },
     }));
-    assert.equal((await forwarded).settings.blocking, false);
+    assert.deepEqual((await forwarded).settings, {
+      goal_lock_enabled: false,
+      snooze_enabled: true,
+      snooze_duration_ms: 60_000,
+      snooze_turn_limit: null,
+      snooze_budget_cap_ms: null,
+      snooze_refill_yield_ms: 30_000,
+      snooze_refill_elapsed_ms: 60_000,
+    });
   } finally {
     browser?.close();
     await ui?.close();
@@ -2054,7 +2039,7 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /label\.append\(sender, timestamp\)/);
   assert.match(styles, /\.bubble-label \{ display: flex; align-items: baseline; gap: 8px;/);
   assert.match(app, /state\.reminders = Array\.isArray\(event\.reminders\) \? event\.reminders : \[\];/);
-  assert.match(app, /reminder\.target === peer && \["scheduled", "due", "message_queued"\]\.includes\(reminder\.state\)/);
+  assert.match(app, /reminder\.target === peer && (?:reminder\.enabled !== false && )?\["scheduled", "due", "message_queued"\]\.includes\(reminder\.state\)/);
   assert.match(app, /function reminderIndicatorMarkup\(reminders, peerName\)/);
   assert.match(app, /aria-haspopup="dialog" aria-controls="reminders-dialog"/);
   assert.match(app, /class="agent-name-line">\$\{reminderIndicatorMarkup\(reminders, humanName\(peer\)\)\}/);
@@ -2261,7 +2246,7 @@ test("router web app stores bounded scoped conversation history in IndexedDB", a
   assert.doesNotMatch(server, /refreshTimer = setInterval\(refreshAgents, 60_000\)/);
 });
 
-async function startGoalControlTestRouter({ getCapabilities = () => ({ goal_control_v1: true, goal_control_blocking_v1: true }) } = {}) {
+async function startGoalControlTestRouter({ getCapabilities = () => ({ goal_control_v1: true }) } = {}) {
   const controls = [];
   const server = createServer((request, response) => {
     if (request.url === "/v1/capabilities") {

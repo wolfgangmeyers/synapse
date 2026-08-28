@@ -832,7 +832,6 @@ function goalControlErrorMessage(code, message) {
     target_instance_changed: "That agent restarted. Close this editor and try again.",
     target_not_connected: "That agent is no longer connected.",
     goal_control_unavailable: "Goal controls are not available on this router.",
-    goal_control_blocking_unavailable: "This router does not support disabling goal blocking.",
     invalid_settings: "Check the goal settings and try again.",
     invalid_goal: "Enter a goal before saving.",
     control_timeout: "The goal change timed out.",
@@ -966,7 +965,8 @@ function renderConversation() {
   const active = selectedAgent?.activity_state === "active";
   const compacting = selectedAgent?.activity_state === "compacting";
   elements.peerName.innerHTML = peer ? `${escapeHtml(humanName(peer))}${active ? '<span class="working-indicator inline" aria-label="Agent is working"><span></span></span>' : ""}${compacting ? compactingBadgeMarkup("inline") : ""}` : "Pick an agent";
-  elements.peerName.append(elements.reminderHeaderButton, elements.goalHeaderButton);
+  elements.peerName.append(elements.reminderHeaderButton);
+  elements.peerName.append(elements.goalHeaderButton);
   const subagents = normalizeSubagents(selectedAgent?.subagents);
   const subagentCount = Math.max(subagents.length, Number.isSafeInteger(selectedAgent?.subagent_count) ? selectedAgent.subagent_count : 0);
   const expanded = subagents.length > 0 && state.expandedSubagents.has(peer);
@@ -1574,7 +1574,6 @@ function compactingBadgeMarkup(extraClass = "") {
 const DEFAULT_GOAL_STATE = {
   enabled: false,
   goal: "",
-  blocking: true,
   goal_lock_enabled: false,
   snooze_enabled: true,
   snooze_duration_ms: 60_000,
@@ -1582,7 +1581,7 @@ const DEFAULT_GOAL_STATE = {
   snooze_budget_cap_ms: null,
   snooze_refill_yield_ms: 30_000,
   snooze_refill_elapsed_ms: 60_000,
-  outcome_counts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+  outcome_counts: { COMPLETED: 0, NOT_DONE: 0 },
 };
 
 function normalizeGoalProjection(value) {
@@ -1595,17 +1594,16 @@ function normalizeGoalProjection(value) {
 
 function normalizeGoalStateValue(value) {
   const projection = normalizeGoalProjection(value);
-  if (!projection || (Object.hasOwn(value, "blocking") && typeof value.blocking !== "boolean")
+  if (!projection
     || typeof value.goal_lock_enabled !== "boolean" || typeof value.snooze_enabled !== "boolean"
     || !positiveGoalInteger(value.snooze_duration_ms) || !positiveGoalInteger(value.snooze_refill_yield_ms)
     || !positiveGoalInteger(value.snooze_refill_elapsed_ms)
     || !(value.snooze_turn_limit === null || (Number.isSafeInteger(value.snooze_turn_limit) && value.snooze_turn_limit >= 1 && value.snooze_turn_limit <= 20))
     || !(value.snooze_budget_cap_ms === null || positiveGoalInteger(value.snooze_budget_cap_ms))) return undefined;
   const counts = value.outcome_counts;
-  if (!counts || typeof counts !== "object" || !["BLOCKED", "COMPLETED", "NOT_DONE", "WAITING_FOR_USER_AUTHORIZATION"].every((key) => Number.isSafeInteger(counts[key]) && counts[key] >= 0)) return undefined;
+  if (!counts || typeof counts !== "object" || !["COMPLETED", "NOT_DONE"].every((key) => Number.isSafeInteger(counts[key]) && counts[key] >= 0)) return undefined;
   return {
     ...projection,
-    blocking: value.blocking !== false,
     goal_lock_enabled: value.goal_lock_enabled,
     snooze_enabled: value.snooze_enabled,
     snooze_duration_ms: value.snooze_duration_ms,
@@ -2307,7 +2305,6 @@ function goalDraftFromState(stateValue) {
   return {
     enabled: stateValue.enabled === true,
     goal: stateValue.goal || "",
-    blocking: stateValue.blocking !== false,
     goal_lock_enabled: stateValue.goal_lock_enabled === true,
     snooze_enabled: stateValue.snooze_enabled !== false,
     snooze_duration_ms: stateValue.snooze_duration_ms || DEFAULT_GOAL_STATE.snooze_duration_ms,
@@ -2340,7 +2337,6 @@ function renderGoalDialog(peer) {
   goalText.disabled = !draft.enabled;
   goalLabel.append(goalText);
   form.append(goalLabel);
-  form.append(goalToggle("goal-blocking", "Blocking", draft.blocking));
   form.append(goalToggle("goal-lock", "Goal lock", draft.goal_lock_enabled, { lock: true }));
   const snoozeFieldset = document.createElement("fieldset");
   const snoozeLegend = document.createElement("legend");
@@ -2441,7 +2437,6 @@ function updateGoalDraftFromInput(input) {
   if (input.classList?.contains("goal-toggle")) {
     const pressed = input.getAttribute("aria-pressed") === "true";
     if (input.id === "goal-enabled") state.goalDraft.enabled = pressed;
-    if (input.id === "goal-blocking") state.goalDraft.blocking = pressed;
     if (input.id === "goal-lock") state.goalDraft.goal_lock_enabled = pressed;
     if (input.id === "snooze-enabled") state.goalDraft.snooze_enabled = pressed;
   }
@@ -2458,7 +2453,7 @@ function updateGoalDraftFromInput(input) {
 }
 
 function goalOutcomeCountsLabel(counts) {
-  return `Outcomes: blocked ${counts.BLOCKED || 0}, completed ${counts.COMPLETED || 0}, not done ${counts.NOT_DONE || 0}, waiting ${counts.WAITING_FOR_USER_AUTHORIZATION || 0}`;
+  return `Outcomes: completed ${counts.COMPLETED || 0}, not done ${counts.NOT_DONE || 0}`;
 }
 
 function setGoalDialogStatus(message, error = false) {
@@ -2492,7 +2487,6 @@ function sendGoalControl() {
     action,
     goal: action === "off" ? "" : draft.goal,
     settings: {
-      blocking: draft.blocking,
       goal_lock_enabled: draft.goal_lock_enabled,
       snooze_enabled: draft.snooze_enabled,
       snooze_duration_ms: draft.snooze_duration_ms,

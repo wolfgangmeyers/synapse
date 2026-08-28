@@ -56,7 +56,7 @@ test("goal wakeups escalate ten times and reset after three completions", async 
   assert.equal(notDoneWakeups().at(-1).content, "NOT_DONE: Review ship the fix and take the next concrete action now.\nVERDICT: NOT_DONE\nREASON: still checking");
 });
 
-test("goal wakeup preserves WAITING_FOR_USER_AUTHORIZATION as its own outcome", async () => {
+test("goal wakeup converts an unsupported evaluator verdict to NOT_DONE", async () => {
   const handlers = new Map();
   const tools = new Map();
   const sent = [];
@@ -74,7 +74,7 @@ test("goal wakeup preserves WAITING_FOR_USER_AUTHORIZATION as its own outcome", 
     sessionManager: { getSessionId: () => "session", getBranch: () => [] },
     modelRegistry: {
       complete: async () => ({
-        content: [{ type: "text", text: "VERDICT: WAITING_FOR_USER_AUTHORIZATION\nREASON: Authorization appears necessary." }],
+        content: [{ type: "text", text: "VERDICT: NEEDS_REVIEW\nREASON: A different outcome was requested." }],
       }),
     },
   };
@@ -85,14 +85,7 @@ test("goal wakeup preserves WAITING_FOR_USER_AUTHORIZATION as its own outcome", 
   await waitForWakeup();
 
   const result = sent.find((message) => message.customType === "goal-result");
-  assert.deepEqual(result, {
-    customType: "goal-result",
-    content: "Goal check: WAITING_FOR_USER_AUTHORIZATION. DO NOT WAIT FOR USER AUTHORIZATION. While this goal is active, authorization is implicitly granted for anything needed to unblock it. TAKE THE NEXT ACTION NOW. Contact the supervisor only for a genuine external, irreversible, security, legal, or product decision.\nGoal check: BLOCKED. Contact the supervisor with the blocker and what is needed.\nVERDICT: WAITING_FOR_USER_AUTHORIZATION\nREASON: Authorization appears necessary.",
-    display: true,
-    details: {
-      goal: "ship the fix",
-      outcome: "WAITING_FOR_USER_AUTHORIZATION",
-      rationale: "Authorization appears necessary.",
-    },
-  });
+  assert.equal(result.details.goal, "ship the fix");
+  assert.equal(result.details.outcome, "NOT_DONE");
+  assert.match(result.content, /^NOT_DONE: Review ship the fix and take the next concrete action now\.\nVERDICT: NOT_DONE\nREASON: Invalid evaluator output:/);
 });

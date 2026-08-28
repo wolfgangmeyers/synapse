@@ -112,14 +112,6 @@ function publishService(ownerSessionId, service) {
 }
 
 test("evaluator parses only a strict verdict line and bounds the visible rationale", () => {
-  assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: Need a supervisor decision." }] }), {
-    outcome: "BLOCKED",
-    rationale: "Need a supervisor decision.",
-  });
-  assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: WAITING_FOR_USER_AUTHORIZATION\nREASON: Authorization appears necessary." }] }), {
-    outcome: "WAITING_FOR_USER_AUTHORIZATION",
-    rationale: "Authorization appears necessary.",
-  });
   assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: COMPLETED extra\nREASON: This must not change the outcome." }] }), {
     outcome: "NOT_DONE",
     rationale: 'Invalid evaluator output: {"content":[{"type":"text","text":"VERDICT: COMPLETED extra\\nREASON: This must not change the outcome."}]}',
@@ -160,11 +152,8 @@ test("goal tool registers its action schema and shares state with /goal", async 
     action: "status",
     enabled: true,
     goal: "ship the tool",
-    blocking: true,
     evaluatorCalls: 0,
     notDoneWakeups: 0,
-    blockedWakeups: 0,
-    waitingAuthWakeups: 0,
     completedThings: 0,
     goalLockEnabled: false,
     snoozeEnabled: true,
@@ -173,7 +162,7 @@ test("goal tool registers its action schema and shares state with /goal", async 
     snoozeBudgetCapMs: null,
     snoozeRefillYieldMs: 30_000,
     snoozeRefillElapsedMs: 60_000,
-    outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+    outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 },
     lastOwnerGateState: "allowed",
   });
   const updateResult = await callGoalTool(current, { action: "set", goal: "ship the updated tool" });
@@ -198,7 +187,6 @@ test("typed goal control persists full configuration and current-session outcome
     response: { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] },
   });
   const settings = {
-    blocking: true,
     goalLockEnabled: true,
     snoozeEnabled: true,
     snoozeDurationMs: 120_000,
@@ -225,10 +213,8 @@ test("typed goal control persists full configuration and current-session outcome
       goal: "ship the WebUI editor",
       ...settings,
       outcomeCounts: {
-        BLOCKED: 0,
         COMPLETED: 0,
         NOT_DONE: 0,
-        WAITING_FOR_USER_AUTHORIZATION: 0,
       },
     },
   });
@@ -236,9 +222,7 @@ test("typed goal control persists full configuration and current-session outcome
     enabled: true,
     goal: "ship the WebUI editor",
     notDoneWakeups: 0,
-    blockedWakeups: 0,
     completedThings: 0,
-    blocking: true,
     goalLockEnabled: true,
     snoozeEnabled: true,
     snoozeDurationMs: 120_000,
@@ -248,10 +232,8 @@ test("typed goal control persists full configuration and current-session outcome
     snoozeRefillYieldMs: 30_000,
     snoozeRefillElapsedMs: 60_000,
     outcomeCounts: {
-      BLOCKED: 0,
       COMPLETED: 0,
       NOT_DONE: 0,
-      WAITING_FOR_USER_AUTHORIZATION: 0,
     },
     appliedGoalControl: { instanceId: "mailbox-instance-1", revision: 1 },
   });
@@ -275,13 +257,11 @@ test("/goal commands persist branch-local state and support status/off", async (
       enabled: true,
       goal: "ship the focused extension",
       notDoneWakeups: 0,
-      blockedWakeups: 0,
       completedThings: 0,
-      blocking: true,
       goalLockEnabled: false,
       snoozeEnabled: true,
       snoozeDurationMs: 60_000,
-      outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+      outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 },
     },
   });
   await current.commands.get("goal").handler("status", current.context);
@@ -298,13 +278,11 @@ test("/goal commands persist branch-local state and support status/off", async (
     enabled: false,
     goal: "ship the focused extension",
     notDoneWakeups: 0,
-    blockedWakeups: 0,
     completedThings: 0,
-    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
-    outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+    outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 },
   });
   await settle(restored);
   assert.equal(restored.sent.length, 0);
@@ -371,21 +349,6 @@ test("goal lock completion allowance is fresh and a new goal clears it", async (
   await flushDeferred();
   await flushDeferred();
   assert.equal((await callGoalTool(nonCompleted, { action: "off" })).isError, true, "non-completed results never permit off");
-});
-
-test("waitingAuthWakeups remains ephemeral across persistence and recovery", async () => {
-  const current = fixture();
-  await setGoal(current, "ephemeral auth count");
-  await current.commands.get("goal-lock").handler("on", current.context);
-  assert.ok(current.entries.every(({ data }) => !Object.hasOwn(data, "waitingAuthWakeups")));
-  const restored = fixture();
-  restored.branch.push(...current.branch, {
-    type: "custom",
-    customType: GOAL_ENTRY,
-    data: { enabled: true, goal: "legacy auth count", waitingAuthWakeups: 3 },
-  });
-  await restored.handlers.get("session_start")({}, restored.context);
-  assert.equal((await callGoalTool(restored, { action: "status" })).details.waitingAuthWakeups, 0);
 });
 
 test("pending mecha_context compaction pauses repeated goal checks until its tool result", async () => {
@@ -583,8 +546,8 @@ test("settled goal evaluation uses bounded active context and exact steer wakeup
   assert.equal(calls[0].model, current.context.model);
   assert.ok(calls[0].options?.signal instanceof AbortSignal);
   const prompt = calls[0].request.systemPrompt;
-  assert.equal(prompt, "goal: finish the goal extension - supervisor-dependent blocking is BLOCKED; return exactly two lines: VERDICT: BLOCKED|COMPLETED|NOT_DONE|WAITING_FOR_USER_AUTHORIZATION and REASON: <concise rationale>");
-  assert.match(calls[0].request.messages[0].content[0].text, /Supervisor-dependent blocking is BLOCKED/);
+  assert.equal(prompt, "goal: finish the goal extension - return exactly two lines: VERDICT: COMPLETED|NOT_DONE and REASON: <concise rationale>");
+  assert.match(calls[0].request.messages[0].content[0].text, /VERDICT: COMPLETED\|NOT_DONE/);
   assert.ok(Buffer.byteLength(prompt) <= 2_048 + MAX_CONTEXT_BYTES + 1_000);
   await flushDeferred();
   assert.deepEqual(current.sent, [{
@@ -644,462 +607,13 @@ test("invalid, missing, or failed model output injects NOT_DONE", async () => {
   }
 
   let reject = true;
-  const current = fixture({ complete: async () => { if (reject) throw new Error("provider unavailable"); return { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: A supervisor decision is required." }] }; } });
+  const current = fixture({ complete: async () => { if (reject) throw new Error("provider unavailable"); return { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: A supervisor decision is required." }] }; } });
   await setGoal(current, "make progress");
   await current.commands.get("goal-snooze").handler("off", current.context);
   await settle(current);
   await flushDeferred();
   await flushDeferred();
   assert.match(current.sent[0].message.content, /^NOT_DONE: Review make progress and take the next concrete action now\.\nVERDICT: NOT_DONE\nREASON: Evaluator unavailable: Error: provider unavailable/);
-});
-
-test("BLOCKED wakeup contacts the supervisor and starts the automatic wait", async () => {
-  const runtime = fakeTimer();
-  const current = fixture({
-    extensionOptions: runtime,
-    response: { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: A supervisor decision is required." }] },
-  });
-  await setGoal(current, "finish the goal extension");
-  await current.commands.get("goal-snooze").handler("off", current.context);
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  assert.equal(current.sent[0].message.content, "Goal check: BLOCKED. CONTACT OR BUG THE SUPERVISOR NOW TO GET UNBLOCKED. A special automatic 5-minute wait is starting. I will wake you after 5 minutes to prompt you to contact the supervisor again.\nVERDICT: BLOCKED\nREASON: A supervisor decision is required.");
-});
-
-test("disabled blocking reports BLOCKED without scheduling the supervisor wait", async () => {
-  const runtime = fakeTimer();
-  const outcomes = ["BLOCKED", "NOT_DONE"];
-  const current = fixture({
-    extensionOptions: runtime,
-    complete: async () => {
-      const outcome = outcomes.shift();
-      return { content: [{ type: "text", text: `VERDICT: ${outcome}\nREASON: The evaluator checked the goal.` }] };
-    },
-  });
-  const settings = {
-    blocking: false,
-    goalLockEnabled: false,
-    snoozeEnabled: false,
-    snoozeDurationMs: 60_000,
-    snoozeTurnLimit: null,
-    snoozeBudgetCapMs: null,
-    snoozeRefillYieldMs: 30_000,
-    snoozeRefillElapsedMs: 60_000,
-  };
-  const applied = applyGoalControl(current, {
-    action: "set",
-    controlId: "goal-control-no-blocking",
-    targetInstanceId: "mailbox-instance-1",
-    revision: 1,
-    goal: "finish without supervisor blocking",
-    settings,
-  });
-  assert.equal(applied.accepted, true);
-  assert.equal(applied.goalState.blocking, false);
-  await settle(current);
-  for (let step = 0; step < 5; step += 1) {
-    runtime.advance(0);
-    await Promise.resolve();
-  }
-  const results = () => current.sent.filter(({ message }) => message.customType === "goal-result");
-  assert.equal(results().length, 1);
-  assert.equal(results()[0].message.details.outcome, "BLOCKED");
-  assert.match(results()[0].message.content, /^Goal check: BLOCKED\. Continue with the next concrete action and report what is needed\./);
-  assert.doesNotMatch(results()[0].message.content, /5-minute|CONTACT OR BUG/);
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blocking, false);
-  await settle(current);
-  for (let step = 0; step < 5; step += 1) {
-    runtime.advance(0);
-    await Promise.resolve();
-  }
-  assert.equal(results().length, 2, "a disabled BLOCKED result does not hold the five-minute supervisor wait");
-  assert.equal(results()[1].message.details.outcome, "NOT_DONE");
-});
-
-test("BLOCKED wait expires independently of the custom snooze turn limit and budget", async () => {
-  const runtime = fakeTimer();
-  const calls = [];
-  const outcomes = ["BLOCKED", "NOT_DONE"];
-  const current = fixture({
-    extensionOptions: runtime,
-    complete: async () => {
-      calls.push(true);
-      const outcome = outcomes.shift();
-      return { content: [{ type: "text", text: `VERDICT: ${outcome}\nREASON: The evaluator checked the goal.` }] };
-    },
-  });
-  await setGoal(current, "finish the goal extension");
-  await current.commands.get("goal-snooze").handler("1s", current.context);
-  await current.commands.get("goal-snooze-turn-limit").handler("1", current.context);
-  assert.equal(current.notices.at(-1).message, "Goal snooze turn limit set: 1");
-  await current.commands.get("goal-snooze-budget").handler("1s", current.context);
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-
-  const resultWakeups = () => current.sent.filter(({ message }) => message.customType === "goal-result");
-  assert.equal(calls.length, 1);
-  assert.equal(resultWakeups().length, 1);
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 1);
-  const supervisorMessage = resultWakeups()[0].message.content;
-  assert.equal(supervisorMessage, "Goal check: BLOCKED. CONTACT OR BUG THE SUPERVISOR NOW TO GET UNBLOCKED. A special automatic 5-minute wait is starting. I will wake you after 5 minutes to prompt you to contact the supervisor again.\nVERDICT: BLOCKED\nREASON: The evaluator checked the goal.");
-
-  runtime.advance(299_999);
-  assert.equal(calls.length, 1);
-  assert.equal(resultWakeups().length, 1);
-  runtime.advance(1);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-
-  assert.equal(calls.length, 2, "the wait expiry invokes the evaluator");
-  assert.equal(resultWakeups().length, 2);
-  assert.equal(resultWakeups()[1].message.details.outcome, "NOT_DONE");
-  assert.equal(resultWakeups()[1].message.content, "NOT_DONE: Review finish the goal extension and take the next concrete action now.\nVERDICT: NOT_DONE\nREASON: The evaluator checked the goal.");
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 1, "the blocker cap is independent of snooze controls");
-});
-
-test("BLOCKED escalation does not reset from evaluator completions and a new goal still clears it", async () => {
-  const runtime = fakeTimer();
-  const outcomes = ["BLOCKED", "COMPLETED", "COMPLETED", "COMPLETED", "BLOCKED"];
-  const current = fixture({
-    extensionOptions: runtime,
-    complete: async () => ({
-      content: [{ type: "text", text: `VERDICT: ${outcomes.shift()}\nREASON: The evaluator checked the goal.` }],
-    }),
-  });
-  const resultWakeups = () => current.sent.filter(({ message }) => message.customType === "goal-result");
-  const flushEvaluation = async () => {
-    runtime.advance(0);
-    await Promise.resolve();
-    runtime.advance(0);
-    await Promise.resolve();
-    runtime.advance(0);
-    await Promise.resolve();
-    runtime.advance(0);
-  };
-
-  await setGoal(current, "finish the first goal");
-  await settle(current);
-  await flushEvaluation();
-  assert.equal(resultWakeups()[0].message.details.outcome, "BLOCKED");
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 1);
-
-  runtime.advance(300_000);
-  await flushEvaluation();
-  for (let completion = 1; completion < 3; completion += 1) {
-    await settle(current);
-    await flushEvaluation();
-  }
-  assert.equal(resultWakeups().filter(({ message }) => message.details.outcome === "COMPLETED").length, 3);
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 1, "evaluator output is not a meaningful worker activity event");
-
-  await settle(current);
-  await flushEvaluation();
-  assert.equal(resultWakeups().at(-1).message.details.outcome, "BLOCKED");
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 2);
-
-  await setGoal(current, "finish the replacement goal");
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 0);
-});
-
-test("BLOCKED sentinel precedes a synchronous settled event", async () => {
-  const runtime = fakeTimer();
-  const calls = [];
-  const outcomes = ["BLOCKED", "COMPLETED"];
-  let firstSend = true;
-  const current = fixture({
-    extensionOptions: runtime,
-    complete: async () => {
-      calls.push(true);
-      const outcome = outcomes.shift();
-      return { content: [{ type: "text", text: `VERDICT: ${outcome}\nREASON: The evaluator checked the goal.` }] };
-    },
-    onSendMessage: () => {
-      if (firstSend) {
-        firstSend = false;
-        void settle(current);
-      }
-    },
-  });
-  await setGoal(current, "finish the goal extension");
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-
-  const resultWakeups = () => current.sent.filter(({ message }) => message.customType === "goal-result");
-  assert.equal(calls.length, 1);
-  assert.equal(resultWakeups().length, 1);
-  assert.equal(resultWakeups()[0].message.details.outcome, "BLOCKED");
-
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  assert.equal(calls.length, 1, "a settle after the injected supervisor message stays within the five-minute wait");
-
-  runtime.advance(299_999);
-  assert.equal(calls.length, 1);
-  runtime.advance(1);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-
-  assert.equal(calls.length, 2, "wait expiry resumes normal evaluator processing");
-  assert.equal(resultWakeups()[1].message.details.outcome, "COMPLETED");
-});
-
-test("BLOCKED results stop after ten escalation waits", async () => {
-  const runtime = fakeTimer();
-  const calls = [];
-  const current = fixture({
-    extensionOptions: runtime,
-    complete: async () => {
-      calls.push(true);
-      return { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: The supervisor must unblock this work." }] };
-    },
-  });
-  await setGoal(current, "finish the goal extension");
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-
-  const resultWakeups = () => current.sent.filter(({ message }) => message.customType === "goal-result");
-  const advanceBlockedWait = async () => {
-    runtime.advance(300_000);
-    await Promise.resolve();
-    runtime.advance(0);
-    await Promise.resolve();
-    runtime.advance(0);
-    await Promise.resolve();
-    runtime.advance(0);
-  };
-  assert.equal(calls.length, 1);
-  assert.equal(resultWakeups().length, 1);
-  const firstMessage = resultWakeups()[0].message.content;
-
-  for (let escalation = 2; escalation <= 10; escalation += 1) {
-    await advanceBlockedWait();
-    assert.equal(calls.length, escalation);
-    assert.equal(resultWakeups().length, escalation);
-    assert.equal(resultWakeups().at(-1).message.content, firstMessage, "each supervisor verdict uses the initial message");
-  }
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 10);
-
-  await advanceBlockedWait();
-  assert.equal(calls.length, 11, "the evaluator may inspect the blocker at the cap");
-  assert.equal(resultWakeups().length, 10, "the cap stops further BLOCKED injections and waits");
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 10);
-});
-
-test("blocked escalation count persists and restores independently of snooze state", async () => {
-  const current = fixture();
-  current.branch.push({
-    type: "custom",
-    customType: GOAL_ENTRY,
-    data: {
-      enabled: true,
-      goal: "recover the blocker",
-      notDoneWakeups: 0,
-      blockedWakeups: 9,
-      completedThings: 0,
-      snoozeEnabled: true,
-      snoozeDurationMs: 1_000,
-    },
-  });
-  await current.handlers.get("session_start")({}, current.context);
-  const status = await callGoalTool(current, { action: "status" });
-  assert.equal(status.details.blockedWakeups, 9);
-  assert.equal(status.details.snoozeEnabled, true);
-  assert.equal(status.details.snoozeDurationMs, 1_000);
-
-  await setGoal(current, "new blocker");
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 0);
-});
-
-test("BLOCKED wait defers through compaction and is canceled by a goal change", async () => {
-  const runtime = fakeTimer();
-  const calls = [];
-  const current = fixture({
-    extensionOptions: runtime,
-    complete: async () => {
-      calls.push(true);
-      return { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: The supervisor must unblock this work." }] };
-    },
-  });
-  await setGoal(current, "finish the goal extension");
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  current.handlers.get("session_before_compact")({}, current.context);
-  runtime.advance(300_000);
-  assert.equal(calls.length, 1);
-  assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 1);
-  current.handlers.get("session_compact")({}, current.context);
-  for (let step = 0; step < 6; step += 1) {
-    runtime.advance(0);
-    await Promise.resolve();
-  }
-  assert.equal(calls.length, 2, "the evaluator resumes after compaction");
-  assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 2);
-
-  await current.commands.get("goal").handler("set replacement goal", current.context);
-  runtime.advance(300_000);
-  assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 2);
-});
-
-test("WAITING_FOR_USER_AUTHORIZATION wakeup demands immediate action and carries its outcome", async () => {
-  const current = fixture({ response: { content: [{ type: "text", text: "VERDICT: WAITING_FOR_USER_AUTHORIZATION\nREASON: Authorization appears necessary." }] } });
-  await setGoal(current, "finish the goal extension");
-  await current.commands.get("goal-snooze").handler("off", current.context);
-  await settle(current);
-  await flushDeferred();
-  await flushDeferred();
-  assert.deepEqual(current.sent[0].message, {
-    customType: "goal-result",
-    content: "Goal check: WAITING_FOR_USER_AUTHORIZATION. DO NOT WAIT FOR USER AUTHORIZATION. While this goal is active, authorization is implicitly granted for anything needed to unblock it. TAKE THE NEXT ACTION NOW. Contact the supervisor only for a genuine external, irreversible, security, legal, or product decision.\nGoal check: BLOCKED. Contact the supervisor with the blocker and what is needed.\nVERDICT: WAITING_FOR_USER_AUTHORIZATION\nREASON: Authorization appears necessary.",
-    display: true,
-    details: {
-      goal: "finish the goal extension",
-      outcome: "WAITING_FOR_USER_AUTHORIZATION",
-      rationale: "Authorization appears necessary.",
-    },
-  });
-});
-
-test("WAITING authorization adds a bounded BLOCKED escalation without consuming NOT_DONE retries", async () => {
-  const responses = ["WAITING_FOR_USER_AUTHORIZATION", "WAITING_FOR_USER_AUTHORIZATION", "WAITING_FOR_USER_AUTHORIZATION", "NOT_DONE"];
-  const current = fixture({
-    complete: async () => ({
-      content: [{ type: "text", text: `VERDICT: ${responses.shift()}\nREASON: Authorization appears necessary.` }],
-    }),
-  });
-  await setGoal(current, "finish the goal extension");
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await settle(current);
-    await flushDeferred();
-    await flushDeferred();
-  }
-
-  const resultWakeups = () => current.sent.filter(({ message }) => message.customType === "goal-result");
-  const waitingWakeups = () => resultWakeups().filter(({ message }) => message.details.outcome === "WAITING_FOR_USER_AUTHORIZATION");
-  assert.equal(waitingWakeups().length, 3);
-  assert.notEqual(waitingWakeups()[0].message.content, waitingWakeups()[1].message.content);
-  assert.notEqual(waitingWakeups()[1].message.content, waitingWakeups()[2].message.content);
-  for (const wakeup of waitingWakeups()) {
-    assert.match(wakeup.message.content, /DO NOT WAIT FOR USER AUTHORIZATION/);
-    assert.match(wakeup.message.content, /Goal check: BLOCKED\./);
-    assert.equal(wakeup.message.details.outcome, "WAITING_FOR_USER_AUTHORIZATION");
-  }
-
-  await settle(current);
-  await flushDeferred();
-  await flushDeferred();
-  const notDone = resultWakeups().find(({ message }) => message.details.outcome === "NOT_DONE");
-  assert.equal(notDone.message.content, "NOT_DONE: Review finish the goal extension and take the next concrete action now.\nVERDICT: NOT_DONE\nREASON: Authorization appears necessary.");
-  const status = await callGoalTool(current, { action: "status" });
-  assert.equal(status.details.waitingAuthWakeups, 3);
-  assert.equal(status.details.notDoneWakeups, 1);
-});
-
-test("ordinary BLOCKED and NOT_DONE wakeups contain no authorization wording", async () => {
-  const blockedRuntime = fakeTimer();
-  const blocked = fixture({
-    extensionOptions: blockedRuntime,
-    response: { content: [{ type: "text", text: "VERDICT: BLOCKED\nREASON: A supervisor decision is required." }] },
-  });
-  await setGoal(blocked, "finish the goal extension");
-  await settle(blocked);
-  blockedRuntime.advance(0);
-  await Promise.resolve();
-  blockedRuntime.advance(0);
-  await Promise.resolve();
-  blockedRuntime.advance(0);
-  await Promise.resolve();
-  blockedRuntime.advance(0);
-  assert.doesNotMatch(blocked.sent[0].message.content, /authorization/i);
-
-  const notDone = fixture({ response: { content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] } });
-  await setGoal(notDone, "finish the goal extension");
-  await settle(notDone);
-  await flushDeferred();
-  await flushDeferred();
-  assert.doesNotMatch(notDone.sent[0].message.content, /authorization/i);
-});
-
-test("BLOCKED sendMessage failure clears the wait sentinel", async () => {
-  const runtime = fakeTimer();
-  const outcomes = ["BLOCKED", "COMPLETED"];
-  const calls = [];
-  let fail = true;
-  const current = fixture({
-    extensionOptions: runtime,
-    complete: async () => {
-      calls.push(true);
-      const outcome = outcomes.shift();
-      return { content: [{ type: "text", text: `VERDICT: ${outcome}\nREASON: The evaluator checked the goal.` }] };
-    },
-    sendMessage: (message) => {
-      if (message.customType === "goal-result" && fail) {
-        fail = false;
-        throw new Error("send failed");
-      }
-    },
-  });
-  await setGoal(current, "make progress");
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  assert.equal(calls.length, 1);
-  assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 1);
-  assert.equal((await callGoalTool(current, { action: "status" })).details.blockedWakeups, 0, "a failed BLOCKED send rolls back its persisted counter");
-
-  await settle(current);
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  await Promise.resolve();
-  runtime.advance(0);
-  assert.equal(calls.length, 2, "a failed BLOCKED send leaves the next settle available");
 });
 
 test("sendMessage failure leaves the next normal settle available", async () => {
@@ -1143,42 +657,6 @@ test("stale session settles cannot start an evaluation", async () => {
   await current.handlers.get("agent_settled")({ sessionId: "owner-session" }, current.context);
   await flushDeferred();
   assert.equal(calls.length, 1);
-});
-
-test("stale session cleanup after a BLOCKED wait allows a later valid settle", async () => {
-  const runtime = fakeTimer();
-  const calls = [];
-  const outcomes = ["BLOCKED", "COMPLETED"];
-  const current = fixture({
-    sessionId: "owner-session",
-    extensionOptions: runtime,
-    complete: async () => {
-      calls.push(true);
-      const outcome = outcomes.shift();
-      return { content: [{ type: "text", text: `VERDICT: ${outcome}\nREASON: The evaluator checked the goal.` }] };
-    },
-  });
-  await setGoal(current, "stay current");
-  await settle(current);
-  for (let step = 0; step < 4; step += 1) {
-    runtime.advance(0);
-    await Promise.resolve();
-  }
-  assert.equal(calls.length, 1);
-  assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 1);
-
-  current.context.sessionManager.getSessionId = () => "other-session";
-  runtime.advance(300_000);
-  assert.equal(calls.length, 1, "the expired stale wait does not evaluate or inject");
-
-  current.context.sessionManager.getSessionId = () => "owner-session";
-  await settle(current);
-  for (let step = 0; step < 4; step += 1) {
-    runtime.advance(0);
-    await Promise.resolve();
-  }
-  assert.equal(calls.length, 2, "a valid settle schedules a normal evaluator after cleanup");
-  assert.equal(current.sent.filter(({ message }) => message.customType === "goal-result").length, 2);
 });
 
 test("missing optional subagent service does not break goal evaluation", async () => {
@@ -1291,11 +769,8 @@ test("the wakeup macrotask rechecks owner activity after evaluation", async () =
       action: "status",
       enabled: true,
       goal: "wait for the owner child",
-      blocking: true,
       evaluatorCalls: 1,
       notDoneWakeups: 0,
-      blockedWakeups: 0,
-      waitingAuthWakeups: 0,
       completedThings: 1,
       goalLockEnabled: false,
       snoozeEnabled: true,
@@ -1304,7 +779,7 @@ test("the wakeup macrotask rechecks owner activity after evaluation", async () =
       snoozeBudgetCapMs: null,
       snoozeRefillYieldMs: 30_000,
       snoozeRefillElapsedMs: 60_000,
-      outcomeCounts: { BLOCKED: 0, COMPLETED: 1, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+      outcomeCounts: { COMPLETED: 1, NOT_DONE: 0 },
       lastOwnerGateState: "suppressed",
     });
     active = false;
@@ -1363,13 +838,11 @@ test("goal snooze is enabled by default, parses duration, and injects availabili
     enabled: true,
     goal: "make progress",
     notDoneWakeups: 0,
-    blockedWakeups: 0,
     completedThings: 0,
-    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
-    outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+    outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 },
   });
   await flushDeferred();
   const availability = current.sent.filter(({ message }) => message.customType === "goal-snooze-availability");
@@ -1617,9 +1090,7 @@ test("snooze commands persist turn limits, budgets, and refills for the WebUI", 
     enabled: false,
     goal: "",
     notDoneWakeups: 0,
-    blockedWakeups: 0,
     completedThings: 0,
-    blocking: true,
     goalLockEnabled: false,
     snoozeEnabled: true,
     snoozeDurationMs: 60_000,
@@ -1628,7 +1099,7 @@ test("snooze commands persist turn limits, budgets, and refills for the WebUI", 
     snoozeBudgetAvailableMs: 2_000,
     snoozeRefillYieldMs: 2_000,
     snoozeRefillElapsedMs: 1_000,
-    outcomeCounts: { BLOCKED: 0, COMPLETED: 0, NOT_DONE: 0, WAITING_FOR_USER_AUTHORIZATION: 0 },
+    outcomeCounts: { COMPLETED: 0, NOT_DONE: 0 },
   });
 
   await current.commands.get("goal-snooze-budget").handler("off", current.context);
@@ -1862,7 +1333,6 @@ test("legacy goal state defaults snooze to enabled with the standard duration", 
   const status = await callGoalTool(current, { action: "status" });
   assert.equal(status.details.snoozeEnabled, true);
   assert.equal(status.details.snoozeDurationMs, 60_000);
-  assert.equal(status.details.blocking, true);
 });
 
 test("NOT_DONE cap re-arms only after three new scoped concrete activities and caps again", async () => {
