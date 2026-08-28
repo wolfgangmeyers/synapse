@@ -6,7 +6,7 @@ type GoalUi = {
 type GoalProvider = {
   streamSimple: (model: AnyRecord | undefined, request: AnyRecord, options: AnyRecord) => { result: () => Promise<unknown> };
 };
-type GoalModelRegistry = {
+export type GoalModelRegistry = {
   getProvider?: (provider: unknown) => unknown;
   getApiKeyAndHeaders?: (model: AnyRecord | undefined) => Promise<{ ok: boolean; error?: string; apiKey?: unknown; headers?: unknown; env?: unknown }>;
   complete?: (model: AnyRecord | undefined, request: AnyRecord, options: AnyRecord) => Promise<unknown>;
@@ -36,7 +36,7 @@ type RearmScope = {
   producerEpoch?: string;
 };
 type AppliedGoalControl = { instanceId: string; revision: number };
-type GoalContext = {
+export type GoalContext = {
   sessionManager: {
     getBranch?: () => AnyRecord[];
     getSessionId?: () => string | undefined;
@@ -55,7 +55,7 @@ type GoalOptions = {
     clearTimeout?: (timer: TimerHandle | undefined) => void;
   };
 };
-type GoalPi = {
+export type GoalPi = {
   getSessionId?: () => string | undefined;
   appendEntry: (...args: unknown[]) => void;
   sendMessage: (...args: unknown[]) => void;

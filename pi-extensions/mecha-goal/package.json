@@ -1,0 +1,14 @@
+{
+  "name": "@mecha/goal-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint . --max-warnings 0"
+  },
+  "devDependencies": {
+    "eslint": "9.39.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.4"
+  }
+}

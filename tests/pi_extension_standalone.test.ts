@@ -19,7 +19,7 @@ import {
   createNativeSubagentTrace,
   INLINE_TOOL_ALLOWANCE_TOOL_NAME,
 } from "../pi-extensions/mecha-messaging/index.ts";
-import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/mecha-messaging/goal.ts";
+import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/mecha-goal/index.ts";
 import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 
 const MAX_NOT_DONE_WAKEUPS = 1000;

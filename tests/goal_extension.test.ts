@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGoalExtension } from "../pi-extensions/mecha-messaging/goal.ts";
+import { createGoalExtension } from "../pi-extensions/mecha-goal/index.ts";
 
 const waitForWakeup = () => new Promise((resolve) => setTimeout(resolve, 15));
 const MAX_NOT_DONE_WAKEUPS = 1000;

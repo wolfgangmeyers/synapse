@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import goalExtension, { GOAL_CONTROL_REQUEST_EVENT } from "../pi-extensions/mecha-messaging/goal.ts";
+import goalExtension, { GOAL_CONTROL_REQUEST_EVENT } from "../pi-extensions/mecha-goal/index.ts";
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging/index.ts";
 
 const settings = {

@@ -5,36 +5,44 @@ description: Safely inspect and validate the canonical Mailbox V2 Pi extension w
 
 # Pi extension maintenance
 
-The active Mailbox V2 package stays in the mecha-developer checkout at
-`REPO_ROOT/pi-extensions/mecha-messaging/`. Pi registers that directory and
-discovers `index.ts`. The package composes the goal extension, so it is the sole
-registration for this extension graph. Do not copy, move, symlink, restore, or
-replace it with an installed artifact under `~/.mecha-developer` or elsewhere.
+The intended split has two checkout packages. Pi registers the Goal package
+first, then the Messaging package:
+
+1. `REPO_ROOT/pi-extensions/mecha-goal/` (discovers `index.ts`)
+2. `REPO_ROOT/pi-extensions/mecha-messaging/` (discovers `index.ts` and retains
+   the generated `mailbox-client.js` for plain-Node consumers)
+
+Each package has exactly one registration. Do not copy, move, symlink, restore,
+or replace either package with an installed artifact under
+`~/.mecha-developer` or elsewhere.
 
 ## Constants
 
 ```bash
 REPO_ROOT="$(git -C /path/to/mecha-developer rev-parse --show-toplevel)"
-SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
+GOAL_SOURCE="$REPO_ROOT/pi-extensions/mecha-goal"
+MESSAGING_SOURCE="$REPO_ROOT/pi-extensions/mecha-messaging"
 SETTINGS="$HOME/.pi/agent/settings.json"
 ```
 
-`SOURCE` must be a directory, not a symlink, in the intended checkout. The
-settings registration must resolve to `SOURCE`, with exactly one registration for
-this package and no standalone `goal.js` registration. The check also rejects old flat `goal.js` and `mecha-messaging.js` registrations, including duplicates alongside the package. Preserve the router default
+Both checkout package paths must be directories, not symlinks. The settings
+`packages` list must contain exactly one Goal registration followed immediately
+by exactly one Messaging registration. Reject standalone `goal.js`,
+`mecha-messaging.js`, and any other flat legacy entry, including entries kept
+alongside the two checkout packages. Preserve the router default
 `http://127.0.0.1:8765` unless an explicit `MECHA_ROUTER_URL` supplies another
 exact loopback HTTP(S) base URL.
 
 ## Status and registration check (read-only)
 
 ```bash
-test -d "$SOURCE" && test ! -L "$SOURCE" || {
-  echo "invalid canonical package: $SOURCE" >&2
+test -d "$GOAL_SOURCE" && test ! -L "$GOAL_SOURCE" && test -d "$MESSAGING_SOURCE" && test ! -L "$MESSAGING_SOURCE" || {
+  echo "invalid canonical package split: $GOAL_SOURCE, $MESSAGING_SOURCE" >&2
   exit 1
 }
-python3 - "$SOURCE" "$SETTINGS" <<'PY'
+python3 - "$GOAL_SOURCE" "$MESSAGING_SOURCE" "$SETTINGS" <<'PY'
 import json, pathlib, sys
-source, settings = map(pathlib.Path, sys.argv[1:])
+goal_source, messaging_source, settings = map(pathlib.Path, sys.argv[1:])
 data = json.loads(settings.read_text())
 packages = data.get("packages", [])
 resolved = []
@@ -45,25 +53,24 @@ for package in packages:
         if not path.is_absolute():
             path = settings.parent / path
         path = path.resolve()
-        if path.name in {"goal.js", "mecha-messaging.js"}:
-            legacy.append(package)
-        if path.name == "mecha-messaging":
-            resolved.append(path)
+        if path.suffix == ".js" or path.name in {"mecha-goal", "mecha-messaging"}:
+            if path.name in {"goal.js", "mecha-messaging.js"}:
+                legacy.append(package)
+            if path.name in {"mecha-goal", "mecha-messaging"}:
+                resolved.append(path)
 if legacy:
     raise SystemExit(f"reject standalone or old flat Pi registration(s): {', '.join(legacy)}")
-matches = [path for path in resolved if path == source.resolve()]
-print(f"package registrations: {len(matches)}; mecha package registrations: {len(resolved)}")
-for path in resolved:
-    print(f"registered: {path}")
-if len(matches) != 1:
-    raise SystemExit("expected exactly one registration for the checkout package")
+expected = [goal_source.resolve(), messaging_source.resolve()]
+if resolved != expected:
+    raise SystemExit(f"expected exactly one Goal and Messaging registration in Goal-first order; found {resolved}")
+print("ok: one Goal and one Messaging checkout package registration in Goal-first order")
 PY
 ```
 
-A healthy setup has one registration resolving to the checkout package. A
+A healthy split setup has two registrations in Goal-first order. A
 registration for `~/.mecha-developer/extensions/mecha-messaging.js` is stale
-and must not be recreated or treated as the active package. The installed
-support root contains the generated plain-Node client at
+and must not be recreated or treated as the active package. Messaging retains
+the generated plain-Node client at
 `~/.mecha-developer/extensions/pi-extensions/mecha-messaging/mailbox-client.js`, plus sidecar
 and harness support files.
 
@@ -73,10 +80,11 @@ Run these before making an authorized source change. If a check fails, stop.
 Do not relocate the extension or edit Pi settings as a workaround.
 
 ```bash
-test -d "$SOURCE" && test ! -L "$SOURCE"
-test -f "$REPO_ROOT/pi-extensions/mecha-messaging/mailbox-client.js"
-(cd "$SOURCE" && npm run test:mecha-messaging)
-(cd "$SOURCE" && npm run check:mailbox-client-drift)
+test -d "$GOAL_SOURCE" && test ! -L "$GOAL_SOURCE"
+test -d "$MESSAGING_SOURCE" && test ! -L "$MESSAGING_SOURCE"
+test -f "$MESSAGING_SOURCE/mailbox-client.js"
+(cd "$MESSAGING_SOURCE" && npm run test:mecha-messaging)
+(cd "$MESSAGING_SOURCE" && npm run check:mailbox-client-drift)
 ```
 
 ## Source updates
@@ -86,11 +94,11 @@ JavaScript file is a reproducible support artifact for plain-Node consumers; it
 is not hand-edited. The installer copies it byte-for-byte to the installed
 support root while keeping the TypeScript package in the checkout.
 
-Make changes only in the checkout package. Keep its path and the single settings
-registration unchanged. Do not run a copy-based installer, create a symlink, or
-restore an old installed artifact. Existing bare Pi processes need a reload after
-an authorized source change; do not claim the new package is active before that
-reload and a controlled wakeup check.
+Make changes only in the appropriate checkout package. Keep both checkout paths
+and their Goal-first settings registrations unchanged. Do not run a copy-based
+installer, create a symlink, or restore an old installed artifact. Existing bare
+Pi processes need a reload after an authorized source change; do not claim the
+new packages are active before that reload and a controlled wakeup check.
 
 Registration keeps the checkout package available through Pi settings. Normal
 Pi supervisor, worker, service, and recovery launches use Pi's default configured
@@ -117,7 +125,7 @@ registration and source-lifecycle decision.
 ## Final verification
 
 1. Re-run the status and preflight checks.
-2. Verify the registered path still resolves to `SOURCE`.
+2. Verify the two registered paths resolve to Goal and Messaging in that order.
 3. If a running Pi process was intentionally reloaded, confirm the extension
    registers and a controlled wakeup produces no terminal console output.
 4. Report the source path, registration count, test output, reload result, and

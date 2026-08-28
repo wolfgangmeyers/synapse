@@ -1,5 +1,13 @@
 import { createMailboxClient, createNanoId, assertAgentId, routerHttpUrl, parseReplyArguments } from "./mailbox-client.js";
-import { createGoalExtension } from "./goal.js";
+import {
+  GOAL_ACTIVITY_EVENT,
+  GOAL_CONTROL_REQUEST_EVENT,
+  GOAL_CONTROL_STATE_EVENT,
+  GOAL_STATE_EVENT,
+  GOAL_STATE_REQUEST_EVENT,
+  GOAL_WORKER_ID_EVENT,
+} from "../mecha-goal/index.js";
+import type { GoalPi, GoalModelRegistry } from "../mecha-goal/index.js";
 export { createMailboxClient } from "./mailbox-client.js";
 import { randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
@@ -14,14 +22,6 @@ import { registerOperationalTools } from "./operational-tools.js";
 import { createReminderLockState, createRouterReminderReader } from "./reminder-lock.js";
 
 const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
-import {
-  GOAL_ACTIVITY_EVENT,
-  GOAL_CONTROL_REQUEST_EVENT,
-  GOAL_CONTROL_STATE_EVENT,
-  GOAL_STATE_EVENT,
-  GOAL_STATE_REQUEST_EVENT,
-  GOAL_WORKER_ID_EVENT,
-} from "./goal.js";
 export { createRecallState } from "./recall-state.js";
 export { createRecallController } from "./recall-controller.js";
 export { createRecallPipeline } from "./recall-pipeline.js";
@@ -152,11 +152,6 @@ type DeliveryCoordinatorOptions = { pi: MessagingPi; sessionContext: PiContext; 
 type PiEvent = JsonObject & { id?: string; status?: string; toolName?: string; toolCallId?: string; result?: ToolResult; isError?: boolean; cancelled?: boolean; canceled?: boolean; aborted?: boolean; error?: JsonValue; details?: JsonObject; message?: JsonObject; messages?: HistoryMessage[]; signal?: AbortSignal; preparation?: { messagesToSummarize?: HistoryMessage[]; turnPrefixMessages?: HistoryMessage[] } };
 type GoalEvents = NonNullable<GoalPi["events"]>;
 type PiEvents = { on: (name: string, handler: (event: PiEvent, context: PiContext) => unknown) => void; emit?: NonNullable<GoalEvents["emit"]> };
-type GoalPi = Parameters<typeof createGoalExtension>[0];
-type GoalHandler = Parameters<GoalPi["on"]>[1];
-type GoalContext = Parameters<GoalHandler>[1];
-type GoalModelRegistry = NonNullable<GoalContext["modelRegistry"]>;
-type GoalTool = Parameters<GoalPi["registerTool"]>[0];
 type MailboxClientOptions = NonNullable<Parameters<typeof createMailboxClient>[0]>;
 type ExternalMailboxMessage = Parameters<NonNullable<MailboxClientOptions["onEnvelope"]>>[0];
 type ExternalMailboxDelivery = Parameters<NonNullable<MailboxClientOptions["onEnvelope"]>>[1];
@@ -3199,6 +3194,5 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
 }
 
 export default function mechaMessagingExtension(pi: PiRuntime) {
-  createGoalExtension(pi);
   return createMechaMessagingExtension(pi);
 }

@@ -8,7 +8,7 @@ import WebSocket from "ws";
 import { openMessageRepository } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { validateClientFrame, validateServerFrame } from "../harness/protocol.js";
-import goalExtension from "../pi-extensions/mecha-messaging/goal.ts";
+import goalExtension from "../pi-extensions/mecha-goal/index.ts";
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging/index.ts";
 import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 import { startRouterWebUi } from "../tools/router_web_ui.mjs";
@@ -718,7 +718,7 @@ test("EventBus goal state reaches the router and WebUI snapshot/live state", asy
   }
 });
 
-test("typed WebUI goal control reaches goal.js and returns correlated live and snapshot state", async () => {
+test("typed WebUI goal control reaches the Goal extension and returns correlated live and snapshot state", async () => {
   const directory = await mkdtemp(join(tmpdir(), "goal-control-webui-e2e-"));
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite") });
   const router = createAgentRouter({ repository, timeoutSweepIntervalMs: 60_000 });
