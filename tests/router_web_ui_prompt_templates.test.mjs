@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { sendPromptTemplateCrud } from "../tools/router_web_ui.mjs";
-import { parsePromptTemplateTokens, renderPromptTemplate } from "../web/router-ui/prompt-templates.js";
+import {
+  parsePromptTemplateImport,
+  parsePromptTemplateTokens,
+  promptTemplateExportPayload,
+  renderPromptTemplate,
+} from "../web/router-ui/prompt-templates.js";
 
 const root = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, root), "utf8");
@@ -19,6 +24,66 @@ test("prompt tokens preserve first-use order, repetition, case, and malformed te
       SECOND: "$& literal",
     }),
     "Hello A$1; B$$2; A$1; $& literal; ${}; ${incomplete}; ${missing}",
+  );
+});
+
+test("prompt template import/export format preserves names and bodies", () => {
+  const templates = [
+    { name: "Review", body: "Check ${File}" },
+    { name: "Review lowercase", body: "Check ${file}" },
+  ];
+  const payload = promptTemplateExportPayload(templates);
+  assert.deepEqual(payload, {
+    format: "mecha-prompt-templates",
+    version: 1,
+    templates,
+  });
+  assert.deepEqual(parsePromptTemplateImport(JSON.stringify(payload)), templates);
+  assert.deepEqual(promptTemplateExportPayload(null), {
+    format: "mecha-prompt-templates",
+    version: 1,
+    templates: [],
+  });
+  assert.deepEqual(promptTemplateExportPayload(undefined), {
+    format: "mecha-prompt-templates",
+    version: 1,
+    templates: [],
+  });
+  assert.deepEqual(promptTemplateExportPayload({ name: "not an array" }), {
+    format: "mecha-prompt-templates",
+    version: 1,
+    templates: [],
+  });
+  assert.throws(() => parsePromptTemplateImport("{"), /valid prompt template JSON file/);
+  assert.throws(
+    () => parsePromptTemplateImport(JSON.stringify({ ...payload, templates: [{ name: "bad\u0000name", body: "body" }] })),
+    /valid name and body/,
+  );
+  assert.throws(
+    () => parsePromptTemplateImport(JSON.stringify({ ...payload, templates: [{ name: "n".repeat(129), body: "body" }] })),
+    /valid name and body/,
+  );
+  assert.throws(
+    () => parsePromptTemplateImport(JSON.stringify({ ...payload, templates: [{ name: "name", body: "b".repeat(65 * 1024) }] })),
+    /valid name and body/,
+  );
+  assert.throws(
+    () => parsePromptTemplateImport(
+      JSON.stringify({ ...payload, templates: [{ name: "name", body: "body\u0000" }] }),
+    ),
+    /valid name and body/,
+  );
+  assert.throws(
+    () => parsePromptTemplateImport(JSON.stringify({ ...payload, templates: [{ name: "Review", body: "one" }, { name: "Review", body: "two" }] })),
+    /duplicate template name/,
+  );
+  assert.throws(
+    () => parsePromptTemplateImport(JSON.stringify({ ...payload, templates: [{ name: "", body: "body" }] })),
+    /valid name and body/,
+  );
+  assert.throws(
+    () => parsePromptTemplateImport(JSON.stringify({ format: "other", version: 1, templates: [] })),
+    /valid prompt template export/,
   );
 });
 
@@ -62,7 +127,12 @@ test("prompt template controls and dialogs are wired into the WebUI", async () =
   assert.match(html, /id="prompt-manage"[^>]*aria-controls="prompt-templates-dialog"/);
   assert.match(html, /id="prompt-templates-dialog"[^>]*class="message-dialog prompt-dialog"/);
   assert.match(html, /id="prompt-use-dialog"[^>]*class="message-dialog prompt-dialog"/);
+  assert.match(html, /id="close-prompt-templates-dialog"/);
   assert.ok(app.includes('type: "prompt_template_crud"'));
+  assert.ok(app.includes("parsePromptTemplateImport"));
+  assert.ok(app.includes("promptTemplateExportPayload"));
+  assert.ok(app.includes('dataset.action = "import"'));
+  assert.ok(app.includes('dataset.action = "export"'));
   assert.ok(app.includes("function renderPromptTemplateEditor()"));
   assert.ok(app.includes('sendPromptTemplateCrud("delete", template.id)'));
   assert.ok(app.includes('textContent = "Delete this template?"'));
