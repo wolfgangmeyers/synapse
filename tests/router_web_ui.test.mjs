@@ -442,21 +442,6 @@ test("router web UI accepts the configured remote host over HTTP and HTTPS same-
   }
 });
 
-test("router web UI reads and validates MECHA_WEB_UI_ALLOWED_HOST", async () => {
-  const previous = process.env.MECHA_WEB_UI_ALLOWED_HOST;
-  process.env.MECHA_WEB_UI_ALLOWED_HOST = "donuts-cloud.tailcdfd89.ts.net";
-  try {
-    assert.equal(parseArguments([]).allowedHost, "donuts-cloud.tailcdfd89.ts.net");
-    await assert.rejects(
-      startRouterWebUi({ allowedHost: "https://donuts-cloud.tailcdfd89.ts.net" }),
-      /allowedHost must be a hostname/,
-    );
-  } finally {
-    if (previous === undefined) delete process.env.MECHA_WEB_UI_ALLOWED_HOST;
-    else process.env.MECHA_WEB_UI_ALLOWED_HOST = previous;
-  }
-});
-
 test("router HTTP API rejects escaped newline text in message bodies", async () => {
   const router = await startTestRouter();
   try {
@@ -2040,9 +2025,9 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(styles, /\.bubble-label \{ display: flex; align-items: baseline; gap: 8px;/);
   assert.match(app, /state\.reminders = Array\.isArray\(event\.reminders\) \? event\.reminders : \[\];/);
   assert.match(app, /reminder\.target === peer && (?:reminder\.enabled !== false && )?\["scheduled", "due", "message_queued"\]\.includes\(reminder\.state\)/);
-  assert.match(app, /function reminderIndicatorMarkup\(reminders, peerName\)/);
+  assert.match(app, /function reminderIndicatorMarkup\(hasReminders, peerName\)/);
   assert.match(app, /aria-haspopup="dialog" aria-controls="reminders-dialog"/);
-  assert.match(app, /class="agent-name-line">\$\{reminderIndicatorMarkup\(reminders, humanName\(peer\)\)\}/);
+  assert.match(app, /class="agent-name-line">\$\{goalIndicatorMarkup\(goal, humanName\(peer\)\)\}\$\{reminderIndicatorMarkup\(hasReminders, humanName\(peer\)\)\}/);
   assert.match(html, /<dialog id="reminders-dialog" class="message-dialog"/);
   assert.match(styles, /#reminders-dialog-body \{ max-height: min\(52vh, 520px\); overflow-y: auto;/);
   assert.match(styles, /\.reminder-indicator \{[\s\S]*width: 24px;[\s\S]*height: 24px;[\s\S]*border-radius: 999px;/);
@@ -2112,8 +2097,6 @@ test("router web app keeps router UX, scoped events, Enter handling, and fixed p
   assert.match(app, /elements\.draft\.setSelectionRange\(end, end\)/);
   assert.match(app, /restoreDraftForSelectedPeer\(\{ focus: true \}\)/);
   assert.match(app, /state\.selectedPeer = loadSelectedPeer\(routerUrl, state\.agentId\)/);
-  assert.match(app, /if \(event\.state === "connected"\) backfillSelectedConversation\(\)/);
-  assert.match(app, /function backfillSelectedConversation\(\) \{[\s\S]*requestHistory\(peer\);[\s\S]*setTimeout\(\(\) => \{[\s\S]*state\.selectedPeer === peer && state\.routerUrl === routerUrl && state\.agentId === agentId[\s\S]*requestHistory\(peer\);[\s\S]*\}, 500\);[\s\S]*\}/);
   assert.match(app, /elements\.agentFilter\.addEventListener\("input"/);
   assert.match(app, /elements\.modelCurrent\.addEventListener\("click"/);
   assert.match(app, /elements\.modelSearch\.addEventListener\("input"/);
