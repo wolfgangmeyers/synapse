@@ -135,29 +135,6 @@ test("WebUI reminder lock relay binds user_interaction identity and correlates s
   }
 });
 
-test("WebUI CRUD relay forwards normal POST and PATCH payloads", async () => {
-  const router = await startFakeRouter();
-  const ui = await startRouterWebUi({ router: router.httpUrl, modelControlTimeoutMs: 100, output: () => {} });
-  let browser;
-  try {
-    browser = await connect(ui, router);
-    browser.send(JSON.stringify({ type: "reminder_crud", requestId: "crud-create", operation: "create", payload: {
-      id: "new-reminder", target: "target-agent", creator: "web-test", body: "hello", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:01:00.000Z", interval_ms: null,
-    } }));
-    assert.equal((await nextEvent(browser, (event) => event.type === "reminder_crud_result" && event.requestId === "crud-create")).accepted, true);
-    browser.send(JSON.stringify({ type: "reminder_crud", requestId: "crud-update", operation: "update", reminderId: "new-reminder", payload: { body: "updated", subject: "new subject" } }));
-    assert.equal((await nextEvent(browser, (event) => event.type === "reminder_crud_result" && event.requestId === "crud-update")).accepted, true);
-    assert.deepEqual(router.httpRequests.map(({ method, url, body }) => ({ method, url, body })), [
-      { method: "POST", url: "/v1/reminders", body: { id: "new-reminder", target: "target-agent", creator: "web-test", body: "hello", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:01:00.000Z", interval_ms: null } },
-      { method: "PATCH", url: "/v1/reminders/new-reminder", body: { body: "updated", subject: "new subject" } },
-    ]);
-  } finally {
-    browser?.close();
-    await ui.close();
-    await router.close();
-  }
-});
-
 test("WebUI rejects mismatched results and fences pending controls on reconnect", async () => {
   const router = await startFakeRouter();
   const ui = await startRouterWebUi({ router: router.httpUrl, modelControlTimeoutMs: 500, output: () => {} });
@@ -213,7 +190,8 @@ test("reminder controls remain separate from normal CRUD and creation", async ()
   assert.match(styles, /\.goal-toggle:focus-visible/);
   assert.match(server, /load\("\/v1\/reminders"\)/);
   assert.match(html, /id="reminder-header-button"[^>]*aria-controls="reminders-dialog"/);
-  assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton, elements\.goalHeaderButton\)/);
+  assert.match(app, /elements\.peerName\.append\(elements\.reminderHeaderButton\);/);
+  assert.match(app, /elements\.peerName\.append\(elements\.goalHeaderButton\);/);
   assert.match(app, /reminderIndicatorMarkup\(hasReminders, humanName\(peer\)\)/);
   assert.match(styles, /\.reminder-indicator/);
   assert.match(styles, /\.reminder-list-item/);

@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -34,5 +36,5 @@ jobs:
       - run: npm ci
       - run: npm ci --prefix pi-extensions/mecha-messaging
       - run: npm run check:mecha-messaging
-      - run: npm test
+      - run: xvfb-run --auto-servernum -- npm test
       - run: node --test tests/claude_sidecar.test.mjs tests/discord_gateway_bridge.test.mjs

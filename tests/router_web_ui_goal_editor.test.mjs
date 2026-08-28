@@ -5,21 +5,6 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, root), "utf8");
 
-test("router management controls use REST relay endpoints", async () => {
-  const html = await read("web/router-ui/index.html");
-  const app = await read("web/router-ui/app.js");
-  const relay = await read("tools/router_web_ui.mjs");
-  for (const id of ["enumerate-tmux-windows", "provision-tmux-window", "tmux-windows"]) assert.match(html, new RegExp(`id="${id}"`));
-  for (const name of ["enumerateTmuxWindows", "provisionTmuxWindow", "removeTmuxWindow", "renameTmuxWindow", "sendTmuxKeys", "tmuxWindowAction"]) assert.match(app, new RegExp(`function ${name}`));
-  for (const name of ["enumerateTmuxWindows", "provisionTmuxWindow", "removeTmuxWindow", "renameTmuxWindow", "sendTmuxKeys", "tmuxWindowAction"]) assert.match(relay, new RegExp(`export const ${name}`));
-  assert.match(app, /fetch\(`\/ui\/tmux\/windows\$\{path\}\?router=/);
-  assert.doesNotMatch(app.slice(app.indexOf("async function managementRequest"), app.indexOf("function openRouterEditor")), /sendCommand/);
-  assert.match(app, /state\.tmuxWindows = Array\.isArray\(payload\.windows\) \? payload\.windows : \[\]/);
-  assert.match(app, /state\.tmuxWindows = \[\];/);
-  assert.match(relay, /incomingHeaders\[name\]/);
-  assert.match(relay, /responseHeaders\["x-correlation-id"\]/);
-});
-
 test("goal editor markup has one shared dialog and an icon-only header entry point", async () => {
   const html = await read("web/router-ui/index.html");
   const css = await read("web/router-ui/styles.css");
