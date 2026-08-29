@@ -31,12 +31,18 @@ func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := r.sweep(ctx); err != nil {
+			if err := r.runSweep(ctx); err != nil {
 				r.emit("router_error", map[string]any{"error_code": "sweep_failed"})
 			}
-			r.sweepLiveState()
 		}
 	}
+}
+
+func (r *Router) runSweep(ctx context.Context) error {
+	r.sweepMu.Lock()
+	defer r.sweepMu.Unlock()
+	_, err := r.sweep(ctx)
+	return err
 }
 
 func (r *Router) sweepLiveState() {
@@ -199,14 +205,121 @@ func (r *Router) connectedAgents() map[string]any {
 }
 
 func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
-	result, err := r.store.Sweep(ctx, store.DefaultRetentionPolicy)
+	// Recovery owns these deletions and transitions so the router can publish
+	// the same records as Node. In particular, do not let store retention remove
+	// an expired queued message before message_expired is emitted.
+	expired, err := r.store.RecoverExpiredUnclaimedMessages(ctx)
+	if err != nil {
+		return store.SweepResult{}, err
+	}
+	for _, messageID := range expired {
+		r.emit("message_expired", map[string]any{"message_id": messageID})
+	}
+	timedOut, err := r.store.RecoverTimedOutDeliveries(ctx, r.maxAttempts)
+	if err != nil {
+		return store.SweepResult{}, err
+	}
+	for _, outcome := range timedOut {
+		r.emit("delivery_timed_out", map[string]any{
+			"message_id": outcome.MessageID,
+			"agent_id":   outcome.AgentID,
+			"attempt":    outcome.Attempt,
+			"lease_id":   outcome.LeaseID,
+			"state":      outcome.State,
+			"reason":     "delivery_timeout",
+		})
+		if outcome.State == "dead_letter" {
+			r.emit("message_dead_lettered", map[string]any{
+				"message_id": outcome.MessageID,
+				"agent_id":   outcome.AgentID,
+				"attempt":    outcome.Attempt,
+				"lease_id":   outcome.LeaseID,
+				"reason":     "delivery_timeout",
+			})
+			for _, reminder := range outcome.RecurringReminderRearmed {
+				r.emit("recurring_reminder_rearmed", map[string]any{
+					"reminder_id": reminder.ReminderID,
+					"message_id":  outcome.MessageID,
+					"next_due_at": reminder.NextDueAt,
+					"reason":      "delivery_timeout",
+				})
+			}
+		}
+	}
+	for _, outcome := range timedOut {
+		r.offerAgent(outcome.AgentID)
+	}
+
+	result, err := r.store.SweepLifecycle(ctx, store.DefaultRetentionPolicy)
 	if err != nil {
 		return result, err
 	}
-	_, _ = r.store.RecoverExpiredUnclaimedMessages(ctx)
-	_, _ = r.store.RecoverTimedOutDeliveries(ctx, r.maxAttempts)
-	r.sweepReminders(ctx)
+	reminderSuccess, reminderFailure := r.sweepReminders(ctx)
+	if err := r.sweepAttachments(); err != nil {
+		return result, err
+	}
+	// Node publishes activity expiry before its heartbeat/sweep record.
+	r.sweepLiveState()
+	r.emitSweepRecord(result, len(expired), len(timedOut), reminderSuccess, reminderFailure)
 	return result, nil
+}
+
+func (r *Router) emitSweepRecord(result store.SweepResult, expiredMessages, timedOutDeliveries, reminderSuccess, reminderFailure int) {
+	counts := map[string]any{
+		"stale_agent_count":        result.StaleAgents,
+		"expired_message_count":    expiredMessages,
+		"timed_out_delivery_count": timedOutDeliveries,
+		"reminder_success_count":   reminderSuccess,
+		"reminder_failure_count":   reminderFailure,
+		"server_job_success_count": 0,
+		"server_job_failure_count": 0,
+	}
+	if result.ConversationMessages > 0 {
+		counts["conversation_message_pruned_count"] = result.ConversationMessages
+	}
+	if result.LifecycleExpired > 0 {
+		counts["lifecycle_running_expired_count"] = result.LifecycleExpired
+	}
+	if result.LifecycleStates > 0 {
+		counts["lifecycle_tombstone_pruned_count"] = result.LifecycleStates
+	}
+	if result.LifecycleEvents > 0 {
+		counts["lifecycle_ledger_pruned_count"] = result.LifecycleEvents
+	}
+	if result.LifecycleProducers > 0 {
+		counts["lifecycle_producer_pruned_count"] = result.LifecycleProducers
+	}
+	if result.GoalControlStates > 0 {
+		counts["goal_control_pruned_count"] = result.GoalControlStates
+	}
+	work := false
+	for _, value := range counts {
+		if count, ok := value.(int); ok && count > 0 {
+			work = true
+			break
+		}
+	}
+	now := r.now()
+	if r.lastSweepRecord.IsZero() {
+		r.lastSweepRecord = now
+	}
+	if work || now.Sub(r.lastSweepRecord) >= r.sweepHeartbeat {
+		r.emit("lifecycle_sweep_completed", counts)
+		r.lastSweepRecord = now
+	}
+}
+
+func (r *Router) sweepAttachments() error {
+	if r.attachments == nil {
+		return nil
+	}
+	_, err := r.attachments.Sweep(func(id string) bool {
+		referenced, referenceErr := r.store.ConversationAttachmentReferenced(context.Background(), id)
+		// Keep the file when the reference check fails. Deleting on an
+		// uncertain database read would turn a transient error into data loss.
+		return referenceErr != nil || referenced
+	})
+	return err
 }
 
 // handleTmux keeps the route present even when no adapter is configured. The
