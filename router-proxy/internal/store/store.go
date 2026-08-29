@@ -91,6 +91,7 @@ type Store struct {
 	maxQueuedBytes       int
 	maxBatchBodyChars    int
 	reminderIncarnations map[string]string
+	migrations           []Migration
 	mu                   sync.Mutex
 	closed               bool
 }
@@ -192,7 +193,7 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	store := &Store{db: db, path: databasePath, clock: clock, ids: ids,
 		maxBodyBytes: maxBodyBytes, maxQueuedMessages: maxQueuedMessages,
 		maxQueuedBytes: maxQueuedBytes, maxBatchBodyChars: maxBatchBodyChars,
-		reminderIncarnations: make(map[string]string)}
+		reminderIncarnations: make(map[string]string), migrations: append([]Migration(nil), migrations...)}
 	if err := db.PingContext(ctx); err != nil {
 		return closeOnError(fmt.Errorf("ping SQLite database: %w", err))
 	}
