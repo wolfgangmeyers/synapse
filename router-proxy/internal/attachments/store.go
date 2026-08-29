@@ -79,6 +79,8 @@ type Store struct {
 	maxTotalBytes  int
 	retention      time.Duration
 	referenced     func(string) bool
+	chmod          func(string, os.FileMode) error
+	syncDir        func(string) error
 	sweepMu        sync.Mutex
 }
 
@@ -116,7 +118,7 @@ func New(options Options) (*Store, error) {
 	if maxAttachments < 0 || maxAttachments > DefaultMaxAttachments || maxBytes <= 0 || maxTotal < maxBytes || retention <= 0 {
 		return nil, errors.New("invalid attachment limits")
 	}
-	store := &Store{directory: directory, clock: options.Clock, maxAttachments: maxAttachments, maxBytes: maxBytes, maxTotalBytes: maxTotal, retention: retention, referenced: options.Referenced}
+	store := &Store{directory: directory, clock: options.Clock, maxAttachments: maxAttachments, maxBytes: maxBytes, maxTotalBytes: maxTotal, retention: retention, referenced: options.Referenced, chmod: os.Chmod, syncDir: syncDirectory}
 	if store.clock == nil {
 		store.clock = wallClock{}
 	}
@@ -217,12 +219,16 @@ func (s *Store) WriteTemp(messageID string, index int, input Input) (Pending, er
 		_ = os.Remove(tempPath)
 		return Pending{}, err
 	}
-	if err := os.Chmod(finalPath, 0o600); err != nil {
-		_ = os.Remove(finalPath)
+	if err := s.chmod(finalPath, 0o600); err != nil {
+		if !preexisting {
+			_ = os.Remove(finalPath)
+		}
 		return Pending{}, err
 	}
-	if err := syncDirectory(s.directory); err != nil {
-		_ = os.Remove(finalPath)
+	if err := s.syncDir(s.directory); err != nil {
+		if !preexisting {
+			_ = os.Remove(finalPath)
+		}
 		return Pending{}, err
 	}
 	return Pending{Attachment: Attachment{ID: id, URL: "/v1/attachments/" + id, MIMEType: strings.ToLower(input.MIMEType), SizeBytes: len(input.Bytes), Name: sanitizeName(input.Name)}, finalPath: finalPath, owner: s, preexisting: preexisting, preexistingReferenced: preexistingReferenced}, nil
@@ -241,13 +247,9 @@ func (s *Store) Discard(p Pending) error {
 		return ErrInvalidAttachmentID
 	}
 	if p.preexisting {
-		if p.preexistingReferenced || s.referenced == nil {
-			return nil
-		}
-		referenced, checked := s.referenceState(p.ID)
-		if referenced || !checked {
-			return nil
-		}
+		// A replacement write can belong to an idempotent message. Never let
+		// compensation remove the file that was already present.
+		return nil
 	}
 	err := os.Remove(path)
 	if errors.Is(err, os.ErrNotExist) {

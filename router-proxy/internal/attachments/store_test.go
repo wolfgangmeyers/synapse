@@ -62,6 +62,22 @@ func TestDiscardPreservesExistingReferencedAttachmentAfterIdempotentRetry(t *tes
 	require.Equal(t, input.Bytes, got)
 }
 
+func TestDiscardPreservesPreexistingAttachmentWhenReferenceCallbackReturnsFalse(t *testing.T) {
+	store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images"), Referenced: func(string) bool { return false }})
+	require.NoError(t, err)
+	input := Input{MIMEType: "image/png", Bytes: pngFixture(1, 1)}
+	original, err := store.WriteTemp("same-message", 1, input)
+	require.NoError(t, err)
+	duplicate, err := store.WriteTemp("same-message", 1, input)
+	require.NoError(t, err)
+	require.True(t, duplicate.preexisting)
+	require.False(t, duplicate.preexistingReferenced)
+	require.NoError(t, store.Discard(duplicate))
+	got, _, err := store.Read(original.ID)
+	require.NoError(t, err)
+	require.Equal(t, input.Bytes, got)
+}
+
 func TestDiscardPreservesPreexistingAttachmentWithoutReferenceCallback(t *testing.T) {
 	store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images")})
 	require.NoError(t, err)
@@ -75,6 +91,43 @@ func TestDiscardPreservesPreexistingAttachmentWithoutReferenceCallback(t *testin
 	got, _, err := store.Read(original.ID)
 	require.NoError(t, err)
 	require.Equal(t, input.Bytes, got)
+}
+
+func TestWriteTempPreservesPreexistingFinalOnPostReplaceFailure(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*Store, string) error
+	}{
+		{name: "chmod", configure: func(store *Store, id string) error {
+			sentinel := errors.New("chmod failed")
+			store.chmod = func(path string, mode os.FileMode) error {
+				if path == filepath.Join(store.directory, id) {
+					return sentinel
+				}
+				return os.Chmod(path, mode)
+			}
+			return sentinel
+		}},
+		{name: "directory sync", configure: func(store *Store, _ string) error {
+			sentinel := errors.New("directory sync failed")
+			store.syncDir = func(string) error { return sentinel }
+			return sentinel
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images")})
+			require.NoError(t, err)
+			input := Input{MIMEType: "image/png", Bytes: pngFixture(1, 1)}
+			original, err := store.WriteTemp("same-message", 1, input)
+			require.NoError(t, err)
+			expected := test.configure(store, original.ID)
+			_, err = store.WriteTemp("same-message", 1, input)
+			require.ErrorIs(t, err, expected)
+			got, _, readErr := store.Read(original.ID)
+			require.NoError(t, readErr)
+			require.Equal(t, input.Bytes, got)
+		})
+	}
 }
 
 func TestAttachmentAdmissionMatchesNodeCountAndByteLimits(t *testing.T) {
