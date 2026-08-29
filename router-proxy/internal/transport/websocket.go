@@ -356,7 +356,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		return err
 	}
 	r.replayGoalControlDesired(s)
-	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner != nil)
+	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner != nil && owner.instanceID != instanceID)
 	for _, replacement := range oldSessions {
 		if replacement != s {
 			_ = replacement.sendError("lease_expired", "")
@@ -513,7 +513,9 @@ func (r *Router) clearStaleGeneration(agentID, instanceID, leaseID string, owner
 	if value, ok := r.activities[agentID]; ok && (ownerChanged || value.instanceID != instanceID || value.leaseID != leaseID) {
 		delete(r.activities, agentID)
 	}
-	if value, ok := r.models[agentID]; ok && (ownerChanged || value.instanceID != instanceID || value.leaseID != leaseID) {
+	// Node retains model state across a same-instance reconnect. The lease
+	// authenticates frames, but the model projection belongs to the instance.
+	if value, ok := r.models[agentID]; ok && (ownerChanged || value.instanceID != instanceID) {
 		delete(r.models, agentID)
 	}
 	if value, ok := r.goals[agentID]; ok && (ownerChanged || value.instanceID != instanceID || value.leaseID != leaseID) {
@@ -661,13 +663,14 @@ func (r *Router) modelCatalog(s *session, frame map[string]json.RawMessage) erro
 		total = int(value)
 	}
 	truncated, _ := frameBool(frame, "truncated")
+	truncated = truncated || total > len(models)
 	r.mu.Lock()
 	if !r.activeSessionLocked(s) {
 		r.mu.Unlock()
 		return r.leaseError(s, frame)
 	}
 	if current == nil {
-		if previous, ok := r.models[s.agentID]; ok && previous.instanceID == s.instanceID && previous.leaseID == s.leaseID {
+		if previous, ok := r.models[s.agentID]; ok && previous.instanceID == s.instanceID {
 			current = previous.current
 		}
 	}
@@ -680,6 +683,26 @@ func (r *Router) modelCatalog(s *session, frame map[string]json.RawMessage) erro
 	r.broadcastModel(s.agentID)
 	return nil
 }
+func (r *Router) projectCurrentModel(s *session, current map[string]any) {
+	models := normalizeModels([]map[string]any{current})
+	if len(models) == 0 {
+		return
+	}
+	r.mu.Lock()
+	projection, ok := r.models[s.agentID]
+	if !ok || projection.instanceID != s.instanceID {
+		projection = modelProjection{instanceID: s.instanceID}
+	}
+	projection.leaseID = s.leaseID
+	projection.current = cloneMap(models[0])
+	r.models[s.agentID] = projection
+	if activity, ok := r.activities[s.agentID]; ok && activity.instanceID == s.instanceID && activity.leaseID == s.leaseID {
+		activity.model = cloneMap(models[0])
+		r.activities[s.agentID] = activity
+	}
+	r.mu.Unlock()
+}
+
 func normalizeModels(values []map[string]any) []map[string]any {
 	seen := map[string]bool{}
 	result := []map[string]any{}
@@ -744,15 +767,16 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 		model = cloneMap(previous.model)
 	}
 	if model == nil {
-		if value, ok := r.models[s.agentID]; ok && value.instanceID == s.instanceID && value.leaseID == s.leaseID {
+		if value, ok := r.models[s.agentID]; ok && value.instanceID == s.instanceID {
 			model = cloneMap(value.current)
 		}
 	}
 	if model != nil {
 		projection := r.models[s.agentID]
-		if projection.instanceID != s.instanceID || projection.leaseID != s.leaseID {
-			projection = modelProjection{instanceID: s.instanceID, leaseID: s.leaseID}
+		if projection.instanceID != s.instanceID {
+			projection = modelProjection{instanceID: s.instanceID}
 		}
+		projection.leaseID = s.leaseID
 		projection.current = cloneMap(model)
 		r.models[s.agentID] = projection
 	}
@@ -861,6 +885,9 @@ func (r *Router) modelControlResult(s *session, frame map[string]json.RawMessage
 		if _, ok := frame[key]; ok {
 			result[key] = frameAny(frame, key)
 		}
+	}
+	if current, ok := result["current_model"].(map[string]any); ok {
+		r.projectCurrentModel(s, current)
 	}
 	if pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
 		return s.sendError("model_control_result_not_pending", frameString(frame, "frame_id"))

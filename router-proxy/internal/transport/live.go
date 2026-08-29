@@ -245,7 +245,7 @@ func (r *Router) rateLimit(sender string) error {
 	return nil
 }
 
-func (r *Router) connectedAgents() map[string]any {
+func (r *Router) connectedAgents(includeModels bool) map[string]any {
 	now := r.now()
 	r.mu.Lock()
 	candidates := make([]*session, 0, len(r.sessions))
@@ -283,14 +283,16 @@ func (r *Router) connectedAgents() map[string]any {
 			item["subagent_count"] = activity.count
 			item["subagents"] = activity.subagents
 		}
-		if model, ok := models[s.agentID]; ok && model.instanceID == s.instanceID && model.leaseID == lease.LeaseID {
-			item["available_models"] = model.available
-			item["model_catalog_total_count"] = model.total
-			item["model_catalog_truncated"] = model.truncated
+		if model, ok := models[s.agentID]; ok && model.instanceID == s.instanceID {
+			if includeModels {
+				item["available_models"] = model.available
+				item["model_catalog_total_count"] = model.total
+				item["model_catalog_truncated"] = model.truncated
+			}
 			if model.current != nil {
 				item["current_model"] = model.current
 			}
-		} else {
+		} else if includeModels {
 			item["available_models"] = []map[string]any{}
 			item["model_catalog_total_count"] = 0
 			item["model_catalog_truncated"] = false
