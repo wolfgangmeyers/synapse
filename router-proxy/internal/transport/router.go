@@ -118,30 +118,33 @@ type Router struct {
 	log           func(string, map[string]any)
 
 	mu sync.RWMutex
-	// ownershipMu serializes only registration and close cleanup. Lease changes
-	// and their in-memory owner mapping must become one observable transition.
-	ownershipMu        sync.Mutex
-	server             *http.Server
-	listener           net.Listener
-	serveDone          chan struct{}
-	sweepCancel        context.CancelFunc
-	sweepDone          chan struct{}
-	closed             bool
-	sessions           map[string]*session
-	convos             map[string]map[string]*session
-	activities         map[string]activity
-	models             map[string]modelProjection
-	goals              map[string]goalState
-	pendingMod         map[string]*pendingControl
-	pendingGoal        map[string]*pendingControl
-	pendingLock        map[string]*pendingControl
-	lifecycleState     map[string]lifecycleAgent
-	nextVersion        int64
-	rates              map[string][]time.Time
-	selectedTmux       string
-	windowIDs          map[string]string
-	goalAvailable      bool
-	lifecycleAvailable bool
+	// ownershipMu protects the small per-agent transition table. A transition
+	// reserves one agent while its SQLite and socket work runs, but this mutex
+	// is only held while reading or changing that table.
+	ownershipMu         sync.Mutex
+	ownership           map[string]*ownershipTransition
+	ownershipGeneration uint64
+	server              *http.Server
+	listener            net.Listener
+	serveDone           chan struct{}
+	sweepCancel         context.CancelFunc
+	sweepDone           chan struct{}
+	closed              bool
+	sessions            map[string]*session
+	convos              map[string]map[string]*session
+	activities          map[string]activity
+	models              map[string]modelProjection
+	goals               map[string]goalState
+	pendingMod          map[string]*pendingControl
+	pendingGoal         map[string]*pendingControl
+	pendingLock         map[string]*pendingControl
+	lifecycleState      map[string]lifecycleAgent
+	nextVersion         int64
+	rates               map[string][]time.Time
+	selectedTmux        string
+	windowIDs           map[string]string
+	goalAvailable       bool
+	lifecycleAvailable  bool
 }
 
 type session struct {
@@ -202,6 +205,12 @@ type pendingControl struct {
 type lifecycleAgent struct {
 	version   int64
 	subagents []map[string]any
+}
+
+type ownershipTransition struct {
+	agentID    string
+	generation uint64
+	done       chan struct{}
 }
 
 func wallClock() time.Time { return time.Now() }
@@ -309,7 +318,7 @@ func New(options Options) (*Router, error) {
 	if !options.GoalControlAvailable {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state")
 	}
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	return r, nil
 }

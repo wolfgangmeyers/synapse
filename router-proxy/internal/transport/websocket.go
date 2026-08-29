@@ -234,12 +234,13 @@ func (s *session) close(code websocket.StatusCode, reason string) error {
 }
 
 func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
-	// Keep lease acquisition and publication together with close cleanup. An old
-	// socket cannot release the new lease between those two operations.
-	r.ownershipMu.Lock()
-	defer r.ownershipMu.Unlock()
-
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
+	transition := r.beginOwnership(agentID)
+	defer r.finishOwnership(agentID, transition)
+
+	if !r.ownershipCurrent(transition) {
+		return errors.New("registration ownership transition superseded")
+	}
 	r.mu.RLock()
 	owner := r.sessions[agentID]
 	subscribers := r.convos[agentID]
@@ -252,7 +253,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	// conversation_sync sockets share one lease. Publish the replacement before
 	// closing the old socket, and undo that publication if its welcome frame fails.
 	if frameString(frame, "conversation_sync") == "v1" && subscribers != nil {
-		if registered, err := r.registerConversationSync(s, frame, owner, reconnecting, subscribers); registered {
+		if registered, err := r.registerConversationSync(s, frame, owner, reconnecting, subscribers, transition); registered {
 			return err
 		}
 	}
@@ -267,7 +268,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		var duplicate *store.DuplicateAgentLeaseError
 		if errors.As(err, &duplicate) {
 			if frameString(frame, "conversation_sync") == "v1" && owner != nil && subscribers != nil {
-				if registered, sharedErr := r.registerConversationSync(s, frame, owner, reconnecting, subscribers); registered {
+				if registered, sharedErr := r.registerConversationSync(s, frame, owner, reconnecting, subscribers, transition); registered {
 					return sharedErr
 				}
 			}
@@ -278,6 +279,10 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		return err
 	}
 
+	if !r.ownershipCurrent(transition) {
+		_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: agentID, InstanceID: instanceID, LeaseID: lease.LeaseID})
+		return errors.New("registration ownership transition superseded")
+	}
 	r.mu.Lock()
 	owner = r.sessions[agentID]
 	subscribers = r.convos[agentID]
@@ -319,17 +324,23 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	return nil
 }
 
-func (r *Router) registerConversationSync(s *session, frame map[string]json.RawMessage, owner, reconnecting *session, subscribers map[string]*session) (bool, error) {
+func (r *Router) registerConversationSync(s *session, frame map[string]json.RawMessage, owner, reconnecting *session, subscribers map[string]*session, transition *ownershipTransition) (bool, error) {
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
 	lease, leaseErr := r.store.LeaseFor(context.Background(), agentID)
 	if owner == nil || leaseErr != nil || lease == nil || lease.ExpiresAt <= timestamp(r.now()) {
 		return false, nil
+	}
+	if !r.ownershipCurrent(transition) {
+		return true, errors.New("registration ownership transition superseded")
 	}
 	if reconnecting != nil {
 		r.removePendingForSession(reconnecting)
 	}
 	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
 	s.setPaused(r.agentCompacting(agentID) || owner.isPaused())
+	if !r.ownershipCurrent(transition) {
+		return true, errors.New("registration ownership transition superseded")
+	}
 	r.mu.Lock()
 	subscribers[instanceID] = s
 	if owner == reconnecting {
