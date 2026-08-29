@@ -2634,7 +2634,7 @@ export function isPortablePromptTemplateId(value) {
     const codeUnit = value.charCodeAt(index);
     if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
       const next = value.charCodeAt(index + 1);
-      if (next < 0xDC00 || next > 0xDFFF) return false;
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return false;
       index += 1;
     } else if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
       return false;
