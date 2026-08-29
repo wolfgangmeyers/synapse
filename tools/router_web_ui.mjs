@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 import WebSocket, { WebSocketServer } from "ws";
+import { isPortablePromptTemplateId } from "../web/router-ui/prompt-templates.js";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
@@ -967,6 +968,9 @@ function normalizePromptTemplatePayload(value, method) {
     || typeof value.name !== "string" || typeof value.body !== "string") {
     throw new Error("Prompt template payload must contain only name, body, id, and updated_at");
   }
+  if (Object.hasOwn(value, "id") && !isPortablePromptTemplateId(value.id)) {
+    throw new Error("Prompt template ID is invalid");
+  }
   const payload = { name: value.name, body: value.body };
   if (method === "POST" && Object.hasOwn(value, "id")) payload.id = value.id;
   if (Object.hasOwn(value, "updated_at")) payload.updated_at = value.updated_at;
@@ -1138,8 +1142,7 @@ function normalizeReminderId(value) {
 
 function normalizePromptTemplateId(value) {
   const promptTemplateId = String(value);
-  if (promptTemplateId.length === 0 || promptTemplateId.includes("\u0000")
-    || new TextEncoder().encode(promptTemplateId).length > 1024) {
+  if (!isPortablePromptTemplateId(promptTemplateId)) {
     throw new Error("Prompt template ID is invalid");
   }
   return promptTemplateId;
