@@ -148,6 +148,35 @@ func TestLifecyclePrunePublishesTerminalProjectionToObservers(t *testing.T) {
 	require.Empty(t, agent["subagents"])
 }
 
+func TestLifecyclePublishDoesNotRevertNewerConcurrentState(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := New(Options{Store: durable, EventLogger: func(string, map[string]any) {}})
+	require.NoError(t, err)
+
+	var sent []map[string]any
+	observer := &session{router: router, agentID: "observer", conversationSync: "v1", lifecycleEnabled: true, sendOverride: func(fields map[string]any) error {
+		sent = append(sent, fields)
+		return nil
+	}}
+	router.mu.Lock()
+	router.convos["observer"] = map[string]*session{"observer-instance": observer}
+	router.lifecycleState["parent-a"] = lifecycleAgent{version: 2, subagents: []map[string]any{{"id": "new-child", "state": "terminal"}}}
+	router.nextVersion = 2
+	router.mu.Unlock()
+
+	// This is the ordering produced when a newer lifecycle event commits while
+	// an older sweep projection is still being prepared.
+	router.publishLifecycleUpdates(context.Background(), []store.LifecycleUpdate{{ParentAgentID: "parent-a", RouterVersion: 1}})
+
+	router.mu.RLock()
+	state := router.lifecycleState["parent-a"]
+	router.mu.RUnlock()
+	require.Equal(t, int64(2), state.version)
+	require.Empty(t, sent)
+}
+
 func TestExpiredLeaseNotifiesAndClosesOnlyMatchingCurrentSession(t *testing.T) {
 	start := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	clock := deterministic.NewFixedClock(start)
