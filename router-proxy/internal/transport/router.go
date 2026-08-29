@@ -117,7 +117,10 @@ type Router struct {
 	attachments   *attachments.Store
 	log           func(string, map[string]any)
 
-	mu                 sync.RWMutex
+	mu sync.RWMutex
+	// ownershipMu serializes only registration and close cleanup. Lease changes
+	// and their in-memory owner mapping must become one observable transition.
+	ownershipMu        sync.Mutex
 	server             *http.Server
 	listener           net.Listener
 	serveDone          chan struct{}
