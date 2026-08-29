@@ -113,13 +113,23 @@ test("prompt template export preserves portable metadata and rejects invalid met
     version: 1,
     templates: [{ id: "legacy/ID%? # é", name: "Review", body: "Body", updated_at: updatedAt }],
   })), [{ id: "legacy/ID%? # é", name: "Review", body: "Body", updated_at: updatedAt }]);
+  assert.deepEqual(parsePromptTemplateImport(JSON.stringify({
+    format: "mecha-prompt-templates",
+    version: 1,
+    templates: [{ id: "valid-😀-id", name: "Review", body: "Body" }],
+  })), [{ id: "valid-😀-id", name: "Review", body: "Body" }]);
   for (const value of [null, "", "2026-08-25T12:34:56Z", "2026-08-25T05:34:56.789-07:00", "2026-02-29T12:34:56.789Z", 123]) {
     assert.throws(() => parsePromptTemplateImport(JSON.stringify({
       format: "mecha-prompt-templates", version: 1,
       templates: [{ name: "Review", body: "Body", updated_at: value }],
     })), /valid metadata/);
   }
-  for (const value of [null, "", "a".repeat(1025), `a\u0000b`, "bad\uD800id", "bad\uDC00id"]) {
+  for (const value of [
+    null, "", "a".repeat(1025), `a\u0000b`,
+    "\uD800leading", "\uDC00leading",
+    "interior\uD800id", "interior\uDC00id",
+    "trailing\uD800", "trailing\uDC00",
+  ]) {
     assert.throws(() => parsePromptTemplateImport(JSON.stringify({
       format: "mecha-prompt-templates", version: 1,
       templates: [{ id: value, name: "Review", body: "Body" }],
@@ -156,10 +166,16 @@ test("prompt template relay maps CRUD commands to the REST routes", async () => 
     await sendPromptTemplateCrud({ requestId: "create-1", operation: "create", payload: { id: "legacy/ID%? # é", name: "Review", body: "Check ${file}", updated_at: "2026-08-25T12:34:56.789Z" } }, configured, (event) => sent.push(event));
     await sendPromptTemplateCrud({ requestId: "update-1", operation: "update", promptTemplateId: "legacy/ID%? # é", payload: { id: "must-be-stripped", name: "Review 2", body: "Check ${file}", updated_at: "2026-08-25T12:34:56.789Z" } }, configured, (event) => sent.push(event));
     await sendPromptTemplateCrud({ requestId: "delete-1", operation: "delete", promptTemplateId: "legacy/ID%? # é" }, configured, (event) => sent.push(event));
-    await assert.rejects(
-      () => sendPromptTemplateCrud({ requestId: "bad-id", operation: "delete", promptTemplateId: "bad\uD800id" }, configured, () => {}),
-      /Prompt template ID is invalid/,
-    );
+    for (const [index, promptTemplateId] of [
+      "\uD800leading", "\uDC00leading",
+      "interior\uD800id", "interior\uDC00id",
+      "trailing\uD800", "trailing\uDC00",
+    ].entries()) {
+      await assert.rejects(
+        () => sendPromptTemplateCrud({ requestId: `bad-id-${index}`, operation: "delete", promptTemplateId }, configured, () => {}),
+        /Prompt template ID is invalid/,
+      );
+    }
     await assert.rejects(
       () => sendPromptTemplateCrud({ requestId: "bad-payload", operation: "create", payload: { id: "bad\uDC00id", name: "Review", body: "Body" } }, configured, () => {}),
       /Prompt template ID is invalid/,
