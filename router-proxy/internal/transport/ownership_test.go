@@ -85,6 +85,96 @@ func registrationFrame(agentID, instanceID, conversationSync string) map[string]
 	return frame
 }
 
+func TestBlockedRegistrationDoesNotStopUnrelatedOwnership(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := New(Options{Store: durable})
+	require.NoError(t, err)
+
+	registrationStarted := make(chan struct{})
+	releaseRegistration := make(chan struct{})
+	blocked := &session{
+		router: router,
+		sendOverride: func(map[string]any) error {
+			close(registrationStarted)
+			<-releaseRegistration
+			return nil
+		},
+		closeOverride: func(websocket.StatusCode, string) error { return nil },
+	}
+	blockedResult := make(chan error, 1)
+	go func() { blockedResult <- router.register(blocked, registrationFrame("blocked", "instance", "")) }()
+	<-registrationStarted
+
+	other := &session{
+		router:        router,
+		sendOverride:  func(map[string]any) error { return nil },
+		closeOverride: func(websocket.StatusCode, string) error { return nil },
+	}
+	otherResult := make(chan error, 1)
+	go func() { otherResult <- router.register(other, registrationFrame("other", "instance", "")) }()
+	select {
+	case err := <-otherResult:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("unrelated registration waited on blocked socket I/O")
+	}
+
+	close(releaseRegistration)
+	require.NoError(t, <-blockedResult)
+}
+
+func TestStaleCloseCannotReleaseReplacementLease(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := New(Options{Store: durable})
+	require.NoError(t, err)
+	_, err = durable.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: "agent", InstanceID: "instance", LeaseID: "old-lease", LeaseDuration: time.Minute})
+	require.NoError(t, err)
+
+	old := &session{router: router, sendOverride: func(map[string]any) error { return nil }, closeOverride: func(websocket.StatusCode, string) error { return nil }}
+	router.configureSession(old, registrationFrame("agent", "instance", ""), "old-lease", "instance")
+	router.mu.Lock()
+	router.sessions["agent"] = old
+	router.mu.Unlock()
+
+	registeredSendStarted := make(chan struct{})
+	releaseRegisteredSend := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	newSession := &session{
+		router: router,
+		sendOverride: func(map[string]any) error {
+			go func() {
+				router.sessionClosed(old, true)
+				close(cleanupDone)
+			}()
+			close(registeredSendStarted)
+			<-releaseRegisteredSend
+			return nil
+		},
+		closeOverride: func(websocket.StatusCode, string) error { return nil },
+	}
+	registerResult := make(chan error, 1)
+	go func() { registerResult <- router.register(newSession, registrationFrame("agent", "instance", "")) }()
+	<-registeredSendStarted
+	select {
+	case <-cleanupDone:
+		t.Fatal("old socket cleanup ran before replacement registration completed")
+	default:
+	}
+	close(releaseRegisteredSend)
+	require.NoError(t, <-registerResult)
+	<-cleanupDone
+
+	lease, err := durable.LeaseFor(context.Background(), "agent")
+	require.NoError(t, err)
+	require.NotNil(t, lease)
+	require.NotEqual(t, "old-lease", lease.LeaseID)
+	require.Equal(t, "instance", lease.InstanceID)
+}
+
 func TestRegisterWriteFailureRollsBackLeaseAndSessionOwnership(t *testing.T) {
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)

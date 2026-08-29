@@ -133,12 +133,52 @@ func (r *Router) broadcastLifecycle(agentID string, version int64) error {
 	return nil
 }
 
+// beginOwnership reserves one agent for an ownership transition. The mutex
+// protects only this table; callers release it before touching SQLite or a
+// socket. Waiting uses the transition's completion signal, so unrelated agents
+// continue without polling or a global ownership bottleneck.
+func (r *Router) beginOwnership(agentID string) *ownershipTransition {
+	for {
+		r.ownershipMu.Lock()
+		if transition := r.ownership[agentID]; transition != nil {
+			done := transition.done
+			r.ownershipMu.Unlock()
+			<-done
+			continue
+		}
+		r.ownershipGeneration++
+		transition := &ownershipTransition{agentID: agentID, generation: r.ownershipGeneration, done: make(chan struct{})}
+		r.ownership[agentID] = transition
+		r.ownershipMu.Unlock()
+		return transition
+	}
+}
+
+func (r *Router) ownershipCurrent(transition *ownershipTransition) bool {
+	r.ownershipMu.Lock()
+	defer r.ownershipMu.Unlock()
+	current := r.ownership[transition.agentID]
+	return current == transition && current.generation == transition.generation
+}
+
+func (r *Router) finishOwnership(agentID string, transition *ownershipTransition) {
+	r.ownershipMu.Lock()
+	if r.ownership[agentID] == transition {
+		delete(r.ownership, agentID)
+		close(transition.done)
+	}
+	r.ownershipMu.Unlock()
+}
+
 func (r *Router) sessionClosed(s *session, registered bool) {
 	if !registered || s.agentID == "" {
 		return
 	}
-	r.ownershipMu.Lock()
-	defer r.ownershipMu.Unlock()
+	transition := r.beginOwnership(s.agentID)
+	defer r.finishOwnership(s.agentID, transition)
+	if !r.ownershipCurrent(transition) {
+		return
+	}
 	r.sessionClosedSerialized(s)
 }
 
