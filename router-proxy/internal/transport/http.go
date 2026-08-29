@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -557,7 +558,7 @@ func (r *Router) handlePromptCollection(w http.ResponseWriter, req *http.Request
 		}
 		r.writeJSON(w, 200, map[string]any{"prompt_templates": items})
 	case http.MethodPost:
-		payload, err := r.readJSON(req)
+		payload, err := r.readPromptTemplateJSON(req)
 		if err != nil {
 			r.writeError(w, err)
 			return
@@ -577,6 +578,83 @@ func (r *Router) handlePromptCollection(w http.ResponseWriter, req *http.Request
 		r.writeError(w, &httpError{404, "not_found", 0})
 	}
 }
+
+// readPromptTemplateJSON keeps the raw ID JSON available long enough to reject
+// surrogate code units that encoding/json would otherwise replace with U+FFFD.
+func (r *Router) readPromptTemplateJSON(req *http.Request) (map[string]json.RawMessage, error) {
+	payload, err := r.readJSON(req)
+	if err != nil {
+		return nil, err
+	}
+	if raw, ok := payload["id"]; ok && !validPromptTemplateIDJSON(raw) {
+		return nil, &httpError{status: 400, code: "invalid_prompt_template"}
+	}
+	return payload, nil
+}
+
+func validPromptTemplateIDJSON(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return false
+	}
+	for index := 1; index < len(raw)-1; index++ {
+		if raw[index] != '\\' {
+			continue
+		}
+		if index+1 >= len(raw)-1 {
+			return false
+		}
+		if raw[index+1] != 'u' {
+			index++
+			continue
+		}
+		if index+5 >= len(raw)-1 {
+			return false
+		}
+		codeUnit, ok := promptTemplateHexCodeUnit(raw[index+2 : index+6])
+		if !ok {
+			return false
+		}
+		if codeUnit >= 0xD800 && codeUnit <= 0xDBFF {
+			next := index + 6
+			if next+5 >= len(raw)-1 || raw[next] != '\\' || raw[next+1] != 'u' {
+				return false
+			}
+			low, ok := promptTemplateHexCodeUnit(raw[next+2 : next+6])
+			if !ok || low < 0xDC00 || low > 0xDFFF {
+				return false
+			}
+			index = next + 5
+		} else if codeUnit >= 0xDC00 && codeUnit <= 0xDFFF {
+			return false
+		} else {
+			index += 5
+		}
+	}
+	return true
+}
+
+func promptTemplateHexCodeUnit(value []byte) (uint16, bool) {
+	if len(value) != 4 {
+		return 0, false
+	}
+	var result uint16
+	for _, digit := range value {
+		result <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			result += uint16(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			result += uint16(digit - 'a' + 10)
+		case digit >= 'A' && digit <= 'F':
+			result += uint16(digit - 'A' + 10)
+		default:
+			return 0, false
+		}
+	}
+	return result, true
+}
+
 func parsePromptTemplateCreate(payload map[string]json.RawMessage) (store.PromptTemplateRequest, error) {
 	for key := range payload {
 		if key != "name" && key != "body" && key != "id" && key != "updated_at" {
@@ -638,7 +716,7 @@ func (r *Router) handlePromptItem(w http.ResponseWriter, req *http.Request, id s
 		}
 		r.writeJSON(w, 200, map[string]any{"prompt_template": item})
 	case http.MethodPatch:
-		payload, err := r.readJSON(req)
+		payload, err := r.readPromptTemplateJSON(req)
 		if err != nil {
 			r.writeError(w, err)
 			return
