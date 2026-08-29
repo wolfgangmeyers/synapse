@@ -10,6 +10,10 @@ import (
 )
 
 func (r *Router) offerAgent(agentID string) {
+	// HTTP enqueue/retry can race a WebSocket replacement. Use the same
+	// ownership lock as frame dispatch before claiming a delivery.
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
 	r.mu.Lock()
 	s := r.sessions[agentID]
 	r.mu.Unlock()
