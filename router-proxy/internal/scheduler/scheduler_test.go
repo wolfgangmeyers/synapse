@@ -43,6 +43,31 @@ func TestRunSkipsOverlappingSweepAndCapturesOneClockValue(t *testing.T) {
 	require.Equal(t, []time.Time{time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)}, seen)
 }
 
+func TestStartRunsStartupAndPeriodicSweepsUntilStop(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	calls := make(chan time.Time, 8)
+	scheduler, err := New(clock, func(_ context.Context, now time.Time) error { calls <- now; return nil })
+	require.NoError(t, err)
+	require.NoError(t, scheduler.Start(context.Background(), 10*time.Millisecond))
+	require.True(t, scheduler.Started())
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("startup sweep did not run")
+	}
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("periodic sweep did not run")
+	}
+	require.NoError(t, scheduler.Stop())
+	require.False(t, scheduler.Started())
+	count := len(calls)
+	time.Sleep(30 * time.Millisecond)
+	require.Equal(t, count, len(calls), "stop must stop the one-second-style loop")
+	require.NoError(t, scheduler.Stop())
+}
+
 func TestRunClearsRunningAfterFailure(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Now())
 	want := context.Canceled

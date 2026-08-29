@@ -14,6 +14,9 @@ import (
 )
 
 const reminderFailureRetry = time.Minute
+const maxJSSafeInteger int64 = 9_007_199_254_740_991
+
+var maxUTCMillis = time.Date(9999, 12, 31, 23, 59, 59, 999_000_000, time.UTC).UnixMilli()
 
 var reminderIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,98}$`)
 
@@ -117,6 +120,9 @@ func (s *Store) Reminders(ctx context.Context) ([]domain.Reminder, error) {
 }
 
 func (s *Store) CancelReminder(ctx context.Context, id string) (bool, error) {
+	if !reminderIDPattern.MatchString(id) {
+		return false, &ReminderValidationError{Reason: "reminder id is invalid"}
+	}
 	var canceled bool
 	err := s.runImmediate(ctx, func() error {
 		current, err := s.reminderForTx(ctx, id)
@@ -233,8 +239,8 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 		_, err = s.db.ExecContext(ctx, "DELETE FROM agents WHERE agent_id = ?", reminder.Target)
 		return err
 	}
-	interval := time.Duration(*reminder.IntervalMS) * time.Millisecond
-	next, err := recurringDueAtAfterNow(reminder.NextDueAt, interval, now)
+	intervalMS := *reminder.IntervalMS
+	next, err := recurringDueAtAfterNow(reminder.NextDueAt, intervalMS, now)
 	if err != nil {
 		return err
 	}
@@ -262,7 +268,7 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 	}
 	prior, _ := protocol.ParseTimestamp(reminder.NextDueAt)
 	current, _ := protocol.ParseTimestamp(now)
-	if !prior.Add(interval).After(current) {
+	if current.UnixMilli()-prior.UnixMilli() >= intervalMS {
 		_, err = s.db.ExecContext(ctx, "UPDATE reminders SET next_due_at=? WHERE id=? AND state='scheduled' AND linked_message_id IS NULL", next, reminder.ID)
 		return err
 	}
@@ -391,7 +397,7 @@ func validateReminderRequest(request ReminderRequest, maxBodyBytes int) (Reminde
 	if !reminderIDPattern.MatchString(request.ID) {
 		return ReminderRequest{}, &ReminderValidationError{Reason: "reminder id is invalid"}
 	}
-	if request.IntervalMS != nil && *request.IntervalMS <= 0 {
+	if request.IntervalMS != nil && (*request.IntervalMS <= 0 || *request.IntervalMS > maxJSSafeInteger) {
 		return ReminderRequest{}, &ReminderValidationError{Reason: "interval_ms must be null or a positive safe integer"}
 	}
 	candidate := protocol.Envelope{ID: "reminder-" + request.ID + "-0", From: request.Creator, To: request.Target, Subject: request.Subject, Body: request.Body, CreatedAt: request.CreatedAt, Sentinel: request.Sentinel}
@@ -403,8 +409,8 @@ func validateReminderRequest(request ReminderRequest, maxBodyBytes int) (Reminde
 	}
 	if request.IntervalMS != nil {
 		due, _ := protocol.ParseTimestamp(request.NextDueAt)
-		if due.Add(time.Duration(*request.IntervalMS) * time.Millisecond).Before(due) {
-			return ReminderRequest{}, &ReminderValidationError{}
+		if due.UnixMilli() > maxUTCMillis-*request.IntervalMS {
+			return ReminderRequest{}, &ReminderValidationError{Reason: "interval_ms cannot advance beyond supported UTC timestamps"}
 		}
 	}
 	return request, nil

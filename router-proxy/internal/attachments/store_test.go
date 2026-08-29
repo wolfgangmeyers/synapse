@@ -28,8 +28,11 @@ func TestAttachmentLifecycleUsesPrivateDirectoryAndAtomicFinalize(t *testing.T) 
 	pending, err := store.WriteTemp("message-1", 1, Input{MIMEType: "image/png", Name: "screen shot.png", Bytes: data})
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(store.directory, pending.ID))
-	require.ErrorIs(t, err, os.ErrNotExist)
-	require.NoError(t, store.Finalize(pending))
+	require.NoError(t, err, "the published file exists before the caller writes its database row")
+	require.NoError(t, store.Finalize(pending), "Finalize remains a safe compatibility check after publication")
+	require.NoError(t, store.Discard(pending), "the caller can compensate for a failed database enqueue")
+	pending, err = store.WriteTemp("message-1", 1, Input{MIMEType: "image/png", Name: "screen shot.png", Bytes: data})
+	require.NoError(t, err)
 	got, metadata, err := store.Read(pending.ID)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
@@ -56,7 +59,8 @@ func TestAttachmentAdmissionMatchesNodeCountAndByteLimits(t *testing.T) {
 func TestAttachmentSweepKeepsReferencedAndRemovesExpiredFiles(t *testing.T) {
 	start := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	clock := deterministic.NewFixedClock(start)
-	store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images"), Clock: clock, Retention: time.Hour})
+	references := map[string]bool{}
+	store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images"), Clock: clock, Retention: time.Hour, Referenced: func(id string) bool { return references[id] }})
 	require.NoError(t, err)
 	old, err := store.WriteTemp("message-1", 1, Input{MIMEType: "image/png", Bytes: pngFixture(1, 1)})
 	require.NoError(t, err)
@@ -66,13 +70,15 @@ func TestAttachmentSweepKeepsReferencedAndRemovesExpiredFiles(t *testing.T) {
 	require.NoError(t, store.Finalize(kept))
 	require.NoError(t, os.Chtimes(filepath.Join(store.directory, old.ID), start.Add(-2*time.Hour), start.Add(-2*time.Hour)))
 	require.NoError(t, os.Chtimes(filepath.Join(store.directory, kept.ID), start.Add(-2*time.Hour), start.Add(-2*time.Hour)))
-	removed, err := store.Sweep(func(id string) bool { return id == kept.ID })
+	references[kept.ID] = true
+	removed, err := store.Sweep(nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{old.ID}, removed)
 	_, _, err = store.Read(old.ID)
 	require.ErrorIs(t, err, os.ErrNotExist)
-	_, _, err = store.Read(kept.ID)
-	require.ErrorIs(t, err, os.ErrNotExist, "unreferenced stale files are rejected by reads too")
+	got, _, err := store.Read(kept.ID)
+	require.NoError(t, err, "referenced stale files remain readable")
+	require.Equal(t, pngFixture(1, 1), got)
 }
 
 func TestAttachmentDirectoryRejectsSymlink(t *testing.T) {

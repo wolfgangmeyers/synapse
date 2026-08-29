@@ -144,7 +144,6 @@ func (s *Store) rearmRecurring(ctx context.Context, messageID, now string) ([]Re
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	type r struct {
 		id, due  string
 		interval int64
@@ -153,16 +152,21 @@ func (s *Store) rearmRecurring(ctx context.Context, messageID, now string) ([]Re
 	for rows.Next() {
 		var x r
 		if err := rows.Scan(&x.id, &x.due, &x.interval); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		list = append(list, x)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	var out []RearmedReminder
 	for _, x := range list {
-		next, err := recurringDueAtAfterNow(x.due, time.Duration(x.interval)*time.Millisecond, now)
+		next, err := recurringDueAtAfterNow(x.due, x.interval, now)
 		if err != nil {
 			return nil, err
 		}
@@ -176,7 +180,10 @@ func (s *Store) rearmRecurring(ctx context.Context, messageID, now string) ([]Re
 	}
 	return out, nil
 }
-func recurringDueAtAfterNow(prior string, interval time.Duration, now string) (string, error) {
+func recurringDueAtAfterNow(prior string, intervalMS int64, now string) (string, error) {
+	if intervalMS <= 0 || intervalMS > maxJSSafeInteger {
+		return "", &ReminderValidationError{Reason: "interval_ms must be a positive safe integer"}
+	}
 	p, err := protocol.ParseTimestamp(prior)
 	if err != nil {
 		return "", err
@@ -188,15 +195,26 @@ func recurringDueAtAfterNow(prior string, interval time.Duration, now string) (s
 	if p.After(n) {
 		return prior, nil
 	}
-	steps := int64(n.Sub(p)/interval) + 1
-	return p.Add(time.Duration(steps) * interval).UTC().Format("2006-01-02T15:04:05.000Z"), nil
+	priorMS, nowMS := p.UnixMilli(), n.UnixMilli()
+	steps := (nowMS-priorMS)/intervalMS + 1
+	if steps <= 0 || steps > (maxUTCMillis-priorMS)/intervalMS {
+		return "", &ReminderValidationError{Reason: "recurrence cannot advance beyond supported UTC timestamps"}
+	}
+	nextMS := priorMS + steps*intervalMS
+	if nextMS > maxUTCMillis {
+		return "", &ReminderValidationError{Reason: "recurrence cannot advance beyond supported UTC timestamps"}
+	}
+	return timeFromUnixMilli(nextMS), nil
+}
+
+func timeFromUnixMilli(value int64) string {
+	return time.UnixMilli(value).UTC().Format("2006-01-02T15:04:05.000Z")
 }
 func (s *Store) rearmFailedReminder(ctx context.Context, messageID, now string) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT id,next_due_at,interval_ms FROM reminders WHERE linked_message_id = ? AND state = 'failed'", messageID)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	type r struct {
 		id, due  string
 		interval sql.NullInt64
@@ -205,11 +223,16 @@ func (s *Store) rearmFailedReminder(ctx context.Context, messageID, now string) 
 	for rows.Next() {
 		var x r
 		if err := rows.Scan(&x.id, &x.due, &x.interval); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		list = append(list, x)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 	for _, x := range list {
@@ -219,7 +242,7 @@ func (s *Store) rearmFailedReminder(ctx context.Context, messageID, now string) 
 			}
 			continue
 		}
-		next, err := recurringDueAtAfterNow(x.due, time.Duration(x.interval.Int64)*time.Millisecond, now)
+		next, err := recurringDueAtAfterNow(x.due, x.interval.Int64, now)
 		if err != nil {
 			return err
 		}
