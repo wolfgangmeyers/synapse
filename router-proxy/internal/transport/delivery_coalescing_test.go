@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -90,6 +91,58 @@ func TestFinalSessionCloseCancelsDeliveryOffer(t *testing.T) {
 	router.deliveryOfferMu.Lock()
 	require.Empty(t, router.pendingDeliveryOffers)
 	router.deliveryOfferMu.Unlock()
+}
+
+func TestDirectDeliveryOfferIsTrackedByRouterClose(t *testing.T) {
+	durable, router := newTransportOrderingFixture(t)
+	sendStarted := make(chan struct{})
+	releaseSend := make(chan struct{})
+	session := newTransportSession(t, router, durable, "recipient", "instance", "lease", "agent", func(fields map[string]any) error {
+		if fields["type"] == "message" {
+			close(sendStarted)
+			<-releaseSend
+		}
+		return nil
+	})
+	session.closeOverride = func(websocket.StatusCode, string) error { return nil }
+	_, err := durable.Enqueue(context.Background(), testEnvelope("direct-offer", "body"))
+	require.NoError(t, err)
+	offerDone := make(chan struct{})
+	go func() {
+		router.offer(session)
+		close(offerDone)
+	}()
+	<-sendStarted
+
+	closeContext, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = router.Close(closeContext)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	select {
+	case <-offerDone:
+		t.Fatal("Close returned before the direct offer finished")
+	default:
+	}
+	close(releaseSend)
+	select {
+	case <-offerDone:
+	case <-time.After(time.Second):
+		t.Fatal("direct offer did not finish after send was released")
+	}
+}
+
+func TestStopPendingDeliveryOffersHonorsDeadlineWhileStoreOfferIsInFlight(t *testing.T) {
+	_, router := newTransportOrderingFixture(t)
+	_, finishStore, finishOffer, ok := router.beginDeliveryOffer(context.Background())
+	require.True(t, ok)
+
+	closeContext, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := router.stopPendingDeliveryOffers(closeContext)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	finishStore()
+	finishOffer()
 }
 
 func TestRouterShutdownClearsAndWaitsForDeliveryOffers(t *testing.T) {
