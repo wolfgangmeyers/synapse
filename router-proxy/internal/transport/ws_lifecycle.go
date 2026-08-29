@@ -205,7 +205,11 @@ func (r *Router) sessionClosedSerialized(s *session) {
 		if primary && len(subscribers) > 0 {
 			// A conversation-sync secondary owns the shared lease after the
 			// primary closes. Delivery remains on exactly one socket.
-			for _, replacement := range subscribers {
+			for _, instanceID := range r.conversationOrder[s.agentID] {
+				replacement := subscribers[instanceID]
+				if replacement == nil {
+					continue
+				}
 				r.sessions[s.agentID] = replacement
 				promoted = replacement
 				primary = false

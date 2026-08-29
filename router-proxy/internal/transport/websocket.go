@@ -271,15 +271,17 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	owner := r.sessions[agentID]
 	subscribers := r.convos[agentID]
 	var reconnecting *session
+	var conversationOrder []string
 	if subscribers != nil {
 		reconnecting = subscribers[instanceID]
+		conversationOrder = append([]string(nil), r.conversationOrder[agentID]...)
 	}
 	r.mu.RUnlock()
 
 	// conversation_sync sockets share one lease. Publish the replacement before
 	// closing the old socket, and undo that publication if its welcome frame fails.
 	if frameString(frame, "conversation_sync") == "v1" && subscribers != nil {
-		if registered, err := r.registerConversationSync(s, frame, owner, reconnecting, subscribers, transition); registered {
+		if registered, err := r.registerConversationSync(s, frame, owner, reconnecting, subscribers, conversationOrder, transition); registered {
 			return err
 		}
 	}
@@ -294,7 +296,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		var duplicate *store.DuplicateAgentLeaseError
 		if errors.As(err, &duplicate) {
 			if frameString(frame, "conversation_sync") == "v1" && owner != nil && subscribers != nil {
-				if registered, sharedErr := r.registerConversationSync(s, frame, owner, reconnecting, subscribers, transition); registered {
+				if registered, sharedErr := r.registerConversationSync(s, frame, owner, reconnecting, subscribers, conversationOrder, transition); registered {
 					return sharedErr
 				}
 			}
@@ -349,7 +351,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	}
 	r.mu.Unlock()
 	if err := r.sendRegistered(s, frame, lease); err != nil {
-		r.rollbackRegisteredLease(s, owner, subscribers, oldLease, agentID)
+		r.rollbackRegisteredLease(s, owner, subscribers, conversationOrder, oldLease, agentID)
 		_ = s.close(websocket.StatusInternalError, "registration failed")
 		return err
 	}
@@ -365,7 +367,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	return nil
 }
 
-func (r *Router) registerConversationSync(s *session, frame map[string]json.RawMessage, owner, reconnecting *session, subscribers map[string]*session, transition *ownershipTransition) (bool, error) {
+func (r *Router) registerConversationSync(s *session, frame map[string]json.RawMessage, owner, reconnecting *session, subscribers map[string]*session, conversationOrder []string, transition *ownershipTransition) (bool, error) {
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
 	lease, leaseErr := r.store.LeaseFor(context.Background(), agentID)
 	if owner == nil || leaseErr != nil || lease == nil || lease.ExpiresAt <= timestamp(r.now()) {
@@ -398,7 +400,7 @@ func (r *Router) registerConversationSync(s *session, frame map[string]json.RawM
 	}
 	r.mu.Unlock()
 	if err := r.sendRegistered(s, frame, *lease); err != nil {
-		r.rollbackSharedRegistration(s, owner, reconnecting, subscribers, agentID, instanceID)
+		r.rollbackSharedRegistration(s, owner, reconnecting, subscribers, conversationOrder, agentID, instanceID)
 		_ = s.close(websocket.StatusInternalError, "registration failed")
 		return true, err
 	}
@@ -414,7 +416,7 @@ func (r *Router) registerConversationSync(s *session, frame map[string]json.RawM
 	return true, nil
 }
 
-func (r *Router) rollbackSharedRegistration(s, owner, reconnecting *session, subscribers map[string]*session, agentID, instanceID string) {
+func (r *Router) rollbackSharedRegistration(s, owner, reconnecting *session, subscribers map[string]*session, conversationOrder []string, agentID, instanceID string) {
 	r.mu.Lock()
 	if subscribers[instanceID] == s {
 		delete(subscribers, instanceID)
@@ -422,10 +424,13 @@ func (r *Router) rollbackSharedRegistration(s, owner, reconnecting *session, sub
 	if owner == reconnecting && r.sessions[agentID] == s {
 		r.sessions[agentID] = owner
 	}
+	if subscribers != nil {
+		r.conversationOrder[agentID] = append([]string(nil), conversationOrder...)
+	}
 	r.mu.Unlock()
 }
 
-func (r *Router) rollbackRegisteredLease(s, owner *session, subscribers map[string]*session, oldLease *domain.Lease, agentID string) {
+func (r *Router) rollbackRegisteredLease(s, owner *session, subscribers map[string]*session, conversationOrder []string, oldLease *domain.Lease, agentID string) {
 	r.mu.Lock()
 	if r.sessions[agentID] == s {
 		if owner != nil {
@@ -438,8 +443,10 @@ func (r *Router) rollbackRegisteredLease(s, owner *session, subscribers map[stri
 		if current[s.instanceID] == s {
 			if subscribers != nil {
 				r.convos[agentID] = subscribers
+				r.conversationOrder[agentID] = append([]string(nil), conversationOrder...)
 			} else {
 				delete(r.convos, agentID)
+				delete(r.conversationOrder, agentID)
 			}
 		}
 	}
@@ -720,6 +727,10 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 		r.mu.Unlock()
 		return r.leaseError(s, frame)
 	}
+	if state == "compacting" {
+		count = 0
+		subagents = []map[string]any{}
+	}
 	if state == "settled" && count == 0 {
 		delete(r.activities, s.agentID)
 		wasSettled = true
@@ -750,7 +761,7 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 	return nil
 }
 func (r *Router) broadcastIdle(agentID, instanceID string, now time.Time) {
-	r.broadcast(map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "generated_at": timestamp(now)})
+	r.broadcast(map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "goal": map[string]any{"enabled": false, "goal": ""}, "generated_at": timestamp(now)})
 }
 
 func (r *Router) modelControl(s *session, frame map[string]json.RawMessage) error {
