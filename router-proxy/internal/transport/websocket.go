@@ -666,7 +666,16 @@ func (r *Router) modelCatalog(s *session, frame map[string]json.RawMessage) erro
 		r.mu.Unlock()
 		return r.leaseError(s, frame)
 	}
+	if current == nil {
+		if previous, ok := r.models[s.agentID]; ok && previous.instanceID == s.instanceID && previous.leaseID == s.leaseID {
+			current = previous.current
+		}
+	}
 	r.models[s.agentID] = modelProjection{instanceID: s.instanceID, leaseID: s.leaseID, current: current, available: models, total: total, truncated: truncated}
+	if activity, ok := r.activities[s.agentID]; ok && activity.instanceID == s.instanceID && activity.leaseID == s.leaseID {
+		activity.model = cloneMap(current)
+		r.activities[s.agentID] = activity
+	}
 	r.mu.Unlock()
 	r.broadcastModel(s.agentID)
 	return nil
@@ -722,10 +731,33 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 		_ = json.Unmarshal(raw, &model)
 	}
 	wasSettled := false
+	var previous activity
 	r.mu.Lock()
 	if !r.activeSessionLocked(s) {
 		r.mu.Unlock()
 		return r.leaseError(s, frame)
+	}
+	if value, ok := r.activities[s.agentID]; ok && value.instanceID == s.instanceID && value.leaseID == s.leaseID {
+		previous = value
+	}
+	if model == nil && previous.model != nil {
+		model = cloneMap(previous.model)
+	}
+	if model == nil {
+		if value, ok := r.models[s.agentID]; ok && value.instanceID == s.instanceID && value.leaseID == s.leaseID {
+			model = cloneMap(value.current)
+		}
+	}
+	if model != nil {
+		projection := r.models[s.agentID]
+		if projection.instanceID != s.instanceID || projection.leaseID != s.leaseID {
+			projection = modelProjection{instanceID: s.instanceID, leaseID: s.leaseID}
+		}
+		projection.current = cloneMap(model)
+		r.models[s.agentID] = projection
+	}
+	if goal == nil && previous.goal != nil {
+		goal = cloneMap(previous.goal)
 	}
 	if state == "compacting" {
 		count = 0
@@ -751,7 +783,7 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 	r.mu.Unlock()
 	r.setAgentPaused(s.agentID, state == "compacting")
 	if wasSettled {
-		r.broadcastIdle(s.agentID, s.instanceID, now)
+		r.broadcastIdle(s.agentID, s.instanceID, now, model)
 	} else {
 		r.broadcastActivity(s.agentID)
 	}
@@ -760,8 +792,12 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 	}
 	return nil
 }
-func (r *Router) broadcastIdle(agentID, instanceID string, now time.Time) {
-	r.broadcast(map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "goal": map[string]any{"enabled": false, "goal": ""}, "generated_at": timestamp(now)})
+func (r *Router) broadcastIdle(agentID, instanceID string, now time.Time, model map[string]any) {
+	fields := map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "goal": map[string]any{"enabled": false, "goal": ""}, "generated_at": timestamp(now)}
+	if model != nil {
+		fields["current_model"] = model
+	}
+	r.broadcast(fields)
 }
 
 func (r *Router) modelControl(s *session, frame map[string]json.RawMessage) error {
@@ -945,7 +981,12 @@ func (r *Router) recordGoal(s *session, frame map[string]json.RawMessage) {
 		r.mu.Unlock()
 		return
 	}
-	r.goals[s.agentID] = goalState{instanceID: s.instanceID, leaseID: s.leaseID, state: rawMapToAny(state), projection: map[string]any{"enabled": frameAny(state, "enabled"), "goal": frameAny(state, "goal")}}
+	projection := map[string]any{"enabled": frameAny(state, "enabled"), "goal": frameAny(state, "goal")}
+	r.goals[s.agentID] = goalState{instanceID: s.instanceID, leaseID: s.leaseID, state: rawMapToAny(state), projection: projection}
+	if activity, ok := r.activities[s.agentID]; ok && activity.instanceID == s.instanceID && activity.leaseID == s.leaseID {
+		activity.goal = cloneMap(projection)
+		r.activities[s.agentID] = activity
+	}
 	r.mu.Unlock()
 	r.broadcastGoal(s.agentID)
 }

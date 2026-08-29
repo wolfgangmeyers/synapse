@@ -188,10 +188,29 @@ func (r *Router) expireActivity(agentID string, now time.Time) error {
 		return nil
 	}
 	delete(r.activities, agentID)
+	goal := cloneMap(activity.goal)
+	model := cloneMap(activity.model)
+	if goal == nil {
+		if value, ok := r.goals[agentID]; ok && value.instanceID == activity.instanceID && value.leaseID == activity.leaseID {
+			goal = cloneMap(value.projection)
+		}
+	}
+	if model == nil {
+		if value, ok := r.models[agentID]; ok && value.instanceID == activity.instanceID && value.leaseID == activity.leaseID {
+			model = cloneMap(value.current)
+		}
+	}
 	primary := r.sessions[agentID]
 	r.mu.Unlock()
 	r.setAgentPaused(agentID, false)
-	r.broadcast(map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": activity.instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "generated_at": timestamp(now)})
+	fields := map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": activity.instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "generated_at": timestamp(now)}
+	if goal != nil {
+		fields["goal"] = goal
+	}
+	if model != nil {
+		fields["current_model"] = model
+	}
+	r.broadcast(fields)
 	r.offer(primary)
 	return nil
 }
@@ -258,10 +277,11 @@ func (r *Router) connectedAgents() map[string]any {
 			continue
 		}
 		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}}
-		if a, ok := activities[s.agentID]; ok && a.instanceID == s.instanceID && a.leaseID == lease.LeaseID && a.expires.After(now) {
-			item["activity_state"] = a.state
-			item["subagent_count"] = a.count
-			item["subagents"] = a.subagents
+		activity, activityOK := activities[s.agentID]
+		if activityOK && activity.instanceID == s.instanceID && activity.leaseID == lease.LeaseID && activity.expires.After(now) {
+			item["activity_state"] = activity.state
+			item["subagent_count"] = activity.count
+			item["subagents"] = activity.subagents
 		}
 		if model, ok := models[s.agentID]; ok && model.instanceID == s.instanceID && model.leaseID == lease.LeaseID {
 			item["available_models"] = model.available
@@ -275,9 +295,21 @@ func (r *Router) connectedAgents() map[string]any {
 			item["model_catalog_total_count"] = 0
 			item["model_catalog_truncated"] = false
 		}
+		if activityOK && activity.instanceID == s.instanceID && activity.leaseID == lease.LeaseID {
+			if activity.goal != nil {
+				item["goal"] = activity.goal
+			}
+			if activity.model != nil {
+				item["current_model"] = activity.model
+			}
+		}
 		if goal, ok := goals[s.agentID]; ok && goal.instanceID == s.instanceID && goal.leaseID == lease.LeaseID {
-			item["goal"] = goal.projection
-			item["goal_state"] = goal.state
+			if _, exists := item["goal"]; !exists && goal.projection != nil {
+				item["goal"] = goal.projection
+			}
+			if goal.state != nil {
+				item["goal_state"] = goal.state
+			}
 		}
 		if state, ok := lifecycle[s.agentID]; ok {
 			item["subagent_version"] = state.version
