@@ -3563,7 +3563,7 @@ test("client exposes one delivery item for single-message deliveries", async () 
   client.close();
 });
 
-test("client sends delivery_items on batch receipts", async () => {
+test("client sends delivery_items on batch receipts", async (t) => {
   const socket = new EventTarget();
   socket.readyState = 0;
   socket.sent = [];
@@ -3578,8 +3578,10 @@ test("client sends delivery_items on batch receipts", async () => {
       client.sendReceipt("ack", delivery);
     },
     webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: false, status: 404 }),
     generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
   });
+  t.after(() => client.close());
 
   const connected = client.connect();
   socket.readyState = 1;
@@ -3638,10 +3640,9 @@ test("client sends delivery_items on batch receipts", async () => {
       items: [{ id: "client-batch-1", attempt: 2 }, { id: "client-batch-2", attempt: 1 }],
     },
   ]);
-  client.close();
 });
 
-test("client does not NACK a Pi injection when its receipt send fails", async () => {
+test("client does not NACK a Pi injection when its receipt send fails", async (t) => {
   const socket = new EventTarget();
   socket.readyState = 0;
   socket.sent = [];
@@ -3666,13 +3667,16 @@ test("client does not NACK a Pi injection when its receipt send fails", async ()
     agentId: "worker",
     onEnvelope: (message, delivery) => coordinator.onEnvelope(message, delivery),
     webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: false, status: 404 }),
     generateId: (() => { let index = 0; return () => `id-${++index}`; })(),
   });
+  t.after(() => client.close());
   coordinator = createPiMailboxDeliveryCoordinator({
     pi: { sendMessage: (...args) => sent.push(args) },
     sessionContext: context,
     client,
   });
+  t.after(() => coordinator.close());
 
   const connected = client.connect();
   socket.readyState = 1;
@@ -3690,8 +3694,6 @@ test("client does not NACK a Pi injection when its receipt send fails", async ()
 
   assert.equal(sent.length, 1);
   assert.deepEqual(socket.sent.map(({ type }) => type), ["register"]);
-  coordinator.close();
-  client.close();
 });
 
 test("Pi injection failure NACKs without acknowledging the delivery", async () => {
