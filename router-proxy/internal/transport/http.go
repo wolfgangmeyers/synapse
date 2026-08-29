@@ -524,12 +524,9 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 	r.offerAgent(result.Message.To)
 }
 func (r *Router) broadcastConversation(message domain.ConversationMessage) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, subs := range r.convos {
-		for _, candidate := range subs {
-			_ = candidate.send(map[string]any{"type": "conversation_message", "message": message})
-		}
+	// A conversation update belongs to either endpoint's projected conversation.
+	for _, candidate := range r.conversationRecipients(message.From, message.To) {
+		_ = candidate.send(map[string]any{"type": "conversation_message", "message": message})
 	}
 }
 

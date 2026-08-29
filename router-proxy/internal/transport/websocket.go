@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -68,7 +69,8 @@ func (r *Router) readLoop(s *session) {
 			continue
 		}
 		if err := validateClientFrame(frame); err != nil {
-			_ = s.sendError("invalid_frame", frameString(frame, "frame_id"))
+			// Node does not echo a request id for a frame that failed schema validation.
+			_ = s.sendError("invalid_frame", "")
 			continue
 		}
 		if frameString(frame, "type") == "register" {
@@ -146,28 +148,7 @@ func hex16(value string) (uint16, bool) {
 	return result, true
 }
 func validateClientFrame(frame map[string]json.RawMessage) error {
-	if frameString(frame, "version") != "v1" || !frameIDRE.MatchString(frameString(frame, "frame_id")) {
-		return errors.New("invalid frame")
-	}
-	typ := frameString(frame, "type")
-	required, ok := clientFrameTypes[typ]
-	if !ok {
-		return errors.New("invalid frame")
-	}
-	for _, key := range required {
-		if _, ok := frame[key]; !ok {
-			return errors.New("invalid frame")
-		}
-	}
-	if typ == "register" {
-		if strings.Contains(frameString(frame, "agent_id"), "@") || !agentIDRE.MatchString(frameString(frame, "agent_id")) || !frameIDRE.MatchString(frameString(frame, "instance_id")) {
-			return errors.New("invalid frame")
-		}
-	}
-	if typ != "register" && (strings.Contains(frameString(frame, "agent_id"), "@") || !agentIDRE.MatchString(frameString(frame, "agent_id")) || !frameIDRE.MatchString(frameString(frame, "instance_id")) || !frameIDRE.MatchString(frameString(frame, "lease_id"))) {
-		return errors.New("invalid frame")
-	}
-	return nil
+	return protocol.ValidateClientFrame(frame)
 }
 func frameString(frame map[string]json.RawMessage, key string) string {
 	var result string
@@ -446,7 +427,7 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 	r.mu.Lock()
 	if state == "settled" && count == 0 {
 		delete(r.activities, s.agentID)
-		s.paused = false
+		s.setPaused(false)
 	} else {
 		expires := now.Add(r.activityTTL)
 		if state == "compacting" {
@@ -456,7 +437,7 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 			count = 999
 		}
 		r.activities[s.agentID] = activity{state: map[bool]string{true: "active", false: "idle"}[state == "active"], instanceID: s.instanceID, until: now.Add(r.activityTTL), expires: expires, count: count, subagents: subagents, goal: goal, model: model}
-		s.paused = state == "compacting"
+		s.setPaused(state == "compacting")
 	}
 	r.mu.Unlock()
 	r.broadcastActivity(s.agentID)
@@ -688,25 +669,8 @@ func (r *Router) messageArrival(s *session, frame map[string]json.RawMessage) er
 	return nil
 }
 func (r *Router) broadcast(fields map[string]any) {
-	r.mu.Lock()
-	sessions := make([]*session, 0)
-	seen := map[*session]bool{}
-	for _, candidate := range r.sessions {
-		if !seen[candidate] {
-			seen[candidate] = true
-			sessions = append(sessions, candidate)
-		}
-	}
-	for _, subscribers := range r.convos {
-		for _, candidate := range subscribers {
-			if !seen[candidate] {
-				seen[candidate] = true
-				sessions = append(sessions, candidate)
-			}
-		}
-	}
-	r.mu.Unlock()
-	for _, candidate := range sessions {
+	// Node projects live broadcasts only to conversation-sync subscribers.
+	for _, candidate := range r.conversationRecipients() {
 		_ = candidate.send(fields)
 	}
 }
@@ -763,7 +727,7 @@ func (r *Router) receiptError(s *session, frame map[string]json.RawMessage, err 
 	return err
 }
 func (r *Router) offer(s *session) {
-	if s == nil || !r.activeSession(s) || !r.activeLease(s) || s.paused {
+	if s == nil || !r.activeSession(s) || !r.activeLease(s) || s.isPaused() {
 		return
 	}
 	delivery, err := r.store.ClaimNextMessage(context.Background(), store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, DeliveryLeaseDuration: r.delivery})

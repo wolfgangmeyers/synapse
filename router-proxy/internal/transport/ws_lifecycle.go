@@ -15,7 +15,7 @@ func (r *Router) syncEnable(s *session, frame map[string]json.RawMessage) error 
 	if !r.sessionMatches(s, frame) {
 		return r.leaseError(s, frame)
 	}
-	s.lifecycleEnabled = true
+	s.setLifecycleEnabled(true)
 	return r.sendLifecycleSnapshot(s)
 }
 func (r *Router) syncResync(s *session, frame map[string]json.RawMessage) error {
@@ -63,21 +63,72 @@ func (r *Router) lifecycleFrame(s *session, frame map[string]json.RawMessage) er
 	}
 	return r.broadcastLifecycle(s.agentID, version)
 }
-func (r *Router) broadcastLifecycle(agentID string, version int64) error {
+func (r *Router) conversationRecipients(agentIDs ...string) []*session {
 	r.mu.Lock()
-	state := r.lifecycleState[agentID]
+	defer r.mu.Unlock()
 	recipients := make([]*session, 0)
-	for _, subs := range r.convos {
-		for _, candidate := range subs {
-			if candidate.lifecycleEnabled {
+	seen := map[*session]bool{}
+	add := func(subscribers map[string]*session) {
+		for _, candidate := range subscribers {
+			if !seen[candidate] {
+				seen[candidate] = true
 				recipients = append(recipients, candidate)
 			}
 		}
 	}
+	if len(agentIDs) == 0 {
+		for _, subscribers := range r.convos {
+			add(subscribers)
+		}
+	} else {
+		for _, agentID := range agentIDs {
+			add(r.convos[agentID])
+		}
+	}
+	return recipients
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	result := make(map[string]any, len(value))
+	for key, item := range value {
+		result[key] = cloneValue(item)
+	}
+	return result
+}
+func cloneValue(value any) any {
+	switch item := value.(type) {
+	case map[string]any:
+		return cloneMap(item)
+	case []map[string]any:
+		result := make([]map[string]any, len(item))
+		for index, child := range item {
+			result[index] = cloneMap(child)
+		}
+		return result
+	case []any:
+		result := make([]any, len(item))
+		for index, child := range item {
+			result[index] = cloneValue(child)
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+func (r *Router) broadcastLifecycle(agentID string, version int64) error {
+	r.mu.Lock()
+	state := r.lifecycleState[agentID]
+	subs := cloneValue(state.subagents).([]map[string]any)
 	r.mu.Unlock()
-	projection := map[string]any{"agent_id": agentID, "subagent_version": state.version, "subagent_count": len(state.subagents), "subagents": state.subagents}
-	for _, recipient := range recipients {
-		_ = recipient.send(map[string]any{"type": "subagent_state_update", "router_version": version, "agent": projection})
+	projection := map[string]any{"agent_id": agentID, "subagent_version": state.version, "subagent_count": len(subs), "subagents": subs}
+	for _, recipient := range r.conversationRecipients() {
+		if recipient.lifecycleEnabledNow() {
+			_ = recipient.send(map[string]any{"type": "subagent_state_update", "router_version": version, "agent": projection})
+		}
 	}
 	return nil
 }
@@ -93,8 +144,12 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 		delete(r.activities, s.agentID)
 		delete(r.goals, s.agentID)
 	}
+	// A reconnect can replace the same agent and instance before the old
+	// reader observes its close. Only remove the exact old subscription.
 	if subscribers := r.convos[s.agentID]; subscribers != nil {
-		delete(subscribers, s.instanceID)
+		if subscribers[s.instanceID] == s {
+			delete(subscribers, s.instanceID)
+		}
 		if len(subscribers) == 0 {
 			delete(r.convos, s.agentID)
 		}
@@ -121,6 +176,11 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 func (r *Router) broadcastActivity(agentID string) {
 	r.mu.Lock()
 	a, ok := r.activities[agentID]
+	if ok {
+		a.subagents = cloneValue(a.subagents).([]map[string]any)
+		a.goal = cloneMap(a.goal)
+		a.model = cloneMap(a.model)
+	}
 	if !ok {
 		r.mu.Unlock()
 		return
@@ -138,6 +198,10 @@ func (r *Router) broadcastActivity(agentID string) {
 func (r *Router) broadcastModel(agentID string) {
 	r.mu.Lock()
 	model, ok := r.models[agentID]
+	if ok {
+		model.available = cloneValue(model.available).([]map[string]any)
+		model.current = cloneMap(model.current)
+	}
 	r.mu.Unlock()
 	if !ok {
 		return
@@ -151,6 +215,9 @@ func (r *Router) broadcastModel(agentID string) {
 func (r *Router) broadcastGoal(agentID string) {
 	r.mu.Lock()
 	goal, ok := r.goals[agentID]
+	if ok {
+		goal.state = cloneMap(goal.state)
+	}
 	r.mu.Unlock()
 	if !ok {
 		return
