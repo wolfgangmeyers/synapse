@@ -380,8 +380,8 @@ func (r *Router) URLs() (string, string) {
 	return fmt.Sprintf("http://%s:%d", host, port), fmt.Sprintf("ws://%s:%d%s", host, port, r.path)
 }
 
-// Listen binds the configured address and serves until Close. The startup
-// lifecycle sweep runs after router_started, matching the Node router.
+// Listen performs the startup lifecycle sweep before opening the listener.
+// A router only becomes reachable after its durable state is clean.
 func (r *Router) Listen(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
@@ -392,6 +392,9 @@ func (r *Router) Listen(ctx context.Context) error {
 		return errors.New("router is already listening")
 	}
 	r.mu.Unlock()
+	if err := r.runSweep(ctx); err != nil {
+		return err
+	}
 	listener, err := net.Listen("tcp", net.JoinHostPort(r.host, fmt.Sprint(r.port)))
 	if err != nil {
 		return err
@@ -410,12 +413,6 @@ func (r *Router) Listen(ctx context.Context) error {
 	_, websocketURL := r.URLs()
 	r.log("router_started", map[string]any{"host": r.host, "port": listener.Addr().(*net.TCPAddr).Port, "router_url": websocketURL})
 	go func() { _ = server.Serve(listener); close(done) }()
-	if err := r.runSweep(ctx); err != nil {
-		// No periodic goroutine owns this channel until startup succeeds.
-		close(sweepDone)
-		_ = r.Close(context.Background())
-		return err
-	}
 	go r.sweepLoop(sweepCtx, sweepDone)
 	return nil
 }
@@ -477,21 +474,19 @@ func (r *Router) Close(ctx context.Context) error {
 	if server != nil {
 		err = server.Shutdown(ctx)
 	}
-	if r.attachments != nil {
-		if sweepErr := r.sweepAttachments(); err == nil {
-			err = sweepErr
-		}
-	}
+	r.sweepAttachmentsBestEffort()
 	if r.memory != nil {
 		if closeErr := r.memory.Close(); err == nil {
 			err = closeErr
 		}
 	}
+	// The stopped record is part of the Close completion contract. Write it
+	// before releasing waiters from concurrent/idempotent Close calls.
+	r.log("router_stopped", nil)
 	r.mu.Lock()
 	r.closeErr = err
 	close(done)
 	r.mu.Unlock()
-	r.log("router_stopped", nil)
 	return err
 }
 

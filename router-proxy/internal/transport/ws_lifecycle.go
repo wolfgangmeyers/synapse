@@ -121,11 +121,18 @@ func cloneValue(value any) any {
 }
 
 func (r *Router) broadcastLifecycle(agentID string, version int64) error {
-	r.mu.Lock()
+	r.mu.RLock()
 	state := r.lifecycleState[agentID]
-	subs := cloneValue(state.subagents).([]map[string]any)
-	r.mu.Unlock()
-	projection := map[string]any{"agent_id": agentID, "subagent_version": state.version, "subagent_count": len(subs), "subagents": subs}
+	subs := cloneValue(state.subagents)
+	r.mu.RUnlock()
+	var children []map[string]any
+	if subs != nil {
+		children, _ = subs.([]map[string]any)
+	}
+	if children == nil {
+		children = []map[string]any{}
+	}
+	projection := map[string]any{"agent_id": agentID, "subagent_version": version, "subagent_count": len(children), "subagents": children}
 	for _, recipient := range r.conversationRecipients() {
 		if recipient.lifecycleEnabledNow() {
 			_ = recipient.send(map[string]any{"type": "subagent_state_update", "router_version": version, "agent": projection})
