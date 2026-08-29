@@ -460,9 +460,55 @@ func lifecycleHashJSON(value any) []byte {
 	_ = encoder.Encode(value)
 	// encoding/json always escapes these JavaScript-valid line separators,
 	// even with HTML escaping disabled. JSON.stringify emits them literally.
+	// Walk JSON strings so a literal \\u2028 in the value is not mistaken for
+	// encoding/json's escape for an actual separator.
 	encodedBytes := bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})
-	encodedBytes = bytes.ReplaceAll(encodedBytes, []byte(`\u2028`), []byte("\u2028"))
-	return bytes.ReplaceAll(encodedBytes, []byte(`\u2029`), []byte("\u2029"))
+	result := make([]byte, 0, len(encodedBytes))
+	inString := false
+	for index := 0; index < len(encodedBytes); index++ {
+		current := encodedBytes[index]
+		if !inString {
+			result = append(result, current)
+			if current == '"' {
+				inString = true
+			}
+			continue
+		}
+		if current == '"' {
+			result = append(result, current)
+			inString = false
+			continue
+		}
+		if current == '\\' && index+1 < len(encodedBytes) {
+			next := encodedBytes[index+1]
+			if next == 'u' && index+5 < len(encodedBytes) && (bytes.Equal(encodedBytes[index+2:index+6], []byte("2028")) || bytes.Equal(encodedBytes[index+2:index+6], []byte("2029"))) {
+				result = append(result, []byte(string(rune(hexValue(encodedBytes[index+2:index+6]))))...)
+				index += 5
+				continue
+			}
+			result = append(result, current, next)
+			index++
+			continue
+		}
+		result = append(result, current)
+	}
+	return result
+}
+
+func hexValue(value []byte) rune {
+	var result rune
+	for _, digit := range value {
+		result <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			result += rune(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			result += rune(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			result += rune(digit-'A') + 10
+		}
+	}
+	return result
 }
 
 func lifecyclePayloadHash(candidate LifecycleCandidate) string {
