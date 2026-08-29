@@ -33,6 +33,7 @@ func (r *Router) scheduleDeliveryOffer(agentID string) {
 	}
 	pending := &pendingDeliveryOffer{done: make(chan struct{})}
 	r.deliveryOfferWG.Add(1)
+	r.deliveryStoreWG.Add(1)
 	pending.timer = time.AfterFunc(DefaultDeliveryOfferCoalesce, func() {
 		r.runDeliveryOffer(agentID, pending)
 	})
@@ -55,7 +56,13 @@ func (r *Router) runDeliveryOffer(agentID string, pending *pendingDeliveryOffer)
 	r.mu.RLock()
 	session := r.sessions[agentID]
 	r.mu.RUnlock()
-	r.offer(session)
+	fields := func() map[string]any {
+		defer r.deliveryStoreWG.Done()
+		return r.deliveryOfferFields(r.deliveryOffersContext, session)
+	}()
+	if fields != nil && session != nil {
+		_ = session.send(fields)
+	}
 }
 
 func (r *Router) cancelPendingDeliveryOffer(agentID string) {
@@ -70,6 +77,7 @@ func (r *Router) cancelPendingDeliveryOffer(agentID string) {
 	r.deliveryOfferMu.Unlock()
 	if stopped {
 		close(pending.done)
+		r.deliveryStoreWG.Done()
 		r.deliveryOfferWG.Done()
 		return
 	}
@@ -93,8 +101,13 @@ func (r *Router) stopPendingDeliveryOffers(ctx context.Context) error {
 	r.deliveryOfferMu.Unlock()
 	for _, offer := range stopped {
 		close(offer.done)
+		r.deliveryStoreWG.Done()
 		r.deliveryOfferWG.Done()
 	}
+	// Store access is complete before shutdown can return. The delivery offer
+	// callback may still be finishing socket I/O when the caller's deadline
+	// expires, but the launcher is then safe to close the store.
+	r.deliveryStoreWG.Wait()
 	waitDone := make(chan struct{})
 	go func() {
 		r.deliveryOfferWG.Wait()

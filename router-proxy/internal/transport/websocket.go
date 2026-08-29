@@ -609,7 +609,10 @@ func (r *Router) activeSessionLocked(s *session) bool {
 	return r.sessions[s.agentID] == s
 }
 func (r *Router) activeLease(s *session) bool {
-	lease, err := r.store.LeaseFor(context.Background(), s.agentID)
+	return r.activeLeaseContext(context.Background(), s)
+}
+func (r *Router) activeLeaseContext(ctx context.Context, s *session) bool {
+	lease, err := r.store.LeaseFor(ctx, s.agentID)
 	return err == nil && lease != nil && lease.LeaseID == s.leaseID && lease.InstanceID == s.deliveryInstance && lease.ExpiresAt > timestamp(r.now())
 }
 func (r *Router) sessionMatchesIdentity(s *session) bool {
@@ -1246,25 +1249,42 @@ func (r *Router) receiptError(s *session, frame map[string]json.RawMessage, err 
 	return err
 }
 func (r *Router) offer(s *session) {
+	r.offerContext(context.Background(), s)
+}
+func (r *Router) offerContext(ctx context.Context, s *session) {
+	fields := r.deliveryOfferFields(ctx, s)
+	if fields != nil && s != nil {
+		_ = s.send(fields)
+	}
+}
+func (r *Router) deliveryOfferFields(ctx context.Context, s *session) map[string]any {
 	// Conversation-sync sockets share a lease, but only the primary socket owns
 	// durable delivery. Secondary activity must not claim the same queue.
-	if s == nil || !r.isPrimarySession(s) || !r.activeLease(s) || s.isPaused() {
-		return
+	if s == nil || r.isClosed() || ctx.Err() != nil || !r.isPrimarySession(s) || !r.activeLeaseContext(ctx, s) || s.isPaused() {
+		return nil
 	}
-	delivery, err := r.store.ClaimNextMessage(context.Background(), store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, DeliveryLeaseDuration: r.delivery})
-	if err != nil || delivery == nil {
-		return
+	delivery, err := r.store.ClaimNextMessage(ctx, store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, DeliveryLeaseDuration: r.delivery})
+	if err != nil || delivery == nil || ctx.Err() != nil {
+		return nil
 	}
-	fields := map[string]any{"type": "message", "message": deliveryEnvelope(r, s, delivery.Message), "attempt_number": delivery.AttemptNumber, "delivery_expires_at": delivery.DeliveryExpiresAt}
+	fields := map[string]any{"type": "message", "message": deliveryEnvelopeContext(ctx, r, s, delivery.Message), "attempt_number": delivery.AttemptNumber, "delivery_expires_at": delivery.DeliveryExpiresAt}
 	if s.ackConfirmation == "correlated_v1" {
 		fields["message_incarnation_id"] = delivery.Message.MessageIncarnationID
 	}
 	if len(delivery.Items) > 1 {
 		fields["delivery_items"] = delivery.Items
 	}
-	_ = s.send(fields)
+	return fields
+}
+func (r *Router) isClosed() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.closed
 }
 func deliveryEnvelope(r *Router, s *session, message domain.Message) map[string]any {
+	return deliveryEnvelopeContext(context.Background(), r, s, message)
+}
+func deliveryEnvelopeContext(ctx context.Context, r *Router, s *session, message domain.Message) map[string]any {
 	value := map[string]any{"id": message.ID, "from": message.From, "to": message.To, "body": message.Body, "created_at": message.CreatedAt, "source": message.Source}
 	if message.Subject != nil {
 		value["subject"] = *message.Subject
@@ -1278,7 +1298,7 @@ func deliveryEnvelope(r *Router, s *session, message domain.Message) map[string]
 	r.mu.Lock()
 	sender := r.sessions[message.From]
 	r.mu.Unlock()
-	if sender == nil || !r.activeLease(sender) {
+	if sender == nil || !r.activeLeaseContext(ctx, sender) {
 		return value
 	}
 	footer := "\n\n[Reply via mailbox to " + message.From + ".]"
