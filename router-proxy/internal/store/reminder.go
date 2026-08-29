@@ -78,6 +78,13 @@ func (s *Store) CreateReminder(ctx context.Context, request ReminderRequest) (bo
 			if !sameReminderRequest(existing, candidate) {
 				return &ReminderIdempotencyConflictError{ID: candidate.ID}
 			}
+			if _, ok := s.reminderIncarnations[candidate.ID]; !ok {
+				incarnation, err := s.ids.Next()
+				if err != nil {
+					return err
+				}
+				s.reminderIncarnations[candidate.ID] = incarnation
+			}
 			result, created = existing, false
 			return nil
 		}
@@ -92,6 +99,11 @@ func (s *Store) CreateReminder(ctx context.Context, request ReminderRequest) (bo
 		if err != nil {
 			return err
 		}
+		incarnation, err := s.ids.Next()
+		if err != nil {
+			return err
+		}
+		s.reminderIncarnations[candidate.ID] = incarnation
 		result, created = nil, true
 		result, err = s.reminderForTx(ctx, candidate.ID)
 		return err
@@ -138,6 +150,9 @@ func (s *Store) CancelReminder(ctx context.Context, id string) (bool, error) {
 		}
 		count, err := result.RowsAffected()
 		canceled = count == 1
+		if canceled {
+			delete(s.reminderIncarnations, id)
+		}
 		return err
 	})
 	return canceled, err

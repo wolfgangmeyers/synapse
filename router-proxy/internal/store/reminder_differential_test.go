@@ -16,25 +16,27 @@ import (
 )
 
 type reminderSnapshot struct {
-	ReminderState string `json:"reminder_state"`
-	LinkedID      string `json:"linked_id"`
-	MessageState  string `json:"message_state"`
-	MessageBody   string `json:"message_body"`
-	SourceKind    string `json:"source_kind"`
+	ReminderState string   `json:"reminder_state"`
+	LinkedID      string   `json:"linked_id"`
+	MessageState  string   `json:"message_state"`
+	MessageBody   string   `json:"message_body"`
+	SourceKind    string   `json:"source_kind"`
+	IDCalls       []string `json:"id_calls"`
 }
 
 func TestNodeAndGoOneShotReminderTransitionMatch(t *testing.T) {
 	nodePath := filepath.Join(t.TempDir(), "node.db")
 	node := runNodeReminderFixture(t, nodePath)
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
-	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "go.db"), Options{Clock: clock, IDSource: deterministic.NewSequenceIDSource(testUUID("reminder-incarnation"))})
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"), testUUID("0002"))
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "go.db"), Options{Clock: clock, IDSource: ids})
 	require.NoError(t, err)
 	_, _, err = store.CreateReminder(context.Background(), reminderRequest("one-shot", nil))
 	require.NoError(t, err)
 	outcomes, err := store.FireDueReminders(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, outcomes, 1)
-	goResult := reminderSnapshot{ReminderState: outcomes[0].Reminder.State, LinkedID: *outcomes[0].Reminder.LinkedMessageID, MessageState: outcomes[0].Message.State, MessageBody: outcomes[0].Message.Body, SourceKind: outcomes[0].Message.Source.Kind}
+	goResult := reminderSnapshot{ReminderState: outcomes[0].Reminder.State, LinkedID: *outcomes[0].Reminder.LinkedMessageID, MessageState: outcomes[0].Message.State, MessageBody: outcomes[0].Message.Body, SourceKind: outcomes[0].Message.Source.Kind, IDCalls: ids.Calls()}
 	require.Equal(t, node, goResult)
 }
 
@@ -43,26 +45,33 @@ func runNodeReminderFixture(t *testing.T, databasePath string) reminderSnapshot 
 	return runNodeJSON[reminderSnapshot](t, databasePath, `
 const { openMessageRepository } = await import(process.env.MECHA_NODE_STORE_MODULE);
 const now = "2026-08-29T12:00:00.000Z";
-const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now) });
+const id_calls = [];
+const id_values = ["123e4567-e89b-42d3-a456-426614170001", "123e4567-e89b-42d3-a456-426614170002"];
+const idSource = () => { const id = id_values[id_calls.length]; if (id === undefined) throw new Error("id source exhausted"); id_calls.push(id); return id; };
+const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now), idSource });
 repository.createReminder({id:"one-shot", target:"agent-a", creator:"creator", body:"reminder body", created_at:now, next_due_at:now, interval_ms:null});
 repository.fireDueReminders();
 const reminder = repository.reminderFor("one-shot");
 const message = repository.messageFor("reminder-one-shot-0");
-console.log(JSON.stringify({reminder_state:reminder.state, linked_id:reminder.linked_message_id, message_state:message.state, message_body:message.body, source_kind:message.source.kind}));
+console.log(JSON.stringify({reminder_state:reminder.state, linked_id:reminder.linked_message_id, message_state:message.state, message_body:message.body, source_kind:message.source.kind, id_calls}));
 repository.close();`)
 }
 
 type reminderControlSnapshot struct {
-	ConflictCode  string `json:"conflict_code"`
-	CancelCode    string `json:"cancel_code"`
-	TimestampCode string `json:"timestamp_code"`
+	ConflictCode  string   `json:"conflict_code"`
+	CancelCode    string   `json:"cancel_code"`
+	TimestampCode string   `json:"timestamp_code"`
+	IDCalls       []string `json:"id_calls"`
 }
 
 func TestNodeAndGoReminderValidationTransitionsMatch(t *testing.T) {
 	node := runNodeJSON[reminderControlSnapshot](t, filepath.Join(t.TempDir(), "node.db"), `
 const { openMessageRepository } = await import(process.env.MECHA_NODE_STORE_MODULE);
 const now = "2026-08-29T12:00:00.000Z";
-const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now) });
+const id_calls = [];
+const id_values = ["123e4567-e89b-42d3-a456-426614170001"];
+const idSource = () => { const id = id_values[id_calls.length]; if (id === undefined) throw new Error("id source exhausted"); id_calls.push(id); return id; };
+const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now), idSource });
 const request = {id:"same", target:"agent-a", creator:"creator", body:"body", created_at:now, next_due_at:now, interval_ms:null};
 repository.createReminder(request);
 let conflict_code = "";
@@ -71,8 +80,9 @@ let cancel_code = "";
 try { repository.cancelReminder("bad/id"); } catch (error) { cancel_code = error.code ?? "unknown"; }
 let timestamp_code = "";
 try { repository.createReminder({...request, id:"too-late", next_due_at:"9999-12-31T23:59:59.999Z", interval_ms:1}); } catch (error) { timestamp_code = error.code ?? "unknown"; }
-console.log(JSON.stringify({conflict_code, cancel_code, timestamp_code})); repository.close();`)
-	store := openTestStore(t)
+console.log(JSON.stringify({conflict_code, cancel_code, timestamp_code, id_calls})); repository.close();`)
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"))
+	store := openTestStoreWithOptions(t, Options{IDSource: ids})
 	request := reminderRequest("same", nil)
 	_, _, err := store.CreateReminder(context.Background(), request)
 	require.NoError(t, err)
@@ -88,29 +98,34 @@ console.log(JSON.stringify({conflict_code, cancel_code, timestamp_code})); repos
 	late.IntervalMS = &lateInterval
 	_, _, err = store.CreateReminder(context.Background(), late)
 	require.ErrorAs(t, err, &validation)
-	require.Equal(t, node, reminderControlSnapshot{ConflictCode: conflict.Code(), CancelCode: validation.Code(), TimestampCode: validation.Code()})
+	require.Equal(t, node, reminderControlSnapshot{ConflictCode: conflict.Code(), CancelCode: validation.Code(), TimestampCode: validation.Code(), IDCalls: ids.Calls()})
 }
 
 type recurrenceSnapshot struct {
-	State        string `json:"state"`
-	NextDue      string `json:"next_due"`
-	Occurrence   int    `json:"occurrence"`
-	AttemptCount int    `json:"attempt_count"`
+	State        string   `json:"state"`
+	NextDue      string   `json:"next_due"`
+	Occurrence   int      `json:"occurrence"`
+	AttemptCount int      `json:"attempt_count"`
+	IDCalls      []string `json:"id_calls"`
 }
 
 func TestNodeAndGoMissedRecurrenceSlotsMatch(t *testing.T) {
 	node := runNodeJSON[recurrenceSnapshot](t, filepath.Join(t.TempDir(), "node.db"), `
 const { openMessageRepository } = await import(process.env.MECHA_NODE_STORE_MODULE);
 let now = "2026-08-29T12:00:00.000Z";
-const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now) });
+const id_calls = [];
+const id_values = ["123e4567-e89b-42d3-a456-426614170001"];
+const idSource = () => { const id = id_values[id_calls.length]; if (id === undefined) throw new Error("id source exhausted"); id_calls.push(id); return id; };
+const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now), idSource });
 repository.createReminder({id:"missed", target:"agent-a", creator:"creator", body:"body", created_at:now, next_due_at:now, interval_ms:60000});
 repository.acquireAgentLease({agentId:"agent-a", instanceId:"instance-a", leaseId:"lease-a", leaseDurationMs:60000});
 now = "2026-08-29T12:05:00.000Z"; repository.fireDueReminders();
 const reminder = repository.reminderFor("missed");
-console.log(JSON.stringify({state:reminder.state, next_due:reminder.next_due_at, occurrence:reminder.occurrence_number, attempt_count:reminder.attempt_count})); repository.close();`)
+console.log(JSON.stringify({state:reminder.state, next_due:reminder.next_due_at, occurrence:reminder.occurrence_number, attempt_count:reminder.attempt_count, id_calls})); repository.close();`)
 	start := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	clock := deterministic.NewFixedClock(start)
-	store := openTestStoreWithOptions(t, Options{Clock: clock})
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"))
+	store := openTestStoreWithOptions(t, Options{Clock: clock, IDSource: ids})
 	interval := int64(60000)
 	_, _, err := store.CreateReminder(context.Background(), ReminderRequest{ID: "missed", Target: "agent-a", Creator: "creator", Body: "body", CreatedAt: formatTimestamp(start), NextDueAt: formatTimestamp(start), IntervalMS: &interval})
 	require.NoError(t, err)
@@ -121,27 +136,31 @@ console.log(JSON.stringify({state:reminder.state, next_due:reminder.next_due_at,
 	require.NoError(t, err)
 	reminder, err := store.ReminderFor(context.Background(), "missed")
 	require.NoError(t, err)
-	require.Equal(t, node, recurrenceSnapshot{State: reminder.State, NextDue: reminder.NextDueAt, Occurrence: reminder.OccurrenceNumber, AttemptCount: reminder.AttemptCount})
+	require.Equal(t, node, recurrenceSnapshot{State: reminder.State, NextDue: reminder.NextDueAt, Occurrence: reminder.OccurrenceNumber, AttemptCount: reminder.AttemptCount, IDCalls: ids.Calls()})
 }
 
 type rearmSnapshot struct {
-	ReminderState        string `json:"reminder_state"`
-	LinkedID             string `json:"linked_id"`
-	NextDue              string `json:"next_due"`
-	Occurrence           int    `json:"occurrence"`
-	AttemptCount         int    `json:"attempt_count"`
-	MessageState         string `json:"message_state"`
-	AttemptState         string `json:"attempt_state"`
-	FailureReason        string `json:"failure_reason"`
-	RetriedMessageState  string `json:"retried_message_state"`
-	RetriedReminderState string `json:"retried_reminder_state"`
+	ReminderState        string   `json:"reminder_state"`
+	LinkedID             string   `json:"linked_id"`
+	NextDue              string   `json:"next_due"`
+	Occurrence           int      `json:"occurrence"`
+	AttemptCount         int      `json:"attempt_count"`
+	MessageState         string   `json:"message_state"`
+	AttemptState         string   `json:"attempt_state"`
+	FailureReason        string   `json:"failure_reason"`
+	RetriedMessageState  string   `json:"retried_message_state"`
+	RetriedReminderState string   `json:"retried_reminder_state"`
+	IDCalls              []string `json:"id_calls"`
 }
 
 func TestNodeAndGoDeadLetterRecurringRearmMatch(t *testing.T) {
 	node := runNodeJSON[rearmSnapshot](t, filepath.Join(t.TempDir(), "node.db"), `
 const { openMessageRepository } = await import(process.env.MECHA_NODE_STORE_MODULE);
 const now = "2026-08-29T12:00:00.000Z";
-const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now) });
+const id_calls = [];
+const id_values = ["123e4567-e89b-42d3-a456-426614170001", "123e4567-e89b-42d3-a456-426614170002", "batch-1"];
+const idSource = () => { const id = id_values[id_calls.length]; if (id === undefined) throw new Error("id source exhausted"); id_calls.push(id); return id; };
+const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now), idSource });
 repository.createReminder({id:"rearm", target:"agent-a", creator:"creator", body:"body", created_at:now, next_due_at:now, interval_ms:60000});
 repository.acquireAgentLease({agentId:"agent-a", instanceId:"instance-a", leaseId:"lease-a", leaseDurationMs:60000});
 repository.fireDueReminders(); repository.claimNextMessage({agentId:"agent-a", instanceId:"instance-a", leaseId:"lease-a", deliveryLeaseDurationMs:60000});
@@ -154,10 +173,10 @@ const message = database.prepare("SELECT state FROM messages WHERE id = ?").get(
 const attempt = database.prepare("SELECT state, failure_reason FROM delivery_attempts WHERE message_id = ?").get("reminder-rearm-0"); database.close();
 const retryRepository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date(now) });
 const retried = retryRepository.retryDeadLetter("reminder-rearm-0"); const retriedReminder = retryRepository.reminderFor("rearm"); retryRepository.close();
-console.log(JSON.stringify({reminder_state:reminder?.state ?? "", linked_id:reminder?.linked_message_id ?? "", next_due:reminder?.next_due_at ?? "", occurrence:reminder?.occurrence_number ?? -1, attempt_count:reminder?.attempt_count ?? -1, message_state:message?.state ?? "", attempt_state:attempt?.state ?? "", failure_reason:attempt?.failure_reason ?? "", retried_message_state:retried?.state ?? "", retried_reminder_state:retriedReminder?.state ?? ""}));`)
+console.log(JSON.stringify({reminder_state:reminder?.state ?? "", linked_id:reminder?.linked_message_id ?? "", next_due:reminder?.next_due_at ?? "", occurrence:reminder?.occurrence_number ?? -1, attempt_count:reminder?.attempt_count ?? -1, message_state:message?.state ?? "", attempt_state:attempt?.state ?? "", failure_reason:attempt?.failure_reason ?? "", retried_message_state:retried?.state ?? "", retried_reminder_state:retriedReminder?.state ?? "", id_calls}));`)
 	start := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	clock := deterministic.NewFixedClock(start)
-	ids := deterministic.NewSequenceIDSource(testUUID("0002"), "delivery-batch")
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"), testUUID("0002"), "batch-1")
 	store := openTestStoreWithOptions(t, Options{Clock: clock, IDSource: ids})
 	interval := int64(60000)
 	_, _, err := store.CreateReminder(context.Background(), ReminderRequest{ID: "rearm", Target: "agent-a", Creator: "creator", Body: "body", CreatedAt: formatTimestamp(start), NextDueAt: formatTimestamp(start), IntervalMS: &interval})
@@ -181,7 +200,7 @@ console.log(JSON.stringify({reminder_state:reminder?.state ?? "", linked_id:remi
 	if reminder.LinkedMessageID != nil {
 		linked = *reminder.LinkedMessageID
 	}
-	require.Equal(t, node, rearmSnapshot{ReminderState: reminder.State, LinkedID: linked, NextDue: reminder.NextDueAt, Occurrence: reminder.OccurrenceNumber, AttemptCount: reminder.AttemptCount, MessageState: messageState, AttemptState: attemptState, FailureReason: reason, RetriedMessageState: "queued", RetriedReminderState: reminder.State})
+	require.Equal(t, node, rearmSnapshot{ReminderState: reminder.State, LinkedID: linked, NextDue: reminder.NextDueAt, Occurrence: reminder.OccurrenceNumber, AttemptCount: reminder.AttemptCount, MessageState: messageState, AttemptState: attemptState, FailureReason: reason, RetriedMessageState: "queued", RetriedReminderState: reminder.State, IDCalls: ids.Calls()})
 	_, err = store.RetryDeadLetter(context.Background(), "reminder-rearm-0")
 	require.NoError(t, err)
 	retriedReminder, err := store.ReminderFor(context.Background(), "rearm")
@@ -190,7 +209,7 @@ console.log(JSON.stringify({reminder_state:reminder?.state ?? "", linked_id:remi
 	require.NoError(t, store.db.QueryRow("SELECT state FROM messages WHERE id='reminder-rearm-0'").Scan(&retriedMessageState))
 	require.Equal(t, "queued", retriedMessageState)
 	require.Equal(t, reminder.State, retriedReminder.State)
-	require.Equal(t, []string{testUUID("0002"), "delivery-batch"}, ids.Calls())
+	require.Equal(t, []string{testUUID("0001"), testUUID("0002"), "batch-1"}, ids.Calls())
 }
 
 func runNodeJSON[T any](t *testing.T, databasePath, script string) T {

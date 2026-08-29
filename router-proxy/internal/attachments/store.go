@@ -64,9 +64,11 @@ type Attachment struct {
 
 type Pending struct {
 	Attachment
-	tempPath  string
-	finalPath string
-	owner     *Store
+	tempPath              string
+	finalPath             string
+	owner                 *Store
+	preexisting           bool
+	preexistingReferenced bool
 }
 
 type Store struct {
@@ -181,6 +183,17 @@ func (s *Store) WriteTemp(messageID string, index int, input Input) (Pending, er
 	hash := sha256.Sum256(input.Bytes)
 	id := fmt.Sprintf("%s-%d-%x.%s", safeMessageID(messageID), index, hash[:12], extension)
 	finalPath := filepath.Join(s.directory, id)
+	preexisting := false
+	preexistingReferenced := false
+	if info, err := os.Lstat(finalPath); err == nil {
+		if !info.Mode().IsRegular() {
+			return Pending{}, ErrInvalidAttachment
+		}
+		preexisting = true
+		preexistingReferenced, _ = s.referenceState(id)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Pending{}, err
+	}
 	file, err := os.CreateTemp(s.directory, ".attachment-*.tmp")
 	if err != nil {
 		return Pending{}, err
@@ -212,7 +225,7 @@ func (s *Store) WriteTemp(messageID string, index int, input Input) (Pending, er
 		_ = os.Remove(finalPath)
 		return Pending{}, err
 	}
-	return Pending{Attachment: Attachment{ID: id, URL: "/v1/attachments/" + id, MIMEType: strings.ToLower(input.MIMEType), SizeBytes: len(input.Bytes), Name: sanitizeName(input.Name)}, finalPath: finalPath, owner: s}, nil
+	return Pending{Attachment: Attachment{ID: id, URL: "/v1/attachments/" + id, MIMEType: strings.ToLower(input.MIMEType), SizeBytes: len(input.Bytes), Name: sanitizeName(input.Name)}, finalPath: finalPath, owner: s, preexisting: preexisting, preexistingReferenced: preexistingReferenced}, nil
 }
 
 // Discard removes a published attachment after enqueue failure.
@@ -226,6 +239,15 @@ func (s *Store) Discard(p Pending) error {
 	}
 	if filepath.Dir(path) != s.directory {
 		return ErrInvalidAttachmentID
+	}
+	if p.preexisting {
+		if p.preexistingReferenced || s.referenced == nil {
+			return nil
+		}
+		referenced, checked := s.referenceState(p.ID)
+		if referenced || !checked {
+			return nil
+		}
 	}
 	err := os.Remove(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -275,7 +297,8 @@ func (s *Store) Read(id string) ([]byte, Attachment, error) {
 	if err != nil || !link.Mode().IsRegular() || !info.Mode().IsRegular() {
 		return nil, Attachment{}, os.ErrNotExist
 	}
-	if !s.retained(info.ModTime()) && !s.isReferenced(id) {
+	referenced, _ := s.referenceState(id)
+	if !s.retained(info.ModTime()) && !referenced {
 		return nil, Attachment{}, os.ErrNotExist
 	}
 	data, err := os.ReadFile(path)
@@ -339,12 +362,16 @@ func (s *Store) Sweep(referenced func(string) bool) ([]string, error) {
 func (s *Store) retained(modified time.Time) bool {
 	return !modified.Before(s.clock.Now().Add(-s.retention))
 }
-func (s *Store) isReferenced(id string) (referenced bool) {
+func (s *Store) referenceState(id string) (referenced, checked bool) {
 	if s.referenced == nil {
-		return false
+		return false, false
 	}
-	defer func() { _ = recover() }()
-	return s.referenced(id)
+	defer func() {
+		if recover() != nil {
+			referenced, checked = false, false
+		}
+	}()
+	return s.referenced(id), true
 }
 func syncDirectory(path string) error {
 	directory, err := os.Open(path)

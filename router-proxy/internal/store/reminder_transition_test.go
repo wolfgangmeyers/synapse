@@ -12,7 +12,7 @@ import (
 func TestRecurringDeadLetterRearmsWithoutHoldingQueryRows(t *testing.T) {
 	start := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	clock := deterministic.NewFixedClock(start)
-	ids := deterministic.NewSequenceIDSource(testUUID("0002"), "delivery-batch")
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"), testUUID("0002"), "delivery-batch")
 	store := openTestStoreWithOptions(t, Options{Clock: clock, IDSource: ids})
 	interval := int64(60_000)
 	request := reminderRequest("rearm", &interval)
@@ -35,13 +35,13 @@ func TestRecurringDeadLetterRearmsWithoutHoldingQueryRows(t *testing.T) {
 	require.Equal(t, "scheduled", reminder.State)
 	require.Nil(t, reminder.LinkedMessageID)
 	require.Equal(t, 1, reminder.AttemptCount)
-	require.Equal(t, []string{testUUID("0002"), "delivery-batch"}, ids.Calls())
+	require.Equal(t, []string{testUUID("0001"), testUUID("0002"), "delivery-batch"}, ids.Calls())
 }
 
 func TestRecurringMissedSlotsAdvanceToTheNextFutureSlot(t *testing.T) {
 	start := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	clock := deterministic.NewFixedClock(start)
-	store := openTestStoreWithOptions(t, Options{Clock: clock, IDSource: deterministic.NewSequenceIDSource()})
+	store := openTestStoreWithOptions(t, Options{Clock: clock, IDSource: deterministic.NewSequenceIDSource(testUUID("0001"))})
 	interval := int64(60_000)
 	request := reminderRequest("missed", &interval)
 	_, _, err := store.CreateReminder(context.Background(), request)

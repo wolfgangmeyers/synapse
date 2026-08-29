@@ -15,7 +15,7 @@ func reminderRequest(id string, interval *int64) ReminderRequest {
 
 func TestCreateAndFireOneShotReminderQueuesAndLinksMessage(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
-	ids := deterministic.NewSequenceIDSource(testUUID("reminder-incarnation"))
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"), testUUID("0002"))
 	store := openTestStoreWithOptions(t, Options{Clock: clock, IDSource: ids})
 	created, reminder, err := store.CreateReminder(context.Background(), reminderRequest("one-shot", nil))
 	require.NoError(t, err)
@@ -38,7 +38,7 @@ func TestCreateAndFireOneShotReminderQueuesAndLinksMessage(t *testing.T) {
 func TestFireDueRemindersAdvancesRecurringRowsAndOrdersByDueTime(t *testing.T) {
 	start := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	clock := deterministic.NewFixedClock(start)
-	ids := deterministic.NewSequenceIDSource(testUUID("first"), testUUID("second"))
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"), testUUID("0002"), testUUID("0003"), testUUID("0004"))
 	store := openTestStoreWithOptions(t, Options{Clock: clock, IDSource: ids})
 	interval := int64(time.Minute / time.Millisecond)
 	first := reminderRequest("b-reminder", &interval)

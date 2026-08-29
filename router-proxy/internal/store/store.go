@@ -82,16 +82,17 @@ type SweepResult struct {
 // Store is a single-connection SQLite store. The mutex protects the explicit
 // BEGIN IMMEDIATE / COMMIT sequences from interleaving operations.
 type Store struct {
-	db                *sql.DB
-	path              string
-	clock             deterministic.Clock
-	ids               deterministic.IDSource
-	maxBodyBytes      int
-	maxQueuedMessages int
-	maxQueuedBytes    int
-	maxBatchBodyChars int
-	mu                sync.Mutex
-	closed            bool
+	db                   *sql.DB
+	path                 string
+	clock                deterministic.Clock
+	ids                  deterministic.IDSource
+	maxBodyBytes         int
+	maxQueuedMessages    int
+	maxQueuedBytes       int
+	maxBatchBodyChars    int
+	reminderIncarnations map[string]string
+	mu                   sync.Mutex
+	closed               bool
 }
 
 //go:embed migrations/*.sql
@@ -190,7 +191,8 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	}
 	store := &Store{db: db, path: databasePath, clock: clock, ids: ids,
 		maxBodyBytes: maxBodyBytes, maxQueuedMessages: maxQueuedMessages,
-		maxQueuedBytes: maxQueuedBytes, maxBatchBodyChars: maxBatchBodyChars}
+		maxQueuedBytes: maxQueuedBytes, maxBatchBodyChars: maxBatchBodyChars,
+		reminderIncarnations: make(map[string]string)}
 	if err := db.PingContext(ctx); err != nil {
 		return closeOnError(fmt.Errorf("ping SQLite database: %w", err))
 	}
@@ -507,11 +509,34 @@ func (s *Store) pruneExpiredQueuedMessages(ctx context.Context, now string) (int
 }
 
 func (s *Store) completeLinkedReminder(ctx context.Context, messageID string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM reminders WHERE linked_message_id = ? AND interval_ms IS NULL AND state = 'message_queued'`, messageID)
+	if err != nil {
+		return err
+	}
+	var completed []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		completed = append(completed, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM reminders
 		WHERE linked_message_id = ? AND interval_ms IS NULL AND state = 'message_queued'`, messageID); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE reminders
+	for _, id := range completed {
+		delete(s.reminderIncarnations, id)
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE reminders
 		SET state = 'scheduled', linked_message_id = NULL
 		WHERE linked_message_id = ? AND interval_ms IS NOT NULL
 		AND state IN ('scheduled', 'message_queued')`, messageID)
