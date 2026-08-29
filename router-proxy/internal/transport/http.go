@@ -369,7 +369,7 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 		}
 		envelope.Body = attachmentBody(envelope.Body, pending)
 	}
-	source := protocol.NormalizeSource(envelope.Source)
+	source := r.httpMessageSource(envelope)
 	envelope.Source = &source
 	releaseConversation := r.lockConversation(envelope.From, envelope.To)
 	result, err := r.store.Enqueue(req.Context(), envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &conversation.Body, Attachments: conversation.Attachments, Source: &source}})
@@ -391,6 +391,9 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 	_ = json.Unmarshal(mustJSON(message), &messageJSON)
 	if result.Deduped {
 		messageJSON["deduped"] = true
+	}
+	if len(pending) > 0 {
+		messageJSON["attachments"] = pendingAttachments(pending)
 	}
 	response := map[string]any{"message": messageJSON}
 	if result.ConversationMessage != nil {
@@ -504,11 +507,47 @@ func protocolError(err error) error {
 	}
 	return &httpError{status: 400, code: code}
 }
+func (r *Router) httpMessageSource(envelope protocol.Envelope) protocol.MessageSource {
+	if envelope.Source != nil {
+		return protocol.NormalizeSource(envelope.Source)
+	}
+	if envelope.Subject != nil && *envelope.Subject == "discord.inbound.v1" {
+		return protocol.MessageSource{Kind: "discord"}
+	}
+
+	webConnected, androidConnected := false, false
+	r.mu.RLock()
+	for _, candidate := range r.convos[envelope.From] {
+		switch candidate.clientType {
+		case "web":
+			webConnected = true
+		case "android":
+			androidConnected = true
+		}
+	}
+	r.mu.RUnlock()
+	if webConnected {
+		return protocol.MessageSource{Kind: "web_ui"}
+	}
+	if androidConnected {
+		return protocol.MessageSource{Kind: "android"}
+	}
+	return protocol.MessageSource{Kind: "agent"}
+}
+
+func pendingAttachments(pending []attachments.Pending) []attachments.Attachment {
+	result := make([]attachments.Attachment, len(pending))
+	for index, item := range pending {
+		result[index] = item.Attachment
+	}
+	return result
+}
+
 func attachmentBody(body string, pending []attachments.Pending) string {
 	text := strings.TrimSpace(body)
 	refs := make([]string, len(pending))
 	for index, item := range pending {
-		refs[index] = fmt.Sprintf("%d. %s", index+1, item.URL)
+		refs[index] = fmt.Sprintf("%d. %s", index+1, item.FilePath())
 	}
 	separator := ""
 	if text != "" {

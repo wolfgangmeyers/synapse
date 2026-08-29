@@ -71,6 +71,10 @@ type Pending struct {
 	preexistingReferenced bool
 }
 
+// FilePath returns the published path represented by this pending attachment.
+// It is used when the message body stores the local file reference.
+func (p Pending) FilePath() string { return p.finalPath }
+
 type Store struct {
 	directory      string
 	clock          Clock
