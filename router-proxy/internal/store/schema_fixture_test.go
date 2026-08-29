@@ -15,7 +15,7 @@ import (
 
 func TestEmbeddedMigrationsMatchNodeMigrationFixtures(t *testing.T) {
 	migrations := DefaultMigrations()
-	require.Len(t, migrations, 20)
+	require.Len(t, migrations, 21)
 	repoRoot := filepath.Join("..", "..", "..")
 	for _, migration := range migrations {
 		contents, err := os.ReadFile(filepath.Join(repoRoot, "harness", "migrations", migration.ID+".sql"))
@@ -107,6 +107,7 @@ func TestMigrationPlanUsesNodeIDsInOrder(t *testing.T) {
 		"012_sentinel_native_cleanup", "013_conversation_history", "014_reminder_batch_links",
 		"015_conversation_source", "016_delivery_batches", "017_subagent_lifecycle",
 		"018_subagent_lifecycle_status", "019_goal_control_desired_state", "020_prompt_templates",
+		"021_goal_control_revision_history",
 	}
 	got := make([]string, 0, len(DefaultMigrations()))
 	for _, migration := range DefaultMigrations() {

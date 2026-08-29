@@ -66,6 +66,28 @@ func TestFireDueRemindersAdvancesRecurringRowsAndOrdersByDueTime(t *testing.T) {
 	}
 }
 
+func TestFireDueRemindersRechecksRowsAddedDuringSweep(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	s := openTestStoreWithOptions(t, Options{Clock: clock})
+	_, _, err := s.CreateReminder(context.Background(), reminderRequest("first", nil))
+	require.NoError(t, err)
+	var attempts []string
+	createdSecond := false
+	outcomes, err := s.FireDueRemindersWithBefore(context.Background(), func(attempt ReminderFireAttempt) {
+		attempts = append(attempts, attempt.ReminderID)
+	}, func(attempt ReminderFireAttempt) {
+		if createdSecond || attempt.ReminderID != "first" {
+			return
+		}
+		createdSecond = true
+		_, _, err := s.CreateReminder(context.Background(), reminderRequest("second", nil))
+		require.NoError(t, err)
+	})
+	require.NoError(t, err)
+	require.Len(t, outcomes, 2)
+	require.Equal(t, []string{"first", "second"}, attempts)
+}
+
 func TestCreateReminderIsIdempotentAndConflictsOnChangedEnvelope(t *testing.T) {
 	store := openTestStore(t)
 	request := reminderRequest("same", nil)

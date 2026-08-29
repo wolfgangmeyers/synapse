@@ -112,6 +112,10 @@ const migrations = Object.freeze([
     id: "020_prompt_templates",
     sql: readFileSync(new URL("./migrations/020_prompt_templates.sql", import.meta.url), "utf8"),
   },
+  {
+    id: "021_goal_control_revision_history",
+    sql: readFileSync(new URL("./migrations/021_goal_control_revision_history.sql", import.meta.url), "utf8"),
+  },
 ]);
 
 export class IdempotencyConflictError extends Error {
@@ -1055,10 +1059,15 @@ class MessageRepository {
     const now = clockTimestamp(this.#clock);
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const existing = this.#database.prepare(`
-        SELECT revision FROM goal_control_desired_state
+        SELECT revision FROM goal_control_revision_history
         WHERE agent_id = ? AND instance_id = ?
       `).get(agentId, instanceId);
       const revision = (existing?.revision ?? 0) + 1;
+      this.#database.prepare(`
+        INSERT INTO goal_control_revision_history (agent_id, instance_id, revision)
+        VALUES (?, ?, ?)
+        ON CONFLICT (agent_id, instance_id) DO UPDATE SET revision = excluded.revision
+      `).run(agentId, instanceId, revision);
       this.#database.prepare(`
         INSERT INTO goal_control_desired_state (
           agent_id, instance_id, revision, config_json, updated_at, expires_at
@@ -1074,6 +1083,36 @@ class MessageRepository {
         FROM goal_control_desired_state
         WHERE agent_id = ? AND instance_id = ?
       `).get(agentId, instanceId));
+    });
+  }
+
+  consumeGoalControlDesired({ agentId, instanceId, sourceAgentId, controlId, revision }) {
+    assertGoalControlDesiredIdentity(agentId, instanceId);
+    if (typeof sourceAgentId !== "string" || sourceAgentId.length === 0
+      || typeof controlId !== "string" || controlId.length === 0
+      || !Number.isSafeInteger(revision) || revision < 1) {
+      throw new TypeError("goal control desired state result identity is invalid");
+    }
+    const now = clockTimestamp(this.#clock);
+    return immediateTransaction(this.#database, this.#databasePath, () => {
+      const row = this.#database.prepare(`
+        SELECT agent_id, instance_id, revision, config_json, updated_at, expires_at
+        FROM goal_control_desired_state
+        WHERE agent_id = ? AND instance_id = ?
+      `).get(agentId, instanceId);
+      if (row === undefined) return undefined;
+      if (row.expires_at <= now) {
+        this.#database.prepare(`DELETE FROM goal_control_desired_state WHERE agent_id = ? AND instance_id = ? AND expires_at <= ?`).run(agentId, instanceId, now);
+        return undefined;
+      }
+      const desired = goalControlDesiredFromRow(row);
+      if (desired === undefined || desired.revision !== revision
+        || desired.config.sourceAgentId !== sourceAgentId || desired.config.controlId !== controlId) return undefined;
+      const deleted = this.#database.prepare(`
+        DELETE FROM goal_control_desired_state
+        WHERE agent_id = ? AND instance_id = ? AND revision = ?
+      `).run(agentId, instanceId, revision);
+      return deleted.changes === 1 ? desired : undefined;
     });
   }
 
