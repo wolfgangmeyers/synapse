@@ -33,10 +33,14 @@ type Migration struct {
 // Options controls Store initialization. Nil Clock and IDSource values use the
 // production wall clock and a cryptographically random UUID source.
 type Options struct {
-	Clock       deterministic.Clock
-	IDSource    deterministic.IDSource
-	BusyTimeout time.Duration
-	Migrations  []Migration
+	Clock             deterministic.Clock
+	IDSource          deterministic.IDSource
+	BusyTimeout       time.Duration
+	Migrations        []Migration
+	MaxBodyBytes      int
+	MaxQueuedMessages int
+	MaxQueuedBytes    int
+	MaxBatchBodyChars int
 }
 
 // RetentionPolicy contains the bounded state cleanup rules implemented by the
@@ -78,12 +82,16 @@ type SweepResult struct {
 // Store is a single-connection SQLite store. The mutex protects the explicit
 // BEGIN IMMEDIATE / COMMIT sequences from interleaving operations.
 type Store struct {
-	db     *sql.DB
-	path   string
-	clock  deterministic.Clock
-	ids    deterministic.IDSource
-	mu     sync.Mutex
-	closed bool
+	db                *sql.DB
+	path              string
+	clock             deterministic.Clock
+	ids               deterministic.IDSource
+	maxBodyBytes      int
+	maxQueuedMessages int
+	maxQueuedBytes    int
+	maxBatchBodyChars int
+	mu                sync.Mutex
+	closed            bool
 }
 
 //go:embed migrations/*.sql
@@ -154,11 +162,35 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-	store := &Store{db: db, path: databasePath, clock: clock, ids: ids}
 	closeOnError := func(err error) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	maxBodyBytes := options.MaxBodyBytes
+	if maxBodyBytes == 0 {
+		maxBodyBytes = 4 * 1024
+	}
+	if maxBodyBytes <= 0 || maxBodyBytes > 64*1024 {
+		return closeOnError(errors.New("maxBodyBytes must be a positive safe integer no greater than 65536"))
+	}
+	maxQueuedMessages := options.MaxQueuedMessages
+	if maxQueuedMessages == 0 {
+		maxQueuedMessages = 15
+	}
+	maxQueuedBytes := options.MaxQueuedBytes
+	if maxQueuedBytes == 0 {
+		maxQueuedBytes = 256 * 1024
+	}
+	maxBatchBodyChars := options.MaxBatchBodyChars
+	if maxBatchBodyChars == 0 {
+		maxBatchBodyChars = 4096
+	}
+	if maxQueuedMessages < 1 || maxQueuedBytes < 1 || maxBatchBodyChars < 0 {
+		return closeOnError(errors.New("queue limits must be positive"))
+	}
+	store := &Store{db: db, path: databasePath, clock: clock, ids: ids,
+		maxBodyBytes: maxBodyBytes, maxQueuedMessages: maxQueuedMessages,
+		maxQueuedBytes: maxQueuedBytes, maxBatchBodyChars: maxBatchBodyChars}
 	if err := db.PingContext(ctx); err != nil {
 		return closeOnError(fmt.Errorf("ping SQLite database: %w", err))
 	}
