@@ -69,6 +69,7 @@ func (r *Router) connectedAgents() map[string]any {
 	for key, value := range r.lifecycleState {
 		lifecycle[key] = value
 	}
+	activitySnapshotVersion := r.nextVersion
 	r.mu.Unlock()
 	agents := make([]map[string]any, 0, len(candidates))
 	for _, s := range candidates {
@@ -106,7 +107,7 @@ func (r *Router) connectedAgents() map[string]any {
 		agents = append(agents, item)
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i]["agent_id"].(string) < agents[j]["agent_id"].(string) })
-	return map[string]any{"generated_at": timestamp(now), "activity_snapshot_version": r.nextVersion, "agents": agents}
+	return map[string]any{"generated_at": timestamp(now), "activity_snapshot_version": activitySnapshotVersion, "agents": agents}
 }
 
 func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,13 +122,141 @@ func sendJSON(t *testing.T, conn *websocket.Conn, value map[string]any) {
 }
 func readJSON(t *testing.T, conn *websocket.Conn) map[string]any {
 	t.Helper()
-	_, payload, err := conn.Read(context.Background())
+	return readJSONWithTimeout(t, conn, 10*time.Second)
+}
+
+func readJSONWithTimeout(t *testing.T, conn *websocket.Conn, timeout time.Duration) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, payload, err := conn.Read(ctx)
 	require.NoError(t, err)
 	var value map[string]any
 	require.NoError(t, json.Unmarshal(payload, &value))
 	return value
 }
 func bytesReader(value []byte) *byteReader { return &byteReader{value: value} }
+
+func registerTestSession(t *testing.T, wsURL, agentID, instanceID, conversationSync string) (*websocket.Conn, map[string]any) {
+	t.Helper()
+	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	frame := map[string]any{"version": "v1", "frame_id": "register-" + agentID, "type": "register", "agent_id": agentID, "instance_id": instanceID}
+	if conversationSync != "" {
+		frame["conversation_sync"] = conversationSync
+	}
+	sendJSON(t, conn, frame)
+	return conn, readJSON(t, conn)
+}
+
+func TestLiveProjectionsOnlyReachNodeProjectedRecipients(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), database, store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	a, aRegistered := registerTestSession(t, wsURL, "a", "a-instance", "v1")
+	defer a.Close(websocket.StatusNormalClosure, "test done")
+	b, _ := registerTestSession(t, wsURL, "b", "b-instance", "v1")
+	defer b.Close(websocket.StatusNormalClosure, "test done")
+	c, _ := registerTestSession(t, wsURL, "c", "c-instance", "v1")
+	defer c.Close(websocket.StatusNormalClosure, "test done")
+	d, _ := registerTestSession(t, wsURL, "d", "d-instance", "")
+	defer d.Close(websocket.StatusNormalClosure, "test done")
+
+	payload := []byte(`{"id":"projection-message","from":"a","to":"b","body":"hello","created_at":"2026-08-29T12:00:00.000Z"}`)
+	request, err := http.NewRequest(http.MethodPost, strings.Replace(wsURL, "ws://", "http://", 1), bytesReader(payload))
+	require.NoError(t, err)
+	request.URL.Path = "/v1/messages"
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	response.Body.Close()
+	require.Equal(t, "conversation_message", readJSON(t, a)["type"])
+	require.Equal(t, "conversation_message", readJSON(t, b)["type"])
+	// b also receives the durable delivery; unrelated conversation c and the
+	// non-subscribing d receive no conversation message.
+	require.Equal(t, "message", readJSON(t, b)["type"])
+
+	sendJSON(t, a, map[string]any{"version": "v1", "frame_id": "activity-frame", "type": "activity", "agent_id": "a", "instance_id": "a-instance", "lease_id": aRegistered["lease_id"], "activity_state": "active"})
+	require.Equal(t, "agent_activity", readJSON(t, a)["type"])
+	require.Equal(t, "agent_activity", readJSON(t, b)["type"])
+	require.Equal(t, "agent_activity", readJSON(t, c)["type"])
+
+	sendJSON(t, a, map[string]any{"version": "v1", "frame_id": "model-frame", "type": "model_catalog", "agent_id": "a", "instance_id": "a-instance", "lease_id": aRegistered["lease_id"], "model_summaries": []any{map[string]any{"provider": "test", "id": "model"}}})
+	require.Equal(t, "agent_model_catalog", readJSON(t, a)["type"])
+	require.Equal(t, "agent_model_catalog", readJSON(t, b)["type"])
+	require.Equal(t, "agent_model_catalog", readJSON(t, c)["type"])
+
+	sendJSON(t, a, map[string]any{"version": "v1", "frame_id": "arrival-frame", "type": "message_arrival", "agent_id": "a", "instance_id": "a-instance", "lease_id": aRegistered["lease_id"], "from": "sender", "source": map[string]any{"kind": "agent"}, "preview": "preview", "body": "body", "created_at": "2026-08-29T12:00:00.000Z", "message_id": "arrival-message"})
+	require.Equal(t, "message_arrival", readJSON(t, a)["type"])
+	require.Equal(t, "message_arrival", readJSON(t, b)["type"])
+	require.Equal(t, "message_arrival", readJSON(t, c)["type"])
+
+	goalState := map[string]any{"enabled": true, "goal": "do work", "goal_lock_enabled": true, "snooze_enabled": true, "snooze_duration_ms": 1, "snooze_turn_limit": nil, "snooze_budget_cap_ms": nil, "snooze_refill_yield_ms": 1, "snooze_refill_elapsed_ms": 1, "outcome_counts": map[string]any{"COMPLETED": 0, "NOT_DONE": 0}}
+	sendJSON(t, a, map[string]any{"version": "v1", "frame_id": "goal-frame", "type": "goal_state", "agent_id": "a", "instance_id": "a-instance", "lease_id": aRegistered["lease_id"], "goal_state": goalState})
+	require.Equal(t, "agent_goal_state", readJSON(t, a)["type"])
+	require.Equal(t, "agent_goal_state", readJSON(t, b)["type"])
+	require.Equal(t, "agent_goal_state", readJSON(t, c)["type"])
+
+	readCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, _, err = d.Read(readCtx)
+	cancel()
+	require.Error(t, err)
+}
+
+func TestInvalidSchemaFrameReturnsInvalidFrameWithoutDisconnecting(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), database, store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	conn, registered := registerTestSession(t, wsURL, "validator", "validator-instance", "v1")
+	defer conn.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, conn, map[string]any{"version": "v1", "frame_id": "bad-frame", "type": "activity", "agent_id": "validator", "instance_id": "validator-instance", "lease_id": registered["lease_id"], "activity_state": "active", "subagent_count": 1000})
+	invalid := readJSON(t, conn)
+	require.Equal(t, "error", invalid["type"])
+	require.Equal(t, "invalid_frame", invalid["code"])
+	require.NotContains(t, invalid, "request_id")
+	sendJSON(t, conn, map[string]any{"version": "v1", "frame_id": "ping-frame", "type": "ping"})
+	require.Equal(t, "pong", readJSON(t, conn)["type"])
+}
+
+func TestSameInstanceReconnectDoesNotLetOldCleanupRemoveReplacement(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), database, store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	old, _ := registerTestSession(t, wsURL, "reconnect", "same-instance", "v1")
+	newConn, _ := registerTestSession(t, wsURL, "reconnect", "same-instance", "v1")
+	defer newConn.Close(websocket.StatusNormalClosure, "test done")
+	// The replacement closes the old connection; its deferred cleanup must not
+	// remove the new conversation subscription or active session.
+	_ = readJSONWithTimeout(t, old, time.Second)
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, _, _ = old.Read(closeCtx)
+	cancel()
+	sendJSON(t, newConn, map[string]any{"version": "v1", "frame_id": "ping-frame", "type": "ping"})
+	require.Equal(t, "pong", readJSON(t, newConn)["type"])
+}
 
 type byteReader struct{ value []byte }
 

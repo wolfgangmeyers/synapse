@@ -152,6 +152,7 @@ type session struct {
 	paused           bool
 	lifecycleEnabled bool
 	writeMu          sync.Mutex
+	stateMu          sync.RWMutex
 	closeOnce        sync.Once
 }
 
@@ -426,6 +427,27 @@ func containsSession(values []*session, wanted *session) bool {
 	}
 	return false
 }
+func (s *session) setPaused(value bool) {
+	s.stateMu.Lock()
+	s.paused = value
+	s.stateMu.Unlock()
+}
+func (s *session) isPaused() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.paused
+}
+func (s *session) setLifecycleEnabled(value bool) {
+	s.stateMu.Lock()
+	s.lifecycleEnabled = value
+	s.stateMu.Unlock()
+}
+func (s *session) lifecycleEnabledNow() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.lifecycleEnabled
+}
+
 func (r *Router) nextID() (string, error)                  { return r.ids.Next() }
 func (r *Router) now() time.Time                           { return r.clock.Now().UTC() }
 func timestamp(value time.Time) string                     { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
