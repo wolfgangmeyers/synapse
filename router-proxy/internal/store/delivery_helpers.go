@@ -87,13 +87,17 @@ func activeMessageState(v string) bool {
 func activeDeliveryState(v string) bool {
 	return v == domain.DeliveryLeased || v == domain.DeliveryInjectionRequested
 }
-func expiredDelivery(rows []storedDelivery, now string) bool {
+func expireDeliveryBatch(s *Store, ctx context.Context, rows []storedDelivery, now string, maxAttempts int) (bool, error) {
+	expired := false
 	for _, d := range rows {
 		if d.DeliveryExpiresAt <= now {
-			return true
+			if _, err := s.failDelivery(ctx, d, domain.DeliveryTimedOut, "delivery_timeout", now, maxAttempts); err != nil {
+				return false, err
+			}
+			expired = true
 		}
 	}
-	return false
+	return expired, nil
 }
 func sameDeliveryItems(actual []protocol.DeliveryItem, expected []storedDelivery) bool {
 	if len(actual) != len(expected) {
