@@ -139,7 +139,7 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleReminderItem(w, req, id)
 		return
 	}
-	if id, action, ok := routeID(path, "/v1/prompt-templates/"); ok {
+	if id, action, ok := routeID(req.URL.EscapedPath(), "/v1/prompt-templates/"); ok {
 		_ = action
 		r.handlePromptItem(w, req, id)
 		return
@@ -562,23 +562,14 @@ func (r *Router) handlePromptCollection(w http.ResponseWriter, req *http.Request
 			r.writeError(w, err)
 			return
 		}
-		if len(payload) != 2 {
-			r.writeError(w, &httpError{400, "invalid_prompt_template", 0})
+		request, err := parsePromptTemplateCreate(payload)
+		if err != nil {
+			r.writeError(w, err)
 			return
 		}
-		name, e := rawString(payload, "name", true)
-		if e != nil {
-			r.writeError(w, e)
-			return
-		}
-		body, e := rawString(payload, "body", true)
-		if e != nil {
-			r.writeError(w, e)
-			return
-		}
-		item, e := r.store.CreatePromptTemplate(req.Context(), store.PromptTemplateRequest{Name: name, Body: body})
-		if e != nil {
-			r.writeError(w, storeError(e))
+		item, err := r.store.CreatePromptTemplate(req.Context(), request)
+		if err != nil {
+			r.writeError(w, storeError(err))
 			return
 		}
 		r.writeJSON(w, 201, map[string]any{"prompt_template": item})
@@ -586,7 +577,54 @@ func (r *Router) handlePromptCollection(w http.ResponseWriter, req *http.Request
 		r.writeError(w, &httpError{404, "not_found", 0})
 	}
 }
+func parsePromptTemplateCreate(payload map[string]json.RawMessage) (store.PromptTemplateRequest, error) {
+	for key := range payload {
+		if key != "name" && key != "body" && key != "id" && key != "updated_at" {
+			return store.PromptTemplateRequest{}, &httpError{400, "invalid_prompt_template", 0}
+		}
+	}
+	name, err := promptTemplateString(payload, "name", true)
+	if err != nil {
+		return store.PromptTemplateRequest{}, err
+	}
+	body, err := promptTemplateString(payload, "body", true)
+	if err != nil {
+		return store.PromptTemplateRequest{}, err
+	}
+	id, err := promptTemplateString(payload, "id", false)
+	if err != nil {
+		return store.PromptTemplateRequest{}, err
+	}
+	updatedAt, err := promptTemplateString(payload, "updated_at", false)
+	if err != nil {
+		return store.PromptTemplateRequest{}, err
+	}
+	return store.PromptTemplateRequest{Name: *name, Body: *body, ID: id, UpdatedAt: updatedAt}, nil
+}
+
+func promptTemplateString(payload map[string]json.RawMessage, key string, required bool) (*string, error) {
+	raw, ok := payload[key]
+	if !ok {
+		if required {
+			return nil, &httpError{400, "invalid_prompt_template", 0}
+		}
+		return nil, nil
+	}
+	if string(raw) == "null" {
+		return nil, &httpError{400, "invalid_prompt_template", 0}
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return nil, &httpError{400, "invalid_prompt_template", 0}
+	}
+	return &value, nil
+}
+
 func (r *Router) handlePromptItem(w http.ResponseWriter, req *http.Request, id string) {
+	if !store.IsPortablePromptTemplateID(id) {
+		r.writeError(w, &httpError{404, "not_found", 0})
+		return
+	}
 	switch req.Method {
 	case http.MethodGet:
 		item, err := r.store.PromptTemplateFor(req.Context(), id)
