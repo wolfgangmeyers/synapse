@@ -578,7 +578,7 @@ func TestActivityProjectionAppearsInAgentsSnapshot(t *testing.T) {
 	defer observer.Close(websocket.StatusNormalClosure, "test done")
 
 	goal := map[string]any{"enabled": true, "goal": "ship the projection"}
-	model := map[string]any{"provider": "test", "id": "current-model"}
+	model := map[string]any{"provider": " test ", "id": " current-model ", "name": "   "}
 	sendJSON(t, worker, map[string]any{
 		"version": "v1", "frame_id": "activity-frame", "type": "activity",
 		"agent_id": "projection-worker", "instance_id": "worker-instance", "lease_id": registration["lease_id"],
@@ -586,7 +586,7 @@ func TestActivityProjectionAppearsInAgentsSnapshot(t *testing.T) {
 	})
 	activity := readJSON(t, observer)
 	require.Equal(t, goal, activity["goal"])
-	require.Equal(t, model, activity["current_model"])
+	require.Equal(t, map[string]any{"provider": "test", "id": "current-model"}, activity["current_model"])
 	_ = readJSON(t, worker)
 
 	server := httptest.NewServer(router)
@@ -609,7 +609,7 @@ func TestActivityProjectionAppearsInAgentsSnapshot(t *testing.T) {
 	}
 	require.NotNil(t, item)
 	require.Equal(t, goal, item["goal"])
-	require.Equal(t, model, item["current_model"])
+	require.Equal(t, map[string]any{"provider": "test", "id": "current-model"}, item["current_model"])
 }
 
 func TestSettledActivityIdleFrameRetainsCurrentModel(t *testing.T) {
