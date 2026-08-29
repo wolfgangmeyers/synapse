@@ -67,16 +67,33 @@ var DefaultRetentionPolicy = RetentionPolicy{
 }
 
 // SweepResult reports rows removed by one atomic sweep.
+type ExpiredLease struct {
+	AgentID    string
+	InstanceID string
+	LeaseID    string
+}
+
+type LifecycleUpdate struct {
+	ParentAgentID string
+	RouterVersion int64
+}
+
 type SweepResult struct {
 	StaleAgents          int
 	LifecycleExpired     int
 	QueuedMessages       int
 	Leases               int
+	ExpiredLeases        []ExpiredLease
 	GoalControlStates    int
 	ConversationMessages int
 	LifecycleStates      int
 	LifecycleEvents      int
 	LifecycleProducers   int
+	LifecycleUpdates     []LifecycleUpdate
+}
+
+type LifecycleSnapshot struct {
+	Subagents []map[string]any
 }
 
 // Store is a single-connection SQLite store. The mutex protects the explicit
@@ -431,6 +448,54 @@ func (s *Store) SweepLifecycle(ctx context.Context, policy RetentionPolicy) (Swe
 	return s.sweep(ctx, policy, false)
 }
 
+// SubagentLifecycleSnapshot returns the currently running children for one
+// parent. Terminal rows are intentionally omitted from the observer projection,
+// matching the Node lifecycle snapshot contract.
+func (s *Store) SubagentLifecycleSnapshot(ctx context.Context, parentAgentID string) (LifecycleSnapshot, error) {
+	if ctx == nil {
+		return LifecycleSnapshot{}, errors.New("context is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return LifecycleSnapshot{}, errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT subagent_id, type, description, status
+		FROM subagent_lifecycle_state
+		WHERE parent_agent_id = ? AND state = 'running'
+		ORDER BY subagent_id ASC`, parentAgentID)
+	if err != nil {
+		return LifecycleSnapshot{}, err
+	}
+	snapshot := LifecycleSnapshot{Subagents: []map[string]any{}}
+	for rows.Next() {
+		var id, childType, description, status sql.NullString
+		if err := rows.Scan(&id, &childType, &description, &status); err != nil {
+			_ = rows.Close()
+			return LifecycleSnapshot{}, err
+		}
+		child := map[string]any{"id": id.String}
+		if childType.Valid {
+			child["type"] = childType.String
+		}
+		if description.Valid {
+			child["description"] = description.String
+		}
+		if status.Valid {
+			child["status"] = status.String
+		}
+		snapshot.Subagents = append(snapshot.Subagents, child)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return LifecycleSnapshot{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return LifecycleSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
 func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued bool) (SweepResult, error) {
 	if err := policy.validate(); err != nil {
 		return SweepResult{}, err
@@ -450,7 +515,11 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 				return err
 			}
 		}
-		result.Leases, err = s.pruneExpiredLeases(ctx, nowText)
+		var expiredLeases []ExpiredLease
+		result.Leases, expiredLeases, err = s.pruneExpiredLeases(ctx, nowText)
+		if !pruneQueued {
+			result.ExpiredLeases = expiredLeases
+		}
 		if err != nil {
 			return err
 		}
@@ -462,7 +531,7 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 		if err != nil {
 			return err
 		}
-		result.LifecycleExpired, result.LifecycleStates, result.LifecycleEvents, result.LifecycleProducers, err = s.pruneLifecycle(ctx, now, policy)
+		result.LifecycleExpired, result.LifecycleStates, result.LifecycleEvents, result.LifecycleProducers, result.LifecycleUpdates, err = s.pruneLifecycle(ctx, now, policy)
 		return err
 	}); err != nil {
 		return SweepResult{}, err
@@ -597,37 +666,37 @@ func (s *Store) pruneStaleAgents(ctx context.Context, now string) (int, error) {
 	return len(agents), nil
 }
 
-func (s *Store) pruneExpiredLeases(ctx context.Context, now string) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT agent_id FROM agent_leases
+func (s *Store) pruneExpiredLeases(ctx context.Context, now string) (int, []ExpiredLease, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT agent_id, instance_id, lease_id FROM agent_leases
 		WHERE expires_at <= ? ORDER BY agent_id ASC`, now)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	var agents []string
+	var expired []ExpiredLease
 	for rows.Next() {
-		var agent string
-		if err := rows.Scan(&agent); err != nil {
+		var lease ExpiredLease
+		if err := rows.Scan(&lease.AgentID, &lease.InstanceID, &lease.LeaseID); err != nil {
 			_ = rows.Close()
-			return 0, err
+			return 0, nil, err
 		}
-		agents = append(agents, agent)
+		expired = append(expired, lease)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return 0, err
+		return 0, nil, err
 	}
 	if err := rows.Close(); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	for _, agent := range agents {
-		if _, err := s.db.ExecContext(ctx, "DELETE FROM agent_leases WHERE agent_id = ?", agent); err != nil {
-			return 0, err
+	for _, lease := range expired {
+		if _, err := s.db.ExecContext(ctx, "DELETE FROM agent_leases WHERE agent_id = ?", lease.AgentID); err != nil {
+			return 0, nil, err
 		}
-		if _, err := s.db.ExecContext(ctx, "UPDATE agents SET disconnected_at = ? WHERE agent_id = ?", now, agent); err != nil {
-			return 0, err
+		if _, err := s.db.ExecContext(ctx, "UPDATE agents SET disconnected_at = ? WHERE agent_id = ?", now, lease.AgentID); err != nil {
+			return 0, nil, err
 		}
 	}
-	return len(agents), nil
+	return len(expired), expired, nil
 }
 
 func (s *Store) pruneExpiredGoalControl(ctx context.Context, now string) (int, error) {
@@ -680,28 +749,28 @@ func (s *Store) pruneConversation(ctx context.Context, now time.Time, policy Ret
 	return len(candidates), nil
 }
 
-func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy RetentionPolicy) (int, int, int, int, error) {
+func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy RetentionPolicy) (int, int, int, int, []LifecycleUpdate, error) {
 	nowText := formatTimestamp(now)
 	terminalCutoff := formatTimestamp(now.Add(-policy.LifecycleTerminalAge))
 	ledgerCutoff := formatTimestamp(now.Add(-policy.LifecycleEventAge))
 	producerCutoff := formatTimestamp(now.Add(-policy.LifecycleProducerAge))
-	expiredRunning, err := s.expireRunningLifecycleChildren(ctx, nowText, producerCutoff)
+	expiredRunning, updates, err := s.expireRunningLifecycleChildren(ctx, nowText, producerCutoff)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, nil, err
 	}
 	stateResult, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_state
 		WHERE state = 'terminal' AND terminal_at <= ?`, terminalCutoff)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, nil, err
 	}
 	stateCount, err := stateResult.RowsAffected()
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, nil, err
 	}
 	var threshold sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `SELECT router_version FROM subagent_lifecycle_events
 		ORDER BY router_version DESC LIMIT 1 OFFSET ?`, policy.LifecycleEventLimit-1).Scan(&threshold); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, nil, err
 	}
 	var eventResult sql.Result
 	if threshold.Valid {
@@ -711,11 +780,11 @@ func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy Retent
 		eventResult, err = s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_events WHERE received_at <= ?`, ledgerCutoff)
 	}
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, nil, err
 	}
 	eventCount, err := eventResult.RowsAffected()
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, nil, err
 	}
 	producerResult, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_producers
 		WHERE last_seen_at <= ?
@@ -727,13 +796,13 @@ func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy Retent
 		AND NOT EXISTS (SELECT 1 FROM subagent_lifecycle_events event
 			WHERE event.parent_agent_id = subagent_lifecycle_producers.parent_agent_id)`, producerCutoff, nowText)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, 0, nil, err
 	}
 	producerCount, err := producerResult.RowsAffected()
-	return expiredRunning, int(stateCount), int(eventCount), int(producerCount), err
+	return expiredRunning, int(stateCount), int(eventCount), int(producerCount), updates, err
 }
 
-func (s *Store) expireRunningLifecycleChildren(ctx context.Context, now, producerCutoff string) (int, error) {
+func (s *Store) expireRunningLifecycleChildren(ctx context.Context, now, producerCutoff string) (int, []LifecycleUpdate, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT state.parent_agent_id, state.subagent_id,
 		producer.instance_id, producer.parent_session_id, producer.producer_epoch
 		FROM subagent_lifecycle_state state
@@ -743,7 +812,7 @@ func (s *Store) expireRunningLifecycleChildren(ctx context.Context, now, produce
 			WHERE lease.agent_id = producer.parent_agent_id AND lease.expires_at > ?)
 		ORDER BY state.parent_agent_id ASC, state.subagent_id ASC`, producerCutoff, now)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	type child struct{ parent, id, instance, session, epoch string }
 	var children []child
@@ -751,23 +820,24 @@ func (s *Store) expireRunningLifecycleChildren(ctx context.Context, now, produce
 		var current child
 		if err := rows.Scan(&current.parent, &current.id, &current.instance, &current.session, &current.epoch); err != nil {
 			_ = rows.Close()
-			return 0, err
+			return 0, nil, err
 		}
 		children = append(children, current)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return 0, err
+		return 0, nil, err
 	}
 	if err := rows.Close(); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	payloadHash := fmt.Sprintf("%x", sha256.Sum256([]byte("producer_expired")))
+	versions := make(map[string]int64, len(children))
 	for _, current := range children {
 		var latest sql.NullInt64
 		if err := s.db.QueryRowContext(ctx, `SELECT MAX(client_sequence) FROM subagent_lifecycle_events
 			WHERE parent_agent_id = ? AND producer_epoch = ?`, current.parent, current.epoch).Scan(&latest); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		sequence := int64(1)
 		if latest.Valid {
@@ -782,12 +852,13 @@ func (s *Store) expireRunningLifecycleChildren(ctx context.Context, now, produce
 			current.parent, current.instance, current.session, current.epoch, current.id,
 			eventID, sequence*1000, payloadHash, now)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		version, err := result.LastInsertId()
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
+		versions[current.parent] = version
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO subagent_lifecycle_state (
 			parent_agent_id, subagent_id, instance_id, parent_session_id, producer_epoch,
 			type, description, status, state, started_at, updated_at, terminal_at,
@@ -802,10 +873,15 @@ func (s *Store) expireRunningLifecycleChildren(ctx context.Context, now, produce
 			terminal_reason = excluded.terminal_reason, router_version = excluded.router_version`,
 			current.parent, current.id, current.instance, current.session, current.epoch,
 			now, now, version); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
-	return len(children), nil
+	var updates []LifecycleUpdate
+	for parent, version := range versions {
+		updates = append(updates, LifecycleUpdate{ParentAgentID: parent, RouterVersion: version})
+	}
+	sort.Slice(updates, func(i, j int) bool { return updates[i].ParentAgentID < updates[j].ParentAgentID })
+	return len(children), updates, nil
 }
 
 func parseTimestamp(value string) time.Time {

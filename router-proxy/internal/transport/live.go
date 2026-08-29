@@ -254,10 +254,10 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 	if err != nil {
 		return result, err
 	}
+	r.closeExpiredLeaseSessions(result.ExpiredLeases)
+	r.publishLifecycleUpdates(ctx, result.LifecycleUpdates)
 	reminderSuccess, reminderFailure := r.sweepReminders(ctx)
-	if err := r.sweepAttachments(); err != nil {
-		return result, err
-	}
+	r.sweepAttachmentsBestEffort()
 	// Node publishes activity expiry before its heartbeat/sweep record.
 	r.sweepLiveState()
 	r.emitSweepRecord(result, len(expired), len(timedOut), reminderSuccess, reminderFailure)
@@ -320,6 +320,62 @@ func (r *Router) sweepAttachments() error {
 		return referenceErr != nil || referenced
 	})
 	return err
+}
+
+func (r *Router) sweepAttachmentsBestEffort() {
+	if err := r.sweepAttachments(); err != nil {
+		r.emit("router_error", map[string]any{"error_code": "attachment_sweep_failed"})
+	}
+}
+
+func (r *Router) publishLifecycleUpdates(ctx context.Context, updates []store.LifecycleUpdate) {
+	for _, update := range updates {
+		snapshot, err := r.store.SubagentLifecycleSnapshot(ctx, update.ParentAgentID)
+		if err != nil {
+			r.emit("router_error", map[string]any{"error_code": "lifecycle_projection_failed", "agent_id": update.ParentAgentID})
+			continue
+		}
+		r.mu.Lock()
+		r.lifecycleState[update.ParentAgentID] = lifecycleAgent{version: update.RouterVersion, subagents: snapshot.Subagents}
+		if update.RouterVersion > r.nextVersion {
+			r.nextVersion = update.RouterVersion
+		}
+		r.mu.Unlock()
+		_ = r.broadcastLifecycle(update.ParentAgentID, update.RouterVersion)
+	}
+}
+
+func (r *Router) closeExpiredLeaseSessions(expired []store.ExpiredLease) {
+	if len(expired) == 0 {
+		return
+	}
+	r.mu.RLock()
+	candidates := make([]*session, 0, len(r.sessions))
+	seen := make(map[*session]struct{})
+	for _, candidate := range r.sessions {
+		if _, ok := seen[candidate]; !ok {
+			seen[candidate] = struct{}{}
+			candidates = append(candidates, candidate)
+		}
+	}
+	for _, subscribers := range r.convos {
+		for _, candidate := range subscribers {
+			if _, ok := seen[candidate]; !ok {
+				seen[candidate] = struct{}{}
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	r.mu.RUnlock()
+	for _, lease := range expired {
+		for _, candidate := range candidates {
+			if candidate.agentID != lease.AgentID || candidate.deliveryInstance != lease.InstanceID || candidate.leaseID != lease.LeaseID || !r.activeSession(candidate) {
+				continue
+			}
+			_ = candidate.sendError("lease_expired", "")
+			_ = candidate.close(4001, "lease expired")
+		}
+	}
 }
 
 // handleTmux keeps the route present even when no adapter is configured. The
