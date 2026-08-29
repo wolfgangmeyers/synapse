@@ -83,11 +83,18 @@ test("prompt template validation rejects NUL characters before SQLite", async (t
     { name: "\u0000daily check", body: "body" },
     { name: "name", body: "\u0000body" },
   ];
+  const invalidIds = ["bad\uD800id", "bad\uDC00id"];
 
   for (const invalid of invalidValues) {
     assert.throws(() => repository.createPromptTemplate(invalid), PromptTemplateValidationError);
   }
   assert.deepEqual(repository.promptTemplates(), []);
+  for (const id of invalidIds) {
+    assert.throws(
+      () => repository.createPromptTemplate({ id, name: "invalid id", body: "body" }),
+      PromptTemplateValidationError,
+    );
+  }
 
   const base = await httpUrl(router);
   for (const invalid of invalidValues) {
@@ -100,6 +107,15 @@ test("prompt template validation rejects NUL characters before SQLite", async (t
     assert.equal((await response.json()).error.code, "invalid_prompt_template");
   }
   assert.deepEqual(repository.promptTemplates(), []);
+  for (const id of invalidIds) {
+    const response = await request(base, "/v1/prompt-templates", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ id, name: "invalid id", body: "body" }),
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, "invalid_prompt_template");
+  }
 
   const created = repository.createPromptTemplate(template());
   for (const patch of [{ name: "\u0000updated" }, { body: "\u0000updated body" }]) {

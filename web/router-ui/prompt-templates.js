@@ -9,6 +9,22 @@ const CANONICAL_PROMPT_TEMPLATE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2
 const PROMPT_TEMPLATE_IMPORT_KEYS = new Set(["name", "body", "id", "updated_at"]);
 const textEncoder = new TextEncoder();
 
+/** Prompt-template IDs must contain only complete UTF-16 code points for UTF-8 portability. */
+export function isPortablePromptTemplateId(value) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\u0000")) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xDC00 || next > 0xDFFF) return false;
+      index += 1;
+    } else if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
+      return false;
+    }
+  }
+  return textEncoder.encode(value).length <= MAX_PROMPT_TEMPLATE_ID_BYTES;
+}
+
 function isCanonicalPromptTemplateTimestamp(value) {
   if (typeof value !== "string" || !CANONICAL_PROMPT_TEMPLATE_TIMESTAMP.test(value)) return false;
   try {
@@ -69,8 +85,7 @@ export function parsePromptTemplateImport(value) {
       throw new Error(`Template ${index + 1} must have a valid name and body.`);
     }
     if (Object.hasOwn(template, "id")) {
-      if (typeof template.id !== "string" || template.id.length === 0
-        || template.id.includes("\u0000") || textEncoder.encode(template.id).length > MAX_PROMPT_TEMPLATE_ID_BYTES) {
+      if (!isPortablePromptTemplateId(template.id)) {
         throw new Error(`Template ${index + 1} has invalid metadata.`);
       }
       if (ids.has(template.id)) throw new Error(`The import contains duplicate template id \"${template.id}\".`);

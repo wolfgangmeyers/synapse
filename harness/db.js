@@ -2629,10 +2629,18 @@ function selectLiveDuplicateMessage(database, candidate) {
 }
 
 export function isPortablePromptTemplateId(value) {
-  return typeof value === "string"
-    && value.length > 0
-    && !value.includes("\u0000")
-    && Buffer.byteLength(value, "utf8") <= PROMPT_TEMPLATE_MAX_ID_BYTES;
+  if (typeof value !== "string" || value.length === 0 || value.includes("\u0000")) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xDC00 || next > 0xDFFF) return false;
+      index += 1;
+    } else if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
+      return false;
+    }
+  }
+  return Buffer.byteLength(value, "utf8") <= PROMPT_TEMPLATE_MAX_ID_BYTES;
 }
 
 function validatePromptTemplateTimestamp(value) {
