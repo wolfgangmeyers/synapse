@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,10 +28,11 @@ func TestPromptTemplatesAcceptPortableIDsAndCanonicalTimestamps(t *testing.T) {
 	require.Equal(t, "2030-01-01T00:00:00.000Z", created.CreatedAt)
 
 	for _, value := range []string{
-		"", strings.Repeat("é", 513), "bad\x00id",
+		"", strings.Repeat("é", 513), strings.Repeat("x", 1025), "bad\x00id", "\xff",
 	} {
 		id := value
-		_, err := s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{ID: &id, Name: "name-" + id, Body: "body"})
+		require.False(t, IsPortablePromptTemplateID(id), "invalid portable ID: %q", id)
+		_, err := s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{ID: &id, Name: "name", Body: "body"})
 		var validation *PromptTemplateValidationError
 		require.ErrorAs(t, err, &validation)
 	}
@@ -45,6 +48,174 @@ func TestPromptTemplatesAcceptPortableIDsAndCanonicalTimestamps(t *testing.T) {
 	validID := strings.Repeat("é", 512)
 	_, err = s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{ID: &validID, Name: "max-id", Body: "body"})
 	require.NoError(t, err)
+}
+
+func TestPromptTemplateValidationMatchesECMAScriptTrimWhitespace(t *testing.T) {
+	s := openTestStore(t)
+	whitespace := []string{
+		"\t", "\n", "\v", "\f", "\r", " ", "\u00a0", "\u1680",
+		"\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005", "\u2006", "\u2007",
+		"\u2008", "\u2009", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff",
+	}
+	for index, value := range whitespace {
+		for field := range map[string]bool{"name": true, "body": true} {
+			request := PromptTemplateRequest{Name: "name", Body: "body"}
+			if field == "name" {
+				request.Name = value
+			} else {
+				request.Body = value
+			}
+			_, err := s.CreatePromptTemplate(context.Background(), request)
+			var validation *PromptTemplateValidationError
+			require.ErrorAs(t, err, &validation, "whitespace %d in %s", index, field)
+		}
+	}
+	// U+0085 is Unicode whitespace, but ECMAScript String.trim leaves it alone.
+	created, err := s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{
+		Name: "\u0085name\u0085", Body: "\u0085body\u0085",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "\u0085name\u0085", created.Name)
+	require.Equal(t, "\u0085body\u0085", created.Body)
+}
+
+func TestPromptTemplateStateMatrix(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := deterministic.NewFixedClock(start)
+	ids := deterministic.NewSequenceIDSource(testUUID("0001"))
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	s, err := Open(ctx, databasePath, Options{Clock: clock, IDSource: ids})
+	require.NoError(t, err)
+
+	first, err := s.CreatePromptTemplate(ctx, PromptTemplateRequest{Name: "first", Body: "body"})
+	require.NoError(t, err)
+	createdAt := first.CreatedAt
+	clock.ResetCalls()
+	ids.ResetCalls()
+
+	renamed, err := s.UpdatePromptTemplate(ctx, first.ID, map[string]json.RawMessage{"name": json.RawMessage(`"renamed"`)})
+	require.NoError(t, err)
+	require.Equal(t, first.ID, renamed.ID)
+	require.Equal(t, createdAt, renamed.CreatedAt)
+	require.Equal(t, "renamed", renamed.Name)
+	require.Equal(t, []time.Time{start}, clock.Calls())
+	require.Empty(t, ids.Calls())
+
+	secondID := "imported/id"
+	secondTimestamp := "2029-12-31T23:59:59.999Z"
+	second, err := s.CreatePromptTemplate(ctx, PromptTemplateRequest{
+		ID: ptr(secondID), Name: "second", Body: "body", UpdatedAt: &secondTimestamp,
+	})
+	require.NoError(t, err)
+	require.Equal(t, secondTimestamp, second.UpdatedAt)
+	beforeConflict := *renamed
+	clock.ResetCalls()
+	ids.ResetCalls()
+	_, err = s.UpdatePromptTemplate(ctx, first.ID, map[string]json.RawMessage{"name": json.RawMessage(`"second"`)})
+	var nameConflict *PromptTemplateNameConflictError
+	require.ErrorAs(t, err, &nameConflict)
+	require.Empty(t, clock.Calls())
+	require.Empty(t, ids.Calls())
+	afterConflict, err := s.PromptTemplateFor(ctx, first.ID)
+	require.NoError(t, err)
+	require.Equal(t, beforeConflict, *afterConflict)
+	clock.ResetCalls()
+	_, err = s.UpdatePromptTemplate(ctx, "missing", map[string]json.RawMessage{"updated_at": json.RawMessage("null")})
+	var validation *PromptTemplateValidationError
+	require.ErrorAs(t, err, &validation)
+	require.Empty(t, clock.Calls())
+
+	// Import failures distinguish name lookup from ID lookup and do not consume
+	// either the timestamp clock or generated-ID source.
+	for _, test := range []struct {
+		request        PromptTemplateRequest
+		wantConflict   bool
+		wantValidation bool
+	}{
+		{request: PromptTemplateRequest{ID: ptr(first.ID), Name: "unused-id", Body: "body"}, wantValidation: true},
+		{request: PromptTemplateRequest{ID: ptr("unused/id"), Name: "second", Body: "body"}, wantConflict: true},
+		{request: PromptTemplateRequest{ID: ptr(first.ID), Name: "second", Body: "body"}, wantConflict: true},
+	} {
+		clock.ResetCalls()
+		ids.ResetCalls()
+		_, err := s.CreatePromptTemplate(ctx, test.request)
+		if test.wantConflict {
+			require.ErrorAs(t, err, &nameConflict)
+		}
+		if test.wantValidation {
+			var validation *PromptTemplateValidationError
+			require.ErrorAs(t, err, &validation)
+		}
+		require.Empty(t, clock.Calls())
+		require.Empty(t, ids.Calls())
+	}
+
+	for index := len(mustPromptTemplates(t, s)); index < maxPromptTemplates; index++ {
+		id := fmt.Sprintf("fill/%d", index)
+		_, err := s.CreatePromptTemplate(ctx, PromptTemplateRequest{ID: &id, Name: id, Body: "body"})
+		require.NoError(t, err)
+	}
+	require.Len(t, mustPromptTemplates(t, s), maxPromptTemplates)
+	clock.ResetCalls()
+	ids.ResetCalls()
+	_, err = s.CreatePromptTemplate(ctx, PromptTemplateRequest{Name: "capacity", Body: "body"})
+	var capacity *PromptTemplateCapacityError
+	require.ErrorAs(t, err, &capacity)
+	require.Empty(t, clock.Calls())
+	require.Empty(t, ids.Calls())
+
+	// At capacity, name conflict still wins, and capacity wins before duplicate
+	// imported-ID validation, matching Node's transaction order.
+	for _, test := range []struct {
+		request      PromptTemplateRequest
+		wantConflict bool
+	}{
+		{request: PromptTemplateRequest{ID: ptr("new/id"), Name: "second", Body: "body"}, wantConflict: true},
+		{request: PromptTemplateRequest{ID: ptr(first.ID), Name: "capacity-id", Body: "body"}},
+	} {
+		clock.ResetCalls()
+		ids.ResetCalls()
+		_, err := s.CreatePromptTemplate(ctx, test.request)
+		if test.wantConflict {
+			require.ErrorAs(t, err, &nameConflict)
+		} else {
+			require.ErrorAs(t, err, &capacity)
+		}
+		require.Empty(t, clock.Calls())
+		require.Empty(t, ids.Calls())
+	}
+	require.NoError(t, s.Close())
+}
+
+func TestPromptTemplateRestartPreservesCreatedAtAndUpdates(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	databasePath := filepath.Join(t.TempDir(), "router.db")
+	s, err := Open(ctx, databasePath, Options{Clock: clock})
+	require.NoError(t, err)
+	created, err := s.CreatePromptTemplate(ctx, PromptTemplateRequest{Name: "persisted", Body: "body"})
+	require.NoError(t, err)
+	clock.ResetCalls()
+	updated, err := s.UpdatePromptTemplate(ctx, created.ID, map[string]json.RawMessage{"body": json.RawMessage(`"updated"`)})
+	require.NoError(t, err)
+	require.Equal(t, created.CreatedAt, updated.CreatedAt)
+	require.Equal(t, []time.Time{time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)}, clock.Calls())
+	require.NoError(t, s.Close())
+
+	restarted, err := Open(ctx, databasePath, Options{Clock: clock})
+	require.NoError(t, err)
+	defer restarted.Close()
+	persisted, err := restarted.PromptTemplateFor(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, updated, persisted)
+}
+
+func mustPromptTemplates(t *testing.T, s *Store) []PromptTemplate {
+	t.Helper()
+	items, err := s.PromptTemplates(context.Background())
+	require.NoError(t, err)
+	return items
 }
 
 func TestPromptTemplateClockSemantics(t *testing.T) {
@@ -81,6 +252,12 @@ func TestPromptTemplateClockSemantics(t *testing.T) {
 	var conflict *PromptTemplateNameConflictError
 	require.ErrorAs(t, err, &conflict)
 	require.Empty(t, clock.Calls())
+
+	laterID := "later/id"
+	later, err := s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{ID: &laterID, Name: "later", Body: "body"})
+	require.NoError(t, err)
+	require.Equal(t, "2030-01-01T00:00:00.000Z", later.CreatedAt)
+	require.Equal(t, []time.Time{time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)}, clock.Calls())
 }
 
 func TestPromptTemplatesListLegacyIDsAndRestrictItemWrites(t *testing.T) {
