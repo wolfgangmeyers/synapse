@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -647,6 +648,64 @@ func (r *Router) findTarget(agent, instance string) *session {
 	}
 	return candidate
 }
+
+func (r *Router) findControlTarget(agent, instance string) (*session, string) {
+	r.mu.RLock()
+	candidate := r.sessions[agent]
+	r.mu.RUnlock()
+	if candidate == nil {
+		return nil, "target_not_connected"
+	}
+	if candidate.instanceID != instance {
+		return nil, "target_instance_changed"
+	}
+	if !r.sessionMatchesIdentity(candidate) {
+		return nil, "target_not_connected"
+	}
+	return candidate, ""
+}
+
+func (r *Router) pruneExpiredPendingControls(now time.Time) {
+	r.mu.Lock()
+	expired := make([]struct {
+		pending *pendingControl
+		code    string
+	}, 0)
+	prune := func(pending map[string]*pendingControl, code string) {
+		for key, item := range pending {
+			if item.expires.After(now) {
+				continue
+			}
+			delete(pending, key)
+			expired = append(expired, struct {
+				pending *pendingControl
+				code    string
+			}{pending: item, code: code})
+		}
+	}
+	prune(r.pendingMod, "model_control_expired")
+	prune(r.pendingGoal, "goal_control_expired")
+	prune(r.pendingLock, "reminder_lock_control_expired")
+	r.mu.Unlock()
+	for _, item := range expired {
+		if item.pending.source != nil && r.sessionMatchesIdentity(item.pending.source) {
+			_ = item.pending.source.sendError(item.code, item.pending.requestID)
+		}
+	}
+}
+
+func pendingCapacityExceeded(pending map[string]*pendingControl, source *session, maxTotal, maxSource int) bool {
+	if len(pending) >= maxTotal {
+		return true
+	}
+	count := 0
+	for _, item := range pending {
+		if item.source == source {
+			count++
+		}
+	}
+	return count >= maxSource
+}
 func (r *Router) modelCatalog(s *session, frame map[string]json.RawMessage) error {
 	if !r.sessionMatches(s, frame) {
 		return r.leaseError(s, frame)
@@ -831,10 +890,11 @@ func (r *Router) modelControl(s *session, frame map[string]json.RawMessage) erro
 	if s.role != "user_interaction" {
 		return s.sendError("model_control_not_allowed", frameString(frame, "frame_id"))
 	}
-	target := r.findTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
-	if target == nil || !r.sessionMatchesIdentity(target) {
-		return s.sendError("target_not_connected", frameString(frame, "frame_id"))
+	target, targetError := r.findControlTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
+	if targetError != "" {
+		return s.sendError(targetError, frameString(frame, "frame_id"))
 	}
+	r.pruneExpiredPendingControls(r.now())
 	key := s.agentID + "\x00" + frameString(frame, "control_id")
 	r.mu.Lock()
 	if _, ok := r.pendingMod[key]; ok {
@@ -904,10 +964,11 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 	if s.role != "user_interaction" {
 		return s.sendError("goal_control_not_allowed", frameString(frame, "frame_id"))
 	}
-	target := r.findTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
-	if target == nil || !r.sessionMatchesIdentity(target) {
-		return s.sendError("target_not_connected", frameString(frame, "frame_id"))
+	target, targetError := r.findControlTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
+	if targetError != "" {
+		return s.sendError(targetError, frameString(frame, "frame_id"))
 	}
+	r.pruneExpiredPendingControls(r.now())
 	key := s.agentID + "\x00" + frameString(frame, "control_id")
 	expires := r.now().Add(10 * time.Minute)
 	config := map[string]any{"sourceAgentId": s.agentID, "controlId": frameString(frame, "control_id"), "action": frameString(frame, "action"), "goal": frameString(frame, "goal"), "settings": frameAny(frame, "settings")}
@@ -915,6 +976,10 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 	if _, ok := r.pendingGoal[key]; ok {
 		r.mu.Unlock()
 		return s.sendError("goal_control_already_pending", frameString(frame, "frame_id"))
+	}
+	if pendingCapacityExceeded(r.pendingGoal, s, r.maxControls, r.maxPerSrc) {
+		r.mu.Unlock()
+		return s.sendError("goal_control_capacity_exceeded", frameString(frame, "frame_id"))
 	}
 	desired, err := r.store.UpsertGoalControlDesired(context.Background(), target.agentID, target.instanceID, config, timestamp(expires))
 	if err != nil {
@@ -1003,19 +1068,24 @@ func (r *Router) recordGoal(s *session, frame map[string]json.RawMessage) {
 	if !ok {
 		return
 	}
+	stateValue := rawMapToAny(state)
 	r.mu.Lock()
 	if !r.activeSessionLocked(s) {
 		r.mu.Unlock()
 		return
 	}
 	projection := map[string]any{"enabled": frameAny(state, "enabled"), "goal": frameAny(state, "goal")}
-	r.goals[s.agentID] = goalState{instanceID: s.instanceID, leaseID: s.leaseID, state: rawMapToAny(state), projection: projection}
+	previous, hadPrevious := r.goals[s.agentID]
+	unchanged := hadPrevious && previous.instanceID == s.instanceID && reflect.DeepEqual(previous.state, stateValue)
+	r.goals[s.agentID] = goalState{instanceID: s.instanceID, leaseID: s.leaseID, state: stateValue, projection: projection}
 	if activity, ok := r.activities[s.agentID]; ok && activity.instanceID == s.instanceID && activity.leaseID == s.leaseID {
 		activity.goal = cloneMap(projection)
 		r.activities[s.agentID] = activity
 	}
 	r.mu.Unlock()
-	r.broadcastGoal(s.agentID)
+	if !unchanged {
+		r.broadcastGoal(s.agentID)
+	}
 }
 func rawMapToAny(value map[string]json.RawMessage) map[string]any {
 	result := map[string]any{}
@@ -1040,15 +1110,20 @@ func (r *Router) reminderLockControl(s *session, frame map[string]json.RawMessag
 	if reminder.Target != frameString(frame, "target_agent_id") {
 		return s.sendError("reminder_target_mismatch", frameString(frame, "frame_id"))
 	}
-	target := r.findTarget(reminder.Target, frameString(frame, "target_instance_id"))
-	if target == nil || !r.sessionMatchesIdentity(target) {
-		return s.sendError("target_not_connected", frameString(frame, "frame_id"))
+	target, targetError := r.findControlTarget(reminder.Target, frameString(frame, "target_instance_id"))
+	if targetError != "" {
+		return s.sendError(targetError, frameString(frame, "frame_id"))
 	}
+	r.pruneExpiredPendingControls(r.now())
 	key := s.agentID + "\x00" + frameString(frame, "control_id")
 	r.mu.Lock()
 	if _, ok := r.pendingLock[key]; ok {
 		r.mu.Unlock()
 		return s.sendError("reminder_lock_control_already_pending", frameString(frame, "frame_id"))
+	}
+	if pendingCapacityExceeded(r.pendingLock, s, r.maxControls, r.maxPerSrc) {
+		r.mu.Unlock()
+		return s.sendError("reminder_lock_control_capacity_exceeded", frameString(frame, "frame_id"))
 	}
 	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: r.now().Add(r.controlTTL), reminder: reminder.ID}
 	r.pendingLock[key] = pending
