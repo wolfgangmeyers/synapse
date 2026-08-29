@@ -16,10 +16,86 @@ func (r *Router) offerAgent(agentID string) {
 	if registering {
 		return
 	}
+	r.scheduleDeliveryOffer(agentID)
+}
+
+func (r *Router) scheduleDeliveryOffer(agentID string) {
+	r.deliveryOfferMu.Lock()
+	defer r.deliveryOfferMu.Unlock()
+	if r.deliveryOffersClosed || r.pendingDeliveryOffers[agentID] != nil {
+		return
+	}
 	r.mu.RLock()
-	s := r.sessions[agentID]
+	sessionExists := r.sessions[agentID] != nil
 	r.mu.RUnlock()
-	r.offer(s)
+	if !sessionExists {
+		return
+	}
+	pending := &pendingDeliveryOffer{done: make(chan struct{})}
+	r.deliveryOfferWG.Add(1)
+	pending.timer = time.AfterFunc(DefaultDeliveryOfferCoalesce, func() {
+		r.runDeliveryOffer(agentID, pending)
+	})
+	r.pendingDeliveryOffers[agentID] = pending
+}
+
+func (r *Router) runDeliveryOffer(agentID string, pending *pendingDeliveryOffer) {
+	r.deliveryOfferMu.Lock()
+	if r.pendingDeliveryOffers[agentID] == pending {
+		delete(r.pendingDeliveryOffers, agentID)
+	}
+	r.deliveryOfferMu.Unlock()
+	defer func() {
+		close(pending.done)
+		r.deliveryOfferWG.Done()
+	}()
+
+	// Resolve the session after the timer fires. Registration may have replaced
+	// the socket during the coalescing window.
+	r.mu.RLock()
+	session := r.sessions[agentID]
+	r.mu.RUnlock()
+	r.offer(session)
+}
+
+func (r *Router) cancelPendingDeliveryOffer(agentID string) {
+	r.deliveryOfferMu.Lock()
+	pending := r.pendingDeliveryOffers[agentID]
+	if pending == nil {
+		r.deliveryOfferMu.Unlock()
+		return
+	}
+	delete(r.pendingDeliveryOffers, agentID)
+	stopped := pending.timer.Stop()
+	r.deliveryOfferMu.Unlock()
+	if stopped {
+		close(pending.done)
+		r.deliveryOfferWG.Done()
+		return
+	}
+	<-pending.done
+}
+
+func (r *Router) stopPendingDeliveryOffers() {
+	r.deliveryOfferMu.Lock()
+	r.deliveryOffersClosed = true
+	pending := make([]*pendingDeliveryOffer, 0, len(r.pendingDeliveryOffers))
+	for agentID, offer := range r.pendingDeliveryOffers {
+		delete(r.pendingDeliveryOffers, agentID)
+		pending = append(pending, offer)
+	}
+	stopped := make([]*pendingDeliveryOffer, 0, len(pending))
+	for _, offer := range pending {
+		if offer.timer.Stop() {
+			stopped = append(stopped, offer)
+		}
+	}
+	r.deliveryOfferMu.Unlock()
+	for _, offer := range stopped {
+		close(offer.done)
+		r.deliveryOfferWG.Done()
+	}
+	r.deliveryOfferWG.Wait()
 }
 
 func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {

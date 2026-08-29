@@ -337,12 +337,15 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	r.clearStaleActivityGeneration(agentID, instanceID)
 	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
 	s.setPaused(r.agentCompacting(agentID))
+	r.cancelPendingDeliveryOffer(agentID)
 	r.mu.Lock()
 	r.sessions[agentID] = s
 	if s.conversationSync == "v1" {
 		r.convos[agentID] = map[string]*session{instanceID: s}
+		r.conversationOrder[agentID] = []string{instanceID}
 	} else {
 		delete(r.convos, agentID)
+		delete(r.conversationOrder, agentID)
 	}
 	r.mu.Unlock()
 	if err := r.sendRegistered(s, frame, lease); err != nil {
@@ -386,6 +389,10 @@ func (r *Router) registerConversationSync(s *session, frame map[string]json.RawM
 	}
 	r.mu.Lock()
 	subscribers[instanceID] = s
+	// Replacing an instance keeps its original connection-order position.
+	if !containsString(r.conversationOrder[agentID], instanceID) {
+		r.conversationOrder[agentID] = append(r.conversationOrder[agentID], instanceID)
+	}
 	if owner == reconnecting {
 		r.sessions[agentID] = s
 	}

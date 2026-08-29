@@ -22,17 +22,18 @@ import (
 )
 
 const (
-	DefaultHost              = "127.0.0.1"
-	DefaultPort              = 8765
-	DefaultPath              = "/v1/agents"
-	DefaultMaxFrameBytes     = 64 * 1024
-	DefaultMaxRequestBytes   = 6 * 1024 * 1024
-	DefaultLeaseDuration     = 30 * time.Second
-	DefaultDeliveryDuration  = 30 * time.Second
-	DefaultMaxDeliveryTries  = 3
-	DefaultActivityTTL       = 15 * time.Second
-	DefaultPendingControlTTL = 30 * time.Second
-	DefaultSweepHeartbeat    = time.Hour
+	DefaultHost                  = "127.0.0.1"
+	DefaultPort                  = 8765
+	DefaultPath                  = "/v1/agents"
+	DefaultMaxFrameBytes         = 64 * 1024
+	DefaultMaxRequestBytes       = 6 * 1024 * 1024
+	DefaultLeaseDuration         = 30 * time.Second
+	DefaultDeliveryDuration      = 30 * time.Second
+	DefaultMaxDeliveryTries      = 3
+	DefaultActivityTTL           = 15 * time.Second
+	DefaultPendingControlTTL     = 30 * time.Second
+	DefaultDeliveryOfferCoalesce = 25 * time.Millisecond
+	DefaultSweepHeartbeat        = time.Hour
 )
 
 var (
@@ -137,29 +138,36 @@ type Router struct {
 	ownershipMu         sync.Mutex
 	ownership           map[string]*ownershipTransition
 	ownershipGeneration uint64
-	server              *http.Server
-	listener            net.Listener
-	serveDone           chan struct{}
-	sweepCancel         context.CancelFunc
-	sweepDone           chan struct{}
-	closed              bool
-	sessions            map[string]*session
-	convos              map[string]map[string]*session
-	activities          map[string]activity
-	models              map[string]modelProjection
-	goals               map[string]goalState
-	latestGoalRevision  map[string]int64
-	lastSweepRecord     time.Time
-	pendingMod          map[string]*pendingControl
-	pendingGoal         map[string]*pendingControl
-	pendingLock         map[string]*pendingControl
-	lifecycleState      map[string]lifecycleAgent
-	nextVersion         int64
-	rates               map[string][]time.Time
-	selectedTmux        string
-	windowIDs           map[string]string
-	goalAvailable       bool
-	lifecycleAvailable  bool
+	// deliveryOfferMu protects one coalescing timer per agent. Close marks the
+	// timer set closed before waiting so no callback can be added concurrently.
+	deliveryOfferMu       sync.Mutex
+	pendingDeliveryOffers map[string]*pendingDeliveryOffer
+	deliveryOfferWG       sync.WaitGroup
+	deliveryOffersClosed  bool
+	server                *http.Server
+	listener              net.Listener
+	serveDone             chan struct{}
+	sweepCancel           context.CancelFunc
+	sweepDone             chan struct{}
+	closed                bool
+	sessions              map[string]*session
+	convos                map[string]map[string]*session
+	conversationOrder     map[string][]string
+	activities            map[string]activity
+	models                map[string]modelProjection
+	goals                 map[string]goalState
+	latestGoalRevision    map[string]int64
+	lastSweepRecord       time.Time
+	pendingMod            map[string]*pendingControl
+	pendingGoal           map[string]*pendingControl
+	pendingLock           map[string]*pendingControl
+	lifecycleState        map[string]lifecycleAgent
+	nextVersion           int64
+	rates                 map[string][]time.Time
+	selectedTmux          string
+	windowIDs             map[string]string
+	goalAvailable         bool
+	lifecycleAvailable    bool
 }
 
 type session struct {
@@ -231,6 +239,11 @@ type ownershipTransition struct {
 	agentID    string
 	generation uint64
 	done       chan struct{}
+}
+
+type pendingDeliveryOffer struct {
+	timer *time.Timer
+	done  chan struct{}
 }
 
 func wallClock() time.Time { return time.Now() }
@@ -342,7 +355,7 @@ func New(options Options) (*Router, error) {
 	if !options.GoalControlAvailable {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state") && contains(options.Store.MigrationIDs(), "021_goal_control_revision_history")
 	}
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	return r, nil
 }
@@ -362,6 +375,8 @@ func contains(values []string, wanted string) bool {
 	}
 	return false
 }
+
+func containsString(values []string, wanted string) bool { return contains(values, wanted) }
 
 // URLs returns the bound HTTP and WebSocket URLs. It is valid after Listen.
 func (r *Router) URLs() (string, string) {
@@ -463,6 +478,7 @@ func (r *Router) Close(ctx context.Context) error {
 		}
 	}
 	r.mu.Unlock()
+	r.stopPendingDeliveryOffers()
 	if sweepCancel != nil && sweepDone != nil {
 		sweepCancel()
 		<-sweepDone

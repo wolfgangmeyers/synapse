@@ -515,22 +515,29 @@ func (r *Router) httpMessageSource(envelope protocol.Envelope) protocol.MessageS
 		return protocol.MessageSource{Kind: "discord"}
 	}
 
-	webConnected, androidConnected := false, false
 	r.mu.RLock()
-	for _, candidate := range r.convos[envelope.From] {
+	defer r.mu.RUnlock()
+	subscribers := r.convos[envelope.From]
+	for _, instanceID := range r.conversationOrder[envelope.From] {
+		candidate := subscribers[instanceID]
+		if candidate == nil {
+			continue
+		}
 		switch candidate.clientType {
 		case "web":
-			webConnected = true
+			return protocol.MessageSource{Kind: "web_ui"}
 		case "android":
-			androidConnected = true
+			return protocol.MessageSource{Kind: "android"}
 		}
 	}
-	r.mu.RUnlock()
-	if webConnected {
-		return protocol.MessageSource{Kind: "web_ui"}
-	}
-	if androidConnected {
-		return protocol.MessageSource{Kind: "android"}
+	// Keep manually constructed test state and pre-order state compatible.
+	for _, candidate := range subscribers {
+		switch candidate.clientType {
+		case "web":
+			return protocol.MessageSource{Kind: "web_ui"}
+		case "android":
+			return protocol.MessageSource{Kind: "android"}
+		}
 	}
 	return protocol.MessageSource{Kind: "agent"}
 }
