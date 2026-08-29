@@ -118,6 +118,11 @@ type Router struct {
 	log           func(string, map[string]any)
 
 	mu sync.RWMutex
+	// conversationLocks serializes each conversation's durable write and live
+	// broadcast together. This is the synchronous Node handler boundary; a
+	// separate lock per participant pair keeps unrelated conversations moving.
+	conversationLocksMu sync.Mutex
+	conversationLocks   map[string]*conversationLock
 	// ownershipMu protects the small per-agent transition table. A transition
 	// reserves one agent while its SQLite and socket work runs, but this mutex
 	// is only held while reading or changing that table.
@@ -135,6 +140,7 @@ type Router struct {
 	activities          map[string]activity
 	models              map[string]modelProjection
 	goals               map[string]goalState
+	latestGoalRevision  map[string]int64
 	pendingMod          map[string]*pendingControl
 	pendingGoal         map[string]*pendingControl
 	pendingLock         map[string]*pendingControl
@@ -205,6 +211,11 @@ type pendingControl struct {
 type lifecycleAgent struct {
 	version   int64
 	subagents []map[string]any
+}
+
+type conversationLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 type ownershipTransition struct {
@@ -318,7 +329,7 @@ func New(options Options) (*Router, error) {
 	if !options.GoalControlAvailable {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state")
 	}
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	return r, nil
 }
