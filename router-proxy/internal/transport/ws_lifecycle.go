@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -210,6 +211,11 @@ func (r *Router) sessionClosedSerialized(s *session) {
 		delete(r.sessions, s.agentID)
 		delete(r.models, s.agentID)
 		delete(r.goals, s.agentID)
+		for key := range r.latestGoalRevision {
+			if strings.HasPrefix(key, s.agentID+"\x00") {
+				delete(r.latestGoalRevision, key)
+			}
+		}
 		if activity, ok := r.activities[s.agentID]; !ok || activity.state != "compacting" {
 			delete(r.activities, s.agentID)
 		}

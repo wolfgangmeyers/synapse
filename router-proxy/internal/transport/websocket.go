@@ -473,6 +473,11 @@ func (r *Router) clearStaleGeneration(agentID, instanceID, leaseID string, owner
 	if value, ok := r.goals[agentID]; ok && (ownerChanged || value.instanceID != instanceID || value.leaseID != leaseID) {
 		delete(r.goals, agentID)
 	}
+	for key := range r.latestGoalRevision {
+		if strings.HasPrefix(key, agentID+"\x00") && (ownerChanged || key != agentID+"\x00"+instanceID) {
+			delete(r.latestGoalRevision, key)
+		}
+	}
 }
 
 func (r *Router) agentCompacting(agentID string) bool {
@@ -800,6 +805,7 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 	revision := r.nextVersion
 	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: r.now().Add(10 * time.Minute), revision: revision}
 	r.pendingGoal[key] = pending
+	r.latestGoalRevision[target.agentID+"\x00"+target.instanceID] = revision
 	r.mu.Unlock()
 	if err := target.send(map[string]any{"type": "goal_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "revision": revision, "action": frameString(frame, "action"), "goal": frameString(frame, "goal"), "settings": frameAny(frame, "settings"), "expires_at": timestamp(pending.expires)}); err != nil {
 		r.mu.Lock()
@@ -819,15 +825,19 @@ func (r *Router) goalControlResult(s *session, frame map[string]json.RawMessage)
 		return r.leaseError(s, frame)
 	}
 	key := frameString(frame, "source_agent_id") + "\x00" + frameString(frame, "control_id")
+	revision, revisionPresent := frameInt(frame, "revision")
 	r.mu.Lock()
 	pending := r.pendingGoal[key]
-	if pending != nil && pending.target == s {
-		delete(r.pendingGoal, key)
+	latestRevision := int64(0)
+	if pending != nil {
+		latestRevision = r.latestGoalRevision[s.agentID+"\x00"+s.instanceID]
 	}
-	r.mu.Unlock()
-	if pending == nil || pending.target != s {
+	if pending == nil || pending.target != s || !revisionPresent || pending.revision != revision || latestRevision != pending.revision || r.hasNewerGoalPendingLocked(pending) {
+		r.mu.Unlock()
 		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
 	}
+	delete(r.pendingGoal, key)
+	r.mu.Unlock()
 	r.recordGoal(s, frame)
 	if pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
 		return nil
@@ -840,6 +850,15 @@ func (r *Router) goalControlResult(s *session, frame map[string]json.RawMessage)
 	}
 	return pending.source.send(result)
 }
+func (r *Router) hasNewerGoalPendingLocked(pending *pendingControl) bool {
+	for _, candidate := range r.pendingGoal {
+		if candidate.source == pending.source && candidate.target == pending.target && candidate.revision > pending.revision {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Router) goalStateFrame(s *session, frame map[string]json.RawMessage) error {
 	if !r.goalAvailable {
 		return s.sendError("goal_control_unavailable", frameString(frame, "frame_id"))

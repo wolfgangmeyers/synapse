@@ -371,8 +371,10 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 	}
 	source := protocol.NormalizeSource(envelope.Source)
 	envelope.Source = &source
+	releaseConversation := r.lockConversation(envelope.From, envelope.To)
 	result, err := r.store.Enqueue(req.Context(), envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &conversation.Body, Attachments: conversation.Attachments, Source: &source}})
 	if err != nil {
+		releaseConversation()
 		for _, item := range pending {
 			_ = r.attachments.Discard(item)
 		}
@@ -383,6 +385,7 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 		_ = item
 	}
 	r.afterEnqueue(result)
+	releaseConversation()
 	message := result.Message
 	messageJSON := map[string]any{}
 	_ = json.Unmarshal(mustJSON(message), &messageJSON)
