@@ -1,21 +1,53 @@
 {
   "version": "v1",
-  "status": "scaffold",
+  "status": "cors_verified",
   "manifest": "manifest.json",
   "cases": [
     {
       "id": "cors-origin-api",
       "method": "OPTIONS",
       "path": "/v1/health",
-      "status": "oracle_pending",
-      "reason": "The Node source and existing model-catalog expectation disagree about Origin-bearing API requests."
+      "status": "verified",
+      "success_status": 204,
+      "response_headers": {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "cache-control": "no-store"
+      }
     },
     {
       "id": "cors-origin-agents",
+      "method": "GET",
+      "path": "/v1/agents",
+      "status": "verified",
+      "success_status": 200,
+      "response_headers": {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+        "access-control-allow-headers": "content-type"
+      }
+    },
+    {
+      "id": "cors-origin-agents-preflight",
       "method": "OPTIONS",
       "path": "/v1/agents",
-      "status": "oracle_pending",
-      "reason": "Do not resolve the existing CORS source/test conflict in this seam."
+      "status": "verified",
+      "success_status": 204,
+      "response_headers": {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "cache-control": "no-store"
+      }
+    },
+    {
+      "id": "options-without-origin",
+      "method": "OPTIONS",
+      "path": "/v1/health",
+      "status": "verified",
+      "error_status": 404,
+      "error_code": "not_found"
     }
   ],
   "route_outcomes": [],

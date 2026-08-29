@@ -680,7 +680,7 @@ test("router does not acknowledge a model control when the target send throws", 
   }
 });
 
-test("router advertises model catalog support without exposing the agent snapshot to browser CORS", async () => {
+test("router advertises model catalog support with wildcard browser CORS", async () => {
   const app = await routerFixture();
   try {
     const capabilities = await (await fetch(`${app.httpUrl}/v1/capabilities`)).json();
@@ -690,8 +690,8 @@ test("router advertises model catalog support without exposing the agent snapsho
     const agents = await fetch(`${app.httpUrl}/v1/agents`, {
       headers: { origin: "https://untrusted.example" },
     });
-    assert.equal(agents.status, 403);
-    assert.equal(agents.headers.get("access-control-allow-origin"), null);
+    assert.equal(agents.status, 200);
+    assert.equal(agents.headers.get("access-control-allow-origin"), "*");
 
     const preflight = await fetch(`${app.httpUrl}/v1/agents`, {
       method: "OPTIONS",
@@ -700,8 +700,8 @@ test("router advertises model catalog support without exposing the agent snapsho
         "access-control-request-method": "GET",
       },
     });
-    assert.equal(preflight.status, 403);
-    assert.equal(preflight.headers.get("access-control-allow-origin"), null);
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
   } finally {
     await app.close();
   }

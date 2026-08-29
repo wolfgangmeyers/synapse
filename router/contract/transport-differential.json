@@ -1,0 +1,13 @@
+{
+  "version": "v1",
+  "status": "verified",
+  "scope": "isolated Node and Go transport smoke",
+  "normalization": ["server-generated frame IDs", "lease IDs", "message incarnation IDs"],
+  "steps": [
+    {"request": "GET /v1/agents", "origin": "https://diff.example", "status": 200, "access_control_allow_origin": "*"},
+    {"request": "OPTIONS /v1/agents", "origin": "https://diff.example", "status": 204, "access_control_allow_origin": "*"},
+    {"request": "OPTIONS /v1/agents", "origin": null, "status": 404, "error_code": "not_found"},
+    {"request": "WebSocket register", "status": "registered"},
+    {"request": "POST /v1/messages then WebSocket receipt", "http_status": 201, "frames": ["registered", "message", "delivery_acknowledged"], "message_id": "diff-message", "attempt_number": 1}
+  ]
+}
