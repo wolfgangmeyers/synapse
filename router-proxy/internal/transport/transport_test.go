@@ -408,8 +408,11 @@ func TestConversationSyncActivityPausesPrimaryAndPromotedSession(t *testing.T) {
 	secondary, secondaryRegistration := registerTestSession(t, wsURL, "shared", "secondary", "v1")
 	defer secondary.Close(websocket.StatusNormalClosure, "test done")
 
-	sendJSON(t, secondary, map[string]any{"version": "v1", "frame_id": "compact", "type": "activity", "agent_id": "shared", "instance_id": "secondary", "lease_id": secondaryRegistration["lease_id"], "activity_state": "compacting"})
-	require.Equal(t, "agent_activity", readJSON(t, primary)["type"])
+	sendJSON(t, secondary, map[string]any{"version": "v1", "frame_id": "compact", "type": "activity", "agent_id": "shared", "instance_id": "secondary", "lease_id": secondaryRegistration["lease_id"], "activity_state": "compacting", "subagent_count": 3, "subagents": []map[string]any{{"id": "stale"}}})
+	compacting := readJSON(t, primary)
+	require.Equal(t, "agent_activity", compacting["type"])
+	require.Equal(t, 0, int(compacting["subagent_count"].(float64)))
+	require.Empty(t, compacting["subagents"])
 	require.Equal(t, "agent_activity", readJSON(t, secondary)["type"])
 
 	client := httptest.NewServer(router)
@@ -462,6 +465,8 @@ func TestConversationSyncActivityPausesPrimaryAndPromotedSession(t *testing.T) {
 	sendJSON(t, secondary, map[string]any{"version": "v1", "frame_id": "settled", "type": "activity", "agent_id": "shared", "instance_id": "secondary", "lease_id": secondaryRegistration["lease_id"], "activity_state": "settled"})
 	activity := readJSON(t, secondary)
 	require.Equal(t, "agent_activity", activity["type"])
+	require.Equal(t, map[string]any{"enabled": false, "goal": ""}, activity["goal"])
+	require.Empty(t, activity["subagents"])
 	message := readJSON(t, secondary)
 	require.Equal(t, "message", message["type"])
 	require.Equal(t, "queued", message["message"].(map[string]any)["id"])
