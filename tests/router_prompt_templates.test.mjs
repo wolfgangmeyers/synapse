@@ -83,7 +83,12 @@ test("prompt template validation rejects NUL characters before SQLite", async (t
     { name: "\u0000daily check", body: "body" },
     { name: "name", body: "\u0000body" },
   ];
-  const invalidIds = ["bad\uD800id", "bad\uDC00id"];
+  const invalidIds = [
+    "\uD800leading", "\uDC00leading",
+    "interior\uD800id", "interior\uDC00id",
+    "trailing\uD800", "trailing\uDC00",
+  ];
+  const validSurrogatePairId = "valid-😀-id";
 
   for (const invalid of invalidValues) {
     assert.throws(() => repository.createPromptTemplate(invalid), PromptTemplateValidationError);
@@ -116,6 +121,13 @@ test("prompt template validation rejects NUL characters before SQLite", async (t
     assert.equal(response.status, 400);
     assert.equal((await response.json()).error.code, "invalid_prompt_template");
   }
+  const validPairResponse = await request(base, "/v1/prompt-templates", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ id: validSurrogatePairId, name: "valid pair", body: "body" }),
+  });
+  assert.equal(validPairResponse.status, 201);
+  assert.equal((await validPairResponse.json()).prompt_template.id, validSurrogatePairId);
 
   const created = repository.createPromptTemplate(template());
   for (const patch of [{ name: "\u0000updated" }, { body: "\u0000updated body" }]) {
