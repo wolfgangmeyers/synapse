@@ -71,6 +71,48 @@ func TestNodeAndGoTransportDifferentialForCORSAndDelivery(t *testing.T) {
 	nodeResult := exerciseEndpoint(t, nodePort)
 	goResult := exerciseEndpoint(t, goPort)
 	require.Equal(t, nodeResult, goResult)
+
+	for _, literal := range []string{"1.0", "1e0", `"1"`} {
+		nodeOutcome := exerciseLifecycleNumericFrame(t, nodePort, literal)
+		goOutcome := exerciseLifecycleNumericFrame(t, goPort, literal)
+		require.Equal(t, nodeOutcome, goOutcome, literal)
+		if literal == `"1"` {
+			require.Equal(t, "invalid_frame", nodeOutcome.Code, literal)
+		} else {
+			require.Equal(t, "subagent_lifecycle_acknowledged", nodeOutcome.Type, literal)
+			require.Equal(t, "applied", nodeOutcome.Disposition, literal)
+		}
+	}
+}
+
+type lifecycleNumericOutcome struct {
+	Type        string
+	Code        string
+	Disposition string
+}
+
+func exerciseLifecycleNumericFrame(t *testing.T, port int, literal string) lifecycleNumericOutcome {
+	t.Helper()
+	identifier := strings.NewReplacer(".", "-", "e", "power", `"`, "quoted").Replace(literal)
+	agentID := "numeric-agent-" + identifier
+	instanceID := "numeric-instance-" + identifier
+	ws, _, err := websocket.Dial(context.Background(), fmt.Sprintf("ws://127.0.0.1:%d/v1/agents", port), nil)
+	require.NoError(t, err)
+	defer ws.Close(websocket.StatusNormalClosure, "test done")
+	sendFrame(t, ws, map[string]any{"version": "v1", "frame_id": "register-" + identifier, "type": "register", "agent_id": agentID, "instance_id": instanceID})
+	registered := readFrame(t, ws)
+	require.Equal(t, "registered", registered["type"])
+	payload := fmt.Sprintf(`{"version":"v1","frame_id":"lifecycle-%s","type":"subagent_lifecycle_snapshot","agent_id":"%s","instance_id":"%s","parent_session_id":"session-%s","lease_id":"%s","producer_epoch":"123e4567-e89b-42d3-a456-426614174000","client_sequence":%s,"event_id":"event-%s","subagents":[{"id":"child-%s","type":"worker","status":"running"}]}`,
+		identifier, agentID, instanceID, identifier, registered["lease_id"], literal, identifier, identifier)
+	require.NoError(t, ws.Write(context.Background(), websocket.MessageText, []byte(payload)))
+	response := readFrame(t, ws)
+	outcome := lifecycleNumericOutcome{Type: frameStringValue(response, "type"), Code: frameStringValue(response, "code"), Disposition: frameStringValue(response, "disposition")}
+	return outcome
+}
+
+func frameStringValue(frame map[string]any, key string) string {
+	value, _ := frame[key].(string)
+	return value
 }
 
 func exerciseEndpoint(t *testing.T, port int) differentialResult {
