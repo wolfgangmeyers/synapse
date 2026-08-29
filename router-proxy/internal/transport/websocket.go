@@ -74,7 +74,14 @@ func (r *Router) readLoop(s *session) {
 			continue
 		}
 		if frameString(frame, "type") == "register" {
-			if err := r.register(s, frame); err != nil {
+			if registered {
+				_ = s.sendError("already_registered", frameString(frame, "frame_id"))
+				continue
+			}
+			r.dispatchMu.Lock()
+			err := r.register(s, frame)
+			r.dispatchMu.Unlock()
+			if err != nil {
 				return
 			}
 			registered = true
@@ -85,7 +92,10 @@ func (r *Router) readLoop(s *session) {
 			_ = s.close(4003, "lease not active")
 			return
 		}
-		if err := r.dispatch(s, frame); err != nil {
+		r.dispatchMu.Lock()
+		err = r.dispatch(s, frame)
+		r.dispatchMu.Unlock()
+		if err != nil {
 			r.emit("router_error", map[string]any{"error_code": "internal_error"})
 			_ = s.sendError("internal_error", frameString(frame, "frame_id"))
 			_ = s.close(websocket.StatusInternalError, "internal server error")
@@ -219,7 +229,49 @@ func (s *session) close(code websocket.StatusCode, reason string) error {
 }
 
 func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
+	// The caller holds dispatchMu. This keeps lease acquisition and all in-memory
+	// ownership changes together with the close callback from an older socket.
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
+	var owner, reconnecting *session
+	var subscribers map[string]*session
+	r.mu.Lock()
+	owner = r.sessions[agentID]
+	subscribers = r.convos[agentID]
+	if subscribers != nil {
+		reconnecting = subscribers[instanceID]
+	}
+	r.mu.Unlock()
+
+	// conversation_sync permits additional sockets for one agent. They share the
+	// primary lease and only the primary session receives durable delivery.
+	if frameString(frame, "conversation_sync") == "v1" && subscribers != nil {
+		lease, leaseErr := r.store.LeaseFor(context.Background(), agentID)
+		if owner != nil && leaseErr == nil && lease != nil && lease.ExpiresAt > timestamp(r.now()) {
+			if reconnecting != nil {
+				r.removePendingForSession(reconnecting)
+			}
+			r.clearStaleInstanceState(agentID, instanceID)
+			r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
+			r.mu.Lock()
+			subscribers[instanceID] = s
+			if owner == reconnecting {
+				r.sessions[agentID] = s
+			}
+			r.mu.Unlock()
+			if reconnecting != nil && reconnecting != s {
+				_ = reconnecting.sendError("lease_expired", "")
+				_ = reconnecting.close(4001, "lease expired")
+			}
+			if err := r.sendRegistered(s, frame, *lease); err != nil {
+				return err
+			}
+			if r.isPrimarySession(s) {
+				r.offer(s)
+			}
+			return nil
+		}
+	}
+
 	leaseID, err := r.nextID()
 	if err != nil {
 		return err
@@ -234,7 +286,50 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		}
 		return err
 	}
-	s.agentID, s.instanceID, s.deliveryInstance, s.leaseID = agentID, instanceID, instanceID, lease.LeaseID
+
+	// AcquireAgentLease may have recovered an expired lease. Replace every old
+	// projection/subscriber atomically before publishing the new session.
+	r.mu.Lock()
+	owner = r.sessions[agentID]
+	subscribers = r.convos[agentID]
+	oldSessions := make([]*session, 0, 1)
+	if owner != nil {
+		oldSessions = append(oldSessions, owner)
+	}
+	for _, candidate := range subscribers {
+		if !containsSession(oldSessions, candidate) {
+			oldSessions = append(oldSessions, candidate)
+		}
+	}
+	r.mu.Unlock()
+	for _, candidate := range oldSessions {
+		r.removePendingForSession(candidate)
+	}
+	r.clearStaleInstanceState(agentID, instanceID)
+	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
+	r.mu.Lock()
+	r.sessions[agentID] = s
+	if s.conversationSync == "v1" {
+		r.convos[agentID] = map[string]*session{instanceID: s}
+	} else {
+		delete(r.convos, agentID)
+	}
+	r.mu.Unlock()
+	for _, replacement := range oldSessions {
+		if replacement != s {
+			_ = replacement.sendError("lease_expired", "")
+			_ = replacement.close(4001, "lease expired")
+		}
+	}
+	if err := r.sendRegistered(s, frame, lease); err != nil {
+		return err
+	}
+	r.offer(s)
+	return nil
+}
+
+func (r *Router) configureSession(s *session, frame map[string]json.RawMessage, leaseID, deliveryInstance string) {
+	s.agentID, s.instanceID, s.deliveryInstance, s.leaseID = frameString(frame, "agent_id"), frameString(frame, "instance_id"), deliveryInstance, leaseID
 	s.role = frameString(frame, "agent_role")
 	if s.role == "" {
 		s.role = "agent"
@@ -243,32 +338,37 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	s.ackConfirmation = frameString(frame, "ack_confirmation")
 	s.conversationSync = frameString(frame, "conversation_sync")
 	s.deliveryReceipts = frameString(frame, "delivery_receipts")
-	r.mu.Lock()
-	replacement := r.sessions[agentID]
-	r.sessions[agentID] = s
-	if s.conversationSync == "v1" {
-		if r.convos[agentID] == nil {
-			r.convos[agentID] = map[string]*session{}
-		}
-		r.convos[agentID][instanceID] = s
-	}
-	r.mu.Unlock()
-	if replacement != nil && replacement != s {
-		_ = replacement.sendError("lease_expired", "")
-		_ = replacement.close(4001, "lease expired")
-	}
-	fields := map[string]any{"type": "registered", "request_id": frameString(frame, "frame_id"), "agent_id": agentID, "instance_id": instanceID, "lease_id": lease.LeaseID, "expires_at": lease.ExpiresAt, "recovered": lease.Recovered, "agent_role": s.role}
+}
+
+func (r *Router) sendRegistered(s *session, frame map[string]json.RawMessage, lease domain.Lease) error {
+	fields := map[string]any{"type": "registered", "request_id": frameString(frame, "frame_id"), "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": lease.LeaseID, "expires_at": lease.ExpiresAt, "recovered": lease.Recovered, "agent_role": s.role}
 	if s.ackConfirmation != "" {
 		fields["ack_confirmation"] = s.ackConfirmation
 	}
 	if s.conversationSync != "" {
 		fields["conversation_sync"] = s.conversationSync
 	}
-	if err := s.send(fields); err != nil {
-		return err
+	return s.send(fields)
+}
+
+func (r *Router) clearStaleInstanceState(agentID, instanceID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if value, ok := r.activities[agentID]; ok && value.instanceID != instanceID {
+		delete(r.activities, agentID)
 	}
-	r.offer(s)
-	return nil
+	if value, ok := r.models[agentID]; ok && value.instanceID != instanceID {
+		delete(r.models, agentID)
+	}
+	if value, ok := r.goals[agentID]; ok && value.instanceID != instanceID {
+		delete(r.goals, agentID)
+	}
+}
+
+func (r *Router) isPrimarySession(s *session) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sessions[s.agentID] == s
 }
 func (r *Router) dispatch(s *session, frame map[string]json.RawMessage) error {
 	switch frameString(frame, "type") {
@@ -319,8 +419,11 @@ func (r *Router) activeLease(s *session) bool {
 	lease, err := r.store.LeaseFor(context.Background(), s.agentID)
 	return err == nil && lease != nil && lease.LeaseID == s.leaseID && lease.InstanceID == s.deliveryInstance && lease.ExpiresAt > timestamp(r.now())
 }
+func (r *Router) sessionMatchesIdentity(s *session) bool {
+	return r.activeSession(s) && r.activeLease(s)
+}
 func (r *Router) sessionMatches(s *session, frame map[string]json.RawMessage) bool {
-	return r.activeSession(s) && r.activeLease(s) && s.agentID == frameString(frame, "agent_id") && s.instanceID == frameString(frame, "instance_id") && s.leaseID == frameString(frame, "lease_id")
+	return r.sessionMatchesIdentity(s) && s.agentID == frameString(frame, "agent_id") && s.instanceID == frameString(frame, "instance_id") && s.leaseID == frameString(frame, "lease_id")
 }
 func (r *Router) leaseError(s *session, frame map[string]json.RawMessage) error {
 	_ = s.sendError("lease_not_active", frameString(frame, "frame_id"))
@@ -454,7 +557,7 @@ func (r *Router) modelControl(s *session, frame map[string]json.RawMessage) erro
 		return s.sendError("model_control_not_allowed", frameString(frame, "frame_id"))
 	}
 	target := r.findTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
-	if target == nil {
+	if target == nil || !r.sessionMatchesIdentity(target) {
 		return s.sendError("target_not_connected", frameString(frame, "frame_id"))
 	}
 	key := s.agentID + "\x00" + frameString(frame, "control_id")
@@ -474,13 +577,18 @@ func (r *Router) modelControl(s *session, frame map[string]json.RawMessage) erro
 		r.mu.Unlock()
 		return s.sendError("model_control_capacity_exceeded", frameString(frame, "frame_id"))
 	}
-	r.mu.Unlock()
-	if err := target.send(map[string]any{"type": "model_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "action": frameString(frame, "action"), "model": frameAny(frame, "model"), "expires_at": timestamp(pending.expires)}); err != nil {
-		return s.sendError("target_send_failed", frameString(frame, "frame_id"))
-	}
-	r.mu.Lock()
 	r.pendingMod[key] = pending
 	r.mu.Unlock()
+	// Record the correlation before writing to the target. A fast target can
+	// reply as soon as the frame is written.
+	if err := target.send(map[string]any{"type": "model_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "action": frameString(frame, "action"), "model": frameAny(frame, "model"), "expires_at": timestamp(pending.expires)}); err != nil {
+		r.mu.Lock()
+		if r.pendingMod[key] == pending {
+			delete(r.pendingMod, key)
+		}
+		r.mu.Unlock()
+		return s.sendError("target_send_failed", frameString(frame, "frame_id"))
+	}
 	return nil
 }
 func (r *Router) modelControlResult(s *session, frame map[string]json.RawMessage) error {
@@ -503,8 +611,8 @@ func (r *Router) modelControlResult(s *session, frame map[string]json.RawMessage
 			result[key] = frameAny(frame, key)
 		}
 	}
-	if pending.source == nil || !r.activeLease(pending.source) {
-		return nil
+	if pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
+		return s.sendError("model_control_result_not_pending", frameString(frame, "frame_id"))
 	}
 	return pending.source.send(result)
 }
@@ -519,7 +627,7 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 		return s.sendError("goal_control_not_allowed", frameString(frame, "frame_id"))
 	}
 	target := r.findTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
-	if target == nil {
+	if target == nil || !r.sessionMatchesIdentity(target) {
 		return s.sendError("target_not_connected", frameString(frame, "frame_id"))
 	}
 	key := s.agentID + "\x00" + frameString(frame, "control_id")
@@ -531,13 +639,16 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 	r.nextVersion++
 	revision := r.nextVersion
 	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: r.now().Add(10 * time.Minute), revision: revision}
-	r.mu.Unlock()
-	if err := target.send(map[string]any{"type": "goal_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "revision": revision, "action": frameString(frame, "action"), "goal": frameString(frame, "goal"), "settings": frameAny(frame, "settings"), "expires_at": timestamp(pending.expires)}); err != nil {
-		return s.sendError("target_send_failed", frameString(frame, "frame_id"))
-	}
-	r.mu.Lock()
 	r.pendingGoal[key] = pending
 	r.mu.Unlock()
+	if err := target.send(map[string]any{"type": "goal_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "revision": revision, "action": frameString(frame, "action"), "goal": frameString(frame, "goal"), "settings": frameAny(frame, "settings"), "expires_at": timestamp(pending.expires)}); err != nil {
+		r.mu.Lock()
+		if r.pendingGoal[key] == pending {
+			delete(r.pendingGoal, key)
+		}
+		r.mu.Unlock()
+		return s.sendError("target_send_failed", frameString(frame, "frame_id"))
+	}
 	return nil
 }
 func (r *Router) goalControlResult(s *session, frame map[string]json.RawMessage) error {
@@ -558,7 +669,7 @@ func (r *Router) goalControlResult(s *session, frame map[string]json.RawMessage)
 		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
 	}
 	r.recordGoal(s, frame)
-	if pending.source == nil || !r.activeLease(pending.source) {
+	if pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
 		return nil
 	}
 	result := map[string]any{"type": "goal_control_result", "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": s.leaseID, "source_agent_id": frameString(frame, "source_agent_id"), "control_id": frameString(frame, "control_id"), "revision": pending.revision}
@@ -613,7 +724,7 @@ func (r *Router) reminderLockControl(s *session, frame map[string]json.RawMessag
 		return s.sendError("reminder_target_mismatch", frameString(frame, "frame_id"))
 	}
 	target := r.findTarget(reminder.Target, frameString(frame, "target_instance_id"))
-	if target == nil {
+	if target == nil || !r.sessionMatchesIdentity(target) {
 		return s.sendError("target_not_connected", frameString(frame, "frame_id"))
 	}
 	key := s.agentID + "\x00" + frameString(frame, "control_id")
@@ -623,13 +734,16 @@ func (r *Router) reminderLockControl(s *session, frame map[string]json.RawMessag
 		return s.sendError("reminder_lock_control_already_pending", frameString(frame, "frame_id"))
 	}
 	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: r.now().Add(r.controlTTL), reminder: reminder.ID}
-	r.mu.Unlock()
-	if err := target.send(map[string]any{"type": "reminder_lock_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "reminder_id": reminder.ID, "action": frameString(frame, "action"), "expires_at": timestamp(pending.expires)}); err != nil {
-		return s.sendError("target_send_failed", frameString(frame, "frame_id"))
-	}
-	r.mu.Lock()
 	r.pendingLock[key] = pending
 	r.mu.Unlock()
+	if err := target.send(map[string]any{"type": "reminder_lock_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "reminder_id": reminder.ID, "action": frameString(frame, "action"), "expires_at": timestamp(pending.expires)}); err != nil {
+		r.mu.Lock()
+		if r.pendingLock[key] == pending {
+			delete(r.pendingLock, key)
+		}
+		r.mu.Unlock()
+		return s.sendError("target_send_failed", frameString(frame, "frame_id"))
+	}
 	return nil
 }
 func (r *Router) reminderLockResult(s *session, frame map[string]json.RawMessage) error {
@@ -643,10 +757,10 @@ func (r *Router) reminderLockResult(s *session, frame map[string]json.RawMessage
 		delete(r.pendingLock, key)
 	}
 	r.mu.Unlock()
-	if pending == nil || pending.target != s {
+	if pending == nil || pending.target != s || pending.reminder != frameString(frame, "reminder_id") {
 		return s.sendError("reminder_lock_control_result_not_pending", frameString(frame, "frame_id"))
 	}
-	if pending.source == nil || !r.activeLease(pending.source) {
+	if pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
 		return nil
 	}
 	result := map[string]any{"type": "reminder_lock_control_result", "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": s.leaseID, "source_agent_id": frameString(frame, "source_agent_id"), "control_id": frameString(frame, "control_id"), "reminder_id": frameString(frame, "reminder_id")}
@@ -727,7 +841,9 @@ func (r *Router) receiptError(s *session, frame map[string]json.RawMessage, err 
 	return err
 }
 func (r *Router) offer(s *session) {
-	if s == nil || !r.activeSession(s) || !r.activeLease(s) || s.isPaused() {
+	// Conversation-sync sockets share a lease, but only the primary socket owns
+	// durable delivery. Secondary activity must not claim the same queue.
+	if s == nil || !r.isPrimarySession(s) || !r.activeLease(s) || s.isPaused() {
 		return
 	}
 	delivery, err := r.store.ClaimNextMessage(context.Background(), store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, DeliveryLeaseDuration: r.delivery})

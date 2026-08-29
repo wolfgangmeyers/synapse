@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,6 +211,93 @@ func TestLiveProjectionsOnlyReachNodeProjectedRecipients(t *testing.T) {
 	_, _, err = d.Read(readCtx)
 	cancel()
 	require.Error(t, err)
+}
+
+func TestRegisterAfterRegistrationReturnsAlreadyRegisteredAndKeepsLease(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	conn, registered := registerTestSession(t, wsURL, "registered", "instance", "")
+	defer conn.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, conn, map[string]any{"version": "v1", "frame_id": "second-register", "type": "register", "agent_id": "registered", "instance_id": "instance"})
+	rejected := readJSON(t, conn)
+	require.Equal(t, "error", rejected["type"])
+	require.Equal(t, "already_registered", rejected["code"])
+	require.Equal(t, "second-register", rejected["request_id"])
+	sendJSON(t, conn, map[string]any{"version": "v1", "frame_id": "ping", "type": "ping"})
+	require.Equal(t, "pong", readJSON(t, conn)["type"])
+	lease, err := durable.LeaseFor(context.Background(), "registered")
+	require.NoError(t, err)
+	require.Equal(t, registered["lease_id"], lease.LeaseID)
+}
+
+func TestConversationSyncInstancesShareOneLeaseAndOneDeliveryOwner(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	connections := make([]*websocket.Conn, 2)
+	registrations := make([]map[string]any, 2)
+	for index := range connections {
+		connections[index], _, err = websocket.Dial(context.Background(), wsURL, nil)
+		require.NoError(t, err)
+		defer connections[index].Close(websocket.StatusNormalClosure, "test done")
+	}
+	var group sync.WaitGroup
+	for index := range connections {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			sendJSON(t, connections[index], map[string]any{"version": "v1", "frame_id": "register-" + string(rune('a'+index)), "type": "register", "agent_id": "shared", "instance_id": "instance-" + string(rune('a'+index)), "conversation_sync": "v1"})
+		}(index)
+	}
+	group.Wait()
+	for index := range connections {
+		registrations[index] = readJSON(t, connections[index])
+		require.Equal(t, "registered", registrations[index]["type"])
+	}
+	require.Equal(t, registrations[0]["lease_id"], registrations[1]["lease_id"])
+	lease, err := durable.LeaseFor(context.Background(), "shared")
+	require.NoError(t, err)
+	require.Equal(t, registrations[0]["lease_id"], lease.LeaseID)
+}
+
+func TestModelControlFastResultIsCorrelatedBeforeForward(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	source, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	defer source.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, source, map[string]any{"version": "v1", "frame_id": "operator-register", "type": "register", "agent_id": "operator", "instance_id": "operator-instance", "agent_role": "user_interaction"})
+	sourceRegistration := readJSON(t, source)
+	target, targetRegistration := registerTestSession(t, wsURL, "target", "target-instance", "")
+	defer target.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, source, map[string]any{"version": "v1", "frame_id": "control-frame", "type": "model_control", "agent_id": "operator", "instance_id": "operator-instance", "lease_id": sourceRegistration["lease_id"], "target_agent_id": "target", "target_instance_id": "target-instance", "control_id": "control-1", "action": "set_model", "model": map[string]any{"provider": "test", "id": "next"}})
+	forwarded := readJSON(t, target)
+	require.Equal(t, "model_control", forwarded["type"])
+	sendJSON(t, target, map[string]any{"version": "v1", "frame_id": "result-frame", "type": "model_control_result", "agent_id": "target", "instance_id": "target-instance", "lease_id": targetRegistration["lease_id"], "source_agent_id": "operator", "control_id": "control-1", "accepted": false, "error_code": "rejected", "current_model": map[string]any{"provider": "test", "id": "current"}})
+	result := readJSON(t, source)
+	require.Equal(t, "model_control_result", result["type"])
+	require.Equal(t, "control-1", result["control_id"])
 }
 
 func TestInvalidSchemaFrameReturnsInvalidFrameWithoutDisconnecting(t *testing.T) {

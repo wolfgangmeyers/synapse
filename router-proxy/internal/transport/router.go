@@ -115,7 +115,11 @@ type Router struct {
 	attachments *attachments.Store
 	log         func(string, map[string]any)
 
-	mu                 sync.Mutex
+	mu sync.Mutex
+	// dispatchMu makes session ownership, lease checks, and each frame's state
+	// transition one serialized operation. Registration and close callbacks from
+	// different WebSockets otherwise create a stale-session TOCTOU window.
+	dispatchMu         sync.Mutex
 	server             *http.Server
 	listener           net.Listener
 	serveDone          chan struct{}

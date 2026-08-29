@@ -137,23 +137,66 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 	if !registered || s.agentID == "" {
 		return
 	}
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
+
+	var promoted *session
 	r.mu.Lock()
-	if r.sessions[s.agentID] == s {
+	primary := r.sessions[s.agentID] == s
+	if subscribers := r.convos[s.agentID]; subscribers != nil {
+		// A reconnect can replace the same agent and instance before the old
+		// reader observes its close. Only remove the exact old subscription.
+		if subscribers[s.instanceID] == s {
+			delete(subscribers, s.instanceID)
+		}
+		if primary && len(subscribers) > 0 {
+			// A conversation-sync secondary owns the shared lease after the
+			// primary closes. Delivery remains on exactly one socket.
+			for _, replacement := range subscribers {
+				r.sessions[s.agentID] = replacement
+				if activity, ok := r.activities[s.agentID]; ok && activity.instanceID != replacement.instanceID {
+					delete(r.activities, s.agentID)
+				}
+				if model, ok := r.models[s.agentID]; ok && model.instanceID != replacement.instanceID {
+					delete(r.models, s.agentID)
+				}
+				if goal, ok := r.goals[s.agentID]; ok && goal.instanceID != replacement.instanceID {
+					delete(r.goals, s.agentID)
+				}
+				primary = false
+				promoted = replacement
+				break
+			}
+		} else if len(subscribers) == 0 {
+			delete(r.convos, s.agentID)
+		}
+	}
+	if primary {
 		delete(r.sessions, s.agentID)
 		delete(r.models, s.agentID)
 		delete(r.activities, s.agentID)
 		delete(r.goals, s.agentID)
 	}
-	// A reconnect can replace the same agent and instance before the old
-	// reader observes its close. Only remove the exact old subscription.
-	if subscribers := r.convos[s.agentID]; subscribers != nil {
-		if subscribers[s.instanceID] == s {
-			delete(subscribers, s.instanceID)
-		}
-		if len(subscribers) == 0 {
-			delete(r.convos, s.agentID)
-		}
+	r.removePendingForSessionLocked(s)
+	r.mu.Unlock()
+	if promoted != nil {
+		r.offer(promoted)
 	}
+	if primary {
+		_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID})
+	}
+}
+
+func (r *Router) removePendingForSession(s *session) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.removePendingForSessionLocked(s)
+}
+
+// removePendingForSessionLocked is called while r.mu is held. Registration
+// invokes the unlocked wrapper before replacing a session; close invokes this
+// form while it removes the exact owner.
+func (r *Router) removePendingForSessionLocked(s *session) {
 	for key, pending := range r.pendingMod {
 		if pending.source == s || pending.target == s {
 			delete(r.pendingMod, key)
@@ -169,8 +212,6 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 			delete(r.pendingLock, key)
 		}
 	}
-	r.mu.Unlock()
-	_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID})
 }
 
 func (r *Router) broadcastActivity(agentID string) {
