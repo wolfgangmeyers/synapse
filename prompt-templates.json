@@ -1,0 +1,18 @@
+{
+  "format": "mecha-prompt-templates",
+  "version": 1,
+  "templates": [
+    {
+      "name": "PR Review",
+      "body": "Review the PR at ${URL}. Use the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 2-3 focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why."
+    },
+    {
+      "name": "Subagent guidance",
+      "body": "Use subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. Do not abuse the inline tool allowance, or it will be disabled."
+    },
+    {
+      "name": "anxiety",
+      "body": "Set a ${interval} recurring reminder on your own window (not the supervisor's) to help you stay on track. List out the requirements of the task at hand, as you understand them. They are probably mentioned in your goal, but this has a different intent. This reminder will list out the requirements, then they will instruct the agent to launch a subagent to check the worker's window (look at it through tmux) and evaluate if it is off track or not. Examples could be severe overkill from a robot review loop, or some rabbit hole that isn't related to the current requirements, or just taking a significantly different approach than the requirements dictate. The reminder should have sufficient detail that the subagent can easily determine if you, the worker, are on track or not. Word this also in such a way that it will be motivating and that it is done well."
+    }
+  ]
+}
