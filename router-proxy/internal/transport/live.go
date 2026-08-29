@@ -4,10 +4,39 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
+
+func (r *Router) beginDeliveryOffer(ctx context.Context) (context.Context, func(), func(), bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.deliveryOfferMu.Lock()
+	if r.deliveryOffersClosed {
+		r.deliveryOfferMu.Unlock()
+		return nil, nil, nil, false
+	}
+	lifecycleCtx := r.deliveryOffersContext
+	r.deliveryOfferWG.Add(1)
+	r.deliveryStoreWG.Add(1)
+	r.deliveryOfferMu.Unlock()
+
+	// The caller's context still controls the operation, while the lifecycle
+	// context cancels it when Close begins. Both are needed because direct offers
+	// originate in synchronous WebSocket handlers with a background context.
+	offerCtx, cancel := context.WithCancel(ctx)
+	stopLifecycle := context.AfterFunc(lifecycleCtx, cancel)
+	finishStore := func() { r.deliveryStoreWG.Done() }
+	finishOffer := func() {
+		stopLifecycle()
+		cancel()
+		r.deliveryOfferWG.Done()
+	}
+	return offerCtx, finishStore, finishOffer, true
+}
 
 func (r *Router) offerAgent(agentID string) {
 	r.ownershipMu.Lock()
@@ -104,17 +133,23 @@ func (r *Router) stopPendingDeliveryOffers(ctx context.Context) error {
 		r.deliveryStoreWG.Done()
 		r.deliveryOfferWG.Done()
 	}
-	// Store access is complete before shutdown can return. The delivery offer
-	// callback may still be finishing socket I/O when the caller's deadline
-	// expires, but the launcher is then safe to close the store.
-	r.deliveryStoreWG.Wait()
-	waitDone := make(chan struct{})
+	if err := waitForDeliveryOffers(ctx, &r.deliveryStoreWG); err != nil {
+		return err
+	}
+	return waitForDeliveryOffers(ctx, &r.deliveryOfferWG)
+}
+
+func waitForDeliveryOffers(ctx context.Context, group *sync.WaitGroup) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
 	go func() {
-		r.deliveryOfferWG.Wait()
-		close(waitDone)
+		group.Wait()
+		close(done)
 	}()
 	select {
-	case <-waitDone:
+	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

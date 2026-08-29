@@ -1252,7 +1252,20 @@ func (r *Router) offer(s *session) {
 	r.offerContext(context.Background(), s)
 }
 func (r *Router) offerContext(ctx context.Context, s *session) {
-	fields := r.deliveryOfferFields(ctx, s)
+	offerCtx, finishStore, finishOffer, ok := r.beginDeliveryOffer(ctx)
+	if !ok {
+		return
+	}
+	storeFinished := false
+	defer func() {
+		if !storeFinished {
+			finishStore()
+		}
+		finishOffer()
+	}()
+	fields := r.deliveryOfferFields(offerCtx, s)
+	finishStore()
+	storeFinished = true
 	if fields != nil && s != nil {
 		_ = s.send(fields)
 	}
