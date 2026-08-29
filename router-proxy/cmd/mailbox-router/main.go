@@ -82,23 +82,28 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer attachmentsStore.Sweep(nil)
 	durable, err = store.Open(ctx, options.database, store.Options{MaxBatchBodyChars: options.maxBatch})
 	if err != nil {
+		_, _ = attachmentsStore.Sweep(nil)
 		log.Fatal(err)
 	}
-	defer durable.Close()
 	logWriter, err := newLogWriter(options.logPath)
 	if err != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
 		log.Fatal(err)
 	}
 	defer logWriter.Close()
 	logger := func(event string, fields map[string]any) { _ = logWriter.Log(event, fields) }
 	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger})
 	if err != nil {
+		_, _ = attachmentsStore.Sweep(nil)
+		_ = durable.Close()
 		log.Fatal(err)
 	}
 	if err := router.Listen(ctx); err != nil {
+		_ = router.Close(context.Background())
+		_ = durable.Close()
 		log.Fatal(err)
 	}
 	httpURL, websocketURL := router.URLs()
@@ -111,6 +116,9 @@ func main() {
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := router.Close(shutdown); err != nil {
+		log.Print(err)
+	}
+	if err := durable.Close(); err != nil {
 		log.Print(err)
 	}
 }

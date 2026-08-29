@@ -418,9 +418,20 @@ func (s *Store) runImmediate(ctx context.Context, operation func() error) error 
 }
 
 // Sweep removes the currently bounded, store-owned resources in one immediate
-// transaction. It intentionally leaves HTTP, delivery, reminder, attachment,
-// logging, and scheduler behavior to later layers.
+// transaction. It retains the historical queue cleanup behavior for callers
+// that use the store directly.
 func (s *Store) Sweep(ctx context.Context, policy RetentionPolicy) (SweepResult, error) {
+	return s.sweep(ctx, policy, true)
+}
+
+// SweepLifecycle runs the store portion of the router lifecycle sweep. Queued
+// messages are recovered by the router first so it can publish the Node
+// message_expired records for every message it removes.
+func (s *Store) SweepLifecycle(ctx context.Context, policy RetentionPolicy) (SweepResult, error) {
+	return s.sweep(ctx, policy, false)
+}
+
+func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued bool) (SweepResult, error) {
 	if err := policy.validate(); err != nil {
 		return SweepResult{}, err
 	}
@@ -433,9 +444,11 @@ func (s *Store) Sweep(ctx context.Context, policy RetentionPolicy) (SweepResult,
 		if err != nil {
 			return err
 		}
-		result.QueuedMessages, err = s.pruneExpiredQueuedMessages(ctx, nowText)
-		if err != nil {
-			return err
+		if pruneQueued {
+			result.QueuedMessages, err = s.pruneExpiredQueuedMessages(ctx, nowText)
+			if err != nil {
+				return err
+			}
 		}
 		result.Leases, err = s.pruneExpiredLeases(ctx, nowText)
 		if err != nil {

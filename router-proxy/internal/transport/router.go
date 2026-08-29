@@ -32,6 +32,7 @@ const (
 	DefaultMaxDeliveryTries  = 3
 	DefaultActivityTTL       = 15 * time.Second
 	DefaultPendingControlTTL = 30 * time.Second
+	DefaultSweepHeartbeat    = time.Hour
 )
 
 var (
@@ -71,53 +72,60 @@ type TmuxAdapter interface {
 // Options configures the transport. Store is required and must be opened with
 // the same persistent SQLite path used by the launcher.
 type Options struct {
-	Store                 *store.Store
-	Host                  string
-	Port                  int
-	Path                  string
-	Clock                 deterministic.Clock
-	IDSource              deterministic.IDSource
-	Attachments           *attachments.Store
-	Memory                MemoryCatalog
-	Tmux                  TmuxAdapter
-	MaxFrameBytes         int
-	MaxRequestBytes       int
-	LeaseDuration         time.Duration
-	DeliveryLeaseDuration time.Duration
-	MaxDeliveryAttempts   int
-	ActivityTTL           time.Duration
-	PendingControlTTL     time.Duration
-	SweepInterval         time.Duration
-	MaxPendingControls    int
-	MaxPendingPerSource   int
-	GoalControlAvailable  bool
-	LifecycleAvailable    bool
-	EventLogger           func(string, map[string]any)
+	Store                  *store.Store
+	Host                   string
+	Port                   int
+	Path                   string
+	Clock                  deterministic.Clock
+	IDSource               deterministic.IDSource
+	Attachments            *attachments.Store
+	Memory                 MemoryCatalog
+	Tmux                   TmuxAdapter
+	MaxFrameBytes          int
+	MaxRequestBytes        int
+	LeaseDuration          time.Duration
+	DeliveryLeaseDuration  time.Duration
+	MaxDeliveryAttempts    int
+	ActivityTTL            time.Duration
+	PendingControlTTL      time.Duration
+	SweepInterval          time.Duration
+	SweepHeartbeatInterval time.Duration
+	MaxPendingControls     int
+	MaxPendingPerSource    int
+	GoalControlAvailable   bool
+	LifecycleAvailable     bool
+	EventLogger            func(string, map[string]any)
 }
 
 type Router struct {
-	store         *store.Store
-	clock         deterministic.Clock
-	ids           deterministic.IDSource
-	host          string
-	port          int
-	path          string
-	maxFrame      int
-	maxRequest    int
-	lease         time.Duration
-	delivery      time.Duration
-	maxAttempts   int
-	activityTTL   time.Duration
-	controlTTL    time.Duration
-	sweepInterval time.Duration
-	maxControls   int
-	maxPerSrc     int
-	memory        MemoryCatalog
-	tmux          TmuxAdapter
-	attachments   *attachments.Store
-	log           func(string, map[string]any)
+	store          *store.Store
+	clock          deterministic.Clock
+	ids            deterministic.IDSource
+	host           string
+	port           int
+	path           string
+	maxFrame       int
+	maxRequest     int
+	lease          time.Duration
+	delivery       time.Duration
+	maxAttempts    int
+	activityTTL    time.Duration
+	controlTTL     time.Duration
+	sweepInterval  time.Duration
+	sweepHeartbeat time.Duration
+	maxControls    int
+	maxPerSrc      int
+	memory         MemoryCatalog
+	tmux           TmuxAdapter
+	attachments    *attachments.Store
+	log            func(string, map[string]any)
 
 	mu sync.RWMutex
+	// sweepMu is the lifecycle boundary: startup, periodic, and shutdown
+	// sweeps cannot overlap one another or live-state cleanup.
+	sweepMu   sync.Mutex
+	closeDone chan struct{}
+	closeErr  error
 	// conversationLocks serializes each conversation's durable write and live
 	// broadcast together. This is the synchronous Node handler boundary; a
 	// separate lock per participant pair keeps unrelated conversations moving.
@@ -141,6 +149,7 @@ type Router struct {
 	models              map[string]modelProjection
 	goals               map[string]goalState
 	latestGoalRevision  map[string]int64
+	lastSweepRecord     time.Time
 	pendingMod          map[string]*pendingControl
 	pendingGoal         map[string]*pendingControl
 	pendingLock         map[string]*pendingControl
@@ -301,6 +310,10 @@ func New(options Options) (*Router, error) {
 	if sweepInterval == 0 {
 		sweepInterval = time.Second
 	}
+	sweepHeartbeat := options.SweepHeartbeatInterval
+	if sweepHeartbeat == 0 {
+		sweepHeartbeat = DefaultSweepHeartbeat
+	}
 	maxControls := options.MaxPendingControls
 	if maxControls == 0 {
 		maxControls = 256
@@ -309,7 +322,7 @@ func New(options Options) (*Router, error) {
 	if maxPerSrc == 0 {
 		maxPerSrc = 16
 	}
-	for name, value := range map[string]time.Duration{"lease": lease, "delivery": delivery, "activity": activityTTL, "control": controlTTL, "sweep": sweepInterval} {
+	for name, value := range map[string]time.Duration{"lease": lease, "delivery": delivery, "activity": activityTTL, "control": controlTTL, "sweep": sweepInterval, "sweep heartbeat": sweepHeartbeat} {
 		if value <= 0 {
 			return nil, fmt.Errorf("%s duration must be positive", name)
 		}
@@ -329,7 +342,7 @@ func New(options Options) (*Router, error) {
 	if !options.GoalControlAvailable {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state") && contains(options.Store.MigrationIDs(), "021_goal_control_revision_history")
 	}
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	return r, nil
 }
@@ -367,8 +380,8 @@ func (r *Router) URLs() (string, string) {
 	return fmt.Sprintf("http://%s:%d", host, port), fmt.Sprintf("ws://%s:%d%s", host, port, r.path)
 }
 
-// Listen binds the configured address and serves until Close. Startup performs
-// a best-effort sweep before accepting traffic.
+// Listen binds the configured address and serves until Close. The startup
+// lifecycle sweep runs after router_started, matching the Node router.
 func (r *Router) Listen(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
@@ -379,8 +392,6 @@ func (r *Router) Listen(ctx context.Context) error {
 		return errors.New("router is already listening")
 	}
 	r.mu.Unlock()
-	_, _ = r.sweep(ctx)
-	r.sweepLiveState()
 	listener, err := net.Listen("tcp", net.JoinHostPort(r.host, fmt.Sprint(r.port)))
 	if err != nil {
 		return err
@@ -399,6 +410,12 @@ func (r *Router) Listen(ctx context.Context) error {
 	_, websocketURL := r.URLs()
 	r.log("router_started", map[string]any{"host": r.host, "port": listener.Addr().(*net.TCPAddr).Port, "router_url": websocketURL})
 	go func() { _ = server.Serve(listener); close(done) }()
+	if err := r.runSweep(ctx); err != nil {
+		// No periodic goroutine owns this channel until startup succeeds.
+		close(sweepDone)
+		_ = r.Close(context.Background())
+		return err
+	}
 	go r.sweepLoop(sweepCtx, sweepDone)
 	return nil
 }
@@ -413,16 +430,27 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 // Close stops HTTP and all connected WebSockets. It does not close the Store.
+// The caller keeps the Store open until this method returns so the final
+// attachment sweep can still check conversation references.
 func (r *Router) Close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	r.mu.Lock()
 	if r.closed {
+		done := r.closeDone
 		r.mu.Unlock()
-		return nil
+		if done != nil {
+			<-done
+		}
+		r.mu.RLock()
+		err := r.closeErr
+		r.mu.RUnlock()
+		return err
 	}
 	r.closed = true
+	r.closeDone = make(chan struct{})
+	done := r.closeDone
 	server := r.server
 	sweepCancel := r.sweepCancel
 	sweepDone := r.sweepDone
@@ -438,7 +466,7 @@ func (r *Router) Close(ctx context.Context) error {
 		}
 	}
 	r.mu.Unlock()
-	if sweepCancel != nil {
+	if sweepCancel != nil && sweepDone != nil {
 		sweepCancel()
 		<-sweepDone
 	}
@@ -450,11 +478,7 @@ func (r *Router) Close(ctx context.Context) error {
 		err = server.Shutdown(ctx)
 	}
 	if r.attachments != nil {
-		_, sweepErr := r.attachments.Sweep(func(id string) bool {
-			referenced, _ := r.store.ConversationAttachmentReferenced(context.Background(), id)
-			return referenced
-		})
-		if err == nil {
+		if sweepErr := r.sweepAttachments(); err == nil {
 			err = sweepErr
 		}
 	}
@@ -463,6 +487,10 @@ func (r *Router) Close(ctx context.Context) error {
 			err = closeErr
 		}
 	}
+	r.mu.Lock()
+	r.closeErr = err
+	close(done)
+	r.mu.Unlock()
 	r.log("router_stopped", nil)
 	return err
 }

@@ -82,6 +82,9 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 
 	require.NoError(t, command.Process.Signal(syscall.SIGTERM))
 	require.NoError(t, command.Wait())
+	logBytes, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Contains(t, string(logBytes), `"event":"router_stopped"`)
 }
 
 func collectLines(reader io.Reader, lines chan<- string) {

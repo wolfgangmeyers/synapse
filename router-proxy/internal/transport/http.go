@@ -900,17 +900,19 @@ func (r *Router) handleReminderItem(w http.ResponseWriter, req *http.Request, id
 	}
 }
 
-func (r *Router) sweepReminders(ctx context.Context) {
+func (r *Router) sweepReminders(ctx context.Context) (int, int) {
 	// Lock the target conversation after each current due row is selected and
 	// before its SQLite transaction. The store re-reads due rows between fires,
 	// so a reminder that becomes due during the sweep gets the same ordering.
 	conversationReleases := make(map[string]func())
+	scheduledForByReminderID := make(map[string]string)
 	defer func() {
 		for _, release := range conversationReleases {
 			release()
 		}
 	}()
 	outcomes, err := r.store.FireDueRemindersWithBefore(ctx, func(attempt store.ReminderFireAttempt) {
+		scheduledForByReminderID[attempt.ReminderID] = attempt.ScheduledFor
 		r.emit("reminder_started", map[string]any{"reminder_id": attempt.ReminderID, "scheduled_for": attempt.ScheduledFor})
 	}, func(attempt store.ReminderFireAttempt) {
 		reminder, err := r.store.ReminderFor(ctx, attempt.ReminderID)
@@ -922,13 +924,29 @@ func (r *Router) sweepReminders(ctx context.Context) {
 		}
 	})
 	if err != nil {
-		return
+		return 0, 0
 	}
+	succeeded, failed := 0, 0
 	for _, outcome := range outcomes {
 		if outcome.Message != nil {
+			succeeded++
+			r.emit("reminder_succeeded", map[string]any{
+				"reminder_id":       outcome.ReminderID,
+				"scheduled_for":     scheduledForByReminderID[outcome.ReminderID],
+				"linked_message_id": outcome.Message.ID,
+				"agent_id":          outcome.Message.To,
+			})
 			r.afterEnqueue(store.EnqueueResult{Message: *outcome.Message, ConversationMessage: outcome.ConversationMessage, ConversationCreated: outcome.ConversationMessage != nil})
+			continue
 		}
+		failed++
+		r.emit("reminder_failed", map[string]any{
+			"reminder_id":   outcome.ReminderID,
+			"scheduled_for": scheduledForByReminderID[outcome.ReminderID],
+			"error_code":    outcome.ErrorCode,
+		})
 	}
+	return succeeded, failed
 }
 
 func (r *Router) handleMessageItem(w http.ResponseWriter, req *http.Request, id, action string) {

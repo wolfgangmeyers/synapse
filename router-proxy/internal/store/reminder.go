@@ -46,6 +46,7 @@ func (e *ReminderNotCancelableError) Code() string { return "reminder_not_cancel
 
 type ReminderFireAttempt struct{ ReminderID, ScheduledFor string }
 type ReminderFireOutcome struct {
+	ReminderID          string
 	Reminder            *domain.Reminder
 	Message             *domain.Message
 	ConversationMessage *domain.ConversationMessage
@@ -231,7 +232,7 @@ func (s *Store) fireDueReminders(ctx context.Context, onAttempt func(ReminderFir
 		})
 		if err != nil {
 			_ = s.recordReminderFailure(ctx, due.id, now)
-			outcomes = append(outcomes, ReminderFireOutcome{ErrorCode: reminderErrorCode(err)})
+			outcomes = append(outcomes, ReminderFireOutcome{ReminderID: due.id, ErrorCode: reminderErrorCode(err)})
 			continue
 		}
 		if outcome != nil {
@@ -262,7 +263,7 @@ func (s *Store) fireOneShot(ctx context.Context, reminder *domain.Reminder, now 
 	if err != nil {
 		return err
 	}
-	*output = &ReminderFireOutcome{Reminder: updated, Message: message, ConversationMessage: conversation}
+	*output = &ReminderFireOutcome{ReminderID: reminder.ID, Reminder: updated, Message: message, ConversationMessage: conversation}
 	return nil
 }
 
@@ -332,7 +333,7 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 	if err != nil {
 		return err
 	}
-	*output = &ReminderFireOutcome{Reminder: updated, Message: message, ConversationMessage: conversation}
+	*output = &ReminderFireOutcome{ReminderID: reminder.ID, Reminder: updated, Message: message, ConversationMessage: conversation}
 	return nil
 }
 
