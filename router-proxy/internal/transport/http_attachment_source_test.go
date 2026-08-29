@@ -127,6 +127,33 @@ func TestHTTPSourceInferenceMatchesConnectedNodeClient(t *testing.T) {
 	}
 }
 
+func TestHTTPSourceInferenceUsesFirstAndroidThenWebSession(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := New(Options{Store: durable, Port: 0, Clock: clock})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/agents"
+	android, _ := registerHTTPSourceClient(t, wsURL, "source-client", "android-instance", "android")
+	defer android.Close(websocket.StatusNormalClosure, "test done")
+	web, _ := registerHTTPSourceClient(t, wsURL, "source-client", "web-instance", "web")
+	defer web.Close(websocket.StatusNormalClosure, "test done")
+
+	response := postJSON(t, server.URL+"/v1/messages", map[string]any{
+		"id": "source-message-android-first", "from": "source-client", "to": "receiver", "body": "hello", "created_at": "2026-08-29T12:00:00.000Z",
+	})
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	var result map[string]any
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&result))
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, map[string]any{"kind": "android"}, result["message"].(map[string]any)["source"])
+	require.Equal(t, map[string]any{"kind": "android"}, result["conversation_message"].(map[string]any)["source"])
+}
+
 func registerHTTPSourceClient(t *testing.T, wsURL, agentID, instanceID, clientType string) (*websocket.Conn, map[string]any) {
 	t.Helper()
 	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)

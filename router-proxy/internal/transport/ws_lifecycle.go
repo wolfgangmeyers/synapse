@@ -200,6 +200,7 @@ func (r *Router) sessionClosedSerialized(s *session) {
 		// reader observes its close. Only remove the exact old subscription.
 		if subscribers[s.instanceID] == s {
 			delete(subscribers, s.instanceID)
+			r.removeConversationOrderLocked(s.agentID, s.instanceID)
 		}
 		if primary && len(subscribers) > 0 {
 			// A conversation-sync secondary owns the shared lease after the
@@ -212,10 +213,12 @@ func (r *Router) sessionClosedSerialized(s *session) {
 			}
 		} else if len(subscribers) == 0 {
 			delete(r.convos, s.agentID)
+			delete(r.conversationOrder, s.agentID)
 		}
 	}
 	if primary {
 		delete(r.sessions, s.agentID)
+		delete(r.conversationOrder, s.agentID)
 		delete(r.models, s.agentID)
 		delete(r.goals, s.agentID)
 		for key := range r.latestGoalRevision {
@@ -229,12 +232,25 @@ func (r *Router) sessionClosedSerialized(s *session) {
 	}
 	r.removePendingForSessionLocked(s)
 	r.mu.Unlock()
+	if primary {
+		r.cancelPendingDeliveryOffer(s.agentID)
+	}
 	if promoted != nil {
 		r.setAgentPaused(s.agentID, sharedPaused || r.agentCompacting(s.agentID))
 		r.offer(promoted)
 	}
 	if primary {
 		_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID})
+	}
+}
+
+func (r *Router) removeConversationOrderLocked(agentID, instanceID string) {
+	order := r.conversationOrder[agentID]
+	for index, value := range order {
+		if value == instanceID {
+			r.conversationOrder[agentID] = append(order[:index], order[index+1:]...)
+			return
+		}
 	}
 }
 
