@@ -19,6 +19,87 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestLifecycleFrameNumericSpellingsMatchNode(t *testing.T) {
+	for _, number := range []string{"1.0", "1e0", "9.007199254740991e15"} {
+		value, ok := frameInt(map[string]json.RawMessage{"after_version": json.RawMessage(number)}, "after_version")
+		require.True(t, ok, number)
+		require.Equal(t, map[string]int64{"1.0": 1, "1e0": 1, "9.007199254740991e15": 9007199254740991}[number], value, number)
+	}
+	for _, number := range []string{"1.5", "9007199254740992", "9.007199254740992e15"} {
+		_, ok := frameInt(map[string]json.RawMessage{"client_sequence": json.RawMessage(number)}, "client_sequence")
+		require.False(t, ok, number)
+	}
+
+	frame := map[string]json.RawMessage{
+		"agent_id":          json.RawMessage(`"parent-a"`),
+		"instance_id":       json.RawMessage(`"instance-a"`),
+		"parent_session_id": json.RawMessage(`"session-a"`),
+		"lease_id":          json.RawMessage(`"lease-a"`),
+		"producer_epoch":    json.RawMessage(`"123e4567-e89b-42d3-a456-426614174000"`),
+		"client_sequence":   json.RawMessage("1.0"),
+		"event_id":          json.RawMessage(`"event-a"`),
+		"lifecycle_event":   json.RawMessage(`"started"`),
+		"subagent":          json.RawMessage(`{"id":"child-a"}`),
+	}
+	candidate, err := lifecycleCandidateFromFrame(frame)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), candidate.ClientSequence)
+}
+
+func TestTerminalOnlyLifecycleProducerSurvivesRouterRestartAndAgentsSnapshot(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{Clock: clock})
+	require.NoError(t, err)
+
+	base := store.LifecycleCandidate{
+		ParentAgentID: "parent-a", InstanceID: "instance-a", ParentSessionID: "session-a", LeaseID: "lease-a",
+		ProducerEpoch: "123e4567-e89b-42d3-a456-426614174000",
+	}
+	snapshot := base
+	snapshot.ClientSequence, snapshot.EventID, snapshot.Snapshot = 1, "snapshot-1", true
+	snapshot.Subagents = []store.LifecycleChild{{ID: "child-a", Type: "worker", Description: "child", Status: "running"}}
+	_, err = durable.ApplySubagentLifecycle(context.Background(), snapshot, false)
+	require.NoError(t, err)
+	terminal := base
+	terminal.ClientSequence, terminal.EventID, terminal.EventKind = 2, "terminal-1", "terminal"
+	terminal.Subagent = store.LifecycleChild{ID: "child-a"}
+	terminal.TerminalReason = "completed"
+	_, err = durable.ApplySubagentLifecycle(context.Background(), terminal, false)
+	require.NoError(t, err)
+	lease, err := durable.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: "parent-a", InstanceID: "instance-a", LeaseID: "lease-a", LeaseDuration: time.Minute})
+	require.NoError(t, err)
+
+	first, err := New(Options{Store: durable, Clock: clock})
+	require.NoError(t, err)
+	firstSession := &session{router: first, agentID: "parent-a", instanceID: "instance-a", deliveryInstance: "instance-a", leaseID: lease.LeaseID, closeOverride: func(websocket.StatusCode, string) error { return nil }}
+	first.mu.Lock()
+	first.sessions[firstSession.agentID] = firstSession
+	first.mu.Unlock()
+	firstSnapshot := first.connectedAgents(false)
+	require.Equal(t, int64(2), firstSnapshot["activity_snapshot_version"])
+	firstAgent := firstSnapshot["agents"].([]map[string]any)[0]
+	require.Equal(t, int64(2), firstAgent["subagent_version"])
+	require.Equal(t, 0, firstAgent["subagent_count"])
+	require.Empty(t, firstAgent["subagents"])
+
+	require.NoError(t, first.Close(context.Background()))
+	second, err := New(Options{Store: durable, Clock: clock})
+	require.NoError(t, err)
+	defer second.Close(context.Background())
+	secondSession := &session{router: second, agentID: "parent-a", instanceID: "instance-a", deliveryInstance: "instance-a", leaseID: lease.LeaseID, closeOverride: func(websocket.StatusCode, string) error { return nil }}
+	second.mu.Lock()
+	second.sessions[secondSession.agentID] = secondSession
+	second.mu.Unlock()
+	secondSnapshot := second.connectedAgents(false)
+	require.Equal(t, int64(2), secondSnapshot["activity_snapshot_version"])
+	secondAgent := secondSnapshot["agents"].([]map[string]any)[0]
+	require.Equal(t, int64(2), secondAgent["subagent_version"])
+	require.Equal(t, 0, secondAgent["subagent_count"])
+	require.Empty(t, secondAgent["subagents"])
+	require.NoError(t, durable.Close())
+}
+
 func TestLifecycleFramePersistsAndSuppressesDuplicateBroadcasts(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})

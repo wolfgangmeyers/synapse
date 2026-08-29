@@ -69,7 +69,11 @@ func (r *Router) sendLifecycleReplay(s *session, replay store.LifecycleReplay) e
 	for _, update := range replay.Updates {
 		agent, ok := byParent[update.ParentAgentID]
 		if !ok {
-			agent = store.LifecycleAgent{AgentID: update.ParentAgentID}
+			var err error
+			agent, err = r.store.LifecycleAgentProjection(context.Background(), update.ParentAgentID)
+			if err != nil {
+				return err
+			}
 		}
 		version := update.RouterVersion
 		agents = append(agents, lifecycleAgentFrame(agent, &version))
@@ -166,7 +170,9 @@ func lifecycleCandidateFromFrame(frame map[string]json.RawMessage) (store.Lifecy
 	if err := json.Unmarshal(frame["subagent"], &candidate.Subagent); err != nil {
 		return store.LifecycleCandidate{}, err
 	}
-	candidate.TerminalReason = frameString(frame, "terminal_reason")
+	if candidate.EventKind == "terminal" {
+		candidate.TerminalReason = frameString(frame, "terminal_reason")
+	}
 	return candidate, nil
 }
 
@@ -178,11 +184,17 @@ func (r *Router) setLifecycleProjection(parent string, version int64, children [
 		return
 	}
 	r.lifecycleState[parent] = lifecycleAgent{version: version, subagents: children}
+	if version > r.nextVersion {
+		r.nextVersion = version
+	}
 }
 
 func (r *Router) hydrateLifecycleProjection(projection store.LifecycleProjection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if projection.RouterVersion > r.nextVersion {
+		r.nextVersion = projection.RouterVersion
+	}
 	seen := make(map[string]struct{}, len(projection.Agents))
 	for _, agent := range projection.Agents {
 		seen[agent.AgentID] = struct{}{}

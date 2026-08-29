@@ -361,7 +361,22 @@ func (r *Router) connectedAgents(includeModels bool) map[string]any {
 				item["goal_state"] = goal.state
 			}
 		}
-		if state, ok := lifecycle[s.agentID]; ok {
+		state, lifecycleOK := lifecycle[s.agentID]
+		if !lifecycleOK && r.lifecycleAvailable {
+			producer, producerErr := r.store.LifecycleProducerFor(context.Background(), s.agentID)
+			if producerErr == nil && producer != nil && producer.Authority == "v2" {
+				agent, projectionErr := r.store.LifecycleAgentProjection(context.Background(), s.agentID)
+				if projectionErr == nil {
+					children := make([]map[string]any, 0, len(agent.Subagents))
+					for _, child := range agent.Subagents {
+						children = append(children, lifecycleChildFrame(child))
+					}
+					state = lifecycleAgent{version: agent.SubagentVersion, subagents: children}
+					lifecycleOK = true
+				}
+			}
+		}
+		if lifecycleOK {
 			item["subagent_version"] = state.version
 			item["subagent_count"] = len(state.subagents)
 			item["subagents"] = state.subagents

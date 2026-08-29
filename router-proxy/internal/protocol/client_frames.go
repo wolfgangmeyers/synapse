@@ -248,17 +248,26 @@ func timestampValue(raw json.RawMessage) bool { return validTimestamp(stringValu
 func lifecycleEpochValue(raw json.RawMessage) bool {
 	return lifecycleEpochPattern.MatchString(stringValue(raw))
 }
-func intValue(raw json.RawMessage, min, max int64) bool {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return false
+
+// SafeInteger parses a JSON number using Node's Number.isSafeInteger
+// boundary while accepting decimal and exponent spellings that represent an
+// integer, such as 1.0 and 1e0.
+func SafeInteger(raw json.RawMessage) (int64, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || !json.Valid(trimmed) {
+		return 0, false
 	}
-	var n json.Number
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var number json.Number
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.UseNumber()
-	if decoder.Decode(&n) != nil || n.String() == "" {
-		return false
+	if decoder.Decode(&number) != nil || number.String() == "" {
+		return 0, false
 	}
-	value, ok := safeInteger(n.String())
+	return safeInteger(number.String())
+}
+
+func intValue(raw json.RawMessage, min, max int64) bool {
+	value, ok := SafeInteger(raw)
 	return ok && value >= min && value <= max
 }
 
@@ -390,7 +399,19 @@ func subagentChildValue(raw json.RawMessage) bool {
 	}
 	return !has(value, "status") || enumValue(value["status"], "queued", "running", "completed", "steered", "aborted", "stopped", "error")
 }
-func lifecycleChildValue(raw json.RawMessage) bool { return subagentChildValue(raw) }
+func lifecycleChildValue(raw json.RawMessage) bool {
+	value, ok := objectValue(raw)
+	if !ok || !stringRange(value["id"], 1, 128) || strings.TrimSpace(stringValue(value["id"])) == "" {
+		return false
+	}
+	if has(value, "type") && (!stringRange(value["type"], 1, 64) || strings.TrimSpace(stringValue(value["type"])) == "") {
+		return false
+	}
+	if has(value, "description") && (!stringRange(value["description"], 1, 512) || strings.TrimSpace(stringValue(value["description"])) == "") {
+		return false
+	}
+	return !has(value, "status") || enumValue(value["status"], "queued", "running", "completed", "steered", "aborted", "stopped", "error")
+}
 func subagentsValue(raw json.RawMessage, max int) bool {
 	values, ok := arrayValue(raw)
 	if !ok || len(values) > max {
@@ -407,7 +428,25 @@ func optionalSubagents(frame map[string]json.RawMessage, key string) bool {
 	raw, ok := frame[key]
 	return !ok || subagentsValue(raw, 999)
 }
-func lifecycleChildrenValue(raw json.RawMessage) bool { return subagentsValue(raw, 999) }
+func lifecycleChildrenValue(raw json.RawMessage) bool {
+	values, ok := arrayValue(raw)
+	if !ok || len(values) > 999 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !lifecycleChildValue(value) {
+			return false
+		}
+		child, _ := objectValue(value)
+		id := strings.TrimSpace(stringValue(child["id"]))
+		if _, exists := seen[id]; exists {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
+}
 func goalProjectionValue(raw json.RawMessage) bool {
 	value, ok := objectValue(raw)
 	if !ok || !required(value, "enabled", "goal") || !boolValue(value["enabled"]) || !stringRange(value["goal"], 0, 4000) {

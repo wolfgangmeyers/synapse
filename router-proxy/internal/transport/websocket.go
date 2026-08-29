@@ -191,12 +191,11 @@ func frameString(frame map[string]json.RawMessage, key string) string {
 	return result
 }
 func frameInt(frame map[string]json.RawMessage, key string) (int64, bool) {
-	var result int64
 	raw, ok := frame[key]
-	if !ok || json.Unmarshal(raw, &result) != nil {
+	if !ok {
 		return 0, false
 	}
-	return result, true
+	return protocol.SafeInteger(raw)
 }
 func frameBool(frame map[string]json.RawMessage, key string) (bool, bool) {
 	var result bool

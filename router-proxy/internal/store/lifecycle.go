@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // LifecycleChild is the native subagent projection carried by a lifecycle
@@ -77,6 +79,17 @@ type LifecycleProjection struct {
 	Agents        []LifecycleAgent
 }
 
+// LifecycleProducerInfo exposes the durable authority marker needed by the
+// transport when a v2 producer has only terminal children left.
+type LifecycleProducerInfo struct {
+	ParentAgentID   string
+	InstanceID      string
+	ParentSessionID string
+	ProducerEpoch   string
+	LeaseID         string
+	Authority       string
+}
+
 type lifecycleProducer struct {
 	ParentAgentID         string
 	InstanceID            string
@@ -87,6 +100,7 @@ type lifecycleProducer struct {
 	LastEventID           string
 	LastEventHash         string
 	LastSnapshotSequence  int64
+	Authority             string
 }
 
 type lifecycleStateRow struct {
@@ -113,6 +127,7 @@ func (s *Store) ApplySubagentLifecycle(ctx context.Context, candidate LifecycleC
 	if ctx == nil {
 		return LifecycleApplyResult{}, errors.New("context is required")
 	}
+	candidate = normalizeLifecycleCandidate(candidate)
 	if candidate.ParentAgentID == "" || candidate.InstanceID == "" || candidate.ParentSessionID == "" || candidate.LeaseID == "" || candidate.ProducerEpoch == "" || candidate.EventID == "" || candidate.ClientSequence < 1 {
 		return LifecycleApplyResult{}, errors.New("invalid lifecycle candidate")
 	}
@@ -391,23 +406,72 @@ func mustLifecycleVersion(ctx context.Context, s *Store) int64 {
 	return version
 }
 
-func lifecyclePayloadHash(candidate LifecycleCandidate) string {
-	value := map[string]any{
-		"parentAgentId": candidate.ParentAgentID, "instanceId": candidate.InstanceID, "parentSessionId": candidate.ParentSessionID,
-		"epoch": candidate.ProducerEpoch, "sequence": candidate.ClientSequence, "eventId": candidate.EventID,
-	}
+type lifecycleHashBase struct {
+	ParentAgentID   string `json:"parentAgentId"`
+	InstanceID      string `json:"instanceId"`
+	ParentSessionID string `json:"parentSessionId"`
+	ProducerEpoch   string `json:"epoch"`
+	ClientSequence  int64  `json:"sequence"`
+	EventID         string `json:"eventId"`
+}
+
+type lifecycleHashSnapshot struct {
+	lifecycleHashBase
+	Subagents []LifecycleChild `json:"subagents"`
+	EventKind string           `json:"eventKind"`
+}
+
+type lifecycleHashEvent struct {
+	lifecycleHashBase
+	Subagent       LifecycleChild `json:"subagent"`
+	EventKind      string         `json:"eventKind"`
+	TerminalReason string         `json:"terminalReason,omitempty"`
+}
+
+func normalizeLifecycleChild(child LifecycleChild) LifecycleChild {
+	child.ID = strings.TrimSpace(child.ID)
+	child.Type = strings.TrimSpace(child.Type)
+	child.Description = strings.TrimSpace(child.Description)
+	return child
+}
+
+func normalizeLifecycleCandidate(candidate LifecycleCandidate) LifecycleCandidate {
 	if candidate.Snapshot {
-		value["subagents"] = candidate.Subagents
-		value["eventKind"] = "snapshot"
-	} else {
-		value["subagent"] = candidate.Subagent
-		value["eventKind"] = candidate.EventKind
-		if candidate.TerminalReason != "" {
-			value["terminalReason"] = candidate.TerminalReason
+		for index := range candidate.Subagents {
+			candidate.Subagents[index] = normalizeLifecycleChild(candidate.Subagents[index])
 		}
+		candidate.TerminalReason = ""
+		return candidate
 	}
-	encoded, _ := json.Marshal(value)
-	sum := sha256.Sum256(encoded)
+	candidate.Subagent = normalizeLifecycleChild(candidate.Subagent)
+	if candidate.EventKind != "terminal" {
+		// Node keeps terminal_reason out of started payloads and storage.
+		candidate.TerminalReason = ""
+	}
+	return candidate
+}
+
+func lifecycleHashJSON(value any) []byte {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(value)
+	return bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})
+}
+
+func lifecyclePayloadHash(candidate LifecycleCandidate) string {
+	candidate = normalizeLifecycleCandidate(candidate)
+	base := lifecycleHashBase{
+		ParentAgentID: candidate.ParentAgentID, InstanceID: candidate.InstanceID, ParentSessionID: candidate.ParentSessionID,
+		ProducerEpoch: candidate.ProducerEpoch, ClientSequence: candidate.ClientSequence, EventID: candidate.EventID,
+	}
+	var value any
+	if candidate.Snapshot {
+		value = lifecycleHashSnapshot{lifecycleHashBase: base, Subagents: candidate.Subagents, EventKind: "snapshot"}
+	} else {
+		value = lifecycleHashEvent{lifecycleHashBase: base, Subagent: candidate.Subagent, EventKind: candidate.EventKind, TerminalReason: candidate.TerminalReason}
+	}
+	sum := sha256.Sum256(lifecycleHashJSON(value))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -418,11 +482,11 @@ func derivedLifecycleEventID(eventID string, index int) string {
 
 func (s *Store) selectLifecycleProducer(ctx context.Context, parent string) (*lifecycleProducer, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT parent_agent_id, instance_id, parent_session_id, producer_epoch, lease_id,
-		highest_client_sequence, last_event_id, last_event_hash, last_snapshot_sequence
+		highest_client_sequence, last_event_id, last_event_hash, last_snapshot_sequence, authority
 		FROM subagent_lifecycle_producers WHERE parent_agent_id = ?`, parent)
 	var producer lifecycleProducer
 	var eventID, eventHash sql.NullString
-	if err := row.Scan(&producer.ParentAgentID, &producer.InstanceID, &producer.ParentSessionID, &producer.ProducerEpoch, &producer.LeaseID, &producer.HighestClientSequence, &eventID, &eventHash, &producer.LastSnapshotSequence); err != nil {
+	if err := row.Scan(&producer.ParentAgentID, &producer.InstanceID, &producer.ParentSessionID, &producer.ProducerEpoch, &producer.LeaseID, &producer.HighestClientSequence, &eventID, &eventHash, &producer.LastSnapshotSequence, &producer.Authority); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -430,6 +494,94 @@ func (s *Store) selectLifecycleProducer(ctx context.Context, parent string) (*li
 	}
 	producer.LastEventID, producer.LastEventHash = lifecycleNullableString(eventID), lifecycleNullableString(eventHash)
 	return &producer, nil
+}
+
+// LifecycleProducerFor returns the durable producer identity and authority.
+// A v2 producer remains meaningful when every child has reached terminal state.
+func (s *Store) LifecycleProducerFor(ctx context.Context, parent string) (*LifecycleProducerInfo, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	if parent == "" {
+		return nil, errors.New("parent agent ID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	producer, err := s.selectLifecycleProducer(ctx, parent)
+	if err != nil || producer == nil {
+		return nil, err
+	}
+	return &LifecycleProducerInfo{
+		ParentAgentID: producer.ParentAgentID, InstanceID: producer.InstanceID,
+		ParentSessionID: producer.ParentSessionID, ProducerEpoch: producer.ProducerEpoch,
+		LeaseID: producer.LeaseID, Authority: producer.Authority,
+	}, nil
+}
+
+// LifecycleAgentProjection reads one parent projection, including a zero-child
+// agent with its durable version when the v2 producer has only tombstones.
+func (s *Store) LifecycleAgentProjection(ctx context.Context, parent string) (LifecycleAgent, error) {
+	if ctx == nil {
+		return LifecycleAgent{}, errors.New("context is required")
+	}
+	if parent == "" {
+		return LifecycleAgent{}, errors.New("parent agent ID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return LifecycleAgent{}, errors.New("store is closed")
+	}
+	var latestState sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(router_version) FROM subagent_lifecycle_state WHERE parent_agent_id = ?`, parent).Scan(&latestState); err != nil {
+		return LifecycleAgent{}, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT subagent_id, type, description, status, router_version
+		FROM subagent_lifecycle_state WHERE parent_agent_id = ? AND state = 'running' ORDER BY subagent_id ASC`, parent)
+	if err != nil {
+		return LifecycleAgent{}, err
+	}
+	defer rows.Close()
+	agent := LifecycleAgent{AgentID: parent, Subagents: []LifecycleChild{}}
+	for rows.Next() {
+		var id string
+		var typ, description, status sql.NullString
+		var version int64
+		if err := rows.Scan(&id, &typ, &description, &status, &version); err != nil {
+			return LifecycleAgent{}, err
+		}
+		if version > agent.SubagentVersion {
+			agent.SubagentVersion = version
+		}
+		child := LifecycleChild{ID: id}
+		if typ.Valid {
+			child.Type = typ.String
+		}
+		if description.Valid {
+			child.Description = description.String
+		}
+		if status.Valid {
+			child.Status = status.String
+		}
+		agent.Subagents = append(agent.Subagents, child)
+	}
+	if err := rows.Err(); err != nil {
+		return LifecycleAgent{}, err
+	}
+	if latestState.Valid && latestState.Int64 > agent.SubagentVersion {
+		agent.SubagentVersion = latestState.Int64
+	}
+	if !latestState.Valid {
+		version, err := s.lifecycleVersion(ctx)
+		if err != nil {
+			return LifecycleAgent{}, err
+		}
+		agent.SubagentVersion = version
+	}
+	return agent, nil
 }
 
 func (s *Store) lifecycleVersion(ctx context.Context) (int64, error) {
@@ -579,19 +731,30 @@ func (s *Store) ReplaySubagentLifecycle(ctx context.Context, afterVersion int64)
 	if err != nil {
 		return LifecycleReplay{}, err
 	}
-	defer rows.Close()
-	result := LifecycleReplay{Mode: "replay", RouterVersion: latest, Updates: []LifecycleReplayUpdate{}}
+	var updates []LifecycleReplayUpdate
 	for rows.Next() {
 		var update LifecycleReplayUpdate
 		var typ, desc, status, reason sql.NullString
 		if err := rows.Scan(&update.RouterVersion, &update.ParentAgentID, &update.SubagentID, &update.State, &typ, &desc, &status, &reason); err != nil {
+			_ = rows.Close()
 			return LifecycleReplay{}, err
 		}
 		update.Type, update.Description, update.Status, update.TerminalReason = lifecycleNullableString(typ), lifecycleNullableString(desc), lifecycleNullableString(status), lifecycleNullableString(reason)
 		update.HasType, update.HasDescription, update.HasStatus, update.HasReason = typ.Valid, desc.Valid, status.Valid, reason.Valid
-		result.Updates = append(result.Updates, update)
+		updates = append(updates, update)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return LifecycleReplay{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return LifecycleReplay{}, err
+	}
+	projection, err := s.lifecycleProjectionRead(ctx)
+	if err != nil {
+		return LifecycleReplay{}, err
+	}
+	return LifecycleReplay{Mode: "replay", RouterVersion: latest, Updates: updates, Projection: projection}, nil
 }
 
 // PayloadHash is exposed for deterministic differential fixtures and does not
