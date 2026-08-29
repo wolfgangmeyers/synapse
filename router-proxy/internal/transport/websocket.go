@@ -400,13 +400,13 @@ func (r *Router) registerConversationSync(s *session, frame map[string]json.RawM
 		r.sessions[agentID] = s
 	}
 	r.mu.Unlock()
+	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner.instanceID != instanceID)
 	if err := r.sendRegistered(s, frame, *lease); err != nil {
 		r.rollbackSharedRegistration(s, owner, reconnecting, subscribers, conversationOrder, agentID, instanceID)
 		_ = s.close(websocket.StatusInternalError, "registration failed")
 		return true, err
 	}
 	r.replayGoalControlDesired(s)
-	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner.instanceID != instanceID)
 	if reconnecting != nil && reconnecting != s {
 		_ = reconnecting.sendError("lease_expired", "")
 		_ = reconnecting.close(4001, "lease expired")
