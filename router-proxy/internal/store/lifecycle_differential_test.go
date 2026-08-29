@@ -35,7 +35,7 @@ type lifecycleParentTrace struct {
 	Count   int   `json:"count"`
 }
 
-func TestNodeAndGoLifecycleTraceMatchesAcrossDuplicatesWhitespaceAndRestart(t *testing.T) {
+func TestNodeAndGoLifecycleTraceMatchesAcrossDuplicatesWhitespaceIncludingU0085AndRestart(t *testing.T) {
 	ctx := context.Background()
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
 
@@ -52,18 +52,18 @@ const base = {
 const snapshot = {
   version: "v1", frame_id: "frame-snapshot", type: "subagent_lifecycle_snapshot",
   ...base, client_sequence: 1, event_id: "snapshot-1",
-  subagents: [{ id: " child-a ", type: " worker ", description: " child <&> ", status: "running" }],
+  subagents: [{ id: " \u0085child-a\u0085 ", type: " worker ", description: " child <&> ", status: "running" }],
 };
 const started = {
   version: "v1", frame_id: "frame-started", type: "subagent_lifecycle_event",
   ...base, client_sequence: 2, event_id: "started-1", lifecycle_event: "started",
   terminal_reason: "ignored",
-  subagent: { id: " child-a ", type: " worker ", description: " child <&> ", status: "running" },
+  subagent: { id: " \u0085child-a\u0085 ", type: " worker ", description: " child <&> ", status: "running" },
 };
 const terminal = {
   version: "v1", frame_id: "frame-terminal", type: "subagent_lifecycle_event",
   ...base, client_sequence: 3, event_id: "terminal-1", lifecycle_event: "terminal",
-  terminal_reason: "completed", subagent: { id: " child-a " },
+  terminal_reason: "completed", subagent: { id: " \u0085child-a\u0085 " },
 };
 const dispositions = [
   repository.applySubagentLifecycleSnapshot(snapshot).disposition,
@@ -96,7 +96,7 @@ console.log(JSON.stringify({
 	// terminal retry after a process restart.
 	crossStore, err := Open(ctx, nodePath, Options{Clock: clock})
 	require.NoError(t, err)
-	terminal := lifecycleCandidate(3, "terminal-1", "terminal", LifecycleChild{ID: " child-a "})
+	terminal := lifecycleCandidate(3, "terminal-1", "terminal", LifecycleChild{ID: " \u0085child-a\u0085 "})
 	terminal.TerminalReason = "completed"
 	result, err := crossStore.ApplySubagentLifecycle(ctx, terminal, false)
 	require.NoError(t, err)
@@ -116,11 +116,11 @@ func applyLifecycleTrace(t *testing.T, lifecycleStore *Store) lifecycleTraceSumm
 	t.Helper()
 	ctx := context.Background()
 	snapshot := lifecycleSnapshotCandidate(1, "snapshot-1", LifecycleChild{
-		ID: " child-a ", Type: " worker ", Description: " child <&> ", Status: "running",
+		ID: " \u0085child-a\u0085 ", Type: " worker ", Description: " child <&> ", Status: "running",
 	})
 	started := lifecycleCandidate(2, "started-1", "started", snapshot.Subagents[0])
 	started.TerminalReason = "ignored"
-	terminal := lifecycleCandidate(3, "terminal-1", "terminal", LifecycleChild{ID: " child-a "})
+	terminal := lifecycleCandidate(3, "terminal-1", "terminal", LifecycleChild{ID: " \u0085child-a\u0085 "})
 	terminal.TerminalReason = "completed"
 
 	var result lifecycleTraceSummary
@@ -150,7 +150,7 @@ func applyLifecycleTrace(t *testing.T, lifecycleStore *Store) lifecycleTraceSumm
 	result.Parent = lifecycleParentTrace{Version: parent.SubagentVersion, Count: len(parent.Subagents)}
 
 	var terminalReason sql.NullString
-	require.NoError(t, lifecycleStore.db.QueryRowContext(ctx, `SELECT terminal_reason FROM subagent_lifecycle_state WHERE parent_agent_id = ? AND subagent_id = ?`, "parent-a", "child-a").Scan(&terminalReason))
+	require.NoError(t, lifecycleStore.db.QueryRowContext(ctx, `SELECT terminal_reason FROM subagent_lifecycle_state WHERE parent_agent_id = ? AND subagent_id = ?`, "parent-a", "\u0085child-a\u0085").Scan(&terminalReason))
 	require.True(t, terminalReason.Valid)
 	require.Equal(t, "completed", terminalReason.String)
 	return result

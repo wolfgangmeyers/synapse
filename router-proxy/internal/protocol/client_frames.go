@@ -257,13 +257,9 @@ func SafeInteger(raw json.RawMessage) (int64, bool) {
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || !json.Valid(trimmed) {
 		return 0, false
 	}
-	var number json.Number
-	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.UseNumber()
-	if decoder.Decode(&number) != nil || number.String() == "" {
-		return 0, false
-	}
-	return safeInteger(number.String())
+	// Decode directly from the raw JSON text. Decoding into json.Number also
+	// accepts a quoted JSON string, but Node's numeric schema rejects strings.
+	return safeInteger(string(trimmed))
 }
 
 func intValue(raw json.RawMessage, min, max int64) bool {

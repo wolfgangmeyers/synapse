@@ -101,6 +101,9 @@ func TestValidateClientFrameAcceptsNodeIntegralNumberSpellingsAndRejectsFraction
 	for _, number := range []string{"1.5", "9007199254740992", "9.007199254740992e15"} {
 		require.Error(t, ValidateClientFrame(goalControlWithDuration(t, number)), number)
 	}
+	for _, number := range []string{`"1"`, `"1.0"`, `"1e0"`} {
+		require.Error(t, ValidateClientFrame(goalControlWithDuration(t, number)), number)
+	}
 }
 
 func goalControlWithDuration(t *testing.T, duration string) map[string]json.RawMessage {
