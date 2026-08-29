@@ -22,6 +22,29 @@ import (
 
 var dataURLRE = regexp.MustCompile(`^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$`)
 
+var recallPolicy = map[string]any{
+	"inactivity_seconds":     30,
+	"maximum_window_seconds": 120,
+	"candidate_limit":        100,
+	"candidate_bytes":        16384,
+	"evaluator":              "anthropic/claude-sonnet-5",
+	"maximum_messages":       3,
+	"expansion": map[string]any{
+		"maximum_ids": 6, "maximum_terms": 3, "maximum_tags": 8,
+		"maximum_matched_records": 12, "maximum_bytes": 16384,
+		"maximum_related_edges": 24, "maximum_graph_depth": 2,
+	},
+	"capture": map[string]any{
+		"evaluator": "anthropic/claude-sonnet-5", "compaction_deadline_ms": 30000,
+		"shutdown_deadline_ms": 10000, "evaluator_timeout_ms": 60000, "router_timeout_ms": 5000,
+		"source_max_bytes": 98304, "source_message_max_bytes": 8192, "tool_result_max_bytes": 2048,
+		"previous_summary_max_bytes": 8192, "candidate_limit": 100, "candidate_max_bytes": 65536,
+		"output_max_bytes": 32768, "maximum_records": 6, "maximum_title_bytes": 256,
+		"maximum_body_bytes_per_record": 16384, "maximum_total_body_bytes": 32768,
+		"maximum_related_ids_per_record": 24,
+	},
+}
+
 var errorMessages = map[string]string{
 	"invalid_request":                   "Request does not match the mailbox protocol.",
 	"escaped_newlines":                  "Message body contains escaped newline text (\\n or \\r). Send real multiline content instead of escaped newline sequences.",
@@ -108,11 +131,7 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.writeJSON(w, http.StatusOK, r.capabilities())
 		return
 	case req.Method == http.MethodGet && path == "/v1/memory/policy":
-		if r.memory == nil {
-			r.writeError(w, &httpError{status: 404, code: "not_found"})
-			return
-		}
-		r.writeJSON(w, http.StatusOK, map[string]any{"recall": map[string]any{"enabled": true}})
+		r.writeJSON(w, http.StatusOK, map[string]any{"recall": recallPolicy})
 		return
 	case strings.HasPrefix(path, "/v1/memory/"):
 		r.handleMemory(w, req)
@@ -1069,6 +1088,7 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 		err = &httpError{500, "internal_error", 0}
 	}
 	value := &httpError{status: 500, code: "internal_error"}
+	var details map[string]any
 	switch candidate := err.(type) {
 	case *httpError:
 		value = candidate
@@ -1081,9 +1101,11 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 	case *store.ReminderIdempotencyConflictError:
 		value = &httpError{409, "reminder_idempotency_conflict", 0}
 	case *store.ReminderNotCancelableError:
-		value = &httpError{409, "reminder_not_cancelable", 0}
+		value = &httpError{status: 409, code: "reminder_not_cancelable"}
+		details = map[string]any{"reminder_id": candidate.ID, "reminder_state": candidate.State}
 	case *store.ReminderCancellationConflictError:
-		value = &httpError{409, "reminder_not_cancelable", 0}
+		value = &httpError{status: 409, code: "reminder_not_cancelable"}
+		details = map[string]any{"reminder_id": candidate.ID, "reminder_state": candidate.State, "linked_message_state": candidate.LinkedMessageState}
 	case *store.PromptTemplateValidationError:
 		value = &httpError{400, "invalid_prompt_template", 0}
 	case *store.PromptTemplateNameConflictError:
@@ -1099,7 +1121,13 @@ func (r *Router) writeError(w http.ResponseWriter, err error) {
 	if value.retryAfter > 0 {
 		headers["Retry-After"] = fmt.Sprint(value.retryAfter)
 	}
-	r.writeJSONHeaders(w, value.status, map[string]any{"error": map[string]any{"code": value.code, "message": errorMessages[value.code]}}, headers)
+	errorBody := map[string]any{"code": value.code, "message": errorMessages[value.code]}
+	for key, detail := range details {
+		if detail != "" {
+			errorBody[key] = detail
+		}
+	}
+	r.writeJSONHeaders(w, value.status, map[string]any{"error": errorBody}, headers)
 }
 func storeError(err error) error {
 	if err == nil {
