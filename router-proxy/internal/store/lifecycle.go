@@ -458,7 +458,11 @@ func lifecycleHashJSON(value any) []byte {
 	encoder := json.NewEncoder(&encoded)
 	encoder.SetEscapeHTML(false)
 	_ = encoder.Encode(value)
-	return bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})
+	// encoding/json always escapes these JavaScript-valid line separators,
+	// even with HTML escaping disabled. JSON.stringify emits them literally.
+	encodedBytes := bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})
+	encodedBytes = bytes.ReplaceAll(encodedBytes, []byte(`\u2028`), []byte("\u2028"))
+	return bytes.ReplaceAll(encodedBytes, []byte(`\u2029`), []byte("\u2029"))
 }
 
 func lifecyclePayloadHash(candidate LifecycleCandidate) string {

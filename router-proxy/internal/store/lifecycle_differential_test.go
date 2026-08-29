@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -110,6 +111,61 @@ console.log(JSON.stringify({
 	require.NoError(t, err)
 	require.Equal(t, "duplicate", result.Disposition)
 	require.NoError(t, crossStore.Close())
+}
+
+func TestNodeAndGoLifecycleHashRetriesTreatU2028AndU2029AsDuplicates(t *testing.T) {
+	ctx := context.Background()
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	const nodeSnapshots = `
+const descriptions = ["before\u2028after", "before\u2029after"];
+const base = { instance_id: "instance-a", parent_session_id: "session-a", lease_id: "lease-a", producer_epoch: "123e4567-e89b-42d3-a456-426614174000" };
+const results = descriptions.map((description, index) => repository.applySubagentLifecycleSnapshot({
+  version: "v1", frame_id: "frame-" + index, type: "subagent_lifecycle_snapshot",
+  agent_id: "unicode-parent-" + index, ...base, client_sequence: 1, event_id: "unicode-snapshot-" + index,
+  subagents: [{ id: "unicode-child-" + index, type: "worker", description, status: "running" }],
+}).disposition);
+console.log(JSON.stringify(results));
+repository.close();
+`
+
+	nodePath := filepath.Join(t.TempDir(), "node.db")
+	nodeResults := runNodeJSON[[]string](t, nodePath, `
+const { openMessageRepository } = await import(process.env.MECHA_NODE_STORE_MODULE);
+const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date("2026-08-29T12:00:00.000Z") });
+`+nodeSnapshots)
+	require.Equal(t, []string{"applied", "applied"}, nodeResults)
+
+	goStore, err := Open(ctx, nodePath, Options{Clock: clock})
+	require.NoError(t, err)
+	for index, description := range []string{"before\u2028after", "before\u2029after"} {
+		candidate := lifecycleSnapshotCandidate(1, "unicode-snapshot-"+fmt.Sprint(index), LifecycleChild{
+			ID: "unicode-child-" + fmt.Sprint(index), Type: "worker", Description: description, Status: "running",
+		})
+		candidate.ParentAgentID = "unicode-parent-" + fmt.Sprint(index)
+		result, applyErr := goStore.ApplySubagentLifecycle(ctx, candidate, false)
+		require.NoError(t, applyErr)
+		require.Equal(t, "duplicate", result.Disposition)
+	}
+	require.NoError(t, goStore.Close())
+
+	goPath := filepath.Join(t.TempDir(), "go.db")
+	goStore, err = Open(ctx, goPath, Options{Clock: clock})
+	require.NoError(t, err)
+	for index, description := range []string{"before\u2028after", "before\u2029after"} {
+		candidate := lifecycleSnapshotCandidate(1, "unicode-snapshot-"+fmt.Sprint(index), LifecycleChild{
+			ID: "unicode-child-" + fmt.Sprint(index), Type: "worker", Description: description, Status: "running",
+		})
+		candidate.ParentAgentID = "unicode-parent-" + fmt.Sprint(index)
+		_, err = goStore.ApplySubagentLifecycle(ctx, candidate, false)
+		require.NoError(t, err)
+	}
+	require.NoError(t, goStore.Close())
+
+	nodeResults = runNodeJSON[[]string](t, goPath, `
+const { openMessageRepository } = await import(process.env.MECHA_NODE_STORE_MODULE);
+const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE, clock: () => new Date("2026-08-29T12:00:00.000Z") });
+`+nodeSnapshots)
+	require.Equal(t, []string{"duplicate", "duplicate"}, nodeResults)
 }
 
 func applyLifecycleTrace(t *testing.T, lifecycleStore *Store) lifecycleTraceSummary {
