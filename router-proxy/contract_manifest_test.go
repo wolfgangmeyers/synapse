@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,11 +25,7 @@ type contractManifest struct {
 		ServerFrames []string `json:"server_frames"`
 		Schema       string   `json:"schema"`
 	} `json:"websocket"`
-	Fixtures struct {
-		HTTPOutcomes    string `json:"http_outcomes"`
-		FrameCases      string `json:"frame_cases"`
-		GeneratedFields string `json:"generated_fields"`
-	} `json:"fixtures"`
+	Fixtures map[string]string `json:"fixtures"`
 }
 
 type frameCasesFixture struct {
@@ -69,8 +66,7 @@ type fieldRule struct {
 
 func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 	contractDir := filepath.Join("..", "router", "contract")
-	var manifest contractManifest
-	readContractFile(t, filepath.Join(contractDir, "manifest.json"), &manifest)
+	manifest := readManifest(t, contractDir)
 
 	require.Equal(t, "v1", manifest.Version)
 	require.Equal(t, "scaffold", manifest.Status)
@@ -81,9 +77,15 @@ func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 	require.NotEmpty(t, manifest.WebSocket.ClientFrames)
 	require.NotEmpty(t, manifest.WebSocket.ServerFrames)
 	require.Equal(t, "protocol/v1/schema.json", manifest.WebSocket.Schema)
-	require.NotEmpty(t, manifest.Fixtures.HTTPOutcomes)
-	require.NotEmpty(t, manifest.Fixtures.FrameCases)
-	require.NotEmpty(t, manifest.Fixtures.GeneratedFields)
+	require.Equal(t, map[string]string{
+		"http_outcomes":    "http-outcomes.json",
+		"frame_cases":      "frame-cases.json",
+		"generated_fields": "generated-fields.json",
+	}, manifest.Fixtures)
+
+	fixtures, err := loadManifestFixtures(contractDir, manifest)
+	require.NoError(t, err)
+	require.Len(t, fixtures, len(manifest.Fixtures))
 
 	protocol := readContractJSON(t, filepath.Join("..", "protocol", "v1", "schema.json"))
 	clientTypes := schemaFrameTypes(t, protocol, "clientFrame")
@@ -100,11 +102,30 @@ func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 	require.Equal(t, serverTypes, manifestServerTypes, "manifest server inventory must match protocol serverFrame union")
 }
 
+func TestManifestFixtureReferenceFailureIsReported(t *testing.T) {
+	contractDir := filepath.Join("..", "router", "contract")
+	manifest := readManifest(t, contractDir)
+	brokenManifest := manifest
+	brokenManifest.Fixtures = make(map[string]string, len(manifest.Fixtures))
+	for name, reference := range manifest.Fixtures {
+		brokenManifest.Fixtures[name] = reference
+	}
+	brokenManifest.Fixtures["frame_cases"] = "missing-frame-cases.json"
+
+	_, err := loadManifestFixtures(contractDir, brokenManifest)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "frame_cases")
+	require.ErrorContains(t, err, "missing-frame-cases.json")
+}
+
 func TestContractFixturesValidateFrameAndGeneratedFieldRules(t *testing.T) {
 	contractDir := filepath.Join("..", "router", "contract")
+	manifest := readManifest(t, contractDir)
+	fixtures, err := loadManifestFixtures(contractDir, manifest)
+	require.NoError(t, err)
 
 	var outcomes httpOutcomesFixture
-	readContractFile(t, filepath.Join(contractDir, "http-outcomes.json"), &outcomes)
+	decodeFixture(t, fixtures, "http_outcomes", &outcomes)
 	require.Equal(t, "v1", outcomes.Version)
 	require.Equal(t, "scaffold", outcomes.Status)
 	require.NotEmpty(t, outcomes.Cases)
@@ -115,7 +136,7 @@ func TestContractFixturesValidateFrameAndGeneratedFieldRules(t *testing.T) {
 	}
 
 	var frames frameCasesFixture
-	readContractFile(t, filepath.Join(contractDir, "frame-cases.json"), &frames)
+	decodeFixture(t, fixtures, "frame_cases", &frames)
 	require.Equal(t, "v1", frames.Version)
 	require.Equal(t, "scaffold", frames.Status)
 	require.NotEmpty(t, frames.Cases)
@@ -144,7 +165,7 @@ func TestContractFixturesValidateFrameAndGeneratedFieldRules(t *testing.T) {
 	require.Equal(t, 4003, *leaseNotActive.CloseCode)
 
 	var generated generatedFieldsFixture
-	readContractFile(t, filepath.Join(contractDir, "generated-fields.json"), &generated)
+	decodeFixture(t, fixtures, "generated_fields", &generated)
 	require.Equal(t, "v1", generated.Version)
 	require.Equal(t, "Normalize only when both path and context match a normalizable rule. Protected rules always win.", generated.NormalizationRule)
 	require.NotEmpty(t, generated.Normalizable)
@@ -173,6 +194,58 @@ func TestContractFixturesValidateFrameAndGeneratedFieldRules(t *testing.T) {
 	require.Contains(t, protected["$.control_id"], "client_frame")
 	require.Contains(t, protected["$.control_id"], "forwarded_frame")
 	require.Contains(t, protected["$.control_id"], "echoed_response")
+}
+
+func readManifest(t *testing.T, contractDir string) contractManifest {
+	t.Helper()
+	var manifest contractManifest
+	readContractFile(t, filepath.Join(contractDir, "manifest.json"), &manifest)
+	return manifest
+}
+
+func decodeFixture(t *testing.T, fixtures map[string]json.RawMessage, name string, destination interface{}) {
+	t.Helper()
+	document, ok := fixtures[name]
+	require.True(t, ok, "manifest fixture %q was not loaded", name)
+	require.NoError(t, json.Unmarshal(document, destination))
+}
+
+func loadManifestFixtures(contractDir string, manifest contractManifest) (map[string]json.RawMessage, error) {
+	if len(manifest.Fixtures) == 0 {
+		return nil, fmt.Errorf("manifest declares no fixtures")
+	}
+	loaded := make(map[string]json.RawMessage, len(manifest.Fixtures))
+	for name, reference := range manifest.Fixtures {
+		path, err := resolveManifestFixturePath(contractDir, reference)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s fixture %q: %w", name, reference, err)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s fixture %q: %w", name, reference, err)
+		}
+		var document json.RawMessage
+		if err := json.Unmarshal(contents, &document); err != nil {
+			return nil, fmt.Errorf("parse %s fixture %q: %w", name, reference, err)
+		}
+		loaded[name] = document
+	}
+	return loaded, nil
+}
+
+func resolveManifestFixturePath(contractDir, reference string) (string, error) {
+	if reference == "" || filepath.IsAbs(reference) {
+		return "", fmt.Errorf("fixture reference must be a non-empty relative path")
+	}
+	path := filepath.Join(contractDir, reference)
+	relative, err := filepath.Rel(contractDir, path)
+	if err != nil {
+		return "", err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("fixture reference escapes contract directory")
+	}
+	return path, nil
 }
 
 func frameTypeSet(frameTypes []string) map[string]struct{} {
