@@ -379,13 +379,19 @@ func (s *Store) RecordInjectionRequested(ctx context.Context, request ReceiptReq
 	}
 	now := formatTimestamp(s.clock.Now())
 	var result domain.Delivery
+	timedOut := false
 	err := s.runImmediate(ctx, func() error {
 		deliveries, err := s.requireDeliveryBatch(ctx, request, now)
 		if err != nil {
 			return err
 		}
-		if expiredDelivery(deliveries, now) {
-			return &DeliveryNotActiveError{MessageID: request.MessageID, AttemptNumber: request.AttemptNumber}
+		expired, err := expireDeliveryBatch(s, ctx, deliveries, now, DefaultMaxDeliveryAttempts)
+		if err != nil {
+			return err
+		}
+		if expired {
+			timedOut = true
+			return nil
 		}
 		allInjectionRequested := true
 		for _, d := range deliveries {
@@ -426,6 +432,9 @@ func (s *Store) RecordInjectionRequested(ctx context.Context, request ReceiptReq
 		result = *delivery
 		return nil
 	})
+	if timedOut {
+		return domain.Delivery{}, &DeliveryNotActiveError{MessageID: request.MessageID, AttemptNumber: request.AttemptNumber}
+	}
 	return result, err
 }
 
@@ -435,13 +444,19 @@ func (s *Store) AcknowledgeDelivery(ctx context.Context, request ReceiptRequest)
 	}
 	now := formatTimestamp(s.clock.Now())
 	var item protocol.DeliveryItem
+	timedOut := false
 	err := s.runImmediate(ctx, func() error {
 		deliveries, err := s.requireDeliveryBatch(ctx, request, now)
 		if err != nil {
 			return err
 		}
-		if expiredDelivery(deliveries, now) {
-			return &DeliveryNotActiveError{MessageID: request.MessageID, AttemptNumber: request.AttemptNumber}
+		expired, err := expireDeliveryBatch(s, ctx, deliveries, now, DefaultMaxDeliveryAttempts)
+		if err != nil {
+			return err
+		}
+		if expired {
+			timedOut = true
+			return nil
 		}
 		for _, d := range deliveries {
 			if d.AttemptState != domain.DeliveryInjectionRequested || d.MessageState != domain.MessageInjectionRequested {
@@ -462,6 +477,9 @@ func (s *Store) AcknowledgeDelivery(ctx context.Context, request ReceiptRequest)
 		item = protocol.DeliveryItem{MessageID: request.MessageID, MessageIncarnationID: deliveries[0].MessageIncarnationID, AttemptNumber: request.AttemptNumber, DeliveryExpiresAt: deliveries[0].DeliveryExpiresAt}
 		return nil
 	})
+	if timedOut {
+		return protocol.DeliveryItem{}, &DeliveryNotActiveError{MessageID: request.MessageID, AttemptNumber: request.AttemptNumber}
+	}
 	return item, err
 }
 
@@ -480,13 +498,19 @@ func (s *Store) NackDelivery(ctx context.Context, request ReceiptRequest, reason
 	}
 	now := formatTimestamp(s.clock.Now())
 	var result BatchFailureResult
+	timedOut := false
 	err := s.runImmediate(ctx, func() error {
 		deliveries, err := s.requireDeliveryBatch(ctx, request, now)
 		if err != nil {
 			return err
 		}
-		if expiredDelivery(deliveries, now) {
-			return &DeliveryNotActiveError{MessageID: request.MessageID, AttemptNumber: request.AttemptNumber}
+		expired, err := expireDeliveryBatch(s, ctx, deliveries, now, maxAttempts)
+		if err != nil {
+			return err
+		}
+		if expired {
+			timedOut = true
+			return nil
 		}
 		for _, d := range deliveries {
 			if (d.AttemptState != domain.DeliveryLeased && d.AttemptState != domain.DeliveryInjectionRequested) || (d.MessageState != domain.MessageLeased && d.MessageState != domain.MessageInjectionRequested) {
@@ -506,6 +530,9 @@ func (s *Store) NackDelivery(ctx context.Context, request ReceiptRequest, reason
 		}
 		return nil
 	})
+	if timedOut {
+		return BatchFailureResult{}, &DeliveryNotActiveError{MessageID: request.MessageID, AttemptNumber: request.AttemptNumber}
+	}
 	return result, err
 }
 
