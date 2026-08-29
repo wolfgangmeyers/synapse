@@ -10,6 +10,12 @@ import (
 )
 
 func (r *Router) offerAgent(agentID string) {
+	r.ownershipMu.Lock()
+	registering := r.ownership[agentID] != nil
+	r.ownershipMu.Unlock()
+	if registering {
+		return
+	}
 	r.mu.RLock()
 	s := r.sessions[agentID]
 	r.mu.RUnlock()

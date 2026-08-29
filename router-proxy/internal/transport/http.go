@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -901,6 +902,34 @@ func (r *Router) handleReminderItem(w http.ResponseWriter, req *http.Request, id
 }
 
 func (r *Router) sweepReminders(ctx context.Context) {
+	// Acquire reminder conversation locks before FireDueReminders starts its
+	// SQLite transactions. This keeps the lock order the same as HTTP enqueue.
+	conversationReleases := make(map[string]func())
+	conversationTargets := make(map[string]string)
+	reminders, err := r.store.Reminders(ctx)
+	if err != nil {
+		return
+	}
+	for _, reminder := range reminders {
+		if reminder.State != "scheduled" || reminder.NextDueAt > timestamp(r.now()) {
+			continue
+		}
+		key := conversationKey("reminders", reminder.Target)
+		conversationTargets[key] = reminder.Target
+	}
+	keys := make([]string, 0, len(conversationTargets))
+	for key := range conversationTargets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		conversationReleases[key] = r.lockConversation("reminders", conversationTargets[key])
+	}
+	defer func() {
+		for _, release := range conversationReleases {
+			release()
+		}
+	}()
 	outcomes, err := r.store.FireDueReminders(ctx, func(attempt store.ReminderFireAttempt) {
 		r.emit("reminder_started", map[string]any{"reminder_id": attempt.ReminderID, "scheduled_for": attempt.ScheduledFor})
 	})

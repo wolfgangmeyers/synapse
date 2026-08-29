@@ -305,6 +305,12 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		return err
 	}
 
+	if r.goalAvailable {
+		if _, err := r.store.DeleteGoalControlDesiredExcept(context.Background(), agentID, instanceID); err != nil {
+			_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: agentID, InstanceID: instanceID, LeaseID: lease.LeaseID})
+			return err
+		}
+	}
 	if !r.ownershipCurrent(transition) {
 		_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: agentID, InstanceID: instanceID, LeaseID: lease.LeaseID})
 		return errors.New("registration ownership transition superseded")
@@ -344,6 +350,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		_ = s.close(websocket.StatusInternalError, "registration failed")
 		return err
 	}
+	r.replayGoalControlDesired(s)
 	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner != nil)
 	for _, replacement := range oldSessions {
 		if replacement != s {
@@ -360,6 +367,11 @@ func (r *Router) registerConversationSync(s *session, frame map[string]json.RawM
 	lease, leaseErr := r.store.LeaseFor(context.Background(), agentID)
 	if owner == nil || leaseErr != nil || lease == nil || lease.ExpiresAt <= timestamp(r.now()) {
 		return false, nil
+	}
+	if r.goalAvailable {
+		if _, err := r.store.DeleteGoalControlDesiredExcept(context.Background(), agentID, instanceID); err != nil {
+			return true, err
+		}
 	}
 	if !r.ownershipCurrent(transition) {
 		return true, errors.New("registration ownership transition superseded")
@@ -383,6 +395,7 @@ func (r *Router) registerConversationSync(s *session, frame map[string]json.RawM
 		_ = s.close(websocket.StatusInternalError, "registration failed")
 		return true, err
 	}
+	r.replayGoalControlDesired(s)
 	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner.instanceID != instanceID)
 	if reconnecting != nil && reconnecting != s {
 		_ = reconnecting.sendError("lease_expired", "")
@@ -451,6 +464,25 @@ func (r *Router) sendRegistered(s *session, frame map[string]json.RawMessage, le
 		fields["conversation_sync"] = s.conversationSync
 	}
 	return s.send(fields)
+}
+
+func (r *Router) replayGoalControlDesired(s *session) {
+	if !r.goalAvailable || !r.sessionMatchesIdentity(s) {
+		return
+	}
+	desired, err := r.store.GoalControlDesiredFor(context.Background(), s.agentID, s.instanceID)
+	if err != nil || desired == nil {
+		return
+	}
+	sourceAgent, sourceOK := desired.Config["sourceAgentId"].(string)
+	controlID, controlOK := desired.Config["controlId"].(string)
+	action, actionOK := desired.Config["action"].(string)
+	goal, goalOK := desired.Config["goal"].(string)
+	settings, settingsOK := desired.Config["settings"].(map[string]any)
+	if !sourceOK || !controlOK || !actionOK || !goalOK || !settingsOK {
+		return
+	}
+	_ = s.send(map[string]any{"type": "goal_control", "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": s.leaseID, "source_agent_id": sourceAgent, "control_id": controlID, "revision": desired.Revision, "action": action, "goal": goal, "settings": settings, "expires_at": desired.ExpiresAt})
 }
 
 func (r *Router) clearStaleActivityGeneration(agentID, instanceID string) {
@@ -796,18 +828,23 @@ func (r *Router) goalControl(s *session, frame map[string]json.RawMessage) error
 		return s.sendError("target_not_connected", frameString(frame, "frame_id"))
 	}
 	key := s.agentID + "\x00" + frameString(frame, "control_id")
+	expires := r.now().Add(10 * time.Minute)
+	config := map[string]any{"sourceAgentId": s.agentID, "controlId": frameString(frame, "control_id"), "action": frameString(frame, "action"), "goal": frameString(frame, "goal"), "settings": frameAny(frame, "settings")}
 	r.mu.Lock()
 	if _, ok := r.pendingGoal[key]; ok {
 		r.mu.Unlock()
 		return s.sendError("goal_control_already_pending", frameString(frame, "frame_id"))
 	}
-	r.nextVersion++
-	revision := r.nextVersion
-	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: r.now().Add(10 * time.Minute), revision: revision}
+	desired, err := r.store.UpsertGoalControlDesired(context.Background(), target.agentID, target.instanceID, config, timestamp(expires))
+	if err != nil {
+		r.mu.Unlock()
+		return s.sendError("goal_control_persist_failed", frameString(frame, "frame_id"))
+	}
+	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: expires, revision: desired.Revision}
 	r.pendingGoal[key] = pending
-	r.latestGoalRevision[target.agentID+"\x00"+target.instanceID] = revision
+	r.latestGoalRevision[target.agentID+"\x00"+target.instanceID] = desired.Revision
 	r.mu.Unlock()
-	if err := target.send(map[string]any{"type": "goal_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "revision": revision, "action": frameString(frame, "action"), "goal": frameString(frame, "goal"), "settings": frameAny(frame, "settings"), "expires_at": timestamp(pending.expires)}); err != nil {
+	if err := target.send(map[string]any{"type": "goal_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "revision": pending.revision, "action": frameString(frame, "action"), "goal": frameString(frame, "goal"), "settings": frameAny(frame, "settings"), "expires_at": desired.ExpiresAt}); err != nil {
 		r.mu.Lock()
 		if r.pendingGoal[key] == pending {
 			delete(r.pendingGoal, key)
@@ -827,19 +864,25 @@ func (r *Router) goalControlResult(s *session, frame map[string]json.RawMessage)
 	key := frameString(frame, "source_agent_id") + "\x00" + frameString(frame, "control_id")
 	revision, revisionPresent := frameInt(frame, "revision")
 	r.mu.Lock()
+	desired, desiredErr := r.store.GoalControlDesiredFor(context.Background(), s.agentID, s.instanceID)
 	pending := r.pendingGoal[key]
-	latestRevision := int64(0)
-	if pending != nil {
-		latestRevision = r.latestGoalRevision[s.agentID+"\x00"+s.instanceID]
+	desiredMatches := desiredErr == nil && desired != nil && desired.Revision == revision
+	if desiredMatches {
+		sourceAgent, sourceOK := desired.Config["sourceAgentId"].(string)
+		controlID, controlOK := desired.Config["controlId"].(string)
+		desiredMatches = sourceOK && controlOK && sourceAgent == frameString(frame, "source_agent_id") && controlID == frameString(frame, "control_id")
 	}
-	if pending == nil || pending.target != s || !revisionPresent || pending.revision != revision || latestRevision != pending.revision || r.hasNewerGoalPendingLocked(pending) {
+	pendingMatches := pending == nil || (pending.target == s && pending.revision == revision && pending.target.instanceID == frameString(frame, "instance_id") && pending.target.leaseID == frameString(frame, "lease_id") && !r.hasNewerGoalPendingLocked(pending))
+	if !revisionPresent || !desiredMatches || !pendingMatches {
 		r.mu.Unlock()
 		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
 	}
-	delete(r.pendingGoal, key)
+	if pending != nil {
+		delete(r.pendingGoal, key)
+	}
 	r.mu.Unlock()
 	r.recordGoal(s, frame)
-	if pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
+	if pending == nil || pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
 		return nil
 	}
 	result := map[string]any{"type": "goal_control_result", "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": s.leaseID, "source_agent_id": frameString(frame, "source_agent_id"), "control_id": frameString(frame, "control_id"), "revision": pending.revision}
