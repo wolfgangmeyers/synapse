@@ -358,7 +358,7 @@ func isCanonicalPromptTemplateTimestamp(value string) bool {
 }
 
 func validPromptTemplateText(value string, maxBytes int) bool {
-	return value != "" && len(value) <= maxBytes && value == trimNonEmpty(value) && !containsNUL(value)
+	return value != "" && len(value) <= maxBytes && trimNonEmpty(value) != "" && !containsNUL(value)
 }
 
 // trimNonEmpty matches ECMAScript String.prototype.trim's whitespace set.

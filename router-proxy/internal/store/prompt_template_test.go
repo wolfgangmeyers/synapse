@@ -79,6 +79,43 @@ func TestPromptTemplateValidationMatchesECMAScriptTrimWhitespace(t *testing.T) {
 	require.Equal(t, "\u0085body\u0085", created.Body)
 }
 
+func TestPromptTemplateValidationPreservesECMAScriptWhitespace(t *testing.T) {
+	s := openTestStore(t)
+	created, err := s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{
+		Name: "  leading and trailing  ", Body: "\u00a0 body with NBSP around it \ufeff",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "  leading and trailing  ", created.Name)
+	require.Equal(t, "\u00a0 body with NBSP around it \ufeff", created.Body)
+
+	updated, err := s.UpdatePromptTemplate(context.Background(), created.ID, map[string]json.RawMessage{
+		"name": json.RawMessage(`"\t renamed \n"`), "body": json.RawMessage(`"\u0085 body \u0085"`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "\t renamed \n", updated.Name)
+	require.Equal(t, "\u0085 body \u0085", updated.Body)
+
+	for index, value := range []string{"\t\n\u00a0\ufeff", "\u00a0", "\ufeff"} {
+		for field := range map[string]bool{"name": true, "body": true} {
+			request := PromptTemplateRequest{Name: "valid", Body: "valid"}
+			if field == "name" {
+				request.Name = value
+			} else {
+				request.Body = value
+			}
+			_, err := s.CreatePromptTemplate(context.Background(), request)
+			var validation *PromptTemplateValidationError
+			require.ErrorAs(t, err, &validation, "whitespace %d in %s", index, field)
+		}
+	}
+
+	// U+0085 is not in ECMAScript's trim set, so it is content, not padding.
+	created, err = s.CreatePromptTemplate(context.Background(), PromptTemplateRequest{Name: "\u0085", Body: "\u0085"})
+	require.NoError(t, err)
+	require.Equal(t, "\u0085", created.Name)
+	require.Equal(t, "\u0085", created.Body)
+}
+
 func TestPromptTemplateStateMatrix(t *testing.T) {
 	ctx := context.Background()
 	start := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)

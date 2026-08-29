@@ -70,6 +70,51 @@ func TestPromptTemplateHTTPAcceptsMetadataAndRejectsPortableMetadataErrors(t *te
 	require.Equal(t, "invalid_prompt_template", missingMetadata["error"].(map[string]any)["code"])
 }
 
+func TestPromptTemplateHTTPPreservesECMAScriptWhitespace(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Clock: clock})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	created := promptRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/prompt-templates", map[string]any{
+		"name": "  leading and trailing  ", "body": "\u00a0 body with NBSP around it \ufeff",
+	})
+	require.Equal(t, float64(http.StatusCreated), created["status"])
+	item := created["prompt_template"].(map[string]any)
+	require.Equal(t, "  leading and trailing  ", item["name"])
+	require.Equal(t, "\u00a0 body with NBSP around it \ufeff", item["body"])
+
+	id := item["id"].(string)
+	updated := promptRequest(t, server.Client(), http.MethodPatch, server.URL+"/v1/prompt-templates/"+url.PathEscape(id), map[string]any{
+		"name": "\t renamed \n", "body": "\u0085 body \u0085",
+	})
+	require.Equal(t, float64(http.StatusOK), updated["status"])
+	item = updated["prompt_template"].(map[string]any)
+	require.Equal(t, "\t renamed \n", item["name"])
+	require.Equal(t, "\u0085 body \u0085", item["body"])
+
+	for index, value := range []string{"\t\n\u00a0\ufeff", "\u00a0", "\ufeff"} {
+		for field := range map[string]bool{"name": true, "body": true} {
+			request := map[string]any{"name": "valid", "body": "valid"}
+			request[field] = value
+			result := promptRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/prompt-templates", request)
+			require.Equal(t, float64(http.StatusBadRequest), result["status"], "whitespace %d in %s", index, field)
+			require.Equal(t, "invalid_prompt_template", result["error"].(map[string]any)["code"])
+		}
+	}
+
+	content := promptRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/prompt-templates", map[string]any{
+		"name": "\u0085", "body": "\u0085",
+	})
+	require.Equal(t, float64(http.StatusCreated), content["status"])
+	require.Equal(t, "\u0085", content["prompt_template"].(map[string]any)["name"])
+	require.Equal(t, "\u0085", content["prompt_template"].(map[string]any)["body"])
+}
+
 func TestPromptTemplateHTTPRejectsUnpairedSurrogateIDs(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
