@@ -70,6 +70,52 @@ func TestPromptTemplateHTTPAcceptsMetadataAndRejectsPortableMetadataErrors(t *te
 	require.Equal(t, "invalid_prompt_template", missingMetadata["error"].(map[string]any)["code"])
 }
 
+func TestPromptTemplateHTTPRejectsUnpairedSurrogateIDs(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Clock: clock})
+	require.NoError(t, err)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	for index, rawID := range []string{`\uD800`, `\uDC00`} {
+		response := rawPromptJSONRequest(t, router, http.MethodPost, "/v1/prompt-templates", fmt.Sprintf(`{"id":"%s","name":"invalid-%d","body":"body"}`, rawID, index))
+		require.Equal(t, http.StatusBadRequest, response.Code)
+		var result map[string]any
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&result))
+		require.Equal(t, "invalid_prompt_template", result["error"].(map[string]any)["code"])
+	}
+
+	validPair := rawPromptJSONRequest(t, router, http.MethodPost, "/v1/prompt-templates", `{"id":"\uD83D\uDE00","name":"valid-pair","body":"body"}`)
+	require.Equal(t, http.StatusCreated, validPair.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(validPair.Body).Decode(&created))
+	item := created["prompt_template"].(map[string]any)
+	require.Equal(t, "😀", item["id"])
+
+	path := server.URL + "/v1/prompt-templates/" + url.PathEscape("😀")
+	for index, rawID := range []string{`\uD800`, `\uDC00`} {
+		response := rawPromptJSONRequest(t, router, http.MethodPatch, "/v1/prompt-templates/%F0%9F%98%80", fmt.Sprintf(`{"id":"%s","body":"invalid-%d"}`, rawID, index))
+		require.Equal(t, http.StatusBadRequest, response.Code)
+	}
+	fetched := promptRequest(t, server.Client(), http.MethodGet, path, nil)
+	require.Equal(t, "😀", fetched["prompt_template"].(map[string]any)["id"])
+	patched := promptRequest(t, server.Client(), http.MethodPatch, path, map[string]any{"body": "patched"})
+	require.Equal(t, float64(http.StatusOK), patched["status"])
+	require.Equal(t, "😀", patched["prompt_template"].(map[string]any)["id"])
+}
+
+func rawPromptJSONRequest(t *testing.T, router http.Handler, method, rawPath, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(method, "http://router"+rawPath, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
 func TestPromptTemplateHTTPUsesOneDecodeForOpaqueIDs(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
