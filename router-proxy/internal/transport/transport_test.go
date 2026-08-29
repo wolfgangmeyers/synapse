@@ -371,6 +371,128 @@ func TestWebSocketStripsAdditiveNestedFieldsAndDispatchesAcceptedActivity(t *tes
 	require.Equal(t, "pong", readJSON(t, sender)["type"])
 }
 
+func TestActivityProjectionAppearsInAgentsSnapshot(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	worker, registration := registerTestSession(t, wsURL, "projection-worker", "worker-instance", "v1")
+	defer worker.Close(websocket.StatusNormalClosure, "test done")
+	observer, _ := registerTestSession(t, wsURL, "projection-observer", "observer-instance", "v1")
+	defer observer.Close(websocket.StatusNormalClosure, "test done")
+
+	goal := map[string]any{"enabled": true, "goal": "ship the projection"}
+	model := map[string]any{"provider": "test", "id": "current-model"}
+	sendJSON(t, worker, map[string]any{
+		"version": "v1", "frame_id": "activity-frame", "type": "activity",
+		"agent_id": "projection-worker", "instance_id": "worker-instance", "lease_id": registration["lease_id"],
+		"activity_state": "active", "goal": goal, "current_model": model,
+	})
+	activity := readJSON(t, observer)
+	require.Equal(t, goal, activity["goal"])
+	require.Equal(t, model, activity["current_model"])
+	_ = readJSON(t, worker)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	response, err := http.Get(server.URL + "/v1/agents")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var snapshot map[string]any
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&snapshot))
+	agents := snapshot["agents"].([]any)
+	require.Len(t, agents, 2)
+	var item map[string]any
+	for _, candidate := range agents {
+		value := candidate.(map[string]any)
+		if value["agent_id"] == "projection-worker" {
+			item = value
+			break
+		}
+	}
+	require.NotNil(t, item)
+	require.Equal(t, goal, item["goal"])
+	require.Equal(t, model, item["current_model"])
+}
+
+func TestSettledActivityIdleFrameRetainsCurrentModel(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	worker, registration := registerTestSession(t, wsURL, "settled-worker", "worker-instance", "v1")
+	defer worker.Close(websocket.StatusNormalClosure, "test done")
+	observer, _ := registerTestSession(t, wsURL, "settled-observer", "observer-instance", "v1")
+	defer observer.Close(websocket.StatusNormalClosure, "test done")
+
+	model := map[string]any{"provider": "test", "id": "current-model"}
+	sendJSON(t, worker, map[string]any{
+		"version": "v1", "frame_id": "active-frame", "type": "activity",
+		"agent_id": "settled-worker", "instance_id": "worker-instance", "lease_id": registration["lease_id"],
+		"activity_state": "active", "current_model": model,
+	})
+	require.Equal(t, "agent_activity", readJSON(t, observer)["type"])
+	require.Equal(t, "agent_activity", readJSON(t, worker)["type"])
+
+	sendJSON(t, worker, map[string]any{
+		"version": "v1", "frame_id": "settled-frame", "type": "activity",
+		"agent_id": "settled-worker", "instance_id": "worker-instance", "lease_id": registration["lease_id"],
+		"activity_state": "settled",
+	})
+	idle := readJSON(t, observer)
+	require.Equal(t, "idle", idle["activity_state"])
+	require.Equal(t, model, idle["current_model"])
+	require.Equal(t, map[string]any{"enabled": false, "goal": ""}, idle["goal"])
+}
+
+func TestExpiredActivityIdleFrameRetainsGoalAndCurrentModel(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock, ActivityTTL: time.Second, SweepInterval: time.Millisecond})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	worker, registration := registerTestSession(t, wsURL, "expiry-worker", "worker-instance", "v1")
+	defer worker.Close(websocket.StatusNormalClosure, "test done")
+	observer, _ := registerTestSession(t, wsURL, "expiry-observer", "observer-instance", "v1")
+	defer observer.Close(websocket.StatusNormalClosure, "test done")
+
+	goal := map[string]any{"enabled": true, "goal": "retain this goal"}
+	model := map[string]any{"provider": "test", "id": "retain-this-model"}
+	sendJSON(t, worker, map[string]any{
+		"version": "v1", "frame_id": "activity-frame", "type": "activity",
+		"agent_id": "expiry-worker", "instance_id": "worker-instance", "lease_id": registration["lease_id"],
+		"activity_state": "active", "goal": goal, "current_model": model,
+	})
+	require.Equal(t, "agent_activity", readJSON(t, observer)["type"])
+	require.Equal(t, "agent_activity", readJSON(t, worker)["type"])
+	require.NoError(t, clock.Advance(2*time.Second))
+
+	var idle map[string]any
+	require.Eventually(t, func() bool {
+		candidate, ok := tryReadJSON(observer, 10*time.Millisecond)
+		if !ok || candidate["type"] != "agent_activity" || candidate["activity_state"] != "idle" {
+			return false
+		}
+		idle = candidate
+		return true
+	}, time.Second, time.Millisecond)
+	require.Equal(t, goal, idle["goal"])
+	require.Equal(t, model, idle["current_model"])
+}
+
 func TestSameInstanceReconnectDoesNotLetOldCleanupRemoveReplacement(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
