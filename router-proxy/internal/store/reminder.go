@@ -54,6 +54,13 @@ type ReminderFireOutcome struct {
 }
 
 // ReminderRequest contains the durable fields accepted by the Node store.
+func reminderLinkedState(reminder *domain.Reminder) string {
+	if reminder != nil && reminder.LinkedMessageState != nil {
+		return *reminder.LinkedMessageState
+	}
+	return ""
+}
+
 type ReminderRequest struct {
 	ID, Target, Creator        string
 	Subject                    *string
@@ -143,7 +150,7 @@ func (s *Store) CancelReminder(ctx context.Context, id string) (bool, error) {
 			return err
 		}
 		if current.State != "failed" && !(current.State == "scheduled" && current.LinkedMessageID == nil) {
-			return &ReminderNotCancelableError{ID: id, State: current.State}
+			return &ReminderCancellationConflictError{ID: id, State: current.State, LinkedMessageState: reminderLinkedState(current)}
 		}
 		result, err := s.db.ExecContext(ctx, "DELETE FROM reminders WHERE id = ? AND (state = 'failed' OR (state = 'scheduled' AND linked_message_id IS NULL))", id)
 		if err != nil {
@@ -153,8 +160,13 @@ func (s *Store) CancelReminder(ctx context.Context, id string) (bool, error) {
 		canceled = count == 1
 		if canceled {
 			delete(s.reminderIncarnations, id)
+			return nil
 		}
-		return err
+		current, err = s.reminderForTx(ctx, id)
+		if err != nil || current == nil {
+			return err
+		}
+		return &ReminderCancellationConflictError{ID: current.ID, State: current.State, LinkedMessageState: reminderLinkedState(current)}
 	})
 	return canceled, err
 }
