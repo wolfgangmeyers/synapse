@@ -54,6 +54,24 @@ type Delivery struct {
 	Items             []DeliveryItem `json:"items"`
 }
 
+type Reminder struct {
+	ID                 string                       `json:"id"`
+	Target             string                       `json:"target"`
+	Creator            string                       `json:"creator"`
+	Subject            *string                      `json:"subject,omitempty"`
+	Body               string                       `json:"body"`
+	CreatedAt          string                       `json:"created_at"`
+	NextDueAt          string                       `json:"next_due_at"`
+	IntervalMS         *int64                       `json:"interval_ms"`
+	Sentinel           *protocol.SentinelDescriptor `json:"sentinel,omitempty"`
+	State              string                       `json:"state"`
+	LinkedMessageID    *string                      `json:"linked_message_id,omitempty"`
+	LinkedMessageState *string                      `json:"linked_message_state,omitempty"`
+	OccurrenceNumber   int                          `json:"occurrence_number"`
+	AttemptCount       int                          `json:"attempt_count"`
+	LastAttemptAt      *string                      `json:"last_attempt_at,omitempty"`
+}
+
 type ConversationMessage struct {
 	Sequence             int64                  `json:"sequence"`
 	ID                   string                 `json:"id"`
