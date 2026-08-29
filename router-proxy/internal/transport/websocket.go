@@ -716,6 +716,7 @@ func (r *Router) modelCatalog(s *session, frame map[string]json.RawMessage) erro
 	var current map[string]any
 	if raw, ok := frame["current_model"]; ok {
 		_ = json.Unmarshal(raw, &current)
+		current = normalizeModelSummary(current)
 	}
 	total := len(models)
 	if value, ok := frameInt(frame, "total_count"); ok && int(value) > total {
@@ -762,26 +763,37 @@ func (r *Router) projectCurrentModel(s *session, current map[string]any) {
 	r.mu.Unlock()
 }
 
+func normalizeModelSummary(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	provider, _ := value["provider"].(string)
+	id, _ := value["id"].(string)
+	provider = strings.TrimSpace(provider)
+	id = strings.TrimSpace(id)
+	if provider == "" || id == "" {
+		return nil
+	}
+	item := map[string]any{"provider": provider, "id": id}
+	if name, _ := value["name"].(string); strings.TrimSpace(name) != "" {
+		item["name"] = strings.TrimSpace(name)
+	}
+	return item
+}
+
 func normalizeModels(values []map[string]any) []map[string]any {
 	seen := map[string]bool{}
 	result := []map[string]any{}
 	for _, value := range values {
-		provider, _ := value["provider"].(string)
-		id, _ := value["id"].(string)
-		provider = strings.TrimSpace(provider)
-		id = strings.TrimSpace(id)
-		if provider == "" || id == "" {
+		item := normalizeModelSummary(value)
+		if item == nil {
 			continue
 		}
-		key := provider + "\x00" + id
+		key := item["provider"].(string) + "\x00" + item["id"].(string)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		item := map[string]any{"provider": provider, "id": id}
-		if name, _ := value["name"].(string); strings.TrimSpace(name) != "" {
-			item["name"] = strings.TrimSpace(name)
-		}
 		result = append(result, item)
 		if len(result) == 1000 {
 			break
@@ -811,6 +823,7 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 	}
 	if raw, ok := frame["current_model"]; ok {
 		_ = json.Unmarshal(raw, &model)
+		model = normalizeModelSummary(model)
 	}
 	wasSettled := false
 	var previous activity
