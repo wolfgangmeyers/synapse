@@ -270,6 +270,8 @@ export function openMessageRepository({
   maxQueuedMessages = DEFAULT_MAX_QUEUED_MESSAGES,
   maxQueuedBytes = DEFAULT_MAX_QUEUED_BYTES,
   maxBatchBodyChars = DEFAULT_MAX_BATCH_BODY_CHARS,
+  // Test fixtures may inject a sequenced source. Production keeps random UUIDs.
+  idSource,
   migrations: migrationPlan = migrations,
 } = {}) {
   if (typeof databasePath !== "string" || databasePath.length === 0) {
@@ -300,6 +302,7 @@ export function openMessageRepository({
       maxQueuedMessages,
       maxQueuedBytes,
       maxBatchBodyChars,
+      idSource,
     });
   } catch (error) {
     database.close();
@@ -315,9 +318,10 @@ class MessageRepository {
   #maxQueuedMessages;
   #maxQueuedBytes;
   #maxBatchBodyChars;
+  #idSource;
   #reminderIncarnations = new Map();
 
-  constructor(database, clock, databasePath, { maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars }) {
+  constructor(database, clock, databasePath, { maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars, idSource }) {
     this.#database = database;
     this.#clock = clock;
     this.#databasePath = databasePath;
@@ -325,6 +329,14 @@ class MessageRepository {
     this.#maxQueuedMessages = maxQueuedMessages;
     this.#maxQueuedBytes = maxQueuedBytes;
     this.#maxBatchBodyChars = maxBatchBodyChars;
+    this.#idSource = idSource ?? randomUUID;
+    if (typeof this.#idSource !== "function") throw new TypeError("idSource must be a function");
+  }
+
+  #nextId() {
+    const id = this.#idSource();
+    if (typeof id !== "string" || id.length === 0) throw new TypeError("idSource must return a non-empty string");
+    return id;
   }
 
   close() {
@@ -358,11 +370,12 @@ class MessageRepository {
         maxQueuedMessages: this.#maxQueuedMessages,
         maxQueuedBytes: this.#maxQueuedBytes,
         maxBatchBodyChars: disableBatching ? 0 : this.#maxBatchBodyChars,
+        idSource: () => this.#nextId(),
       });
       if (result.created || result.batched || result.deduped) {
         const messageIncarnationId = result.message.id === candidate.id
           ? result.message.message_incarnation_id
-          : randomUUID();
+          : this.#nextId();
         insertConversationMessage(this.#database, conversationCandidate, {
           messageIncarnationId,
           deliveryMessageId: result.message.id,
@@ -388,7 +401,7 @@ class MessageRepository {
         if (!sameReminder(existing, candidate)) {
           throw new ReminderIdempotencyConflictError(candidate.id);
         }
-        if (!this.#reminderIncarnations.has(candidate.id)) this.#reminderIncarnations.set(candidate.id, randomUUID());
+        if (!this.#reminderIncarnations.has(candidate.id)) this.#reminderIncarnations.set(candidate.id, this.#nextId());
         return { created: false, reminder: existing };
       }
       this.#database.prepare(`
@@ -413,7 +426,7 @@ class MessageRepository {
         candidate.interval_ms,
         candidate.sentinel === undefined ? null : JSON.stringify(candidate.sentinel),
       );
-      this.#reminderIncarnations.set(candidate.id, randomUUID());
+      this.#reminderIncarnations.set(candidate.id, this.#nextId());
       return { created: true, reminder: selectReminder(this.#database, candidate.id) };
     });
   }
@@ -446,7 +459,7 @@ class MessageRepository {
       if (existing !== undefined) throw new PromptTemplateNameConflictError(candidate.name);
       const count = this.#database.prepare("SELECT COUNT(*) AS count FROM prompt_templates").get().count;
       if (count >= MAX_PROMPT_TEMPLATES) throw new PromptTemplateCapacityError();
-      const id = randomUUID();
+      const id = this.#nextId();
       this.#database.prepare(`
         INSERT INTO prompt_templates (id, name, body, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
@@ -490,7 +503,7 @@ class MessageRepository {
     }
     let incarnation = this.#reminderIncarnations.get(reminderId);
     if (incarnation === undefined) {
-      incarnation = randomUUID();
+      incarnation = this.#nextId();
       this.#reminderIncarnations.set(reminderId, incarnation);
     }
     return incarnation;
@@ -696,6 +709,7 @@ class MessageRepository {
             maxQueuedMessages: this.#maxQueuedMessages,
             maxQueuedBytes: this.#maxQueuedBytes,
             maxBatchBodyChars: this.#maxBatchBodyChars,
+            idSource: () => this.#nextId(),
             onAttempt: () => {
               try {
                 onAttempt?.({ reminderId: id, scheduledFor: nextDueAt });
@@ -1122,11 +1136,11 @@ class MessageRepository {
         maxBodyBytes: this.#maxBodyBytes,
       });
       if (rows.length === 0) return undefined;
-      const batchId = randomUUID();
+      const batchId = this.#nextId();
       const items = [];
       for (const row of rows) {
         if (!MESSAGE_INCARNATION_ID.test(row.message_incarnation_id ?? "")) {
-          const incarnationId = randomUUID();
+          const incarnationId = this.#nextId();
           this.#database.prepare(`
             UPDATE messages
             SET message_incarnation_id = ?
@@ -2524,7 +2538,7 @@ function assertConversationPeer(value) {
 function enqueueCandidate(
   database,
   candidate,
-  { firstSeenAt, maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars = DEFAULT_MAX_BATCH_BODY_CHARS },
+  { firstSeenAt, maxBodyBytes, maxQueuedMessages, maxQueuedBytes, maxBatchBodyChars = DEFAULT_MAX_BATCH_BODY_CHARS, idSource = randomUUID },
 ) {
   const existing = selectMessage(database, candidate.id);
   if (existing !== undefined) {
@@ -2563,7 +2577,7 @@ function enqueueCandidate(
     candidate.body,
     candidate.created_at,
     oneHourAfter(firstSeenAt),
-    randomUUID(),
+    idSource(),
     candidate.sentinel_json,
     candidate.source.kind,
   );
@@ -2743,6 +2757,7 @@ function enqueueReminderMessage(database, reminder, now, limits) {
       maxQueuedMessages: limits.maxQueuedMessages,
       maxQueuedBytes: limits.maxQueuedBytes,
       maxBatchBodyChars: limits.maxBatchBodyChars,
+      idSource: limits.idSource,
     },
   );
   if (!result.created && !result.batched && !result.deduped) {
@@ -2750,7 +2765,7 @@ function enqueueReminderMessage(database, reminder, now, limits) {
   }
   const messageIncarnationId = result.message.id === candidate.id
     ? result.message.message_incarnation_id
-    : randomUUID();
+    : limits.idSource();
   insertConversationMessage(database, prepareConversationCandidate(candidate), {
     messageIncarnationId,
     deliveryMessageId: result.message.id,

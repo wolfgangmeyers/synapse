@@ -44,6 +44,39 @@ func TestAttachmentLifecycleUsesPrivateDirectoryAndAtomicFinalize(t *testing.T) 
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestDiscardPreservesExistingReferencedAttachmentAfterIdempotentRetry(t *testing.T) {
+	references := map[string]bool{}
+	store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images"), Referenced: func(id string) bool { return references[id] }})
+	require.NoError(t, err)
+	input := Input{MIMEType: "image/png", Bytes: pngFixture(1, 1)}
+	original, err := store.WriteTemp("same-message", 1, input)
+	require.NoError(t, err)
+	references[original.ID] = true
+	duplicate, err := store.WriteTemp("same-message", 1, input)
+	require.NoError(t, err)
+	require.True(t, duplicate.preexisting)
+	require.True(t, duplicate.preexistingReferenced)
+	require.NoError(t, store.Discard(duplicate))
+	got, _, err := store.Read(original.ID)
+	require.NoError(t, err)
+	require.Equal(t, input.Bytes, got)
+}
+
+func TestDiscardPreservesPreexistingAttachmentWithoutReferenceCallback(t *testing.T) {
+	store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images")})
+	require.NoError(t, err)
+	input := Input{MIMEType: "image/png", Bytes: pngFixture(1, 1)}
+	original, err := store.WriteTemp("same-message", 1, input)
+	require.NoError(t, err)
+	duplicate, err := store.WriteTemp("same-message", 1, input)
+	require.NoError(t, err)
+	require.True(t, duplicate.preexisting)
+	require.NoError(t, store.Discard(duplicate))
+	got, _, err := store.Read(original.ID)
+	require.NoError(t, err)
+	require.Equal(t, input.Bytes, got)
+}
+
 func TestAttachmentAdmissionMatchesNodeCountAndByteLimits(t *testing.T) {
 	store, err := New(Options{Directory: filepath.Join(t.TempDir(), "images"), MaxBytes: 24, MaxTotalBytes: 48})
 	require.NoError(t, err)
