@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
@@ -24,8 +25,10 @@ type PromptTemplate struct {
 }
 
 type PromptTemplateRequest struct {
-	Name string
-	Body string
+	Name      string
+	Body      string
+	ID        *string
+	UpdatedAt *string
 }
 
 type PromptTemplateValidationError struct{}
@@ -51,7 +54,10 @@ const (
 	maxPromptBodyBytes = 65536
 )
 
-var promptTemplateIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var (
+	promptTemplateTimestampPattern   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`)
+	generatedPromptTemplateIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+)
 
 // MigrationIDs returns the migrations configured for this store in order.
 func (s *Store) MigrationIDs() []string {
@@ -156,7 +162,7 @@ func (s *Store) PromptTemplates(ctx context.Context) ([]PromptTemplate, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var result []PromptTemplate
+	result := make([]PromptTemplate, 0)
 	for rows.Next() {
 		var item PromptTemplate
 		if err := rows.Scan(&item.ID, &item.Name, &item.Body, &item.CreatedAt, &item.UpdatedAt); err != nil {
@@ -183,16 +189,8 @@ func (s *Store) CreatePromptTemplate(ctx context.Context, request PromptTemplate
 	if err := validatePromptTemplateRequest(request); err != nil {
 		return nil, err
 	}
-	now := formatTimestamp(s.clock.Now())
 	var result *PromptTemplate
 	err := s.runImmediate(ctx, func() error {
-		var count int
-		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM prompt_templates").Scan(&count); err != nil {
-			return err
-		}
-		if count >= maxPromptTemplates {
-			return &PromptTemplateCapacityError{}
-		}
 		var existing string
 		err := s.db.QueryRowContext(ctx, "SELECT id FROM prompt_templates WHERE name = ?", request.Name).Scan(&existing)
 		if err == nil {
@@ -201,14 +199,42 @@ func (s *Store) CreatePromptTemplate(ctx context.Context, request PromptTemplate
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		id, err := s.ids.Next()
-		if err != nil {
+		var count int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM prompt_templates").Scan(&count); err != nil {
 			return err
 		}
-		if !promptTemplateIDPattern.MatchString(id) {
-			return fmt.Errorf("generated prompt template ID is invalid")
+		if count >= maxPromptTemplates {
+			return &PromptTemplateCapacityError{}
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO prompt_templates (id,name,body,created_at,updated_at) VALUES (?,?,?,?,?)`, id, request.Name, request.Body, now, now); err != nil {
+
+		id := ""
+		if request.ID != nil {
+			id = *request.ID
+			var existingID string
+			err := s.db.QueryRowContext(ctx, "SELECT id FROM prompt_templates WHERE id = ?", id).Scan(&existingID)
+			if err == nil {
+				return &PromptTemplateValidationError{}
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		} else {
+			var err error
+			id, err = s.ids.Next()
+			if err != nil {
+				return err
+			}
+			if !generatedPromptTemplateIDPattern.MatchString(id) {
+				return fmt.Errorf("generated prompt template ID is invalid")
+			}
+		}
+
+		createdAt := formatTimestamp(s.clock.Now())
+		updatedAt := createdAt
+		if request.UpdatedAt != nil {
+			updatedAt = *request.UpdatedAt
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO prompt_templates (id,name,body,created_at,updated_at) VALUES (?,?,?,?,?)`, id, request.Name, request.Body, createdAt, updatedAt); err != nil {
 			return err
 		}
 		result, err = s.PromptTemplateFor(ctx, id)
@@ -218,11 +244,11 @@ func (s *Store) CreatePromptTemplate(ctx context.Context, request PromptTemplate
 }
 
 func (s *Store) UpdatePromptTemplate(ctx context.Context, id string, patch map[string]json.RawMessage) (*PromptTemplate, error) {
-	if !promptTemplateIDPattern.MatchString(id) || len(patch) == 0 {
+	if !IsPortablePromptTemplateID(id) || len(patch) == 0 {
 		return nil, &PromptTemplateValidationError{}
 	}
 	for key := range patch {
-		if key != "name" && key != "body" {
+		if key != "name" && key != "body" && key != "updated_at" {
 			return nil, &PromptTemplateValidationError{}
 		}
 	}
@@ -231,6 +257,7 @@ func (s *Store) UpdatePromptTemplate(ctx context.Context, id string, patch map[s
 		return existing, err
 	}
 	name, body := existing.Name, existing.Body
+	var updatedAt *string
 	if raw, ok := patch["name"]; ok {
 		if err := json.Unmarshal(raw, &name); err != nil {
 			return nil, &PromptTemplateValidationError{}
@@ -241,10 +268,16 @@ func (s *Store) UpdatePromptTemplate(ctx context.Context, id string, patch map[s
 			return nil, &PromptTemplateValidationError{}
 		}
 	}
-	if err := validatePromptTemplateRequest(PromptTemplateRequest{Name: name, Body: body}); err != nil {
+	if raw, ok := patch["updated_at"]; ok {
+		var value string
+		if string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
+			return nil, &PromptTemplateValidationError{}
+		}
+		updatedAt = &value
+	}
+	if err := validatePromptTemplateRequest(PromptTemplateRequest{Name: name, Body: body, UpdatedAt: updatedAt}); err != nil {
 		return nil, err
 	}
-	now := formatTimestamp(s.clock.Now())
 	var result *PromptTemplate
 	err = s.runImmediate(ctx, func() error {
 		var conflict string
@@ -255,7 +288,11 @@ func (s *Store) UpdatePromptTemplate(ctx context.Context, id string, patch map[s
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, "UPDATE prompt_templates SET name = ?, body = ?, updated_at = ? WHERE id = ?", name, body, now, id); err != nil {
+		if updatedAt == nil {
+			value := formatTimestamp(s.clock.Now())
+			updatedAt = &value
+		}
+		if _, err := s.db.ExecContext(ctx, "UPDATE prompt_templates SET name = ?, body = ?, updated_at = ? WHERE id = ?", name, body, *updatedAt, id); err != nil {
 			return err
 		}
 		result, err = s.PromptTemplateFor(ctx, id)
@@ -265,7 +302,7 @@ func (s *Store) UpdatePromptTemplate(ctx context.Context, id string, patch map[s
 }
 
 func (s *Store) DeletePromptTemplate(ctx context.Context, id string) (bool, error) {
-	if !promptTemplateIDPattern.MatchString(id) {
+	if !IsPortablePromptTemplateID(id) {
 		return false, nil
 	}
 	var deleted bool
@@ -285,7 +322,26 @@ func validatePromptTemplateRequest(request PromptTemplateRequest) error {
 	if request.Name == "" || request.Body == "" || len(request.Name) == 0 || len(request.Body) == 0 || len(request.Name) > maxPromptNameBytes || len(request.Body) > maxPromptBodyBytes || request.Name != trimNonEmpty(request.Name) || request.Body != trimNonEmpty(request.Body) || containsNUL(request.Name) || containsNUL(request.Body) {
 		return &PromptTemplateValidationError{}
 	}
+	if request.ID != nil && !IsPortablePromptTemplateID(*request.ID) {
+		return &PromptTemplateValidationError{}
+	}
+	if request.UpdatedAt != nil && !isCanonicalPromptTemplateTimestamp(*request.UpdatedAt) {
+		return &PromptTemplateValidationError{}
+	}
 	return nil
+}
+
+// IsPortablePromptTemplateID applies the cross-router import and item-route limit.
+func IsPortablePromptTemplateID(value string) bool {
+	return value != "" && utf8.ValidString(value) && !containsNUL(value) && len([]byte(value)) <= 1024
+}
+
+func isCanonicalPromptTemplateTimestamp(value string) bool {
+	if !promptTemplateTimestampPattern.MatchString(value) {
+		return false
+	}
+	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", value)
+	return err == nil && parsed.UTC().Format("2006-01-02T15:04:05.000Z") == value
 }
 func trimNonEmpty(value string) string {
 	if len(value) == 0 {
