@@ -85,6 +85,39 @@ func registrationFrame(agentID, instanceID, conversationSync string) map[string]
 	return frame
 }
 
+func TestConversationSyncRegistrationClearsModelBeforeRegistered(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := New(Options{Store: durable})
+	require.NoError(t, err)
+	_, err = durable.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: "agent", InstanceID: "old-instance", LeaseID: "lease", LeaseDuration: time.Minute})
+	require.NoError(t, err)
+
+	old := &session{router: router, sendOverride: func(map[string]any) error { return nil }, closeOverride: func(websocket.StatusCode, string) error { return nil }}
+	router.configureSession(old, registrationFrame("agent", "old-instance", "v1"), "lease", "old-instance")
+	router.mu.Lock()
+	router.sessions["agent"] = old
+	router.convos["agent"] = map[string]*session{"old-instance": old}
+	router.models["agent"] = modelProjection{instanceID: "old-instance", leaseID: "lease", current: map[string]any{"provider": "old", "id": "stale"}}
+	router.mu.Unlock()
+
+	seenRegistered := make(chan bool, 1)
+	replacement := &session{
+		router: router,
+		sendOverride: func(fields map[string]any) error {
+			snapshot := router.connectedAgents(true)
+			agent := snapshot["agents"].([]map[string]any)[0]
+			_, hasCurrentModel := agent["current_model"]
+			seenRegistered <- fields["type"] == "registered" && !hasCurrentModel
+			return nil
+		},
+		closeOverride: func(websocket.StatusCode, string) error { return nil },
+	}
+	require.NoError(t, router.register(replacement, registrationFrame("agent", "new-instance", "v1")))
+	require.True(t, <-seenRegistered)
+}
+
 func TestBlockedRegistrationDoesNotStopUnrelatedOwnership(t *testing.T) {
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
