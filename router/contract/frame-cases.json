@@ -11,7 +11,8 @@
     {"id": "unpaired-surrogates", "status": "pending", "scope": "JSON strings"},
     {"id": "binary-message", "status": "pending", "scope": "WebSocket input"},
     {"id": "frame-too-large", "close_code": 1009, "status": "pending"},
-    {"id": "lease-expired", "close_code": 4003, "status": "pending"},
+    {"id": "lease-expired", "close_code": 4001, "status": "pending"},
+    {"id": "lease-not-active", "close_code": 4003, "status": "pending"},
     {"id": "replacement", "close_code": 4001, "status": "pending"},
     {"id": "duplicate-identity", "close_code": 4009, "status": "pending"},
     {"id": "internal-error", "close_code": 1011, "status": "pending"}
