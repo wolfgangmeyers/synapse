@@ -57,6 +57,55 @@ func TestConcurrentConversationMessagesBroadcastInPersistedSequence(t *testing.T
 	require.Equal(t, int64(2), <-delivered)
 }
 
+func TestReminderConversationMessageDoesNotOvertakeHTTPMessage(t *testing.T) {
+	durable, router := newTransportOrderingFixture(t)
+	created, _, err := durable.CreateReminder(context.Background(), store.ReminderRequest{
+		ID: "ordering-reminder", Target: "recipient", Creator: "source", Body: "reminder", CreatedAt: "2026-08-29T12:00:00.000Z", NextDueAt: "2026-08-29T12:00:00.000Z",
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+	firstBroadcast := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	delivered := make(chan int64, 2)
+	subscriber := &session{router: router, sendOverride: func(fields map[string]any) error {
+		if fields["type"] != "conversation_message" {
+			return nil
+		}
+		message := fields["message"].(domain.ConversationMessage)
+		if message.Sequence == 1 {
+			close(firstBroadcast)
+			<-releaseFirst
+		}
+		delivered <- message.Sequence
+		return nil
+	}}
+	router.mu.Lock()
+	router.convos["recipient"] = map[string]*session{"instance": subscriber}
+	router.mu.Unlock()
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	reminderResult := make(chan struct{})
+	go func() {
+		router.sweepReminders(context.Background())
+		close(reminderResult)
+	}()
+	<-firstBroadcast
+
+	httpResult := make(chan error, 1)
+	go func() { httpResult <- postOrderingMessage(server.URL, "http-after-reminder", "reminders", "recipient") }()
+	select {
+	case sequence := <-delivered:
+		t.Fatalf("HTTP message broadcast before reminder was released: sequence %d", sequence)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	require.NoError(t, <-httpResult)
+	<-reminderResult
+	require.Equal(t, int64(1), <-delivered)
+	require.Equal(t, int64(2), <-delivered)
+}
+
 func TestDistinctConversationMessagesDoNotBlockEachOther(t *testing.T) {
 	_, router := newTransportOrderingFixture(t)
 	firstBroadcast := make(chan struct{})
@@ -156,6 +205,62 @@ func TestControlResultsCorrelateToExactSessionsLeasesAndControlIDs(t *testing.T)
 				require.Equal(t, "reminder-1", result["reminder_id"])
 			}
 		})
+	}
+}
+
+func TestGoalResultAfterTargetReconnectUsesDurableCorrelation(t *testing.T) {
+	durable, router := newTransportOrderingFixture(t)
+	targetErrors := make(chan map[string]any, 3)
+	source := newTransportSession(t, router, durable, "source", "source-instance", "source-lease", "user_interaction", func(map[string]any) error { return nil })
+	target := newTransportSession(t, router, durable, "target", "target-instance", "target-lease", "agent", func(map[string]any) error { return nil })
+	request := controlRequestFrame("goal", "source", "source-instance", "source-lease", "target", "target-instance", "durable-control")
+	require.NoError(t, router.goalControl(source, request))
+	desired, err := durable.GoalControlDesiredFor(context.Background(), "target", "target-instance")
+	require.NoError(t, err)
+	require.NotNil(t, desired)
+	require.Equal(t, int64(1), desired.Revision)
+
+	// A reconnect drops the in-memory pending entry but keeps the durable desired row.
+	router.removePendingForSession(target)
+	replayed := make(chan map[string]any, 1)
+	replacement := newTransportSession(t, router, durable, "target", "target-instance", "replacement-lease", "agent", func(fields map[string]any) error {
+		switch fields["type"] {
+		case "goal_control":
+			replayed <- fields
+		case "error":
+			targetErrors <- fields
+		}
+		return nil
+	})
+	router.replayGoalControlDesired(replacement)
+	replayedFrame := <-replayed
+	require.Equal(t, "durable-control", replayedFrame["control_id"])
+	require.Equal(t, int64(1), replayedFrame["revision"])
+
+	for _, mismatch := range []map[string]any{
+		{"source_agent_id": "source", "control_id": "durable-control", "revision": int64(2)},
+		{"source_agent_id": "other-source", "control_id": "durable-control", "revision": int64(1)},
+		{"source_agent_id": "source", "control_id": "other-control", "revision": int64(1)},
+	} {
+		result := controlResultFrame("goal", mismatch["source_agent_id"].(string), mismatch["control_id"].(string), "target", "target-instance", "replacement-lease")
+		result["revision"] = rawJSON(mismatch["revision"])
+		result["goal_state"] = rawJSON(map[string]any{"enabled": true, "goal": "stale"})
+		require.NoError(t, router.goalControlResult(replacement, result))
+		require.Equal(t, "goal_control_result_not_pending", (<-targetErrors)["code"])
+	}
+
+	valid := controlResultFrame("goal", "source", "durable-control", "target", "target-instance", "replacement-lease")
+	valid["revision"] = rawJSON(int64(1))
+	valid["goal_state"] = rawJSON(map[string]any{"enabled": true, "goal": "recovered"})
+	require.NoError(t, router.goalControlResult(replacement, valid))
+	router.mu.RLock()
+	goal := router.goals["target"]
+	router.mu.RUnlock()
+	require.Equal(t, "recovered", goal.state["goal"])
+	select {
+	case <-targetErrors:
+		t.Fatal("valid reconnect result was rejected")
+	default:
 	}
 }
 
