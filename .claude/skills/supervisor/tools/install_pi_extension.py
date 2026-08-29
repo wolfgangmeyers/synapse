@@ -690,13 +690,36 @@ def restore_transaction(marker: dict) -> None:
     clear_transaction(marker)
 
 
+def clear_unmarked_settings_backup() -> None:
+    """Discard only a settings backup that predates any visible transaction mutation."""
+    support_backup_exists = SUPPORT_BACKUP.exists() or SUPPORT_BACKUP.is_symlink()
+    settings_backup_exists = SETTINGS_BACKUP.exists() or SETTINGS_BACKUP.is_symlink()
+    if support_backup_exists:
+        raise RuntimeError("installer rollback copies exist without a transaction marker")
+    if not settings_backup_exists:
+        return
+    if SETTINGS_BACKUP.is_symlink() or not SETTINGS_BACKUP.is_file():
+        raise RuntimeError("unmarked installer settings rollback must be a regular, non-symlink file")
+    try:
+        _, had_settings = load_settings()
+    except ValueError as error:
+        raise RuntimeError("current Pi settings are invalid; preserving unmarked rollback") from error
+    if not had_settings:
+        raise RuntimeError("current Pi settings are missing; preserving unmarked rollback")
+
+    # Install replacement starts only after the marker is durable. A lone
+    # settings backup therefore cannot represent visible transactional changes;
+    # it is residue from pre-marker staging or the legacy retained-copy installer.
+    SETTINGS_BACKUP.unlink()
+    fsync_directory(SETTINGS.parent)
+
+
 def recover_transaction() -> None:
     # Keep the recovery entrypoint safe when called directly as well as through
     # main(), before it reads or restores settings.
     assert_no_symlinked_components(SETTINGS.parent, base=Path.home())
     if not TRANSACTION_MARKER.exists() and not TRANSACTION_MARKER.is_symlink():
-        if SUPPORT_BACKUP.exists() or SETTINGS_BACKUP.exists():
-            raise RuntimeError("installer rollback copies exist without a transaction marker")
+        clear_unmarked_settings_backup()
         return
     marker = _marker_data()
     if marker.get("phase") in {"completed", "restored"}:

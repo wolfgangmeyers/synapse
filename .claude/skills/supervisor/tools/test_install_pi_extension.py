@@ -249,6 +249,156 @@ class InstallPiExtensionTest(unittest.TestCase):
         self.assertFalse(recovered.SUPPORT_BACKUP.exists())
         self.assertFalse(recovered.SETTINGS_BACKUP.exists())
 
+    def test_recovery_removes_only_unmarked_settings_backup_with_valid_current_settings(self):
+        installer = self.installer
+        installer.INSTALLED_SUPPORT_ROOT.mkdir(parents=True, exist_ok=True)
+        (installer.INSTALLED_SUPPORT_ROOT / "current-support.txt").write_bytes(b"current support\n")
+        support_before = self.snapshot_tree(installer.INSTALLED_SUPPORT_ROOT)
+        installer.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        installer.SETTINGS.write_text(
+            json.dumps({"theme": "current", "packages": ["/current/package"]}),
+            encoding="utf-8",
+        )
+        settings_before = installer.SETTINGS.read_bytes()
+        installer.SETTINGS_BACKUP.write_text(
+            json.dumps({"theme": "legacy", "packages": ["/old/package"]}),
+            encoding="utf-8",
+        )
+
+        installer.recover_transaction()
+
+        self.assertEqual(installer.SETTINGS.read_bytes(), settings_before)
+        self.assertEqual(self.snapshot_tree(installer.INSTALLED_SUPPORT_ROOT), support_before)
+        self.assertFalse(installer.SETTINGS_BACKUP.exists())
+        self.assertFalse(installer.TRANSACTION_MARKER.exists())
+
+    def test_main_continues_after_recovering_unmarked_settings_backup(self):
+        self.seed_old_install()
+        installer = self.installer
+        installer.SETTINGS_BACKUP.write_text(
+            json.dumps({"theme": "legacy", "packages": ["/old/package"]}),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(installer.main(), 0)
+
+        settings = json.loads(installer.SETTINGS.read_text(encoding="utf-8"))
+        self.assertEqual(settings["theme"], "preserve")
+        self.assertEqual(settings["packages"][-2:], [
+            str(installer.GOAL_PACKAGE),
+            str(installer.CHECKOUT_PACKAGE),
+        ])
+        self.assertFalse(installer.SETTINGS_BACKUP.exists())
+        self.assertFalse(installer.TRANSACTION_MARKER.exists())
+
+    def test_main_stops_before_staging_when_unmarked_backup_cleanup_fsync_fails(self):
+        installer = self.installer
+        installer.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        installer.SETTINGS.write_text(json.dumps({"packages": []}), encoding="utf-8")
+        settings_before = installer.SETTINGS.read_bytes()
+        installer.SETTINGS_BACKUP.write_text(json.dumps({"packages": []}), encoding="utf-8")
+
+        with (
+            mock.patch.object(installer, "fsync_directory", side_effect=OSError("fsync failed")),
+            mock.patch.object(installer, "stage_support_root") as stage_support_root,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            installer.main()
+
+        self.assertIn("Installer recovery failed", str(raised.exception))
+        stage_support_root.assert_not_called()
+        self.assertEqual(installer.SETTINGS.read_bytes(), settings_before)
+        self.assertFalse(installer.TRANSACTION_MARKER.exists())
+
+    def test_marked_recovery_does_not_run_unmarked_cleanup(self):
+        self.seed_old_install()
+        installer = self.installer
+        old_support = self.snapshot_tree(installer.INSTALLED_SUPPORT_ROOT)
+        old_settings = installer.SETTINGS.read_bytes()
+        os.environ["MECHA_MESSAGING_INSTALL_FAIL_PHASE"] = "after_recording"
+        try:
+            with self.assertRaises(SystemExit):
+                installer.main()
+        finally:
+            os.environ.pop("MECHA_MESSAGING_INSTALL_FAIL_PHASE", None)
+
+        recovered = self._load_installer()
+        with mock.patch.object(recovered, "clear_unmarked_settings_backup") as unmarked_cleanup:
+            recovered.recover_transaction()
+
+        unmarked_cleanup.assert_not_called()
+        self.assertEqual(self.snapshot_tree(recovered.INSTALLED_SUPPORT_ROOT), old_support)
+        self.assertEqual(recovered.SETTINGS.read_bytes(), old_settings)
+        self.assertFalse(recovered.TRANSACTION_MARKER.exists())
+        self.assertFalse(recovered.SUPPORT_BACKUP.exists())
+        self.assertFalse(recovered.SETTINGS_BACKUP.exists())
+
+    def test_recovery_preserves_unmarked_settings_backup_without_valid_current_settings(self):
+        for current in (None, b"not json", json.dumps({"packages": "not a list"}).encode("utf-8")):
+            with self.subTest(current=current):
+                self.reset_home()
+                installer = self.installer
+                installer.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+                if current is not None:
+                    installer.SETTINGS.write_bytes(current)
+                installer.SETTINGS_BACKUP.write_text(
+                    json.dumps({"theme": "legacy", "packages": ["/old/package"]}),
+                    encoding="utf-8",
+                )
+                backup_before = installer.SETTINGS_BACKUP.read_bytes()
+
+                with self.assertRaises(RuntimeError):
+                    installer.recover_transaction()
+
+                self.assertEqual(installer.SETTINGS_BACKUP.read_bytes(), backup_before)
+                if current is None:
+                    self.assertFalse(installer.SETTINGS.exists())
+                else:
+                    self.assertEqual(installer.SETTINGS.read_bytes(), current)
+
+    def test_recovery_preserves_ambiguous_unmarked_rollback_state(self):
+        installer = self.installer
+        installer.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        installer.SETTINGS.write_text(json.dumps({"packages": []}), encoding="utf-8")
+        installer.SETTINGS_BACKUP.write_text(json.dumps({"packages": []}), encoding="utf-8")
+        installer.SUPPORT_BACKUP.mkdir(parents=True)
+        (installer.SUPPORT_BACKUP / "old-support.txt").write_bytes(b"old support\n")
+        settings_backup_before = installer.SETTINGS_BACKUP.read_bytes()
+        support_backup_before = self.snapshot_tree(installer.SUPPORT_BACKUP)
+
+        with self.assertRaises(RuntimeError):
+            installer.recover_transaction()
+
+        self.assertEqual(installer.SETTINGS_BACKUP.read_bytes(), settings_backup_before)
+        self.assertEqual(self.snapshot_tree(installer.SUPPORT_BACKUP), support_backup_before)
+
+    def test_recovery_explicitly_preserves_symlinked_unmarked_settings_backup(self):
+        installer = self.installer
+        installer.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        installer.SETTINGS.write_text(json.dumps({"packages": []}), encoding="utf-8")
+        outside = Path(self.home.name) / "outside-settings-backup"
+        outside.write_bytes(b"do not touch\n")
+        installer.SETTINGS_BACKUP.symlink_to(outside)
+
+        with self.assertRaises(RuntimeError):
+            installer.recover_transaction()
+
+        self.assertTrue(installer.SETTINGS_BACKUP.is_symlink())
+        self.assertEqual(outside.read_bytes(), b"do not touch\n")
+
+    def test_recovery_preserves_directory_unmarked_settings_backup(self):
+        installer = self.installer
+        installer.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        installer.SETTINGS.write_text(json.dumps({"packages": []}), encoding="utf-8")
+        installer.SETTINGS_BACKUP.mkdir()
+        (installer.SETTINGS_BACKUP / "unexpected.txt").write_bytes(b"do not touch\n")
+        backup_before = self.snapshot_tree(installer.SETTINGS_BACKUP)
+
+        with self.assertRaises(RuntimeError):
+            installer.recover_transaction()
+
+        self.assertEqual(self.snapshot_tree(installer.SETTINGS_BACKUP), backup_before)
+
     def test_recovery_retries_after_interruption_between_restore_phases(self):
         self.seed_old_install()
         installer = self.installer
