@@ -128,7 +128,7 @@ test("prompt template repository validates fields, exact names, and collection c
     { name: "name", body: "   " },
     { name: "x".repeat(129), body: "body" },
     { name: "name", body: "x".repeat(65_537) },
-    { id: "caller-id", name: "name", body: "body" },
+    { id: "", name: "name", body: "body" },
   ]) {
     assert.throws(() => repository.createPromptTemplate(invalid), PromptTemplateValidationError);
   }
@@ -252,4 +252,71 @@ test("prompt templates persist after repository and router restart", async (t) =
   const list = await request(restartedBase, "/v1/prompt-templates");
   assert.equal(list.status, 200);
   assert.deepEqual((await list.json()).prompt_templates, [saved]);
+});
+
+test("prompt templates accept portable imported identity and timestamp", async (t) => {
+  const { repository, router } = await fixture(t);
+  const id = "legacy/Punctuation?%# \u00e9";
+  const updatedAt = "2029-12-31T23:59:59.999Z";
+  const base = await httpUrl(router);
+  const createdResponse = await request(base, "/v1/prompt-templates", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(template({ id, updated_at: updatedAt })),
+  });
+  assert.equal(createdResponse.status, 201);
+  assert.deepEqual((await createdResponse.json()).prompt_template, {
+    id,
+    name: "daily check",
+    body: template().body,
+    created_at: NOW.toISOString(),
+    updated_at: updatedAt,
+  });
+
+  const fetched = await request(base, `/v1/prompt-templates/${encodeURIComponent(id)}`);
+  assert.equal(fetched.status, 200);
+  assert.equal((await fetched.json()).prompt_template.id, id);
+  assert.deepEqual(repository.promptTemplates()[0].updated_at, updatedAt);
+});
+
+test("prompt template timestamp clock consumption distinguishes normal and imported writes", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-prompt-template-clock-"));
+  const clockValues = [
+    "2030-01-01T00:00:01.000Z",
+    "2030-01-01T00:00:02.000Z",
+    "2030-01-01T00:00:03.000Z",
+  ];
+  let measuring = false;
+  let clockCalls = 0;
+  const clock = () => new Date(measuring ? clockValues[clockCalls++] : NOW);
+  const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), clock });
+  measuring = true;
+  t.after(async () => {
+    repository.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const normal = repository.createPromptTemplate(template({ name: "normal" })).prompt_template;
+  const imported = repository.createPromptTemplate(template({
+    id: "Imported ID / mixed-case",
+    name: "imported",
+    updated_at: "2028-01-01T00:00:00.123Z",
+  })).prompt_template;
+  const normalUpdated = repository.updatePromptTemplate(normal.id, { body: "normal update" }).prompt_template;
+  const importedUpdated = repository.updatePromptTemplate(imported.id, {
+    body: "imported update",
+    updated_at: "2027-01-01T00:00:00.456Z",
+  }).prompt_template;
+  assert.throws(
+    () => repository.createPromptTemplate(template({ name: "normal" })),
+    PromptTemplateNameConflictError,
+  );
+
+  assert.equal(clockCalls, 3);
+  assert.equal(normal.created_at, "2030-01-01T00:00:01.000Z");
+  assert.equal(normal.updated_at, normal.created_at);
+  assert.equal(imported.created_at, "2030-01-01T00:00:02.000Z");
+  assert.equal(imported.updated_at, "2028-01-01T00:00:00.123Z");
+  assert.equal(normalUpdated.updated_at, "2030-01-01T00:00:03.000Z");
+  assert.equal(importedUpdated.updated_at, "2027-01-01T00:00:00.456Z");
 });
