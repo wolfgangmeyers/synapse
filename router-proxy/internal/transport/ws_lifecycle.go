@@ -137,9 +137,11 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 	if !registered || s.agentID == "" {
 		return
 	}
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
+	r.sessionClosedSerialized(s)
+}
 
+func (r *Router) sessionClosedSerialized(s *session) {
+	sharedPaused := s.isPaused()
 	var promoted *session
 	r.mu.Lock()
 	primary := r.sessions[s.agentID] == s
@@ -154,17 +156,8 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 			// primary closes. Delivery remains on exactly one socket.
 			for _, replacement := range subscribers {
 				r.sessions[s.agentID] = replacement
-				if activity, ok := r.activities[s.agentID]; ok && activity.instanceID != replacement.instanceID {
-					delete(r.activities, s.agentID)
-				}
-				if model, ok := r.models[s.agentID]; ok && model.instanceID != replacement.instanceID {
-					delete(r.models, s.agentID)
-				}
-				if goal, ok := r.goals[s.agentID]; ok && goal.instanceID != replacement.instanceID {
-					delete(r.goals, s.agentID)
-				}
-				primary = false
 				promoted = replacement
+				primary = false
 				break
 			}
 		} else if len(subscribers) == 0 {
@@ -174,12 +167,15 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 	if primary {
 		delete(r.sessions, s.agentID)
 		delete(r.models, s.agentID)
-		delete(r.activities, s.agentID)
 		delete(r.goals, s.agentID)
+		if activity, ok := r.activities[s.agentID]; !ok || activity.state != "compacting" {
+			delete(r.activities, s.agentID)
+		}
 	}
 	r.removePendingForSessionLocked(s)
 	r.mu.Unlock()
 	if promoted != nil {
+		r.setAgentPaused(s.agentID, sharedPaused || r.agentCompacting(s.agentID))
 		r.offer(promoted)
 	}
 	if primary {

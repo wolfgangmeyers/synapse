@@ -10,14 +10,92 @@ import (
 )
 
 func (r *Router) offerAgent(agentID string) {
-	// HTTP enqueue/retry can race a WebSocket replacement. Use the same
-	// ownership lock as frame dispatch before claiming a delivery.
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	r.mu.Lock()
+	r.mu.RLock()
 	s := r.sessions[agentID]
-	r.mu.Unlock()
+	r.mu.RUnlock()
 	r.offer(s)
+}
+
+func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(r.sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := r.sweep(ctx); err != nil {
+				r.emit("router_error", map[string]any{"error_code": "sweep_failed"})
+			}
+			r.sweepLiveState()
+		}
+	}
+}
+
+func (r *Router) sweepLiveState() {
+	now := r.now()
+	r.mu.RLock()
+	expiredAgents := make([]string, 0)
+	for agentID, activity := range r.activities {
+		if !activity.expires.After(now) {
+			expiredAgents = append(expiredAgents, agentID)
+		}
+	}
+	r.mu.RUnlock()
+	for _, agentID := range expiredAgents {
+		_ = r.expireActivity(agentID, now)
+	}
+
+	type expiredControl struct {
+		pending *pendingControl
+		code    string
+	}
+	expired := make([]expiredControl, 0)
+	r.mu.Lock()
+	for key, pending := range r.pendingMod {
+		if pending.expires.After(now) {
+			continue
+		}
+		delete(r.pendingMod, key)
+		expired = append(expired, expiredControl{pending: pending, code: "model_control_expired"})
+	}
+	for key, pending := range r.pendingGoal {
+		if pending.expires.After(now) {
+			continue
+		}
+		delete(r.pendingGoal, key)
+		expired = append(expired, expiredControl{pending: pending, code: "goal_control_expired"})
+	}
+	for key, pending := range r.pendingLock {
+		if pending.expires.After(now) {
+			continue
+		}
+		delete(r.pendingLock, key)
+		expired = append(expired, expiredControl{pending: pending, code: "reminder_lock_control_expired"})
+	}
+	r.mu.Unlock()
+	for _, item := range expired {
+		if item.pending.source != nil && r.sessionMatchesIdentity(item.pending.source) {
+			_ = item.pending.source.sendError(item.code, item.pending.requestID)
+		}
+	}
+}
+
+func (r *Router) expireActivity(agentID string, now time.Time) error {
+	r.mu.Lock()
+	activity, ok := r.activities[agentID]
+	if !ok || activity.expires.After(now) {
+		r.mu.Unlock()
+		return nil
+	}
+	delete(r.activities, agentID)
+	primary := r.sessions[agentID]
+	r.mu.Unlock()
+	r.setAgentPaused(agentID, false)
+	r.broadcast(map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": activity.instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "generated_at": timestamp(now)})
+	r.offer(primary)
+	return nil
 }
 
 func (r *Router) rateLimit(sender string) error {
@@ -82,12 +160,12 @@ func (r *Router) connectedAgents() map[string]any {
 			continue
 		}
 		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}}
-		if a, ok := activities[s.agentID]; ok && a.expires.After(now) {
+		if a, ok := activities[s.agentID]; ok && a.instanceID == s.instanceID && a.leaseID == lease.LeaseID && a.expires.After(now) {
 			item["activity_state"] = a.state
 			item["subagent_count"] = a.count
 			item["subagents"] = a.subagents
 		}
-		if model, ok := models[s.agentID]; ok && model.instanceID == s.instanceID {
+		if model, ok := models[s.agentID]; ok && model.instanceID == s.instanceID && model.leaseID == lease.LeaseID {
 			item["available_models"] = model.available
 			item["model_catalog_total_count"] = model.total
 			item["model_catalog_truncated"] = model.truncated
@@ -99,7 +177,7 @@ func (r *Router) connectedAgents() map[string]any {
 			item["model_catalog_total_count"] = 0
 			item["model_catalog_truncated"] = false
 		}
-		if goal, ok := goals[s.agentID]; ok && goal.instanceID == s.instanceID {
+		if goal, ok := goals[s.agentID]; ok && goal.instanceID == s.instanceID && goal.leaseID == lease.LeaseID {
 			item["goal"] = goal.projection
 			item["goal_state"] = goal.state
 		}

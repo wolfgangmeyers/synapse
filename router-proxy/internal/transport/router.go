@@ -87,6 +87,7 @@ type Options struct {
 	MaxDeliveryAttempts   int
 	ActivityTTL           time.Duration
 	PendingControlTTL     time.Duration
+	SweepInterval         time.Duration
 	MaxPendingControls    int
 	MaxPendingPerSource   int
 	GoalControlAvailable  bool
@@ -95,34 +96,33 @@ type Options struct {
 }
 
 type Router struct {
-	store       *store.Store
-	clock       deterministic.Clock
-	ids         deterministic.IDSource
-	host        string
-	port        int
-	path        string
-	maxFrame    int
-	maxRequest  int
-	lease       time.Duration
-	delivery    time.Duration
-	maxAttempts int
-	activityTTL time.Duration
-	controlTTL  time.Duration
-	maxControls int
-	maxPerSrc   int
-	memory      MemoryCatalog
-	tmux        TmuxAdapter
-	attachments *attachments.Store
-	log         func(string, map[string]any)
+	store         *store.Store
+	clock         deterministic.Clock
+	ids           deterministic.IDSource
+	host          string
+	port          int
+	path          string
+	maxFrame      int
+	maxRequest    int
+	lease         time.Duration
+	delivery      time.Duration
+	maxAttempts   int
+	activityTTL   time.Duration
+	controlTTL    time.Duration
+	sweepInterval time.Duration
+	maxControls   int
+	maxPerSrc     int
+	memory        MemoryCatalog
+	tmux          TmuxAdapter
+	attachments   *attachments.Store
+	log           func(string, map[string]any)
 
-	mu sync.Mutex
-	// dispatchMu makes session ownership, lease checks, and each frame's state
-	// transition one serialized operation. Registration and close callbacks from
-	// different WebSockets otherwise create a stale-session TOCTOU window.
-	dispatchMu         sync.Mutex
+	mu                 sync.RWMutex
 	server             *http.Server
 	listener           net.Listener
 	serveDone          chan struct{}
+	sweepCancel        context.CancelFunc
+	sweepDone          chan struct{}
 	closed             bool
 	sessions           map[string]*session
 	convos             map[string]map[string]*session
@@ -158,11 +158,14 @@ type session struct {
 	writeMu          sync.Mutex
 	stateMu          sync.RWMutex
 	closeOnce        sync.Once
+	sendOverride     func(map[string]any) error
+	closeOverride    func(websocket.StatusCode, string) error
 }
 
 type activity struct {
 	state      string
 	instanceID string
+	leaseID    string
 	until      time.Time
 	expires    time.Time
 	count      int
@@ -172,6 +175,7 @@ type activity struct {
 }
 type modelProjection struct {
 	instanceID string
+	leaseID    string
 	current    map[string]any
 	available  []map[string]any
 	total      int
@@ -179,6 +183,7 @@ type modelProjection struct {
 }
 type goalState struct {
 	instanceID string
+	leaseID    string
 	projection map[string]any
 	state      map[string]any
 }
@@ -269,6 +274,10 @@ func New(options Options) (*Router, error) {
 	if controlTTL == 0 {
 		controlTTL = DefaultPendingControlTTL
 	}
+	sweepInterval := options.SweepInterval
+	if sweepInterval == 0 {
+		sweepInterval = time.Second
+	}
 	maxControls := options.MaxPendingControls
 	if maxControls == 0 {
 		maxControls = 256
@@ -277,7 +286,7 @@ func New(options Options) (*Router, error) {
 	if maxPerSrc == 0 {
 		maxPerSrc = 16
 	}
-	for name, value := range map[string]time.Duration{"lease": lease, "delivery": delivery, "activity": activityTTL, "control": controlTTL} {
+	for name, value := range map[string]time.Duration{"lease": lease, "delivery": delivery, "activity": activityTTL, "control": controlTTL, "sweep": sweepInterval} {
 		if value <= 0 {
 			return nil, fmt.Errorf("%s duration must be positive", name)
 		}
@@ -297,7 +306,7 @@ func New(options Options) (*Router, error) {
 	if !options.GoalControlAvailable {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state")
 	}
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	return r, nil
 }
@@ -348,6 +357,7 @@ func (r *Router) Listen(ctx context.Context) error {
 	}
 	r.mu.Unlock()
 	_, _ = r.sweep(ctx)
+	r.sweepLiveState()
 	listener, err := net.Listen("tcp", net.JoinHostPort(r.host, fmt.Sprint(r.port)))
 	if err != nil {
 		return err
@@ -356,12 +366,17 @@ func (r *Router) Listen(ctx context.Context) error {
 	r.listener = listener
 	r.serveDone = make(chan struct{})
 	r.server = &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
+	sweepCtx, sweepCancel := context.WithCancel(context.Background())
+	r.sweepCancel = sweepCancel
+	r.sweepDone = make(chan struct{})
 	done := r.serveDone
+	sweepDone := r.sweepDone
 	server := r.server
 	r.mu.Unlock()
 	_, websocketURL := r.URLs()
 	r.log("router_started", map[string]any{"host": r.host, "port": listener.Addr().(*net.TCPAddr).Port, "router_url": websocketURL})
 	go func() { _ = server.Serve(listener); close(done) }()
+	go r.sweepLoop(sweepCtx, sweepDone)
 	return nil
 }
 
@@ -386,6 +401,8 @@ func (r *Router) Close(ctx context.Context) error {
 	}
 	r.closed = true
 	server := r.server
+	sweepCancel := r.sweepCancel
+	sweepDone := r.sweepDone
 	sessions := make([]*session, 0, len(r.sessions))
 	for _, candidate := range r.sessions {
 		sessions = append(sessions, candidate)
@@ -398,6 +415,10 @@ func (r *Router) Close(ctx context.Context) error {
 		}
 	}
 	r.mu.Unlock()
+	if sweepCancel != nil {
+		sweepCancel()
+		<-sweepDone
+	}
 	for _, candidate := range sessions {
 		_ = candidate.close(websocket.StatusGoingAway, "router shutdown")
 	}
