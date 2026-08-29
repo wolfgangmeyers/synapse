@@ -326,6 +326,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		r.removePendingForSession(candidate)
 	}
 	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
+	s.setPaused(r.agentCompacting(agentID))
 	r.mu.Lock()
 	r.sessions[agentID] = s
 	if s.conversationSync == "v1" {
