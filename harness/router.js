@@ -21,6 +21,7 @@ import {
   PromptTemplateCapacityError,
   PromptTemplateNameConflictError,
   PromptTemplateValidationError,
+  isPortablePromptTemplateId,
   ReminderCancellationConflictError,
   ReminderIdempotencyConflictError,
   ReminderValidationError,
@@ -2878,6 +2879,10 @@ export function createAgentRouter({
   }
 
   async function handlePromptTemplateItem(request, response, promptTemplateId) {
+    if (!isPortablePromptTemplateId(promptTemplateId)) {
+      sendHttpError(response, 404, "not_found");
+      return;
+    }
     if (request.method === "GET") {
       const promptTemplate = repository.promptTemplateFor(promptTemplateId);
       if (promptTemplate === undefined) sendHttpError(response, 404, "not_found");

@@ -2036,7 +2036,7 @@ function handlePromptTemplateCrudResult(event) {
     const importState = state.promptTemplateImport;
     if (importState?.phase === "refreshing") {
       const confirmedNames = new Set(importState.confirmedConflictNames);
-      importState.conflicts = importState.templates.filter((template) => state.promptTemplates.some((candidate) => candidate.name === template.name));
+      importState.conflicts = promptTemplateImportConflicts(importState.templates);
       const newlyConflicted = importState.conflicts.some((template) => !confirmedNames.has(template.name));
       if (newlyConflicted) {
         importState.phase = "confirm";
@@ -2104,12 +2104,27 @@ function startPromptTemplateImport() {
   }
 }
 
+function promptTemplateImportConflicts(templates) {
+  return templates.filter((template) => template.id !== undefined
+    && template.updated_at !== undefined
+    && state.promptTemplates.some((candidate) => candidate.id === template.id));
+}
+
 function sendNextPromptTemplateImport() {
   const importState = state.promptTemplateImport;
   if (!importState || importState.phase !== "running") return;
   const template = importState.templates[importState.index];
   if (!template) return;
-  const existing = state.promptTemplates.find((candidate) => candidate.name === template.name);
+  const existing = template.id === undefined
+    ? undefined
+    : state.promptTemplates.find((candidate) => candidate.id === template.id);
+  if (existing !== undefined && template.updated_at === undefined) {
+    importState.index += 1;
+    importState.completed += 1;
+    if (importState.index < importState.templates.length) sendNextPromptTemplateImport();
+    else finishPromptTemplateImport();
+    return;
+  }
   const requested = sendPromptTemplateCrud(
     existing === undefined ? "create" : "update",
     existing?.id,
@@ -2121,6 +2136,20 @@ function sendNextPromptTemplateImport() {
     },
   );
   if (!requested) stopPromptTemplateImport("The router is not connected. Remaining templates were not retried.");
+}
+
+function finishPromptTemplateImport() {
+  const importState = state.promptTemplateImport;
+  if (!importState) return;
+  const importedCount = importState.completed;
+  state.promptTemplateImport = null;
+  state.promptTemplateImportNotice = {
+    message: `Imported ${importedCount} template${importedCount === 1 ? "" : "s"}.`,
+    error: false,
+  };
+  state.promptTemplateListGeneration += 1;
+  state.promptTemplateListDirty = true;
+  if (!requestPromptTemplates()) renderPromptTemplateDialog();
 }
 
 function handlePromptTemplateImportResult(event, pending) {
@@ -2146,21 +2175,19 @@ function handlePromptTemplateImportResult(event, pending) {
     sendNextPromptTemplateImport();
     return;
   }
-  const importedCount = importState.completed;
-  state.promptTemplateImport = null;
-  state.promptTemplateImportNotice = {
-    message: `Imported ${importedCount} template${importedCount === 1 ? "" : "s"}.`,
-    error: false,
-  };
-  state.promptTemplateListGeneration += 1;
-  state.promptTemplateListDirty = true;
-  if (!requestPromptTemplates()) renderPromptTemplateDialog();
+  finishPromptTemplateImport();
 }
 
 function normalizePromptTemplates(templates) {
   return (Array.isArray(templates) ? templates : []).flatMap((template) => {
     if (!template || typeof template !== "object" || template.id === undefined) return [];
-    return [{ id: String(template.id), name: String(template.name ?? ""), body: String(template.body ?? "") }];
+    return [{
+      id: String(template.id),
+      name: String(template.name ?? ""),
+      body: String(template.body ?? ""),
+      ...(Object.hasOwn(template, "created_at") ? { created_at: template.created_at } : {}),
+      ...(Object.hasOwn(template, "updated_at") ? { updated_at: template.updated_at } : {}),
+    }];
   });
 }
 
@@ -2287,8 +2314,8 @@ async function handlePromptTemplateImportFile(file) {
       renderPromptTemplateDialog();
       return;
     }
-    const conflicts = templates.filter((template) => state.promptTemplates.some((candidate) => candidate.name === template.name));
-    const newCount = templates.length - conflicts.length;
+    const conflicts = promptTemplateImportConflicts(templates);
+    const newCount = templates.filter((template) => !state.promptTemplates.some((candidate) => candidate.id === template.id)).length;
     if (state.promptTemplates.length + newCount > 100) {
       throw new Error("Import would exceed the 100-template limit.");
     }

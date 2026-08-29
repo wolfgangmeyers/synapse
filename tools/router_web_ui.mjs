@@ -943,7 +943,7 @@ export async function sendPromptTemplateCrud(command, configured, sendBrowser) {
     ? "/v1/prompt-templates"
     : `/v1/prompt-templates/${encodeURIComponent(promptTemplateId)}`, configured.routerUrl);
   const options = { method, headers: { "content-type": "application/json" } };
-  if (method === "POST" || method === "PATCH") options.body = JSON.stringify(normalizePromptTemplatePayload(command.payload));
+  if (method === "POST" || method === "PATCH") options.body = JSON.stringify(normalizePromptTemplatePayload(command.payload, method));
   const response = await fetch(url, options);
   const body = await response.json().catch(() => ({}));
   sendBrowser({
@@ -959,14 +959,18 @@ export async function sendPromptTemplateCrud(command, configured, sendBrowser) {
   });
 }
 
-function normalizePromptTemplatePayload(value) {
+function normalizePromptTemplatePayload(value, method) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Prompt template payload is invalid");
   const keys = Object.keys(value);
-  if (keys.some((key) => !["name", "body"].includes(key))
+  const allowed = new Set(["name", "body", "id", "updated_at"]);
+  if (keys.some((key) => !allowed.has(key))
     || typeof value.name !== "string" || typeof value.body !== "string") {
-    throw new Error("Prompt template payload must contain only name and body");
+    throw new Error("Prompt template payload must contain only name, body, id, and updated_at");
   }
-  return { name: value.name, body: value.body };
+  const payload = { name: value.name, body: value.body };
+  if (method === "POST" && Object.hasOwn(value, "id")) payload.id = value.id;
+  if (Object.hasOwn(value, "updated_at")) payload.updated_at = value.updated_at;
+  return payload;
 }
 
 async function sendReminderCrud(command, configured, sendBrowser) {
@@ -1133,8 +1137,11 @@ function normalizeReminderId(value) {
 }
 
 function normalizePromptTemplateId(value) {
-  const promptTemplateId = String(value).trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(promptTemplateId)) throw new Error("Prompt template ID is invalid");
+  const promptTemplateId = String(value);
+  if (promptTemplateId.length === 0 || promptTemplateId.includes("\u0000")
+    || new TextEncoder().encode(promptTemplateId).length > 1024) {
+    throw new Error("Prompt template ID is invalid");
+  }
   return promptTemplateId;
 }
 
