@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -42,6 +43,9 @@ type Options struct {
 	MaxBytes       int
 	MaxTotalBytes  int
 	Retention      time.Duration
+	// Referenced reports whether conversation metadata still owns an attachment.
+	// It is consulted for reads and expiry sweeps.
+	Referenced func(string) bool
 }
 
 type Input struct {
@@ -72,6 +76,8 @@ type Store struct {
 	maxBytes       int
 	maxTotalBytes  int
 	retention      time.Duration
+	referenced     func(string) bool
+	sweepMu        sync.Mutex
 }
 
 type wallClock struct{}
@@ -108,7 +114,7 @@ func New(options Options) (*Store, error) {
 	if maxAttachments < 0 || maxAttachments > DefaultMaxAttachments || maxBytes <= 0 || maxTotal < maxBytes || retention <= 0 {
 		return nil, errors.New("invalid attachment limits")
 	}
-	store := &Store{directory: directory, clock: options.Clock, maxAttachments: maxAttachments, maxBytes: maxBytes, maxTotalBytes: maxTotal, retention: retention}
+	store := &Store{directory: directory, clock: options.Clock, maxAttachments: maxAttachments, maxBytes: maxBytes, maxTotalBytes: maxTotal, retention: retention, referenced: options.Referenced}
 	if store.clock == nil {
 		store.clock = wallClock{}
 	}
@@ -136,10 +142,10 @@ func (s *Store) ValidateBatch(inputs []Input) error {
 	return nil
 }
 
-// WriteTemp validates and writes one attachment without making it visible at its
-// final name. Finalize is the commit point used after the durable message write.
-// WriteBatch validates count and aggregate size before creating any files. A
-// caller can finalize each returned item after its database transaction.
+// WriteTemp retains the historical method name, but publishes the file before
+// returning. The caller can now safely enqueue its database row and Discard the
+// published file if that transaction fails.
+// WriteBatch validates count and aggregate size before publishing any files.
 func (s *Store) WriteBatch(messageID string, inputs []Input) ([]Pending, error) {
 	if err := s.ValidateBatch(inputs); err != nil {
 		return nil, err
@@ -194,26 +200,52 @@ func (s *Store) WriteTemp(messageID string, index int, input Input) (Pending, er
 		_ = os.Remove(tempPath)
 		return Pending{}, err
 	}
-	return Pending{Attachment: Attachment{ID: id, URL: "/v1/attachments/" + id, MIMEType: strings.ToLower(input.MIMEType), SizeBytes: len(input.Bytes), Name: sanitizeName(input.Name)}, tempPath: tempPath, finalPath: finalPath, owner: s}, nil
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		_ = os.Remove(tempPath)
+		return Pending{}, err
+	}
+	if err := os.Chmod(finalPath, 0o600); err != nil {
+		_ = os.Remove(finalPath)
+		return Pending{}, err
+	}
+	if err := syncDirectory(s.directory); err != nil {
+		_ = os.Remove(finalPath)
+		return Pending{}, err
+	}
+	return Pending{Attachment: Attachment{ID: id, URL: "/v1/attachments/" + id, MIMEType: strings.ToLower(input.MIMEType), SizeBytes: len(input.Bytes), Name: sanitizeName(input.Name)}, finalPath: finalPath, owner: s}, nil
 }
 
-// Discard removes an unpublished temporary attachment after enqueue failure.
+// Discard removes a published attachment after enqueue failure.
 func (s *Store) Discard(p Pending) error {
-	if p.owner != s || p.tempPath == "" || filepath.Dir(p.tempPath) != s.directory {
+	if p.owner != s || (p.tempPath == "" && p.finalPath == "") {
 		return ErrInvalidAttachmentID
 	}
-	err := os.Remove(p.tempPath)
+	path := p.finalPath
+	if path == "" {
+		path = p.tempPath
+	}
+	if filepath.Dir(path) != s.directory {
+		return ErrInvalidAttachmentID
+	}
+	err := os.Remove(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return syncDirectory(s.directory)
 }
 
-// Finalize atomically publishes a temporary attachment. Replacing an existing
-// identical content-addressed file is harmless and keeps retries idempotent.
+// Finalize is retained for callers of the earlier API. New writes are already
+// published; this method verifies that publication completed.
 func (s *Store) Finalize(p Pending) error {
-	if p.owner != s || p.tempPath == "" || !attachmentIDPattern.MatchString(p.ID) || filepath.Dir(p.finalPath) != s.directory {
+	if p.owner != s || !attachmentIDPattern.MatchString(p.ID) || filepath.Dir(p.finalPath) != s.directory {
 		return ErrInvalidAttachmentID
+	}
+	if p.tempPath == "" {
+		_, err := os.Stat(p.finalPath)
+		return err
 	}
 	if err := s.ensureDirectory(false); err != nil {
 		return err
@@ -221,7 +253,10 @@ func (s *Store) Finalize(p Pending) error {
 	if err := os.Rename(p.tempPath, p.finalPath); err != nil {
 		return err
 	}
-	return os.Chmod(p.finalPath, 0o600)
+	if err := os.Chmod(p.finalPath, 0o600); err != nil {
+		return err
+	}
+	return syncDirectory(s.directory)
 }
 
 func (s *Store) Read(id string) ([]byte, Attachment, error) {
@@ -240,7 +275,7 @@ func (s *Store) Read(id string) ([]byte, Attachment, error) {
 	if err != nil || !link.Mode().IsRegular() || !info.Mode().IsRegular() {
 		return nil, Attachment{}, os.ErrNotExist
 	}
-	if !s.retained(info.ModTime()) {
+	if !s.retained(info.ModTime()) && !s.isReferenced(id) {
 		return nil, Attachment{}, os.ErrNotExist
 	}
 	data, err := os.ReadFile(path)
@@ -268,6 +303,11 @@ func (s *Store) Delete(id string) error {
 // Sweep removes unreferenced regular files older than the retention period.
 // The callback is consulted while the private directory is still checked.
 func (s *Store) Sweep(referenced func(string) bool) ([]string, error) {
+	s.sweepMu.Lock()
+	defer s.sweepMu.Unlock()
+	if referenced == nil {
+		referenced = s.referenced
+	}
 	if err := s.ensureDirectory(false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -298,6 +338,21 @@ func (s *Store) Sweep(referenced func(string) bool) ([]string, error) {
 
 func (s *Store) retained(modified time.Time) bool {
 	return !modified.Before(s.clock.Now().Add(-s.retention))
+}
+func (s *Store) isReferenced(id string) (referenced bool) {
+	if s.referenced == nil {
+		return false
+	}
+	defer func() { _ = recover() }()
+	return s.referenced(id)
+}
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 func (s *Store) ensureDirectory(create bool) error {
 	if create {
