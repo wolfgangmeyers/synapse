@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -252,28 +253,40 @@ func (s *Store) UpdatePromptTemplate(ctx context.Context, id string, patch map[s
 			return nil, &PromptTemplateValidationError{}
 		}
 	}
+	// Node validates patch metadata before it looks up the item. Keep that
+	// ordering so malformed metadata on an unknown ID remains a 400.
+	var patchName, patchBody, updatedAt *string
+	if raw, ok := patch["name"]; ok {
+		var value string
+		if json.Unmarshal(raw, &value) != nil || !validPromptTemplateText(value, maxPromptNameBytes) {
+			return nil, &PromptTemplateValidationError{}
+		}
+		patchName = &value
+	}
+	if raw, ok := patch["body"]; ok {
+		var value string
+		if json.Unmarshal(raw, &value) != nil || !validPromptTemplateText(value, maxPromptBodyBytes) {
+			return nil, &PromptTemplateValidationError{}
+		}
+		patchBody = &value
+	}
+	if raw, ok := patch["updated_at"]; ok {
+		var value string
+		if string(raw) == "null" || json.Unmarshal(raw, &value) != nil || !isCanonicalPromptTemplateTimestamp(value) {
+			return nil, &PromptTemplateValidationError{}
+		}
+		updatedAt = &value
+	}
 	existing, err := s.PromptTemplateFor(ctx, id)
 	if err != nil || existing == nil {
 		return existing, err
 	}
 	name, body := existing.Name, existing.Body
-	var updatedAt *string
-	if raw, ok := patch["name"]; ok {
-		if err := json.Unmarshal(raw, &name); err != nil {
-			return nil, &PromptTemplateValidationError{}
-		}
+	if patchName != nil {
+		name = *patchName
 	}
-	if raw, ok := patch["body"]; ok {
-		if err := json.Unmarshal(raw, &body); err != nil {
-			return nil, &PromptTemplateValidationError{}
-		}
-	}
-	if raw, ok := patch["updated_at"]; ok {
-		var value string
-		if string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
-			return nil, &PromptTemplateValidationError{}
-		}
-		updatedAt = &value
+	if patchBody != nil {
+		body = *patchBody
 	}
 	if err := validatePromptTemplateRequest(PromptTemplateRequest{Name: name, Body: body, UpdatedAt: updatedAt}); err != nil {
 		return nil, err
@@ -319,7 +332,7 @@ func (s *Store) DeletePromptTemplate(ctx context.Context, id string) (bool, erro
 }
 
 func validatePromptTemplateRequest(request PromptTemplateRequest) error {
-	if request.Name == "" || request.Body == "" || len(request.Name) == 0 || len(request.Body) == 0 || len(request.Name) > maxPromptNameBytes || len(request.Body) > maxPromptBodyBytes || request.Name != trimNonEmpty(request.Name) || request.Body != trimNonEmpty(request.Body) || containsNUL(request.Name) || containsNUL(request.Body) {
+	if !validPromptTemplateText(request.Name, maxPromptNameBytes) || !validPromptTemplateText(request.Body, maxPromptBodyBytes) {
 		return &PromptTemplateValidationError{}
 	}
 	if request.ID != nil && !IsPortablePromptTemplateID(*request.ID) {
@@ -343,30 +356,30 @@ func isCanonicalPromptTemplateTimestamp(value string) bool {
 	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", value)
 	return err == nil && parsed.UTC().Format("2006-01-02T15:04:05.000Z") == value
 }
+
+func validPromptTemplateText(value string, maxBytes int) bool {
+	return value != "" && len(value) <= maxBytes && value == trimNonEmpty(value) && !containsNUL(value)
+}
+
+// trimNonEmpty matches ECMAScript String.prototype.trim's whitespace set.
+// unicode.IsSpace is close, but it includes U+0085 and omits U+FEFF.
 func trimNonEmpty(value string) string {
-	if len(value) == 0 {
-		return ""
+	return strings.TrimFunc(value, isECMAScriptTrimSpace)
+}
+
+func isECMAScriptTrimSpace(r rune) bool {
+	switch {
+	case r == '\t', r == '\n', r == '\v', r == '\f', r == '\r':
+		return true
+	case r == ' ', r == '\u00a0', r == '\ufeff':
+		return true
+	case r == '\u1680', r == '\u2028', r == '\u2029', r == '\u202f', r == '\u205f', r == '\u3000':
+		return true
+	case r >= '\u2000' && r <= '\u200a':
+		return true
+	default:
+		return false
 	}
-	start, end := 0, len(value)
-	for start < end {
-		r, size := rune(value[start]), 1
-		if r >= 0x80 {
-			r, size = utf8DecodeRuneInString(value[start:])
-		}
-		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
-			break
-		}
-		start += size
-	}
-	for end > start {
-		r, size := utf8DecodeLastRuneInString(value[:end])
-		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
-			_ = size
-			break
-		}
-		end -= size
-	}
-	return value[start:end]
 }
 func containsNUL(value string) bool {
 	for _, r := range value {
@@ -534,25 +547,4 @@ func (s *Store) ReminderIncarnation(ctx context.Context, id string) (string, err
 		s.reminderIncarnations[id] = value
 	}
 	return s.reminderIncarnations[id], nil
-}
-
-// These tiny UTF-8 helpers avoid accepting malformed input through the prompt
-// template boundary while keeping validation byte-oriented like Node.
-func utf8DecodeRuneInString(value string) (rune, int) {
-	for _, r := range value {
-		return r, len(string(r))
-	}
-	return 0, 0
-}
-func utf8DecodeLastRuneInString(value string) (rune, int) {
-	for index := len(value) - 1; index >= 0; index-- {
-		if value[index]&0xc0 != 0x80 {
-			r := []rune(value[index:])
-			if len(r) == 0 {
-				return 0, 1
-			}
-			return r[0], len(string(r[0]))
-		}
-	}
-	return 0, 1
 }
