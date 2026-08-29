@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"math/big"
 	"regexp"
-	"strconv"
+	"strings"
 	"unicode/utf16"
 )
 
@@ -257,8 +258,75 @@ func intValue(raw json.RawMessage, min, max int64) bool {
 	if decoder.Decode(&n) != nil || n.String() == "" {
 		return false
 	}
-	value, err := strconv.ParseInt(n.String(), 10, 64)
-	return err == nil && value >= min && value <= max && value <= maxSafeInteger
+	value, ok := safeInteger(n.String())
+	return ok && value >= min && value <= max
+}
+
+var jsonNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
+
+// safeInteger follows the Node Number.isSafeInteger boundary while accepting
+// JSON decimal and exponent spellings that represent an integer.
+func safeInteger(text string) (int64, bool) {
+	if !jsonNumberPattern.MatchString(text) {
+		return 0, false
+	}
+	negative := strings.HasPrefix(text, "-")
+	if negative {
+		text = text[1:]
+	}
+	mantissa, exponentText := text, "0"
+	if index := strings.IndexAny(mantissa, "eE"); index >= 0 {
+		exponentText = mantissa[index+1:]
+		mantissa = mantissa[:index]
+	}
+	whole, fraction := mantissa, ""
+	if index := strings.IndexByte(whole, '.'); index >= 0 {
+		fraction = whole[index+1:]
+		whole = whole[:index]
+	}
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return 0, true
+	}
+
+	exponent := new(big.Int)
+	if _, ok := exponent.SetString(exponentText, 10); !ok {
+		return 0, false
+	}
+	scale := new(big.Int).Sub(big.NewInt(int64(len(fraction))), exponent)
+	if scale.Sign() > 0 {
+		if scale.Cmp(big.NewInt(int64(len(digits)))) > 0 {
+			return 0, false
+		}
+		count := int(scale.Int64())
+		if strings.TrimRight(digits[len(digits)-count:], "0") != "" {
+			return 0, false
+		}
+		digits = digits[:len(digits)-count]
+	} else if scale.Sign() < 0 {
+		places := new(big.Int).Neg(scale)
+		if places.Cmp(big.NewInt(int64(16-len(digits)))) > 0 {
+			return 0, false
+		}
+		count := int(places.Int64())
+		digits += strings.Repeat("0", count)
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return 0, true
+	}
+	value := new(big.Int)
+	if _, ok := value.SetString(digits, 10); !ok {
+		return 0, false
+	}
+	if negative {
+		value.Neg(value)
+	}
+	limit := big.NewInt(maxSafeInteger)
+	if new(big.Int).Abs(value).Cmp(limit) > 0 || !value.IsInt64() {
+		return 0, false
+	}
+	return value.Int64(), true
 }
 func requiredInt(frame map[string]json.RawMessage, key string, min, max int64) bool {
 	raw, ok := frame[key]

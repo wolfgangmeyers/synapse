@@ -336,6 +336,41 @@ func TestInvalidSchemaFrameReturnsInvalidFrameWithoutDisconnecting(t *testing.T)
 	require.Equal(t, "pong", readJSON(t, conn)["type"])
 }
 
+func TestWebSocketStripsAdditiveNestedFieldsAndDispatchesAcceptedActivity(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	sender, registered := registerTestSession(t, wsURL, "activity-sender", "sender-instance", "v1")
+	defer sender.Close(websocket.StatusNormalClosure, "test done")
+	observer, _ := registerTestSession(t, wsURL, "activity-observer", "observer-instance", "v1")
+	defer observer.Close(websocket.StatusNormalClosure, "test done")
+
+	sendJSON(t, sender, map[string]any{
+		"version": "v1", "frame_id": "activity-frame", "type": "activity",
+		"agent_id": "activity-sender", "instance_id": "sender-instance", "lease_id": registered["lease_id"],
+		"activity_state": "active", "future": map[string]any{"drop": true},
+		"subagents":     []any{map[string]any{"id": "child", "description": "working", "status": "running", "future": true}},
+		"goal":          map[string]any{"enabled": true, "goal": "ship", "future": true},
+		"current_model": map[string]any{"provider": "test", "id": "model", "future": true},
+	})
+	activity := readJSON(t, observer)
+	require.Equal(t, "agent_activity", activity["type"])
+	require.Equal(t, "ship", activity["goal"].(map[string]any)["goal"])
+	require.NotContains(t, activity, "future")
+	require.NotContains(t, activity["goal"], "future")
+	require.NotContains(t, activity["current_model"], "future")
+	require.NotContains(t, activity["subagents"].([]any)[0], "future")
+	// Drain the sender's own projected activity before checking that the socket remains usable.
+	require.Equal(t, "agent_activity", readJSON(t, sender)["type"])
+	sendJSON(t, sender, map[string]any{"version": "v1", "frame_id": "ping-frame", "type": "ping"})
+	require.Equal(t, "pong", readJSON(t, sender)["type"])
+}
+
 func TestSameInstanceReconnectDoesNotLetOldCleanupRemoveReplacement(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))

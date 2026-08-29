@@ -59,12 +59,18 @@ func (r *Router) readLoop(s *session) {
 		if err != nil {
 			return
 		}
-		if kind != websocket.MessageText || !utf8.Valid(payload) || containsUnpairedSurrogate(payload) {
+		if kind != websocket.MessageText || !utf8.Valid(payload) {
 			_ = s.sendError("invalid_frame", "")
 			continue
 		}
 		frame, err := decodeFrame(payload)
 		if err != nil {
+			_ = s.sendError("invalid_frame", "")
+			continue
+		}
+		frame = protocol.SanitizeClientFrame(frame)
+		sanitizedPayload, err := json.Marshal(frame)
+		if err != nil || containsUnpairedSurrogate(sanitizedPayload) {
 			_ = s.sendError("invalid_frame", "")
 			continue
 		}
@@ -109,26 +115,46 @@ func decodeFrame(payload []byte) (map[string]json.RawMessage, error) {
 }
 
 func containsUnpairedSurrogate(payload []byte) bool {
-	text := string(payload)
-	for i := 0; i+5 < len(text); i++ {
-		if text[i] != '\\' || text[i+1] != 'u' {
+	inString := false
+	for index := 0; index < len(payload); index++ {
+		if !inString {
+			if payload[index] == '"' {
+				inString = true
+			}
 			continue
 		}
-		value, ok := hex16(text[i+2 : i+6])
+		if payload[index] == '"' {
+			inString = false
+			continue
+		}
+		if payload[index] != '\\' || index+1 >= len(payload) {
+			continue
+		}
+		if payload[index+1] != 'u' {
+			index++
+			continue
+		}
+		if index+6 > len(payload) {
+			return false
+		}
+		value, ok := hex16(string(payload[index+2 : index+6]))
 		if !ok {
-			return true
+			index += 5
+			continue
 		}
 		if value >= 0xd800 && value <= 0xdbff {
-			if i+11 >= len(text) || text[i+6] != '\\' || text[i+7] != 'u' {
+			if index+12 > len(payload) || payload[index+6] != '\\' || payload[index+7] != 'u' {
 				return true
 			}
-			low, ok := hex16(text[i+8 : i+12])
+			low, ok := hex16(string(payload[index+8 : index+12]))
 			if !ok || low < 0xdc00 || low > 0xdfff {
 				return true
 			}
-			i += 6
+			index += 11
 		} else if value >= 0xdc00 && value <= 0xdfff {
 			return true
+		} else {
+			index += 5
 		}
 	}
 	return false
