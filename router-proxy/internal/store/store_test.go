@@ -112,7 +112,7 @@ func TestMigration005BackfillsInSequenceBeforeAppliedAtClock(t *testing.T) {
 	require.NoError(t, second.db.QueryRow("SELECT applied_at FROM schema_migrations WHERE id = '005_message_incarnation'").Scan(&appliedAt))
 	require.Equal(t, "incarnation-a", incarnation)
 	require.Equal(t, formatTimestamp(start), appliedAt)
-	require.Equal(t, 16, len(clock.Calls()), "only unapplied migrations consume startup clock values")
+	require.Equal(t, 17, len(clock.Calls()), "only unapplied migrations consume startup clock values")
 	require.Equal(t, []string{"incarnation-a"}, ids.Calls())
 }
 

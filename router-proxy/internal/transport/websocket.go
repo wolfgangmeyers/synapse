@@ -877,6 +877,11 @@ func (r *Router) goalControlResult(s *session, frame map[string]json.RawMessage)
 		r.mu.Unlock()
 		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
 	}
+	consumed, consumeErr := r.store.ConsumeGoalControlDesired(context.Background(), s.agentID, s.instanceID, frameString(frame, "source_agent_id"), frameString(frame, "control_id"), revision)
+	if consumeErr != nil || consumed == nil {
+		r.mu.Unlock()
+		return s.sendError("goal_control_result_not_pending", frameString(frame, "frame_id"))
+	}
 	if pending != nil {
 		delete(r.pendingGoal, key)
 	}

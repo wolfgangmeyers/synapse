@@ -210,7 +210,7 @@ func TestControlResultsCorrelateToExactSessionsLeasesAndControlIDs(t *testing.T)
 
 func TestGoalResultAfterTargetReconnectUsesDurableCorrelation(t *testing.T) {
 	durable, router := newTransportOrderingFixture(t)
-	targetErrors := make(chan map[string]any, 3)
+	targetErrors := make(chan map[string]any, 4)
 	source := newTransportSession(t, router, durable, "source", "source-instance", "source-lease", "user_interaction", func(map[string]any) error { return nil })
 	target := newTransportSession(t, router, durable, "target", "target-instance", "target-lease", "agent", func(map[string]any) error { return nil })
 	request := controlRequestFrame("goal", "source", "source-instance", "source-lease", "target", "target-instance", "durable-control")
@@ -257,11 +257,21 @@ func TestGoalResultAfterTargetReconnectUsesDurableCorrelation(t *testing.T) {
 	goal := router.goals["target"]
 	router.mu.RUnlock()
 	require.Equal(t, "recovered", goal.state["goal"])
-	select {
-	case <-targetErrors:
-		t.Fatal("valid reconnect result was rejected")
-	default:
-	}
+	require.Nil(t, func() *store.GoalControlDesired {
+		remaining, readErr := durable.GoalControlDesiredFor(context.Background(), "target", "target-instance")
+		require.NoError(t, readErr)
+		return remaining
+	}())
+
+	duplicate := controlResultFrame("goal", "source", "durable-control", "target", "target-instance", "replacement-lease")
+	duplicate["revision"] = rawJSON(int64(1))
+	duplicate["goal_state"] = rawJSON(map[string]any{"enabled": true, "goal": "overwritten"})
+	require.NoError(t, router.goalControlResult(replacement, duplicate))
+	require.Equal(t, "goal_control_result_not_pending", (<-targetErrors)["code"])
+	router.mu.RLock()
+	goal = router.goals["target"]
+	router.mu.RUnlock()
+	require.Equal(t, "recovered", goal.state["goal"])
 }
 
 func TestStaleGoalResultCannotSatisfyNewerPendingControl(t *testing.T) {

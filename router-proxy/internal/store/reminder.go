@@ -161,41 +161,66 @@ func (s *Store) CancelReminder(ctx context.Context, id string) (bool, error) {
 // FireDueReminders claims and advances due rows one at a time inside immediate
 // transactions. Store's single write path makes concurrent calls harmless.
 func (s *Store) FireDueReminders(ctx context.Context, onAttempt func(ReminderFireAttempt)) ([]ReminderFireOutcome, error) {
+	return s.fireDueReminders(ctx, onAttempt, nil)
+}
+
+// FireDueRemindersWithBefore lets the transport acquire a conversation lock
+// after each due row is selected and immediately before its transaction starts.
+// The due rows are re-read after every fire so a reminder created or re-armed
+// during the sweep gets the same ordering protection as an older due row.
+func (s *Store) FireDueRemindersWithBefore(ctx context.Context, onAttempt func(ReminderFireAttempt), beforeAttempt func(ReminderFireAttempt)) ([]ReminderFireOutcome, error) {
+	return s.fireDueReminders(ctx, onAttempt, beforeAttempt)
+}
+
+func (s *Store) fireDueReminders(ctx context.Context, onAttempt func(ReminderFireAttempt), beforeAttempt func(ReminderFireAttempt)) ([]ReminderFireOutcome, error) {
 	now := formatTimestamp(s.clock.Now())
-	rows, err := s.db.QueryContext(ctx, `SELECT id,next_due_at,last_attempt_at FROM reminders WHERE state = 'scheduled' AND next_due_at <= ? ORDER BY next_due_at ASC,id ASC`, now)
-	if err != nil {
-		return nil, err
-	}
 	type dueRow struct {
 		id, due string
 		last    sql.NullString
 	}
-	var due []dueRow
-	for rows.Next() {
-		var row dueRow
-		if err := rows.Scan(&row.id, &row.due, &row.last); err != nil {
-			_ = rows.Close()
+	processed := make(map[string]bool)
+	var outcomes []ReminderFireOutcome
+	for {
+		rows, err := s.db.QueryContext(ctx, `SELECT id,next_due_at,last_attempt_at FROM reminders WHERE state = 'scheduled' AND next_due_at <= ? ORDER BY next_due_at ASC,id ASC`, now)
+		if err != nil {
 			return nil, err
 		}
-		due = append(due, row)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	var outcomes []ReminderFireOutcome
-	for _, dueRow := range due {
-		if dueRow.last.Valid {
-			last, parseErr := protocol.ParseTimestamp(dueRow.last.String)
-			if parseErr != nil || last.Add(reminderFailureRetry).After(parseTimestamp(now)) {
+		var due *dueRow
+		for rows.Next() {
+			var candidate dueRow
+			if err := rows.Scan(&candidate.id, &candidate.due, &candidate.last); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if processed[candidate.id] {
 				continue
 			}
+			if candidate.last.Valid {
+				last, parseErr := protocol.ParseTimestamp(candidate.last.String)
+				if parseErr != nil || last.Add(reminderFailureRetry).After(parseTimestamp(now)) {
+					processed[candidate.id] = true
+					continue
+				}
+			}
+			candidateCopy := candidate
+			due = &candidateCopy
+			break
 		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if due == nil {
+			break
+		}
+		processed[due.id] = true
+		attempt := ReminderFireAttempt{ReminderID: due.id, ScheduledFor: due.due}
+		notifyBeforeAttempt(beforeAttempt, attempt)
 		var outcome *ReminderFireOutcome
-		err := s.runImmediate(ctx, func() error {
-			reminder, err := s.reminderForTx(ctx, dueRow.id)
+		err = s.runImmediate(ctx, func() error {
+			reminder, err := s.reminderForTx(ctx, due.id)
 			if err != nil || reminder == nil || reminder.State != "scheduled" || reminder.NextDueAt > now {
 				return err
 			}
@@ -205,7 +230,7 @@ func (s *Store) FireDueReminders(ctx context.Context, onAttempt func(ReminderFir
 			return s.fireRecurring(ctx, reminder, now, onAttempt, &outcome)
 		})
 		if err != nil {
-			_ = s.recordReminderFailure(ctx, dueRow.id, now)
+			_ = s.recordReminderFailure(ctx, due.id, now)
 			outcomes = append(outcomes, ReminderFireOutcome{ErrorCode: reminderErrorCode(err)})
 			continue
 		}
@@ -389,6 +414,14 @@ func (s *Store) recordReminderFailure(ctx context.Context, id, now string) error
 	})
 }
 func notifyAttempt(callback func(ReminderFireAttempt), attempt ReminderFireAttempt) {
+	if callback == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	callback(attempt)
+}
+
+func notifyBeforeAttempt(callback func(ReminderFireAttempt), attempt ReminderFireAttempt) {
 	if callback == nil {
 		return
 	}

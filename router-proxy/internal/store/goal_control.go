@@ -60,6 +60,39 @@ func (s *Store) goalControlDesiredForTx(ctx context.Context, agentID, instanceID
 	return &desired, nil
 }
 
+// ConsumeGoalControlDesired atomically verifies and removes the desired control.
+// Removing it before a result is projected fences duplicate results while the
+// revision history remains available for the next control.
+func (s *Store) ConsumeGoalControlDesired(ctx context.Context, agentID, instanceID, sourceAgentID, controlID string, revision int64) (*GoalControlDesired, error) {
+	if agentID == "" || instanceID == "" || sourceAgentID == "" || controlID == "" || revision < 1 {
+		return nil, errors.New("goal control desired state identity is invalid")
+	}
+	var result *GoalControlDesired
+	err := s.runImmediate(ctx, func() error {
+		desired, err := s.goalControlDesiredForTx(ctx, agentID, instanceID, formatTimestamp(s.clock.Now()))
+		if err != nil || desired == nil || desired.Revision != revision {
+			return err
+		}
+		desiredSource, sourceOK := desired.Config["sourceAgentId"].(string)
+		desiredControl, controlOK := desired.Config["controlId"].(string)
+		if !sourceOK || !controlOK || desiredSource != sourceAgentID || desiredControl != controlID {
+			return nil
+		}
+		deleted, err := s.db.ExecContext(ctx, `DELETE FROM goal_control_desired_state
+			WHERE agent_id = ? AND instance_id = ? AND revision = ?`, agentID, instanceID, revision)
+		if err != nil {
+			return err
+		}
+		count, err := deleted.RowsAffected()
+		if err != nil || count != 1 {
+			return err
+		}
+		result = desired
+		return nil
+	})
+	return result, err
+}
+
 func (s *Store) UpsertGoalControlDesired(ctx context.Context, agentID, instanceID string, config map[string]any, expiresAt string) (*GoalControlDesired, error) {
 	if agentID == "" || instanceID == "" || config == nil {
 		return nil, errors.New("goal control desired state is invalid")
@@ -77,14 +110,23 @@ func (s *Store) UpsertGoalControlDesired(ctx context.Context, agentID, instanceI
 	var result *GoalControlDesired
 	err = s.runImmediate(ctx, func() error {
 		var revision int64
-		err := s.db.QueryRowContext(ctx, `SELECT revision FROM goal_control_desired_state
+		err := s.db.QueryRowContext(ctx, `SELECT revision FROM goal_control_revision_history
 			WHERE agent_id = ? AND instance_id = ?`, agentID, instanceID).Scan(&revision)
 		if errors.Is(err, sql.ErrNoRows) {
-			revision = 0
+			revision = 1
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO goal_control_revision_history
+				(agent_id,instance_id,revision) VALUES (?,?,?)`, agentID, instanceID, revision); err != nil {
+				return err
+			}
 		} else if err != nil {
 			return err
+		} else {
+			revision++
+			if _, err := s.db.ExecContext(ctx, `UPDATE goal_control_revision_history
+				SET revision = ? WHERE agent_id = ? AND instance_id = ?`, revision, agentID, instanceID); err != nil {
+				return err
+			}
 		}
-		revision++
 		now := formatTimestamp(s.clock.Now())
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO goal_control_desired_state
 			(agent_id,instance_id,revision,config_json,updated_at,expires_at) VALUES (?,?,?,?,?,?)

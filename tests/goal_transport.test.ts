@@ -283,6 +283,19 @@ test("goal desired state is exact-instance, durable, revisioned, and bounded", a
     now = new Date("2030-01-01T00:00:02.000Z");
     assert.equal(repository.pruneGoalControlDesired(), 1);
     assert.equal(repository.goalControlDesiredFor({ agentId: "expired-worker", instanceId: "expired-instance" }), undefined);
+    const afterExpiry = repository.upsertGoalControlDesired({
+      agentId: "expired-worker", instanceId: "expired-instance", config: firstConfig,
+      expiresAt: "2030-01-01T00:01:00.000Z",
+    });
+    assert.equal(afterExpiry.revision, 2);
+    assert.deepEqual(repository.consumeGoalControlDesired({
+      agentId: "expired-worker", instanceId: "expired-instance", sourceAgentId: "goal-web",
+      controlId: "first", revision: afterExpiry.revision,
+    }), afterExpiry);
+    assert.equal(repository.consumeGoalControlDesired({
+      agentId: "expired-worker", instanceId: "expired-instance", sourceAgentId: "goal-web",
+      controlId: "first", revision: afterExpiry.revision,
+    }), undefined);
   } finally {
     repository.close();
     await rm(directory, { recursive: true, force: true });

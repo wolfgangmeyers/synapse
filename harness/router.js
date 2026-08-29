@@ -271,7 +271,8 @@ export function createAgentRouter({
   // the same process instance. A different instance deletes the old record.
   const goalControlV1Available = typeof repository.migrationIds === "function"
     && repository.migrationIds().includes("019_goal_control_desired_state")
-    && ["goalControlDesiredFor", "upsertGoalControlDesired", "deleteGoalControlDesiredExcept", "pruneGoalControlDesired"].every((method) => typeof repository[method] === "function");
+    && repository.migrationIds().includes("021_goal_control_revision_history")
+    && ["goalControlDesiredFor", "upsertGoalControlDesired", "consumeGoalControlDesired", "deleteGoalControlDesiredExcept", "pruneGoalControlDesired"].every((method) => typeof repository[method] === "function");
   // V2 is deliberately unavailable instead of silently becoming a second
   // process-local lifecycle store when a router starts against a pre-017 DB.
   const lifecycleV2Available = typeof repository.migrationIds === "function"
@@ -1312,6 +1313,23 @@ export function createAgentRouter({
         || pending.targetInstanceId !== frame.instance_id
         || pending.targetLeaseId !== frame.lease_id
         || pending.revision !== frame.revision))) {
+        sendError(currentSocket, generateFrameId, "goal_control_result_not_pending", frame.frame_id);
+        return;
+      }
+      let consumed;
+      try {
+        consumed = repository.consumeGoalControlDesired({
+          agentId: session.agentId,
+          instanceId: session.instanceId,
+          sourceAgentId: frame.source_agent_id,
+          controlId: frame.control_id,
+          revision: frame.revision,
+        });
+      } catch {
+        sendError(currentSocket, generateFrameId, "goal_control_result_not_pending", frame.frame_id);
+        return;
+      }
+      if (consumed === undefined) {
         sendError(currentSocket, generateFrameId, "goal_control_result_not_pending", frame.frame_id);
         return;
       }
