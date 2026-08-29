@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
 	"errors"
@@ -63,6 +64,8 @@ var DefaultRetentionPolicy = RetentionPolicy{
 
 // SweepResult reports rows removed by one atomic sweep.
 type SweepResult struct {
+	StaleAgents          int
+	LifecycleExpired     int
 	QueuedMessages       int
 	Leases               int
 	GoalControlStates    int
@@ -225,8 +228,9 @@ func ensureDatabaseParent(databasePath string) error {
 	if !info.IsDir() {
 		return errors.New("database parent is not a directory")
 	}
-	// Existing parents are not chmodded: opening a database must not change
-	// permissions on an unrelated directory. Newly-created parents are 0700.
+	if err := os.Chmod(parent, 0o700); err != nil {
+		return fmt.Errorf("secure database parent: %w", err)
+	}
 	return nil
 }
 
@@ -390,6 +394,10 @@ func (s *Store) Sweep(ctx context.Context, policy RetentionPolicy) (SweepResult,
 		now := s.clock.Now()
 		nowText := formatTimestamp(now)
 		var err error
+		result.StaleAgents, err = s.pruneStaleAgents(ctx, nowText)
+		if err != nil {
+			return err
+		}
 		result.QueuedMessages, err = s.pruneExpiredQueuedMessages(ctx, nowText)
 		if err != nil {
 			return err
@@ -406,7 +414,7 @@ func (s *Store) Sweep(ctx context.Context, policy RetentionPolicy) (SweepResult,
 		if err != nil {
 			return err
 		}
-		result.LifecycleStates, result.LifecycleEvents, result.LifecycleProducers, err = s.pruneLifecycle(ctx, now, policy)
+		result.LifecycleExpired, result.LifecycleStates, result.LifecycleEvents, result.LifecycleProducers, err = s.pruneLifecycle(ctx, now, policy)
 		return err
 	}); err != nil {
 		return SweepResult{}, err
@@ -456,11 +464,66 @@ func (s *Store) pruneExpiredQueuedMessages(ctx context.Context, now string) (int
 		return 0, err
 	}
 	for _, id := range ids {
+		if err := s.completeLinkedReminder(ctx, id); err != nil {
+			return 0, err
+		}
 		if _, err := s.db.ExecContext(ctx, "DELETE FROM messages WHERE id = ?", id); err != nil {
 			return 0, err
 		}
 	}
 	return len(ids), nil
+}
+
+func (s *Store) completeLinkedReminder(ctx context.Context, messageID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM reminders
+		WHERE linked_message_id = ? AND interval_ms IS NULL AND state = 'message_queued'`, messageID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE reminders
+		SET state = 'scheduled', linked_message_id = NULL
+		WHERE linked_message_id = ? AND interval_ms IS NOT NULL
+		AND state IN ('scheduled', 'message_queued')`, messageID)
+	return err
+}
+
+func (s *Store) pruneStaleAgents(ctx context.Context, now string) (int, error) {
+	threshold := formatTimestamp(parseTimestamp(now).Add(-time.Hour))
+	rows, err := s.db.QueryContext(ctx, `SELECT agent_id FROM agents
+		WHERE (
+			(last_connected_at IS NULL AND first_seen_at <= ? AND NOT EXISTS (
+				SELECT 1 FROM reminders
+				WHERE reminders.target = agents.agent_id
+				AND (reminders.state = 'scheduled'
+					OR (reminders.interval_ms IS NULL AND reminders.linked_message_id IS NOT NULL))
+			))
+			OR (disconnected_at IS NOT NULL AND disconnected_at <= ?)
+		)
+		ORDER BY agent_id ASC`, threshold, threshold)
+	if err != nil {
+		return 0, err
+	}
+	var agents []string
+	for rows.Next() {
+		var agent string
+		if err := rows.Scan(&agent); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		agents = append(agents, agent)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, agent := range agents {
+		if _, err := s.db.ExecContext(ctx, "DELETE FROM agents WHERE agent_id = ?", agent); err != nil {
+			return 0, err
+		}
+	}
+	return len(agents), nil
 }
 
 func (s *Store) pruneExpiredLeases(ctx context.Context, now string) (int, error) {
@@ -546,24 +609,28 @@ func (s *Store) pruneConversation(ctx context.Context, now time.Time, policy Ret
 	return len(candidates), nil
 }
 
-func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy RetentionPolicy) (int, int, int, error) {
+func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy RetentionPolicy) (int, int, int, int, error) {
 	nowText := formatTimestamp(now)
 	terminalCutoff := formatTimestamp(now.Add(-policy.LifecycleTerminalAge))
 	ledgerCutoff := formatTimestamp(now.Add(-policy.LifecycleEventAge))
 	producerCutoff := formatTimestamp(now.Add(-policy.LifecycleProducerAge))
+	expiredRunning, err := s.expireRunningLifecycleChildren(ctx, nowText, producerCutoff)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
 	stateResult, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_state
 		WHERE state = 'terminal' AND terminal_at <= ?`, terminalCutoff)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	stateCount, err := stateResult.RowsAffected()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	var threshold sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `SELECT router_version FROM subagent_lifecycle_events
 		ORDER BY router_version DESC LIMIT 1 OFFSET ?`, policy.LifecycleEventLimit-1).Scan(&threshold); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	var eventResult sql.Result
 	if threshold.Valid {
@@ -573,11 +640,11 @@ func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy Retent
 		eventResult, err = s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_events WHERE received_at <= ?`, ledgerCutoff)
 	}
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	eventCount, err := eventResult.RowsAffected()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	producerResult, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_producers
 		WHERE last_seen_at <= ?
@@ -589,10 +656,93 @@ func (s *Store) pruneLifecycle(ctx context.Context, now time.Time, policy Retent
 		AND NOT EXISTS (SELECT 1 FROM subagent_lifecycle_events event
 			WHERE event.parent_agent_id = subagent_lifecycle_producers.parent_agent_id)`, producerCutoff, nowText)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	producerCount, err := producerResult.RowsAffected()
-	return int(stateCount), int(eventCount), int(producerCount), err
+	return expiredRunning, int(stateCount), int(eventCount), int(producerCount), err
+}
+
+func (s *Store) expireRunningLifecycleChildren(ctx context.Context, now, producerCutoff string) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT state.parent_agent_id, state.subagent_id,
+		producer.instance_id, producer.parent_session_id, producer.producer_epoch
+		FROM subagent_lifecycle_state state
+		JOIN subagent_lifecycle_producers producer ON producer.parent_agent_id = state.parent_agent_id
+		WHERE state.state = 'running' AND producer.last_seen_at <= ?
+		AND NOT EXISTS (SELECT 1 FROM agent_leases lease
+			WHERE lease.agent_id = producer.parent_agent_id AND lease.expires_at > ?)
+		ORDER BY state.parent_agent_id ASC, state.subagent_id ASC`, producerCutoff, now)
+	if err != nil {
+		return 0, err
+	}
+	type child struct{ parent, id, instance, session, epoch string }
+	var children []child
+	for rows.Next() {
+		var current child
+		if err := rows.Scan(&current.parent, &current.id, &current.instance, &current.session, &current.epoch); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		children = append(children, current)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	payloadHash := fmt.Sprintf("%x", sha256.Sum256([]byte("producer_expired")))
+	for _, current := range children {
+		var latest sql.NullInt64
+		if err := s.db.QueryRowContext(ctx, `SELECT MAX(client_sequence) FROM subagent_lifecycle_events
+			WHERE parent_agent_id = ? AND producer_epoch = ?`, current.parent, current.epoch).Scan(&latest); err != nil {
+			return 0, err
+		}
+		sequence := int64(1)
+		if latest.Valid {
+			sequence = latest.Int64/1000 + 1
+		}
+		eventID := fmt.Sprintf("%x", sha256.Sum256([]byte("producer_expired:"+current.parent+":"+current.id+":"+now)))
+		result, err := s.db.ExecContext(ctx, `INSERT INTO subagent_lifecycle_events (
+			parent_agent_id, instance_id, parent_session_id, producer_epoch, subagent_id,
+			event_id, client_sequence, event_kind, state, type, description, status,
+			terminal_reason, payload_hash, received_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'terminal', 'terminal', NULL, NULL, NULL, 'producer_expired', ?, ?)`,
+			current.parent, current.instance, current.session, current.epoch, current.id,
+			eventID, sequence*1000, payloadHash, now)
+		if err != nil {
+			return 0, err
+		}
+		version, err := result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO subagent_lifecycle_state (
+			parent_agent_id, subagent_id, instance_id, parent_session_id, producer_epoch,
+			type, description, status, state, started_at, updated_at, terminal_at,
+			terminal_reason, router_version)
+			VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'terminal', NULL, ?, ?, 'producer_expired', ?)
+			ON CONFLICT (parent_agent_id, subagent_id) DO UPDATE SET
+			instance_id = excluded.instance_id, parent_session_id = excluded.parent_session_id,
+			producer_epoch = excluded.producer_epoch, type = excluded.type, description = excluded.description,
+			status = excluded.status, state = excluded.state,
+			started_at = CASE WHEN excluded.state = 'running' THEN excluded.started_at ELSE subagent_lifecycle_state.started_at END,
+			updated_at = excluded.updated_at, terminal_at = excluded.terminal_at,
+			terminal_reason = excluded.terminal_reason, router_version = excluded.router_version`,
+			current.parent, current.id, current.instance, current.session, current.epoch,
+			now, now, version); err != nil {
+			return 0, err
+		}
+	}
+	return len(children), nil
+}
+
+func parseTimestamp(value string) time.Time {
+	parsed, err := time.Parse("2006-01-02T15:04:05.000Z", value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func formatTimestamp(value time.Time) string {

@@ -1,8 +1,13 @@
 package store
 
 import (
+	"context"
+	"encoding/json"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -17,6 +22,81 @@ func TestEmbeddedMigrationsMatchNodeMigrationFixtures(t *testing.T) {
 		require.NoError(t, err, migration.ID)
 		require.Equal(t, string(contents), migration.SQL, migration.ID)
 	}
+}
+
+type nodeStoreSnapshot struct {
+	Migrations []string `json:"migrations"`
+	Settings   struct {
+		JournalMode   string `json:"journalMode"`
+		Synchronous   string `json:"synchronous"`
+		ForeignKeys   bool   `json:"foreignKeys"`
+		BusyTimeoutMS int    `json:"busyTimeoutMs"`
+	} `json:"settings"`
+}
+
+func TestNodeCreatedDatabaseOpensInGo(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "node-created.db")
+	node := runNodeStore(t, databasePath)
+	require.Equal(t, migrationIDs(), node.Migrations)
+	require.Equal(t, "wal", node.Settings.JournalMode)
+	require.Equal(t, "full", node.Settings.Synchronous)
+	require.True(t, node.Settings.ForeignKeys)
+	require.Equal(t, 5000, node.Settings.BusyTimeoutMS)
+
+	store, err := Open(context.Background(), databasePath, Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	var count int
+	require.NoError(t, store.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count))
+	require.Equal(t, len(DefaultMigrations()), count)
+}
+
+func TestGoCreatedDatabaseOpensInNode(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "go-created.db")
+	store, err := Open(context.Background(), databasePath, Options{})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	node := runNodeStore(t, databasePath)
+	require.Equal(t, migrationIDs(), node.Migrations)
+	require.Equal(t, "wal", node.Settings.JournalMode)
+	require.Equal(t, "full", node.Settings.Synchronous)
+	require.True(t, node.Settings.ForeignKeys)
+	require.Equal(t, 5000, node.Settings.BusyTimeoutMS)
+}
+
+func runNodeStore(t *testing.T, databasePath string) nodeStoreSnapshot {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	require.NoError(t, err)
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	moduleURL := (&url.URL{Scheme: "file", Path: filepath.Join(repoRoot, "harness", "db.js")}).String()
+	const script = `
+const { openMessageRepository } = await import(process.env.MECHA_NODE_STORE_MODULE);
+const repository = openMessageRepository({ databasePath: process.env.MECHA_NODE_STORE_DATABASE });
+console.log(JSON.stringify({ migrations: repository.migrationIds(), settings: repository.settings() }));
+repository.close();
+`
+	command := exec.Command(node, "--input-type=module", "-e", script)
+	command.Env = append(os.Environ(),
+		"MECHA_NODE_STORE_MODULE="+moduleURL,
+		"MECHA_NODE_STORE_DATABASE="+databasePath,
+	)
+	output, err := command.Output()
+	require.NoError(t, err)
+	var snapshot nodeStoreSnapshot
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(string(output))), &snapshot))
+	return snapshot
+}
+
+func migrationIDs() []string {
+	migrations := DefaultMigrations()
+	ids := make([]string, 0, len(migrations))
+	for _, migration := range migrations {
+		ids = append(ids, migration.ID)
+	}
+	return ids
 }
 
 func TestMigrationPlanUsesNodeIDsInOrder(t *testing.T) {
