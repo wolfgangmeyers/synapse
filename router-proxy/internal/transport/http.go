@@ -118,7 +118,7 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleMemory(w, req)
 		return
 	case req.Method == http.MethodGet && path == "/v1/agents":
-		r.writeJSON(w, http.StatusOK, r.connectedAgents())
+		r.writeJSON(w, http.StatusOK, r.connectedAgents(req.URL.Query().Get("models") != "omit"))
 		return
 	case req.Method == http.MethodGet && path == "/v1/conversations":
 		r.handleConversation(w, req)

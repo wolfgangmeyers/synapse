@@ -314,6 +314,142 @@ func TestModelControlFastResultIsCorrelatedBeforeForward(t *testing.T) {
 	require.Equal(t, "control-1", result["control_id"])
 }
 
+func TestModelControlResultProjectsCurrentModelAndPreservesCatalog(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	source, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	defer source.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, source, map[string]any{
+		"version": "v1", "frame_id": "register-model-controller", "type": "register",
+		"agent_id": "model-controller", "instance_id": "controller-instance", "agent_role": "user_interaction", "conversation_sync": "v1",
+	})
+	sourceRegistration := readJSON(t, source)
+	target, targetRegistration := registerTestSession(t, wsURL, "model-target", "target-instance", "v1")
+	defer target.Close(websocket.StatusNormalClosure, "test done")
+
+	catalog := []any{map[string]any{"provider": "provider", "id": "current"}}
+	newModel := map[string]any{"provider": "provider", "id": "next"}
+	sendJSON(t, target, map[string]any{
+		"version": "v1", "frame_id": "catalog-frame", "type": "model_catalog",
+		"agent_id": "model-target", "instance_id": "target-instance", "lease_id": targetRegistration["lease_id"],
+		"model_summaries": catalog, "total_count": 2,
+	})
+	catalogEvent := readJSON(t, target)
+	require.Equal(t, "agent_model_catalog", catalogEvent["type"])
+	require.Equal(t, true, catalogEvent["truncated"], "total_count greater than returned models implies truncation")
+	_ = readJSON(t, source)
+
+	sendJSON(t, source, map[string]any{
+		"version": "v1", "frame_id": "control-frame", "type": "model_control",
+		"agent_id": "model-controller", "instance_id": "controller-instance", "lease_id": sourceRegistration["lease_id"],
+		"target_agent_id": "model-target", "target_instance_id": "target-instance", "control_id": "control-1",
+		"action": "set_model", "model": newModel,
+	})
+	require.Equal(t, "model_control", readJSON(t, target)["type"])
+	sendJSON(t, target, map[string]any{
+		"version": "v1", "frame_id": "result-frame", "type": "model_control_result",
+		"agent_id": "model-target", "instance_id": "target-instance", "lease_id": targetRegistration["lease_id"],
+		"source_agent_id": "model-controller", "control_id": "control-1", "accepted": true, "current_model": newModel,
+	})
+	require.Equal(t, "model_control_result", readJSON(t, source)["type"])
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	readAgents := func(path string) map[string]any {
+		response, getErr := http.Get(server.URL + path)
+		require.NoError(t, getErr)
+		defer response.Body.Close()
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		var snapshot map[string]any
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&snapshot))
+		for _, candidate := range snapshot["agents"].([]any) {
+			item := candidate.(map[string]any)
+			if item["agent_id"] == "model-target" {
+				return item
+			}
+		}
+		require.Fail(t, "target agent missing")
+		return nil
+	}
+	full := readAgents("/v1/agents")
+	require.Equal(t, newModel, full["current_model"])
+	require.Equal(t, catalog, full["available_models"])
+	require.Equal(t, float64(2), full["model_catalog_total_count"])
+	require.Equal(t, true, full["model_catalog_truncated"])
+
+	omitted := readAgents("/v1/agents?models=omit")
+	require.Equal(t, newModel, omitted["current_model"])
+	require.NotContains(t, omitted, "available_models")
+	require.NotContains(t, omitted, "model_catalog_total_count")
+	require.NotContains(t, omitted, "model_catalog_truncated")
+
+	otherValue := readAgents("/v1/agents?models=OMIT")
+	require.Contains(t, otherValue, "available_models")
+	require.Contains(t, otherValue, "model_catalog_total_count")
+	require.Contains(t, otherValue, "model_catalog_truncated")
+
+}
+
+func TestModelProjectionUsesInstanceIdentityAcrossReconnects(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	old, registration := registerTestSession(t, wsURL, "model-reconnect", "same-instance", "v1")
+	defer old.Close(websocket.StatusNormalClosure, "test done")
+	model := map[string]any{"provider": "provider", "id": "persisted"}
+	sendJSON(t, old, map[string]any{
+		"version": "v1", "frame_id": "catalog-frame", "type": "model_catalog",
+		"agent_id": "model-reconnect", "instance_id": "same-instance", "lease_id": registration["lease_id"],
+		"model_summaries": []any{model}, "current_model": model,
+	})
+	require.Equal(t, "agent_model_catalog", readJSON(t, old)["type"])
+
+	reconnected, _ := registerTestSession(t, wsURL, "model-reconnect", "same-instance", "v1")
+	defer reconnected.Close(websocket.StatusNormalClosure, "test done")
+	server := httptest.NewServer(router)
+	defer server.Close()
+	readAgent := func() map[string]any {
+		response, getErr := http.Get(server.URL + "/v1/agents")
+		require.NoError(t, getErr)
+		defer response.Body.Close()
+		var snapshot map[string]any
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&snapshot))
+		for _, candidate := range snapshot["agents"].([]any) {
+			item := candidate.(map[string]any)
+			if item["agent_id"] == "model-reconnect" {
+				return item
+			}
+		}
+		require.Fail(t, "reconnected agent missing")
+		return nil
+	}
+	reconnectedAgent := readAgent()
+	require.Equal(t, model, reconnectedAgent["current_model"])
+	require.Equal(t, []any{model}, reconnectedAgent["available_models"])
+
+	replacement, _ := registerTestSession(t, wsURL, "model-reconnect", "new-instance", "v1")
+	defer replacement.Close(websocket.StatusNormalClosure, "test done")
+	cleared := readAgent()
+	require.NotContains(t, cleared, "current_model")
+	require.Equal(t, []any{}, cleared["available_models"])
+	require.Equal(t, float64(0), cleared["model_catalog_total_count"])
+	require.Equal(t, false, cleared["model_catalog_truncated"])
+}
+
 func TestInvalidSchemaFrameReturnsInvalidFrameWithoutDisconnecting(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
