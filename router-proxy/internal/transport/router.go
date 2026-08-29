@@ -1,0 +1,432 @@
+// Package transport implements the Mailbox V2 HTTP and WebSocket boundary.
+// State transitions stay in store; this package owns wire validation,
+// connection lifetime, fan-out, and the small amount of live projection state.
+package transport
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+)
+
+const (
+	DefaultHost              = "127.0.0.1"
+	DefaultPort              = 8765
+	DefaultPath              = "/v1/agents"
+	DefaultMaxFrameBytes     = 64 * 1024
+	DefaultMaxRequestBytes   = 6 * 1024 * 1024
+	DefaultLeaseDuration     = 30 * time.Second
+	DefaultDeliveryDuration  = 30 * time.Second
+	DefaultMaxDeliveryTries  = 3
+	DefaultActivityTTL       = 15 * time.Second
+	DefaultPendingControlTTL = 30 * time.Second
+)
+
+var (
+	allowedHosts = map[string]bool{"127.0.0.1": true, "::1": true, "0.0.0.0": true}
+	frameIDRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	agentIDRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	messageIDRE  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	failureRE    = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+)
+
+// MemoryCatalog is the optional HTTP memory capability. Implementations may
+// be backed by the local knowledge-base catalog.
+type MemoryCatalog interface {
+	Rebuild(context.Context) (any, error)
+	Lookup(context.Context, map[string]any) (any, error)
+	Expand(context.Context, map[string]any) (any, error)
+	Apply(context.Context, map[string]any) (map[string]any, error)
+	Touch(context.Context, map[string]any) (string, error)
+	Close() error
+}
+
+// TmuxAdapter is deliberately narrow so the router can be tested without a
+// tmux process. A nil adapter reports tmux_unavailable, matching Node when no
+// session is selected.
+type TmuxAdapter interface {
+	Enumerate(context.Context, string) ([]string, error)
+	Provision(context.Context, string, string) error
+	Remove(context.Context, string, string) error
+	Rename(context.Context, string, string, string) error
+	SendKeys(context.Context, string, string, string, string) error
+	Start(context.Context, string, string, string) (string, string, error)
+	Stop(context.Context, string, string, string) (string, string, error)
+	Restart(context.Context, string, string, string) (string, string, error)
+	Resume(context.Context, string, string, string) (string, string, error)
+}
+
+// Options configures the transport. Store is required and must be opened with
+// the same persistent SQLite path used by the launcher.
+type Options struct {
+	Store                 *store.Store
+	Host                  string
+	Port                  int
+	Path                  string
+	Clock                 deterministic.Clock
+	IDSource              deterministic.IDSource
+	Attachments           *attachments.Store
+	Memory                MemoryCatalog
+	Tmux                  TmuxAdapter
+	MaxFrameBytes         int
+	MaxRequestBytes       int
+	LeaseDuration         time.Duration
+	DeliveryLeaseDuration time.Duration
+	MaxDeliveryAttempts   int
+	ActivityTTL           time.Duration
+	PendingControlTTL     time.Duration
+	MaxPendingControls    int
+	MaxPendingPerSource   int
+	GoalControlAvailable  bool
+	LifecycleAvailable    bool
+	EventLogger           func(string, map[string]any)
+}
+
+type Router struct {
+	store       *store.Store
+	clock       deterministic.Clock
+	ids         deterministic.IDSource
+	host        string
+	port        int
+	path        string
+	maxFrame    int
+	maxRequest  int
+	lease       time.Duration
+	delivery    time.Duration
+	maxAttempts int
+	activityTTL time.Duration
+	controlTTL  time.Duration
+	maxControls int
+	maxPerSrc   int
+	memory      MemoryCatalog
+	tmux        TmuxAdapter
+	attachments *attachments.Store
+	log         func(string, map[string]any)
+
+	mu                 sync.Mutex
+	server             *http.Server
+	listener           net.Listener
+	serveDone          chan struct{}
+	closed             bool
+	sessions           map[string]*session
+	convos             map[string]map[string]*session
+	activities         map[string]activity
+	models             map[string]modelProjection
+	goals              map[string]goalState
+	pendingMod         map[string]*pendingControl
+	pendingGoal        map[string]*pendingControl
+	pendingLock        map[string]*pendingControl
+	lifecycleState     map[string]lifecycleAgent
+	nextVersion        int64
+	rates              map[string][]time.Time
+	selectedTmux       string
+	windowIDs          map[string]string
+	goalAvailable      bool
+	lifecycleAvailable bool
+}
+
+type session struct {
+	router           *Router
+	conn             *websocket.Conn
+	agentID          string
+	instanceID       string
+	deliveryInstance string
+	leaseID          string
+	role             string
+	clientType       string
+	ackConfirmation  string
+	conversationSync string
+	deliveryReceipts string
+	paused           bool
+	lifecycleEnabled bool
+	writeMu          sync.Mutex
+	closeOnce        sync.Once
+}
+
+type activity struct {
+	state      string
+	instanceID string
+	until      time.Time
+	expires    time.Time
+	count      int
+	subagents  []map[string]any
+	goal       map[string]any
+	model      map[string]any
+}
+type modelProjection struct {
+	instanceID string
+	current    map[string]any
+	available  []map[string]any
+	total      int
+	truncated  bool
+}
+type goalState struct {
+	instanceID string
+	projection map[string]any
+	state      map[string]any
+}
+type pendingControl struct {
+	controlID string
+	requestID string
+	source    *session
+	target    *session
+	expires   time.Time
+	revision  int64
+	reminder  string
+}
+type lifecycleAgent struct {
+	version   int64
+	subagents []map[string]any
+}
+
+func wallClock() time.Time { return time.Now() }
+
+type clockFunc func() time.Time
+
+func (f clockFunc) Now() time.Time { return f() }
+
+type randomIDs struct{}
+
+func (randomIDs) Next() (string, error) {
+	value := fmt.Sprintf("%d", time.Now().UnixNano())
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:16]), nil
+}
+
+// New constructs an HTTP/WebSocket transport over an already-open Store.
+func New(options Options) (*Router, error) {
+	if options.Store == nil {
+		return nil, errors.New("store is required")
+	}
+	host := options.Host
+	if host == "" {
+		host = DefaultHost
+	}
+	if !allowedHosts[host] {
+		return nil, errors.New("host must be 127.0.0.1, ::1, or 0.0.0.0")
+	}
+	port := options.Port
+	if port < 0 || port > 65535 {
+		return nil, errors.New("port must be an integer from 0 through 65535")
+	}
+	path := options.Path
+	if path == "" {
+		path = DefaultPath
+	}
+	if !strings.HasPrefix(path, "/") {
+		return nil, errors.New("WebSocket path must begin with /")
+	}
+	clock := options.Clock
+	if clock == nil {
+		clock = clockFunc(wallClock)
+	}
+	ids := options.IDSource
+	if ids == nil {
+		ids = randomIDs{}
+	}
+	maxFrame := options.MaxFrameBytes
+	if maxFrame == 0 {
+		maxFrame = DefaultMaxFrameBytes
+	}
+	maxRequest := options.MaxRequestBytes
+	if maxRequest == 0 {
+		maxRequest = DefaultMaxRequestBytes
+	}
+	lease := options.LeaseDuration
+	if lease == 0 {
+		lease = DefaultLeaseDuration
+	}
+	delivery := options.DeliveryLeaseDuration
+	if delivery == 0 {
+		delivery = DefaultDeliveryDuration
+	}
+	attempts := options.MaxDeliveryAttempts
+	if attempts == 0 {
+		attempts = DefaultMaxDeliveryTries
+	}
+	activityTTL := options.ActivityTTL
+	if activityTTL == 0 {
+		activityTTL = DefaultActivityTTL
+	}
+	controlTTL := options.PendingControlTTL
+	if controlTTL == 0 {
+		controlTTL = DefaultPendingControlTTL
+	}
+	maxControls := options.MaxPendingControls
+	if maxControls == 0 {
+		maxControls = 256
+	}
+	maxPerSrc := options.MaxPendingPerSource
+	if maxPerSrc == 0 {
+		maxPerSrc = 16
+	}
+	for name, value := range map[string]time.Duration{"lease": lease, "delivery": delivery, "activity": activityTTL, "control": controlTTL} {
+		if value <= 0 {
+			return nil, fmt.Errorf("%s duration must be positive", name)
+		}
+	}
+	if maxFrame <= 0 || maxFrame > 64*1024 || maxRequest <= 0 || maxRequest > DefaultMaxRequestBytes || attempts <= 0 || maxPerSrc <= 0 || maxControls < maxPerSrc {
+		return nil, errors.New("invalid router limits")
+	}
+	logger := options.EventLogger
+	if logger == nil {
+		logger = func(string, map[string]any) {}
+	}
+	lifecycle := options.LifecycleAvailable
+	if !options.LifecycleAvailable {
+		lifecycle = contains(options.Store.MigrationIDs(), "017_subagent_lifecycle")
+	}
+	goal := options.GoalControlAvailable
+	if !options.GoalControlAvailable {
+		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state")
+	}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}}
+	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
+	return r, nil
+}
+
+// NewWithStore is a convenience for callers that prefer the store as the first
+// argument.
+func NewWithStore(s *store.Store, options Options) (*Router, error) {
+	options.Store = s
+	return New(options)
+}
+
+func contains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+// URLs returns the bound HTTP and WebSocket URLs. It is valid after Listen.
+func (r *Router) URLs() (string, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	port := r.port
+	if r.listener != nil {
+		if address, ok := r.listener.Addr().(*net.TCPAddr); ok {
+			port = address.Port
+		}
+	}
+	host := r.host
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return fmt.Sprintf("http://%s:%d", host, port), fmt.Sprintf("ws://%s:%d%s", host, port, r.path)
+}
+
+// Listen binds the configured address and serves until Close. Startup performs
+// a best-effort sweep before accepting traffic.
+func (r *Router) Listen(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	r.mu.Lock()
+	if r.listener != nil {
+		r.mu.Unlock()
+		return errors.New("router is already listening")
+	}
+	r.mu.Unlock()
+	_, _ = r.sweep(ctx)
+	listener, err := net.Listen("tcp", net.JoinHostPort(r.host, fmt.Sprint(r.port)))
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.listener = listener
+	r.serveDone = make(chan struct{})
+	r.server = &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
+	done := r.serveDone
+	server := r.server
+	r.mu.Unlock()
+	_, websocketURL := r.URLs()
+	r.log("router_started", map[string]any{"host": r.host, "port": listener.Addr().(*net.TCPAddr).Port, "router_url": websocketURL})
+	go func() { _ = server.Serve(listener); close(done) }()
+	return nil
+}
+
+// ServeHTTP exposes the router for net/http and httptest callers.
+func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path == r.path && websocketUpgrade(req) {
+		r.serveWebSocket(w, req)
+		return
+	}
+	r.handleHTTP(w, req)
+}
+
+// Close stops HTTP and all connected WebSockets. It does not close the Store.
+func (r *Router) Close(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	server := r.server
+	sessions := make([]*session, 0, len(r.sessions))
+	for _, candidate := range r.sessions {
+		sessions = append(sessions, candidate)
+	}
+	for _, subscribers := range r.convos {
+		for _, candidate := range subscribers {
+			if !containsSession(sessions, candidate) {
+				sessions = append(sessions, candidate)
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, candidate := range sessions {
+		_ = candidate.close(websocket.StatusGoingAway, "router shutdown")
+	}
+	var err error
+	if server != nil {
+		err = server.Shutdown(ctx)
+	}
+	if r.attachments != nil {
+		_, sweepErr := r.attachments.Sweep(func(id string) bool {
+			referenced, _ := r.store.ConversationAttachmentReferenced(context.Background(), id)
+			return referenced
+		})
+		if err == nil {
+			err = sweepErr
+		}
+	}
+	if r.memory != nil {
+		if closeErr := r.memory.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	r.log("router_stopped", nil)
+	return err
+}
+
+func containsSession(values []*session, wanted *session) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+func (r *Router) nextID() (string, error)                  { return r.ids.Next() }
+func (r *Router) now() time.Time                           { return r.clock.Now().UTC() }
+func timestamp(value time.Time) string                     { return value.UTC().Format("2006-01-02T15:04:05.000Z") }
+func (r *Router) emit(event string, fields map[string]any) { r.log(event, fields) }

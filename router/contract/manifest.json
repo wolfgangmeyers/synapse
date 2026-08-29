@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "version": "v1",
-  "status": "scaffold",
+  "status": "cors_verified",
   "source": {
     "http": "harness/router.js",
     "protocol": "protocol/v1/schema.json",
@@ -9,14 +9,14 @@
     "launcher": "tools/run_router.mjs"
   },
   "cors": {
-    "status": "oracle_pending",
+    "status": "verified",
     "recorded": true,
-    "source_behavior": "Origin-bearing API requests receive wildcard CORS headers.",
-    "test_conflict": "tests/model_catalog_transport.test.mjs:683",
-    "go_implementation": "deferred"
+    "source_behavior": "Origin-bearing API requests receive wildcard CORS headers and Origin preflight returns 204.",
+    "test_conflict": "retired in tests/model_catalog_transport.test.mjs",
+    "go_implementation": "implemented"
   },
   "http": [
-    {"methods": ["OPTIONS"], "path": "/*", "source": "handleHttpRequest", "cors": "oracle_pending"},
+    {"methods": ["OPTIONS"], "path": "/*", "source": "handleHttpRequest", "cors": "verified"},
     {"methods": ["GET"], "path": "/v1/health", "source": "handleHttpRequest"},
     {"methods": ["GET"], "path": "/v1/capabilities", "source": "handleHttpRequest"},
     {"methods": ["GET"], "path": "/v1/memory/policy", "source": "handleHttpRequest"},
@@ -25,7 +25,7 @@
     {"methods": ["POST"], "path": "/v1/memory/expand", "source": "handleMemoryRequest"},
     {"methods": ["POST"], "path": "/v1/memory/apply", "source": "handleMemoryRequest"},
     {"methods": ["POST"], "path": "/v1/memory/touch", "source": "handleMemoryRequest"},
-    {"methods": ["GET"], "path": "/v1/agents", "source": "handleHttpRequest", "cors": "oracle_pending"},
+    {"methods": ["GET"], "path": "/v1/agents", "source": "handleHttpRequest", "cors": "verified"},
     {"methods": ["GET"], "path": "/v1/conversations", "source": "handleHttpRequest"},
     {"methods": ["GET"], "path": "/v1/attachments/{attachment_id}", "source": "serveImageAttachment"},
     {"methods": ["POST"], "path": "/v1/messages", "source": "enqueueHttpMessage"},
@@ -60,6 +60,7 @@
   "fixtures": {
     "http_outcomes": "http-outcomes.json",
     "frame_cases": "frame-cases.json",
-    "generated_fields": "generated-fields.json"
+    "generated_fields": "generated-fields.json",
+    "transport_differential": "transport-differential.json"
   }
 }

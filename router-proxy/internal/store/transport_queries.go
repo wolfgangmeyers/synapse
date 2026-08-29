@@ -1,0 +1,502 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"time"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
+)
+
+// PromptTemplate is the persisted shared prompt-template projection exposed by
+// the HTTP API.
+type PromptTemplate struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type PromptTemplateRequest struct {
+	Name string
+	Body string
+}
+
+type PromptTemplateValidationError struct{}
+
+func (e *PromptTemplateValidationError) Error() string { return "invalid prompt template request" }
+func (e *PromptTemplateValidationError) Code() string  { return "invalid_prompt_template" }
+
+type PromptTemplateNameConflictError struct{ Name string }
+
+func (e *PromptTemplateNameConflictError) Error() string {
+	return "prompt template name already exists"
+}
+func (e *PromptTemplateNameConflictError) Code() string { return "prompt_template_name_conflict" }
+
+type PromptTemplateCapacityError struct{}
+
+func (e *PromptTemplateCapacityError) Error() string { return "prompt template collection is full" }
+func (e *PromptTemplateCapacityError) Code() string  { return "prompt_template_capacity_exceeded" }
+
+const (
+	maxPromptTemplates = 100
+	maxPromptNameBytes = 128
+	maxPromptBodyBytes = 65536
+)
+
+var promptTemplateIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// MigrationIDs returns the migrations configured for this store in order.
+func (s *Store) MigrationIDs() []string {
+	ids := make([]string, 0, len(s.migrations))
+	for _, migration := range s.migrations {
+		ids = append(ids, migration.ID)
+	}
+	return ids
+}
+
+// AdmissionLimits reports the limits used by enqueue validation.
+type AdmissionLimits struct {
+	MaxBodyBytes      int `json:"maxBodyBytes"`
+	MaxQueuedMessages int `json:"maxQueuedMessages"`
+	MaxQueuedBytes    int `json:"maxQueuedBytes"`
+	MaxBatchBodyChars int `json:"maxBatchBodyChars"`
+}
+
+func (s *Store) AdmissionLimits() AdmissionLimits {
+	return AdmissionLimits{MaxBodyBytes: s.maxBodyBytes, MaxQueuedMessages: s.maxQueuedMessages, MaxQueuedBytes: s.maxQueuedBytes, MaxBatchBodyChars: s.maxBatchBodyChars}
+}
+
+func (s *Store) ConversationHistory(ctx context.Context, owner, peer string) ([]domain.ConversationMessage, error) {
+	if owner == "" || peer == "" {
+		return nil, errors.New("owner and peer are required")
+	}
+	a, b := owner, peer
+	if b < a {
+		a, b = b, a
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT conversation_sequence,message_id,message_incarnation_id,sender,recipient,subject,body,created_at,recorded_at,attachments_json,source_kind
+		FROM conversation_messages WHERE participant_a = ? AND participant_b = ? ORDER BY conversation_sequence ASC`, a, b)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.ConversationMessage
+	for rows.Next() {
+		var message domain.ConversationMessage
+		var subject, attachments, source sql.NullString
+		if err := rows.Scan(&message.Sequence, &message.ID, &message.MessageIncarnationID, &message.From, &message.To, &subject, &message.Body, &message.CreatedAt, &message.RecordedAt, &attachments, &source); err != nil {
+			return nil, err
+		}
+		if subject.Valid {
+			message.Subject = &subject.String
+		}
+		message.Attachments = []json.RawMessage{}
+		if attachments.Valid && attachments.String != "" {
+			if err := json.Unmarshal([]byte(attachments.String), &message.Attachments); err != nil {
+				return nil, err
+			}
+		}
+		message.Source = protocol.MessageSource{Kind: "unknown"}
+		if source.Valid {
+			message.Source.Kind = source.String
+		}
+		result = append(result, message)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ConversationHighWaterSequence(ctx context.Context) (int64, error) {
+	var sequence sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT seq FROM sqlite_sequence WHERE name = 'conversation_messages'`).Scan(&sequence)
+	if errors.Is(err, sql.ErrNoRows) || !sequence.Valid {
+		return 0, nil
+	}
+	return sequence.Int64, err
+}
+
+func (s *Store) ConversationAttachmentReferenced(ctx context.Context, attachmentID string) (bool, error) {
+	if attachmentID == "" {
+		return false, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT attachments_json FROM conversation_messages WHERE attachments_json != '[]'`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var attachments []struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(raw), &attachments) == nil {
+			for _, attachment := range attachments {
+				if attachment.ID == attachmentID {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, rows.Err()
+}
+
+func (s *Store) PromptTemplates(ctx context.Context) ([]PromptTemplate, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,body,created_at,updated_at FROM prompt_templates ORDER BY created_at ASC,id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []PromptTemplate
+	for rows.Next() {
+		var item PromptTemplate
+		if err := rows.Scan(&item.ID, &item.Name, &item.Body, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) PromptTemplateFor(ctx context.Context, id string) (*PromptTemplate, error) {
+	var item PromptTemplate
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,body,created_at,updated_at FROM prompt_templates WHERE id = ?`, id).Scan(&item.ID, &item.Name, &item.Body, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (s *Store) CreatePromptTemplate(ctx context.Context, request PromptTemplateRequest) (*PromptTemplate, error) {
+	if err := validatePromptTemplateRequest(request); err != nil {
+		return nil, err
+	}
+	now := formatTimestamp(s.clock.Now())
+	var result *PromptTemplate
+	err := s.runImmediate(ctx, func() error {
+		var count int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM prompt_templates").Scan(&count); err != nil {
+			return err
+		}
+		if count >= maxPromptTemplates {
+			return &PromptTemplateCapacityError{}
+		}
+		var existing string
+		err := s.db.QueryRowContext(ctx, "SELECT id FROM prompt_templates WHERE name = ?", request.Name).Scan(&existing)
+		if err == nil {
+			return &PromptTemplateNameConflictError{Name: request.Name}
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		id, err := s.ids.Next()
+		if err != nil {
+			return err
+		}
+		if !promptTemplateIDPattern.MatchString(id) {
+			return fmt.Errorf("generated prompt template ID is invalid")
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO prompt_templates (id,name,body,created_at,updated_at) VALUES (?,?,?,?,?)`, id, request.Name, request.Body, now, now); err != nil {
+			return err
+		}
+		result, err = s.PromptTemplateFor(ctx, id)
+		return err
+	})
+	return result, err
+}
+
+func (s *Store) UpdatePromptTemplate(ctx context.Context, id string, patch map[string]json.RawMessage) (*PromptTemplate, error) {
+	if !promptTemplateIDPattern.MatchString(id) || len(patch) == 0 {
+		return nil, &PromptTemplateValidationError{}
+	}
+	for key := range patch {
+		if key != "name" && key != "body" {
+			return nil, &PromptTemplateValidationError{}
+		}
+	}
+	existing, err := s.PromptTemplateFor(ctx, id)
+	if err != nil || existing == nil {
+		return existing, err
+	}
+	name, body := existing.Name, existing.Body
+	if raw, ok := patch["name"]; ok {
+		if err := json.Unmarshal(raw, &name); err != nil {
+			return nil, &PromptTemplateValidationError{}
+		}
+	}
+	if raw, ok := patch["body"]; ok {
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, &PromptTemplateValidationError{}
+		}
+	}
+	if err := validatePromptTemplateRequest(PromptTemplateRequest{Name: name, Body: body}); err != nil {
+		return nil, err
+	}
+	now := formatTimestamp(s.clock.Now())
+	var result *PromptTemplate
+	err = s.runImmediate(ctx, func() error {
+		var conflict string
+		err := s.db.QueryRowContext(ctx, "SELECT id FROM prompt_templates WHERE name = ? AND id <> ?", name, id).Scan(&conflict)
+		if err == nil {
+			return &PromptTemplateNameConflictError{Name: name}
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "UPDATE prompt_templates SET name = ?, body = ?, updated_at = ? WHERE id = ?", name, body, now, id); err != nil {
+			return err
+		}
+		result, err = s.PromptTemplateFor(ctx, id)
+		return err
+	})
+	return result, err
+}
+
+func (s *Store) DeletePromptTemplate(ctx context.Context, id string) (bool, error) {
+	if !promptTemplateIDPattern.MatchString(id) {
+		return false, nil
+	}
+	var deleted bool
+	err := s.runImmediate(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, "DELETE FROM prompt_templates WHERE id = ?", id)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		deleted = count == 1
+		return err
+	})
+	return deleted, err
+}
+
+func validatePromptTemplateRequest(request PromptTemplateRequest) error {
+	if request.Name == "" || request.Body == "" || len(request.Name) == 0 || len(request.Body) == 0 || len(request.Name) > maxPromptNameBytes || len(request.Body) > maxPromptBodyBytes || request.Name != trimNonEmpty(request.Name) || request.Body != trimNonEmpty(request.Body) || containsNUL(request.Name) || containsNUL(request.Body) {
+		return &PromptTemplateValidationError{}
+	}
+	return nil
+}
+func trimNonEmpty(value string) string {
+	if len(value) == 0 {
+		return ""
+	}
+	start, end := 0, len(value)
+	for start < end {
+		r, size := rune(value[start]), 1
+		if r >= 0x80 {
+			r, size = utf8DecodeRuneInString(value[start:])
+		}
+		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
+			break
+		}
+		start += size
+	}
+	for end > start {
+		r, size := utf8DecodeLastRuneInString(value[:end])
+		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
+			_ = size
+			break
+		}
+		end -= size
+	}
+	return value[start:end]
+}
+func containsNUL(value string) bool {
+	for _, r := range value {
+		if r == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateReminder applies the same content/cadence-only PATCH surface as Node.
+type ReminderUpdateResult struct {
+	Reminder          *domain.Reminder
+	SchedulingChanged bool
+}
+
+type ReminderCancellationConflictError struct{ ID, State, LinkedMessageState string }
+
+func (e *ReminderCancellationConflictError) Error() string { return "reminder is not cancelable" }
+func (e *ReminderCancellationConflictError) Code() string  { return "reminder_not_cancelable" }
+
+type CancelAllResult struct {
+	Canceled int `json:"canceled"`
+}
+
+func (s *Store) UpdateReminder(ctx context.Context, id string, patch map[string]json.RawMessage) (*ReminderUpdateResult, error) {
+	if !reminderIDPattern.MatchString(id) || len(patch) == 0 {
+		return nil, &ReminderValidationError{}
+	}
+	for key := range patch {
+		switch key {
+		case "interval_ms", "next_due_at", "body", "subject", "target":
+		default:
+			return nil, &ReminderValidationError{}
+		}
+	}
+	existing, err := s.ReminderFor(ctx, id)
+	if err != nil || existing == nil {
+		return nil, err
+	}
+	candidate := ReminderRequest{ID: existing.ID, Target: existing.Target, Creator: existing.Creator, Subject: existing.Subject, Body: existing.Body, CreatedAt: existing.CreatedAt, NextDueAt: existing.NextDueAt, IntervalMS: existing.IntervalMS, Sentinel: existing.Sentinel}
+	nextDueSupplied := false
+	for key, raw := range patch {
+		switch key {
+		case "interval_ms":
+			if string(raw) == "null" {
+				candidate.IntervalMS = nil
+			} else {
+				var value int64
+				if json.Unmarshal(raw, &value) != nil {
+					return nil, &ReminderValidationError{}
+				}
+				candidate.IntervalMS = &value
+			}
+		case "next_due_at":
+			if json.Unmarshal(raw, &candidate.NextDueAt) != nil {
+				return nil, &ReminderValidationError{}
+			}
+			nextDueSupplied = true
+		case "body":
+			if json.Unmarshal(raw, &candidate.Body) != nil {
+				return nil, &ReminderValidationError{}
+			}
+		case "subject":
+			if string(raw) == "null" {
+				candidate.Subject = nil
+			} else {
+				var value string
+				if json.Unmarshal(raw, &value) != nil {
+					return nil, &ReminderValidationError{}
+				}
+				candidate.Subject = &value
+			}
+		case "target":
+			if json.Unmarshal(raw, &candidate.Target) != nil {
+				return nil, &ReminderValidationError{}
+			}
+		}
+	}
+	if _, err := validateReminderRequest(candidate, s.maxBodyBytes); err != nil {
+		return nil, err
+	}
+	now := formatTimestamp(s.clock.Now())
+	changed := !sameInterval(existing.IntervalMS, candidate.IntervalMS) || existing.NextDueAt != candidate.NextDueAt
+	if !sameInterval(existing.IntervalMS, candidate.IntervalMS) && !nextDueSupplied && candidate.IntervalMS != nil {
+		candidate.NextDueAt, err = protocol.TimestampAfter(now, time.Duration(*candidate.IntervalMS)*time.Millisecond)
+		if err != nil {
+			return nil, err
+		}
+		changed = true
+	}
+	var result *ReminderUpdateResult
+	err = s.runImmediate(ctx, func() error {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO agents (agent_id,first_seen_at) VALUES (?,?) ON CONFLICT(agent_id) DO NOTHING`, candidate.Target, now); err != nil {
+			return err
+		}
+		sentinel, err := protocol.SentinelJSON(candidate.Sentinel)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE reminders SET target=?,subject=?,body=?,next_due_at=?,interval_ms=?,sentinel_json=? WHERE id=?`, candidate.Target, nullableSubject(candidate.Subject), candidate.Body, candidate.NextDueAt, nullableInterval(candidate.IntervalMS), nullableString(sentinel), id)
+		if err != nil {
+			return err
+		}
+		updated, err := s.reminderForTx(ctx, id)
+		if err != nil {
+			return err
+		}
+		result = &ReminderUpdateResult{Reminder: updated, SchedulingChanged: changed}
+		return nil
+	})
+	return result, err
+}
+
+func (s *Store) CancelAllReminders(ctx context.Context) (CancelAllResult, error) {
+	var result CancelAllResult
+	err := s.runImmediate(ctx, func() error {
+		var id, state, linked sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT reminders.id,reminders.state,messages.state FROM reminders LEFT JOIN messages ON messages.id=reminders.linked_message_id WHERE reminders.state NOT IN ('scheduled','failed') OR (reminders.state='scheduled' AND reminders.linked_message_id IS NOT NULL) ORDER BY reminders.id ASC LIMIT 1`).Scan(&id, &state, &linked)
+		if err == nil {
+			return &ReminderCancellationConflictError{ID: id.String, State: state.String, LinkedMessageState: linked.String}
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT id FROM reminders WHERE state='failed' OR (state='scheduled' AND linked_message_id IS NULL)`)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		res, err := s.db.ExecContext(ctx, `DELETE FROM reminders WHERE state='failed' OR (state='scheduled' AND linked_message_id IS NULL)`)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		result.Canceled = int(n)
+		for _, id := range ids {
+			delete(s.reminderIncarnations, id)
+		}
+		return err
+	})
+	return result, err
+}
+
+func (s *Store) ReminderIncarnation(ctx context.Context, id string) (string, error) {
+	if _, err := s.ReminderFor(ctx, id); err != nil {
+		return "", err
+	}
+	if _, ok := s.reminderIncarnations[id]; !ok {
+		value, err := s.ids.Next()
+		if err != nil {
+			return "", err
+		}
+		s.reminderIncarnations[id] = value
+	}
+	return s.reminderIncarnations[id], nil
+}
+
+// These tiny UTF-8 helpers avoid accepting malformed input through the prompt
+// template boundary while keeping validation byte-oriented like Node.
+func utf8DecodeRuneInString(value string) (rune, int) {
+	for _, r := range value {
+		return r, len(string(r))
+	}
+	return 0, 0
+}
+func utf8DecodeLastRuneInString(value string) (rune, int) {
+	for index := len(value) - 1; index >= 0; index-- {
+		if value[index]&0xc0 != 0x80 {
+			r := []rune(value[index:])
+			if len(r) == 0 {
+				return 0, 1
+			}
+			return r[0], len(string(r[0]))
+		}
+	}
+	return 0, 1
+}

@@ -69,9 +69,9 @@ func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 	manifest := readManifest(t, contractDir)
 
 	require.Equal(t, "v1", manifest.Version)
-	require.Equal(t, "scaffold", manifest.Status)
-	require.Equal(t, "oracle_pending", manifest.CORS.Status)
-	require.Equal(t, "deferred", manifest.CORS.GoImplementation)
+	require.Equal(t, "cors_verified", manifest.Status)
+	require.Equal(t, "verified", manifest.CORS.Status)
+	require.Equal(t, "implemented", manifest.CORS.GoImplementation)
 	require.NotEmpty(t, manifest.HTTP)
 	require.Equal(t, "/v1/agents", manifest.WebSocket.Path)
 	require.NotEmpty(t, manifest.WebSocket.ClientFrames)
@@ -80,7 +80,8 @@ func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 	require.Equal(t, map[string]string{
 		"http_outcomes":    "http-outcomes.json",
 		"frame_cases":      "frame-cases.json",
-		"generated_fields": "generated-fields.json",
+		"generated_fields":       "generated-fields.json",
+		"transport_differential": "transport-differential.json",
 	}, manifest.Fixtures)
 
 	fixtures, err := loadManifestFixtures(contractDir, manifest)
@@ -127,12 +128,12 @@ func TestContractFixturesValidateFrameAndGeneratedFieldRules(t *testing.T) {
 	var outcomes httpOutcomesFixture
 	decodeFixture(t, fixtures, "http_outcomes", &outcomes)
 	require.Equal(t, "v1", outcomes.Version)
-	require.Equal(t, "scaffold", outcomes.Status)
+	require.Equal(t, "cors_verified", outcomes.Status)
 	require.NotEmpty(t, outcomes.Cases)
 	require.Empty(t, outcomes.RouteOutcomes)
 	for _, outcomeCase := range outcomes.Cases {
 		require.NotEmpty(t, outcomeCase.ID)
-		require.Equal(t, "oracle_pending", outcomeCase.Status)
+		require.Equal(t, "verified", outcomeCase.Status)
 	}
 
 	var frames frameCasesFixture
