@@ -270,8 +270,8 @@ func rawInt(payload map[string]json.RawMessage, key string, required bool) (*int
 	if string(raw) == "null" {
 		return nil, nil
 	}
-	var value int64
-	if json.Unmarshal(raw, &value) != nil {
+	value, ok := protocol.SafeInteger(raw)
+	if !ok {
 		return nil, &httpError{status: 400, code: "invalid_request"}
 	}
 	return &value, nil

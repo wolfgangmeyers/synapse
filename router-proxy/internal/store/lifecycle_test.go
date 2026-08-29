@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -71,6 +72,10 @@ func TestApplySubagentLifecycleSuppressesDuplicateUpdatesAndReplaysPersistedVers
 	require.NoError(t, err)
 	require.Equal(t, "replay", replay.Mode)
 	require.Equal(t, int64(3), replay.RouterVersion)
+	require.Len(t, replay.Projection.Agents, 1)
+	require.Equal(t, "parent-a", replay.Projection.Agents[0].AgentID)
+	require.Equal(t, int64(2), replay.Projection.Agents[0].SubagentVersion)
+	require.Equal(t, []LifecycleChild{{ID: "child-b", Type: "worker", Description: "second", Status: "queued"}}, replay.Projection.Agents[0].Subagents)
 	require.Len(t, replay.Updates, 2)
 	require.Equal(t, int64(2), replay.Updates[0].RouterVersion)
 	require.Equal(t, "running", replay.Updates[0].State)
@@ -86,6 +91,48 @@ func TestApplySubagentLifecycleSuppressesDuplicateUpdatesAndReplaysPersistedVers
 	persisted, err := store.ReplaySubagentLifecycle(ctx, 1)
 	require.NoError(t, err)
 	require.Equal(t, replay, persisted)
+}
+
+func TestStartedTerminalReasonIsDiscardedAndDoesNotChangeDuplicateHash(t *testing.T) {
+	store := openTestStoreWithOptions(t, Options{})
+	ctx := context.Background()
+	started := lifecycleCandidate(2, "started-1", "started", LifecycleChild{ID: "child-a", Type: "worker"})
+	started.TerminalReason = "ignored"
+	result, err := store.ApplySubagentLifecycle(ctx, started, false)
+	require.NoError(t, err)
+	require.Equal(t, "conflict", result.Disposition)
+
+	// A snapshot establishes the producer before the event, matching Node's
+	// lifecycle ordering. The started event then supplies the first child row.
+	_, err = store.ApplySubagentLifecycle(ctx, lifecycleSnapshotCandidate(1, "snapshot-1"), false)
+	require.NoError(t, err)
+	result, err = store.ApplySubagentLifecycle(ctx, started, false)
+	require.NoError(t, err)
+	require.Equal(t, "applied", result.Disposition)
+
+	started.TerminalReason = ""
+	result, err = store.ApplySubagentLifecycle(ctx, started, false)
+	require.NoError(t, err)
+	require.Equal(t, "duplicate", result.Disposition)
+
+	var terminalReason sql.NullString
+	require.NoError(t, store.db.QueryRow(`SELECT terminal_reason FROM subagent_lifecycle_events WHERE event_id = ?`, "started-1").Scan(&terminalReason))
+	require.False(t, terminalReason.Valid)
+}
+
+func TestReplaySubagentLifecycleClosesEventRowsBeforeReadingProjection(t *testing.T) {
+	store := openTestStoreWithOptions(t, Options{})
+	ctx := context.Background()
+	_, err := store.ApplySubagentLifecycle(ctx, lifecycleSnapshotCandidate(1, "snapshot-1", LifecycleChild{ID: "child-a"}), false)
+	require.NoError(t, err)
+
+	replayContext, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	replay, err := store.ReplaySubagentLifecycle(replayContext, 0)
+	require.NoError(t, err)
+	require.Equal(t, "replay", replay.Mode)
+	require.Len(t, replay.Updates, 1)
+	require.Len(t, replay.Projection.Agents, 1)
 }
 
 func TestApplySubagentLifecycleUsesNoopForRepeatedStartedMetadata(t *testing.T) {
