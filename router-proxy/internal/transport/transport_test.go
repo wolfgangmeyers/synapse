@@ -403,6 +403,15 @@ func TestModelControlResultProjectsCurrentModelAndPreservesCatalog(t *testing.T)
 	require.Equal(t, true, catalogEvent["truncated"], "total_count greater than returned models implies truncation")
 	_ = readJSON(t, source)
 
+	oldModel := map[string]any{"provider": "provider", "id": "current"}
+	sendJSON(t, target, map[string]any{
+		"version": "v1", "frame_id": "activity-frame", "type": "activity",
+		"agent_id": "model-target", "instance_id": "target-instance", "lease_id": targetRegistration["lease_id"],
+		"activity_state": "active", "current_model": oldModel,
+	})
+	require.Equal(t, "agent_activity", readJSON(t, target)["type"])
+	require.Equal(t, "agent_activity", readJSON(t, source)["type"])
+
 	sendJSON(t, source, map[string]any{
 		"version": "v1", "frame_id": "control-frame", "type": "model_control",
 		"agent_id": "model-controller", "instance_id": "controller-instance", "lease_id": sourceRegistration["lease_id"],
@@ -416,6 +425,19 @@ func TestModelControlResultProjectsCurrentModelAndPreservesCatalog(t *testing.T)
 		"source_agent_id": "model-controller", "control_id": "control-1", "accepted": true, "current_model": newModel,
 	})
 	require.Equal(t, "model_control_result", readJSON(t, source)["type"])
+
+	// A client refresh may omit current_model. The activity projection must retain
+	// the model confirmed by the control result for both websocket and HTTP views.
+	sendJSON(t, target, map[string]any{
+		"version": "v1", "frame_id": "activity-refresh", "type": "activity",
+		"agent_id": "model-target", "instance_id": "target-instance", "lease_id": targetRegistration["lease_id"],
+		"activity_state": "active", "subagent_count": 1,
+		"subagents": []any{map[string]any{"id": "child"}},
+	})
+	refresh := readJSON(t, source)
+	require.Equal(t, "agent_activity", refresh["type"])
+	require.Equal(t, newModel, refresh["current_model"])
+	_ = readJSON(t, target)
 
 	server := httptest.NewServer(router)
 	defer server.Close()
