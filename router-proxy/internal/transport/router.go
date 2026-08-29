@@ -122,6 +122,10 @@ type Router struct {
 	log            func(string, map[string]any)
 
 	mu sync.RWMutex
+	// lifecycleMu serializes listener startup with the transition to closed.
+	// This keeps a startup sweep from touching the store after Close returns.
+	lifecycleMu           sync.Mutex
+	deliveryOffersContext context.Context
 	// sweepMu is the lifecycle boundary: startup, periodic, and shutdown
 	// sweeps cannot overlap one another or live-state cleanup.
 	sweepMu   sync.Mutex
@@ -143,7 +147,9 @@ type Router struct {
 	deliveryOfferMu       sync.Mutex
 	pendingDeliveryOffers map[string]*pendingDeliveryOffer
 	deliveryOfferWG       sync.WaitGroup
+	deliveryStoreWG       sync.WaitGroup
 	deliveryOffersClosed  bool
+	deliveryOffersCancel  context.CancelFunc
 	server                *http.Server
 	listener              net.Listener
 	serveDone             chan struct{}
@@ -355,7 +361,8 @@ func New(options Options) (*Router, error) {
 	if !options.GoalControlAvailable {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state") && contains(options.Store.MigrationIDs(), "021_goal_control_revision_history")
 	}
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}}
+	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	return r, nil
 }
@@ -401,7 +408,13 @@ func (r *Router) Listen(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return errors.New("router is closed")
+	}
 	if r.listener != nil {
 		r.mu.Unlock()
 		return errors.New("router is already listening")
@@ -415,6 +428,11 @@ func (r *Router) Listen(ctx context.Context) error {
 		return err
 	}
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		_ = listener.Close()
+		return errors.New("router is closed")
+	}
 	r.listener = listener
 	r.serveDone = make(chan struct{})
 	r.server = &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
@@ -448,10 +466,12 @@ func (r *Router) Close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	r.lifecycleMu.Lock()
 	r.mu.Lock()
 	if r.closed {
-		done := r.closeDone
 		r.mu.Unlock()
+		r.lifecycleMu.Unlock()
+		done := r.closeDone
 		if done != nil {
 			<-done
 		}
@@ -462,6 +482,7 @@ func (r *Router) Close(ctx context.Context) error {
 	}
 	r.closed = true
 	r.closeDone = make(chan struct{})
+	r.lifecycleMu.Unlock()
 	done := r.closeDone
 	server := r.server
 	sweepCancel := r.sweepCancel
@@ -478,6 +499,9 @@ func (r *Router) Close(ctx context.Context) error {
 		}
 	}
 	r.mu.Unlock()
+	if r.deliveryOffersCancel != nil {
+		r.deliveryOffersCancel()
+	}
 	for _, candidate := range sessions {
 		_ = candidate.close(websocket.StatusGoingAway, "router shutdown")
 	}
