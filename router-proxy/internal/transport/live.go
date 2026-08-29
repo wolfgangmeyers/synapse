@@ -336,6 +336,11 @@ func (r *Router) publishLifecycleUpdates(ctx context.Context, updates []store.Li
 			continue
 		}
 		r.mu.Lock()
+		current, ok := r.lifecycleState[update.ParentAgentID]
+		if ok && current.version > update.RouterVersion {
+			r.mu.Unlock()
+			continue
+		}
 		r.lifecycleState[update.ParentAgentID] = lifecycleAgent{version: update.RouterVersion, subagents: snapshot.Subagents}
 		if update.RouterVersion > r.nextVersion {
 			r.nextVersion = update.RouterVersion
