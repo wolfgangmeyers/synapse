@@ -8,23 +8,23 @@ import org.junit.Test
 class RouterAliasTest {
     @Test
     fun routerConfigUsesAliasWhenPresentAndEndpointOtherwise() {
-        assertEquals("Home lab", RouterConfig("Home lab", "127.0.0.1:18765").displayName)
-        assertEquals("127.0.0.1:18765", RouterConfig("", "127.0.0.1:18765").displayName)
+        assertEquals("Home lab", RouterConfig("Home lab", "router.example:8765").displayName)
+        assertEquals("router.example:8765", RouterConfig("", "router.example:8765").displayName)
     }
 
     @Test
     fun parseRouterConfigSupportsNewLegacyAndRawRecords() {
-        assertEquals("Home lab\u001f127.0.0.1:18765", RouterConfig("Home lab", "127.0.0.1:18765").persist())
-        assertEquals("\u001f127.0.0.1:18765", RouterConfig("", "127.0.0.1:18765").persist())
-        assertEquals(RouterConfig("Home lab", "127.0.0.1:18765"), parseRouterConfig("  Home lab  \u001f127.0.0.1:18765", allowCleartextLoopback = true))
-        assertEquals(RouterConfig("", "127.0.0.1:18765"), parseRouterConfig("\u001f127.0.0.1:18765", allowCleartextLoopback = true))
-        assertEquals(RouterConfig("", "127.0.0.1:18765"), parseRouterConfig("127.0.0.1:18765", allowCleartextLoopback = true))
+        assertEquals("Home lab\u001frouter.example:8765", RouterConfig("Home lab", "router.example:8765").persist())
+        assertEquals("\u001frouter.example:8765", RouterConfig("", "router.example:8765").persist())
+        assertEquals(RouterConfig("Home lab", "router.example:8765"), parseRouterConfig("  Home lab  \u001frouter.example:8765", allowCleartextLoopback = true))
+        assertEquals(RouterConfig("", "router.example:8765"), parseRouterConfig("\u001frouter.example:8765", allowCleartextLoopback = true))
+        assertEquals(RouterConfig("", "router.example:8765"), parseRouterConfig("router.example:8765", allowCleartextLoopback = true))
         assertNull(parseRouterConfig("not a router://bad"))
     }
 
     @Test
     fun routerEndpointNormalizationRejectsInvalidPortsAndDefaultsMissingPorts() {
-        assertEquals("127.0.0.1:18765", normalizeRouterEndpointCandidate("127.0.0.1:18765", allowCleartextLoopback = true))
+        assertEquals("router.example:8765", normalizeRouterEndpointCandidate("router.example", allowCleartextLoopback = true))
         assertNull(normalizeRouterEndpointCandidate("router.example:0"))
         assertNull(normalizeRouterEndpointCandidate("router.example:70000"))
     }
@@ -38,13 +38,13 @@ class RouterAliasTest {
 
     @Test
     fun routerUpsertTrimsAliasesAndReplacesEditedEndpoint() {
-        val routers = listOf(RouterConfig("Old", "127.0.0.1:18765"), RouterConfig("Other", "localhost:8765", "https"))
+        val routers = listOf(RouterConfig("Old", "127.0.0.1:8765"), RouterConfig("Other", "localhost:8765", "https"))
 
         val updated = upsertRouterConfig(
             routers = routers,
             candidate = "https://new-router.example",
             alias = "  Home lab  ",
-            previousEndpoint = "127.0.0.1:18765",
+            previousEndpoint = "127.0.0.1:8765",
             allowCleartextLoopback = true,
         )
 
@@ -52,33 +52,82 @@ class RouterAliasTest {
     }
 
     @Test
-    fun debugCleartextRejectsLegacy8765AndAllowsOnlyTheExactAdbReverse18765Endpoint() {
-        assertEquals("127.0.0.1:18765", normalizeRouterEndpointCandidate("http://127.0.0.1:18765", allowCleartextLoopback = true))
-        assertEquals("127.0.0.1:18765", normalizeRouterEndpointCandidate("127.0.0.1:18765", allowCleartextLoopback = true))
-        assertNull(normalizeRouterEndpointCandidate("http://127.0.0.1:8765", allowCleartextLoopback = true))
-        assertNull(parseRouterConfig("\u001f127.0.0.1:8765", allowCleartextLoopback = true))
-        assertNull(normalizeRouterEndpointCandidate("http://localhost:18765", allowCleartextLoopback = true))
-        assertNull(normalizeRouterEndpointCandidate("http://[::1]:18765", allowCleartextLoopback = true))
+    fun httpAndHttpsProfilesWithTheSameEndpointRemainDistinct() {
+        val http = RouterConfig("Local", "router.example:8765", "http")
+        val https = RouterConfig("Secure", "router.example:8765", "https")
+        val updated = upsertRouterConfig(listOf(http), "https://router.example:8765", "Secure", allowCleartextLoopback = false)
+
+        assertEquals(listOf(http, https), updated.sortedBy { it.scheme })
+        assertEquals(https.identity, persistedRouterConfig(https.identity, updated, allowCleartextLoopback = false)?.identity)
+    }
+
+    @Test
+    fun releaseEnumerationDropsLegacyCleartextAndSavingPurgesIt() {
+        val legacy = RouterConfig("Legacy", "router.example:8765").persist()
+        val secure = RouterConfig("Secure", "secure.example:443", "https")
+        val enumerated = routerConfigsFromRecords(listOf(legacy, secure.persist()), allowCleartextLoopback = false)
+
+        assertEquals(listOf(secure), enumerated)
+
+        val updated = upsertRouterConfig(enumerated, "https://new.example", "New", allowCleartextLoopback = false)
         assertEquals(
-            "Debug cleartext is limited to http://127.0.0.1:18765. Run adb reverse tcp:18765 tcp:18765.",
-            routerEndpointValidationMessage("http://127.0.0.1:8765", allowCleartextLoopback = true),
+            setOf(secure.persist(), RouterConfig("New", "new.example:8765", "https").persist()),
+            routerRecordsForPersistence(updated, allowCleartextLoopback = false),
         )
+    }
+
+    @Test
+    fun debugEnumerationPreservesConfiguredHttpProfiles() {
+        val http = RouterConfig("Local", "router.example:8765").persist()
+        val https = RouterConfig("Secure", "router.example:8765", "https").persist()
+
+        assertEquals(
+            listOf(
+                RouterConfig("Local", "router.example:8765"),
+                RouterConfig("Secure", "router.example:8765", "https"),
+            ),
+            routerConfigsFromRecords(listOf(http, https), allowCleartextLoopback = true),
+        )
+        assertEquals(
+            setOf(http, https),
+            routerRecordsForPersistence(
+                listOf(RouterConfig("Local", "router.example:8765"), RouterConfig("Secure", "router.example:8765", "https")),
+                allowCleartextLoopback = true,
+            ),
+        )
+    }
+
+    @Test
+    fun releaseDoesNotRestoreLegacyCleartextAsActive() {
+        val http = RouterConfig("Local", "router.example:8765", "http")
+        val https = RouterConfig("Secure", "router.example:8765", "https")
+
+        assertEquals(https.identity, persistedRouterConfig("router.example:8765", listOf(http, https), allowCleartextLoopback = false)?.identity)
+        assertNull(persistedRouterConfig("router.example:8765", listOf(http), allowCleartextLoopback = false))
+        assertEquals(http.identity, persistedRouterConfig("router.example:8765", listOf(http), allowCleartextLoopback = true)?.identity)
+    }
+
+    @Test
+    fun debugAcceptsUserConfiguredHttpAndWebSocketEndpointsButReleaseRejectsCleartext() {
+        assertEquals("127.0.0.1:8765", normalizeRouterEndpointCandidate("http://127.0.0.1:8765", allowCleartextLoopback = true))
+        assertEquals("192.168.1.20:8765", normalizeRouterEndpointCandidate("http://192.168.1.20:8765", allowCleartextLoopback = true))
+        assertEquals("router.tailnet.example:8765", normalizeRouterEndpointCandidate("http://router.tailnet.example", allowCleartextLoopback = true))
+        assertEquals("[fd7a:115c:a1e0::1]:8765", normalizeRouterEndpointCandidate("http://[fd7a:115c:a1e0::1]:8765", allowCleartextLoopback = true))
+        assertEquals("http", routerSchemeForCandidate("http://router.example", allowCleartextLoopback = true))
+        assertEquals("Release builds require an HTTPS router URL.", routerEndpointValidationMessage("http://router.example", allowCleartextLoopback = false))
+        assertNull(normalizeRouterEndpointCandidate("http://router.example", allowCleartextLoopback = false))
         assertEquals("127.0.0.1:8765", normalizeRouterEndpointCandidate("https://127.0.0.1:8765", allowCleartextLoopback = false))
-        assertNull(normalizeRouterEndpointCandidate("http://router.example"))
-        assertNull(normalizeRouterEndpointCandidate("router.example", allowCleartextLoopback = false))
         assertEquals("secure.example:443", normalizeRouterEndpointCandidate("https://secure.example:443", allowCleartextLoopback = false))
         assertNull(normalizeRouterEndpointCandidate("https://user:pass@secure.example"))
         assertNull(normalizeRouterEndpointCandidate("https://secure.example/path"))
         assertNull(normalizeRouterEndpointCandidate("https://secure.example?query=1"))
         if (BuildConfig.DEBUG) {
-            assertEquals("http://127.0.0.1:18765", routerHttpUrl("127.0.0.1:18765", "http"))
-            assertEquals("ws://127.0.0.1:18765/v1/agents", routerWebSocketUrl("127.0.0.1:18765", "http"))
+            assertEquals("http://router.example:8765", routerHttpUrl("router.example:8765", "http"))
+            assertEquals("ws://router.example:8765/v1/agents", routerWebSocketUrl("router.example:8765", "http"))
         } else {
-            assertThrows(IllegalArgumentException::class.java) { routerHttpUrl("127.0.0.1:18765", "http") }
-            assertThrows(IllegalArgumentException::class.java) { routerWebSocketUrl("127.0.0.1:18765", "http") }
+            assertThrows(IllegalArgumentException::class.java) { routerHttpUrl("router.example:8765", "http") }
+            assertThrows(IllegalArgumentException::class.java) { routerWebSocketUrl("router.example:8765", "http") }
         }
-        assertThrows(IllegalArgumentException::class.java) { routerHttpUrl("127.0.0.1:8765", "http") }
-        assertThrows(IllegalArgumentException::class.java) { routerWebSocketUrl("127.0.0.1:8765", "http") }
         assertEquals("https://secure.example:443", routerHttpUrl("secure.example:443", "https"))
         assertEquals("wss://secure.example:443/v1/agents", routerWebSocketUrl("secure.example:443", "https"))
     }

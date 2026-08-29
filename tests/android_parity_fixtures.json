@@ -10,13 +10,13 @@
       "kind": "router",
       "input": {
         "secure": {"record": "Secure\u001fhttps://secure.example", "alias": "Secure"},
-        "local": {"record": "Local\u001f127.0.0.1:18765", "alias": "Local"},
+        "local": {"record": "Local\u001f127.0.0.1:8765", "alias": "Local"},
         "edited": {"record": "Renamed\u001fhttps://secure.example:443", "alias": "Renamed"},
         "invalid": "https://user:pass@secure.example/path"
       },
       "expected": {
         "secure": {"alias": "Secure", "endpoint": "secure.example:8765", "scheme": "https", "displayName": "Secure", "persist": "Secure\u001fhttps://secure.example:8765", "http": "https://secure.example:8765", "websocket": "wss://secure.example:8765/v1/agents"},
-        "local": {"alias": "Local", "endpoint": "127.0.0.1:18765", "scheme": "http", "displayName": "Local", "persist": "Local\u001f127.0.0.1:18765", "http": "http://127.0.0.1:18765", "websocket": "ws://127.0.0.1:18765/v1/agents"},
+        "local": {"alias": "Local", "endpoint": "127.0.0.1:8765", "scheme": "http", "displayName": "Local", "persist": "Local\u001f127.0.0.1:8765", "http": "http://127.0.0.1:8765", "websocket": "ws://127.0.0.1:8765/v1/agents"},
         "edited": {"alias": "Renamed", "endpoint": "secure.example:443", "scheme": "https", "displayName": "Renamed", "persist": "Renamed\u001fhttps://secure.example:443", "http": "https://secure.example:443", "websocket": "wss://secure.example:443/v1/agents"},
         "invalid": null
       }

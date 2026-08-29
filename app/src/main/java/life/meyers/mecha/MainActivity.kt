@@ -79,6 +79,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -132,8 +133,6 @@ import kotlin.concurrent.scheduleAtFixedRate
 import kotlinx.coroutines.delay
 
 private const val DEFAULT_ROUTER_PORT = 8765
-private const val ISOLATED_DEBUG_ROUTER_PORT = 18765
-private const val ISOLATED_DEBUG_ROUTER_ENDPOINT = "127.0.0.1:$ISOLATED_DEBUG_ROUTER_PORT"
 private const val ROUTER_RECORD_SEPARATOR = "\u001f"
 private const val PREFS = "mecha"
 private const val MESSAGE_NOTIFICATION_CHANNEL = "messages"
@@ -372,6 +371,8 @@ internal data class RouterConfig(
     val scheme: String = "http",
 ) {
     val displayName: String get() = alias.ifBlank { endpoint }
+    val url: String get() = "${scheme}://$endpoint"
+    val identity: String get() = url
     fun persist() = "$alias$ROUTER_RECORD_SEPARATOR${if (scheme == "https") "https://" else ""}$endpoint"
 }
 
@@ -496,34 +497,49 @@ class MainActivity : ComponentActivity() {
 
     private fun prefs() = getSharedPreferences(PREFS, MODE_PRIVATE)
 
-    private fun routers(): List<RouterConfig> = prefs().getStringSet("router_endpoints", emptySet())
-        .orEmpty()
-        .mapNotNull(::parseRouterConfig)
-        .distinctBy { it.endpoint }
-        .sortedBy { it.displayName.lowercase() }
+    private fun routers(): List<RouterConfig> = routerConfigsFromRecords(
+        prefs().getStringSet("router_endpoints", emptySet()).orEmpty(),
+        allowCleartextLoopback = BuildConfig.DEBUG,
+    )
 
     private fun persistedActiveRouter(): String? {
         val routers = routers()
         val saved = prefs().getString("active_router", null)
-        if (saved != null && routers.none { it.endpoint == saved }) {
-            routerEndpointValidationMessage(saved)?.let {
+        val savedCandidates = savedRouterCandidates(saved, routers)
+        val active = persistedRouterConfig(saved, routers, BuildConfig.DEBUG)
+        if (saved != null && savedCandidates.none { routerConfigAllowed(it) }) {
+            routerEndpointValidationMessage(
+                savedCandidates.firstOrNull()?.url ?: saved,
+                allowCleartextLoopback = BuildConfig.DEBUG,
+            )?.let {
                 routerError = it
                 showRouterManager = true
             }
         }
-        return saved?.takeIf { active -> routers.any { it.endpoint == active } }
-            ?: routers.firstOrNull()?.endpoint
+        if (active == null) prefs().edit().remove("active_router").commit()
+        else if (saved != active.identity) prefs().edit().putString("active_router", active.identity).commit()
+        return active?.identity
     }
 
-    private fun activeRouterScheme(): String = routers().firstOrNull { it.endpoint == activeRouter }?.scheme ?: "http"
+    private fun routerConfigAllowed(config: RouterConfig): Boolean = routerConfigAllowed(config, BuildConfig.DEBUG)
 
-    private fun routerHttp() = routerHttpUrl(activeRouter, activeRouterScheme())
+    private fun routerConfig(router: String): RouterConfig? = routers().firstOrNull { it.identity == router }
+        ?: routers().firstOrNull { it.endpoint == router }
 
-    private fun routerSchemeFor(router: String): String = routers().firstOrNull { it.endpoint == router }?.scheme ?: "http"
+    private fun activeRouterConfig(): RouterConfig? = routerConfig(activeRouter)
 
-    private fun routerHttpFor(router: String): String = routerHttpUrl(router, routerSchemeFor(router))
+    private fun activeRouterScheme(): String = activeRouterConfig()?.scheme ?: "http"
 
-    private fun routerWs() = routerWebSocketUrl(activeRouter, activeRouterScheme())
+    private fun routerHttp() = activeRouterConfig()?.let { routerHttpUrl(it.endpoint, it.scheme) }
+        ?: routerHttpUrl(activeRouter, activeRouterScheme())
+
+    private fun routerSchemeFor(router: String): String = routerConfig(router)?.scheme ?: "http"
+
+    private fun routerHttpFor(router: String): String = routerConfig(router)?.let { routerHttpUrl(it.endpoint, it.scheme) }
+        ?: routerHttpUrl(router, routerSchemeFor(router))
+
+    private fun routerWs() = activeRouterConfig()?.let { routerWebSocketUrl(it.endpoint, it.scheme) }
+        ?: routerWebSocketUrl(activeRouter, activeRouterScheme())
 
     private fun routerHistoryKey(peer: String) = historyKey(activeRouter, agentId, instanceId, peer)
 
@@ -566,8 +582,13 @@ class MainActivity : ComponentActivity() {
             connection = "Add a router to connect"
             return
         }
-        if (routers().none { it.endpoint == activeRouter }) {
-            connection = routerEndpointValidationMessage(activeRouter) ?: "Choose a valid router configuration."
+        val config = routerConfig(activeRouter)
+        if (config == null || !routerConfigAllowed(config)) {
+            connection = routerEndpointValidationMessage(
+                config?.url ?: activeRouter,
+                allowCleartextLoopback = BuildConfig.DEBUG,
+            ) ?: "Choose a valid router configuration."
+            showRouterManager = true
             return
         }
         val router = activeRouter
@@ -584,7 +605,7 @@ class MainActivity : ComponentActivity() {
             nextGeneration
         }
         connection = "Connecting to your agents…"
-        socket = client.newWebSocket(Request.Builder().url(routerWebSocketUrl(router, routerSchemeFor(router))).build(), object : WebSocketListener() {
+        socket = client.newWebSocket(Request.Builder().url(routerWs()).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (generation != connectionGeneration) return
                 webSocket.send(
@@ -2184,14 +2205,23 @@ class MainActivity : ComponentActivity() {
 
     private fun saveRouter(candidate: String, alias: String): Boolean {
         val previousEndpoint = editingRouterEndpoint
-        val endpoint = normalizeRouterEndpointCandidate(candidate)
-        if (endpoint == null) {
+        val normalizedEndpoint = normalizeRouterEndpointCandidate(candidate)
+        if (normalizedEndpoint == null) {
             routerError = routerEndpointValidationMessage(candidate) ?: "Enter a valid router URL."
             return false
         }
+        val currentRouters = routers()
+        val updatedConfigs = upsertRouterConfig(currentRouters, candidate, alias, previousEndpoint)
+        val existingScheme = currentRouters.firstOrNull { it.identity == previousEndpoint || it.endpoint == previousEndpoint }?.scheme
+        val savedScheme = if (candidate.trim().contains("://")) routerSchemeForCandidate(candidate) ?: return false else existingScheme ?: "http"
+        val savedConfig = updatedConfigs.firstOrNull { it.identity == "$savedScheme://$normalizedEndpoint" }
+        if (savedConfig == null) {
+            routerError = "Enter a valid router URL."
+            return false
+        }
+        val endpoint = savedConfig.identity
         val nextActiveRouter = activeRouterAfterRouterSave(activeRouter, previousEndpoint, endpoint)
-        val updated = upsertRouterConfig(routers(), candidate, alias, previousEndpoint).map { it.persist() }.toSet()
-        prefs().edit().putStringSet("router_endpoints", updated).putString("active_router", nextActiveRouter).commit()
+        prefs().edit().putStringSet("router_endpoints", routerRecordsForPersistence(updatedConfigs, BuildConfig.DEBUG)).putString("active_router", nextActiveRouter).commit()
         editingRouterEndpoint = null
         routerRevision++
         routerError = ""
@@ -2210,14 +2240,26 @@ class MainActivity : ComponentActivity() {
         return true
     }
 
-    private fun switchRouter(endpoint: String) {
-        if (endpoint == activeRouter) {
+    private fun switchRouter(router: String) {
+        val config = routers().firstOrNull { it.identity == router }
+        if (config == null) {
+            routerError = "Choose a saved router configuration."
+            return
+        }
+        if (!routerConfigAllowed(config)) {
+            routerError = routerEndpointValidationMessage(config.url, allowCleartextLoopback = BuildConfig.DEBUG)
+                ?: "Release builds require an HTTPS router URL."
+            showRouterManager = true
+            return
+        }
+        val nextActiveRouter = config.identity
+        if (nextActiveRouter == activeRouter) {
             showRouterManager = false
             return
         }
-        prefs().edit().putString("active_router", endpoint).commit()
+        prefs().edit().putString("active_router", nextActiveRouter).commit()
         historyLock.withLock {
-            activeRouter = endpoint
+            activeRouter = nextActiveRouter
             activeHydrationFence = null
             deliveryCoordinator.invalidate()
             peers = emptyList()
@@ -2228,20 +2270,22 @@ class MainActivity : ComponentActivity() {
         connect()
     }
 
-    private fun removeRouter(endpoint: String) {
-        val remaining = routers().filterNot { it.endpoint == endpoint }
+    private fun removeRouter(router: String) {
+        val remaining = routers().filterNot { it.identity == router }
         val editor = prefs().edit()
         prefs().all.keys.filter {
-            it == knownPeersKeyFor(endpoint) || it.startsWith("history:$endpoint:") || it.startsWith("draft:$endpoint:") || it == draftPeersKey(endpoint) || it.startsWith("conversation_id:$endpoint:")
+            it == knownPeersKeyFor(router) || it.startsWith("history:$router:") || it.startsWith("draft:$router:") || it == draftPeersKey(router) || it.startsWith("conversation_id:$router:")
         }.forEach(editor::remove)
-        val next = if (endpoint == activeRouter) remaining.firstOrNull()?.endpoint.orEmpty() else activeRouter
+        val next = if (router == activeRouter) {
+            remaining.firstOrNull { routerConfigAllowed(it) }?.identity.orEmpty()
+        } else activeRouter
         editor.putStringSet("router_endpoints", remaining.map { it.persist() }.toSet())
         if (next.isBlank()) editor.remove("active_router") else editor.putString("active_router", next)
         editor.commit()
         routerRevision++
         routerError = ""
-        if (editingRouterEndpoint == endpoint) editingRouterEndpoint = null
-        if (endpoint == activeRouter) {
+        if (editingRouterEndpoint == router) editingRouterEndpoint = null
+        if (router == activeRouter) {
             historyLock.withLock {
                 activeRouter = next
                 activeHydrationFence = null
@@ -2327,7 +2371,7 @@ class MainActivity : ComponentActivity() {
                     selectedPeer.isBlank() -> PeerHome(
                         connection = connection,
                         agentId = agentId,
-                        activeRouterDisplayName = routers().firstOrNull { it.endpoint == activeRouter }?.displayName ?: activeRouter,
+                        activeRouterDisplayName = routers().firstOrNull { it.identity == activeRouter }?.displayName ?: activeRouter,
                         peers = peers,
                         agentFilter = agentFilter,
                         onAgentFilter = { agentFilter = it },
@@ -2762,86 +2806,87 @@ private fun Conversation(
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.fillMaxWidth().background(SurfaceDark)) {
             val useOverflow = conversationHeaderUsesOverflow(maxWidth.value)
-            Row(
+            Column(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onBack, Modifier.height(48.dp)) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Back")
+                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
                 }
-                Avatar(peer, 34.dp)
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (peerStatus.active) {
-                            Spacer(Modifier.width(8.dp))
-                            WorkingIndicator(compact = true)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (peerStatus.active) {
+                                Spacer(Modifier.width(8.dp))
+                                WorkingIndicator(compact = true)
+                            }
                         }
+                        if (peerStatus.activityState == "compacting") CompactingIndicator() else PeerActivityIndicators(peerStatus, compact = true)
+                        ArrivalIndicator(arrival, onArrival, onDismissArrival, header = true)
                     }
-                    if (peerStatus.activityState == "compacting") CompactingIndicator() else PeerActivityIndicators(peerStatus, compact = true)
-                    ArrivalIndicator(arrival, onArrival, onDismissArrival, header = true)
-                }
-                if (useOverflow) {
-                    // Keep prompt invocation visible on phones. The overflow menu remains available for the other controls.
-                    TextButton(
-                        onClick = {
-                            promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
-                            promptPickerOpen = true
-                            onLoadPromptTemplates()
-                        },
-                        modifier = Modifier.height(44.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp),
-                    ) { Text("Prompt", color = Periwinkle) }
-                    ConversationHeaderOverflowMenu(
-                        capabilities = capabilities,
-                        goalEnabled = peerStatus.goalState?.enabled == true,
-                        currentModel = peerStatus.modelCatalog.current?.key,
-                        onGoal = { goalEditorOpen = true },
-                        onModel = { modelPickerOpen = true },
-                        onReminders = {
-                            reminderCreateOpen = visibleRemindersForPeer(reminders, peer).isEmpty()
-                            reminderDialogOpen = true
-                            onRefreshReminders()
-                        },
-                        onPrompt = {
-                            promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
-                            promptPickerOpen = true
-                            onLoadPromptTemplates()
-                        },
-                        onManagePrompts = { promptManagerOpen = true; onLoadPromptTemplates() },
-                    )
-                } else {
-                    if (capabilities.goalControlV1) {
-                        TextButton(onClick = { goalEditorOpen = true }, modifier = Modifier.height(44.dp)) {
-                            Text(if (peerStatus.goalState?.enabled == true) "Goal" else "Set goal", color = if (peerStatus.goalState?.enabled == true) Teal else Periwinkle)
+                    if (useOverflow) {
+                        // Keep prompt invocation visible on phones. The overflow menu remains available for the other controls.
+                        IconButton(
+                            onClick = {
+                                promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
+                                promptPickerOpen = true
+                                onLoadPromptTemplates()
+                            },
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = "Use prompt template", tint = Periwinkle)
                         }
-                    }
-                    if (capabilities.modelControlV1) {
-                        TextButton(onClick = { modelPickerOpen = true }, modifier = Modifier.height(44.dp)) {
-                            Text(peerStatus.modelCatalog.current?.key ?: "Model", color = Periwinkle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        ConversationHeaderOverflowMenu(
+                            capabilities = capabilities,
+                            goalEnabled = peerStatus.goalState?.enabled == true,
+                            currentModel = peerStatus.modelCatalog.current?.key,
+                            onGoal = { goalEditorOpen = true },
+                            onModel = { modelPickerOpen = true },
+                            onReminders = {
+                                reminderCreateOpen = visibleRemindersForPeer(reminders, peer).isEmpty()
+                                reminderDialogOpen = true
+                                onRefreshReminders()
+                            },
+                            onPrompt = {
+                                promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
+                                promptPickerOpen = true
+                                onLoadPromptTemplates()
+                            },
+                            onManagePrompts = { promptManagerOpen = true; onLoadPromptTemplates() },
+                        )
+                    } else {
+                        if (capabilities.goalControlV1) {
+                            TextButton(onClick = { goalEditorOpen = true }, modifier = Modifier.height(44.dp)) {
+                                Text(if (peerStatus.goalState?.enabled == true) "Goal" else "Set goal", color = if (peerStatus.goalState?.enabled == true) Teal else Periwinkle)
+                            }
                         }
-                    }
-                    TextButton(
-                        onClick = {
-                            reminderCreateOpen = visibleRemindersForPeer(reminders, peer).isEmpty()
-                            reminderDialogOpen = true
-                            onRefreshReminders()
-                        },
-                        modifier = Modifier.height(44.dp),
-                    ) { Text("Reminders", color = if (visibleRemindersForPeer(reminders, peer).isEmpty()) TextMuted else Teal) }
-                    TextButton(
-                        onClick = {
-                            promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
-                            promptPickerOpen = true
-                            onLoadPromptTemplates()
-                        },
-                        modifier = Modifier.height(44.dp),
-                    ) { Text("Prompt", color = Periwinkle) }
-                    TextButton(onClick = { promptManagerOpen = true; onLoadPromptTemplates() }, modifier = Modifier.height(44.dp)) {
-                        Text("Manage", color = TextMuted)
+                        if (capabilities.modelControlV1) {
+                            TextButton(onClick = { modelPickerOpen = true }, modifier = Modifier.height(44.dp)) {
+                                Text(peerStatus.modelCatalog.current?.key ?: "Model", color = Periwinkle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        TextButton(
+                            onClick = {
+                                reminderCreateOpen = visibleRemindersForPeer(reminders, peer).isEmpty()
+                                reminderDialogOpen = true
+                                onRefreshReminders()
+                            },
+                            modifier = Modifier.height(44.dp),
+                        ) { Text("Reminders", color = if (visibleRemindersForPeer(reminders, peer).isEmpty()) TextMuted else Teal) }
+                        TextButton(
+                            onClick = {
+                                promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
+                                promptPickerOpen = true
+                                onLoadPromptTemplates()
+                            },
+                            modifier = Modifier.height(44.dp),
+                        ) { Text("Prompt", color = Periwinkle) }
+                        TextButton(onClick = { promptManagerOpen = true; onLoadPromptTemplates() }, modifier = Modifier.height(44.dp)) {
+                            Text("Manage", color = TextMuted)
+                        }
                     }
                 }
             }
@@ -3001,28 +3046,35 @@ private fun ConversationHeaderOverflowMenu(
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
+            containerColor = SurfaceDark,
         ) {
+            val menuColors = MenuDefaults.itemColors(textColor = TextPrimary)
             conversationControlMenuActions(capabilities.goalControlV1, capabilities.modelControlV1).forEach { action ->
                 when (action) {
                     ConversationControlAction.GOAL -> DropdownMenuItem(
                         text = { Text(if (goalEnabled) "Goal" else "Set goal") },
                         onClick = { expanded = false; onGoal() },
+                        colors = menuColors,
                     )
                     ConversationControlAction.MODEL -> DropdownMenuItem(
                         text = { Text(currentModel?.let { "Model: $it" } ?: "Model") },
                         onClick = { expanded = false; onModel() },
+                        colors = menuColors,
                     )
                     ConversationControlAction.REMINDERS -> DropdownMenuItem(
                         text = { Text("Reminders") },
                         onClick = { expanded = false; onReminders() },
+                        colors = menuColors,
                     )
                     ConversationControlAction.PROMPT -> DropdownMenuItem(
                         text = { Text("Prompt") },
                         onClick = { expanded = false; onPrompt() },
+                        colors = menuColors,
                     )
                     ConversationControlAction.MANAGE_PROMPTS -> DropdownMenuItem(
                         text = { Text("Manage prompts") },
                         onClick = { expanded = false; onManagePrompts() },
+                        colors = menuColors,
                     )
                 }
             }
@@ -3662,8 +3714,8 @@ private fun RouterManagement(
     onEdit: (String) -> Unit,
     onCancelEdit: () -> Unit,
 ) {
-    val editingRouter = routers.firstOrNull { it.endpoint == editingEndpoint }
-    var endpoint by remember(editingEndpoint) { mutableStateOf(editingRouter?.let { if (it.scheme == "https") "https://${it.endpoint}" else it.endpoint }.orEmpty()) }
+    val editingRouter = routers.firstOrNull { it.identity == editingEndpoint }
+    var endpoint by remember(editingEndpoint) { mutableStateOf(editingRouter?.url.orEmpty()) }
     var alias by remember(editingEndpoint) { mutableStateOf(editingRouter?.alias.orEmpty()) }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 18.dp)) {
         Text("Routers", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -3701,22 +3753,22 @@ private fun RouterManagement(
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(routers, key = { it.endpoint }) { router ->
+                items(routers, key = { it.identity }) { router ->
                     Card(
-                        Modifier.fillMaxWidth().clickable { onSelect(router.endpoint) },
-                        colors = CardDefaults.cardColors(containerColor = if (router.endpoint == activeRouter) SurfaceRaised else SurfaceDark),
+                        Modifier.fillMaxWidth().clickable { onSelect(router.identity) },
+                        colors = CardDefaults.cardColors(containerColor = if (router.identity == activeRouter) SurfaceRaised else SurfaceDark),
                         shape = RoundedCornerShape(18.dp),
                     ) {
                         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(router.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                                if (router.alias.isNotBlank()) Text(router.endpoint, style = MaterialTheme.typography.bodySmall, color = TextMuted)
-                                if (router.endpoint == activeRouter) Text("Active", style = MaterialTheme.typography.bodySmall, color = Teal)
+                                Text(router.url, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                                if (router.identity == activeRouter) Text("Active", style = MaterialTheme.typography.bodySmall, color = Teal)
                             }
-                            IconButton({ onEdit(router.endpoint) }) {
+                            IconButton({ onEdit(router.identity) }) {
                                 Icon(Icons.Default.Edit, "Edit router", tint = Periwinkle)
                             }
-                            IconButton({ onRemove(router.endpoint) }) {
+                            IconButton({ onRemove(router.identity) }) {
                                 Icon(Icons.Default.Delete, "Remove router", tint = Color(0xFFFFA4A0))
                             }
                         }
@@ -4109,9 +4161,9 @@ private val BRACKETED_IPV6_ENDPOINT = Regex("^\\[([^]]+)](?::([0-9]{1,5}))?$")
 private fun normalizedRouterAuthority(authority: String): Pair<String, String>? {
     val ipv6 = BRACKETED_IPV6_ENDPOINT.matchEntire(authority)
     if (ipv6 != null) {
-        if (ipv6.groupValues[1] != "::1") return null
+        val host = ipv6.groupValues[1].lowercase()
         val port = ipv6.groupValues[2].ifBlank { DEFAULT_ROUTER_PORT.toString() }.toIntOrNull() ?: return null
-        return if (port in 1..65535) "::1" to "[::1]:$port" else null
+        return if (port in 1..65535) host to "[$host]:$port" else null
     }
     if (authority == "::1") return "::1" to "[::1]:$DEFAULT_ROUTER_PORT"
     val match = ROUTER_ENDPOINT.matchEntire(authority) ?: return null
@@ -4133,8 +4185,8 @@ private fun normalizedRouterEndpoint(
         else -> "http"
     }
     val authority = if (hasScheme) trimmed.substringAfter("://") else trimmed
-    val (host, endpoint) = normalizedRouterAuthority(authority) ?: return null
-    if (scheme == "http" && (!allowCleartextLoopback || host != "127.0.0.1" || endpoint != ISOLATED_DEBUG_ROUTER_ENDPOINT)) return null
+    val (_, endpoint) = normalizedRouterAuthority(authority) ?: return null
+    if (scheme == "http" && !allowCleartextLoopback) return null
     return scheme to endpoint
 }
 
@@ -4152,8 +4204,8 @@ internal fun routerEndpointValidationMessage(
     }
     return when {
         scheme == "https" -> "Enter a valid HTTPS router URL without credentials, a path, or a query."
-        allowCleartextLoopback -> "Debug cleartext is limited to http://$ISOLATED_DEBUG_ROUTER_ENDPOINT. Run adb reverse tcp:$ISOLATED_DEBUG_ROUTER_PORT tcp:$ISOLATED_DEBUG_ROUTER_PORT."
-        else -> "Release builds require an HTTPS router URL."
+        (scheme == "http" || scheme == "implicit-http") && !allowCleartextLoopback -> "Release builds require an HTTPS router URL."
+        else -> "Enter a valid HTTP or HTTPS router URL without credentials, a path, or a query."
     }
 }
 
@@ -4169,9 +4221,7 @@ internal fun routerSchemeForCandidate(
 
 internal fun routerHttpUrl(endpoint: String, scheme: String): String = when (scheme) {
     "http" -> {
-        require(BuildConfig.DEBUG && endpoint == ISOLATED_DEBUG_ROUTER_ENDPOINT) {
-            "Debug cleartext is limited to http://$ISOLATED_DEBUG_ROUTER_ENDPOINT."
-        }
+        require(BuildConfig.DEBUG) { "Release builds require an HTTPS router URL." }
         "http://$endpoint"
     }
     "https" -> "https://$endpoint"
@@ -4180,9 +4230,7 @@ internal fun routerHttpUrl(endpoint: String, scheme: String): String = when (sch
 
 internal fun routerWebSocketUrl(endpoint: String, scheme: String): String = when (scheme) {
     "http" -> {
-        require(BuildConfig.DEBUG && endpoint == ISOLATED_DEBUG_ROUTER_ENDPOINT) {
-            "Debug cleartext is limited to ws://$ISOLATED_DEBUG_ROUTER_ENDPOINT/v1/agents."
-        }
+        require(BuildConfig.DEBUG) { "Release builds require a WSS router connection." }
         "ws://$endpoint/v1/agents"
     }
     "https" -> "wss://$endpoint/v1/agents"
@@ -4194,15 +4242,51 @@ private fun parseRouterEndpointScheme(
     allowCleartextLoopback: Boolean = BuildConfig.DEBUG,
 ): Pair<String, String>? = normalizedRouterEndpoint(stored, allowCleartextLoopback)
 
+internal fun parseRouterConfig(stored: String): RouterConfig? = parseRouterConfig(stored, BuildConfig.DEBUG)
+
 internal fun parseRouterConfig(
     stored: String,
-    allowCleartextLoopback: Boolean = BuildConfig.DEBUG,
+    allowCleartextLoopback: Boolean,
 ): RouterConfig? {
     val parts = stored.split(ROUTER_RECORD_SEPARATOR, limit = 2)
     val alias = if (parts.size == 2) parts[0].trim() else ""
     val rawEndpoint = if (parts.size == 2) parts[1] else parts[0]
     val (scheme, endpoint) = parseRouterEndpointScheme(rawEndpoint, allowCleartextLoopback) ?: return null
     return RouterConfig(alias, endpoint, scheme)
+}
+
+internal fun routerConfigAllowed(config: RouterConfig, allowCleartextLoopback: Boolean): Boolean =
+    config.scheme != "http" || allowCleartextLoopback
+
+internal fun routerConfigsFromRecords(
+    records: Iterable<String>,
+    allowCleartextLoopback: Boolean,
+): List<RouterConfig> = records
+    .mapNotNull { parseRouterConfig(it, allowCleartextLoopback) }
+    .distinctBy { it.identity }
+    .sortedBy { it.displayName.lowercase() }
+
+internal fun routerRecordsForPersistence(
+    routers: Iterable<RouterConfig>,
+    allowCleartextLoopback: Boolean,
+): Set<String> = routers
+    .filter { routerConfigAllowed(it, allowCleartextLoopback) }
+    .map { it.persist() }
+    .toSet()
+
+internal fun savedRouterCandidates(saved: String?, routers: List<RouterConfig>): List<RouterConfig> {
+    if (saved == null) return emptyList()
+    routers.firstOrNull { it.identity == saved }?.let { return listOf(it) }
+    return routers.filter { it.endpoint == saved }
+}
+
+internal fun persistedRouterConfig(
+    saved: String?,
+    routers: List<RouterConfig>,
+    allowCleartextLoopback: Boolean,
+): RouterConfig? {
+    val requested = savedRouterCandidates(saved, routers).firstOrNull { routerConfigAllowed(it, allowCleartextLoopback) }
+    return requested ?: routers.firstOrNull { routerConfigAllowed(it, allowCleartextLoopback) }
 }
 
 internal fun upsertRouterConfig(
@@ -4213,7 +4297,7 @@ internal fun upsertRouterConfig(
     scheme: String? = null,
     allowCleartextLoopback: Boolean = BuildConfig.DEBUG,
 ): List<RouterConfig> {
-    val existingScheme = routers.firstOrNull { it.endpoint == previousEndpoint }?.scheme
+    val existingScheme = routers.firstOrNull { it.identity == previousEndpoint || it.endpoint == previousEndpoint }?.scheme
     val candidateHasScheme = candidate.trim().contains("://")
     val candidateForValidation = if (!candidateHasScheme && existingScheme == "https") "https://${candidate.trim()}" else candidate
     val endpoint = normalizeRouterEndpointCandidate(candidateForValidation, allowCleartextLoopback) ?: return routers
@@ -4223,8 +4307,9 @@ internal fun upsertRouterConfig(
         existingScheme ?: "http"
     }
     val trimmedAlias = alias.trim()
-    return (routers.filterNot { it.endpoint == endpoint || it.endpoint == previousEndpoint } + RouterConfig(trimmedAlias, endpoint, savedScheme))
-        .distinctBy { it.endpoint }
+    val savedConfig = RouterConfig(trimmedAlias, endpoint, savedScheme)
+    return (routers.filterNot { it.identity == savedConfig.identity || it.identity == previousEndpoint || it.endpoint == previousEndpoint } + savedConfig)
+        .distinctBy { it.identity }
 }
 
 internal fun activeRouterAfterRouterSave(activeRouter: String, previousEndpoint: String?, savedEndpoint: String): String =
