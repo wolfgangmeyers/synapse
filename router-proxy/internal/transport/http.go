@@ -231,6 +231,9 @@ func rawString(payload map[string]json.RawMessage, key string, required bool) (s
 		}
 		return "", nil
 	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return "", &httpError{status: 400, code: "invalid_request"}
+	}
 	var value string
 	if json.Unmarshal(raw, &value) != nil {
 		return "", &httpError{status: 400, code: "invalid_request"}
@@ -389,9 +392,6 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 	message := result.Message
 	messageJSON := map[string]any{}
 	_ = json.Unmarshal(mustJSON(message), &messageJSON)
-	if result.Deduped {
-		messageJSON["deduped"] = true
-	}
 	if len(pending) > 0 {
 		messageJSON["attachments"] = pendingAttachments(pending)
 	}
@@ -441,6 +441,9 @@ func (r *Router) parseMessage(payload map[string]json.RawMessage) (protocol.Enve
 	}
 	var subject *string
 	if raw, ok := payload["subject"]; ok {
+		if string(bytes.TrimSpace(raw)) == "null" {
+			return protocol.Envelope{}, parsedConversation{}, nil, &httpError{status: 400, code: "invalid_request"}
+		}
 		var v string
 		if json.Unmarshal(raw, &v) != nil {
 			return protocol.Envelope{}, parsedConversation{}, nil, &httpError{status: 400, code: "invalid_request"}
@@ -486,13 +489,13 @@ func (r *Router) parseMessage(payload map[string]json.RawMessage) (protocol.Enve
 		}
 	}
 	envelope := protocol.Envelope{ID: id, From: from, To: to, Subject: subject, Body: body, CreatedAt: created, Sentinel: sentinel, Source: source}
+	if strings.Contains(body, "\\n") || strings.Contains(body, "\\r") {
+		return protocol.Envelope{}, conversation, nil, &httpError{status: 400, code: "escaped_newlines"}
+	}
 	max := r.store.AdmissionLimits().MaxBodyBytes
 	if len(inputs) > 0 { /* attachmentBody is validated after file publication */
 	} else if e := protocol.ValidateEnvelope(envelope, max); e != nil {
 		return protocol.Envelope{}, conversation, nil, protocolError(e)
-	}
-	if strings.Contains(body, "\\n") || strings.Contains(body, "\\r") {
-		return protocol.Envelope{}, conversation, nil, &httpError{status: 400, code: "escaped_newlines"}
 	}
 	return envelope, conversation, inputs, nil
 }
@@ -885,6 +888,9 @@ func (r *Router) parseReminder(payload map[string]json.RawMessage) (store.Remind
 	}
 	var subject *string
 	if raw, ok := payload["subject"]; ok {
+		if string(bytes.TrimSpace(raw)) == "null" {
+			return store.ReminderRequest{}, &httpError{400, "invalid_request", 0}
+		}
 		var v string
 		if json.Unmarshal(raw, &v) != nil {
 			return store.ReminderRequest{}, &httpError{400, "invalid_reminder", 0}
