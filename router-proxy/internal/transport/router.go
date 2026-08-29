@@ -364,6 +364,13 @@ func New(options Options) (*Router, error) {
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
+	if lifecycle {
+		projection, err := options.Store.LifecycleProjection(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		r.hydrateLifecycleProjection(projection)
+	}
 	return r, nil
 }
 
