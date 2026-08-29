@@ -19,7 +19,7 @@ class AndroidParityFixtureTest {
         for (index in 0 until scenarios.length()) {
             val scenario = scenarios.getJSONObject(index)
             val expected = JSONObject(scenario.getJSONObject("expected").toString())
-            // The canonical fixture includes the debug-only reverse endpoint; a release build rejects it.
+            // The canonical fixture includes a cleartext endpoint; a release build rejects it.
             if (!BuildConfig.DEBUG && scenario.getString("kind") == "router") expected.put("local", JSONObject.NULL)
             assertEquals(
                 "scenario ${scenario.getString("id")}",
