@@ -76,7 +76,7 @@ func (r *Router) cancelPendingDeliveryOffer(agentID string) {
 	<-pending.done
 }
 
-func (r *Router) stopPendingDeliveryOffers() {
+func (r *Router) stopPendingDeliveryOffers(ctx context.Context) error {
 	r.deliveryOfferMu.Lock()
 	r.deliveryOffersClosed = true
 	pending := make([]*pendingDeliveryOffer, 0, len(r.pendingDeliveryOffers))
@@ -95,7 +95,17 @@ func (r *Router) stopPendingDeliveryOffers() {
 		close(offer.done)
 		r.deliveryOfferWG.Done()
 	}
-	r.deliveryOfferWG.Wait()
+	waitDone := make(chan struct{})
+	go func() {
+		r.deliveryOfferWG.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {

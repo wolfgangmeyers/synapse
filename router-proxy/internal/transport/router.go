@@ -478,17 +478,18 @@ func (r *Router) Close(ctx context.Context) error {
 		}
 	}
 	r.mu.Unlock()
-	r.stopPendingDeliveryOffers()
+	for _, candidate := range sessions {
+		_ = candidate.close(websocket.StatusGoingAway, "router shutdown")
+	}
+	err := r.stopPendingDeliveryOffers(ctx)
 	if sweepCancel != nil && sweepDone != nil {
 		sweepCancel()
 		<-sweepDone
 	}
-	for _, candidate := range sessions {
-		_ = candidate.close(websocket.StatusGoingAway, "router shutdown")
-	}
-	var err error
 	if server != nil {
-		err = server.Shutdown(ctx)
+		if shutdownErr := server.Shutdown(ctx); err == nil {
+			err = shutdownErr
+		}
 	}
 	r.sweepAttachmentsBestEffort()
 	if r.memory != nil {
