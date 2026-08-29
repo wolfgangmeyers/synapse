@@ -19,6 +19,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHTTPEnvelopeParityRejectsNullEscapedNewlineAndGoOnlyDedupField(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	messageBase := `"id":"message-parity","from":"sender","to":"receiver","created_at":"2026-08-29T12:00:00.000Z"`
+	reminderBase := `"id":"reminder-parity","target":"receiver","creator":"sender","created_at":"2026-08-29T12:00:00.000Z","next_due_at":"2026-08-29T12:00:00.000Z"`
+	for _, test := range []struct {
+		name, endpoint, payload string
+	}{
+		{"message body null", "/v1/messages", "{" + messageBase + `,"body":null}`},
+		{"message subject null", "/v1/messages", "{" + messageBase + `,"body":"body","subject":null}`},
+		{"reminder body null", "/v1/reminders", "{" + reminderBase + `,"body":null}`},
+		{"reminder subject null", "/v1/reminders", "{" + reminderBase + `,"body":"body","subject":null}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response, requestErr := http.Post(server.URL+test.endpoint, "application/json", strings.NewReader(test.payload))
+			require.NoError(t, requestErr)
+			defer response.Body.Close()
+			require.Equal(t, http.StatusBadRequest, response.StatusCode)
+			var result map[string]map[string]string
+			require.NoError(t, json.NewDecoder(response.Body).Decode(&result))
+			require.Equal(t, "invalid_request", result["error"]["code"])
+		})
+	}
+
+	escapedBody := strings.Repeat(`\n`, (1<<20)+1)
+	payload, err := json.Marshal(map[string]any{"id": "escaped-parity", "from": "sender", "to": "receiver", "body": escapedBody, "created_at": "2026-08-29T12:00:00.000Z"})
+	require.NoError(t, err)
+	response, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(string(payload)))
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusBadRequest, response.StatusCode)
+	var escapedResult map[string]map[string]string
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&escapedResult))
+	require.Equal(t, "escaped_newlines", escapedResult["error"]["code"])
+
+	valid := `{"id":"dedup-parity","from":"sender","to":"receiver","body":"body","created_at":"2026-08-29T12:00:00.000Z"}`
+	first, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(valid))
+	require.NoError(t, err)
+	first.Body.Close()
+	duplicate, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(valid))
+	require.NoError(t, err)
+	defer duplicate.Body.Close()
+	require.Equal(t, http.StatusOK, duplicate.StatusCode)
+	var duplicateResult map[string]map[string]any
+	require.NoError(t, json.NewDecoder(duplicate.Body).Decode(&duplicateResult))
+	_, hasDeduped := duplicateResult["message"]["deduped"]
+	require.False(t, hasDeduped)
+}
+
 func TestHTTPOriginAndPreflightMatchCurrentNodeContract(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
