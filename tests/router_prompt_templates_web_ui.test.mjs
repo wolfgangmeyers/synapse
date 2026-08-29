@@ -256,10 +256,12 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
 
     const importedTemplateName = "Imported review prompt";
     const importedTemplateBody = "Imported body ${File}";
+    const importedTemplateId = "legacy/Imported%id? # é";
+    const importedTemplateTimestamp = "2026-08-25T12:34:56.789Z";
     const firstImport = {
       format: "mecha-prompt-templates",
       version: 1,
-      templates: [{ name: importedTemplateName, body: importedTemplateBody }],
+      templates: [{ id: importedTemplateId, name: importedTemplateName, body: importedTemplateBody, updated_at: importedTemplateTimestamp }],
     };
     await setPromptTemplateImportFile(browser, firstImport);
     await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
@@ -277,9 +279,10 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
     await waitForPromptTemplate(browser, importedTemplateName, importedTemplateBody);
 
     const overriddenTemplateBody = "Overridden body ${File}";
+    const overriddenTemplateTimestamp = "2026-08-25T12:35:56.789Z";
     await setPromptTemplateImportFile(browser, {
       ...firstImport,
-      templates: [{ name: importedTemplateName, body: overriddenTemplateBody }],
+      templates: [{ id: importedTemplateId, name: importedTemplateName, body: overriddenTemplateBody, updated_at: overriddenTemplateTimestamp }],
     });
     await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
     assert.match(
@@ -291,15 +294,43 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
 
     await installPromptTemplateDownloadCapture(browser);
     await browser.evaluate(`(() => document.querySelector('[data-action="export"]')?.click())()`);
-    assert.deepEqual(await readPromptTemplateDownload(browser), {
-      download: "prompt-templates.json",
-      payload: {
-        format: "mecha-prompt-templates",
-        version: 1,
-        templates: [{ name: importedTemplateName, body: overriddenTemplateBody }],
-      },
+    const download = await readPromptTemplateDownload(browser);
+    assert.equal(download.download, "prompt-templates.json");
+    assert.deepEqual(download.payload, {
+      format: "mecha-prompt-templates",
+      version: 1,
+      templates: [{
+        id: importedTemplateId,
+        name: importedTemplateName,
+        body: overriddenTemplateBody,
+        updated_at: overriddenTemplateTimestamp,
+      }],
     });
     await restorePromptTemplateDownloadCapture(browser);
+
+    const ignoredImport = {
+      format: "mecha-prompt-templates",
+      version: 1,
+      templates: [{
+        id: importedTemplateId,
+        name: "Changed name is ignored",
+        body: "Changed body is ignored",
+      }],
+    };
+    await setPromptTemplateImportFile(browser, ignoredImport);
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
+    assert.match(
+      await browser.evaluate("(() => document.querySelector('.prompt-template-import-confirmation')?.textContent)()"),
+      /No existing templates will be changed/,
+    );
+    const ignoredImportCommandStart = await webSocketSendSpyLength(browser);
+    await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
+    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 1 template.");
+    await waitForPromptTemplate(browser, importedTemplateName, overriddenTemplateBody);
+    assert.equal(
+      (await webSocketPromptTemplateCommands(browser, ignoredImportCommandStart)).some((command) => ["create", "update"].includes(command.operation)),
+      false,
+    );
 
     const multiImportTemplates = [
       { name: "Imported schedule prompt", body: "Schedule body ${File}" },
@@ -619,10 +650,15 @@ async function installWebSocketSendSpy(browser) {
     const prototype = WebSocket.prototype;
     const originalSend = prototype.send;
     const types = [];
+    const commands = [];
     function spySend(data) {
       let type = null;
       if (typeof data === "string") {
-        try { type = JSON.parse(data)?.type ?? null; } catch {}
+        try {
+          const command = JSON.parse(data);
+          type = command?.type ?? null;
+          commands.push(command);
+        } catch {}
       }
       types.push(type);
       return originalSend.call(this, data);
@@ -630,6 +666,7 @@ async function installWebSocketSendSpy(browser) {
     prototype.send = spySend;
     globalThis[key] = {
       types,
+      commands,
       restore() {
         if (prototype.send === spySend) prototype.send = originalSend;
         delete globalThis[key];
@@ -644,6 +681,11 @@ async function webSocketSendSpyLength(browser) {
 
 async function webSocketSendTypes(browser, start) {
   return browser.evaluate(`(() => globalThis.__routerPromptTemplatesWebSocketSendSpy?.types.slice(${start}) ?? [])()`);
+}
+
+async function webSocketPromptTemplateCommands(browser, start) {
+  return browser.evaluate(`(() => (globalThis.__routerPromptTemplatesWebSocketSendSpy?.commands.slice(${start}) ?? [])
+    .filter((command) => command?.type === "prompt_template_crud"))()`);
 }
 
 async function restoreWebSocketSendSpy(browser) {

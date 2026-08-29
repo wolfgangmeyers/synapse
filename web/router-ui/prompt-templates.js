@@ -4,16 +4,38 @@ const PROMPT_TEMPLATE_EXPORT_VERSION = 1;
 const MAX_PROMPT_TEMPLATES = 100;
 const MAX_PROMPT_TEMPLATE_NAME_BYTES = 128;
 const MAX_PROMPT_TEMPLATE_BODY_BYTES = 64 * 1024;
+const MAX_PROMPT_TEMPLATE_ID_BYTES = 1024;
+const CANONICAL_PROMPT_TEMPLATE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const PROMPT_TEMPLATE_IMPORT_KEYS = new Set(["name", "body", "id", "updated_at"]);
+const textEncoder = new TextEncoder();
+
+function isCanonicalPromptTemplateTimestamp(value) {
+  if (typeof value !== "string" || !CANONICAL_PROMPT_TEMPLATE_TIMESTAMP.test(value)) return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
 
 /** Return a portable JSON shape that can be imported through the existing CRUD paths. */
 export function promptTemplateExportPayload(templates) {
   return {
     format: PROMPT_TEMPLATE_EXPORT_FORMAT,
     version: PROMPT_TEMPLATE_EXPORT_VERSION,
-    templates: (Array.isArray(templates) ? templates : []).map((template) => ({
-      name: String(template?.name ?? ""),
-      body: String(template?.body ?? ""),
-    })),
+    templates: (Array.isArray(templates) ? templates : []).map((template) => {
+      const exported = {
+        name: String(template?.name ?? ""),
+        body: String(template?.body ?? ""),
+      };
+      if (template && typeof template === "object" && Object.hasOwn(template, "id")) {
+        exported.id = template.id;
+      }
+      if (template && typeof template === "object" && isCanonicalPromptTemplateTimestamp(template.updated_at)) {
+        exported.updated_at = template.updated_at;
+      }
+      return exported;
+    }),
   };
 }
 
@@ -33,18 +55,38 @@ export function parsePromptTemplateImport(value) {
     throw new Error("This is not a valid prompt template export file.");
   }
   const names = new Set();
+  const ids = new Set();
   return parsed.templates.map((template, index) => {
     if (!template || typeof template !== "object" || Array.isArray(template)
-      || typeof template.name !== "string" || typeof template.body !== "string"
+      || Object.keys(template).some((key) => !PROMPT_TEMPLATE_IMPORT_KEYS.has(key))) {
+      throw new Error(`Template ${index + 1} has invalid metadata.`);
+    }
+    if (typeof template.name !== "string" || typeof template.body !== "string"
       || template.name.includes("\u0000") || template.body.includes("\u0000")
       || template.name.trim() === "" || template.body.trim() === ""
-      || new TextEncoder().encode(template.name).length > MAX_PROMPT_TEMPLATE_NAME_BYTES
-      || new TextEncoder().encode(template.body).length > MAX_PROMPT_TEMPLATE_BODY_BYTES) {
+      || textEncoder.encode(template.name).length > MAX_PROMPT_TEMPLATE_NAME_BYTES
+      || textEncoder.encode(template.body).length > MAX_PROMPT_TEMPLATE_BODY_BYTES) {
       throw new Error(`Template ${index + 1} must have a valid name and body.`);
+    }
+    if (Object.hasOwn(template, "id")) {
+      if (typeof template.id !== "string" || template.id.length === 0
+        || template.id.includes("\u0000") || textEncoder.encode(template.id).length > MAX_PROMPT_TEMPLATE_ID_BYTES) {
+        throw new Error(`Template ${index + 1} has invalid metadata.`);
+      }
+      if (ids.has(template.id)) throw new Error(`The import contains duplicate template id \"${template.id}\".`);
+      ids.add(template.id);
+    }
+    if (Object.hasOwn(template, "updated_at") && !isCanonicalPromptTemplateTimestamp(template.updated_at)) {
+      throw new Error(`Template ${index + 1} has invalid metadata.`);
     }
     if (names.has(template.name)) throw new Error(`The import contains duplicate template name \"${template.name}\".`);
     names.add(template.name);
-    return { name: template.name, body: template.body };
+    return {
+      ...(Object.hasOwn(template, "id") ? { id: template.id } : {}),
+      name: template.name,
+      body: template.body,
+      ...(Object.hasOwn(template, "updated_at") ? { updated_at: template.updated_at } : {}),
+    };
   });
 }
 

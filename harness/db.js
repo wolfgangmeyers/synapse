@@ -212,6 +212,9 @@ export class PromptTemplateCapacityError extends Error {
 
 const PROMPT_TEMPLATE_MAX_NAME_BYTES = 128;
 const PROMPT_TEMPLATE_MAX_BODY_BYTES = 64 * 1024;
+const PROMPT_TEMPLATE_MAX_ID_BYTES = 1_024;
+const PROMPT_TEMPLATE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PROMPT_TEMPLATE_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_PROMPT_TEMPLATES = 100;
 const MAX_GOAL_CONTROL_DESIRED_CONFIG_BYTES = 16_384;
 
@@ -339,6 +342,12 @@ class MessageRepository {
     return id;
   }
 
+  #nextPromptTemplateId() {
+    const id = this.#nextId();
+    if (!PROMPT_TEMPLATE_ID_PATTERN.test(id)) throw new PromptTemplateValidationError();
+    return id;
+  }
+
   close() {
     this.#reminderIncarnations.clear();
     this.#database.close();
@@ -449,7 +458,6 @@ class MessageRepository {
 
   createPromptTemplate(promptTemplate) {
     const candidate = validatePromptTemplate(promptTemplate);
-    const now = clockTimestamp(this.#clock);
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const existing = this.#database.prepare(`
         SELECT id
@@ -459,17 +467,24 @@ class MessageRepository {
       if (existing !== undefined) throw new PromptTemplateNameConflictError(candidate.name);
       const count = this.#database.prepare("SELECT COUNT(*) AS count FROM prompt_templates").get().count;
       if (count >= MAX_PROMPT_TEMPLATES) throw new PromptTemplateCapacityError();
-      const id = this.#nextId();
+      const existingId = candidate.id === undefined
+        ? undefined
+        : this.#database.prepare("SELECT id FROM prompt_templates WHERE id = ?").get(candidate.id);
+      if (existingId !== undefined) throw new PromptTemplateValidationError();
+      const id = candidate.id ?? this.#nextPromptTemplateId();
+      const createdAt = clockTimestamp(this.#clock);
+      const updatedAt = candidate.updated_at ?? createdAt;
       this.#database.prepare(`
         INSERT INTO prompt_templates (id, name, body, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
-      `).run(id, candidate.name, candidate.body, now, now);
+      `).run(id, candidate.name, candidate.body, createdAt, updatedAt);
       return { created: true, prompt_template: selectPromptTemplate(this.#database, id) };
     });
   }
 
   updatePromptTemplate(promptTemplateId, patch) {
     const candidatePatch = validatePromptTemplatePatch(patch);
+    if (!isPortablePromptTemplateId(promptTemplateId)) return undefined;
     return immediateTransaction(this.#database, this.#databasePath, () => {
       const existing = selectPromptTemplate(this.#database, promptTemplateId);
       if (existing === undefined) return undefined;
@@ -481,16 +496,18 @@ class MessageRepository {
         WHERE name = ? AND id <> ?
       `).get(candidate.name, promptTemplateId);
       if (conflict !== undefined) throw new PromptTemplateNameConflictError(candidate.name);
+      const updatedAt = candidatePatch.updated_at ?? clockTimestamp(this.#clock);
       this.#database.prepare(`
         UPDATE prompt_templates
         SET name = ?, body = ?, updated_at = ?
         WHERE id = ?
-      `).run(candidate.name, candidate.body, clockTimestamp(this.#clock), promptTemplateId);
+      `).run(candidate.name, candidate.body, updatedAt, promptTemplateId);
       return { prompt_template: selectPromptTemplate(this.#database, promptTemplateId) };
     });
   }
 
   deletePromptTemplate(promptTemplateId) {
+    if (!isPortablePromptTemplateId(promptTemplateId)) return false;
     return immediateTransaction(this.#database, this.#databasePath, () => (
       this.#database.prepare("DELETE FROM prompt_templates WHERE id = ?").run(promptTemplateId).changes === 1
     ));
@@ -2611,11 +2628,31 @@ function selectLiveDuplicateMessage(database, candidate) {
   return row === undefined ? undefined : selectMessage(database, row.id);
 }
 
+export function isPortablePromptTemplateId(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && !value.includes("\u0000")
+    && Buffer.byteLength(value, "utf8") <= PROMPT_TEMPLATE_MAX_ID_BYTES;
+}
+
+function validatePromptTemplateTimestamp(value) {
+  if (typeof value !== "string"
+    || !PROMPT_TEMPLATE_TIMESTAMP_PATTERN.test(value)
+    || !Number.isFinite(Date.parse(value))) {
+    throw new PromptTemplateValidationError();
+  }
+  try {
+    if (new Date(value).toISOString() !== value) throw new PromptTemplateValidationError();
+  } catch {
+    throw new PromptTemplateValidationError();
+  }
+}
+
 function validatePromptTemplate(promptTemplate) {
   if (promptTemplate === null || typeof promptTemplate !== "object" || Array.isArray(promptTemplate)) {
     throw new PromptTemplateValidationError();
   }
-  const expectedKeys = new Set(["name", "body"]);
+  const expectedKeys = new Set(["id", "name", "body", "updated_at"]);
   if (Object.keys(promptTemplate).some((key) => !expectedKeys.has(key))
     || typeof promptTemplate.name !== "string"
     || promptTemplate.name.includes("\u0000")
@@ -2627,7 +2664,16 @@ function validatePromptTemplate(promptTemplate) {
     || Buffer.byteLength(promptTemplate.body, "utf8") > PROMPT_TEMPLATE_MAX_BODY_BYTES) {
     throw new PromptTemplateValidationError();
   }
-  return { name: promptTemplate.name, body: promptTemplate.body };
+  const candidate = { name: promptTemplate.name, body: promptTemplate.body };
+  if (Object.hasOwn(promptTemplate, "id")) {
+    if (!isPortablePromptTemplateId(promptTemplate.id)) throw new PromptTemplateValidationError();
+    candidate.id = promptTemplate.id;
+  }
+  if (Object.hasOwn(promptTemplate, "updated_at")) {
+    validatePromptTemplateTimestamp(promptTemplate.updated_at);
+    candidate.updated_at = promptTemplate.updated_at;
+  }
+  return candidate;
 }
 
 function validatePromptTemplatePatch(patch) {
@@ -2635,7 +2681,7 @@ function validatePromptTemplatePatch(patch) {
     throw new PromptTemplateValidationError();
   }
   const patchKeys = Object.keys(patch);
-  if (patchKeys.length === 0 || patchKeys.some((key) => !["name", "body"].includes(key))) {
+  if (patchKeys.length === 0 || patchKeys.some((key) => !["name", "body", "updated_at"].includes(key))) {
     throw new PromptTemplateValidationError();
   }
   if (Object.hasOwn(patch, "name") && (typeof patch.name !== "string"
@@ -2650,6 +2696,7 @@ function validatePromptTemplatePatch(patch) {
     || Buffer.byteLength(patch.body, "utf8") > PROMPT_TEMPLATE_MAX_BODY_BYTES)) {
     throw new PromptTemplateValidationError();
   }
+  if (Object.hasOwn(patch, "updated_at")) validatePromptTemplateTimestamp(patch.updated_at);
   return { ...patch };
 }
 

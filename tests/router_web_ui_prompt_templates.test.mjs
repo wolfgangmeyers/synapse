@@ -87,6 +87,61 @@ test("prompt template import/export format preserves names and bodies", () => {
   );
 });
 
+test("prompt template export preserves portable metadata and rejects invalid metadata", () => {
+  const updatedAt = "2026-08-25T12:34:56.789Z";
+  assert.deepEqual(promptTemplateExportPayload([
+    {
+      id: "legacy/ID%? # é",
+      name: "Review",
+      body: "Check ${File}",
+      created_at: "server-only",
+      updated_at: updatedAt,
+    },
+    { id: "without-update", name: "No timestamp", body: "Body", updated_at: "" },
+    { name: "No metadata", body: "Body", updated_at: "not-a-timestamp" },
+  ]), {
+    format: "mecha-prompt-templates",
+    version: 1,
+    templates: [
+      { id: "legacy/ID%? # é", name: "Review", body: "Check ${File}", updated_at: updatedAt },
+      { id: "without-update", name: "No timestamp", body: "Body" },
+      { name: "No metadata", body: "Body" },
+    ],
+  });
+  assert.deepEqual(parsePromptTemplateImport(JSON.stringify({
+    format: "mecha-prompt-templates",
+    version: 1,
+    templates: [{ id: "legacy/ID%? # é", name: "Review", body: "Body", updated_at: updatedAt }],
+  })), [{ id: "legacy/ID%? # é", name: "Review", body: "Body", updated_at: updatedAt }]);
+  for (const value of [null, "", "2026-08-25T12:34:56Z", "2026-08-25T05:34:56.789-07:00", "2026-02-29T12:34:56.789Z", 123]) {
+    assert.throws(() => parsePromptTemplateImport(JSON.stringify({
+      format: "mecha-prompt-templates", version: 1,
+      templates: [{ name: "Review", body: "Body", updated_at: value }],
+    })), /valid metadata/);
+  }
+  for (const value of [null, "", "a".repeat(1025), `a\u0000b`]) {
+    assert.throws(() => parsePromptTemplateImport(JSON.stringify({
+      format: "mecha-prompt-templates", version: 1,
+      templates: [{ id: value, name: "Review", body: "Body" }],
+    })), /valid metadata/);
+  }
+  assert.throws(() => parsePromptTemplateImport(JSON.stringify({
+    format: "mecha-prompt-templates", version: 1,
+    templates: [{ name: "Review", body: "Body", created_at: null }],
+  })), /valid metadata/);
+  assert.throws(() => parsePromptTemplateImport(JSON.stringify({
+    format: "mecha-prompt-templates", version: 1,
+    templates: [
+      { id: "same", name: "Review", body: "Body" },
+      { id: "same", name: "Other", body: "Body" },
+    ],
+  })), /duplicate template id/);
+  assert.throws(() => parsePromptTemplateImport(JSON.stringify({
+    format: "mecha-prompt-templates", version: 1,
+    templates: [{ name: "Review", body: "Body", extra: true }],
+  })), /valid metadata/);
+});
+
 test("prompt template relay maps CRUD commands to the REST routes", async () => {
   const calls = [];
   const sent = [];
@@ -98,20 +153,20 @@ test("prompt template relay maps CRUD commands to the REST routes", async () => 
   try {
     const configured = { routerUrl: "http://router.test", agentId: "web-agent" };
     await sendPromptTemplateCrud({ requestId: "list-1", operation: "list" }, configured, (event) => sent.push(event));
-    await sendPromptTemplateCrud({ requestId: "create-1", operation: "create", payload: { name: "Review", body: "Check ${file}" } }, configured, (event) => sent.push(event));
-    await sendPromptTemplateCrud({ requestId: "update-1", operation: "update", promptTemplateId: "generated-id", payload: { name: "Review 2", body: "Check ${file}" } }, configured, (event) => sent.push(event));
-    await sendPromptTemplateCrud({ requestId: "delete-1", operation: "delete", promptTemplateId: "generated-id" }, configured, (event) => sent.push(event));
+    await sendPromptTemplateCrud({ requestId: "create-1", operation: "create", payload: { id: "legacy/ID%? # é", name: "Review", body: "Check ${file}", updated_at: "2026-08-25T12:34:56.789Z" } }, configured, (event) => sent.push(event));
+    await sendPromptTemplateCrud({ requestId: "update-1", operation: "update", promptTemplateId: "legacy/ID%? # é", payload: { id: "must-be-stripped", name: "Review 2", body: "Check ${file}", updated_at: "2026-08-25T12:34:56.789Z" } }, configured, (event) => sent.push(event));
+    await sendPromptTemplateCrud({ requestId: "delete-1", operation: "delete", promptTemplateId: "legacy/ID%? # é" }, configured, (event) => sent.push(event));
   } finally {
     globalThis.fetch = previousFetch;
   }
   assert.deepEqual(calls.map(({ url, options }) => [url, options.method]), [
     ["http://router.test/v1/prompt-templates", "GET"],
     ["http://router.test/v1/prompt-templates", "POST"],
-    ["http://router.test/v1/prompt-templates/generated-id", "PATCH"],
-    ["http://router.test/v1/prompt-templates/generated-id", "DELETE"],
+    ["http://router.test/v1/prompt-templates/legacy%2FID%25%3F%20%23%20%C3%A9", "PATCH"],
+    ["http://router.test/v1/prompt-templates/legacy%2FID%25%3F%20%23%20%C3%A9", "DELETE"],
   ]);
-  assert.deepEqual(JSON.parse(calls[1].options.body), { name: "Review", body: "Check ${file}" });
-  assert.deepEqual(JSON.parse(calls[2].options.body), { name: "Review 2", body: "Check ${file}" });
+  assert.deepEqual(JSON.parse(calls[1].options.body), { id: "legacy/ID%? # é", name: "Review", body: "Check ${file}", updated_at: "2026-08-25T12:34:56.789Z" });
+  assert.deepEqual(JSON.parse(calls[2].options.body), { name: "Review 2", body: "Check ${file}", updated_at: "2026-08-25T12:34:56.789Z" });
   assert.equal(calls[3].options.body, undefined);
   assert.deepEqual(sent.map((event) => event.type), [
     "prompt_template_crud_result", "prompt_template_crud_result", "prompt_template_crud_result", "prompt_template_crud_result",
