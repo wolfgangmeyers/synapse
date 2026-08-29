@@ -325,6 +325,10 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	for _, candidate := range oldSessions {
 		r.removePendingForSession(candidate)
 	}
+	// Drop activity from a different instance before deriving the new
+	// session's pause state. Same-instance reconnects retain their pause until
+	// the client reports that compaction is complete.
+	r.clearStaleActivityGeneration(agentID, instanceID)
 	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
 	s.setPaused(r.agentCompacting(agentID))
 	r.mu.Lock()
@@ -447,6 +451,14 @@ func (r *Router) sendRegistered(s *session, frame map[string]json.RawMessage, le
 		fields["conversation_sync"] = s.conversationSync
 	}
 	return s.send(fields)
+}
+
+func (r *Router) clearStaleActivityGeneration(agentID, instanceID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if value, ok := r.activities[agentID]; ok && value.instanceID != instanceID {
+		delete(r.activities, agentID)
+	}
 }
 
 func (r *Router) clearStaleGeneration(agentID, instanceID, leaseID string, ownerChanged bool) {

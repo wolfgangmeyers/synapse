@@ -502,6 +502,88 @@ func TestConversationSyncReconnectRetainsCompactingPause(t *testing.T) {
 	require.NotEqual(t, "message", event["type"])
 }
 
+func TestDifferentInstanceReplacementClearsStaleCompactingPause(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	old, registration := registerTestSession(t, wsURL, "replacement-pause", "old-instance", "v1")
+	sendJSON(t, old, map[string]any{"version": "v1", "frame_id": "compact", "type": "activity", "agent_id": "replacement-pause", "instance_id": "old-instance", "lease_id": registration["lease_id"], "activity_state": "compacting"})
+	require.Equal(t, "agent_activity", readJSON(t, old)["type"])
+	require.NoError(t, old.Close(websocket.StatusNormalClosure, "disconnect"))
+	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, _, _ = old.Read(readCtx)
+	cancel()
+
+	newConn, _ := registerTestSession(t, wsURL, "replacement-pause", "new-instance", "v1")
+	defer newConn.Close(websocket.StatusNormalClosure, "test done")
+	client := httptest.NewServer(router)
+	defer client.Close()
+	payload := []byte(`{"id":"replacement-delivery","from":"sender","to":"replacement-pause","body":"hello","created_at":"2026-08-29T12:00:00.000Z"}`)
+	request, err := http.NewRequest(http.MethodPost, client.URL+"/v1/messages", bytesReader(payload))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	response.Body.Close()
+	require.Equal(t, "conversation_message", readJSON(t, newConn)["type"])
+	message := readJSON(t, newConn)
+	require.Equal(t, "message", message["type"])
+	require.Equal(t, "replacement-delivery", message["message"].(map[string]any)["id"])
+}
+
+func TestUnacknowledgedDeliveryRetriesAfterReconnect(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock, DeliveryLeaseDuration: time.Second, SweepInterval: 5 * time.Millisecond})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	old, _ := registerTestSession(t, wsURL, "retry-reconnect", "instance", "")
+	client := httptest.NewServer(router)
+	defer client.Close()
+	payload := []byte(`{"id":"retry-message","from":"sender","to":"retry-reconnect","body":"hello","created_at":"2026-08-29T12:00:00.000Z"}`)
+	request, err := http.NewRequest(http.MethodPost, client.URL+"/v1/messages", bytesReader(payload))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	response.Body.Close()
+	first := readJSON(t, old)
+	require.Equal(t, "message", first["type"])
+	require.Equal(t, float64(1), first["attempt_number"])
+	require.NoError(t, old.Close(websocket.StatusNormalClosure, "disconnect"))
+
+	require.NoError(t, clock.Advance(2*time.Second))
+	require.Eventually(t, func() bool {
+		message, lookupErr := durable.MessageFor(context.Background(), "retry-message")
+		return lookupErr == nil && message != nil && message.State == "queued"
+	}, time.Second, time.Millisecond)
+
+	reconnected, registration := registerTestSession(t, wsURL, "retry-reconnect", "instance", "")
+	defer reconnected.Close(websocket.StatusNormalClosure, "test done")
+	second := readJSON(t, reconnected)
+	require.Equal(t, "message", second["type"])
+	require.Equal(t, "retry-message", second["message"].(map[string]any)["id"])
+	require.Equal(t, float64(2), second["attempt_number"])
+	sendJSON(t, reconnected, map[string]any{"version": "v1", "frame_id": "injection", "type": "injection_requested", "agent_id": "retry-reconnect", "instance_id": "instance", "lease_id": registration["lease_id"], "message_id": "retry-message", "attempt_number": 2})
+	sendJSON(t, reconnected, map[string]any{"version": "v1", "frame_id": "ack", "type": "ack", "agent_id": "retry-reconnect", "instance_id": "instance", "lease_id": registration["lease_id"], "message_id": "retry-message", "attempt_number": 2})
+	sendJSON(t, reconnected, map[string]any{"version": "v1", "frame_id": "after-ack", "type": "ping"})
+	require.Equal(t, "pong", readJSON(t, reconnected)["type"])
+}
+
 func TestConversationSyncReconnectsPausedQueueAndDeliversExactlyOnce(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
