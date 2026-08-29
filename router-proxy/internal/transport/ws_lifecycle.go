@@ -3,7 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"sort"
+	"errors"
 	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -17,8 +17,18 @@ func (r *Router) syncEnable(s *session, frame map[string]json.RawMessage) error 
 		return r.leaseError(s, frame)
 	}
 	s.setLifecycleEnabled(true)
+	if afterVersion, ok := frameInt(frame, "after_version"); ok && afterVersion > 0 {
+		replay, err := r.store.ReplaySubagentLifecycle(context.Background(), afterVersion)
+		if err != nil {
+			return err
+		}
+		if replay.Mode == "replay" {
+			return r.sendLifecycleReplay(s, replay)
+		}
+	}
 	return r.sendLifecycleSnapshot(s)
 }
+
 func (r *Router) syncResync(s *session, frame map[string]json.RawMessage) error {
 	if !r.lifecycleAvailable {
 		return s.sendError("migration_017_required", frameString(frame, "frame_id"))
@@ -26,19 +36,68 @@ func (r *Router) syncResync(s *session, frame map[string]json.RawMessage) error 
 	if !r.sessionMatches(s, frame) {
 		return r.leaseError(s, frame)
 	}
+	afterVersion, _ := frameInt(frame, "after_version")
+	replay, err := r.store.ReplaySubagentLifecycle(context.Background(), afterVersion)
+	if err != nil {
+		return err
+	}
+	if replay.Mode == "replay" {
+		return r.sendLifecycleReplay(s, replay)
+	}
 	return r.sendLifecycleSnapshot(s)
 }
+
 func (r *Router) sendLifecycleSnapshot(s *session) error {
-	r.mu.Lock()
-	agents := make([]map[string]any, 0, len(r.lifecycleState))
-	for id, state := range r.lifecycleState {
-		agents = append(agents, map[string]any{"agent_id": id, "subagent_version": state.version, "subagent_count": len(state.subagents), "subagents": state.subagents})
+	projection, err := r.store.LifecycleProjection(context.Background())
+	if err != nil {
+		return err
 	}
-	version := r.nextVersion
-	r.mu.Unlock()
-	sort.Slice(agents, func(i, j int) bool { return agents[i]["agent_id"].(string) < agents[j]["agent_id"].(string) })
-	return s.send(map[string]any{"type": "subagent_state_snapshot", "router_version": version, "agents": agents})
+	r.hydrateLifecycleProjection(projection)
+	agents := make([]map[string]any, 0, len(projection.Agents))
+	for _, agent := range projection.Agents {
+		agents = append(agents, lifecycleAgentFrame(agent, nil))
+	}
+	return s.send(map[string]any{"type": "subagent_state_snapshot", "router_version": projection.RouterVersion, "agents": agents})
 }
+
+func (r *Router) sendLifecycleReplay(s *session, replay store.LifecycleReplay) error {
+	agents := make([]map[string]any, 0, len(replay.Updates))
+	byParent := make(map[string]store.LifecycleAgent, len(replay.Projection.Agents))
+	for _, agent := range replay.Projection.Agents {
+		byParent[agent.AgentID] = agent
+	}
+	for _, update := range replay.Updates {
+		agent, ok := byParent[update.ParentAgentID]
+		if !ok {
+			agent = store.LifecycleAgent{AgentID: update.ParentAgentID}
+		}
+		version := update.RouterVersion
+		agents = append(agents, lifecycleAgentFrame(agent, &version))
+	}
+	return s.send(map[string]any{"type": "subagent_state_replay", "router_version": replay.RouterVersion, "updates": agents})
+}
+
+func lifecycleAgentFrame(agent store.LifecycleAgent, version *int64) map[string]any {
+	children := make([]map[string]any, 0, len(agent.Subagents))
+	for _, child := range agent.Subagents {
+		item := map[string]any{"id": child.ID}
+		if child.Type != "" {
+			item["type"] = child.Type
+		}
+		if child.Description != "" {
+			item["description"] = child.Description
+		}
+		if child.Status != "" {
+			item["status"] = child.Status
+		}
+		children = append(children, item)
+	}
+	if version == nil {
+		version = &agent.SubagentVersion
+	}
+	return map[string]any{"agent_id": agent.AgentID, "subagent_version": *version, "subagent_count": len(children), "subagents": children}
+}
+
 func (r *Router) lifecycleFrame(s *session, frame map[string]json.RawMessage) error {
 	if !r.lifecycleAvailable {
 		return s.sendError("migration_017_required", frameString(frame, "frame_id"))
@@ -46,23 +105,115 @@ func (r *Router) lifecycleFrame(s *session, frame map[string]json.RawMessage) er
 	if !r.sessionMatches(s, frame) {
 		return r.leaseError(s, frame)
 	}
-	var children []map[string]any
-	if frameString(frame, "type") == "subagent_lifecycle_snapshot" {
-		_ = json.Unmarshal(frame["subagents"], &children)
-	} else {
-		var child map[string]any
-		_ = json.Unmarshal(frame["subagent"], &child)
-		children = []map[string]any{child}
-	}
-	r.mu.Lock()
-	r.nextVersion++
-	version := r.nextVersion
-	r.lifecycleState[s.agentID] = lifecycleAgent{version: version, subagents: children}
-	r.mu.Unlock()
-	if err := s.send(map[string]any{"type": "subagent_lifecycle_acknowledged", "request_id": frameString(frame, "frame_id"), "event_id": frameString(frame, "event_id"), "client_sequence": mustInt(frame, "client_sequence"), "producer_epoch": frameString(frame, "producer_epoch"), "agent_id": frameString(frame, "agent_id"), "instance_id": frameString(frame, "instance_id"), "parent_session_id": frameString(frame, "parent_session_id"), "lease_id": frameString(frame, "lease_id"), "disposition": "applied", "router_version": version}); err != nil {
+	candidate, err := lifecycleCandidateFromFrame(frame)
+	if err != nil {
 		return err
 	}
-	return r.broadcastLifecycle(s.agentID, version)
+	result, err := r.store.ApplySubagentLifecycle(context.Background(), candidate, candidate.Snapshot)
+	if err != nil {
+		return err
+	}
+	if result.Disposition == "applied" {
+		r.setLifecycleProjection(candidate.ParentAgentID, result.RouterVersion, result.Snapshot.Subagents)
+	}
+	ack := map[string]any{
+		"type":              "subagent_lifecycle_acknowledged",
+		"request_id":        frameString(frame, "frame_id"),
+		"event_id":          frameString(frame, "event_id"),
+		"client_sequence":   mustInt(frame, "client_sequence"),
+		"producer_epoch":    frameString(frame, "producer_epoch"),
+		"agent_id":          frameString(frame, "agent_id"),
+		"instance_id":       frameString(frame, "instance_id"),
+		"parent_session_id": frameString(frame, "parent_session_id"),
+		"lease_id":          frameString(frame, "lease_id"),
+		"disposition":       result.Disposition,
+		"router_version":    result.RouterVersion,
+	}
+	if result.HasAppliedVersion {
+		ack["applied_version"] = result.AppliedVersion
+	}
+	if err := s.send(ack); err != nil {
+		return err
+	}
+	if result.Disposition == "applied" {
+		return r.broadcastLifecycle(candidate.ParentAgentID, result.RouterVersion)
+	}
+	return nil
+}
+
+func lifecycleCandidateFromFrame(frame map[string]json.RawMessage) (store.LifecycleCandidate, error) {
+	sequence, ok := frameInt(frame, "client_sequence")
+	if !ok {
+		return store.LifecycleCandidate{}, errors.New("invalid lifecycle client_sequence")
+	}
+	candidate := store.LifecycleCandidate{
+		ParentAgentID:   frameString(frame, "agent_id"),
+		InstanceID:      frameString(frame, "instance_id"),
+		ParentSessionID: frameString(frame, "parent_session_id"),
+		LeaseID:         frameString(frame, "lease_id"),
+		ProducerEpoch:   frameString(frame, "producer_epoch"),
+		ClientSequence:  sequence,
+		EventID:         frameString(frame, "event_id"),
+		EventKind:       frameString(frame, "lifecycle_event"),
+	}
+	if candidate.EventKind == "" {
+		candidate.Snapshot = true
+		if err := json.Unmarshal(frame["subagents"], &candidate.Subagents); err != nil {
+			return store.LifecycleCandidate{}, err
+		}
+		return candidate, nil
+	}
+	if err := json.Unmarshal(frame["subagent"], &candidate.Subagent); err != nil {
+		return store.LifecycleCandidate{}, err
+	}
+	candidate.TerminalReason = frameString(frame, "terminal_reason")
+	return candidate, nil
+}
+
+func (r *Router) setLifecycleProjection(parent string, version int64, children []map[string]any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.lifecycleState[parent]
+	if ok && current.version > version {
+		return
+	}
+	r.lifecycleState[parent] = lifecycleAgent{version: version, subagents: children}
+}
+
+func (r *Router) hydrateLifecycleProjection(projection store.LifecycleProjection) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[string]struct{}, len(projection.Agents))
+	for _, agent := range projection.Agents {
+		seen[agent.AgentID] = struct{}{}
+		children := make([]map[string]any, 0, len(agent.Subagents))
+		for _, child := range agent.Subagents {
+			children = append(children, lifecycleChildFrame(child))
+		}
+		current, ok := r.lifecycleState[agent.AgentID]
+		if !ok || current.version <= agent.SubagentVersion {
+			r.lifecycleState[agent.AgentID] = lifecycleAgent{version: agent.SubagentVersion, subagents: children}
+		}
+	}
+	for parent, current := range r.lifecycleState {
+		if _, ok := seen[parent]; !ok && current.version <= projection.RouterVersion {
+			delete(r.lifecycleState, parent)
+		}
+	}
+}
+
+func lifecycleChildFrame(child store.LifecycleChild) map[string]any {
+	item := map[string]any{"id": child.ID}
+	if child.Type != "" {
+		item["type"] = child.Type
+	}
+	if child.Description != "" {
+		item["description"] = child.Description
+	}
+	if child.Status != "" {
+		item["status"] = child.Status
+	}
+	return item
 }
 func (r *Router) conversationRecipients(agentIDs ...string) []*session {
 	r.mu.Lock()

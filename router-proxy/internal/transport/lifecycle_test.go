@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +18,81 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
+
+func TestLifecycleFramePersistsAndSuppressesDuplicateBroadcasts(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := New(Options{Store: durable, Clock: clock})
+	require.NoError(t, err)
+	_, err = durable.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: "parent-a", InstanceID: "instance-a", LeaseID: "lease-a", LeaseDuration: time.Minute})
+	require.NoError(t, err)
+	var sent []map[string]any
+	s := &session{
+		router: router, agentID: "parent-a", instanceID: "instance-a", deliveryInstance: "instance-a", leaseID: "lease-a",
+		lifecycleEnabled: true, sendOverride: func(fields map[string]any) error { sent = append(sent, fields); return nil },
+	}
+	router.mu.Lock()
+	router.sessions[s.agentID] = s
+	router.convos[s.agentID] = map[string]*session{s.instanceID: s}
+	router.mu.Unlock()
+	frame := func(eventID string, sequence int64, kind string) map[string]json.RawMessage {
+		values := map[string]any{
+			"type": "subagent_lifecycle_event", "frame_id": "frame-" + eventID, "agent_id": "parent-a",
+			"instance_id": "instance-a", "parent_session_id": "session-a", "lease_id": "lease-a",
+			"producer_epoch": "123e4567-e89b-42d3-a456-426614174000", "client_sequence": sequence,
+			"event_id": eventID,
+		}
+		if kind == "" {
+			// Node producers establish the producer with a snapshot before events.
+			values["subagents"] = []map[string]any{}
+		} else {
+			values["lifecycle_event"] = kind
+			values["subagent"] = map[string]any{"id": "child-a", "type": "worker", "description": "child", "status": "running"}
+			if kind == "terminal" {
+				values["terminal_reason"] = "completed"
+			}
+		}
+		result := make(map[string]json.RawMessage, len(values))
+		for key, value := range values {
+			raw, marshalErr := json.Marshal(value)
+			require.NoError(t, marshalErr)
+			result[key] = raw
+		}
+		return result
+	}
+	require.NoError(t, router.lifecycleFrame(s, frame("snapshot-1", 1, "")))
+	sent = nil
+	require.NoError(t, router.lifecycleFrame(s, frame("event-1", 2, "started")))
+	require.Len(t, sent, 2)
+	require.Equal(t, "subagent_lifecycle_acknowledged", sent[0]["type"])
+	require.Equal(t, "subagent_state_update", sent[1]["type"])
+	sent = nil
+	require.NoError(t, router.lifecycleFrame(s, frame("event-1", 2, "started")))
+	require.Len(t, sent, 1)
+	require.Equal(t, "duplicate", sent[0]["disposition"])
+
+	sent = nil
+	require.NoError(t, router.lifecycleFrame(s, frame("event-2", 3, "terminal")))
+	require.Len(t, sent, 2)
+	require.Equal(t, "applied", sent[0]["disposition"])
+	require.Equal(t, "subagent_state_update", sent[1]["type"])
+	require.Equal(t, int64(2), sent[0]["router_version"])
+
+	sent = nil
+	resync := frame("resync", 1, "started")
+	resync["type"], _ = json.Marshal("subagent_state_resync")
+	resync["after_version"], _ = json.Marshal(int64(1))
+	delete(resync, "lifecycle_event")
+	delete(resync, "subagent")
+	require.NoError(t, router.syncResync(s, resync))
+	require.Len(t, sent, 1)
+	require.Equal(t, "subagent_state_replay", sent[0]["type"])
+	updates := sent[0]["updates"].([]map[string]any)
+	require.Len(t, updates, 1)
+	require.Equal(t, int64(2), updates[0]["subagent_version"])
+}
 
 func TestLifecycleSweepPublishesExpiredMessageAndDeliveryRecovery(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
