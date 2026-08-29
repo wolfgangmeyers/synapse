@@ -78,9 +78,7 @@ func (r *Router) readLoop(s *session) {
 				_ = s.sendError("already_registered", frameString(frame, "frame_id"))
 				continue
 			}
-			r.dispatchMu.Lock()
 			err := r.register(s, frame)
-			r.dispatchMu.Unlock()
 			if err != nil {
 				return
 			}
@@ -92,9 +90,7 @@ func (r *Router) readLoop(s *session) {
 			_ = s.close(4003, "lease not active")
 			return
 		}
-		r.dispatchMu.Lock()
 		err = r.dispatch(s, frame)
-		r.dispatchMu.Unlock()
 		if err != nil {
 			r.emit("router_error", map[string]any{"error_code": "internal_error"})
 			_ = s.sendError("internal_error", frameString(frame, "frame_id"))
@@ -204,6 +200,9 @@ func (s *session) sendError(code, requestID string) error {
 	return s.send(fields)
 }
 func (s *session) send(fields map[string]any) error {
+	if s.sendOverride != nil {
+		return s.sendOverride(fields)
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	id, err := s.router.nextID()
@@ -224,54 +223,36 @@ func (s *session) send(fields map[string]any) error {
 }
 func (s *session) close(code websocket.StatusCode, reason string) error {
 	var err error
-	s.closeOnce.Do(func() { err = s.conn.Close(code, reason) })
+	s.closeOnce.Do(func() {
+		if s.closeOverride != nil {
+			err = s.closeOverride(code, reason)
+			return
+		}
+		err = s.conn.Close(code, reason)
+	})
 	return err
 }
 
 func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
-	// The caller holds dispatchMu. This keeps lease acquisition and all in-memory
-	// ownership changes together with the close callback from an older socket.
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
-	var owner, reconnecting *session
-	var subscribers map[string]*session
-	r.mu.Lock()
-	owner = r.sessions[agentID]
-	subscribers = r.convos[agentID]
+	r.mu.RLock()
+	owner := r.sessions[agentID]
+	subscribers := r.convos[agentID]
+	var reconnecting *session
 	if subscribers != nil {
 		reconnecting = subscribers[instanceID]
 	}
-	r.mu.Unlock()
+	r.mu.RUnlock()
 
-	// conversation_sync permits additional sockets for one agent. They share the
-	// primary lease and only the primary session receives durable delivery.
+	// conversation_sync sockets share one lease. Publish the replacement before
+	// closing the old socket, and undo that publication if its welcome frame fails.
 	if frameString(frame, "conversation_sync") == "v1" && subscribers != nil {
-		lease, leaseErr := r.store.LeaseFor(context.Background(), agentID)
-		if owner != nil && leaseErr == nil && lease != nil && lease.ExpiresAt > timestamp(r.now()) {
-			if reconnecting != nil {
-				r.removePendingForSession(reconnecting)
-			}
-			r.clearStaleInstanceState(agentID, instanceID)
-			r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
-			r.mu.Lock()
-			subscribers[instanceID] = s
-			if owner == reconnecting {
-				r.sessions[agentID] = s
-			}
-			r.mu.Unlock()
-			if reconnecting != nil && reconnecting != s {
-				_ = reconnecting.sendError("lease_expired", "")
-				_ = reconnecting.close(4001, "lease expired")
-			}
-			if err := r.sendRegistered(s, frame, *lease); err != nil {
-				return err
-			}
-			if r.isPrimarySession(s) {
-				r.offer(s)
-			}
-			return nil
+		if registered, err := r.registerConversationSync(s, frame, owner, reconnecting, subscribers); registered {
+			return err
 		}
 	}
 
+	oldLease, _ := r.store.LeaseFor(context.Background(), agentID)
 	leaseID, err := r.nextID()
 	if err != nil {
 		return err
@@ -280,6 +261,23 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	if err != nil {
 		var duplicate *store.DuplicateAgentLeaseError
 		if errors.As(err, &duplicate) {
+			if frameString(frame, "conversation_sync") == "v1" {
+				for attempt := 0; attempt < 100; attempt++ {
+					r.mu.RLock()
+					owner, subscribers = r.sessions[agentID], r.convos[agentID]
+					var reconnecting *session
+					if subscribers != nil {
+						reconnecting = subscribers[instanceID]
+					}
+					r.mu.RUnlock()
+					if owner != nil && subscribers != nil {
+						if registered, sharedErr := r.registerConversationSync(s, frame, owner, reconnecting, subscribers); registered {
+							return sharedErr
+						}
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
 			_ = s.send(map[string]any{"type": "lease_rejected", "request_id": frameString(frame, "frame_id"), "code": "duplicate_identity", "agent_id": agentID, "instance_id": instanceID, "active_instance_id": duplicate.ActiveInstanceID})
 			_ = s.close(4009, "duplicate identity")
 			return errors.New("duplicate registration")
@@ -287,8 +285,6 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		return err
 	}
 
-	// AcquireAgentLease may have recovered an expired lease. Replace every old
-	// projection/subscriber atomically before publishing the new session.
 	r.mu.Lock()
 	owner = r.sessions[agentID]
 	subscribers = r.convos[agentID]
@@ -305,7 +301,6 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	for _, candidate := range oldSessions {
 		r.removePendingForSession(candidate)
 	}
-	r.clearStaleInstanceState(agentID, instanceID)
 	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
 	r.mu.Lock()
 	r.sessions[agentID] = s
@@ -315,17 +310,89 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		delete(r.convos, agentID)
 	}
 	r.mu.Unlock()
+	if err := r.sendRegistered(s, frame, lease); err != nil {
+		r.rollbackRegisteredLease(s, owner, subscribers, oldLease, agentID)
+		_ = s.close(websocket.StatusInternalError, "registration failed")
+		return err
+	}
+	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner != nil)
 	for _, replacement := range oldSessions {
 		if replacement != s {
 			_ = replacement.sendError("lease_expired", "")
 			_ = replacement.close(4001, "lease expired")
 		}
 	}
-	if err := r.sendRegistered(s, frame, lease); err != nil {
-		return err
-	}
 	r.offer(s)
 	return nil
+}
+
+func (r *Router) registerConversationSync(s *session, frame map[string]json.RawMessage, owner, reconnecting *session, subscribers map[string]*session) (bool, error) {
+	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
+	lease, leaseErr := r.store.LeaseFor(context.Background(), agentID)
+	if owner == nil || leaseErr != nil || lease == nil || lease.ExpiresAt <= timestamp(r.now()) {
+		return false, nil
+	}
+	if reconnecting != nil {
+		r.removePendingForSession(reconnecting)
+	}
+	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
+	s.setPaused(r.agentCompacting(agentID) || owner.isPaused())
+	r.mu.Lock()
+	subscribers[instanceID] = s
+	if owner == reconnecting {
+		r.sessions[agentID] = s
+	}
+	r.mu.Unlock()
+	if err := r.sendRegistered(s, frame, *lease); err != nil {
+		r.rollbackSharedRegistration(s, owner, reconnecting, subscribers, agentID, instanceID)
+		_ = s.close(websocket.StatusInternalError, "registration failed")
+		return true, err
+	}
+	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner.instanceID != instanceID)
+	if reconnecting != nil && reconnecting != s {
+		_ = reconnecting.sendError("lease_expired", "")
+		_ = reconnecting.close(4001, "lease expired")
+	}
+	if r.isPrimarySession(s) {
+		r.offer(s)
+	}
+	return true, nil
+}
+
+func (r *Router) rollbackSharedRegistration(s, owner, reconnecting *session, subscribers map[string]*session, agentID, instanceID string) {
+	r.mu.Lock()
+	if subscribers[instanceID] == s {
+		delete(subscribers, instanceID)
+	}
+	if owner == reconnecting && r.sessions[agentID] == s {
+		r.sessions[agentID] = owner
+	}
+	r.mu.Unlock()
+}
+
+func (r *Router) rollbackRegisteredLease(s, owner *session, subscribers map[string]*session, oldLease *domain.Lease, agentID string) {
+	r.mu.Lock()
+	if r.sessions[agentID] == s {
+		if owner != nil {
+			r.sessions[agentID] = owner
+		} else {
+			delete(r.sessions, agentID)
+		}
+	}
+	if current := r.convos[agentID]; current != nil {
+		if current[s.instanceID] == s {
+			if subscribers != nil {
+				r.convos[agentID] = subscribers
+			} else {
+				delete(r.convos, agentID)
+			}
+		}
+	}
+	r.mu.Unlock()
+	_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID})
+	if oldLease != nil {
+		_, _ = r.store.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: oldLease.AgentID, InstanceID: oldLease.InstanceID, LeaseID: oldLease.LeaseID, LeaseDuration: r.lease})
+	}
 }
 
 func (r *Router) configureSession(s *session, frame map[string]json.RawMessage, leaseID, deliveryInstance string) {
@@ -351,23 +418,48 @@ func (r *Router) sendRegistered(s *session, frame map[string]json.RawMessage, le
 	return s.send(fields)
 }
 
-func (r *Router) clearStaleInstanceState(agentID, instanceID string) {
+func (r *Router) clearStaleGeneration(agentID, instanceID, leaseID string, ownerChanged bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if value, ok := r.activities[agentID]; ok && value.instanceID != instanceID {
+	if value, ok := r.activities[agentID]; ok && (ownerChanged || value.instanceID != instanceID || value.leaseID != leaseID) {
 		delete(r.activities, agentID)
 	}
-	if value, ok := r.models[agentID]; ok && value.instanceID != instanceID {
+	if value, ok := r.models[agentID]; ok && (ownerChanged || value.instanceID != instanceID || value.leaseID != leaseID) {
 		delete(r.models, agentID)
 	}
-	if value, ok := r.goals[agentID]; ok && value.instanceID != instanceID {
+	if value, ok := r.goals[agentID]; ok && (ownerChanged || value.instanceID != instanceID || value.leaseID != leaseID) {
 		delete(r.goals, agentID)
 	}
 }
 
+func (r *Router) agentCompacting(agentID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	activity, ok := r.activities[agentID]
+	return ok && activity.state == "compacting" && activity.expires.After(r.now())
+}
+
+func (r *Router) setAgentPaused(agentID string, paused bool) {
+	r.mu.RLock()
+	primary := r.sessions[agentID]
+	sessions := make([]*session, 0, len(r.convos[agentID])+1)
+	if primary != nil {
+		sessions = append(sessions, primary)
+	}
+	for _, candidate := range r.convos[agentID] {
+		if !containsSession(sessions, candidate) {
+			sessions = append(sessions, candidate)
+		}
+	}
+	r.mu.RUnlock()
+	for _, candidate := range sessions {
+		candidate.setPaused(paused)
+	}
+}
+
 func (r *Router) isPrimarySession(s *session) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.sessions[s.agentID] == s
 }
 func (r *Router) dispatch(s *session, frame map[string]json.RawMessage) error {
@@ -408,8 +500,12 @@ func (r *Router) dispatch(s *session, frame map[string]json.RawMessage) error {
 	return nil
 }
 func (r *Router) activeSession(s *session) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.activeSessionLocked(s)
+}
+
+func (r *Router) activeSessionLocked(s *session) bool {
 	if s.conversationSync == "v1" {
 		return r.convos[s.agentID][s.instanceID] == s
 	}
@@ -447,8 +543,8 @@ func (r *Router) renew(s *session, frame map[string]json.RawMessage) error {
 	return s.send(fields)
 }
 func (r *Router) findTarget(agent, instance string) *session {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	candidate := r.sessions[agent]
 	if candidate == nil || candidate.instanceID != instance {
 		return nil
@@ -472,7 +568,11 @@ func (r *Router) modelCatalog(s *session, frame map[string]json.RawMessage) erro
 	}
 	truncated, _ := frameBool(frame, "truncated")
 	r.mu.Lock()
-	r.models[s.agentID] = modelProjection{instanceID: s.instanceID, current: current, available: models, total: total, truncated: truncated}
+	if !r.activeSessionLocked(s) {
+		r.mu.Unlock()
+		return r.leaseError(s, frame)
+	}
+	r.models[s.agentID] = modelProjection{instanceID: s.instanceID, leaseID: s.leaseID, current: current, available: models, total: total, truncated: truncated}
 	r.mu.Unlock()
 	r.broadcastModel(s.agentID)
 	return nil
@@ -527,10 +627,15 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 	if raw, ok := frame["current_model"]; ok {
 		_ = json.Unmarshal(raw, &model)
 	}
+	wasSettled := false
 	r.mu.Lock()
+	if !r.activeSessionLocked(s) {
+		r.mu.Unlock()
+		return r.leaseError(s, frame)
+	}
 	if state == "settled" && count == 0 {
 		delete(r.activities, s.agentID)
-		s.setPaused(false)
+		wasSettled = true
 	} else {
 		expires := now.Add(r.activityTTL)
 		if state == "compacting" {
@@ -539,16 +644,28 @@ func (r *Router) activity(s *session, frame map[string]json.RawMessage) error {
 		if count > 999 {
 			count = 999
 		}
-		r.activities[s.agentID] = activity{state: map[bool]string{true: "active", false: "idle"}[state == "active"], instanceID: s.instanceID, until: now.Add(r.activityTTL), expires: expires, count: count, subagents: subagents, goal: goal, model: model}
-		s.setPaused(state == "compacting")
+		activityState := "idle"
+		if state == "active" || state == "compacting" {
+			activityState = state
+		}
+		r.activities[s.agentID] = activity{state: activityState, instanceID: s.instanceID, leaseID: s.leaseID, until: now.Add(r.activityTTL), expires: expires, count: count, subagents: subagents, goal: goal, model: model}
 	}
 	r.mu.Unlock()
-	r.broadcastActivity(s.agentID)
+	r.setAgentPaused(s.agentID, state == "compacting")
+	if wasSettled {
+		r.broadcastIdle(s.agentID, s.instanceID, now)
+	} else {
+		r.broadcastActivity(s.agentID)
+	}
 	if state != "compacting" {
 		r.offer(s)
 	}
 	return nil
 }
+func (r *Router) broadcastIdle(agentID, instanceID string, now time.Time) {
+	r.broadcast(map[string]any{"type": "agent_activity", "agent_id": agentID, "instance_id": instanceID, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "generated_at": timestamp(now)})
+}
+
 func (r *Router) modelControl(s *session, frame map[string]json.RawMessage) error {
 	if !r.sessionMatches(s, frame) {
 		return r.leaseError(s, frame)
@@ -696,7 +813,11 @@ func (r *Router) recordGoal(s *session, frame map[string]json.RawMessage) {
 		return
 	}
 	r.mu.Lock()
-	r.goals[s.agentID] = goalState{instanceID: s.instanceID, state: rawMapToAny(state), projection: map[string]any{"enabled": frameAny(state, "enabled"), "goal": frameAny(state, "goal")}}
+	if !r.activeSessionLocked(s) {
+		r.mu.Unlock()
+		return
+	}
+	r.goals[s.agentID] = goalState{instanceID: s.instanceID, leaseID: s.leaseID, state: rawMapToAny(state), projection: map[string]any{"enabled": frameAny(state, "enabled"), "goal": frameAny(state, "goal")}}
 	r.mu.Unlock()
 	r.broadcastGoal(s.agentID)
 }

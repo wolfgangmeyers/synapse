@@ -126,6 +126,20 @@ func readJSON(t *testing.T, conn *websocket.Conn) map[string]any {
 	return readJSONWithTimeout(t, conn, 10*time.Second)
 }
 
+func tryReadJSON(conn *websocket.Conn, timeout time.Duration) (map[string]any, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, payload, err := conn.Read(ctx)
+	if err != nil {
+		return nil, false
+	}
+	var value map[string]any
+	if json.Unmarshal(payload, &value) != nil {
+		return nil, false
+	}
+	return value, true
+}
+
 func readJSONWithTimeout(t *testing.T, conn *websocket.Conn, timeout time.Duration) map[string]any {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -344,6 +358,146 @@ func TestSameInstanceReconnectDoesNotLetOldCleanupRemoveReplacement(t *testing.T
 	cancel()
 	sendJSON(t, newConn, map[string]any{"version": "v1", "frame_id": "ping-frame", "type": "ping"})
 	require.Equal(t, "pong", readJSON(t, newConn)["type"])
+}
+
+func TestConversationSyncActivityPausesPrimaryAndPromotedSession(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	primary, _ := registerTestSession(t, wsURL, "shared", "primary", "v1")
+	secondary, secondaryRegistration := registerTestSession(t, wsURL, "shared", "secondary", "v1")
+	defer secondary.Close(websocket.StatusNormalClosure, "test done")
+
+	sendJSON(t, secondary, map[string]any{"version": "v1", "frame_id": "compact", "type": "activity", "agent_id": "shared", "instance_id": "secondary", "lease_id": secondaryRegistration["lease_id"], "activity_state": "compacting"})
+	require.Equal(t, "agent_activity", readJSON(t, primary)["type"])
+	require.Equal(t, "agent_activity", readJSON(t, secondary)["type"])
+
+	client := httptest.NewServer(router)
+	defer client.Close()
+	payload := []byte(`{"id":"queued","from":"sender","to":"shared","body":"hello","created_at":"2026-08-29T12:00:00.000Z"}`)
+	request, err := http.NewRequest(http.MethodPost, client.URL+"/v1/messages", bytesReader(payload))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	response.Body.Close()
+	readCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, payload, readErr := primary.Read(readCtx)
+	cancel()
+	require.NoError(t, readErr)
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(payload, &event))
+	require.NotEqual(t, "message", event["type"])
+	require.Equal(t, "conversation_message", readJSON(t, secondary)["type"])
+
+	_ = primary.Close(websocket.StatusNormalClosure, "promote")
+	readCtx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, _, _ = primary.Read(readCtx)
+	cancel()
+	require.Eventually(t, func() bool {
+		response, requestErr := http.Get(client.URL + "/v1/agents")
+		if requestErr != nil {
+			return false
+		}
+		defer response.Body.Close()
+		var snapshot map[string]any
+		if json.NewDecoder(response.Body).Decode(&snapshot) != nil {
+			return false
+		}
+		agents, ok := snapshot["agents"].([]any)
+		if !ok || len(agents) != 1 {
+			return false
+		}
+		item, ok := agents[0].(map[string]any)
+		if !ok {
+			return false
+		}
+		if item["instance_id"] != "secondary" || item["activity_state"] != "compacting" {
+			return false
+		}
+		return true
+	}, time.Second, time.Millisecond)
+	// Promotion keeps the shared compacting pause. Settling on the promoted
+	// socket releases the queue and makes that socket the delivery owner.
+	sendJSON(t, secondary, map[string]any{"version": "v1", "frame_id": "settled", "type": "activity", "agent_id": "shared", "instance_id": "secondary", "lease_id": secondaryRegistration["lease_id"], "activity_state": "settled"})
+	activity := readJSON(t, secondary)
+	require.Equal(t, "agent_activity", activity["type"])
+	message := readJSON(t, secondary)
+	require.Equal(t, "message", message["type"])
+	require.Equal(t, "queued", message["message"].(map[string]any)["id"])
+}
+
+func TestConversationSyncReconnectRetainsCompactingPause(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	old, registration := registerTestSession(t, wsURL, "reconnect-pause", "instance", "v1")
+	defer old.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, old, map[string]any{"version": "v1", "frame_id": "compact", "type": "activity", "agent_id": "reconnect-pause", "instance_id": "instance", "lease_id": registration["lease_id"], "activity_state": "compacting"})
+	require.Equal(t, "agent_activity", readJSON(t, old)["type"])
+	newConn, newRegistration := registerTestSession(t, wsURL, "reconnect-pause", "instance", "v1")
+	defer newConn.Close(websocket.StatusNormalClosure, "test done")
+	require.Equal(t, registration["lease_id"], newRegistration["lease_id"])
+	client := httptest.NewServer(router)
+	defer client.Close()
+	payload := []byte(`{"id":"reconnect-queued","from":"sender","to":"reconnect-pause","body":"hello","created_at":"2026-08-29T12:00:00.000Z"}`)
+	request, err := http.NewRequest(http.MethodPost, client.URL+"/v1/messages", bytesReader(payload))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	response.Body.Close()
+	readCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, payload, readErr := newConn.Read(readCtx)
+	cancel()
+	require.NoError(t, readErr)
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(payload, &event))
+	require.NotEqual(t, "message", event["type"])
+}
+
+func TestPeriodicSweepExpiresActivityAndPendingControl(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock, ActivityTTL: time.Second, PendingControlTTL: time.Second, SweepInterval: time.Millisecond})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	source, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	defer source.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, source, map[string]any{"version": "v1", "frame_id": "source-register", "type": "register", "agent_id": "source", "instance_id": "source-instance", "conversation_sync": "v1", "agent_role": "user_interaction"})
+	sourceRegistration := readJSON(t, source)
+	target, _ := registerTestSession(t, wsURL, "target", "target-instance", "")
+	defer target.Close(websocket.StatusNormalClosure, "test done")
+	targetLease, leaseErr := durable.LeaseFor(context.Background(), "target")
+	require.NoError(t, leaseErr)
+	require.NotNil(t, targetLease)
+	sendJSON(t, source, map[string]any{"version": "v1", "frame_id": "activity", "type": "activity", "agent_id": "source", "instance_id": "source-instance", "lease_id": sourceRegistration["lease_id"], "activity_state": "active"})
+	require.Equal(t, "agent_activity", readJSON(t, source)["type"])
+	sendJSON(t, source, map[string]any{"version": "v1", "frame_id": "control", "type": "model_control", "agent_id": "source", "instance_id": "source-instance", "lease_id": sourceRegistration["lease_id"], "target_agent_id": "target", "target_instance_id": "target-instance", "control_id": "expire-me", "action": "set_model", "model": map[string]any{"provider": "test", "id": "next"}})
+	forwarded, ok := tryReadJSON(target, time.Second)
+	require.True(t, ok)
+	require.Equal(t, "model_control", forwarded["type"])
+	require.NoError(t, clock.Advance(time.Second))
+	require.Eventually(t, func() bool {
+		value, ok := tryReadJSON(source, 10*time.Millisecond)
+		return ok && value["code"] == "model_control_expired"
+	}, time.Second, time.Millisecond)
 }
 
 type byteReader struct{ value []byte }
