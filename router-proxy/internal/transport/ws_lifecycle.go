@@ -137,6 +137,8 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 	if !registered || s.agentID == "" {
 		return
 	}
+	r.ownershipMu.Lock()
+	defer r.ownershipMu.Unlock()
 	r.sessionClosedSerialized(s)
 }
 

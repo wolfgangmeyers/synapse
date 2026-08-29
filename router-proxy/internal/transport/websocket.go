@@ -234,6 +234,11 @@ func (s *session) close(code websocket.StatusCode, reason string) error {
 }
 
 func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
+	// Keep lease acquisition and publication together with close cleanup. An old
+	// socket cannot release the new lease between those two operations.
+	r.ownershipMu.Lock()
+	defer r.ownershipMu.Unlock()
+
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
 	r.mu.RLock()
 	owner := r.sessions[agentID]
@@ -261,21 +266,9 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	if err != nil {
 		var duplicate *store.DuplicateAgentLeaseError
 		if errors.As(err, &duplicate) {
-			if frameString(frame, "conversation_sync") == "v1" {
-				for attempt := 0; attempt < 100; attempt++ {
-					r.mu.RLock()
-					owner, subscribers = r.sessions[agentID], r.convos[agentID]
-					var reconnecting *session
-					if subscribers != nil {
-						reconnecting = subscribers[instanceID]
-					}
-					r.mu.RUnlock()
-					if owner != nil && subscribers != nil {
-						if registered, sharedErr := r.registerConversationSync(s, frame, owner, reconnecting, subscribers); registered {
-							return sharedErr
-						}
-					}
-					time.Sleep(time.Millisecond)
+			if frameString(frame, "conversation_sync") == "v1" && owner != nil && subscribers != nil {
+				if registered, sharedErr := r.registerConversationSync(s, frame, owner, reconnecting, subscribers); registered {
+					return sharedErr
 				}
 			}
 			_ = s.send(map[string]any{"type": "lease_rejected", "request_id": frameString(frame, "frame_id"), "code": "duplicate_identity", "agent_id": agentID, "instance_id": instanceID, "active_instance_id": duplicate.ActiveInstanceID})
