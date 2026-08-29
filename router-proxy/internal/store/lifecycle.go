@@ -429,9 +429,11 @@ type lifecycleHashEvent struct {
 }
 
 func normalizeLifecycleChild(child LifecycleChild) LifecycleChild {
-	child.ID = strings.TrimSpace(child.ID)
-	child.Type = strings.TrimSpace(child.Type)
-	child.Description = strings.TrimSpace(child.Description)
+	// Lifecycle payloads are normalized with JavaScript String.trim semantics.
+	// Go's strings.TrimSpace removes U+0085, which JavaScript preserves.
+	child.ID = strings.TrimFunc(child.ID, isECMAScriptTrimSpace)
+	child.Type = strings.TrimFunc(child.Type, isECMAScriptTrimSpace)
+	child.Description = strings.TrimFunc(child.Description, isECMAScriptTrimSpace)
 	return child
 }
 
