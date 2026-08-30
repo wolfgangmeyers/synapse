@@ -39,6 +39,26 @@ func TestEnvelopeUsesInjectedClockAndIDSource(t *testing.T) {
 	require.Len(t, clock.Calls(), 1)
 }
 
+func TestMultiMessageFrameRequiresExplicitPerItemEnvelopes(t *testing.T) {
+	items := []DeliveryItem{
+		{MessageID: "message-1", MessageIncarnationID: "123e4567-e89b-42d3-a716-446655440000", AttemptNumber: 1, DeliveryExpiresAt: "2026-08-29T12:00:30.000Z"},
+		{MessageID: "message-2", MessageIncarnationID: "123e4567-e89b-42d3-a716-446655440001", AttemptNumber: 2, DeliveryExpiresAt: "2026-08-29T12:00:30.000Z"},
+	}
+	frame := MessageFrame{
+		Version: Version, FrameID: "frame-1", Type: "message",
+		Message:              Envelope{ID: "message-1", From: "sender", To: "agent-1", Body: "Mailbox message batch", CreatedAt: "2026-08-29T12:00:00.000Z"},
+		MessageIncarnationID: items[0].MessageIncarnationID, AttemptNumber: 1, DeliveryExpiresAt: items[0].DeliveryExpiresAt,
+		DeliveryItems: items,
+		DeliveryMessages: []Envelope{
+			{ID: "message-1", From: "sender", To: "agent-1", Body: "one", CreatedAt: "2026-08-29T12:00:00.000Z"},
+			{ID: "message-2", From: "sender", To: "agent-1", Body: "two", CreatedAt: "2026-08-29T12:00:01.000Z"},
+		},
+	}
+	require.NoError(t, ValidateMessageFrame(frame))
+	frame.DeliveryMessages = nil
+	require.Error(t, ValidateMessageFrame(frame))
+}
+
 func TestMessageFrameUsesInjectedIDsAndPreservesDeliveryIdentity(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
 	ids := deterministic.NewSequenceIDSource("frame-1")

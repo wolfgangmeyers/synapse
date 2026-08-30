@@ -50,6 +50,154 @@ class InboundDeliveryTest {
     }
 
     @Test
+    fun delimiterTextInOneBodyIsPersistedAsOneBodyAndNeverSplit() {
+        var stored: ChatMessage? = null
+        val frame = deliveryFrame("message-delimiter").apply {
+            getJSONObject("message").put("body", "Mailbox message batch\\n\\nfirst\\n\\n---\\n\\nsecond")
+        }
+
+        assertTrue(settleIncomingDelivery(
+            frame,
+            "android",
+            "instance-1",
+            "lease-1",
+            ::parse,
+            { _, message -> stored = message; true },
+            {},
+            {},
+        ))
+        assertEquals("Mailbox message batch\\n\\nfirst\\n\\n---\\n\\nsecond", stored?.body)
+    }
+
+    @Test
+    fun legacyMultiDeliveryWithoutPerItemEnvelopesRemainsUnacked() {
+        val events = mutableListOf<String>()
+        val first = deliveryItem("message-1", "550e8400-e29b-41d4-a716-446655440000", 2)
+        val second = deliveryItem("message-2", "550e8400-e29b-41d4-a716-446655440001", 3)
+        val frame = deliveryFrame("message-1").put("delivery_items", org.json.JSONArray(listOf(first, second)))
+
+        val settled = settleIncomingDelivery(
+            frame = frame,
+            agentId = "android",
+            instanceId = "instance-1",
+            leaseId = "lease-1",
+            parseMessage = { events += "parse"; parse(it) },
+            persistMessage = { _, _ -> events += "persist"; true },
+            sendInjection = { events += "injection" },
+            sendAck = { events += "ack" },
+        )
+
+        assertFalse(settled)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun settleDeliveryPersistsEveryExplicitTwoItemEnvelopeBeforeAcknowledging() {
+        val events = mutableListOf<String>()
+        var stored = emptyList<ChatMessage>()
+        val first = deliveryItem("message-1", "550e8400-e29b-41d4-a716-446655440000", 2)
+        val second = deliveryItem("message-2", "550e8400-e29b-41d4-a716-446655440001", 3)
+        val frame = deliveryFrame("message-1").apply {
+            getJSONObject("message").put("body", "Mailbox message batch\\n\\none\\n\\n---\\n\\ntwo")
+            put("delivery_items", org.json.JSONArray().put(first).put(second))
+            put("delivery_messages", org.json.JSONArray().put(
+                JSONObject()
+                    .put("id", "message-1")
+                    .put("from", "sender")
+                    .put("to", "android")
+                    .put("body", "one")
+                    .put("created_at", "2026-08-29T00:00:00.000Z"),
+            ).put(
+                JSONObject()
+                    .put("id", "message-2")
+                    .put("from", "sender")
+                    .put("to", "android")
+                    .put("body", "two")
+                    .put("created_at", "2026-08-29T00:00:01.000Z"),
+            ))
+        }
+        val receipts = mutableListOf<JSONObject>()
+
+        assertTrue(settleIncomingDelivery(
+            frame = frame,
+            agentId = "android",
+            instanceId = "instance-1",
+            leaseId = "lease-1",
+            parseMessage = ::parse,
+            persistMessage = { peer, message ->
+                events += "persist:$peer:${message.id}"
+                stored = mergeConversationMessages(stored, listOf(message))
+                true
+            },
+            sendInjection = { events += "injection"; receipts += it },
+            sendAck = { events += "ack"; receipts += it },
+        ))
+
+        assertEquals(listOf("message-1", "message-2"), stored.map(ChatMessage::id))
+        assertEquals(listOf("one", "two"), stored.map(ChatMessage::body))
+        assertEquals(listOf("persist:sender:message-1", "persist:sender:message-2", "injection", "ack"), events)
+        assertEquals(2, receipts.first().getJSONArray("delivery_items").length())
+        assertEquals(2, receipts.last().getJSONArray("delivery_items").length())
+    }
+
+    @Test
+    fun wrongDeliveryRecipientIsRejectedBeforePersistenceOrReceipt() {
+        val events = mutableListOf<String>()
+        val frame = deliveryFrame("message-wrong-recipient").apply {
+            getJSONObject("message").put("to", "other-agent")
+        }
+
+        assertFalse(settleIncomingDelivery(
+            frame,
+            "android",
+            "instance-1",
+            "lease-1",
+            { events += "parse"; parse(it) },
+            { _, _ -> events += "persist"; true },
+            { events += "injection" },
+            { events += "ack" },
+        ))
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun mismatchedOrDuplicateDeliveryItemsAreRejectedBeforePersistence() {
+        var persistenceCalls = 0
+        val mismatched = deliveryFrame("message-1").put("delivery_items", org.json.JSONArray(listOf(
+            deliveryItem("message-other", "550e8400-e29b-41d4-a716-446655440000", 2),
+        )))
+        val duplicate = deliveryFrame("message-1").put("delivery_items", org.json.JSONArray(listOf(
+            deliveryItem("message-1", "550e8400-e29b-41d4-a716-446655440000", 2),
+            deliveryItem("message-1", "550e8400-e29b-41d4-a716-446655440000", 2),
+        )))
+        val messageMismatch = deliveryFrame("message-1").apply {
+            put("delivery_items", org.json.JSONArray(listOf(deliveryItem("message-1", "550e8400-e29b-41d4-a716-446655440000", 2))))
+            put("delivery_messages", org.json.JSONArray().put(
+                JSONObject()
+                    .put("id", "message-other")
+                    .put("from", "sender")
+                    .put("to", "android")
+                    .put("body", "wrong")
+                    .put("created_at", "2026-08-29T00:00:00.000Z"),
+            ))
+        }
+
+        listOf(mismatched, duplicate, messageMismatch).forEach { frame ->
+            assertFalse(settleIncomingDelivery(
+                frame = frame,
+                agentId = "android",
+                instanceId = "instance-1",
+                leaseId = "lease-1",
+                parseMessage = ::parse,
+                persistMessage = { _, _ -> persistenceCalls++; true },
+                sendInjection = { error("receipt sent") },
+                sendAck = { error("receipt sent") },
+            ))
+        }
+        assertEquals(0, persistenceCalls)
+    }
+
+    @Test
     fun acknowledgementFailureLeavesPersistedMessageUntouched() {
         var stored = emptyList<ChatMessage>()
         val settled = settleIncomingDelivery(
@@ -79,6 +227,7 @@ class InboundDeliveryTest {
             JSONObject()
                 .put("id", "stale-message")
                 .put("from", "sender")
+                .put("to", "android")
                 .put("body", "old")
                 .put("created_at", Instant.ofEpochMilli(now - HISTORY_RETENTION_MS - 1).toString()),
         )
@@ -110,6 +259,58 @@ class InboundDeliveryTest {
     }
 
     @Test
+    fun malformedDeliveryFrameSendsNoReceiptOrPersistenceAttempt() {
+        val events = mutableListOf<String>()
+        val malformed = deliveryFrame("message-malformed").apply {
+            getJSONObject("message").put("body", 7)
+        }
+
+        assertFalse(settleIncomingDelivery(
+            frame = malformed,
+            agentId = "android",
+            instanceId = "instance-1",
+            leaseId = "lease-1",
+            parseMessage = { events += "parse"; parse(it) },
+            persistMessage = { _, _ -> events += "persist"; true },
+            sendInjection = { events += "injection" },
+            sendAck = { events += "ack" },
+        ))
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun deliveryValidationRequiresTheSameStrictMessageFieldsAsConversationValidation() {
+        val frame = deliveryFrame("message-valid")
+        val conversation = JSONObject()
+            .put("version", "v1")
+            .put("frame_id", "conversation-valid")
+            .put("type", "conversation_message")
+            .put("message", JSONObject()
+                .put("sequence", 1)
+                .put("id", "message-valid")
+                .put("message_incarnation_id", "550e8400-e29b-41d4-a716-446655440000")
+                .put("from", "sender")
+                .put("to", "android")
+                .put("body", "hello")
+                .put("created_at", "2026-08-29T00:00:00.000Z")
+                .put("recorded_at", "2026-08-29T00:00:00.000Z")
+                .put("attachments", org.json.JSONArray()))
+
+        assertTrue(validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) != null)
+        assertTrue(validateLiveMessageFrame(conversation, LiveMessageFrameKind.CONVERSATION_MESSAGE) != null)
+        val originalDelivery = JSONObject(frame.getJSONObject("message").toString())
+        val originalConversation = JSONObject(conversation.getJSONObject("message").toString())
+        listOf("id", "from", "to", "body", "created_at").forEach { key ->
+            frame.getJSONObject("message").put(key, if (key == "body") 7 else "")
+            conversation.getJSONObject("message").put(key, if (key == "body") 7 else "")
+            assertFalse(validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) != null)
+            assertFalse(validateLiveMessageFrame(conversation, LiveMessageFrameKind.CONVERSATION_MESSAGE) != null)
+            frame.getJSONObject("message").put(key, originalDelivery.get(key))
+            conversation.getJSONObject("message").put(key, originalConversation.get(key))
+        }
+    }
+
+    @Test
     fun invalidOrUnpersistableDeliverySendsNoReceipt() {
         var sends = 0
         assertFalse(settleIncomingDelivery(
@@ -136,8 +337,24 @@ class InboundDeliveryTest {
     }
 
     private fun deliveryFrame(id: String) = JSONObject()
+        .put("version", "v1")
+        .put("frame_id", "frame-$id")
+        .put("type", "message")
+        .put("message", JSONObject()
+            .put("id", id)
+            .put("from", "sender")
+            .put("to", "android")
+            .put("body", "hello")
+            .put("created_at", "2026-08-29T00:00:00.000Z"))
+        .put("message_incarnation_id", "550e8400-e29b-41d4-a716-446655440000")
         .put("attempt_number", 2)
-        .put("message", JSONObject().put("id", id).put("from", "sender").put("body", "hello"))
+        .put("delivery_expires_at", "2026-08-29T00:00:30.000Z")
+
+    private fun deliveryItem(id: String, incarnation: String, attempt: Int) = JSONObject()
+        .put("message_id", id)
+        .put("message_incarnation_id", incarnation)
+        .put("attempt_number", attempt)
+        .put("delivery_expires_at", "2026-08-29T00:00:30.000Z")
 
     private fun parse(value: JSONObject) = ChatMessage(
         id = value.getString("id"),
@@ -146,6 +363,7 @@ class InboundDeliveryTest {
         sender = value.getString("from"),
         body = value.getString("body"),
         direction = Direction.INCOMING,
-        createdAt = Instant.now().toString(),
+        createdAt = value.getString("created_at"),
+        recipient = value.optString("to", "android"),
     )
 }

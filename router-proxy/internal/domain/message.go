@@ -48,7 +48,10 @@ func (m Message) Envelope() protocol.Envelope {
 type DeliveryItem = protocol.DeliveryItem
 
 type Delivery struct {
-	Message           Message        `json:"message"`
+	Message Message `json:"message"`
+	// Messages keeps the original envelopes for the additive multi-delivery
+	// wire field. Message remains the legacy merged envelope.
+	Messages          []Message      `json:"messages"`
 	AttemptNumber     int            `json:"attempt_number"`
 	DeliveryExpiresAt string         `json:"delivery_expires_at"`
 	Items             []DeliveryItem `json:"items"`

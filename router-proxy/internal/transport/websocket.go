@@ -1285,6 +1285,13 @@ func (r *Router) deliveryOfferFields(ctx context.Context, s *session) map[string
 	}
 	if len(delivery.Items) > 1 {
 		fields["delivery_items"] = delivery.Items
+		// Keep the legacy merged envelope and add the original per-item
+		// envelopes for clients that persist each message separately.
+		messages := make([]protocol.Envelope, 0, len(delivery.Messages))
+		for _, message := range delivery.Messages {
+			messages = append(messages, message.Envelope())
+		}
+		fields["delivery_messages"] = messages
 	}
 	return fields
 }

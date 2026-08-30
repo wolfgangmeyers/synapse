@@ -884,7 +884,13 @@ func deliveryFromRows(rows []storedDeliveryRow, items []protocol.DeliveryItem, e
 	for i := range rows {
 		messages[i] = rows[i].Message
 	}
-	return &domain.Delivery{Message: domain.BuildDeliveryMessage(messages), AttemptNumber: items[0].AttemptNumber, DeliveryExpiresAt: expires, Items: items}
+	return &domain.Delivery{
+		Message:           domain.BuildDeliveryMessage(messages),
+		Messages:          messages,
+		AttemptNumber:     items[0].AttemptNumber,
+		DeliveryExpiresAt: expires,
+		Items:             items,
+	}
 }
 func (s *Store) activeDelivery(ctx context.Context, agent, lease string) (*domain.Delivery, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT messages.enqueue_sequence,messages.id,messages.sender,messages.recipient,messages.subject,messages.body,messages.created_at,messages.expires_at,messages.message_incarnation_id,messages.state,messages.sentinel_json,messages.source_kind,delivery_attempts.attempt_number,delivery_attempts.delivery_expires_at,delivery_attempts.delivery_batch_id,delivery_attempts.owner_lease_id FROM messages JOIN delivery_attempts ON delivery_attempts.message_id = messages.id WHERE messages.recipient = ? AND messages.state IN ('leased','injection_requested') AND delivery_attempts.state IN ('leased','injection_requested') ORDER BY messages.enqueue_sequence ASC`, agent)

@@ -138,7 +138,9 @@ test("router echoes Android ACK capability but preserves legacy response shape",
       body: "raw body",
       created_at: "2026-07-15T06:00:00.000Z",
     });
-    assert.equal((await offered).message.body, "raw body\n\n[Reply via mailbox to sender.]");
+    const offeredFrame = await offered;
+    assert.equal(offeredFrame.message.body, "raw body\n\n[Reply via mailbox to sender.]");
+    assert.equal(offeredFrame.delivery_messages, undefined, "single deliveries keep the legacy frame shape");
     assert.equal(repository.messageFor("reply-hint-message").body, "raw body");
   } finally {
     for (const socket of sockets) socket.terminate();
@@ -267,6 +269,10 @@ test("legacy ACK does not receive correlated settlement confirmation", async () 
     const offered = await waitForFrame((frame) => frame.type === "message");
     assert.equal(offered.message.id, "legacy-ack-message");
     assert.equal(offered.delivery_items.length, 2);
+    assert.deepEqual(offered.delivery_messages.map(({ id, body }) => ({ id, body })), [
+      { id: "legacy-ack-message", body: "body" },
+      { id: "legacy-ack-message-2", body: "second body" },
+    ]);
     assert.match(offered.message.body, /second body/);
     send({ type: "injection_requested", agent_id: "legacy-worker", instance_id: "legacy-instance", lease_id: lease.lease_id, message_id: offered.message.id, attempt_number: offered.attempt_number });
     send({ type: "ack", agent_id: "legacy-worker", instance_id: "legacy-instance", lease_id: lease.lease_id, message_id: offered.message.id, attempt_number: offered.attempt_number });
@@ -775,19 +781,38 @@ test("Android keeps one activity-owned router session across launcher and notifi
 
 test("Android opts into shared conversations, hydrates by generation, and uses the web image protocol", () => {
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
+  const history = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/HistoryRetention.kt", import.meta.url), "utf8");
   const images = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/ImageAttachments.kt", import.meta.url), "utf8");
   assert.match(activity, /\.put\("conversation_sync", "v1"\)/);
   assert.match(activity, /"conversation_message" -> runOnUiThread \{\s*if \(generation == connectionGeneration\) receiveConversationMessage\(frame\)/);
   assert.match(activity, /"agent_activity" -> runOnUiThread \{\s*if \(generation == connectionGeneration\) receiveAgentActivity\(frame\)/);
-  assert.match(activity, /addPathSegments\("v1\/conversations"\)/);
-  assert.match(activity, /"history:\$activeRouter:\$agentId:\$peer"/);
-  assert.match(activity, /generation != connectionGeneration \|\| activeRouter != router \|\| agentId != owner \|\| selectedPeer != peer/);
-  assert.match(activity, /reconcileConversationMessages\(historyFor\(peer\), hydrated, highWaterSequence\)/);
+  assert.match(activity, /internal fun conversationHistoryUrl\([\s\S]*addPathSegments\("v1\/conversations"\)/);
+  assert.match(activity, /historyPreferenceKey\(router, owner, ownerInstance, peer\)/);
+  assert.match(activity, /isCurrentHistoryHydration\([\s\S]*currentRouter = activeRouter/);
+  assert.match(activity, /isCurrentHistoryHydrationStart\([\s\S]*requestedGeneration = generation[\s\S]*currentConnectionGeneration = connectionGeneration/);
+  assert.match(activity, /val persistedHistory = historyForUnlocked\(\s*request\.router,\s*request\.ownerAgentId,\s*request\.ownerInstanceId,\s*request\.peer,\s*\)/);
+  assert.match(activity, /reconcileConversationMessages\([\s\S]*parsed\.highWaterSequence/);
+  assert.match(activity, /HistoryFailure\.HTTP/);
+  assert.match(activity, /HistoryFailure\.INVALID_RESPONSE/);
+  assert.match(activity, /HistoryFailure\.EXCEPTION/);
+  assert.match(activity, /HistoryFailure\.PERSISTENCE/);
+  assert.match(activity, /readHistoryResponseBody\(response\.body\)/);
+  assert.match(activity, /responseBody\?\.let \{ parseHistoryResponse\(it, request\.ownerAgentId, request\.peer\) \}/);
+  assert.match(activity, /historyHttpClient\(client\)/);
+  assert.match(activity, /followRedirects\(false\)/);
+  assert.match(activity, /if \(!persisted\.committed\)/);
+  assert.match(activity, /HistoryAppendStatus\.PERSISTENCE_FAILED/);
+  assert.match(activity, /reportHistoryPersistenceFailureUnlocked/);
+  assert.match(activity, /scheduleHistoryRecoveryUnlocked/);
+  assert.match(activity, /historyState\.status == HistoryStatus.ERROR/);
+  assert.match(activity, /TextButton\(onClick = onRetryHistory\)/);
+  assert.match(activity, /shouldRetryHistoryAfterPeerResolution\([\s\S]*activeHydrationFence/);
+  assert.match(activity, /peerStateEventFence\.reset\(nextGeneration\)/);
   assert.match(activity, /rememberLauncherForActivityResult\(ActivityResultContracts\.GetMultipleContents\(\)\)/);
   assert.match(activity, /imagePicker\.launch\("image\/\*"\)/);
   assert.match(activity, /Icon\(PaperclipIcon, "Attach images", tint = Periwinkle\)/);
   assert.doesNotMatch(activity, /Text\("Attach"\)/);
-  assert.doesNotMatch(activity, /Text\("Paste"\)/);
+  assert.match(activity, /onPaste\(replacePromptTemplateSelection\(draft, preview, selection\)\)/);
   assert.match(activity, /private fun synchronizedHaloPulse\(label: String\): HaloPulse/);
   assert.match(activity, /private fun PulsingDot\(color: Color, pulse: HaloPulse, size: Dp, haloSpread: Dp\)/);
   assert.match(activity, /Box\(Modifier\.size\(size \+ haloSpread \* 2\), contentAlignment = Alignment\.Center\)/);
@@ -795,7 +820,10 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
   assert.match(activity, /contentReceiver\(receiveImages\)/);
   assert.match(activity, /acceptedImageUri\(item\.uri\?\.toString\(\), item\.intent\?\.data\?\.toString\(\), item\.text\?\.toString\(\)\)/);
   assert.match(activity, /JSONObject\(\)\.put\("type", "image"\)\.put\("data_url", image\.dataUrl\)\.put\("name", image\.name\)/);
-  assert.match(activity, /if \(response\.isSuccessful\) \{[\s\S]*drafts\.clearIfUnchanged\(router, recipient, text\)/);
+  assert.match(activity, /if \(response\.isSuccessful\) \{[\s\S]*val applied = applyOutboundEvent\(OutboundDeliveryEvent\.Accepted\([\s\S]*if \(!applied\) return@runOnUiThread[\s\S]*drafts\.clearIfUnchanged\(router, recipient, text\)/);
+  assert.match(activity, /settleAndClearOutboundForIdentityChange\([\s\S]*cancelConnection\(\)[\s\S]*putString\("agent_id", trimmed\)/);
+  assert.match(history, /delivery_messages/);
+  assert.match(activity, /validated\.deliveryMessages\.map[\s\S]*messagesByPeer[\s\S]*delivery_items/);
   assert.match(images, /MAX_IMAGE_ATTACHMENTS = 3/);
   assert.match(images, /MAX_IMAGE_BYTES = 768 \* 1024/);
   assert.match(images, /MAX_IMAGE_INPUT_BYTES = 12 \* 1024 \* 1024/);
@@ -807,7 +835,11 @@ test("Android opts into shared conversations, hydrates by generation, and uses t
 test("Android home renders only router-discovered connected peers", () => {
   const activity = readFileSync(new URL("../app/src/main/java/life/meyers/mecha/MainActivity.kt", import.meta.url), "utf8");
   assert.match(activity, /scheduleAtFixedRate\(60_000, 60_000\)[\s\S]*discoverPeers\(generation\)/);
-  assert.match(activity, /val discovered = buildList \{[\s\S]*peerStatusFromJson\(peer, agent, peers\.firstOrNull \{ it\.id == peer \}\)[\s\S]*\}\n\s*runOnUiThread \{ if \(generation == connectionGeneration\) peers = discovered\.sortedBy \{ it\.id \} \}/);
+  assert.match(activity, /if \(!discoveryResponseWithinBound\(agents\)\) return@use/);
+  assert.match(activity, /val existingById = peers\.associateBy\(PeerStatus::id\)[\s\S]*val discovered = buildList \{/);
+  assert.match(activity, /peerStateEventFence\.beginDiscovery\(generation\)/);
+  assert.match(activity, /!peerStateEventFence\.isCurrentForPeer\(request, current\.id\)/);
+  assert.match(activity, /discovered\.forEach \{ candidate ->[\s\S]*peers = nextPeers\.distinctBy\(PeerStatus::id\)\.sortedBy\(PeerStatus::id\)/);
   assert.match(activity, /private fun receiveAgentActivity\(frame: JSONObject\)/);
   assert.match(activity, /normalizedSubagentSummaries\(source\.optJSONArray\("subagents"\)\)/);
   assert.match(activity, /current\?\.subagents\?\.size == incomingCount/);

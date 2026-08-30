@@ -142,6 +142,10 @@ const deliveryItems = [
     delivery_expires_at: "2030-01-01T00:00:30.000Z",
   },
 ];
+const deliveryMessages = [
+  { id: "message-1", from: "sender", to: "receiver", body: "one", created_at: "2030-01-01T00:00:00.000Z" },
+  { id: "message-2", from: "sender", to: "receiver", body: "two", created_at: "2030-01-01T00:00:01.000Z" },
+];
 
 function baseDeliveryClientFrame(type, extra = {}) {
   return {
@@ -167,10 +171,27 @@ test("delivery_items validate on delivery, injection, ACK, and NACK frames", () 
     attempt_number: 1,
     delivery_expires_at: "2030-01-01T00:00:30.000Z",
     delivery_items: deliveryItems,
+    delivery_messages: deliveryMessages,
   }));
   assert.doesNotThrow(() => validateClientFrame(baseDeliveryClientFrame("injection_requested", { delivery_items: deliveryItems })));
   assert.doesNotThrow(() => validateClientFrame(baseDeliveryClientFrame("ack", { delivery_items: deliveryItems })));
   assert.doesNotThrow(() => validateClientFrame(baseDeliveryClientFrame("nack", { delivery_items: deliveryItems, reason: "injection_failed" })));
+});
+
+test("multi-item delivery frames require matching explicit per-item envelopes", () => {
+  const base = {
+    version: "v1",
+    frame_id: "delivery-frame",
+    type: "message",
+    message: { id: "message-1", from: "sender", to: "receiver", body: "opaque", created_at: "2030-01-01T00:00:00.000Z" },
+    message_incarnation_id: "11111111-1111-4111-8111-111111111111",
+    attempt_number: 1,
+    delivery_expires_at: "2030-01-01T00:00:30.000Z",
+    delivery_items: deliveryItems,
+  };
+  assert.throws(() => validateServerFrame(base), ProtocolValidationError);
+  assert.throws(() => validateServerFrame({ ...base, delivery_messages: [deliveryMessages[0]] }), ProtocolValidationError);
+  assert.doesNotThrow(() => validateServerFrame({ ...base, delivery_messages: deliveryMessages }));
 });
 
 test("malformed delivery_items are rejected on delivery receipts and messages", () => {

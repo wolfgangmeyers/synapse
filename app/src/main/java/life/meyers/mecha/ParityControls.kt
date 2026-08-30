@@ -98,6 +98,46 @@ internal data class CapabilityData(
     val subagentLifecycleV2: Boolean = false,
 )
 
+internal data class RegisteredSession(
+    val requestId: String,
+    val agentId: String,
+    val instanceId: String,
+    val leaseId: String,
+    val effectiveRole: String,
+    val ackConfirmation: String,
+)
+
+internal fun parseRegisteredSession(
+    value: JSONObject,
+    expectedRequestId: String,
+    expectedAgentId: String,
+    expectedInstanceId: String,
+): RegisteredSession? {
+    val allowed = setOf(
+        "version", "frame_id", "type", "request_id", "agent_id", "instance_id", "lease_id",
+        "expires_at", "recovered", "agent_role", "ack_confirmation", "conversation_sync",
+    )
+    val required = allowed - "conversation_sync"
+    if (!value.keys().asSequence().all { it in allowed } || !required.all(value::has)
+        || value.optString("version") != "v1" || value.optString("type") != "registered"
+    ) return null
+    val frameId = value.optString("frame_id")
+    val requestId = value.optString("request_id")
+    val agentId = value.optString("agent_id")
+    val instanceId = value.optString("instance_id")
+    val leaseId = value.optString("lease_id")
+    val role = value.optString("agent_role")
+    val ackConfirmation = value.optString("ack_confirmation")
+    if (!FRAME_ID.matches(frameId) || requestId != expectedRequestId || !FRAME_ID.matches(requestId)
+        || agentId != expectedAgentId || !AGENT_ID.matches(agentId)
+        || instanceId != expectedInstanceId || !FRAME_ID.matches(instanceId)
+        || !FRAME_ID.matches(leaseId) || role != "user_interaction"
+        || ackConfirmation != "correlated_v1"
+        || value.get("recovered") !is Boolean || value.optString("expires_at").isBlank()
+    ) return null
+    return RegisteredSession(requestId, agentId, instanceId, leaseId, role, ackConfirmation)
+}
+
 internal data class PendingControl(
     val controlId: String,
     val requestFrameId: String,

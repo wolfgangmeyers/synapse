@@ -1514,7 +1514,12 @@ export function createAgentRouter({
             : {}),
           attempt_number: delivery.attempt_number,
           delivery_expires_at: delivery.delivery_expires_at,
-          ...((delivery.items?.length ?? 1) > 1 ? { delivery_items: delivery.items } : {}),
+          ...((delivery.items?.length ?? 1) > 1 ? {
+            delivery_items: delivery.items,
+            // Keep the merged top-level message for legacy clients. New clients
+            // can persist these original envelopes without parsing the body.
+            delivery_messages: delivery.messages.map(toEnvelope),
+          } : {}),
         }, currentSession.ackConfirmation === "correlated_v1");
       } catch (error) {
         if (error instanceof LeaseNotActiveError) {

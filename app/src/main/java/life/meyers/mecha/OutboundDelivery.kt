@@ -174,6 +174,87 @@ internal fun enqueueOutboundDelivery(
     )
 }
 
+internal data class OutboundRouterSwitchResult(
+    val state: OutboundReducerState,
+    val persisted: Boolean,
+)
+
+internal data class OutboundIdentityChangeResult(
+    val state: OutboundReducerState,
+    val persisted: Boolean,
+)
+
+/** Settles and durably saves the old owner/router scope before identity changes. */
+internal fun settleOutboundForIdentityChange(
+    state: OutboundReducerState,
+    oldRouter: String,
+    oldOwner: String,
+    oldOwnerInstance: String,
+    persist: (router: String, owner: String, ownerInstance: String, peer: String, messages: List<ChatMessage>) -> Boolean,
+): OutboundIdentityChangeResult {
+    if (oldRouter.isBlank()) return OutboundIdentityChangeResult(OutboundReducerState(), true)
+    val settled = reduceOutboundDelivery(state, OutboundDeliveryEvent.ConnectionChanged)
+    // Identity changes clear the in-memory scope. Rewrite every populated peer so an
+    // additive row whose earlier commit failed cannot disappear with that scope.
+    val peersToPersist = settled.messagesByPeer.keys.filter { peer ->
+        settled.messagesByPeer[peer].orEmpty().isNotEmpty()
+    }
+    val persisted = peersToPersist.all { peer ->
+        persist(oldRouter, oldOwner, oldOwnerInstance, peer, settled.messagesByPeer[peer].orEmpty())
+    }
+    return if (persisted) {
+        OutboundIdentityChangeResult(OutboundReducerState(), true)
+    } else {
+        // Keep the old scoped state so a failed local commit cannot turn into data loss.
+        OutboundIdentityChangeResult(state, false)
+    }
+}
+
+/** Settles the old router scope before the caller changes its active router. */
+internal fun settleOutboundForRouterSwitch(
+    state: OutboundReducerState,
+    oldRouter: String,
+    persist: (router: String, peer: String, messages: List<ChatMessage>) -> Boolean,
+): OutboundRouterSwitchResult {
+    if (oldRouter.isBlank()) return OutboundRouterSwitchResult(OutboundReducerState(), true)
+    val settled = reduceOutboundDelivery(state, OutboundDeliveryEvent.ConnectionChanged)
+    val peersToPersist = settled.messagesByPeer.keys.filter { peer ->
+        settled.messagesByPeer[peer] != state.messagesByPeer[peer]
+    }
+    val persisted = peersToPersist.all { peer ->
+        persist(oldRouter, peer, settled.messagesByPeer[peer].orEmpty())
+    }
+    return if (persisted) {
+        OutboundRouterSwitchResult(OutboundReducerState(), true)
+    } else {
+        // Keep the old scoped state so a failed local commit cannot turn into data loss.
+        OutboundRouterSwitchResult(state, false)
+    }
+}
+
+internal data class OptimisticSendResult(
+    val state: OutboundReducerState,
+    val persisted: Boolean,
+)
+
+/** Persist the optimistic row before the caller is allowed to issue HTTP. */
+internal fun persistOptimisticSend(
+    state: OutboundReducerState,
+    operation: OutboundOperation,
+    persist: (OutboundReducerState) -> Boolean,
+): OptimisticSendResult {
+    val next = enqueueOutboundDelivery(state, operation)
+    if (next == state) return OptimisticSendResult(state, false)
+    return if (persist(next)) OptimisticSendResult(next, true) else OptimisticSendResult(state, false)
+}
+
+/** A draft may be cleared only after this exact accepted event changes pending state. */
+internal fun acceptedOutboundEventApplied(
+    state: OutboundReducerState,
+    event: OutboundDeliveryEvent,
+): Boolean = event is OutboundDeliveryEvent.Accepted
+    && reduceOutboundDelivery(state, event) != state
+
 internal fun sameOutboundScope(left: OutboundScope, right: OutboundScope): Boolean =
     left.router == right.router
         && left.connectionGeneration == right.connectionGeneration

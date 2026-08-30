@@ -18,12 +18,23 @@ internal data class CapturedDelivery(
     val targetInstanceId: String?,
     val message: ChatMessage,
     val attemptNumber: Int,
+    /** Every original message represented by the delivery frame, including the first one. */
+    val messages: List<ChatMessage> = listOf(message),
+    val deliveryItems: List<ValidatedDeliveryItem> = emptyList(),
+    val messagesByPeer: Map<String, List<ChatMessage>> = mapOf(peer to messages),
+    val targetInstanceIdsByPeer: Map<String, String?> = mapOf(peer to targetInstanceId),
+)
+
+internal data class DeliveredNotification(
+    val peer: String,
+    val message: ChatMessage,
 )
 
 /** Proof returned by the same retention pass that wrote local history. */
 internal data class DeliveryPersistenceProof(
     val committed: Boolean,
     val retainedMessageKeys: Set<String> = emptySet(),
+    val notifications: List<DeliveredNotification> = emptyList(),
 )
 
 internal data class SettledDelivery(
@@ -31,6 +42,9 @@ internal data class SettledDelivery(
     val peer: String,
     val messageId: String,
     val attemptNumber: Int,
+    val messages: List<ChatMessage> = emptyList(),
+    val deliveryItems: List<ValidatedDeliveryItem> = emptyList(),
+    val notifications: List<DeliveredNotification> = emptyList(),
 )
 
 /**
@@ -77,7 +91,15 @@ internal class ConversationDeliveryCoordinator(
     ): SettledDelivery? = stateLock.withLock {
         if (currentConnection != delivery.connection) return@withLock null
         val proof = persist(delivery)
-        if (!proof.committed || delivery.message.key !in proof.retainedMessageKeys) return@withLock null
-        SettledDelivery(delivery.connection, delivery.peer, delivery.message.id, delivery.attemptNumber)
+        if (!proof.committed || delivery.messages.any { it.key !in proof.retainedMessageKeys }) return@withLock null
+        SettledDelivery(
+            connection = delivery.connection,
+            peer = delivery.peer,
+            messageId = delivery.message.id,
+            attemptNumber = delivery.attemptNumber,
+            messages = delivery.messages,
+            deliveryItems = delivery.deliveryItems,
+            notifications = proof.notifications,
+        )
     }
 }

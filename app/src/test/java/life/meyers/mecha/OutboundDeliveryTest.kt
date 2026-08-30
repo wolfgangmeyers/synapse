@@ -64,6 +64,21 @@ class OutboundDeliveryTest {
     }
 
     @Test
+    fun lateHttpSuccessCannotClearDraftAfterThePendingOperationWasRejected() {
+        val operation = operation("message-1", scope)
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation)
+        val staleSuccess = OutboundDeliveryEvent.Accepted(
+            "message-1",
+            "message-1",
+            scope.copy(connectionGeneration = scope.connectionGeneration + 1),
+            operation.message.copy(incarnationId = "router-incarnation"),
+        )
+
+        assertFalse(acceptedOutboundEventApplied(pending, staleSuccess))
+        assertEquals(pending, reduceOutboundDelivery(pending, staleSuccess))
+    }
+
+    @Test
     fun matchingHistoryEchoSettlesBeforeHttpAndReorderedHttpIsIgnored() {
         val operation = operation("message-1", scope)
         val pending = enqueueOutboundDelivery(OutboundReducerState(), operation)
@@ -108,6 +123,41 @@ class OutboundDeliveryTest {
             assertEquals(pending, result)
         }
         assertEquals(OutboundDeliveryStatus.PENDING, pending.messagesByPeer["peer"]!!.single().deliveryStatus)
+    }
+
+    @Test
+    fun identityChangePersistsSettledRowsUnderTheOldOwnerScopeBeforeClearing() {
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation("message-1", scope))
+        val persisted = mutableListOf<List<String>>()
+        val result = settleOutboundForIdentityChange(
+            pending,
+            oldRouter = "router-old",
+            oldOwner = "old-owner",
+            oldOwnerInstance = "old-instance",
+        ) { router, owner, instance, peer, messages ->
+            persisted += listOf(router, owner, instance, peer, messages.single().id, messages.single().deliveryStatus.name)
+            true
+        }
+
+        assertTrue(result.persisted)
+        assertTrue(result.state.messagesByPeer.isEmpty())
+        assertTrue(result.state.pending.isEmpty())
+        assertEquals(listOf("router-old", "old-owner", "old-instance", "peer", "message-1", "UNCERTAIN"), persisted.single())
+    }
+
+    @Test
+    fun identityChangeKeepsOldScopedStateWhenPersistenceFails() {
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation("message-1", scope))
+
+        val result = settleOutboundForIdentityChange(
+            pending,
+            oldRouter = "router-old",
+            oldOwner = "old-owner",
+            oldOwnerInstance = "old-instance",
+        ) { _, _, _, _, _ -> false }
+
+        assertFalse(result.persisted)
+        assertEquals(pending, result.state)
     }
 
     @Test
