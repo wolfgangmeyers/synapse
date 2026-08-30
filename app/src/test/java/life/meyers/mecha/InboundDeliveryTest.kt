@@ -13,6 +13,7 @@ class InboundDeliveryTest {
     @Test
     fun persistsAndDeduplicatesBeforeSendingReceipts() {
         val events = mutableListOf<String>()
+        val receipts = mutableListOf<JSONObject>()
         var stored = emptyList<ChatMessage>()
         val frame = deliveryFrame("message-1")
         val settled = settleIncomingDelivery(
@@ -26,13 +27,18 @@ class InboundDeliveryTest {
                 stored = mergeConversationMessages(stored, listOf(message))
                 true
             },
-            sendInjection = { events += "injection" },
-            sendAck = { events += "ack" },
+            sendInjection = { events += "injection"; receipts += it },
+            sendAck = { events += "ack"; receipts += it },
         )
 
         assertTrue(settled)
         assertEquals(listOf("persist:sender", "injection", "ack"), events)
         assertEquals(1, stored.size)
+        assertEquals(2, receipts.size)
+        receipts.forEach { receipt ->
+            assertEquals("550e8400-e29b-41d4-a716-446655440000", receipt.getString("message_incarnation_id"))
+            assertEquals(1, receipt.getJSONArray("delivery_items").length())
+        }
 
         settleIncomingDelivery(
             frame = frame,
@@ -188,6 +194,76 @@ class InboundDeliveryTest {
 
         assertFalse(settled)
         assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun legacyRegistrationWithExplicitTwoItemBatchEchoesExactItemsWithoutIncarnation() {
+        val registration = parseRegisteredSession(
+            JSONObject()
+                .put("version", "v1")
+                .put("frame_id", "registered-legacy")
+                .put("type", "registered")
+                .put("request_id", "request-legacy")
+                .put("agent_id", "android")
+                .put("instance_id", "instance-1")
+                .put("lease_id", "lease-1")
+                .put("expires_at", "2026-08-29T00:00:30.000Z")
+                .put("recovered", false)
+                .put("agent_role", "user_interaction"),
+            "request-legacy",
+            "android",
+            "instance-1",
+        )
+        assertNotNull(registration)
+        val correlatedAck = usesCorrelatedAck(registration?.ackConfirmation)
+        assertFalse(correlatedAck)
+
+        val first = deliveryItem("message-1", "550e8400-e29b-41d4-a716-446655440000", 2)
+        val second = deliveryItem("message-2", "550e8400-e29b-41d4-a716-446655440001", 2)
+        val frame = deliveryFrame("message-1").apply {
+            remove("message_incarnation_id")
+            getJSONObject("message").put("body", "Mailbox message batch\\n\\none\\n\\n---\\n\\ntwo")
+            put("delivery_items", org.json.JSONArray().put(first).put(second))
+            put("delivery_messages", org.json.JSONArray().put(
+                JSONObject()
+                    .put("id", "message-1")
+                    .put("from", "sender")
+                    .put("to", "android")
+                    .put("body", "one")
+                    .put("created_at", "2026-08-29T00:00:00.000Z"),
+            ).put(
+                JSONObject()
+                    .put("id", "message-2")
+                    .put("from", "sender")
+                    .put("to", "android")
+                    .put("body", "two")
+                    .put("created_at", "2026-08-29T00:00:01.000Z"),
+            ))
+        }
+        val receipts = mutableListOf<Pair<String, JSONObject>>()
+        var stored = emptyList<ChatMessage>()
+
+        assertTrue(settleIncomingDelivery(
+            frame = frame,
+            agentId = "android",
+            instanceId = "instance-1",
+            leaseId = "lease-1",
+            parseMessage = ::parse,
+            persistMessage = { peer, message ->
+                stored = mergeConversationMessages(stored, listOf(message))
+                peer == "sender"
+            },
+            sendInjection = { receipts += "injection_requested" to it },
+            sendAck = { receipts += "ack" to it },
+            correlatedAck = correlatedAck,
+        ))
+
+        assertEquals(listOf("message-1", "message-2"), stored.map(ChatMessage::id))
+        assertEquals(listOf("injection_requested", "ack"), receipts.map { it.first })
+        receipts.forEach { (_, receipt) ->
+            assertEquals(org.json.JSONArray().put(first).put(second).toString(), receipt.getJSONArray("delivery_items").toString())
+            assertFalse(receipt.has("message_incarnation_id"))
+        }
     }
 
     @Test

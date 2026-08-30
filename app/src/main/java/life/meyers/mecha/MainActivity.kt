@@ -351,6 +351,33 @@ internal data class ChatMessage(
     val key get() = "$id\u001f$incarnationId"
 }
 
+internal fun deliveryReceiptFrame(
+    type: String,
+    agentId: String,
+    instanceId: String,
+    leaseId: String,
+    deliveryItems: List<ValidatedDeliveryItem>,
+    correlatedAck: Boolean,
+    frameId: String = UUID.randomUUID().toString(),
+): JSONObject {
+    val first = deliveryItems.first()
+    return JSONObject()
+        .put("version", "v1")
+        .put("frame_id", frameId)
+        .put("type", type)
+        .put("agent_id", agentId)
+        .put("instance_id", instanceId)
+        .put("lease_id", leaseId)
+        .put("message_id", first.messageId)
+        .put("attempt_number", first.attemptNumber)
+        .apply {
+            if (correlatedAck) put("message_incarnation_id", first.messageIncarnationId)
+            if (correlatedAck || deliveryItems.size > 1) {
+                put("delivery_items", JSONArray(deliveryItems.map(::deliveryItemJson)))
+            }
+        }
+}
+
 /** Persists every original delivery item before either router receipt is sent. */
 internal fun settleIncomingDelivery(
     frame: JSONObject,
@@ -386,25 +413,13 @@ internal fun settleIncomingDelivery(
     messages.forEach { message ->
         if (!persistMessage(message.sender, message)) return false
     }
-    val first = validated.deliveryItems.first()
-    fun receipt(type: String) = JSONObject()
-        .put("version", "v1")
-        .put("frame_id", UUID.randomUUID().toString())
-        .put("type", type)
-        .put("agent_id", agentId)
-        .put("instance_id", instanceId)
-        .put("lease_id", leaseId)
-        .put("message_id", first.messageId)
-        .put("attempt_number", first.attemptNumber)
-        .apply {
-            if (correlatedAck) {
-                put("message_incarnation_id", first.messageIncarnationId)
-                put("delivery_items", JSONArray(validated.deliveryItems.map(::deliveryItemJson)))
-            }
-        }
     // Receipt transport is best effort after persistence. A failed send must not undo saved history.
-    runCatching { sendInjection(receipt("injection_requested")) }
-    runCatching { sendAck(receipt("ack")) }
+    runCatching {
+        sendInjection(deliveryReceiptFrame("injection_requested", agentId, instanceId, leaseId, validated.deliveryItems, correlatedAck))
+    }
+    runCatching {
+        sendAck(deliveryReceiptFrame("ack", agentId, instanceId, leaseId, validated.deliveryItems, correlatedAck))
+    }
     return true
 }
 
@@ -1818,6 +1833,7 @@ class MainActivity : ComponentActivity() {
         // connection identity returned by it for both receipts.
         val items = settled.deliveryItems
         if (items.isEmpty() || settled.messages.size != items.size) return
+        val first = items.first()
         val ledgerKeys = if (settled.correlatedAck) items.mapIndexed { index, item ->
             DeliveryLedgerKey(
                 router = settled.connection.router,
@@ -1828,38 +1844,26 @@ class MainActivity : ComponentActivity() {
                 messageIncarnationId = item.messageIncarnationId,
             )
         } else emptyList()
-        val first = items.first()
-        val deliveryItems = JSONArray(items.map(::deliveryItemJson))
-        val injection = JSONObject()
-            .put("version", "v1")
-            .put("frame_id", UUID.randomUUID().toString())
-            .put("type", "injection_requested")
-            .put("agent_id", settled.connection.agentId)
-            .put("instance_id", settled.connection.instanceId)
-            .put("lease_id", settled.connection.leaseId)
-            .put("message_id", first.messageId)
-            .put("attempt_number", first.attemptNumber)
-            .apply {
-                if (settled.correlatedAck) put("delivery_items", deliveryItems)
-            }
+        val injection = deliveryReceiptFrame(
+            type = "injection_requested",
+            agentId = settled.connection.agentId,
+            instanceId = settled.connection.instanceId,
+            leaseId = settled.connection.leaseId,
+            deliveryItems = items,
+            correlatedAck = settled.correlatedAck,
+        )
         runCatching { webSocket.send(injection.toString()) }
 
         val ackRequestId = UUID.randomUUID().toString()
-        val ack = JSONObject()
-            .put("version", "v1")
-            .put("frame_id", ackRequestId)
-            .put("type", "ack")
-            .put("agent_id", settled.connection.agentId)
-            .put("instance_id", settled.connection.instanceId)
-            .put("lease_id", settled.connection.leaseId)
-            .put("message_id", first.messageId)
-            .put("attempt_number", first.attemptNumber)
-            .apply {
-                if (settled.correlatedAck) {
-                    put("message_incarnation_id", first.messageIncarnationId)
-                    put("delivery_items", deliveryItems)
-                }
-            }
+        val ack = deliveryReceiptFrame(
+            type = "ack",
+            agentId = settled.connection.agentId,
+            instanceId = settled.connection.instanceId,
+            leaseId = settled.connection.leaseId,
+            deliveryItems = items,
+            correlatedAck = settled.correlatedAck,
+            frameId = ackRequestId,
+        )
         historyLock.withLock {
             if (settled.connection == DeliveryConnectionIdentity(
                     activeRouter,
