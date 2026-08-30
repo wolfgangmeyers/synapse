@@ -1,7 +1,10 @@
 package life.meyers.mecha
 
 import org.junit.Assert.assertEquals
+import org.json.JSONObject
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -11,6 +14,57 @@ private val GOAL_CONTROL_FRAME_FIELDS = setOf("version", "frame_id", "type", "ag
 private val GOAL_CONTROL_SETTINGS_FIELDS = setOf("goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms")
 
 class ParityControlsTest {
+    @Test
+    fun registeredResponseWithoutAckCapabilityUsesLegacySettlement() {
+        val session = parseRegisteredSession(registeredFrame(), "request-1", "android", "instance-1")
+
+        assertNotNull(session)
+        assertNull(session?.ackConfirmation)
+        assertFalse(usesCorrelatedAck(session?.ackConfirmation))
+        assertTrue(registeredSessionMatchesLease(session, "lease-1"))
+    }
+
+    @Test
+    fun registeredResponseWithSupportedAckCapabilityEnablesCorrelatedSettlement() {
+        val session = parseRegisteredSession(
+            registeredFrame().put("ack_confirmation", CORRELATED_ACK_CONFIRMATION),
+            "request-1",
+            "android",
+            "instance-1",
+        )
+
+        assertEquals(CORRELATED_ACK_CONFIRMATION, session?.ackConfirmation)
+        assertTrue(usesCorrelatedAck(session?.ackConfirmation))
+        assertTrue(registeredSessionMatchesLease(session, "lease-1"))
+    }
+
+    @Test
+    fun registeredResponseWithUnknownAckCapabilityRemainsConnectedWithLegacySettlement() {
+        val session = parseRegisteredSession(
+            registeredFrame().put("ack_confirmation", "future_v2"),
+            "request-1",
+            "android",
+            "instance-1",
+        )
+
+        assertEquals("future_v2", session?.ackConfirmation)
+        assertFalse(usesCorrelatedAck(session?.ackConfirmation))
+        assertTrue(registeredSessionMatchesLease(session, "lease-1"))
+        assertFalse(registeredSessionMatchesLease(session, "other-lease"))
+    }
+
+    private fun registeredFrame() = JSONObject()
+        .put("version", "v1")
+        .put("frame_id", "registered-1")
+        .put("type", "registered")
+        .put("request_id", "request-1")
+        .put("agent_id", "android")
+        .put("instance_id", "instance-1")
+        .put("lease_id", "lease-1")
+        .put("expires_at", "2026-08-29T00:00:30.000Z")
+        .put("recovered", false)
+        .put("agent_role", "user_interaction")
+
     private val draft = GoalEditorDraft(
         enabled = true,
         goal = "Ship the Android slice",

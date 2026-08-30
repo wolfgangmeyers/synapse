@@ -744,13 +744,15 @@ class MainActivity : ComponentActivity() {
                                 false
                             } else if (currentLease.isBlank()) {
                                 leaseId = registered.leaseId
-                                negotiatedAckConfirmation = registered.ackConfirmation
+                                negotiatedAckConfirmation = registered.ackConfirmation.orEmpty()
                                 pendingLeaseRenewalRequestId = null
                                 deliveryCoordinator.register(generation, registered.leaseId)
                             } else {
-                                val renewalAccepted = registered.leaseId == currentLease
-                                    && registered.ackConfirmation == negotiatedAckConfirmation
-                                if (renewalAccepted) pendingLeaseRenewalRequestId = null
+                                val renewalAccepted = registeredSessionMatchesLease(registered, currentLease)
+                                if (renewalAccepted) {
+                                    negotiatedAckConfirmation = registered.ackConfirmation.orEmpty()
+                                    pendingLeaseRenewalRequestId = null
+                                }
                                 renewalAccepted
                             }
                         }
@@ -1782,7 +1784,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun settleDelivery(webSocket: WebSocket, frame: JSONObject, callbackGeneration: Int) {
-        if (negotiatedAckConfirmation != "correlated_v1") return
+        val correlatedAck = usesCorrelatedAck(negotiatedAckConfirmation)
         val captured = deliveryCoordinator.capture(callbackGeneration) { connection ->
             captureDeliveryForSettlement(
                 frame = frame,
@@ -1843,7 +1845,7 @@ class MainActivity : ComponentActivity() {
                     instanceId,
                     connectionGeneration,
                     leaseId,
-                ) && negotiatedAckConfirmation == "correlated_v1"
+                ) && correlatedAck
             ) {
                 pendingDeliveryAcknowledgements[ackRequestId] = PendingDeliveryAcknowledgement(
                     ledgerKeys,
@@ -1853,11 +1855,25 @@ class MainActivity : ComponentActivity() {
             }
         }
         val ackSent = runCatching { webSocket.send(ack.toString()) }.getOrDefault(false)
-        if (!ackSent) historyLock.withLock { pendingDeliveryAcknowledgements.remove(ackRequestId) }
+        if (!ackSent) {
+            if (correlatedAck) historyLock.withLock { pendingDeliveryAcknowledgements.remove(ackRequestId) }
+        } else if (!correlatedAck) {
+            historyLock.withLock {
+                if (settled.connection == DeliveryConnectionIdentity(
+                        activeRouter,
+                        agentId,
+                        instanceId,
+                        connectionGeneration,
+                        leaseId,
+                    )
+                ) {
+                    ledgerKeys.forEach { deliveryReplayLedger.markAcknowledged(it) }
+                }
+            }
+        }
     }
 
     private fun receiveDeliveryAcknowledged(frame: JSONObject, callbackGeneration: Int) {
-        if (negotiatedAckConfirmation != "correlated_v1") return
         val acknowledgement = parseDeliveryAcknowledgedFrame(frame) ?: return
         historyLock.withLock {
             val pending = pendingDeliveryAcknowledgements[acknowledgement.requestId] ?: return@withLock
