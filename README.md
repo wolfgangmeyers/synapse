@@ -40,7 +40,7 @@ Use the managed Python tools first. When a model-session tool is unavailable, th
 | `.claude/skills/supervisor/tools/cron-bootstrap.sh` | Wrap cron jobs that need the user's login environment. | Sources shell profiles and, when present, reads the local Claude OAuth token file into the child process. Use only from cron; never print or copy the token. |
 | `.claude/skills/watchdog/tools/watchdog-agent.sh` | Run the optional Codex watchdog wrapper. | Keeps state, logs, locks, and work files under `MECHA_STATE_DIR` (default `~/.mecha-developer`) and validates paths. It is not a worker launcher. |
 | `.claude/skills/supervisor/tools/hooks/claude-activity.sh` | Claude Code activity hook used by the sidecar. | Requires `TMUX_PANE` and a live sidecar marker. It must remain fast and exit successfully; it is not a launcher or mailbox sender. |
-| `tools/run_router.sh` | Start this checkout's local Mailbox V2 router with its configured database/log paths. | Inspect the existing router and paths before running. Keep the router loopback-only and do not point it at an unknown or shared database. |
+| `tools/run_router.sh` | Build and start this checkout's Go Mailbox V2 router with its configured database/log paths. | Inspect the existing router and paths before running. Keep the router loopback-only and do not point it at an unknown or shared database. Use `tools/run_router.sh --node` only for an explicit Node rollback. |
 
 If the installed `~/.claude` link is stale, invoke the canonical checkout path and repair installation separately. Never put credentials, tokens, or auth state in commands, logs, task files, or documentation.
 

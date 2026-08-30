@@ -6,7 +6,8 @@
     "http": "harness/router.js",
     "protocol": "protocol/v1/schema.json",
     "database": ["harness/db.js", "harness/migrations/001_initial.sql", "harness/migrations/020_prompt_templates.sql"],
-    "launcher": "tools/run_router.mjs"
+    "launcher": "tools/run_router.sh",
+    "node_rollback_launcher": "tools/run_router.mjs"
   },
   "cors": {
     "status": "verified",

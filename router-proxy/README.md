@@ -4,15 +4,32 @@ Transparent HTTP and WebSocket reverse proxy for the Mailbox V2 router. It expos
 
 See `AGENTS.md` for how this fits into the mecha-developer system.
 
-## Build
+## Build and run the Mailbox router
+
+The supported local launcher builds and runs the Go Mailbox router:
+
+```bash
+tools/run_router.sh
+```
+
+The equivalent Make command is:
+
+```bash
+make -C router-proxy run-router
+```
+
+The launcher uses `~/.mecha-developer/router.sqlite`, `~/.mecha-developer/router.jsonl`, `127.0.0.1`, port `8765`, and a 4096-character batch limit by default. Set `MECHA_ROUTER_DATABASE`, `MECHA_ROUTER_LOG`, `MECHA_ROUTER_HOST`, `MECHA_ROUTER_PORT`, or `MECHA_ROUTER_MAX_BATCH_CHARS` to override them.
+
+The Node implementation remains available as an explicit rollback path:
+
+```bash
+tools/run_router.sh --node
+```
+
+## Build and run the proxy
 
 ```bash
 go build -o router-proxy ./router-proxy
-```
-
-## Run
-
-```bash
 go run ./router-proxy \
   --upstream-host 127.0.0.1 \
   --upstream-port 8765 \
@@ -37,7 +54,7 @@ MECHA_ROUTER_PROXY_READY listen=http://0.0.0.0:9876 upstream=http://127.0.0.1:87
 Terminal 1 — router:
 
 ```bash
-node tools/run_router.mjs --database ~/.mecha-developer/router.sqlite
+tools/run_router.sh
 ```
 
 Terminal 2 — proxy:
