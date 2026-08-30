@@ -109,6 +109,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.Dialog
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -139,6 +140,7 @@ private const val MESSAGE_NOTIFICATION_CHANNEL = "messages"
 private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1
 // Keeps durable unsent drafts bounded per router.
 private const val MAX_DRAFTS_PER_ROUTER = 50
+internal const val MAX_DISCOVERED_PEERS = 1_000
 private val AGENT_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]*")
 private val ROUTER_ENDPOINT = Regex("^([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)(?::([0-9]{1,5}))?$")
 private val Ink = Color(0xFF0B0D14)
@@ -178,6 +180,24 @@ internal data class PeerStatus(
 ) {
     val active get() = activityState == "active"
 }
+
+private data class DiscoveredPeer(
+    val id: String,
+    val source: JSONObject,
+    val instanceId: String,
+    val observedAtMs: Long?,
+)
+
+private data class PendingDeliveryAcknowledgement(
+    val keys: List<DeliveryLedgerKey>,
+    val attemptNumber: Int,
+    val connection: DeliveryConnectionIdentity,
+)
+
+private data class StoredHistoryRead(
+    val messages: List<ChatMessage>,
+    val migrated: Boolean,
+)
 
 internal data class ReminderSummary(
     val id: String,
@@ -331,11 +351,7 @@ internal data class ChatMessage(
     val key get() = "$id\u001f$incarnationId"
 }
 
-/** Persists a delivered message before either router receipt is sent.
- *
- * The persistence callback must return false when the normal history bounds reject the
- * incoming row. In that case the delivery remains unacknowledged for router retry.
- */
+/** Persists every original delivery item before either router receipt is sent. */
 internal fun settleIncomingDelivery(
     frame: JSONObject,
     agentId: String,
@@ -346,10 +362,26 @@ internal fun settleIncomingDelivery(
     sendInjection: (JSONObject) -> Unit,
     sendAck: (JSONObject) -> Unit,
 ): Boolean {
-    val payload = frame.optJSONObject("message") ?: return false
-    val message = runCatching { parseMessage(payload) }.getOrNull() ?: return false
-    val peer = if (message.sender == agentId) payload.optString("to") else message.sender
-    if (peer.isBlank() || !persistMessage(peer, message)) return false
+    val validated = validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) ?: return false
+    val messages = validated.deliveryMessages.map { deliveryMessage ->
+        val item = deliveryMessage.item
+        val payload = deliveryMessage.payload
+        if (!isInboundDeliveryForAgent(payload.getString("from"), payload.getString("to"), agentId)) return false
+        val message = runCatching { parseMessage(payload) }.getOrNull()?.copy(
+            id = item.messageId,
+            incarnationId = item.messageIncarnationId,
+        ) ?: return false
+        if (message.id != item.messageId || message.sender != payload.getString("from")
+            || !isInboundDeliveryForAgent(message.sender, message.recipient, agentId)
+        ) return false
+        message
+    }
+    // A batch is retryable until every original envelope has been accepted locally.
+    if (messages.size != validated.deliveryItems.size) return false
+    messages.forEach { message ->
+        if (!persistMessage(message.sender, message)) return false
+    }
+    val first = validated.deliveryItems.first()
     fun receipt(type: String) = JSONObject()
         .put("version", "v1")
         .put("frame_id", UUID.randomUUID().toString())
@@ -357,13 +389,68 @@ internal fun settleIncomingDelivery(
         .put("agent_id", agentId)
         .put("instance_id", instanceId)
         .put("lease_id", leaseId)
-        .put("message_id", message.id)
-        .put("attempt_number", frame.optInt("attempt_number", 1))
+        .put("message_id", first.messageId)
+        .put("message_incarnation_id", first.messageIncarnationId)
+        .put("attempt_number", first.attemptNumber)
+        .put("delivery_items", JSONArray(validated.deliveryItems.map(::deliveryItemJson)))
     // Receipt transport is best effort after persistence. A failed send must not undo saved history.
     runCatching { sendInjection(receipt("injection_requested")) }
     runCatching { sendAck(receipt("ack")) }
     return true
 }
+
+internal fun captureDeliveryForSettlement(
+    frame: JSONObject,
+    connection: DeliveryConnectionIdentity,
+    parseMessage: (ValidatedLiveMessage, String, String) -> ChatMessage?,
+    targetInstanceId: (String) -> String?,
+): CapturedDelivery? {
+    val validated = validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) ?: return null
+    val messages = validated.deliveryMessages.map { deliveryMessage ->
+        val item = deliveryMessage.item
+        val payload = deliveryMessage.payload
+        if (!isInboundDeliveryForAgent(
+                payload.getString("from"),
+                payload.getString("to"),
+                connection.agentId,
+            )
+        ) return null
+        val message = parseMessage(
+            validated.copy(
+                payload = payload,
+                incarnationId = item.messageIncarnationId,
+                attemptNumber = item.attemptNumber,
+                deliveryItems = listOf(item),
+                deliveryMessages = listOf(deliveryMessage),
+            ),
+            connection.router,
+            connection.agentId,
+        ) ?: return null
+        if (message.id != item.messageId || message.sender != payload.getString("from")
+            || !isInboundDeliveryForAgent(message.sender, message.recipient, connection.agentId)
+        ) return null
+        message
+    }
+    if (messages.size != validated.deliveryItems.size) return null
+    val peers = messages.map { conversationPeerForMessage(it, connection.agentId) ?: return null }.distinct()
+    return CapturedDelivery(
+        connection = connection,
+        peer = peers.first(),
+        targetInstanceId = targetInstanceId(peers.first()),
+        message = messages.first(),
+        attemptNumber = validated.deliveryItems.first().attemptNumber,
+        messages = messages,
+        deliveryItems = validated.deliveryItems,
+        messagesByPeer = messages.groupBy { conversationPeerForMessage(it, connection.agentId)!! },
+        targetInstanceIdsByPeer = peers.associateWith(targetInstanceId),
+    )
+}
+
+private fun deliveryItemJson(item: ValidatedDeliveryItem): JSONObject = JSONObject()
+    .put("message_id", item.messageId)
+    .put("message_incarnation_id", item.messageIncarnationId)
+    .put("attempt_number", item.attemptNumber)
+    .put("delivery_expires_at", item.deliveryExpiresAt)
 
 internal data class RouterConfig(
     val alias: String,
@@ -415,13 +502,16 @@ class MainActivity : ComponentActivity() {
     private val imageLoader = RemoteImageLoader(OkHttpImageFetcher(client))
     private val historyLock = ConversationStateLock()
     private val deliveryCoordinator = ConversationDeliveryCoordinator(historyLock)
+    private lateinit var deliveryReplayLedger: DeliveryReplayLedger
+    private val pendingDeliveryAcknowledgements = mutableMapOf<String, PendingDeliveryAcknowledgement>()
     private lateinit var instanceId: String
     private lateinit var drafts: DraftStore
     private var socket: WebSocket? = null
     private var leaseTimer: Timer? = null
     private var leaseId = ""
+    private var negotiatedAckConfirmation = ""
+    private var pendingLeaseRenewalRequestId: String? = null
     private var connectionGeneration = 0
-    private var peerDiscoveryRequest = 0
     private var lifecycleEnabled = false
     private var lifecycleVersion = 0L
     private var lifecycleRouter = ""
@@ -461,8 +551,12 @@ class MainActivity : ComponentActivity() {
     private val pendingPromptRequests = mutableMapOf<String, PendingPromptRequest>()
     private var reminders by mutableStateOf(emptyList<ReminderSummary>())
     private var reminderUiState by mutableStateOf(ReminderUiState())
+    private var historyUiState by mutableStateOf(HistoryUiState())
     private var hydrationRequestSerial = 0L
     private var activeHydrationFence: HistoryHydrationFence? = null
+    private val peerStateEventFence = PeerStateEventFence()
+    private val historyRecoveryTasks = mutableMapOf<String, Runnable>()
+    private val historyRecoveryAttempts = mutableMapOf<String, Int>()
     private var reminderLocks by mutableStateOf(emptyMap<String, Boolean>())
     private var reminderRefreshSerial = 0
     private val pendingReminderCrud = LinkedHashMap<String, PendingReminderCrud>()
@@ -472,6 +566,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val preferences = prefs()
         drafts = DraftStore(preferences)
+        deliveryReplayLedger = DeliveryReplayLedger(preferences)
         instanceId = preferences.getString("instance_id", null)
             ?: UUID.randomUUID().toString().also { preferences.edit().putString("instance_id", it).apply() }
         agentId = preferences.getString("agent_id", null)
@@ -595,9 +690,13 @@ class MainActivity : ComponentActivity() {
         val generation = historyLock.withLock {
             val nextGeneration = connectionGeneration + 1
             connectionGeneration = nextGeneration
+            peerStateEventFence.reset(nextGeneration)
             lifecycleEnabled = false
             lifecycleRouter = router
             leaseId = ""
+            negotiatedAckConfirmation = ""
+            pendingLeaseRenewalRequestId = null
+            pendingDeliveryAcknowledgements.clear()
             activeHydrationFence = null
             deliveryCoordinator.begin(
                 DeliveryConnectionIdentity(router, agentId, instanceId, nextGeneration, ""),
@@ -605,13 +704,14 @@ class MainActivity : ComponentActivity() {
             nextGeneration
         }
         connection = "Connecting to your agents…"
+        val registrationRequestId = UUID.randomUUID().toString()
         socket = client.newWebSocket(Request.Builder().url(routerWs()).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (generation != connectionGeneration) return
                 webSocket.send(
                     JSONObject()
                         .put("version", "v1")
-                        .put("frame_id", UUID.randomUUID().toString())
+                        .put("frame_id", registrationRequestId)
                         .put("type", "register")
                         .put("agent_id", agentId)
                         .put("agent_role", "user_interaction")
@@ -619,6 +719,7 @@ class MainActivity : ComponentActivity() {
                         .put("client_type", "android")
                         .put("ack_confirmation", "correlated_v1")
                         .put("conversation_sync", "v1")
+                        .put("delivery_receipts", "delivery_items_v1")
                         .toString(),
                 )
             }
@@ -633,27 +734,50 @@ class MainActivity : ComponentActivity() {
                 }
                 when (frame.optString("type")) {
                     "registered" -> {
-                        val registeredLease = frame.optString("lease_id")
-                        val accepted = historyLock.withLock {
-                            if (generation != connectionGeneration || activeRouter != router || registeredLease.isBlank()) {
+                        val currentLease = historyLock.withLock { leaseId }
+                        val expectedRequestId = if (currentLease.isBlank()) registrationRequestId else pendingLeaseRenewalRequestId
+                        val registered = expectedRequestId?.let {
+                            parseRegisteredSession(frame, it, agentId, instanceId)
+                        }
+                        val accepted = registered != null && historyLock.withLock {
+                            if (generation != connectionGeneration || activeRouter != router) {
                                 false
+                            } else if (currentLease.isBlank()) {
+                                leaseId = registered.leaseId
+                                negotiatedAckConfirmation = registered.ackConfirmation
+                                pendingLeaseRenewalRequestId = null
+                                deliveryCoordinator.register(generation, registered.leaseId)
                             } else {
-                                leaseId = registeredLease
-                                deliveryCoordinator.register(generation, registeredLease)
+                                val renewalAccepted = registered.leaseId == currentLease
+                                    && registered.ackConfirmation == negotiatedAckConfirmation
+                                if (renewalAccepted) pendingLeaseRenewalRequestId = null
+                                renewalAccepted
                             }
                         }
                         if (!accepted) {
-                            connection = "Router rejected this username"
+                            historyLock.withLock {
+                                if (generation == connectionGeneration && activeRouter == router) {
+                                    leaseId = ""
+                                    negotiatedAckConfirmation = ""
+                                    pendingLeaseRenewalRequestId = null
+                                    pendingDeliveryAcknowledgements.clear()
+                                    deliveryCoordinator.invalidate()
+                                }
+                            }
+                            connection = "Router rejected this connection"
+                            webSocket.close(4003, "registration mismatch")
                             return
                         }
+                        if (currentLease.isNotBlank()) return
                         connection = "Connected as $agentId"
                         startLeaseRenewal(webSocket, generation)
                         discoverPeers(generation)
-                        fetchCapabilities(generation, router, registeredLease)
+                        fetchCapabilities(generation, router, registered!!.leaseId)
                         fetchReminders(generation)
                         runOnUiThread { if (generation == connectionGeneration) requestPromptTemplates() }
                         selectedPeer.takeIf { it.isNotBlank() }?.let { hydrateHistory(it, generation) }
                     }
+                    "delivery_acknowledged" -> receiveDeliveryAcknowledged(frame, generation)
                     "lease_rejected" -> connection = "Username is already connected elsewhere"
                     "error" -> receiveRouterError(frame)
                     "conversation_message" -> runOnUiThread {
@@ -715,9 +839,14 @@ class MainActivity : ComponentActivity() {
         settleOutboundOnConnectionChange()
         historyLock.withLock {
             connectionGeneration++
+            peerStateEventFence.reset(connectionGeneration)
             activeHydrationFence = null
+            cancelHistoryRecoveryUnlocked()
             deliveryCoordinator.invalidate()
             leaseId = ""
+            negotiatedAckConfirmation = ""
+            pendingLeaseRenewalRequestId = null
+            pendingDeliveryAcknowledgements.clear()
         }
         clearReminderScope("The router connection closed before this reminder change was confirmed.")
         pendingModelControls.values.forEach { controlHandler.removeCallbacksAndMessages(it.controlId) }
@@ -743,10 +872,12 @@ class MainActivity : ComponentActivity() {
         leaseTimer = Timer().apply {
             scheduleAtFixedRate(20_000, 20_000) {
                 if (generation != connectionGeneration || leaseId.isBlank()) return@scheduleAtFixedRate
+                val requestId = UUID.randomUUID().toString()
+                pendingLeaseRenewalRequestId = requestId
                 webSocket.send(
                     JSONObject()
                         .put("version", "v1")
-                        .put("frame_id", UUID.randomUUID().toString())
+                        .put("frame_id", requestId)
                         .put("type", "lease_renew")
                         .put("agent_id", agentId)
                         .put("instance_id", instanceId)
@@ -1375,74 +1506,172 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun discoverPeers(generation: Int) {
-        val request = ++peerDiscoveryRequest
+        val router = activeRouter
+        val request = historyLock.withLock {
+            if (generation != connectionGeneration || router != activeRouter) return@withLock null
+            peerStateEventFence.beginDiscovery(generation)
+        } ?: return
         Thread {
-        try {
-            client.newCall(Request.Builder().url("${routerHttp()}/v1/agents").build()).execute().use { response ->
-                if (!response.isSuccessful || generation != connectionGeneration) return@use
-                val agents = JSONObject(response.body?.string().orEmpty()).optJSONArray("agents") ?: return@use
-                val existingPeers = historyLock.withLock { peers }
-                val discovered = buildList {
-                    for (index in 0 until agents.length()) {
-                        val agent = agents.optJSONObject(index) ?: continue
-                        val peer = agent.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: continue
-                        add(peerStatusFromJson(peer, agent, existingPeers.firstOrNull { it.id == peer }))
-                    }
-                }
-                runOnUiThread {
-                    historyLock.withLock {
-                        if (generation != connectionGeneration || request != peerDiscoveryRequest) return@withLock
-                        discovered.forEach { next ->
-                            val previous = peers.firstOrNull { it.id == next.id }
-                            if (previous?.instanceId != null && next.instanceId != null && previous.instanceId != next.instanceId) {
-                                settleOutboundForPeer(next.id, next.instanceId)
+            try {
+                client.newCall(Request.Builder().url("${routerHttpFor(router)}/v1/agents").build()).execute().use { response ->
+                    if (!response.isSuccessful || generation != connectionGeneration) return@use
+                    val agents = JSONObject(response.body?.string().orEmpty()).optJSONArray("agents") ?: return@use
+                    if (!discoveryResponseWithinBound(agents)) return@use
+                    runOnUiThread {
+                        var retryPeer: String? = null
+                        historyLock.withLock {
+                            if (generation != connectionGeneration || router != activeRouter) return@withLock
+                            val existingById = peers.associateBy(PeerStatus::id)
+                            val discovered = buildList {
+                                for (index in 0 until agents.length()) {
+                                    val agent = agents.optJSONObject(index) ?: continue
+                                    val peer = agent.optString("agent_id")
+                                        .takeIf { it.isNotBlank() && it != agentId && AGENT_ID.matches(it) } ?: continue
+                                    val instance = agent.optString("instance_id").takeIf { it.isNotBlank() }
+                                    val observedAt = historyObservationTimestamp(agent.optString("connected_at"))
+                                    if (instance != null) add(DiscoveredPeer(peer, agent, instance, observedAt))
+                                }
                             }
+                            val discoveredById = discovered.associateBy(DiscoveredPeer::id)
+                            val nextPeers = buildList {
+                                peers.forEach { current ->
+                                    val candidate = discoveredById[current.id]
+                                    if (candidate != null && peerStateEventFence.acceptDiscovery(
+                                            request,
+                                            candidate.id,
+                                            candidate.instanceId,
+                                            candidate.observedAtMs,
+                                        )
+                                    ) {
+                                        val updated = peerStatusFromJson(candidate.id, candidate.source, current)
+                                        if (current.instanceId != null && current.instanceId != updated.instanceId) {
+                                            settleOutboundForPeer(candidate.id, updated.instanceId)
+                                        }
+                                        add(updated)
+                                        if (shouldRetryHistoryAfterPeerResolution(
+                                                activeHydrationFence,
+                                                selectedPeer,
+                                                candidate.id,
+                                                current.instanceId,
+                                                updated.instanceId,
+                                                connectionGeneration,
+                                            )
+                                        ) retryPeer = candidate.id
+                                    } else if (candidate != null || !peerStateEventFence.isCurrentForPeer(request, current.id)) {
+                                        // Keep the current projection when this candidate was
+                                        // rejected as stale. A newer peer event also remains
+                                        // authoritative when discovery omits that peer.
+                                        add(current)
+                                    }
+                                }
+                                discovered.forEach { candidate ->
+                                    if (candidate.id in existingById) return@forEach
+                                    if (peerStateEventFence.acceptDiscovery(
+                                            request,
+                                            candidate.id,
+                                            candidate.instanceId,
+                                            candidate.observedAtMs,
+                                        )
+                                    ) add(peerStatusFromJson(candidate.id, candidate.source))
+                                }
+                            }
+                            peers = nextPeers.distinctBy(PeerStatus::id).sortedBy(PeerStatus::id)
                         }
-                        peers = discovered.sortedBy { it.id }
+                        retryPeer?.takeIf { leaseId.isNotBlank() }?.let { hydrateHistory(it, generation) }
                     }
                 }
+            } catch (_: Exception) {
+                // The active connection remains usable when discovery is unavailable.
             }
-        } catch (_: Exception) {
-            // The active connection remains usable when discovery is unavailable.
-        }
         }.start()
     }
 
     private fun receiveAgentActivity(frame: JSONObject) = historyLock.withLock {
         val peer = frame.optString("agent_id").takeIf { it.isNotBlank() && it != agentId } ?: return@withLock
         val incomingInstance = frame.optString("instance_id").takeIf { it.isNotBlank() }
+        val event = peerStateEventFence.observeEvent(
+            connectionGeneration,
+            peer,
+            incomingInstance,
+            historyObservationTimestamp(frame.optString("generated_at")),
+        ) ?: return@withLock
+        if (!peerStateEventFence.isNewest(event)) return@withLock
         val current = peers.firstOrNull { it.id == peer }
         if (current?.instanceId != null && incomingInstance != null && current.instanceId != incomingInstance) {
             settleOutboundForPeer(peer, incomingInstance)
-            return@withLock
         }
         val updated = peerStatusFromJson(peer, frame, current)
         peers = if (current == null) (peers + updated).sortedBy { it.id } else peers.map { if (it.id == peer) updated else it }
+        if (shouldRetryHistoryAfterPeerResolution(
+                activeHydrationFence,
+                selectedPeer,
+                peer,
+                current?.instanceId,
+                updated.instanceId,
+                connectionGeneration,
+            ) && leaseId.isNotBlank()
+        ) {
+            hydrateHistory(peer)
+        }
     }
 
     private fun receiveModelCatalog(frame: JSONObject) = historyLock.withLock {
         val parsed = parseModelCatalogFrame(frame) ?: return@withLock
+        val event = peerStateEventFence.observeEvent(
+            connectionGeneration,
+            parsed.agentId,
+            parsed.instanceId,
+            historyObservationTimestamp(frame.optString("generated_at")),
+        ) ?: return@withLock
+        if (!peerStateEventFence.isNewest(event)) return@withLock
         val current = peers.firstOrNull { it.id == parsed.agentId }
-        if (current?.instanceId != null && current.instanceId != parsed.instanceId) {
-            settleOutboundForPeer(parsed.agentId, parsed.instanceId)
-            return@withLock
-        }
-        val next = (current ?: PeerStatus(parsed.agentId)).copy(
+        val replaced = current?.instanceId != null && current.instanceId != parsed.instanceId
+        if (replaced) settleOutboundForPeer(parsed.agentId, parsed.instanceId)
+        val base = if (replaced) PeerStatus(parsed.agentId) else current ?: PeerStatus(parsed.agentId)
+        val next = base.copy(
             instanceId = parsed.instanceId,
             modelCatalog = ModelCatalog(if (parsed.models.isEmpty()) CatalogStatus.EMPTY else CatalogStatus.READY, parsed.models, parsed.totalCount, parsed.truncated, parsed.current),
         )
         peers = if (current == null) (peers + next).sortedBy { it.id } else peers.map { if (it.id == parsed.agentId) next else it }
+        if (shouldRetryHistoryAfterPeerResolution(
+                activeHydrationFence,
+                selectedPeer,
+                parsed.agentId,
+                current?.instanceId,
+                next.instanceId,
+                connectionGeneration,
+            ) && leaseId.isNotBlank()
+        ) {
+            hydrateHistory(parsed.agentId)
+        }
     }
 
     private fun receiveGoalState(frame: JSONObject) = historyLock.withLock {
         val parsed = parseGoalStateFrame(frame) ?: return@withLock
+        val event = peerStateEventFence.observeEvent(
+            connectionGeneration,
+            parsed.agentId,
+            parsed.instanceId,
+            historyObservationTimestamp(frame.optString("generated_at")),
+        ) ?: return@withLock
+        if (!peerStateEventFence.isNewest(event)) return@withLock
         val current = peers.firstOrNull { it.id == parsed.agentId }
-        if (current?.instanceId != null && current.instanceId != parsed.instanceId) {
-            settleOutboundForPeer(parsed.agentId, parsed.instanceId)
-            return@withLock
-        }
-        val next = (current ?: PeerStatus(parsed.agentId)).copy(instanceId = parsed.instanceId, goalState = parsed.state)
+        val replaced = current?.instanceId != null && current.instanceId != parsed.instanceId
+        if (replaced) settleOutboundForPeer(parsed.agentId, parsed.instanceId)
+        val base = if (replaced) PeerStatus(parsed.agentId) else current ?: PeerStatus(parsed.agentId)
+        val next = base.copy(instanceId = parsed.instanceId, goalState = parsed.state)
         peers = if (current == null) (peers + next).sortedBy { it.id } else peers.map { if (it.id == parsed.agentId) next else it }
+        if (shouldRetryHistoryAfterPeerResolution(
+                activeHydrationFence,
+                selectedPeer,
+                parsed.agentId,
+                current?.instanceId,
+                next.instanceId,
+                connectionGeneration,
+            ) && leaseId.isNotBlank()
+        ) {
+            hydrateHistory(parsed.agentId)
+        }
     }
 
     private fun receiveRouterError(frame: JSONObject) {
@@ -1539,44 +1768,111 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun receiveConversationMessage(frame: JSONObject) {
-        val payload = frame.optJSONObject("message") ?: return
-        val message = chatMessage(payload) ?: return
-        val peer = if (message.sender == agentId) payload.optString("to") else message.sender
-        if (peer.isBlank() || !appendMessage(peer, message)) return
-        if (message.direction == Direction.INCOMING) postInboundNotification(peer, message.body)
+        val validated = validateLiveMessageFrame(frame, LiveMessageFrameKind.CONVERSATION_MESSAGE) ?: return
+        val message = chatMessage(validated) ?: return
+        val peer = conversationPeerForMessage(message, agentId) ?: return
+        val result = appendMessage(peer, message)
+        when (result.status) {
+            HistoryAppendStatus.SAVED -> if (message.direction == Direction.INCOMING && result.shouldNotify) postInboundNotification(peer, message.body)
+            HistoryAppendStatus.IGNORED -> Unit
+            // appendMessage keeps the bounded in-memory row and schedules hydration;
+            // the error banner tells the user why the recovery is in progress.
+            HistoryAppendStatus.PERSISTENCE_FAILED -> Unit
+        }
     }
 
     private fun settleDelivery(webSocket: WebSocket, frame: JSONObject, callbackGeneration: Int) {
+        if (negotiatedAckConfirmation != "correlated_v1") return
         val captured = deliveryCoordinator.capture(callbackGeneration) { connection ->
-            val payload = frame.optJSONObject("message") ?: return@capture null
-            val message = runCatching {
-                chatMessage(payload, connection.router, connection.agentId)
-            }.getOrNull() ?: return@capture null
-            val peer = if (message.sender == connection.agentId) payload.optString("to") else message.sender
-            if (peer.isBlank()) return@capture null
-            CapturedDelivery(
+            captureDeliveryForSettlement(
+                frame = frame,
                 connection = connection,
-                peer = peer,
-                targetInstanceId = peers.firstOrNull { it.id == peer }?.instanceId,
-                message = message,
-                attemptNumber = frame.optInt("attempt_number", 1),
+                parseMessage = { validated, router, owner -> chatMessage(validated, router, owner) },
+                targetInstanceId = { peer -> peers.firstOrNull { it.id == peer }?.instanceId },
             )
         } ?: return
         val settled = deliveryCoordinator.settle(captured, ::appendCapturedDelivery) ?: return
+        settled.notifications.forEach { notification ->
+            runCatching { postInboundNotification(notification.peer, notification.message.body) }
+        }
 
         // The coordinator has released the state lock. Use only the immutable
         // connection identity returned by it for both receipts.
-        listOf("injection_requested", "ack").forEach { type ->
-            val receipt = JSONObject()
-                .put("version", "v1")
-                .put("frame_id", UUID.randomUUID().toString())
-                .put("type", type)
-                .put("agent_id", settled.connection.agentId)
-                .put("instance_id", settled.connection.instanceId)
-                .put("lease_id", settled.connection.leaseId)
-                .put("message_id", settled.messageId)
-                .put("attempt_number", settled.attemptNumber)
-            runCatching { webSocket.send(receipt.toString()) }
+        val items = settled.deliveryItems
+        if (items.isEmpty() || settled.messages.size != items.size) return
+        val ledgerKeys = items.mapIndexed { index, item ->
+            DeliveryLedgerKey(
+                router = settled.connection.router,
+                ownerAgentId = settled.connection.agentId,
+                ownerInstanceId = settled.connection.instanceId,
+                peer = conversationPeerForMessage(settled.messages[index], settled.connection.agentId) ?: return,
+                messageId = item.messageId,
+                messageIncarnationId = item.messageIncarnationId,
+            )
+        }
+        val first = items.first()
+        val deliveryItems = JSONArray(items.map(::deliveryItemJson))
+        val injection = JSONObject()
+            .put("version", "v1")
+            .put("frame_id", UUID.randomUUID().toString())
+            .put("type", "injection_requested")
+            .put("agent_id", settled.connection.agentId)
+            .put("instance_id", settled.connection.instanceId)
+            .put("lease_id", settled.connection.leaseId)
+            .put("message_id", first.messageId)
+            .put("attempt_number", first.attemptNumber)
+            .put("delivery_items", deliveryItems)
+        runCatching { webSocket.send(injection.toString()) }
+
+        val ackRequestId = UUID.randomUUID().toString()
+        val ack = JSONObject()
+            .put("version", "v1")
+            .put("frame_id", ackRequestId)
+            .put("type", "ack")
+            .put("agent_id", settled.connection.agentId)
+            .put("instance_id", settled.connection.instanceId)
+            .put("lease_id", settled.connection.leaseId)
+            .put("message_id", first.messageId)
+            .put("message_incarnation_id", first.messageIncarnationId)
+            .put("attempt_number", first.attemptNumber)
+            .put("delivery_items", deliveryItems)
+        historyLock.withLock {
+            if (settled.connection == DeliveryConnectionIdentity(
+                    activeRouter,
+                    agentId,
+                    instanceId,
+                    connectionGeneration,
+                    leaseId,
+                ) && negotiatedAckConfirmation == "correlated_v1"
+            ) {
+                pendingDeliveryAcknowledgements[ackRequestId] = PendingDeliveryAcknowledgement(
+                    ledgerKeys,
+                    first.attemptNumber,
+                    settled.connection,
+                )
+            }
+        }
+        val ackSent = runCatching { webSocket.send(ack.toString()) }.getOrDefault(false)
+        if (!ackSent) historyLock.withLock { pendingDeliveryAcknowledgements.remove(ackRequestId) }
+    }
+
+    private fun receiveDeliveryAcknowledged(frame: JSONObject, callbackGeneration: Int) {
+        if (negotiatedAckConfirmation != "correlated_v1") return
+        val acknowledgement = parseDeliveryAcknowledgedFrame(frame) ?: return
+        historyLock.withLock {
+            val pending = pendingDeliveryAcknowledgements[acknowledgement.requestId] ?: return@withLock
+            if (callbackGeneration != connectionGeneration
+                || pending.connection != DeliveryConnectionIdentity(activeRouter, agentId, instanceId, connectionGeneration, leaseId)
+                || acknowledgement.agentId != agentId
+                || acknowledgement.instanceId != instanceId
+                || acknowledgement.leaseId != leaseId
+                || acknowledgement.messageId != pending.keys.firstOrNull()?.messageId
+                || acknowledgement.messageIncarnationId != pending.keys.firstOrNull()?.messageIncarnationId
+                || acknowledgement.attemptNumber != pending.attemptNumber
+            ) return@withLock
+            if (pending.keys.all { key -> deliveryReplayLedger.markAcknowledged(key) }) {
+                pendingDeliveryAcknowledgements.remove(acknowledgement.requestId)
+            }
         }
     }
 
@@ -1595,62 +1891,86 @@ class MainActivity : ComponentActivity() {
     ): List<ChatMessage> {
         if (peer.isBlank()) return emptyList()
         val preferences = prefs()
-        preferences.edit().remove(legacyRouterHistoryKey(router, peer)).apply()
         val currentKey = historyKey(router, owner, ownerInstance, peer)
         val previousKey = previousRouterHistoryKey(router, owner, peer)
-        val raw = preferences.getString(currentKey, null)
-            ?: preferences.getString(previousKey, null)?.also {
-                preferences.edit().putString(currentKey, it).remove(previousKey).commit()
-            }
-            ?: return emptyList()
-        val parsed = try {
-            val array = JSONArray(raw)
-            List(array.length()) { index ->
-                val value = array.getJSONObject(index)
-                ChatMessage(
-                    id = value.optString("id", UUID.randomUUID().toString()),
-                    incarnationId = value.optString("message_incarnation_id"),
-                    sequence = value.optLong("sequence"),
-                    sender = value.optString("sender", peer),
-                    body = value.optString("body"),
-                    direction = if (value.optString("direction") == Direction.OUTGOING.name) Direction.OUTGOING else Direction.INCOMING,
-                    createdAt = value.optString("created_at", Instant.EPOCH.toString()),
-                    recordedAt = value.optString("recorded_at").takeIf { it.isNotBlank() },
-                    attachments = imageReferences(value.optJSONArray("attachments"), router),
-                    recipient = value.optString("recipient", peer),
-                    deliveryStatus = if (value.optString("direction") == Direction.OUTGOING.name) {
-                        runCatching { OutboundDeliveryStatus.valueOf(value.optString("delivery_status", OutboundDeliveryStatus.SENT.name)) }
-                            .getOrDefault(OutboundDeliveryStatus.SENT)
-                    } else OutboundDeliveryStatus.NONE,
-                )
-            }
-        } catch (_: Exception) {
-            return migrateLegacyHistory(router, owner, ownerInstance, peer, raw)
-        }
+        val legacyKey = legacyRouterHistoryKey(router, peer)
+        // Read every old scope before any key is removed. A failed write leaves the source
+        // row available for the next launch and avoids silent history loss.
+        val sources = listOf(
+            currentKey to preferences.getString(currentKey, null),
+            previousKey to preferences.getString(previousKey, null),
+            legacyKey to preferences.getString(legacyKey, null),
+        )
+        if (sources.all { it.second == null }) return emptyList()
         val nowMs = System.currentTimeMillis()
+        val parsed = sources.mapNotNull { (_, raw) ->
+            raw?.let { decodeStoredHistory(it, router, owner, peer, nowMs) }
+        }.fold(emptyList<ChatMessage>()) { rows, read -> mergeConversationMessages(rows, read.messages, nowMs) }
+            .filter { isMessageInConversationScope(it.sender, it.recipient, owner, peer) }
         val retained = pruneConversationHistory(parsed, nowMs)
-        if (retained != parsed) persistHistoryProofUnlocked(router, owner, ownerInstance, peer, retained, nowMs)
+        val hasMigrationSource = sources.drop(1).any { it.second != null }
+        val hasMigratedCurrent = sources.first().second != null
+            && decodeStoredHistory(sources.first().second.orEmpty(), router, owner, peer, nowMs)?.migrated == true
+        if (hasMigrationSource || hasMigratedCurrent || sources.first().second == null || retained != parsed) {
+            val proof = persistHistoryProofUnlocked(router, owner, ownerInstance, peer, retained, nowMs)
+            if (proof.committed) {
+                val editor = preferences.edit()
+                if (sources[1].second != null) editor.remove(previousKey)
+                if (sources[2].second != null) editor.remove(legacyKey)
+                editor.commit()
+            }
+        }
         return retained
     }
 
-    private fun migrateLegacyHistory(router: String, owner: String, ownerInstance: String, peer: String, raw: String): List<ChatMessage> {
-        if (raw.isBlank() || raw == "No messages yet") return emptyList()
-        return raw.lines().filter { it.isNotBlank() }.map { line ->
-            val outgoing = line.startsWith("You · ")
+    private fun decodeStoredHistory(
+        raw: String,
+        router: String,
+        owner: String,
+        peer: String,
+        migrationTimestampMs: Long,
+    ): StoredHistoryRead = try {
+        val array = JSONArray(raw)
+        StoredHistoryRead(List(array.length()) { index ->
+            val value = array.getJSONObject(index)
+            val outgoing = value.optString("direction") == Direction.OUTGOING.name
             ChatMessage(
-                id = UUID.randomUUID().toString(),
-                incarnationId = "",
-                sequence = 0,
-                sender = if (outgoing) owner else peer,
-                body = line.substringAfter(" · ", line),
+                id = value.optString("id", UUID.randomUUID().toString()),
+                incarnationId = value.optString("message_incarnation_id"),
+                sequence = value.optLong("sequence"),
+                sender = value.optString("sender", if (outgoing) owner else peer),
+                body = value.optString("body"),
                 direction = if (outgoing) Direction.OUTGOING else Direction.INCOMING,
-                createdAt = Instant.EPOCH.toString(),
-                recipient = if (outgoing) peer else owner,
-                deliveryStatus = if (outgoing) OutboundDeliveryStatus.SENT else OutboundDeliveryStatus.NONE,
+                createdAt = value.optString("created_at", Instant.ofEpochMilli(migrationTimestampMs).toString()),
+                recordedAt = value.optString("recorded_at").takeIf { it.isNotBlank() },
+                attachments = imageReferences(value.optJSONArray("attachments"), router),
+                recipient = value.optString("recipient", if (outgoing) peer else owner),
+                deliveryStatus = if (outgoing) {
+                    runCatching { OutboundDeliveryStatus.valueOf(value.optString("delivery_status", OutboundDeliveryStatus.SENT.name)) }
+                        .getOrDefault(OutboundDeliveryStatus.SENT)
+                } else OutboundDeliveryStatus.NONE,
             )
-        }.also { messages ->
-            persistHistoryProofUnlocked(router, owner, ownerInstance, peer, messages, System.currentTimeMillis())
-        }
+        }, migrated = false)
+    } catch (_: Exception) {
+        val timestamp = Instant.ofEpochMilli(migrationTimestampMs).toString()
+        val messages = if (raw.isBlank() || raw == "No messages yet") emptyList() else raw.lines()
+            .filter { it.isNotBlank() }
+            .map { line ->
+                val outgoing = line.startsWith("You · ")
+                ChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    incarnationId = "",
+                    sequence = 0,
+                    sender = if (outgoing) owner else peer,
+                    body = line.substringAfter(" · ", line),
+                    direction = if (outgoing) Direction.OUTGOING else Direction.INCOMING,
+                    createdAt = timestamp,
+                    recordedAt = timestamp,
+                    recipient = if (outgoing) peer else owner,
+                    deliveryStatus = if (outgoing) OutboundDeliveryStatus.SENT else OutboundDeliveryStatus.NONE,
+                )
+            }
+        StoredHistoryRead(messages, migrated = true)
     }
 
     private fun persistHistory(peer: String, value: List<ChatMessage>): Boolean = historyLock.withLock {
@@ -1681,6 +2001,9 @@ class MainActivity : ComponentActivity() {
         value: List<ChatMessage>,
         nowMs: Long,
     ): HistoryPersistenceProof {
+        if (router.isBlank() || owner.isBlank() || ownerInstance.isBlank() || peer.isBlank()
+            || value.any { !isMessageInConversationScope(it.sender, it.recipient, owner, peer) }
+        ) return HistoryPersistenceProof(false, emptySet())
         val retained = pruneConversationHistory(value, nowMs)
         val array = JSONArray()
         retained.forEach { message ->
@@ -1705,49 +2028,137 @@ class MainActivity : ComponentActivity() {
 
     private fun appendCapturedDelivery(delivery: CapturedDelivery): DeliveryPersistenceProof {
         val connection = delivery.connection
-        val peer = delivery.peer
-        val message = delivery.message
+        val deliveredMessages = delivery.messages
+        if (deliveredMessages.any { !isInboundDeliveryForAgent(it.sender, it.recipient, connection.agentId) }
+            || delivery.messagesByPeer.any { (peer, peerMessages) ->
+                peerMessages.any { !isMessageInConversationScope(it.sender, it.recipient, connection.agentId, peer) }
+            }
+        ) return DeliveryPersistenceProof(false)
         // Peer replacement is part of the same fence as the socket identity. This
         // also rejects null-at-capture to known-instance transitions.
-        if (peers.firstOrNull { it.id == peer }?.instanceId != delivery.targetInstanceId) {
-            return DeliveryPersistenceProof(false)
-        }
+        if (delivery.messagesByPeer.keys.any { peer ->
+                peers.firstOrNull { it.id == peer }?.instanceId != delivery.targetInstanceIdsByPeer[peer]
+            }
+        ) return DeliveryPersistenceProof(false)
         val nowMs = System.currentTimeMillis()
-        if (!isRetainedConversationMessage(message, nowMs)) return DeliveryPersistenceProof(false)
-        val current = outboundState.messagesByPeer[peer]
-            ?: historyForUnlocked(connection.router, connection.agentId, connection.instanceId, peer)
-        val next = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (peer to current))
-        val updated = mergeConversationMessages(next.messagesByPeer[peer].orEmpty(), listOf(message), nowMs)
-        if (!persistKnownPeers(connection.router, knownPeers(connection.router) + peer)) {
-            return DeliveryPersistenceProof(false)
+        val ledgerStatusesByKey = deliveredMessages.associate { message ->
+            message.key to deliveryReplayLedger.status(
+                DeliveryLedgerKey(
+                    connection.router,
+                    connection.agentId,
+                    connection.instanceId,
+                    conversationPeerForMessage(message, connection.agentId) ?: return DeliveryPersistenceProof(false),
+                    message.id,
+                    message.incarnationId,
+                ),
+                nowMs,
+            )
         }
-        val persisted = persistHistoryProofUnlocked(
-            connection.router,
-            connection.agentId,
-            connection.instanceId,
-            peer,
-            updated,
-            nowMs,
-        )
-        val saved = persisted.committed
-        if (saved) {
-            outboundState = next.copy(messagesByPeer = next.messagesByPeer + (peer to updated))
+        if (deliveredMessages.any {
+                !isRetainedConversationMessage(it, nowMs) && ledgerStatusesByKey[it.key] == null
+            }
+        ) return DeliveryPersistenceProof(false)
+
+        var nextState = outboundState
+        val retainedKeys = mutableSetOf<String>()
+        val notifications = mutableListOf<DeliveredNotification>()
+        delivery.messagesByPeer.forEach { (peer, peerMessages) ->
+            val persistedHistory = historyForUnlocked(connection.router, connection.agentId, connection.instanceId, peer)
+            val current = mergeHydrationConversationMessages(
+                persisted = persistedHistory,
+                inMemory = nextState.messagesByPeer[peer].orEmpty(),
+                nowMs = nowMs,
+            )
+            val persistedKeys = persistedHistory.map(ChatMessage::key).toSet()
+            val ledgerStatuses = peerMessages.associate { it.key to ledgerStatusesByKey[it.key] }
+            retainedKeys += peerMessages.filter { ledgerStatuses[it.key] != null }.map(ChatMessage::key)
+            val newIncomingMessages = peerMessages.filter {
+                it.direction == Direction.INCOMING && it.key !in persistedKeys && ledgerStatuses[it.key] == null
+            }
+            val updated = peerMessages.fold(current) { rows, message ->
+                mergeConversationMessages(rows, listOf(message), nowMs)
+            }
+            nextState = nextState.copy(messagesByPeer = nextState.messagesByPeer + (peer to updated))
             if (selectedPeer == peer) messages = updated
+            if (peerMessages.all { ledgerStatuses[it.key] != null }) {
+                outboundState = nextState
+                return@forEach
+            }
+            if (!persistKnownPeers(connection.router, knownPeers(connection.router) + peer)) {
+                // Keep the bounded additive state visible while the router remains the
+                // source for the scheduled hydration retry. Do not acknowledge this offer.
+                outboundState = nextState
+                reportHistoryPersistenceFailureUnlocked(peer, connection.router, connection.generation)
+                return DeliveryPersistenceProof(false)
+            }
+            val persisted = persistHistoryProofUnlocked(
+                connection.router,
+                connection.agentId,
+                connection.instanceId,
+                peer,
+                updated,
+                nowMs,
+            )
+            retainedKeys += persisted.retainedMessageKeys
+            outboundState = nextState
+            if (!persisted.committed || peerMessages.any { it.key !in persisted.retainedMessageKeys }) {
+                // A failed commit or retention pass must not make any live additive
+                // message disappear. Hydration will retry the complete delivery.
+                reportHistoryPersistenceFailureUnlocked(peer, connection.router, connection.generation)
+                return DeliveryPersistenceProof(false, retainedKeys)
+            }
+            peerMessages.forEach { message ->
+                if (ledgerStatuses[message.key] == null && !deliveryReplayLedger.markPersisted(
+                        DeliveryLedgerKey(connection.router, connection.agentId, connection.instanceId, peer, message.id, message.incarnationId),
+                        nowMs,
+                    )
+                ) {
+                    reportHistoryPersistenceFailureUnlocked(peer, connection.router, connection.generation)
+                    return DeliveryPersistenceProof(false, retainedKeys)
+                }
+                retainedKeys += message.key
+            }
+            if (selectedPeer == peer) historyUiState = HistoryUiState()
+            notifications += newIncomingMessages.map { DeliveredNotification(peer, it) }
         }
-        return DeliveryPersistenceProof(saved, persisted.retainedMessageKeys)
+        return DeliveryPersistenceProof(true, retainedKeys, notifications)
     }
 
-    private fun appendMessage(peer: String, message: ChatMessage): Boolean = historyLock.withLock {
+    private fun appendMessage(peer: String, message: ChatMessage): HistoryAppendResult = historyLock.withLock {
+        if (!isMessageInConversationScope(message.sender, message.recipient, agentId, peer)) {
+            return@withLock HistoryAppendResult(HistoryAppendStatus.IGNORED, outboundState.messagesByPeer[peer].orEmpty())
+        }
         val nowMs = System.currentTimeMillis()
-        val current = outboundState.messagesByPeer[peer] ?: historyFor(peer)
+        // The in-memory list can contain a row whose previous SharedPreferences commit failed.
+        // Read the durable list separately so a redelivered row can notify once after recovery.
+        val persisted = historyForUnlocked(activeRouter, agentId, instanceId, peer)
+        val current = mergeHydrationConversationMessages(
+            persisted = persisted,
+            inMemory = outboundState.messagesByPeer[peer].orEmpty(),
+            nowMs = nowMs,
+        )
+        val deliveryLedgerKey = if (message.direction == Direction.INCOMING) DeliveryLedgerKey(
+            activeRouter,
+            agentId,
+            instanceId,
+            peer,
+            message.id,
+            message.incarnationId,
+        ) else null
+        val alreadyPersisted = persisted.any { sameConversationMessageIdentity(it, message) }
+            || deliveryLedgerKey?.let { deliveryReplayLedger.status(it, nowMs) != null } == true
         val pending = outboundState.pending.values.firstOrNull { it.message.id == message.id }
         val currentTarget = peers.firstOrNull { it.id == peer }?.instanceId
         if (message.direction == Direction.OUTGOING && pending != null
             && (pending.scope.router != activeRouter || pending.scope.connectionGeneration != connectionGeneration
-                || pending.scope.targetInstanceId != null && pending.scope.targetInstanceId != currentTarget)) return@withLock false
+                || pending.scope.targetInstanceId != null && pending.scope.targetInstanceId != currentTarget)) {
+            return@withLock HistoryAppendResult(HistoryAppendStatus.IGNORED, current)
+        }
         // Incoming history follows the same 30-day policy as settled rows. Pending
         // outgoing bubbles are the only retention exception.
-        if (message.direction == Direction.INCOMING && !isRetainedConversationMessage(message, nowMs)) return@withLock false
+        if (message.direction == Direction.INCOMING && !isRetainedConversationMessage(message, nowMs)) {
+            return@withLock HistoryAppendResult(HistoryAppendStatus.IGNORED, current)
+        }
         var next = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (peer to current))
         if (message.direction == Direction.OUTGOING) {
             next = reduceOutboundDelivery(
@@ -1758,25 +2169,131 @@ class MainActivity : ComponentActivity() {
                 ),
             )
         }
-        val updated = mergeConversationMessages(next.messagesByPeer[peer].orEmpty(), listOf(message), nowMs)
-        // The router receipt is an acknowledgement of durable local retention. A stale
-        // incoming row may be pruned by the normal 30-day/cap policy, so reject it here.
-        if (message.direction == Direction.INCOMING && updated.none { it.key == message.key }) return@withLock false
-        next = next.copy(messagesByPeer = next.messagesByPeer + (peer to updated))
-        val knownPeersSaved = persistKnownPeers(knownPeers() + peer)
-        val persisted = if (knownPeersSaved) persistHistoryProofUnlocked(peer, updated, nowMs) else HistoryPersistenceProof(false, emptySet())
-        val saved = knownPeersSaved && persisted.committed
-            && (message.direction != Direction.INCOMING || message.key in persisted.retainedMessageKeys)
-        if (saved) {
+        val result = appendLiveConversationMessage(
+            existing = next.messagesByPeer[peer].orEmpty(),
+            message = message,
+            nowMs = nowMs,
+            persist = { updated ->
+                if (!persistKnownPeers(knownPeers() + peer)) {
+                    HistoryPersistenceProof(false, updated.map(ChatMessage::key).toSet())
+                } else {
+                    persistHistoryProofUnlocked(peer, updated, nowMs)
+                }
+            },
+            alreadyPersisted = alreadyPersisted,
+        )
+        if (result.status == HistoryAppendStatus.IGNORED) return@withLock result
+        val durableResult = if (result.status == HistoryAppendStatus.SAVED && deliveryLedgerKey != null
+            && !alreadyPersisted
+            && !deliveryReplayLedger.markPersisted(deliveryLedgerKey, nowMs)
+        ) {
+            result.copy(status = HistoryAppendStatus.PERSISTENCE_FAILED)
+        } else result
+        next = next.copy(messagesByPeer = next.messagesByPeer + (peer to durableResult.messages))
+        if (durableResult.status == HistoryAppendStatus.SAVED) {
             outboundState = next
-            if (selectedPeer == peer) messages = updated
+            if (selectedPeer == peer) {
+                messages = durableResult.messages
+                historyUiState = HistoryUiState()
+            }
+        } else {
+            // Keep a retained live message in memory so a failed commit is visible.
+            // The recovery hydration below is responsible for making it durable.
+            outboundState = next
+            if (selectedPeer == peer) messages = durableResult.messages
+            reportHistoryPersistenceFailureUnlocked(peer, activeRouter, connectionGeneration)
         }
-        saved
+        durableResult
+    }
+
+    private fun historyRequestIsCurrentUnlocked(request: HistoryHydrationFence): Boolean {
+        val currentTargetInstance = peers.firstOrNull { it.id == request.peer }?.instanceId
+        return isCurrentHistoryHydration(
+            request,
+            currentRouter = activeRouter,
+            currentOwnerAgentId = agentId,
+            currentOwnerInstanceId = instanceId,
+            currentPeer = selectedPeer,
+            currentTargetInstanceId = currentTargetInstance,
+            currentConnectionGeneration = connectionGeneration,
+            currentRequestSerial = activeHydrationFence?.requestSerial,
+        )
+    }
+
+    private fun cancelHistoryRecoveryUnlocked(peer: String? = null) {
+        val keys = if (peer == null) historyRecoveryTasks.keys.toList() else listOf(peer)
+        keys.forEach { key -> historyRecoveryTasks.remove(key)?.let(reconnectHandler::removeCallbacks) }
+        if (peer == null) historyRecoveryAttempts.clear() else historyRecoveryAttempts.remove(peer)
+    }
+
+    /** Automatic persistence recovery backs off and stops with a user-visible retry action. */
+    private fun scheduleHistoryRecoveryUnlocked(peer: String, router: String, generation: Int) {
+        if (peer.isBlank() || historyRecoveryTasks.containsKey(peer)) return
+        val attempt = historyRecoveryAttempts[peer] ?: 0
+        if (!hasHistoryRecoveryBudget(attempt)) {
+            if (activeRouter == router && connectionGeneration == generation && selectedPeer == peer) {
+                historyUiState = historyErrorState(HistoryFailure.PERSISTENCE_EXHAUSTED)
+            }
+            return
+        }
+        historyRecoveryAttempts[peer] = attempt + 1
+        val task = Runnable {
+            historyLock.withLock {
+                historyRecoveryTasks.remove(peer)
+                if (activeRouter == router && connectionGeneration == generation && selectedPeer == peer && leaseId.isNotBlank()) {
+                    hydrateHistory(peer, generation)
+                }
+            }
+        }
+        historyRecoveryTasks[peer] = task
+        reconnectHandler.postDelayed(task, historyRecoveryDelayMs(attempt))
+    }
+
+    private fun reportHistoryPersistenceFailureUnlocked(peer: String, router: String, generation: Int) {
+        if (selectedPeer == peer) {
+            val state = historyErrorState(HistoryFailure.PERSISTENCE)
+            runOnUiThread {
+                historyLock.withLock {
+                    if (activeRouter == router && connectionGeneration == generation && selectedPeer == peer) {
+                        historyUiState = state
+                    }
+                }
+            }
+        }
+        scheduleHistoryRecoveryUnlocked(peer, router, generation)
+    }
+
+    private fun publishHistoryFailure(request: HistoryHydrationFence, failure: HistoryFailure, statusCode: Int? = null) {
+        val state = historyErrorState(failure, statusCode)
+        runOnUiThread {
+            historyLock.withLock {
+                if (historyRequestIsCurrentUnlocked(request)) historyUiState = state
+            }
+        }
+    }
+
+    private fun retryHistory() {
+        val peer = historyLock.withLock {
+            cancelHistoryRecoveryUnlocked(selectedPeer)
+            selectedPeer.takeIf { it.isNotBlank() && leaseId.isNotBlank() }
+        }
+        peer?.let(::hydrateHistory)
     }
 
     private fun hydrateHistory(peer: String, generation: Int = connectionGeneration) {
         val request = historyLock.withLock {
-            if (peer.isBlank() || activeRouter.isBlank()) return@withLock null
+            // The default generation is read before the lock. Recheck it, the selected
+            // peer, and the owner scope after waiting so a stale caller cannot publish LOADING.
+            if (!isCurrentHistoryHydrationStart(
+                    requestedPeer = peer,
+                    requestedGeneration = generation,
+                    currentRouter = activeRouter,
+                    currentOwnerAgentId = agentId,
+                    currentOwnerInstanceId = instanceId,
+                    currentSelectedPeer = selectedPeer,
+                    currentConnectionGeneration = connectionGeneration,
+                ) || leaseId.isBlank()
+            ) return@withLock null
             val fence = HistoryHydrationFence(
                 router = activeRouter,
                 ownerAgentId = agentId,
@@ -1787,77 +2304,114 @@ class MainActivity : ComponentActivity() {
                 requestSerial = ++hydrationRequestSerial,
             )
             activeHydrationFence = fence
+            historyUiState = HistoryUiState(HistoryStatus.LOADING)
             fence
         } ?: return
         Thread {
             try {
-                val url = okhttp3.HttpUrl.Builder()
-                    .scheme(routerSchemeFor(request.router))
-                    .host(request.router.substringBefore(':'))
-                    .port(request.router.substringAfter(':').toInt())
-                    .addPathSegments("v1/conversations")
-                    .addQueryParameter("owner", request.ownerAgentId)
-                    .addQueryParameter("peer", request.peer)
-                    .build()
-                client.newCall(Request.Builder().url(url).build()).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val payload = JSONObject(response.body?.string().orEmpty())
-                    val snapshot = payload.optJSONArray("messages") ?: JSONArray()
-                    val highWaterSequence = payload.optLong("high_water_sequence")
-                    val hydrated = List(snapshot.length()) { index ->
-                        chatMessage(snapshot.getJSONObject(index), request.router, request.ownerAgentId)
-                    }.filterNotNull()
+                val url = conversationHistoryUrl(
+                    routerHttpFor(request.router),
+                    request.ownerAgentId,
+                    request.peer,
+                )
+                historyHttpClient(client).newCall(Request.Builder().url(url).build()).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        publishHistoryFailure(request, HistoryFailure.HTTP, response.code)
+                        return@use
+                    }
+                    val responseBody = readHistoryResponseBody(response.body)
+                    val parsed = responseBody?.let { parseHistoryResponse(it, request.ownerAgentId, request.peer) }
+                    if (parsed == null) {
+                        publishHistoryFailure(request, HistoryFailure.INVALID_RESPONSE)
+                        return@use
+                    }
+                    val hydrated = mutableListOf<ChatMessage>()
+                    var malformedMessage = false
+                    for (index in 0 until parsed.messages.length()) {
+                        val message = runCatching {
+                            chatMessage(parsed.messages.getJSONObject(index), request.router, request.ownerAgentId)
+                        }.getOrNull()
+                        if (message == null) {
+                            malformedMessage = true
+                            break
+                        }
+                        hydrated += message
+                    }
+                    if (malformedMessage) {
+                        publishHistoryFailure(request, HistoryFailure.INVALID_RESPONSE)
+                        return@use
+                    }
                     runOnUiThread {
                         historyLock.withLock {
-                            // All identity fields, including a previously unknown peer instance,
-                            // must still match while the response is applied.
-                            val currentTargetInstance = peers.firstOrNull { it.id == request.peer }?.instanceId
-                            if (!isCurrentHistoryHydration(
-                                    request,
-                                    currentRouter = activeRouter,
-                                    currentOwnerAgentId = agentId,
-                                    currentOwnerInstanceId = instanceId,
-                                    currentPeer = selectedPeer,
-                                    currentTargetInstanceId = currentTargetInstance,
-                                    currentConnectionGeneration = connectionGeneration,
-                                    currentRequestSerial = activeHydrationFence?.requestSerial,
+                            if (!historyRequestIsCurrentUnlocked(request)) return@withLock
+                            try {
+                                val nowMs = System.currentTimeMillis()
+                                val persistedHistory = historyForUnlocked(
+                                    request.router,
+                                    request.ownerAgentId,
+                                    request.ownerInstanceId,
+                                    request.peer,
                                 )
-                            ) return@withLock
-                            val nowMs = System.currentTimeMillis()
-                            val merged = reconcileConversationMessages(
-                                historyForUnlocked(request.router, request.ownerAgentId, request.ownerInstanceId, request.peer),
-                                hydrated,
-                                highWaterSequence,
-                                nowMs,
-                            )
-                            var next = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (request.peer to merged))
-                            hydrated.filter { it.direction == Direction.OUTGOING }.forEach { echo ->
-                                next = reduceOutboundDelivery(
-                                    next,
-                                    OutboundDeliveryEvent.HistoryEcho(
-                                        OutboundScope(request.router, request.connectionGeneration, request.peer, currentTargetInstance),
-                                        echo,
-                                    ),
+                                val inMemory = outboundState.messagesByPeer[request.peer].orEmpty()
+                                val recovery = (outboundState.pending.values + outboundState.settled.values)
+                                    .filter { operation ->
+                                        operation.scope.router == request.router
+                                            && operation.scope.connectionGeneration == request.connectionGeneration
+                                            && operation.scope.peer == request.peer
+                                    }
+                                    .map(OutboundOperation::message)
+                                // Start with the in-memory copy. This preserves unsaved additive rows
+                                // and uncertain sends while an older router snapshot is in flight.
+                                val existing = mergeHydrationConversationMessages(
+                                    persisted = persistedHistory,
+                                    inMemory = inMemory,
+                                    recovery = recovery,
+                                    nowMs = nowMs,
                                 )
-                            }
-                            val finalMessages = next.messagesByPeer[request.peer].orEmpty()
-                            val persisted = persistHistoryProofUnlocked(
-                                request.router,
-                                request.ownerAgentId,
-                                request.ownerInstanceId,
-                                request.peer,
-                                finalMessages,
-                                nowMs,
-                            )
-                            if (persisted.committed) {
+                                val merged = reconcileConversationMessages(
+                                    existing,
+                                    hydrated,
+                                    parsed.highWaterSequence,
+                                    nowMs,
+                                )
+                                var next = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (request.peer to merged))
+                                hydrated.filter { it.direction == Direction.OUTGOING }.forEach { echo ->
+                                    next = reduceOutboundDelivery(
+                                        next,
+                                        OutboundDeliveryEvent.HistoryEcho(
+                                            OutboundScope(request.router, request.connectionGeneration, request.peer, peers.firstOrNull { it.id == request.peer }?.instanceId),
+                                            echo,
+                                        ),
+                                    )
+                                }
+                                val finalMessages = next.messagesByPeer[request.peer].orEmpty()
+                                val persisted = persistHistoryProofUnlocked(
+                                    request.router,
+                                    request.ownerAgentId,
+                                    request.ownerInstanceId,
+                                    request.peer,
+                                    finalMessages,
+                                    nowMs,
+                                )
+                                if (!persisted.committed) {
+                                    reportHistoryPersistenceFailureUnlocked(request.peer, request.router, request.connectionGeneration)
+                                    return@withLock
+                                }
                                 outboundState = next
                                 messages = finalMessages
+                                cancelHistoryRecoveryUnlocked(request.peer)
+                                historyUiState = HistoryUiState()
+                            } catch (_: Exception) {
+                                reportHistoryPersistenceFailureUnlocked(request.peer, request.router, request.connectionGeneration)
                             }
                         }
                     }
                 }
-            } catch (_: Exception) {
-                // A later reconnect or peer selection retries hydration without discarding live messages.
+            } catch (error: Exception) {
+                publishHistoryFailure(
+                    request,
+                    if (error is java.io.InterruptedIOException) HistoryFailure.TIMEOUT else HistoryFailure.EXCEPTION,
+                )
             }
         }.start()
     }
@@ -1867,21 +2421,29 @@ class MainActivity : ComponentActivity() {
         router: String = activeRouter,
         localAgentId: String = agentId,
     ): ChatMessage? {
-        val id = value.optString("id")
-        val sender = value.optString("from")
-        if (id.isBlank() || sender.isBlank()) return null
+        val validated = validateLiveMessagePayload(value, LiveMessageFrameKind.CONVERSATION_MESSAGE) ?: return null
+        return chatMessage(validated, router, localAgentId)
+    }
+
+    private fun chatMessage(
+        validated: ValidatedLiveMessage,
+        router: String = activeRouter,
+        localAgentId: String = agentId,
+    ): ChatMessage {
+        val value = validated.payload
+        val sender = value.getString("from")
         val direction = if (sender == localAgentId) Direction.OUTGOING else Direction.INCOMING
         return ChatMessage(
-            id = id,
-            incarnationId = value.optString("message_incarnation_id"),
-            sequence = value.optLong("sequence"),
+            id = value.getString("id"),
+            incarnationId = validated.incarnationId,
+            sequence = validated.sequence,
             sender = sender,
-            body = value.optString("body"),
+            body = value.getString("body"),
             direction = direction,
-            createdAt = value.optString("created_at", Instant.EPOCH.toString()),
-            recordedAt = value.optString("recorded_at").takeIf { it.isNotBlank() },
+            createdAt = value.getString("created_at"),
+            recordedAt = validated.recordedAt,
             attachments = imageReferences(value.optJSONArray("attachments"), router),
-            recipient = value.optString("to"),
+            recipient = value.getString("to"),
             deliveryStatus = if (direction == Direction.OUTGOING) OutboundDeliveryStatus.SENT else OutboundDeliveryStatus.NONE,
         )
     }
@@ -1911,6 +2473,8 @@ class MainActivity : ComponentActivity() {
             clearReminderLocksForPeer(selectedPeer)
             clearReminderCrudForPeer(selectedPeer)
             activeHydrationFence = null
+            cancelHistoryRecoveryUnlocked()
+            historyUiState = HistoryUiState()
         }
         agentFilter = ""
         selectedPeer = peer
@@ -1947,6 +2511,8 @@ class MainActivity : ComponentActivity() {
         clearReminderLocksForPeer(selectedPeer)
         clearReminderCrudForPeer(selectedPeer)
         activeHydrationFence = null
+        historyLock.withLock { cancelHistoryRecoveryUnlocked() }
+        historyUiState = HistoryUiState()
         selectedPeer = ""
         messages = emptyList()
         images = emptyList()
@@ -2034,23 +2600,30 @@ class MainActivity : ComponentActivity() {
             requestAttachments = localAttachments,
             deadlineAtMs = System.currentTimeMillis() + OUTBOUND_DELIVERY_TIMEOUT_MS,
         )
+        var optimisticPersisted = false
         historyLock.withLock {
             val current = outboundState.messagesByPeer[recipient] ?: historyForUnlocked(recipient)
-            val next = enqueueOutboundDelivery(
+            val result = persistOptimisticSend(
                 outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (recipient to current)),
                 operation,
-            )
-            if (next == outboundState) return@withLock
-            if (!persistKnownPeers(knownPeers() + recipient) || !persistHistoryUnlocked(recipient, next.messagesByPeer[recipient].orEmpty())) {
+            ) { next ->
+                persistKnownPeers(knownPeers() + recipient)
+                    && persistHistoryUnlocked(recipient, next.messagesByPeer[recipient].orEmpty())
+            }
+            if (!result.persisted) {
+                // Keep the draft and images untouched. HTTP starts only after this branch.
                 connection = "Message could not be saved locally."
                 return@withLock
             }
+            val next = result.state
             outboundState.pending.keys
                 .filterNot { next.pending.containsKey(it) }
                 .forEach { controlHandler.removeCallbacksAndMessages(it) }
             outboundState = next
             if (selectedPeer == recipient) messages = next.messagesByPeer[recipient].orEmpty()
+            optimisticPersisted = true
         }
+        if (!optimisticPersisted) return
         controlHandler.postDelayed({
             applyOutboundEvent(OutboundDeliveryEvent.Timeout(messageId, scope, System.currentTimeMillis()))
         }, OUTBOUND_DELIVERY_TIMEOUT_MS)
@@ -2091,7 +2664,10 @@ class MainActivity : ComponentActivity() {
                                         "Message delivery was not confirmed; the router may have accepted it.",
                                     ))
                                 } else {
-                                    applyOutboundEvent(OutboundDeliveryEvent.Accepted(messageId, operation.requestId, scope, accepted))
+                                    // A late success may be rejected after a reconnect, peer switch,
+                                    // or history echo. Only the exact pending operation can clear its draft.
+                                    val applied = applyOutboundEvent(OutboundDeliveryEvent.Accepted(messageId, operation.requestId, scope, accepted))
+                                    if (!applied) return@runOnUiThread
                                     drafts.clearIfUnchanged(router, recipient, text)
                                     if (activeRouter == router && selectedPeer == recipient && draft == text) draft = ""
                                     if (activeRouter == router && selectedPeer == recipient && images === sentImages) images = emptyList()
@@ -2129,10 +2705,11 @@ class MainActivity : ComponentActivity() {
         parsed.takeIf { matchesOutboundEnvelope(operation, it) }
     }.getOrNull()
 
-    private fun applyOutboundEvent(event: OutboundDeliveryEvent) = historyLock.withLock {
+    private fun applyOutboundEvent(event: OutboundDeliveryEvent): Boolean = historyLock.withLock {
         val previous = outboundState
         val next = reduceOutboundDelivery(previous, event)
-        if (next == previous) return@withLock
+        if (next == previous) return@withLock false
+        val accepted = event is OutboundDeliveryEvent.Accepted
         val callbackId = when (event) {
             is OutboundDeliveryEvent.Accepted -> event.localId
             is OutboundDeliveryEvent.Rejected -> event.localId
@@ -2147,9 +2724,10 @@ class MainActivity : ComponentActivity() {
             .forEach { peer -> persistHistoryUnlocked(peer, next.messagesByPeer[peer].orEmpty()) }
         if (selectedPeer.isNotBlank()) messages = next.messagesByPeer[selectedPeer] ?: messages
         next.error?.let { connection = it }
+        accepted
     }
 
-    private fun settleOutboundOnConnectionChange() = historyLock.withLock {
+    private fun settleOutboundOnConnectionChange(capturedRouter: String = activeRouter) = historyLock.withLock {
         val previous = outboundState
         val next = reduceOutboundDelivery(previous, OutboundDeliveryEvent.ConnectionChanged)
         if (next == previous) return@withLock
@@ -2157,9 +2735,60 @@ class MainActivity : ComponentActivity() {
         outboundState = next
         next.messagesByPeer.keys
             .filter { next.messagesByPeer[it] != previous.messagesByPeer[it] }
-            .forEach { peer -> persistHistory(peer, next.messagesByPeer[peer].orEmpty()) }
+            .forEach { peer ->
+                // The caller captures the router before any scope transition.
+                persistHistoryProofUnlocked(capturedRouter, agentId, instanceId, peer, next.messagesByPeer[peer].orEmpty(), System.currentTimeMillis())
+            }
         if (selectedPeer.isNotBlank()) messages = next.messagesByPeer[selectedPeer] ?: messages
         next.error?.let { connection = it }
+    }
+
+    /** Settle old pending sends and persist them before changing activeRouter. */
+    private fun settleAndClearOutboundForRouterSwitch(oldRouter: String): Boolean = historyLock.withLock {
+        val result = settleOutboundForRouterSwitch(outboundState, oldRouter) { router, peer, value ->
+            val proof = persistHistoryProofUnlocked(router, agentId, instanceId, peer, value, System.currentTimeMillis())
+            proof.committed && value.all { it.key in proof.retainedMessageKeys }
+        }
+        if (!result.persisted) {
+            connection = "Pending messages could not be saved locally."
+            return@withLock false
+        }
+        outboundState = result.state
+        true
+    }
+
+    /** Settle and persist the old owner before changing the local identity. */
+    private fun settleAndClearOutboundForIdentityChange(
+        oldRouter: String,
+        oldOwner: String,
+        oldOwnerInstance: String,
+    ): Boolean = historyLock.withLock {
+        val result = settleOutboundForIdentityChange(outboundState, oldRouter, oldOwner, oldOwnerInstance) { router, owner, ownerInstance, peer, value ->
+            val proof = persistHistoryProofUnlocked(router, owner, ownerInstance, peer, value, System.currentTimeMillis())
+            proof.committed && value.all { it.key in proof.retainedMessageKeys }
+        }
+        if (!result.persisted) {
+            connection = "Pending messages could not be saved locally."
+            return@withLock false
+        }
+        outboundState = result.state
+        true
+    }
+
+    private fun switchActiveRouter(nextRouter: String): Boolean {
+        val oldRouter = activeRouter
+        if (oldRouter == nextRouter) return true
+        // Keep activeRouter unchanged until old pending state has its old scope.
+        if (!settleAndClearOutboundForRouterSwitch(oldRouter)) return false
+        returnHome()
+        cancelConnection()
+        historyLock.withLock {
+            activeRouter = nextRouter
+            activeHydrationFence = null
+            outboundState = OutboundReducerState()
+            peers = emptyList()
+        }
+        return true
     }
 
     private fun settleOutboundForPeer(peer: String, targetInstanceId: String?) = historyLock.withLock {
@@ -2192,14 +2821,25 @@ class MainActivity : ComponentActivity() {
             showProfileEditor = false
             return
         }
-        prefs().edit().putString("agent_id", trimmed).commit()
+        val oldRouter = activeRouter
+        val oldOwner = agentId
+        val oldOwnerInstance = instanceId
+        // The old connection and history scope remain authoritative until all pending
+        // rows are settled and persisted. Identity mutation happens only afterward.
+        if (!settleAndClearOutboundForIdentityChange(oldRouter, oldOwner, oldOwnerInstance)) return
+        cancelConnection()
+        returnHome()
+        if (!prefs().edit().putString("agent_id", trimmed).commit()) {
+            connection = "Username could not be saved locally."
+            return
+        }
         historyLock.withLock {
             agentId = trimmed
             activeHydrationFence = null
-            deliveryCoordinator.invalidate()
+            outboundState = OutboundReducerState()
+            messages = emptyList()
         }
         showProfileEditor = false
-        cancelConnection()
         connect()
     }
 
@@ -2221,22 +2861,21 @@ class MainActivity : ComponentActivity() {
         }
         val endpoint = savedConfig.identity
         val nextActiveRouter = activeRouterAfterRouterSave(activeRouter, previousEndpoint, endpoint)
-        prefs().edit().putStringSet("router_endpoints", routerRecordsForPersistence(updatedConfigs, BuildConfig.DEBUG)).putString("active_router", nextActiveRouter).commit()
+        val saved = prefs().edit()
+            .putStringSet("router_endpoints", routerRecordsForPersistence(updatedConfigs, BuildConfig.DEBUG))
+            .commit()
+        if (!saved) {
+            routerError = "Router settings could not be saved."
+            return false
+        }
+        if (nextActiveRouter != activeRouter && !switchActiveRouter(nextActiveRouter)) return false
+        prefs().edit().putString("active_router", nextActiveRouter).commit()
         editingRouterEndpoint = null
         routerRevision++
         routerError = ""
         showRouterManager = false
-        if (nextActiveRouter != activeRouter) {
-            historyLock.withLock {
-                activeRouter = nextActiveRouter
-                activeHydrationFence = null
-                deliveryCoordinator.invalidate()
-                peers = emptyList()
-            }
-            returnHome()
-            cancelConnection()
-            connect()
-        }
+        if (nextActiveRouter != activeRouter) return true
+        if (socket == null && nextActiveRouter.isNotBlank()) connect()
         return true
     }
 
@@ -2257,43 +2896,30 @@ class MainActivity : ComponentActivity() {
             showRouterManager = false
             return
         }
+        if (!switchActiveRouter(nextActiveRouter)) return
         prefs().edit().putString("active_router", nextActiveRouter).commit()
-        historyLock.withLock {
-            activeRouter = nextActiveRouter
-            activeHydrationFence = null
-            deliveryCoordinator.invalidate()
-            peers = emptyList()
-        }
-        returnHome()
         showRouterManager = false
-        cancelConnection()
         connect()
     }
 
     private fun removeRouter(router: String) {
         val remaining = routers().filterNot { it.identity == router }
+        val wasActive = router == activeRouter
+        val next = if (wasActive) {
+            remaining.firstOrNull { routerConfigAllowed(it) }?.identity.orEmpty()
+        } else activeRouter
+        if (wasActive && !switchActiveRouter(next)) return
         val editor = prefs().edit()
         prefs().all.keys.filter {
             it == knownPeersKeyFor(router) || it.startsWith("history:$router:") || it.startsWith("draft:$router:") || it == draftPeersKey(router) || it.startsWith("conversation_id:$router:")
         }.forEach(editor::remove)
-        val next = if (router == activeRouter) {
-            remaining.firstOrNull { routerConfigAllowed(it) }?.identity.orEmpty()
-        } else activeRouter
         editor.putStringSet("router_endpoints", remaining.map { it.persist() }.toSet())
         if (next.isBlank()) editor.remove("active_router") else editor.putString("active_router", next)
         editor.commit()
         routerRevision++
         routerError = ""
         if (editingRouterEndpoint == router) editingRouterEndpoint = null
-        if (router == activeRouter) {
-            historyLock.withLock {
-                activeRouter = next
-                activeHydrationFence = null
-                deliveryCoordinator.invalidate()
-                peers = emptyList()
-            }
-            returnHome()
-            cancelConnection()
+        if (wasActive) {
             if (next.isNotBlank()) connect() else connection = "Add a router to connect"
         }
     }
@@ -2399,6 +3025,8 @@ class MainActivity : ComponentActivity() {
                             { selectedArrival = it },
                             ::dismissMessageArrival,
                             capabilities,
+                            historyUiState,
+                            ::retryHistory,
                             modelControlState,
                             goalControlState,
                             reminders,
@@ -2721,6 +3349,8 @@ private fun Conversation(
     onArrival: (MessageArrival) -> Unit,
     onDismissArrival: (String) -> Unit,
     capabilities: ControlCapabilities,
+    historyState: HistoryUiState,
+    onRetryHistory: () -> Unit,
     modelControlState: ControlState,
     goalControlState: ControlState,
     reminders: List<ReminderSummary>,
@@ -2892,6 +3522,20 @@ private fun Conversation(
             }
         }
         HorizontalDivider(color = SurfaceRaised)
+        if (historyState.status == HistoryStatus.ERROR) {
+            Row(
+                Modifier.fillMaxWidth().background(SurfaceRaised).padding(start = 16.dp, top = 4.dp, end = 8.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    historyState.message ?: "History could not be loaded.",
+                    Modifier.weight(1f),
+                    color = Color(0xFFFFB4AB),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = onRetryHistory) { Text("Retry", color = Periwinkle) }
+            }
+        }
         if (messages.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("Start a conversation with ${humanName(peer)}", color = TextMuted)
@@ -4106,6 +4750,17 @@ internal fun matchesPendingReminderLock(
     && result.sourceAgentId == sourceAgentId
     && result.leaseId == currentLeaseId
 
+internal fun mergeHydrationConversationMessages(
+    persisted: List<ChatMessage>,
+    inMemory: List<ChatMessage>,
+    recovery: List<ChatMessage> = emptyList(),
+    nowMs: Long = System.currentTimeMillis(),
+): List<ChatMessage> = mergeConversationMessages(
+    mergeConversationMessages(recovery, inMemory, nowMs),
+    persisted,
+    nowMs,
+)
+
 internal fun reconcileConversationMessages(
     existing: List<ChatMessage>,
     snapshot: List<ChatMessage>,
@@ -4119,6 +4774,9 @@ internal fun reconcileConversationMessages(
     return mergeConversationMessages(retainedLive, snapshot, nowMs)
 }
 
+internal fun sameConversationMessageIdentity(left: ChatMessage, right: ChatMessage): Boolean =
+    left.id == right.id && (left.incarnationId == right.incarnationId || left.incarnationId.isBlank() || right.incarnationId.isBlank())
+
 internal fun mergeConversationMessages(
     existing: List<ChatMessage>,
     incoming: List<ChatMessage>,
@@ -4126,9 +4784,7 @@ internal fun mergeConversationMessages(
 ): List<ChatMessage> {
     val merged = existing.toMutableList()
     incoming.forEach { message ->
-        val index = merged.indexOfFirst { current ->
-            current.id == message.id && (current.incarnationId == message.incarnationId || current.incarnationId.isBlank() || message.incarnationId.isBlank())
-        }
+        val index = merged.indexOfFirst { current -> sameConversationMessageIdentity(current, message) }
         if (index < 0) {
             merged += message
             return@forEach
@@ -4146,6 +4802,18 @@ internal fun mergeConversationMessages(
             } else {
                 merged[index] = message.copy(deliveryStatus = OutboundDeliveryStatus.SENT)
             }
+        } else if (isCanonicalConversationMessage(current) && !isCanonicalConversationMessage(message)) {
+            // Delivery envelopes are identity proofs, not an authority to replace a richer history row.
+            return@forEach
+        } else if (isCanonicalConversationMessage(current)
+            && isCanonicalConversationMessage(message)
+            && current.incarnationId.isNotBlank()
+            && current.incarnationId == message.incarnationId
+            && current != message
+            && message.sequence <= current.sequence
+        ) {
+            // Same-incarnation conflicts have no ordering evidence. Keep the existing canonical row.
+            return@forEach
         } else {
             merged[index] = message
         }
@@ -4227,6 +4895,23 @@ internal fun routerHttpUrl(endpoint: String, scheme: String): String = when (sch
     "https" -> "https://$endpoint"
     else -> error("Unsupported router scheme")
 }
+
+internal fun conversationHistoryUrl(routerBaseUrl: String, owner: String, peer: String): okhttp3.HttpUrl {
+    val base = runCatching { routerBaseUrl.toHttpUrl() }
+        .getOrElse { throw IllegalArgumentException("Router URL is invalid", it) }
+    return base.newBuilder()
+        .addPathSegments("v1/conversations")
+        .addQueryParameter("owner", owner)
+        .addQueryParameter("peer", peer)
+        .build()
+}
+
+internal fun historyHttpClient(base: OkHttpClient): OkHttpClient = base.newBuilder()
+    .retryOnConnectionFailure(false)
+    .callTimeout(HISTORY_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+    .followRedirects(false)
+    .followSslRedirects(false)
+    .build()
 
 internal fun routerWebSocketUrl(endpoint: String, scheme: String): String = when (scheme) {
     "http" -> {
@@ -4327,6 +5012,8 @@ internal fun normalizeEscapedNewlines(value: String): String = value
 internal fun boundedDraftPeers(existing: List<String>, peer: String): List<String> =
     (existing.filterNot { it == peer } + peer).takeLast(MAX_DRAFTS_PER_ROUTER)
 
+internal fun discoveryResponseWithinBound(agents: JSONArray): Boolean = agents.length() <= MAX_DISCOVERED_PEERS
+
 internal fun visibleConnectedPeers(peers: List<PeerStatus>, filter: String): List<PeerStatus> {
     val normalizedFilter = filter.trim().lowercase()
     return peers.filter { peer ->
@@ -4376,7 +5063,8 @@ internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerS
     }
     val normalizedSubagentCount = if (incomingStale || durableVersion != null && incomingVersion == null) current?.subagentCount ?: incomingCount else maxOf(incomingCount, preservedSummaries.size)
     val parsedModels = if (source.has("available_models")) parseModelSummaries(source.optJSONArray("available_models")) else null
-    val currentModel = if (source.has("current_model")) parseModelSummary(source.optJSONObject("current_model")) else current?.modelCatalog?.current
+    val currentModel = if (source.has("current_model")) parseModelSummary(source.optJSONObject("current_model"))
+    else current?.modelCatalog?.current?.takeIf { sameInstance }
     val catalog = if (parsedModels != null) {
         ModelCatalog(
             if (parsedModels.isEmpty()) CatalogStatus.EMPTY else CatalogStatus.READY,
@@ -4385,8 +5073,13 @@ internal fun peerStatusFromJson(peer: String, source: JSONObject, current: PeerS
             source.optBoolean("model_catalog_truncated", false),
             currentModel,
         )
-    } else current?.modelCatalog ?: ModelCatalog(CatalogStatus.LOADING, current = currentModel)
-    val goalState = if (source.has("goal_state")) parseGoalStateValue(source.optJSONObject("goal_state")) else current?.goalState
+    } else if (sameInstance) {
+        current?.modelCatalog ?: ModelCatalog(CatalogStatus.LOADING, current = currentModel)
+    } else {
+        ModelCatalog(CatalogStatus.LOADING, current = currentModel)
+    }
+    val goalState = if (source.has("goal_state")) parseGoalStateValue(source.optJSONObject("goal_state"))
+    else current?.goalState?.takeIf { sameInstance }
     return PeerStatus(
         id = peer,
         activityState = source.optString("activity_state", "idle"),

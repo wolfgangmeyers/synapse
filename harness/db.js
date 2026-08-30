@@ -2408,6 +2408,9 @@ function deliveryFromRows(database, rows, items, deliveryExpiresAt) {
   const message = rows.length > 1 ? { ...first, body } : first;
   return {
     message,
+    // Keep each original envelope beside the legacy merged body. The wire router
+    // uses this only for the additive multi-delivery field.
+    messages: rows.map((row) => toMessage(row)),
     attempt_number: items[0].attempt_number,
     delivery_expires_at: deliveryExpiresAt,
     items,

@@ -68,6 +68,7 @@ type MessageFrame struct {
 	AttemptNumber        int            `json:"attempt_number"`
 	DeliveryExpiresAt    string         `json:"delivery_expires_at"`
 	DeliveryItems        []DeliveryItem `json:"delivery_items,omitempty"`
+	DeliveryMessages     []Envelope     `json:"delivery_messages,omitempty"`
 }
 
 type DeliveryReceipt struct {
@@ -128,7 +129,23 @@ func ValidateMessageFrame(frame MessageFrame) error {
 	if frame.Version != Version || !frameIDPattern.MatchString(frame.FrameID) || frame.Type != "message" || !incarnationPattern.MatchString(frame.MessageIncarnationID) || frame.AttemptNumber < 1 || !validTimestamp(frame.DeliveryExpiresAt) {
 		return &ValidationError{Code: "invalid_request"}
 	}
-	return ValidateEnvelope(frame.Message, AbsoluteMaxBodyBytes)
+	if err := ValidateEnvelope(frame.Message, AbsoluteMaxBodyBytes); err != nil {
+		return err
+	}
+	if len(frame.DeliveryItems) > 1 || (len(frame.DeliveryItems) > 0 && len(frame.DeliveryMessages) > 0) {
+		if len(frame.DeliveryMessages) != len(frame.DeliveryItems) {
+			return &ValidationError{Code: "invalid_request"}
+		}
+	}
+	for index, message := range frame.DeliveryMessages {
+		if err := ValidateEnvelope(message, AbsoluteMaxBodyBytes); err != nil {
+			return err
+		}
+		if len(frame.DeliveryItems) > 0 && (message.ID != frame.DeliveryItems[index].MessageID || message.To != frame.Message.To) {
+			return &ValidationError{Code: "invalid_request"}
+		}
+	}
+	return nil
 }
 
 func NewEnvelope(clock interface{ Now() time.Time }, ids interface{ Next() (string, error) }, from, to string, subject *string, body string, sentinel *SentinelDescriptor) (Envelope, error) {

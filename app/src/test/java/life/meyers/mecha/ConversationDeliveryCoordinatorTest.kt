@@ -8,6 +8,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -65,6 +66,30 @@ class ConversationDeliveryCoordinatorTest {
 
         assertNull(rejected)
         assertEquals(0, networkSends)
+    }
+
+    @Test
+    fun batchSettlementRequiresEveryItemToBeRetainedBeforeReceiptsCanBeBuilt() {
+        val lock = ConversationStateLock()
+        val coordinator = ConversationDeliveryCoordinator(lock)
+        coordinator.begin(connection(generation = 2, leaseId = "lease-2"))
+        assertTrue(coordinator.register(2, "lease-2"))
+        val first = message("first", System.currentTimeMillis())
+        val second = message("second", System.currentTimeMillis())
+        val captured = coordinator.capture(2) { identity ->
+            CapturedDelivery(
+                connection = identity,
+                peer = "peer",
+                targetInstanceId = null,
+                message = first,
+                attemptNumber = 1,
+                messages = listOf(first, second),
+            )
+        }
+
+        assertNull(coordinator.settle(captured!!, persist = {
+            DeliveryPersistenceProof(committed = true, retainedMessageKeys = setOf(first.key))
+        }))
     }
 
     @Test
@@ -246,6 +271,160 @@ class ConversationDeliveryCoordinatorTest {
         assertFalse(networkCallbacksUnderLock.get())
         assertFalse(receiptCallbacksUnderLock.get())
         assertEquals(rounds * 4, state.messagesByPeer[peer].orEmpty().size)
+    }
+
+    @Test
+    fun optimisticSendDoesNotReachHttpWhenItsLocalCommitFails() {
+        val now = System.currentTimeMillis()
+        val scope = OutboundScope("router-a", 1, "peer", null)
+        val operation = outboundOperation("send", scope, now)
+        var persistenceCalls = 0
+        val result = persistOptimisticSend(OutboundReducerState(), operation) {
+            persistenceCalls++
+            false
+        }
+        var httpCalls = 0
+        if (result.persisted) httpCalls++
+
+        assertFalse(result.persisted)
+        assertEquals(1, persistenceCalls)
+        assertEquals(0, httpCalls)
+        assertTrue(result.state.pending.isEmpty())
+        assertTrue(result.state.messagesByPeer.isEmpty())
+    }
+
+    @Test
+    fun routerSwitchSettlesAndPersistsPendingMessagesBeforeClearingOutboundScope() {
+        val now = System.currentTimeMillis()
+        val oldScope = OutboundScope("router-old", 4, "peer", "instance-old")
+        val operation = outboundOperation("pending", oldScope, now)
+        val state = enqueueOutboundDelivery(OutboundReducerState(), operation)
+        val persisted = mutableListOf<Triple<String, String, List<ChatMessage>>>()
+        val result = settleOutboundForRouterSwitch(state, "router-old") { router, peer, messages ->
+            persisted += Triple(router, peer, messages)
+            true
+        }
+
+        assertTrue(result.persisted)
+        assertTrue(result.state.pending.isEmpty())
+        assertTrue(result.state.messagesByPeer.isEmpty())
+        assertEquals("router-old", persisted.single().first)
+        assertEquals("peer", persisted.single().second)
+        assertEquals(OutboundDeliveryStatus.UNCERTAIN, persisted.single().third.single().deliveryStatus)
+        assertEquals("router-old", state.pending.values.single().scope.router)
+    }
+
+    @Test
+    fun routerSwitchKeepsScopedStateWhenSettledHistoryCannotBePersisted() {
+        val now = System.currentTimeMillis()
+        val scope = OutboundScope("router-old", 4, "peer", "instance-old")
+        val state = enqueueOutboundDelivery(OutboundReducerState(), outboundOperation("pending", scope, now))
+        val result = settleOutboundForRouterSwitch(state, "router-old") { _, _, _ -> false }
+
+        assertFalse(result.persisted)
+        assertEquals(state, result.state)
+    }
+
+    @Test
+    fun newerInstanceEventWinsWhenAStartedDiscoveryReturnsLate() {
+        val fence = PeerStateEventFence()
+        fence.reset(3)
+        val discovery = fence.begin(3)!!
+        val event = fence.begin(3)!!
+        val old = PeerStatus("peer", activityState = "idle", instanceId = "old-instance")
+        val source = JSONObject()
+            .put("instance_id", "new-instance")
+            .put("activity_state", "active")
+            .put("subagent_count", 0)
+        var peers = listOf(old)
+        if (fence.isNewest(event)) {
+            peers = peers.map { if (it.id == "peer") peerStatusFromJson("peer", source, it) else it }
+        }
+        if (fence.isNewest(discovery)) peers = listOf(old)
+
+        assertEquals("new-instance", peers.single().instanceId)
+        assertEquals("active", peers.single().activityState)
+        assertFalse(fence.isNewest(discovery))
+
+        fence.reset(4)
+        assertFalse(fence.isNewest(event))
+    }
+
+    @Test
+    fun unrelatedPeerEventDoesNotInvalidateOtherEntriesInAFullDiscoverySnapshot() {
+        val fence = PeerStateEventFence()
+        fence.reset(3)
+        val discovery = fence.beginDiscovery(3)!!
+
+        assertNotNull(fence.observeEvent(3, "peer-b", "instance-b", 200L))
+        assertTrue(fence.isCurrentForPeer(discovery, "peer-a"))
+        assertFalse(fence.isCurrentForPeer(discovery, "peer-b"))
+    }
+
+    @Test
+    fun delayedOldInstanceEventCannotReplaceANewerDiscoveryInstance() {
+        val fence = PeerStateEventFence()
+        fence.reset(3)
+        val discovery = fence.beginDiscovery(3)!!
+        assertTrue(fence.acceptDiscovery(discovery, "peer", "instance-new", 200L))
+
+        assertNull(fence.observeEvent(3, "peer", "instance-old", 100L))
+        assertNotNull(fence.observeEvent(3, "peer", "instance-new", 300L))
+    }
+
+    @Test
+    fun newerInstanceActivityReplacesOldProjectionInsteadOfBeingDiscarded() {
+        val old = PeerStatus(
+            "peer",
+            activityState = "active",
+            subagentCount = 1,
+            subagents = listOf(SubagentSummary("old-child", "Old")),
+            instanceId = "old-instance",
+        )
+        val updated = peerStatusFromJson(
+            "peer",
+            JSONObject()
+                .put("instance_id", "new-instance")
+                .put("activity_state", "active")
+                .put("subagent_count", 1)
+                .put("subagents", org.json.JSONArray().put(JSONObject().put("id", "new-child").put("description", "New"))),
+            old,
+        )
+
+        assertEquals("new-instance", updated.instanceId)
+        assertEquals(listOf("new-child"), updated.subagents.map(SubagentSummary::id))
+        assertEquals(0, updated.modelCatalog.models.size)
+        assertEquals(null, updated.goalState)
+    }
+
+    @Test
+    fun peerDiscoveryRetriesHydrationWhenItResolvesAnUnknownInstance() {
+        val request = HistoryHydrationFence(
+            router = "router-a",
+            ownerAgentId = "android",
+            ownerInstanceId = "owner-1",
+            peer = "peer",
+            targetInstanceId = null,
+            connectionGeneration = 3,
+            requestSerial = 7,
+        )
+
+        assertTrue(shouldRetryHistoryAfterPeerResolution(request, "peer", "peer", null, "peer-instance-2", 3))
+        assertFalse(shouldRetryHistoryAfterPeerResolution(request, "other-peer", "peer", null, "peer-instance-2", 3))
+        assertFalse(shouldRetryHistoryAfterPeerResolution(request, "peer", "peer", null, "peer-instance-2", 4))
+        assertFalse(shouldRetryHistoryAfterPeerResolution(request, "peer", "peer", null, null, 3))
+
+        val retry = request.copy(targetInstanceId = "peer-instance-2", requestSerial = 8)
+        assertTrue(isCurrentHistoryHydration(
+            retry,
+            currentRouter = "router-a",
+            currentOwnerAgentId = "android",
+            currentOwnerInstanceId = "owner-1",
+            currentPeer = "peer",
+            currentTargetInstanceId = "peer-instance-2",
+            currentConnectionGeneration = 3,
+            currentRequestSerial = 8,
+        ))
     }
 
     @Test

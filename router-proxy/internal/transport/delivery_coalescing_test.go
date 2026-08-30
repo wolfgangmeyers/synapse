@@ -39,6 +39,9 @@ func TestDeliveryOfferCoalescesBurstIntoOneBatch(t *testing.T) {
 		items, ok := fields["delivery_items"].([]protocol.DeliveryItem)
 		require.True(t, ok)
 		require.Len(t, items, 3)
+		messages, ok := fields["delivery_messages"].([]protocol.Envelope)
+		require.True(t, ok)
+		require.Equal(t, []string{"one", "two", "three"}, []string{messages[0].Body, messages[1].Body, messages[2].Body})
 	case <-time.After(time.Second):
 		t.Fatal("coalesced delivery did not arrive")
 	}

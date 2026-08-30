@@ -147,6 +147,11 @@
       "minItems": 1,
       "items": { "$ref": "#/$defs/deliveryItem" }
     },
+    "deliveryMessages": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/envelope" }
+    },
     "registerFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -847,8 +852,18 @@
         "message_incarnation_id": { "$ref": "#/$defs/messageIncarnationId" },
         "attempt_number": { "$ref": "#/$defs/attemptNumber" },
         "delivery_expires_at": { "$ref": "#/$defs/utcMillis" },
-        "delivery_items": { "$ref": "#/$defs/deliveryItems" }
-      }
+        "delivery_items": { "$ref": "#/$defs/deliveryItems" },
+        "delivery_messages": { "$ref": "#/$defs/deliveryMessages" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["delivery_items"],
+            "properties": { "delivery_items": { "minItems": 2 } }
+          },
+          "then": { "required": ["delivery_messages"] }
+        }
+      ]
     },
     "attachmentReference": {
       "type": "object",
