@@ -192,13 +192,18 @@ internal data class PeerStatus(
     val compacting get() = activityState == "compacting"
 }
 
-/** The orbit is reserved for the agent's own working state. */
 internal enum class ActivityOrbit(val color: Color) {
     WORKING(Teal),
+    SUBAGENT(Color(0xFF60A5FA)),
+    COMPACTING(Color(0xFFC084FC)),
 }
 
-internal fun activityOrbitFor(peer: PeerStatus): ActivityOrbit? =
-    if (peer.active) ActivityOrbit.WORKING else null
+internal fun activityOrbitFor(peer: PeerStatus): ActivityOrbit? = when {
+    peer.compacting -> ActivityOrbit.COMPACTING
+    peer.active -> ActivityOrbit.WORKING
+    peer.subagentCount > 0 -> ActivityOrbit.SUBAGENT
+    else -> null
+}
 
 private data class DiscoveredPeer(
     val id: String,
