@@ -23,6 +23,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -94,8 +95,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
@@ -108,6 +115,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.window.Dialog
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -132,6 +141,7 @@ import java.util.concurrent.TimeUnit
 import java.time.temporal.ChronoUnit
 import kotlin.concurrent.scheduleAtFixedRate
 import kotlinx.coroutines.delay
+import kotlin.math.PI
 
 private const val DEFAULT_ROUTER_PORT = 8765
 private const val ROUTER_RECORD_SEPARATOR = "\u001f"
@@ -179,7 +189,16 @@ internal data class PeerStatus(
     val goalState: GoalState? = null,
 ) {
     val active get() = activityState == "active"
+    val compacting get() = activityState == "compacting"
 }
+
+/** The orbit is reserved for the agent's own working state. */
+internal enum class ActivityOrbit(val color: Color) {
+    WORKING(Teal),
+}
+
+internal fun activityOrbitFor(peer: PeerStatus): ActivityOrbit? =
+    if (peer.active) ActivityOrbit.WORKING else null
 
 private data class DiscoveredPeer(
     val id: String,
@@ -3222,27 +3241,39 @@ private fun PeerRow(
     onDismissArrival: (String) -> Unit,
 ) {
     val peerId = peer.id
-    Card(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-        shape = RoundedCornerShape(18.dp),
+    val orbit = activityOrbitFor(peer)
+    OrbitingBorder(
+        active = orbit != null,
+        orbitColor = orbit?.color ?: Teal,
+        label = "peer-card-${peer.id}",
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 18.dp,
     ) {
-        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Avatar(peerId)
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(humanName(peerId), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (peer.active) {
-                        Spacer(Modifier.width(8.dp))
-                        WorkingIndicator(compact = true)
+        Card(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable(onClick = onClick),
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            shape = RoundedCornerShape(18.dp),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Avatar(peerId)
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(humanName(peerId), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (peer.compacting) {
+                            Spacer(Modifier.width(8.dp))
+                            CompactingIndicator(compact = true)
+                        } else if (peer.active) {
+                            Spacer(Modifier.width(8.dp))
+                            WorkingIndicator(compact = true)
+                        }
                     }
+                    PeerActivityIndicators(peer)
+                    ArrivalIndicator(arrival, onArrival, onDismissArrival)
                 }
-                if (peer.activityState == "compacting") CompactingIndicator() else PeerActivityIndicators(peer)
-                ArrivalIndicator(arrival, onArrival, onDismissArrival)
+                Spacer(Modifier.width(8.dp))
+                Icon(Icons.Default.ChevronRight, "Open conversation", tint = TextMuted)
             }
-            Spacer(Modifier.width(8.dp))
-            Icon(Icons.Default.ChevronRight, "Open conversation", tint = TextMuted)
         }
     }
 }
@@ -3341,11 +3372,20 @@ private fun MessageArrivalDialog(arrival: MessageArrival, onDismiss: () -> Unit,
 }
 
 @Composable
-private fun CompactingIndicator() {
+private fun CompactingIndicator(compact: Boolean = false) {
+    val pulse = synchronizedHaloPulse("compacting-pulse")
+    val dotSize = if (compact) 7.dp else 8.dp
+    val horizontalPadding = if (compact) 6.dp else 8.dp
+    val verticalPadding = if (compact) 3.dp else 4.dp
     Row(
-        Modifier.background(Color(0xFF7E22CE).copy(alpha = 0.28f), RoundedCornerShape(999.dp)).padding(horizontal = 8.dp, vertical = 4.dp),
+        Modifier
+            .semantics(mergeDescendants = true) { contentDescription = "Compacting" }
+            .background(Color(0xFF7E22CE).copy(alpha = 0.28f), RoundedCornerShape(999.dp))
+            .padding(horizontal = horizontalPadding, vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        PulsingDot(Periwinkle, pulse, dotSize, 10.dp)
+        Spacer(Modifier.width(6.dp))
         Text("Compacting", style = MaterialTheme.typography.labelSmall, color = Color(0xFFF2E8FF), fontWeight = FontWeight.Bold)
     }
 }
@@ -3367,6 +3407,65 @@ private fun WorkingIndicator(compact: Boolean = false) {
         Spacer(Modifier.width(6.dp))
         Text("Working", style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold)
     }
+}
+
+/** Draws one moving segment so working state is visible without a second status pill. */
+@Composable
+private fun OrbitingBorder(
+    active: Boolean,
+    orbitColor: Color,
+    label: String,
+    modifier: Modifier = Modifier,
+    cornerRadius: Dp = 18.dp,
+    content: @Composable () -> Unit,
+) {
+    if (!active) {
+        Box(modifier) { content() }
+        return
+    }
+    val transition = rememberInfiniteTransition(label = "$label-orbit")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = tween(900, easing = LinearEasing)),
+        label = "$label-orbit-progress",
+    )
+    Box(
+        modifier.drawWithCache {
+            val strokeWidth = 1.5.dp.toPx()
+            val radius = cornerRadius.toPx()
+            onDrawWithContent {
+                drawContent()
+                drawPartialOrbitingBorder(progress, radius, strokeWidth, orbitColor)
+            }
+        },
+    ) { content() }
+}
+
+private fun DrawScope.drawPartialOrbitingBorder(
+    progress: Float,
+    cornerRadius: Float,
+    strokeWidth: Float,
+    color: Color,
+) {
+    val inset = strokeWidth / 2f
+    val width = (size.width - strokeWidth).coerceAtLeast(0f)
+    val height = (size.height - strokeWidth).coerceAtLeast(0f)
+    val radius = cornerRadius.coerceAtMost(minOf(width, height) / 2f)
+    val perimeter = (2f * (width - 2f * radius)) + (2f * (height - 2f * radius)) + (2f * PI.toFloat() * radius)
+    if (perimeter <= strokeWidth * 2f) return
+    val segment = (perimeter * 0.24f).coerceIn(strokeWidth, perimeter - strokeWidth)
+    drawRoundRect(
+        color = color.copy(alpha = 0.82f),
+        topLeft = Offset(inset, inset),
+        size = androidx.compose.ui.geometry.Size(width, height),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius),
+        style = Stroke(
+            width = strokeWidth,
+            cap = StrokeCap.Round,
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(segment, perimeter - segment), -progress * perimeter),
+        ),
+    )
 }
 
 @Composable
@@ -3497,8 +3596,16 @@ private fun Conversation(
     LaunchedEffect(messages.lastOrNull()?.id) {
         if (messages.isNotEmpty()) transcriptState.animateScrollToItem(messages.lastIndex)
     }
+    val orbit = activityOrbitFor(peerStatus)
     Column(Modifier.fillMaxSize()) {
-        BoxWithConstraints(Modifier.fillMaxWidth().background(SurfaceDark)) {
+        OrbitingBorder(
+            active = orbit != null,
+            orbitColor = orbit?.color ?: Teal,
+            label = "conversation-header-${peerStatus.id}",
+            modifier = Modifier.fillMaxWidth(),
+            cornerRadius = 0.dp,
+        ) {
+            BoxWithConstraints(Modifier.fillMaxWidth().background(SurfaceDark)) {
             val useOverflow = conversationHeaderUsesOverflow(maxWidth.value)
             Column(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
@@ -3513,12 +3620,15 @@ private fun Conversation(
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(humanName(peer), modifier = Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (peerStatus.active) {
+                            if (peerStatus.compacting) {
+                                Spacer(Modifier.width(8.dp))
+                                CompactingIndicator(compact = true)
+                            } else if (peerStatus.active) {
                                 Spacer(Modifier.width(8.dp))
                                 WorkingIndicator(compact = true)
                             }
                         }
-                        if (peerStatus.activityState == "compacting") CompactingIndicator() else PeerActivityIndicators(peerStatus, compact = true)
+                        PeerActivityIndicators(peerStatus, compact = true)
                         ArrivalIndicator(arrival, onArrival, onDismissArrival, header = true)
                     }
                     if (useOverflow) {
@@ -3584,6 +3694,7 @@ private fun Conversation(
                     }
                 }
             }
+        }
         }
         HorizontalDivider(color = SurfaceRaised)
         if (historyState.status == HistoryStatus.ERROR) {
