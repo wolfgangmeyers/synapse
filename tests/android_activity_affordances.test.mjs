@@ -13,21 +13,20 @@ function section(start, end) {
   return source.slice(startIndex, endIndex);
 }
 
-test("Android maps the orbit to working state only", () => {
-  assert.match(source, /internal enum class ActivityOrbit\(val color: Color\) \{\s*WORKING\(Teal\),\s*\}/);
-  assert.match(source, /internal fun activityOrbitFor\(peer: PeerStatus\): ActivityOrbit\? =\s*if \(peer\.active\) ActivityOrbit\.WORKING else null/);
-  assert.doesNotMatch(source, /ActivityOrbit\.(SUBAGENT|COMPACTING)/);
+test("Android maps working, subagent, and compacting states to their orbit colors", () => {
+  assert.match(source, /internal enum class ActivityOrbit\(val color: Color\) \{[\s\S]*WORKING\(Teal\),[\s\S]*SUBAGENT\(Color\(0xFF60A5FA\)\),[\s\S]*COMPACTING\(Color\(0xFFC084FC\)\),[\s\S]*\}/);
+  assert.match(source, /internal fun activityOrbitFor\(peer: PeerStatus\): ActivityOrbit\? = when \{[\s\S]*peer\.compacting -> ActivityOrbit\.COMPACTING[\s\S]*peer\.active -> ActivityOrbit\.WORKING[\s\S]*peer\.subagentCount > 0 -> ActivityOrbit\.SUBAGENT[\s\S]*else -> null[\s\S]*\}/);
 });
 
-test("Android wraps the conversation header and agent row with the working orbit", () => {
+test("Android wraps the conversation header and agent row with the mapped orbit", () => {
   const row = section("private fun PeerRow(", "private fun PeerActivityIndicators(");
   const conversation = section("private fun Conversation(", "private fun ConversationHeaderOverflowMenu(");
 
   assert.match(row, /val orbit = activityOrbitFor\(peer\)/);
-  assert.match(row, /OrbitingBorder\([\s\S]*label = "peer-card-\$\{peer\.id\}"/);
+  assert.match(row, /OrbitingBorder\([\s\S]*active = orbit != null,[\s\S]*orbitColor = orbit\?\.color \?: Teal,[\s\S]*label = "peer-card-\$\{peer\.id\}"/);
   assert.match(row, /Avatar\(peerId\)/);
   assert.match(conversation, /val orbit = activityOrbitFor\(peerStatus\)/);
-  assert.match(conversation, /OrbitingBorder\([\s\S]*label = "conversation-header-\$\{peerStatus\.id\}"/);
+  assert.match(conversation, /OrbitingBorder\([\s\S]*active = orbit != null,[\s\S]*orbitColor = orbit\?\.color \?: Teal,[\s\S]*label = "conversation-header-\$\{peerStatus\.id\}"/);
 });
 
 test("Android keeps the compacting label semantics while adding a pulsing dot", () => {
