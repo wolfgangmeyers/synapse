@@ -536,12 +536,24 @@ git diff --check
 
 ### Focused tests
 
+The originally planned focused command included the existing mailbox suite:
+
 ```text
 ./pi-extensions/mecha-messaging/node_modules/.bin/tsx --test \
   tests/mecha_messaging_compaction_orchestration.test.ts \
   tests/mecha_messaging_compaction_orchestration_differential.test.ts \
   tests/mecha_messaging_compaction_orchestration_e2e.test.ts \
   tests/mailbox_v2_delivery.test.ts
+```
+
+The command that produced the 24-test compaction evidence used the installed-Pi E2E file:
+
+```text
+./pi-extensions/mecha-messaging/node_modules/.bin/tsx --test \
+  tests/mecha_messaging_compaction_orchestration.test.ts \
+  tests/mecha_messaging_compaction_orchestration_differential.test.ts \
+  tests/mecha_messaging_compaction_orchestration_e2e.test.ts \
+  tests/pi_hard_compaction_e2e.test.ts
 ```
 
 ### Full package tests
@@ -632,10 +644,10 @@ The compaction orchestration extraction and its focused tests are complete in co
 
 Validation evidence for the completed target:
 
-- The focused compaction command passed 24 tests: 15 direct orchestration tests, 4 differential-harness tests, 1 isolated fake-Pi E2E test, and 4 installed-Pi tests.
-- The isolated fake-Pi E2E ran all seven scenarios without a skip. It used temporary module-resolution, HOME, Pi settings, project, session, SQLite, memory, and fake-`pi` paths. It verified the exact capture request and complete fake-`pi` argument list.
+- The planned focused command with `tests/mailbox_v2_delivery.test.ts` was retained above as the mailbox-inclusive validation command. The actual 24-test compaction command used `tests/pi_hard_compaction_e2e.test.ts`: 15 direct orchestration tests, 4 differential-harness tests, 1 isolated fake-Pi E2E test, and 4 installed-Pi tests.
+- The isolated fake-Pi E2E ran seven scenarios without a skip: self-compaction success, non-idle self-compaction, child-armed self-compaction, hard-threshold handling, capture with a successful tool result, mailbox gating while logically paused, and shutdown cleanup. It used temporary module-resolution, HOME, Pi settings, project, session, SQLite, memory, and fake-`pi` paths. It verified the exact capture request and complete fake-`pi` argument list. It did not cover advisory-threshold notification, an active Pi stream, or a cancellation-insensitive tool. Advisory-threshold notification is covered by the direct orchestration tests. Active-stream compaction and the cancellation-insensitive tool are covered only by the optional installed-Pi tests when an installed package is available.
 - Plain `npm test` exited successfully. The TypeScript package suite reported 432 passed, 0 failed, and 3 expected installed-Pi skips. The JavaScript suite reported 391 passed, 0 failed, and 2 unrelated environment skips.
-- With the installed package root explicitly configured, all four installed-Pi tests passed. With no installed package available, the same tests reported the expected three skips. A configured missing root and a configured package with the wrong manifest identity failed all three installed-Pi tests; those cases do not silently skip.
+- With the installed package root explicitly configured, all four tests in `tests/pi_hard_compaction_e2e.test.ts` passed: one router-startup test and three installed-Pi scenarios. With no installed package available, the three runtime-dependent scenarios reported the expected skips while the router-startup test still ran. A configured missing root and a configured package with the wrong manifest identity failed the three runtime-dependent scenarios; those cases do not silently skip.
 - Typecheck, Mecha Messaging lint, and `git diff --check` passed.
 
 A 29-mutation proof was completed against temporary copies of the extracted module and root test fixture. Each mutation was applied once, its focused assertion failed, the temporary copy was restored before the next mutation, and the temporary directory was removed afterward. No mutation runner, permanent mutation dependency, or mutated source was added to the repository. All 29 mutations were killed across self-compaction request and completion state, hard-compaction guards and callbacks, logical mailbox pause and capture/handoff behavior, policy and model forwarding, root tool/event ordering, and shutdown ownership and ordering.
