@@ -6,6 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging/index.ts";
+import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -69,6 +70,75 @@ function usage(input) {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
 }
+
+test("unreachable router startup closes bounded resources without invoking launchctl", async () => {
+  const handlers = new Map();
+  const reconnectTimers = [];
+  const intervals = [];
+  const execCalls = [];
+  const states = [];
+  const kickstarts = [];
+  let client;
+  const pi = {
+    events: { on() {} },
+    on(type, handler) { handlers.set(type, handler); },
+    registerCommand() {},
+    registerTool() {},
+    sendMessage() {},
+    exec: async (...args) => { execCalls.push(args); throw new Error("launchctl must not run in this test"); },
+  };
+  const context = {
+    sessionManager: {
+      getSessionId: () => "unreachable-router-session",
+      getBranch: () => [],
+      isPersisted: () => false,
+      getSessionFile: () => undefined,
+    },
+    ui: { notify() {}, setStatus() {} },
+  };
+  createMechaMessagingExtension(pi, {
+    resolveCurrentAgentId: () => "unreachable-router",
+    setIntervalImpl: (callback, delay) => {
+      const interval = { callback, delay, cleared: false };
+      intervals.push(interval);
+      return interval;
+    },
+    clearIntervalImpl: (interval) => { if (interval !== undefined) interval.cleared = true; },
+    createClient: (options) => {
+      client = createMailboxClient({
+        ...options,
+        routerUrl: "http://127.0.0.1:1",
+        kickstart: () => { kickstarts.push("attempted"); },
+        onConnectionState: (state) => { states.push(state); },
+        reconnectInitialDelayMs: 1,
+        reconnectMaxDelayMs: 1,
+        setTimeoutImpl: (callback, delay) => {
+          const timer = { callback, delay, cleared: false };
+          reconnectTimers.push(timer);
+          return timer;
+        },
+        clearTimeoutImpl: (timer) => { timer.cleared = true; },
+      });
+      return client;
+    },
+  });
+
+  try {
+    handlers.get("session_start")({}, context);
+    await waitFor(() => states.some(({ state }) => state === "reconnecting"), "unreachable router should enter bounded reconnect");
+  } finally {
+    handlers.get("session_shutdown")({}, context);
+  }
+
+  assert.ok(client);
+  assert.ok(kickstarts.length <= 1);
+
+  assert.deepEqual(execCalls, []);
+  assert.ok(reconnectTimers.length >= 1);
+  assert.ok(reconnectTimers.every(({ cleared }) => cleared));
+  assert.ok(intervals.length >= 1);
+  assert.ok(intervals.every(({ cleared }) => cleared));
+});
 
 async function createRuntimeSession(t, runtime, {
   responses,
