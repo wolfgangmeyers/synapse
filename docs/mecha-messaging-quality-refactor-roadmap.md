@@ -6,18 +6,15 @@ The goal is to reduce the size and coupling of that composition root without cha
 
 ## Update status
 
-The scoped lifecycle refactor is complete in the current working tree. This document records validation evidence for the current files; no immutable final commit or tree hash is claimed yet.
+The scoped lifecycle refactor was completed in lifecycle commit `cbbeedcb16902457fa8c21241c452201a21a7e8d`, with tree `ed2dd944b08186a02df90b8d02fac1fff4de4aa8`. This status is checked against extraction base commit `0cdcaf74f54dc961abd16aa3be2fec8c433647d1` and base tree `a8101f1c45b7385f7a0694cd8b25c56c2b0df39e`.
 
-Final evidence:
+Validation evidence:
 
 - 23 focused lifecycle, differential, native-Pi, package-discovery, and export tests passed.
-- The isolated native E2E passed once using TSX, a temporary packaged native `19.2.2` fork at source commit `3be57...`, and installed Pi `0.84.3`.
-- The full TypeScript suite passed 411 tests with 3 skipped. The JavaScript compatibility suite passed 386 tests with 2 skipped.
+- The isolated native-Pi E2E passed 1/1 with TSX, temporary module-resolution, router SQLite, and session paths, a packaged Wolfgang fork native `19.2.2` artifact from source commit `3be57...`, and installed Pi `0.84.3`.
 - Typecheck, lint, generated mailbox-client drift checks, and `git diff --check` passed.
-- Focused coverage was 94.69% lines, 64.78% branches, and 93.65% functions. The measurement does not aggregate child-process coverage.
-- Mutation testing and independent review are complete.
-
-These results describe the measured current working tree. The roadmap does not require 100% coverage.
+- The differential comparator and representative lifecycle mutation assertions passed. This is mutation coverage for the stated assertions, not a complete mutation-testing run.
+- Full-suite validation, aggregate coverage, and independent review have not been completed. These results do not claim final review or commit.
 
 ## Root public exports
 
@@ -110,7 +107,7 @@ Each slice should move existing code with the smallest possible adapter. Keep th
 
 **Status and evidence.** The approved boundary is implemented in the current working tree. `pi-extensions/mecha-messaging/activity-lifecycle.ts` owns the settled-notification scheduler, owner-scoped native service reads, native child tracking and tombstones, lifecycle snapshot reconciliation, activity heartbeat, and activity projection assembly. `index.ts` remains the composition root: it keeps Pi event registration, Goal activity, mailbox pause state, compaction orchestration, model and diagnostics behavior, and the existing root adapters. The extraction does not add a lifecycle publication path: typed lifecycle frames still come from heartbeat polling.
 
-The differential harness used the pre-extraction TypeScript baseline and passed with no unlisted mismatch. The focused lifecycle, differential, native-Pi, package-discovery, and export tests passed: 23 passed, 0 failed, 0 skipped. The isolated native-Pi E2E passed once using TSX, temporary module-resolution, router SQLite, and session paths, the packaged Wolfgang fork native `19.2.2` artifact at source commit `3be57...`, and installed Pi `@earendil-works/pi-coding-agent` `0.84.3`. Full-suite, compatibility, typecheck, lint, generated mailbox-client drift, diff, coverage, mutation, and independent-review results are recorded in Update status above. No immutable final target hash is recorded.
+The differential harness used the pre-extraction TypeScript baseline and passed with no unlisted mismatch. The focused lifecycle, differential, native-Pi, package-discovery, and export tests passed: 23 passed, 0 failed, 0 skipped. The isolated native-Pi E2E passed 1/1 using TSX, temporary module-resolution, router SQLite, and session paths, the packaged Wolfgang fork native `19.2.2` artifact at source commit `3be57...`, and installed Pi `@earendil-works/pi-coding-agent` `0.84.3`. The differential comparator and representative lifecycle mutation assertions passed. Full-suite validation, aggregate coverage, complete mutation testing, and independent review remain outstanding. The implementation is recorded in lifecycle commit `cbbeedcb16902457fa8c21241c452201a21a7e8d`.
 
 **Scope.** Extract the settled-notification scheduler, native subagent tracking, lifecycle snapshot reconciliation, activity heartbeat, and activity projection assembly. The Goal meaningful-activity adapter can remain in the composition root until its dependency on the Goal package is explicitly separated.
 
