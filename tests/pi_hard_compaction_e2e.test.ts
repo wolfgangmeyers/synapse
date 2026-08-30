@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -18,19 +18,56 @@ async function waitFor(check, description, attempts = 100) {
   assert.ok(check(), description);
 }
 
+function packageRootFromEnvironment(): { root: string | undefined; configured: boolean } {
+  const configuredRoot = process.env.MECHA_PI_PACKAGE_ROOT?.trim();
+  if (configuredRoot !== undefined && configuredRoot.length > 0) {
+    return { root: configuredRoot, configured: true };
+  }
+  try {
+    const npmRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8", timeout: 5_000 }).trim();
+    if (npmRoot.length === 0) return { root: undefined, configured: false };
+    const root = join(npmRoot, "@earendil-works", "pi-coding-agent");
+    return { root: existsSync(root) ? root : undefined, configured: false };
+  } catch {
+    return { root: undefined, configured: false };
+  }
+}
+
+function readPackageMetadata(root: string, expectedName: string): { name?: string; version?: string } {
+  const manifestPath = join(root, "package.json");
+  if (!existsSync(manifestPath)) throw new Error(`installed Pi package manifest is missing: ${manifestPath}`);
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`installed Pi package manifest is unreadable: ${manifestPath}`, { cause: error });
+  }
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error(`installed Pi package manifest is invalid: ${manifestPath}`);
+  }
+  const metadata = manifest as { name?: unknown; version?: unknown };
+  if (metadata.name !== expectedName || typeof metadata.version !== "string" || metadata.version.length === 0) {
+    throw new Error(`installed Pi package identity mismatch at ${root}: expected ${expectedName}`);
+  }
+  return { name: metadata.name, version: metadata.version };
+}
+
 async function installedPiRuntime(t) {
-  const root = process.env.MECHA_PI_PACKAGE_ROOT ?? (() => {
-    try {
-      return join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "@earendil-works", "pi-coding-agent");
-    } catch {
-      return undefined;
-    }
-  })();
-  const codingPath = root === undefined ? undefined : join(root, "dist", "index.js");
-  const aiPath = root === undefined ? undefined : join(root, "node_modules", "@earendil-works", "pi-ai", "dist", "index.js");
-  if (codingPath === undefined || aiPath === undefined || !existsSync(codingPath) || !existsSync(aiPath)) {
+  const { root, configured } = packageRootFromEnvironment();
+  if (root === undefined) {
     t.skip("requires an installed Pi runtime; set MECHA_PI_PACKAGE_ROOT to run this integration test");
     return undefined;
+  }
+  const codingPath = join(root, "dist", "index.js");
+  const aiRoot = join(root, "node_modules", "@earendil-works", "pi-ai");
+  const aiPath = join(aiRoot, "dist", "index.js");
+  if (!existsSync(codingPath) || !existsSync(aiPath)) {
+    throw new Error(`${configured ? "configured" : "discovered"} Pi package root is incomplete: ${root}`);
+  }
+  const codingPackage = readPackageMetadata(root, "@earendil-works/pi-coding-agent");
+  const aiPackage = readPackageMetadata(aiRoot, "@earendil-works/pi-ai");
+  if (codingPackage.version !== aiPackage.version) {
+    throw new Error(`installed Pi package versions do not match: ${codingPackage.version} and ${aiPackage.version}`);
   }
   return {
     coding: await import(pathToFileURL(codingPath).href),

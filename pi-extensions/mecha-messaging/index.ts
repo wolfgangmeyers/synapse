@@ -31,6 +31,8 @@ import {
   createPiMailboxDeliveryCoordinator,
 } from "./delivery-coordinator.js";
 import type { DeliveryCoordinator } from "./delivery-coordinator.js";
+import { createCompactionOrchestration } from "./compaction-orchestration.js";
+import type { CompactionOrchestration } from "./compaction-orchestration.js";
 import { createRecallController } from "./recall-controller.js";
 import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
 import { runRecallEvaluator as evaluateRecall, validateRecallChoice as validateChoice } from "./recall-evaluator.js";
@@ -43,9 +45,7 @@ import {
   compactionNotificationMessage,
   compactionPolicyFromEnvironment,
   effectiveCompactionPolicy,
-  hardCompactionThreshold,
   nextCompactionThreshold,
-  normalizePostCompactionNotification,
   postCompactionNotificationMessage,
   resolveCompactionPolicy,
   selectCompactionTier,
@@ -70,8 +70,6 @@ export { createRecallController } from "./recall-controller.js";
 export { createRecallPipeline } from "./recall-pipeline.js";
 export { runRecallEvaluator, validateRecallChoice } from "./recall-evaluator.js";
 
-const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
-const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
 const MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES = 128 * 1024;
 const MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES = 64 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES = 256 * 1024;
@@ -181,8 +179,6 @@ type PiRuntime = MessagingPi & { events: PiEvents; on(name: string, handler: (ev
 type MemoryCapture = ReturnType<typeof createMemoryCaptureLifecycle>;
 type ModelSwitchOverride = { sessionId: string; model: ModelMetadata; sourceContext: PiContext | undefined; sourceModel: ModelMetadata | null };
 type RateReservation = { timestamp: number };
-type PendingSelfCompaction = { customInstructions?: string; postCompactionNotification?: string };
-type PendingHardCompaction = { thresholdPercent: number };
 type CompactionRequest = { action?: string; policy?: CompactionPolicyInput | readonly CompactionLevelInput[]; customInstructions?: string; postCompactionNotification?: string };
 type ParentMessageInput = { message?: string };
 type MailboxSendInput = { recipient?: string; body?: string; subject?: string };
@@ -1009,7 +1005,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   pi.events?.on?.(GOAL_STATE_EVENT, receiveGoalProjection);
   pi.events?.on?.(GOAL_CONTROL_STATE_EVENT, receiveGoalControlState);
   try { pi.events?.emit?.(GOAL_STATE_REQUEST_EVENT); } catch { /* optional goal bridge is best-effort */ }
-  let mailboxPausedForCompaction = false;
   let startupError: ErrorLike | undefined;
   let activeWork = ""; let recallAbort: AbortController | undefined; let recallProcess: ReturnType<typeof execFile> | undefined; let policyAbort: AbortController | undefined; let policyReady: Promise<JsonObject> | undefined; let capture: MemoryCapture | undefined;
   const ensureCapture = async (signal: AbortSignal | undefined): Promise<MemoryCapture> => { if (capture !== undefined) return capture; const response = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000) }); if (!response.ok) throw new Error("capture policy unavailable"); const { recall: policy } = await response.json(); capture = createMemoryCaptureLifecycle({ policy, context: async ({ signal }: CaptureContextInput) => { const lookup = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/lookup`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify({ stores: ["default"] }) }); if (!lookup.ok) throw new Error("capture destination unavailable"); const { records } = await lookup.json(); return records; }, apply: async (body: CaptureApplyInput, signal: AbortSignal) => { const applied = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/apply`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify(body) }); if (!applied.ok) throw new Error("capture apply failed"); return applied.json(); }, diagnostics: appendMemoryCaptureDiagnostic }); return capture; };
@@ -1066,12 +1061,10 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   let modelSwitchOverride: ModelSwitchOverride | undefined;
   let settledNotificationRecipient: string | undefined;
   let settledNotificationEnabled = false;
-  let compactionPolicy: CompactionPolicy;
-  let compactionPolicyError: ErrorLike | undefined;
-  try { compactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { compactionPolicyError = error instanceof Error ? error : new Error(String(error)); compactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
-  let notifiedCompactionPercent = 0;
-  let pendingSelfCompaction: PendingSelfCompaction | undefined;
-  let pendingHardCompaction: PendingHardCompaction | undefined;
+  let initialCompactionPolicy: CompactionPolicy;
+  let initialCompactionPolicyError: ErrorLike | undefined;
+  try { initialCompactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { initialCompactionPolicyError = error instanceof Error ? error : new Error(String(error)); initialCompactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
+  let compaction: CompactionOrchestration | undefined;
 
   function rememberParentActivityContext(context: PiContext | undefined) {
     if (context !== undefined) parentActivityContext = context;
@@ -1138,169 +1131,20 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     });
   }
 
-  function pauseMailboxForCompaction(context: PiContext) {
-    if (children.has(context.sessionManager.getSessionId()) || client === undefined || mailboxPausedForCompaction) return;
-    rememberParentActivityContext(context);
-    mailboxPausedForCompaction = true;
-    activityLifecycle.onCompactionStarted(context);
-    context.ui?.setStatus("mecha-mailbox", "mailbox: compacting");
-  }
-
-  function resumeMailboxAfterCompaction(context: PiContext) {
-    if (children.has(context.sessionManager.getSessionId()) || client === undefined || !mailboxPausedForCompaction) return;
-    rememberParentActivityContext(context);
-    mailboxPausedForCompaction = false;
-    activityLifecycle.onCompactionResumed(context);
-    context.ui?.setStatus("mecha-mailbox", "mailbox: connected");
-  }
-
-  function compactionStatus(context: PiContext) {
-    const usage = context?.getContextUsage?.();
-    const effective = effectiveCompactionPolicy(compactionPolicy, context?.model);
-    return {
-      policy: compactionPolicy,
-      effectivePolicy: effective.policy,
-      modelKeys: effective.modelKeys,
-      matchedModelKey: effective.matchedModelKey,
-      selectedTier: usage === undefined ? undefined : selectCompactionTier(compactionPolicy, usage.contextWindow, context?.model),
-      usage,
-      notifiedThroughPercent: notifiedCompactionPercent,
-      configurationError: compactionPolicyError?.message,
-    };
-  }
-
-  function sendPostCompactionNotification(note: string | undefined, result: CompactResult) {
-    const normalizedNote = normalizePostCompactionNotification(note);
-    if (normalizedNote === undefined) return;
-    const message = {
-      customType: POST_COMPACTION_MESSAGE_TYPE,
-      content: postCompactionNotificationMessage(normalizedNote, result),
-      display: true,
-      details: {
-        tokens_before: typeof result?.tokensBefore === "number" && Number.isFinite(result.tokensBefore) ? result.tokensBefore : undefined,
-        estimated_tokens_after: typeof result?.estimatedTokensAfter === "number" && Number.isFinite(result.estimatedTokensAfter) ? result.estimatedTokensAfter : undefined,
-        first_kept_entry_id: typeof result?.firstKeptEntryId === "string" ? result.firstKeptEntryId : undefined,
-        summary_chars: typeof result?.summary === "string" ? result.summary.length : undefined,
-      },
-    };
-    setTimeoutImpl(() => {
-      try {
-        pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
-      } catch {
-        // A post-compaction handoff must not turn a successful compaction into a failed compact call.
-      }
-    }, 0);
-  }
-
-  function requestSelfCompaction(input: CompactionRequest, context: PiContext) {
-    if (typeof context?.compact !== "function") throw new Error("Pi compaction is unavailable in this context");
-    const handoffNote = input.postCompactionNotification ?? effectiveCompactionPolicy(compactionPolicy, context?.model).policy.postCompactionNotification;
-    pendingSelfCompaction = {
-      customInstructions: input.customInstructions,
-      postCompactionNotification: normalizePostCompactionNotification(handoffNote),
-    };
-    return pendingSelfCompaction;
-  }
-
-  function runPendingSelfCompaction(context: PiContext) {
-    if (pendingSelfCompaction === undefined || children.has(context.sessionManager.getSessionId())) return;
-    if (typeof context?.compact !== "function") {
-      pendingSelfCompaction = undefined;
-      context.ui?.notify("Self-compaction is unavailable at the idle boundary; use /compact manually.", "error");
-      return;
-    }
-    if (typeof context.isIdle === "function" && !context.isIdle()) return;
-    const request: PendingSelfCompaction = pendingSelfCompaction;
-    pendingSelfCompaction = undefined;
-    context.compact({
-      customInstructions: request.customInstructions,
-      onComplete: (result: CompactResult) => {
-        resumeMailboxAfterCompaction(context);
-        notifiedCompactionPercent = 0;
-        sendPostCompactionNotification(request.postCompactionNotification, result);
-      },
-      onError: (error: ErrorLike) => {
-        resumeMailboxAfterCompaction(context);
-        context.ui?.notify(`Self-compaction failed: ${errorMessage(error)}`, "error");
-      },
-    });
-  }
-
-  function enforceHardCompaction(context: PiContext) {
-    if (pendingHardCompaction !== undefined) {
-      context.abort?.();
-      return true;
-    }
-    const usage = context.getContextUsage?.();
-    if (usage === undefined || usage.percent === null) return false;
-    const threshold = hardCompactionThreshold(compactionPolicy, usage);
-    if (threshold === undefined) return false;
-    if (typeof context.compact !== "function") {
-      context.abort?.();
-      context.ui?.notify("Pi context limit reached, but compaction is unavailable.", "error");
-      return true;
-    }
-
-    const request = { thresholdPercent: threshold.percent };
-    pendingHardCompaction = request;
-    // Pi sends this abort signal to the provider and running tools, but custom
-    // implementations can ignore it and delay the idle boundary for compaction.
-    context.abort?.();
-    try {
-      context.compact({
-        onComplete: () => {
-          if (pendingHardCompaction !== request) return;
-          pendingHardCompaction = undefined;
-          resumeMailboxAfterCompaction(context);
-        },
-        onError: (error: ErrorLike) => {
-          if (pendingHardCompaction !== request) return;
-          pendingHardCompaction = undefined;
-          resumeMailboxAfterCompaction(context);
-          context.ui?.notify(`Hard context compaction failed: ${errorMessage(error)}`, "error");
-        },
-      });
-    } catch (error) {
-      if (pendingHardCompaction === request) pendingHardCompaction = undefined;
-      const message = errorMessage(error);
-      context.ui?.notify(`Hard context compaction failed: ${message}`, "error");
-    }
-    return true;
-  }
-
-  function monitorContextThreshold(context: PiContext) {
-    if (children.has(context.sessionManager.getSessionId())) return;
-    const usage = context.getContextUsage?.();
-    if (usage?.percent === null || usage?.percent === undefined) return;
-    const level = nextCompactionThreshold(compactionPolicy, { ...usage, model: context.model }, notifiedCompactionPercent);
-    if (level === undefined) return;
-    notifiedCompactionPercent = level.percent;
-    pi.sendMessage({
-      customType: CONTEXT_THRESHOLD_MESSAGE_TYPE,
-      content: compactionNotificationMessage({ level, usage }),
-      display: true,
-      details: {
-        percent: usage.percent,
-        tokens: usage.tokens,
-        context_window: usage.contextWindow,
-        threshold_percent: level.percent,
-        tier_max_context_tokens: level.tier.maxContextTokens,
-        mandatory: level.mandatory === true,
-      },
-    }, level.mandatory === true
-      ? { triggerTurn: false }
-      : { deliverAs: "followUp", triggerTurn: true });
-  }
   try {
     settledNotificationRecipient = assertAgentId(process.env.MECHA_PI_NOTIFY_ON_SETTLED);
   } catch {
     // The launcher rejects invalid values; a manually configured Pi stays disabled.
   }
   const children = childSessionIds();
+  const compactionState = (): CompactionOrchestration => {
+    if (compaction === undefined) throw new Error("compaction orchestration is not initialized");
+    return compaction;
+  };
   const activityLifecycle: ActivityLifecycle = createActivityLifecycle({
     getClient: () => client,
     getParentContext: () => parentActivityContext,
-    isCompacting: () => mailboxPausedForCompaction,
+    isCompacting: () => compaction?.isMailboxPaused() ?? false,
     getGoalProjection: () => goalProjectionReceived ? goalProjection : undefined,
     getCurrentModel: () => effectiveModelProjection(parentActivityContext).current ?? undefined,
     getNativeService: (ownerSessionId) => currentSubagentsServiceAccessor?.(ownerSessionId),
@@ -1315,6 +1159,23 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     setIntervalImpl,
     clearIntervalImpl,
     nowImpl,
+  });
+  compaction = createCompactionOrchestration({
+    getClient: () => client === undefined ? undefined : {},
+    isChildSession: (sessionId) => children.has(sessionId),
+    rememberParentContext: (context) => { if (isPiContext(context)) rememberParentActivityContext(context); },
+    activity: {
+      onCompactionStarted: (context) => activityLifecycle.onCompactionStarted(context),
+      onCompactionResumed: (context) => activityLifecycle.onCompactionResumed(context),
+    },
+    setMailboxStatus: (context, value) => context.ui?.setStatus?.("mecha-mailbox", `mailbox: ${value}`),
+    sendMessage: (message, messageOptions) => pi.sendMessage(message, messageOptions),
+    ensureCapture,
+    getEnvironment: () => process.env,
+    initialPolicy: initialCompactionPolicy,
+    initialPolicyError: initialCompactionPolicyError,
+    errorMessage,
+    setTimeoutImpl,
   });
   const settledNotifications = activityLifecycle.settledNotifications;
   const childReplyClients = new Map<string, MailboxClient | undefined>();
@@ -1726,18 +1587,15 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     async execute(_toolCallId: string, input: ContextToolInput, _signal: AbortSignal | undefined, _onUpdate: (() => void) | undefined, toolContext: PiContext) {
       try {
         if (input.action === "set_policy") {
-          compactionPolicy = resolveCompactionPolicy(input.policy);
-          compactionPolicyError = undefined;
-          notifiedCompactionPercent = 0;
-          const status = compactionStatus(toolContext);
+          const status = compactionState().setPolicy(input.policy, toolContext);
           return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
         }
         if (input.action === "compact") {
-          const request = requestSelfCompaction(input, toolContext);
-          return { content: [{ type: "text", text: "Self-compaction deferred until Pi reaches the idle settled boundary." }], details: { ...compactionStatus(toolContext), compactState: "deferred_until_agent_settled", postCompactionNotification: request.postCompactionNotification } };
+          const request = compactionState().requestSelfCompaction(input, toolContext);
+          return { content: [{ type: "text", text: "Self-compaction deferred until Pi reaches the idle settled boundary." }], details: { ...compactionState().status(toolContext), compactState: "deferred_until_agent_settled", postCompactionNotification: request.postCompactionNotification } };
         }
         if (input.action !== "status") throw new Error("unsupported mecha_context action");
-        const status = compactionStatus(toolContext);
+        const status = compactionState().status(toolContext);
         return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
       } catch (error) {
         return { content: [{ type: "text", text: errorMessage(error) }], details: {}, isError: true };
@@ -1768,7 +1626,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     // Suppress only native subagent children recorded by lifecycle events. Do not use the generic
     // parentSession header here: ordinary /fork and /clone sessions carry it but are still top-level agents.
     if (children.has(context?.sessionManager?.getSessionId?.())) return undefined;
-    if (pendingHardCompaction !== undefined) {
+    if (compactionState().hasPendingHardCompaction()) {
       return {
         block: true,
         reason: "Pi context compaction is pending; tool work resumes after it settles.",
@@ -1799,17 +1657,11 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
 
   pi.on("session_before_compact", async (event: PiEvent, context: PiContext) => {
     if (children.has(context.sessionManager.getSessionId())) return undefined;
-    pauseMailboxForCompaction(context);
-    const resumeIfCanceled = () => resumeMailboxAfterCompaction(context);
-    event.signal?.addEventListener?.("abort", resumeIfCanceled, { once: true });
-    try {
-      await (await ensureCapture(event.signal)).compact([...(event.preparation?.messagesToSummarize ?? []), ...(event.preparation?.turnPrefixMessages ?? [])], { signal: event.signal });
-    } catch {}
-    if (event.signal?.aborted) resumeIfCanceled();
+    await compactionState().onSessionBeforeCompact(event, context);
     return undefined;
   });
   pi.on("context", (event: PiEvent, context: PiContext) => {
-    if (!children.has(context.sessionManager.getSessionId())) enforceHardCompaction(context);
+    if (!children.has(context.sessionManager.getSessionId())) compactionState().enforceHardCompaction(context);
 
     // First quarantine malformed tool calls (invalid names)
     const { messages: validMessages, malformed } = quarantineMalformedToolCalls(event.messages ?? []);
@@ -1877,12 +1729,12 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     }
   });
   pi.on("agent_settled", async (_event: PiEvent, context: PiContext) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
-  pi.on("agent_settled", (_event: PiEvent, context: PiContext) => { monitorContextThreshold(context); });
-  pi.on("session_compact", (_event: PiEvent, context: PiContext) => { if (!children.has(context.sessionManager.getSessionId())) { notifiedCompactionPercent = 0; resumeMailboxAfterCompaction(context); } });
+  pi.on("agent_settled", (_event: PiEvent, context: PiContext) => { compactionState().monitorContextThreshold(context); });
+  pi.on("session_compact", (_event: PiEvent, context: PiContext) => { if (!children.has(context.sessionManager.getSessionId())) compactionState().onSessionCompact(context); });
   pi.on("agent_settled", (_event: PiEvent, context: PiContext) => {
     if (!children.has(context.sessionManager.getSessionId())) activityLifecycle.onAgentSettled(context);
-    if (pendingSelfCompaction !== undefined) settledNotificationPending = false;
-    runPendingSelfCompaction(context);
+    if (compactionState().hasPendingSelfCompaction()) settledNotificationPending = false;
+    compactionState().runPendingSelfCompaction(context);
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationEnabled || !settledNotificationPending) return;
 
     // Consume before sendReply starts so a later run can arm independently.
@@ -1983,7 +1835,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       mailboxClient = createClient({
         agentId,
         parentSessionId: sessionId,
-        onEnvelope: (message, delivery) => { const normalizedDelivery = normalizeMailboxDelivery(delivery); if (!mailboxPausedForCompaction && isMailboxMessage(message) && normalizedDelivery !== undefined) coordinator?.onEnvelope(message, normalizedDelivery); },
+        onEnvelope: (message, delivery) => { const normalizedDelivery = normalizeMailboxDelivery(delivery); if (!compactionState().isMailboxPaused() && isMailboxMessage(message) && normalizedDelivery !== undefined) coordinator?.onEnvelope(message, normalizedDelivery); },
         onModelControl: handleModelControl,
         onModelControlTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
         onGoalControl: handleGoalControl,
@@ -2062,8 +1914,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     parentActivityContext = undefined;
     settledNotificationPending = false;
     settledNotificationAgentId = undefined;
-    pendingSelfCompaction = undefined;
-    mailboxPausedForCompaction = false;
+    compactionState().onSessionShutdown();
     settledNotifications.dispose();
     coordinator?.close();
     coordinator = undefined;
