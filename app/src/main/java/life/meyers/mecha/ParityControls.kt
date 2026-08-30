@@ -98,14 +98,22 @@ internal data class CapabilityData(
     val subagentLifecycleV2: Boolean = false,
 )
 
+internal const val CORRELATED_ACK_CONFIRMATION = "correlated_v1"
+
 internal data class RegisteredSession(
     val requestId: String,
     val agentId: String,
     val instanceId: String,
     val leaseId: String,
     val effectiveRole: String,
-    val ackConfirmation: String,
+    val ackConfirmation: String?,
 )
+
+internal fun usesCorrelatedAck(ackConfirmation: String?): Boolean =
+    ackConfirmation == CORRELATED_ACK_CONFIRMATION
+
+internal fun registeredSessionMatchesLease(session: RegisteredSession?, currentLeaseId: String): Boolean =
+    session != null && (currentLeaseId.isBlank() || session.leaseId == currentLeaseId)
 
 internal fun parseRegisteredSession(
     value: JSONObject,
@@ -117,7 +125,7 @@ internal fun parseRegisteredSession(
         "version", "frame_id", "type", "request_id", "agent_id", "instance_id", "lease_id",
         "expires_at", "recovered", "agent_role", "ack_confirmation", "conversation_sync",
     )
-    val required = allowed - "conversation_sync"
+    val required = allowed - setOf("conversation_sync", "ack_confirmation")
     if (!value.keys().asSequence().all { it in allowed } || !required.all(value::has)
         || value.optString("version") != "v1" || value.optString("type") != "registered"
     ) return null
@@ -127,12 +135,15 @@ internal fun parseRegisteredSession(
     val instanceId = value.optString("instance_id")
     val leaseId = value.optString("lease_id")
     val role = value.optString("agent_role")
-    val ackConfirmation = value.optString("ack_confirmation")
+    val ackConfirmation = when {
+        !value.has("ack_confirmation") || value.isNull("ack_confirmation") -> null
+        value.get("ack_confirmation") is String -> value.getString("ack_confirmation")
+        else -> return null
+    }
     if (!FRAME_ID.matches(frameId) || requestId != expectedRequestId || !FRAME_ID.matches(requestId)
         || agentId != expectedAgentId || !AGENT_ID.matches(agentId)
         || instanceId != expectedInstanceId || !FRAME_ID.matches(instanceId)
         || !FRAME_ID.matches(leaseId) || role != "user_interaction"
-        || ackConfirmation != "correlated_v1"
         || value.get("recovered") !is Boolean || value.optString("expires_at").isBlank()
     ) return null
     return RegisteredSession(requestId, agentId, instanceId, leaseId, role, ackConfirmation)
