@@ -4,6 +4,8 @@ import java.time.Instant
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -47,6 +49,103 @@ class InboundDeliveryTest {
             sendAck = { events += "ack" },
         )
         assertEquals(1, stored.size)
+    }
+
+    @Test
+    fun legacyDeliveryWithoutAckCapabilityPersistsAndUsesLegacyReceipts() {
+        val registration = parseRegisteredSession(
+            JSONObject()
+                .put("version", "v1")
+                .put("frame_id", "registered-1")
+                .put("type", "registered")
+                .put("request_id", "request-1")
+                .put("agent_id", "android")
+                .put("instance_id", "instance-1")
+                .put("lease_id", "lease-1")
+                .put("expires_at", "2026-08-29T00:00:30.000Z")
+                .put("recovered", false)
+                .put("agent_role", "user_interaction"),
+            "request-1",
+            "android",
+            "instance-1",
+        )
+        assertNotNull(registration)
+        val correlatedAck = usesCorrelatedAck(registration?.ackConfirmation)
+        assertFalse(correlatedAck)
+
+        val events = mutableListOf<String>()
+        var stored: ChatMessage? = null
+        val receipts = mutableListOf<JSONObject>()
+        val frame = deliveryFrame("legacy-message").apply { remove("message_incarnation_id") }
+        assertFalse(validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) != null)
+
+        val coordinator = ConversationDeliveryCoordinator(ConversationStateLock())
+        coordinator.begin(DeliveryConnectionIdentity("router", "android", "instance-1", 1, ""))
+        assertNull(coordinator.capture(1) { connection ->
+            captureDeliveryForSettlement(
+                frame = frame,
+                connection = connection,
+                parseMessage = { validated, _, _ -> parse(validated.payload) },
+                targetInstanceId = { null },
+                correlatedAck = correlatedAck,
+            )
+        })
+        assertTrue(coordinator.register(1, "lease-1"))
+        assertNotNull(coordinator.capture(1) { connection ->
+            captureDeliveryForSettlement(
+                frame = frame,
+                connection = connection,
+                parseMessage = { validated, _, _ -> parse(validated.payload) },
+                targetInstanceId = { null },
+                correlatedAck = correlatedAck,
+            )
+        })
+
+        assertTrue(settleIncomingDelivery(
+            frame = frame,
+            agentId = "android",
+            instanceId = "instance-1",
+            leaseId = "lease-1",
+            parseMessage = ::parse,
+            persistMessage = { peer, message ->
+                events += "persist:$peer"
+                stored = message
+                true
+            },
+            sendInjection = { events += "injection"; receipts += it },
+            sendAck = { events += "ack"; receipts += it },
+            correlatedAck = correlatedAck,
+        ))
+
+        assertEquals(listOf("persist:sender", "injection", "ack"), events)
+        assertEquals("legacy-message", stored?.id)
+        assertEquals("", stored?.incarnationId)
+        receipts.forEach { receipt ->
+            assertFalse(receipt.has("message_incarnation_id"))
+            assertFalse(receipt.has("delivery_items"))
+        }
+    }
+
+    @Test
+    fun malformedLegacyDeliveryRemainsRejected() {
+        val events = mutableListOf<String>()
+        val malformed = deliveryFrame("legacy-malformed").apply {
+            remove("message_incarnation_id")
+            getJSONObject("message").put("body", 7)
+        }
+
+        assertFalse(settleIncomingDelivery(
+            frame = malformed,
+            agentId = "android",
+            instanceId = "instance-1",
+            leaseId = "lease-1",
+            parseMessage = { events += "parse"; parse(it) },
+            persistMessage = { _, _ -> events += "persist"; true },
+            sendInjection = { events += "injection" },
+            sendAck = { events += "ack" },
+            correlatedAck = false,
+        ))
+        assertTrue(events.isEmpty())
     }
 
     @Test

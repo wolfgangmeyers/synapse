@@ -18,6 +18,8 @@ internal data class CapturedDelivery(
     val targetInstanceId: String?,
     val message: ChatMessage,
     val attemptNumber: Int,
+    /** Correlated sessions require incarnation identity and use the replay ledger. */
+    val correlatedAck: Boolean = true,
     /** Every original message represented by the delivery frame, including the first one. */
     val messages: List<ChatMessage> = listOf(message),
     val deliveryItems: List<ValidatedDeliveryItem> = emptyList(),
@@ -42,6 +44,7 @@ internal data class SettledDelivery(
     val peer: String,
     val messageId: String,
     val attemptNumber: Int,
+    val correlatedAck: Boolean = true,
     val messages: List<ChatMessage> = emptyList(),
     val deliveryItems: List<ValidatedDeliveryItem> = emptyList(),
     val notifications: List<DeliveredNotification> = emptyList(),
@@ -97,6 +100,7 @@ internal class ConversationDeliveryCoordinator(
             peer = delivery.peer,
             messageId = delivery.message.id,
             attemptNumber = delivery.attemptNumber,
+            correlatedAck = delivery.correlatedAck,
             messages = delivery.messages,
             deliveryItems = delivery.deliveryItems,
             notifications = proof.notifications,
