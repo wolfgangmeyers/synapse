@@ -5,6 +5,7 @@ import { sendPromptTemplateCrud } from "../tools/router_web_ui.mjs";
 import {
   parsePromptTemplateImport,
   parsePromptTemplateTokens,
+  planPromptTemplateImport,
   promptTemplateExportPayload,
   renderPromptTemplate,
 } from "../web/router-ui/prompt-templates.js";
@@ -85,6 +86,34 @@ test("prompt template import/export format preserves names and bodies", () => {
     () => parsePromptTemplateImport(JSON.stringify({ format: "other", version: 1, templates: [] })),
     /valid prompt template export/,
   );
+});
+
+test("prompt template import plans updates and preserves every name collision", () => {
+  const updatedAt = "2026-08-25T12:34:56.789Z";
+  const existing = [
+    { id: "alpha-id", name: "Alpha", body: "old alpha" },
+    { id: "beta-id", name: "Beta", body: "old beta" },
+    { name: "Legacy", body: "old legacy" },
+  ];
+  const plan = planPromptTemplateImport([
+    { id: "alpha-id", name: "Alpha", body: "new alpha", updated_at: updatedAt },
+    { id: "beta-id", name: "Beta", body: "stale beta" },
+    { id: "other-alpha-id", name: "Alpha", body: "renamed alpha" },
+    { name: "Beta", body: "name-only beta" },
+    { id: "alpha-id", name: "Beta", body: "beta under alpha id", updated_at: updatedAt },
+    { id: "legacy-id", name: "Legacy", body: "legacy collision" },
+    { id: "new-id", name: "New", body: "new body" },
+  ], existing);
+  assert.deepEqual(plan.map(({ action, id, reason }) => ({ action, id, reason })), [
+    { action: "update", id: "alpha-id", reason: undefined },
+    { action: "skip", id: undefined, reason: "missing_timestamp" },
+    { action: "skip", id: undefined, reason: "name_conflict" },
+    { action: "skip", id: undefined, reason: "name_conflict" },
+    { action: "skip", id: undefined, reason: "name_conflict" },
+    { action: "skip", id: undefined, reason: "name_conflict" },
+    { action: "create", id: undefined, reason: undefined },
+  ]);
+  assert.equal(plan.filter((item) => item.action === "create").length, 1);
 });
 
 test("prompt template export preserves portable metadata and rejects invalid metadata", () => {

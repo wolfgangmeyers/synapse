@@ -105,6 +105,30 @@ export function parsePromptTemplateImport(value) {
   });
 }
 
+/** Plan imports without allowing an imported name to replace a different local template. */
+export function planPromptTemplateImport(templates, existing, overwrite = true) {
+  const byId = new Map();
+  for (const template of Array.isArray(existing) ? existing : []) {
+    if (template && typeof template === "object" && template.id !== undefined) byId.set(String(template.id), template);
+  }
+  const byName = new Map((Array.isArray(existing) ? existing : []).map((template) => [template?.name, template]));
+  return (Array.isArray(templates) ? templates : []).map((template) => {
+    const matchingId = template?.id === undefined ? undefined : byId.get(String(template.id));
+    const matchingName = byName.get(template?.name);
+    if (matchingId !== undefined) {
+      if (matchingName !== undefined && String(matchingName.id) !== String(matchingId.id)) {
+        return { template, action: "skip", reason: "name_conflict" };
+      }
+      if (!overwrite || template.updated_at === undefined) {
+        return { template, action: "skip", reason: "missing_timestamp" };
+      }
+      return { template, action: "update", id: String(matchingId.id) };
+    }
+    if (matchingName !== undefined) return { template, action: "skip", reason: "name_conflict" };
+    return { template, action: "create" };
+  });
+}
+
 /** Return distinct, non-empty prompt token names in their first-use order. */
 export function parsePromptTemplateTokens(body) {
   const names = [];
