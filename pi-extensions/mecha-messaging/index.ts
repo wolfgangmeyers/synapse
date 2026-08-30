@@ -14,6 +14,11 @@ import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRecallState } from "./recall-state.js";
+import {
+  captureNativeSentinelSpawner,
+  createPiMailboxDeliveryCoordinator,
+} from "./delivery-coordinator.js";
+import type { DeliveryCoordinator } from "./delivery-coordinator.js";
 import { createRecallController } from "./recall-controller.js";
 import { createRecallPipeline as createPipeline } from "./recall-pipeline.js";
 import { runRecallEvaluator as evaluateRecall, validateRecallChoice as validateChoice } from "./recall-evaluator.js";
@@ -53,9 +58,6 @@ export { createRecallController } from "./recall-controller.js";
 export { createRecallPipeline } from "./recall-pipeline.js";
 export { runRecallEvaluator, validateRecallChoice } from "./recall-evaluator.js";
 
-const DEFAULT_SESSION_CHECKPOINT_RETRY_MS = 250;
-const DEFAULT_PENDING_REINJECTION_DELAY_MS = 5_000;
-const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
 const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
 const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
 const MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES = 128 * 1024;
@@ -123,7 +125,6 @@ type HistoryMessage = JsonObject & { role?: string; stopReason?: string; toolCal
 type ContentBlock = JsonValue;
 type MalformedToolCall = { messageIndex: number; blockIndex: number; toolName: string | undefined; toolNameLength: number | undefined; toolCallId: string | undefined };
 type OrphanToolResult = { messageIndex: number; toolCallId: string | undefined; providerToolCallId: string | undefined; toolName: string | undefined; previousRole: string | undefined; nextRole: string | undefined; nearestAssistantIndex: number | undefined; nearestAssistantStopReason: string | undefined; nearestAssistantToolCallIds: string[]; matchingToolCallLater: boolean };
-type SessionFileReader = (file: string, encoding: BufferEncoding) => string;
 function isMailboxMessage(value: ExternalMailboxMessage): value is MailboxMessage {
   return isRecord(value) && typeof value.id === "string";
 }
@@ -143,8 +144,6 @@ function isDeliveryItem(value: JsonValue | undefined): value is DeliveryItem {
 type MailboxMessage = { id: string; from?: string; to?: string; body?: string; subject?: string; source?: { kind?: string }; sentinel?: { model?: ModelInput } };
 type MailboxDelivery = { messageId: string; attemptNumber: number; items: DeliveryItem[] };
 type MailboxClient = ReturnType<typeof createMailboxClient>;
-type DeliveryCoordinator = { onEnvelope: (message: MailboxMessage, delivery: MailboxDelivery) => void | Promise<void>; onMessageEnd: (event: MessageEndEvent, context: PiContext) => void; close: () => void };
-type MessageEndEvent = { message?: JsonObject };
 type ToolResult = { content: Array<{ type: string; text: string }>; details?: object & { cancelled?: boolean; canceled?: boolean }; isError?: boolean; cancelled?: boolean; canceled?: boolean; aborted?: boolean; error?: JsonValue; toolName?: string; toolCallId?: string };
 type ToolCallEvent = JsonObject & { toolName?: string; toolCallId?: string; result?: ToolResult; isError?: boolean; cancelled?: boolean; canceled?: boolean; aborted?: boolean; details?: JsonObject; error?: JsonValue };
 type ExtensionTrace = { enabled: boolean; record: (event: string, fields?: object) => boolean };
@@ -160,9 +159,6 @@ type GoalControlResult = { accepted: boolean; errorCode?: string; goalState?: Go
 type ReminderLock = ReturnType<typeof createReminderLockState>;
 type SendMessageOptions = { deliverAs?: string; triggerTurn?: boolean };
 type MessagingPi = { sendMessage: GoalPi["sendMessage"] };
-type PendingDelivery = { delivery: MailboxDelivery; checkpointTimer?: Timer; lastInjectedAt: number; lastInjectedAttemptNumber: number };
-type SpawnSubagent = (message: MailboxMessage) => Promise<string>;
-type DeliveryCoordinatorOptions = { pi: MessagingPi; sessionContext: PiContext; client: MailboxClient; defer?: typeof setImmediate; setTimeoutImpl?: typeof setTimeout; clearTimeoutImpl?: typeof clearTimeout; checkpointRetryDelayMs?: number; pendingReinjectionDelayMs?: number; readSessionFile?: SessionFileReader; spawnSubagent?: SpawnSubagent; now?: () => number };
 type PiEvent = JsonObject & { id?: string; status?: string; toolName?: string; toolCallId?: string; result?: ToolResult; isError?: boolean; cancelled?: boolean; canceled?: boolean; aborted?: boolean; error?: JsonValue; details?: JsonObject; message?: JsonObject; messages?: HistoryMessage[]; signal?: AbortSignal; preparation?: { messagesToSummarize?: HistoryMessage[]; turnPrefixMessages?: HistoryMessage[] } };
 type GoalEvents = NonNullable<GoalPi["events"]>;
 type PiEvents = { on: (name: string, handler: (event: PiEvent, context: PiContext) => unknown) => void; emit?: NonNullable<GoalEvents["emit"]> };
@@ -805,74 +801,10 @@ export function queryTmuxWindowName(
   }
 }
 
-export function routeMailboxEnvelope(envelope: MailboxMessage, inject: (envelope: MailboxMessage) => void): void {
-  inject(envelope);
-}
-
-function sameDeliveryItem(left: DeliveryItem | undefined, right: DeliveryItem | undefined): boolean {
-  return left?.messageId === right?.messageId
-    && left?.messageIncarnationId === right?.messageIncarnationId
-    && left?.attemptNumber === right?.attemptNumber
-    && left?.deliveryExpiresAt === right?.deliveryExpiresAt;
-}
-
-function isMailboxSessionEntry(entry: SessionEntry, messageId: string, deliveryItems: DeliveryItem[] | undefined = undefined): boolean {
-  if (entry?.type !== "custom_message"
-    || entry.customType !== MAILBOX_MESSAGE_TYPE
-    || entry.details?.message_id !== messageId) return false;
-  if (!Array.isArray(deliveryItems) || deliveryItems.length === 0) return true;
-  const persistedItems = entry.details?.delivery_items;
-  return Array.isArray(persistedItems)
-    && persistedItems.length === deliveryItems.length
-    && deliveryItems.every((item, index) => sameDeliveryItem(isDeliveryItem(persistedItems[index]) ? persistedItems[index] : undefined, item));
-}
-
-
-function readPersistedSessionEntries(sessionFile: string, readSessionFile: SessionFileReader): SessionEntry[] {
-  const source = readSessionFile(sessionFile, "utf8");
-  return source.split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line));
-}
-
-export function mailboxSessionDeliveryState(sessionManager: SessionManager, messageId: string, {
-  deliveryItems = undefined,
-  readSessionFile = readFileSync,
-  onPersistenceError = () => {},
-}: { deliveryItems?: DeliveryItem[]; readSessionFile?: SessionFileReader; onPersistenceError?: (error: ErrorLike) => void } = {}): "absent" | "history_unverified" | "durable" {
-  const branch = sessionManager.getBranch();
-  const hasBranchMessage = branch.some((entry) => isMailboxSessionEntry(entry, messageId));
-  if (!hasBranchMessage) return "absent";
-  if (!branch.some((entry) => isMailboxSessionEntry(entry, messageId, deliveryItems))) return "history_unverified";
-  if (!sessionManager.isPersisted()) return "history_unverified";
-  const sessionFile = sessionManager.getSessionFile();
-  if (typeof sessionFile !== "string" || sessionFile.length === 0) return "history_unverified";
-  try {
-    return readPersistedSessionEntries(sessionFile, readSessionFile)
-      .some((entry) => isMailboxSessionEntry(entry, messageId, deliveryItems))
-      ? "durable"
-      : "history_unverified";
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") onPersistenceError(error instanceof Error ? error : new Error(String(error)));
-    return "history_unverified";
-  }
-}
-
-function mailboxCustomMessage(message: MailboxMessage, delivery: MailboxDelivery | undefined = undefined): JsonObject {
-  const subject = message.subject === undefined ? "" : `\nSubject: ${message.subject}`;
-  return {
-    customType: MAILBOX_MESSAGE_TYPE,
-    content: `Mailbox message from ${message.from}${subject}\n\n${message.body}`,
-    display: true,
-    details: {
-      message_id: message.id,
-      ...(Array.isArray(delivery?.items) && delivery.items.length > 0 ? { delivery_items: delivery.items } : {}),
-      from: message.from,
-      to: message.to,
-      ...(message.subject === undefined ? {} : { subject: message.subject }),
-    },
-  };
-}
+export {
+  routeMailboxEnvelope,
+  mailboxSessionDeliveryState,
+} from "./delivery-coordinator.js";
 
 function providerToolCallId(toolCallId: string | undefined): string | undefined {
   return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId.split("|", 1)[0] : undefined;
@@ -970,284 +902,11 @@ export function quarantineOrphanToolResults(messages: HistoryMessage[]): { messa
     : { messages: sanitized, orphaned };
 }
 
-export async function spawnNativeSentinel(message: MailboxMessage, resolveService?: () => Promise<SubagentService | undefined>): Promise<string> {
-  const service = await resolveService?.();
-  if (service === undefined || typeof service.spawn !== "function" || typeof message.body !== "string" || message.sentinel === undefined) {
-    throw new Error("Pi native subagent service is unavailable");
-  }
-  return service.spawn("general-purpose", message.body, {
-    description: "Scheduled Sentinel work",
-    model: message.sentinel.model,
-    inheritContext: true,
-  });
-}
-
-export function captureNativeSentinelSpawner(resolveService: () => Promise<SubagentService | undefined>): (message: MailboxMessage) => Promise<string> {
-  return (message) => spawnNativeSentinel(message, resolveService);
-}
-
-export function createPiMailboxDeliveryCoordinator({
-  pi,
-  sessionContext,
-  client,
-  defer = setImmediate,
-  setTimeoutImpl = setTimeout,
-  clearTimeoutImpl = clearTimeout,
-  checkpointRetryDelayMs = DEFAULT_SESSION_CHECKPOINT_RETRY_MS,
-  pendingReinjectionDelayMs = DEFAULT_PENDING_REINJECTION_DELAY_MS,
-  readSessionFile = readFileSync,
-  spawnSubagent = spawnNativeSentinel,
-  now = Date.now,
-}: DeliveryCoordinatorOptions): DeliveryCoordinator {
-  if (pi === undefined || typeof pi.sendMessage !== "function") {
-    throw new TypeError("pi.sendMessage is required");
-  }
-  if (sessionContext?.sessionManager === undefined) {
-    throw new TypeError("a Pi session context is required");
-  }
-  if (client === undefined || typeof client.sendReceipt !== "function") {
-    throw new TypeError("a mailbox client with sendReceipt is required");
-  }
-  if (typeof defer !== "function") throw new TypeError("defer must be a function");
-  if (typeof setTimeoutImpl !== "function" || typeof clearTimeoutImpl !== "function") {
-    throw new TypeError("session checkpoint timers are required");
-  }
-  if (!Number.isSafeInteger(checkpointRetryDelayMs) || checkpointRetryDelayMs <= 0) {
-    throw new TypeError("checkpointRetryDelayMs must be a positive safe integer");
-  }
-  if (!Number.isSafeInteger(pendingReinjectionDelayMs) || pendingReinjectionDelayMs <= 0) {
-    throw new TypeError("pendingReinjectionDelayMs must be a positive safe integer");
-  }
-  if (typeof readSessionFile !== "function") throw new TypeError("readSessionFile must be a function");
-  if (typeof now !== "function") throw new TypeError("now must be a function");
-  if (typeof spawnSubagent !== "function") throw new TypeError("spawnSubagent must be a function");
-
-  const sessionId = sessionContext.sessionManager.getSessionId();
-  const pending = new Map<string, PendingDelivery>();
-  const announcedArrivals = new Set<string>();
-  const sentinelInFlight = new Map<string, Promise<void>>();
-  const reportedPersistenceErrors = new Set<string>();
-  let active = true;
-
-  function receipt(type: string, delivery: MailboxDelivery, reason: string | undefined = undefined): void {
-    client.sendReceipt(type, delivery, reason);
-  }
-
-  function persistenceUnavailable(context: PiContext): void {
-    context.ui?.setStatus("mecha-mailbox", "mailbox: waiting for durable session checkpoint");
-  }
-
-  function sessionDeliveryState(context: PiContext, messageId: string, deliveryItems: DeliveryItem[] | undefined = undefined) {
-    return mailboxSessionDeliveryState(context.sessionManager, messageId, {
-      deliveryItems,
-      readSessionFile,
-      onPersistenceError: (error) => {
-        if (reportedPersistenceErrors.has(messageId)) return;
-        reportedPersistenceErrors.add(messageId);
-        context.ui?.notify(`Mailbox v2 session checkpoint unreadable: ${errorMessage(error)}`, "error");
-      },
-    });
-  }
-
-  function confirmExistingDelivery(delivery: MailboxDelivery, context: PiContext): boolean {
-    const state = sessionDeliveryState(context, delivery.messageId, delivery.items);
-    if (state !== "durable") {
-      persistenceUnavailable(context);
-      return false;
-    }
-    try {
-      receipt("injection_requested", delivery);
-      receipt("ack", delivery);
-      context.ui?.setStatus("mecha-mailbox", "mailbox: connected");
-      return true;
-    } catch {
-      // The persisted session entry makes the next router replay safe to acknowledge.
-      return false;
-    }
-  }
-
-  function clearCheckpointTimer(pendingDelivery: PendingDelivery): void {
-    if (pendingDelivery.checkpointTimer !== undefined) {
-      clearTimeoutImpl(pendingDelivery.checkpointTimer);
-      pendingDelivery.checkpointTimer = undefined;
-    }
-  }
-
-  function checkDurableCheckpoint(messageId: string, context: PiContext): void {
-    if (!active || context.sessionManager.getSessionId() !== sessionId) return;
-    const latest = pending.get(messageId);
-    if (latest === undefined) return;
-    const state = sessionDeliveryState(context, messageId, latest.delivery.items);
-    if (state === "durable") {
-      clearCheckpointTimer(latest);
-      pending.delete(messageId);
-      reportedPersistenceErrors.delete(messageId);
-      try {
-        receipt("ack", latest.delivery);
-        context.ui?.setStatus("mecha-mailbox", "mailbox: connected");
-      } catch {
-        // The persisted session entry makes the next router replay safe to acknowledge.
-      }
-      return;
-    }
-    persistenceUnavailable(context);
-    if (latest.checkpointTimer !== undefined) return;
-    latest.checkpointTimer = setTimeoutImpl(() => {
-      latest.checkpointTimer = undefined;
-      checkDurableCheckpoint(messageId, context);
-    }, checkpointRetryDelayMs);
-  }
-
-  function maybeSendMessageArrival(message: MailboxMessage): void {
-    if (announcedArrivals.has(message.id)) return;
-    const sourceKind = message?.source?.kind;
-    if (message.from === message.to || typeof sourceKind !== "string" || !["agent", "discord", "reminder"].includes(sourceKind)) return;
-    if (typeof client.sendMessageArrival !== "function") return;
-    client.sendMessageArrival(message);
-    announcedArrivals.add(message.id);
-  }
-
-  function injectMailboxMessage(message: MailboxMessage, delivery: MailboxDelivery): void {
-    routeMailboxEnvelope(message, (envelope) => {
-      pi.sendMessage(mailboxCustomMessage(envelope, delivery), { deliverAs: "steer", triggerTurn: true });
-    });
-  }
-
-  function shouldReinjectPending(pendingDelivery: PendingDelivery, delivery: MailboxDelivery, state: "absent" | "history_unverified" | "durable"): boolean {
-    return state === "absent"
-      && delivery.attemptNumber > pendingDelivery.lastInjectedAttemptNumber
-      && now() - pendingDelivery.lastInjectedAt >= pendingReinjectionDelayMs;
-  }
-
-  function recordSentinelStatus(message: MailboxMessage, subagentId: string): void {
-    // ponytail: this status deliberately contains no scheduled prompt or derived text.
-    pi.sendMessage({
-      customType: "mecha-sentinel-status",
-      content: "Sentinel work handed off to a native subagent.",
-      display: false,
-      details: { message_id: message.id, subagent_id: subagentId, state: "handed_off" },
-    }, { deliverAs: "followUp", triggerTurn: false });
-  }
-
-  async function onSentinelEnvelope(message: MailboxMessage, delivery: MailboxDelivery): Promise<void> {
-    const existing = sentinelInFlight.get(message.id);
-    if (existing !== undefined) return existing;
-    const handoff = (async () => {
-      let subagentId;
-      try {
-        subagentId = await spawnSubagent(message);
-      } catch {
-        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
-        return;
-      }
-      if (typeof subagentId !== "string" || subagentId.length === 0) {
-        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
-        return;
-      }
-      try { recordSentinelStatus(message, subagentId); } catch { /* a local status must not duplicate a handed-off child */ }
-      try {
-        receipt("injection_requested", delivery);
-        receipt("ack", delivery);
-      } catch {
-        // The native child already exists. The normal router delivery lifecycle decides any replay.
-      }
-    })();
-    sentinelInFlight.set(message.id, handoff);
-    return handoff;
-  }
-
-  function onEnvelope(message: MailboxMessage, delivery: MailboxDelivery): void | Promise<void> {
-    if (!active) return undefined;
-    if (message.sentinel !== undefined) return onSentinelEnvelope(message, delivery);
-    const currentContext = sessionContext;
-    const state = sessionDeliveryState(currentContext, message.id, delivery.items);
-    if (state === "durable") {
-      confirmExistingDelivery(delivery, currentContext);
-      return;
-    }
-
-    const existing = pending.get(message.id);
-    if (existing !== undefined) {
-      existing.delivery = delivery;
-      if (shouldReinjectPending(existing, delivery, state)) {
-        try {
-          injectMailboxMessage(message, delivery);
-          existing.lastInjectedAt = now();
-          existing.lastInjectedAttemptNumber = delivery.attemptNumber;
-        } catch {
-          // Keep the original pending delivery; the router lease timeout preserves retry.
-        }
-      }
-      try {
-        receipt("injection_requested", delivery);
-      } catch {
-        // The original Pi injection remains pending; do not NACK it as a failed injection.
-      }
-      return;
-    }
-    if (state === "history_unverified") {
-      persistenceUnavailable(currentContext);
-      return;
-    }
-
-    pending.set(message.id, {
-      delivery,
-      checkpointTimer: undefined,
-      lastInjectedAt: now(),
-      lastInjectedAttemptNumber: delivery.attemptNumber,
-    });
-    try {
-      injectMailboxMessage(message, delivery);
-    } catch {
-      pending.delete(message.id);
-      try {
-        receipt("nack", delivery, "injection_failed");
-      } catch {
-        // The router's lease timeout preserves retry when the socket is gone.
-      }
-      return;
-    }
-    try {
-      maybeSendMessageArrival(message);
-    } catch {
-      // Arrival indicators are ephemeral UI hints; delivery receipts own replay safety.
-    }
-    // Keep this pending on a receipt-send failure: Pi may have queued the message already.
-    try {
-      receipt("injection_requested", delivery);
-    } catch {
-      // The router lease will time out or the reconnecting client will receive a replay.
-    }
-  }
-
-  function onMessageEnd(event: MessageEndEvent, context: PiContext): void {
-    const details = isRecord(event.message?.details) ? event.message.details : undefined;
-    const messageId = typeof details?.message_id === "string" ? details.message_id : undefined;
-    if (event.message?.role !== "custom" || event.message.customType !== MAILBOX_MESSAGE_TYPE
-      || typeof messageId !== "string") {
-      return;
-    }
-    if (context.sessionManager.getSessionId() !== sessionId) return;
-    const pendingDelivery = pending.get(messageId);
-    if (pendingDelivery === undefined) return;
-
-    defer(() => checkDurableCheckpoint(messageId, context));
-  }
-
-  return {
-    onEnvelope,
-    onMessageEnd,
-
-    close() {
-      active = false;
-      for (const pendingDelivery of pending.values()) clearCheckpointTimer(pendingDelivery);
-      pending.clear();
-      announcedArrivals.clear();
-      sentinelInFlight.clear();
-      reportedPersistenceErrors.clear();
-    },
-  };
-}
+export {
+  spawnNativeSentinel,
+  captureNativeSentinelSpawner,
+  createPiMailboxDeliveryCoordinator,
+} from "./delivery-coordinator.js";
 
 export function createMechaMessagingExtension(pi: PiRuntime, {
   resolveCurrentAgentId = resolveAgentId,

@@ -92,6 +92,7 @@ test("the Messaging package dependency graph stays within Messaging and extracte
   const files = (await readdir(PACKAGE_ROOT)).filter((file) => /\.(?:ts|js)$/.test(file)).sort();
   assert.deepEqual(files, [
     "compaction-policy.ts",
+    "delivery-coordinator.ts",
     "index.ts",
     "mailbox-client.js",
     "mailbox-client.ts",

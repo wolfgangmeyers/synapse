@@ -1,3 +1,11 @@
+/**
+ * Resolves compaction thresholds without owning the session lifecycle. The
+ * messaging extension uses the result to warn before context becomes costly and
+ * to identify the explicit thresholds that must stop provider work.
+ *
+ * Policy inputs may come from tool calls or process environment, so this module
+ * validates and normalizes them before they can affect a live session.
+ */
 type Environment = NodeJS.ProcessEnv;
 type ModelInput = { provider?: string; id?: string; name?: string; contextWindow?: number; maxTokens?: number };
 type CompactResult = { tokensBefore?: number; estimatedTokensAfter?: number; firstKeptEntryId?: string; summary?: string };
@@ -15,6 +23,8 @@ type CompactionUsageOrPercent = number | CompactionUsage;
 const CONTEXT_THRESHOLD_SUFFIX = "Use workers or subagents for bounded side work to avoid context bloat.";
 const COMPACTION_POLICY_ENV = "MECHA_PI_COMPACTION_POLICY";
 const COMPACTION_MODEL_KEY_ENV = "MECHA_PI_MODEL_KEY";
+// Handoff notes are operator guidance, not a second transcript. Keep the
+// injected message bounded even when policy comes from an external process.
 const MAX_POST_COMPACTION_NOTE_CHARS = 4000;
 
 const SMALL_CONTEXT_LEVELS = Object.freeze([
@@ -31,6 +41,9 @@ const OPUS_LEVEL_PERCENTS = Object.freeze([15, 20, 25, 30, 35, 40]);
 const OPUS_CONTEXT_LEVELS = Object.freeze(
   SMALL_CONTEXT_LEVELS.map((level, index) => Object.freeze({ ...level, percent: OPUS_LEVEL_PERCENTS[index] })),
 );
+// Tiers are ordered by context-window size below; null is the unbounded
+// fallback. The upper bound is inclusive, so a window exactly at a boundary
+// uses that tier's ladder.
 const LARGE_CONTEXT_LEVELS = Object.freeze([
   Object.freeze({ percent: 20, guidance: "large-context awareness only; no compaction needed yet" }),
   Object.freeze({ percent: 30, guidance: "compact soon, ideally at the next clean boundary" }),
@@ -49,6 +62,10 @@ export const DEFAULT_COMPACTION_POLICY: CompactionPolicyInput = Object.freeze({
   }),
 });
 
+/**
+ * Trims optional handoff guidance and enforces the message-size limit. Empty
+ * notes disappear, and runtime values from untyped configuration are rejected.
+ */
 export function normalizePostCompactionNotification(value: string | null | undefined): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") throw new TypeError("postCompactionNotification must be a string");
@@ -74,6 +91,8 @@ function normalizeCompactionLevel(level: CompactionLevelInput): CompactionLevel 
 }
 
 function normalizeCompactionLevels(rawLevels: readonly CompactionLevelInput[]): CompactionLevel[] {
+  // Duplicate percentages are collapsed after validation; the last entry wins,
+  // then the levels are sorted so threshold selection is deterministic.
   if (!Array.isArray(rawLevels) || rawLevels.length === 0) {
     throw new TypeError("compaction policy requires at least one percentage level");
   }
@@ -85,6 +104,8 @@ function normalizeCompactionLevels(rawLevels: readonly CompactionLevelInput[]): 
 }
 
 function normalizeCompactionTier(tier: CompactionTierInput): CompactionTier {
+  // A null limit denotes the final fallback tier. Finite limits must be safe
+  // positive integers because they define context-window routing boundaries.
   if (tier === null || typeof tier !== "object" || Array.isArray(tier)) {
     throw new TypeError("each compaction tier must be an object");
   }
@@ -95,12 +116,16 @@ function normalizeCompactionTier(tier: CompactionTierInput): CompactionTier {
   return { maxContextTokens, levels: normalizeCompactionLevels(tier.levels) };
 }
 
+// Model keys are compared case-insensitively and without surrounding spaces;
+// this keeps environment values and model metadata on the same lookup path.
 function normalizeModelKey(key: string | undefined): string {
   if (typeof key !== "string" || key.trim().length === 0) throw new TypeError("model policy key must be a non-empty string");
   return key.trim().toLowerCase();
 }
 
 function normalizeCompactionModels(rawModels: CompactionPolicyInput["models"]): Record<string, CompactionPolicy> | undefined {
+  // Model overrides are recursively normalized, but nested model maps are not
+  // processed, so one lookup has one unambiguous policy to apply.
   if (rawModels === undefined || rawModels === null) return undefined;
   const entries = Array.isArray(rawModels)
     ? rawModels.map((entry): [string | undefined, CompactionPolicyInput] => [entry.key, entry.policy ?? entry])
@@ -128,6 +153,11 @@ function isStringArray(value: ModelInput | readonly string[] | undefined): value
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+/**
+ * Accepts legacy percentage arrays and structured level/tier policies. Every
+ * form is converted to sorted tiers and validated levels; model overrides are
+ * resolved separately without processing another model map.
+ */
 export function resolveCompactionPolicy(input: CompactionPolicyInput | readonly CompactionLevelInput[] = DEFAULT_COMPACTION_POLICY, { allowModels = true }: { allowModels?: boolean } = {}): CompactionPolicy {
   if (isLevelInputArray(input)) {
     return { tiers: [{ maxContextTokens: null, levels: normalizeCompactionLevels(input) }] };
@@ -156,6 +186,12 @@ export function resolveCompactionPolicy(input: CompactionPolicyInput | readonly 
   };
 }
 
+/**
+ * Reads the optional environment policy as JSON, with the legacy comma-separated
+ * percentage form as a fallback. Invalid external configuration throws instead
+ * of silently changing the active thresholds; the caller can then report the
+ * error and choose its known-safe default.
+ */
 export function compactionPolicyFromEnvironment(environment: Environment = process.env): CompactionPolicy {
   const configured = environment[COMPACTION_POLICY_ENV];
   if (typeof configured !== "string" || configured.trim().length === 0) {
@@ -170,6 +206,11 @@ export function compactionPolicyFromEnvironment(environment: Environment = proce
   }
 }
 
+/**
+ * Produces deterministic model lookup keys from most specific to least specific,
+ * then appends the explicit environment fallback. The first configured match
+ * therefore wins without depending on object key order.
+ */
 export function compactionModelKeys(model: ModelInput | undefined, environment: Environment = process.env): string[] {
   const keys: string[] = [];
   const add = (value: string | undefined) => {
@@ -199,6 +240,11 @@ export function effectiveCompactionPolicy(policy: CompactionPolicyInput | readon
   };
 }
 
+/**
+ * Selects the first tier whose inclusive limit contains the context window.
+ * Unknown windows use the smallest tier; oversized finite windows fall through
+ * to the final tier, which is normally the unbounded fallback.
+ */
 export function selectCompactionTier(policy: CompactionPolicyInput | readonly CompactionLevelInput[], contextWindow: number | undefined, modelOrKeys: ModelInput | readonly string[] | undefined, environment: Environment = process.env) {
   const effective = effectiveCompactionPolicy(policy, modelOrKeys, environment);
   const tiers = effective.policy.tiers;
@@ -209,6 +255,10 @@ export function selectCompactionTier(policy: CompactionPolicyInput | readonly Co
   return { ...tier, matchedModelKey: effective.matchedModelKey, modelKeys: effective.modelKeys };
 }
 
+/**
+ * Finds the highest crossed level above the notification watermark. This is the
+ * advisory path: it reports guidance and does not itself force compaction.
+ */
 export function nextCompactionThreshold(policy: CompactionPolicyInput | readonly CompactionLevelInput[], usageOrPercent: CompactionUsageOrPercent, alreadyNotifiedPercent = 0, contextWindow: number | undefined = undefined, modelOrKeys: ModelInput | readonly string[] | undefined = undefined, environment: Environment = process.env) {
   const percent = typeof usageOrPercent === "object" && usageOrPercent !== null ? usageOrPercent.percent : usageOrPercent;
   const window = typeof usageOrPercent === "object" && usageOrPercent !== null ? usageOrPercent.contextWindow : contextWindow;
@@ -221,6 +271,11 @@ export function nextCompactionThreshold(policy: CompactionPolicyInput | readonly
   return level === undefined ? undefined : { ...level, tier };
 }
 
+/**
+ * Finds the first crossed level explicitly marked mandatory. The lifecycle guard
+ * uses this separate result to stop provider work; advisory levels never become
+ * mandatory merely because usage is high.
+ */
 export function hardCompactionThreshold(policy: CompactionPolicyInput | readonly CompactionLevelInput[], usage: CompactionUsage | undefined, modelOrKeys: ModelInput | readonly string[] | undefined = undefined, environment: Environment = process.env) {
   if (usage === undefined || !Number.isFinite(usage.percent) || usage.percent === null) return undefined;
   const tier = selectCompactionTier(policy, usage.contextWindow, usage.model ?? modelOrKeys, environment);
@@ -228,6 +283,11 @@ export function hardCompactionThreshold(policy: CompactionPolicyInput | readonly
   return level === undefined ? undefined : { ...level, tier };
 }
 
+/**
+ * Formats normalized handoff guidance with compact status metadata. It reports
+ * summary length but omits summary text, keeping private or large summaries out
+ * of the follow-up message.
+ */
 export function postCompactionNotificationMessage(note: string, result: CompactResult = {}) {
   const fields = [];
   if (typeof result.tokensBefore === "number" && Number.isFinite(result.tokensBefore)) fields.push(`tokens before: ${result.tokensBefore.toLocaleString()}`);

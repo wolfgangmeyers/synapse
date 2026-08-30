@@ -9,6 +9,7 @@ import test from "node:test";
 
 import WebSocket from "ws";
 
+import { createPiMailboxDeliveryCoordinator as createDirectPiMailboxDeliveryCoordinator } from "../pi-extensions/mecha-messaging/delivery-coordinator.ts";
 import {
   appendMemoryCaptureDiagnostic,
   compactionNotificationMessage,
@@ -495,10 +496,24 @@ function sessionEntry(messageId) {
   };
 }
 
-async function durableSession(messageId) {
+async function durableSession(messageId, t) {
+  if (t === undefined || typeof t.after !== "function") throw new TypeError("a test context is required");
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-session-"));
   const sessionFile = join(directory, "session.jsonl");
   const entries = [];
+  let closePromise;
+  const closeDirectory = async () => {
+    closePromise ??= rm(directory, { recursive: true, force: true });
+    return closePromise;
+  };
+  t.after(async () => {
+    try {
+      await closeDirectory();
+    } catch {
+      // Test cleanup must make a second best-effort removal after an explicit close failure.
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+  });
   const manager = {
     getBranch: () => entries,
     isPersisted: () => true,
@@ -517,7 +532,7 @@ async function durableSession(messageId) {
       await writeFile(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
     },
     async close() {
-      await rm(directory, { recursive: true, force: true });
+      await closeDirectory();
     },
   };
 }
@@ -807,22 +822,10 @@ test("parent activity before the cooldown cancels that idle generation", () => {
   assert.equal(sent.length, 0);
 });
 
-test("subject-bearing PR watch wakeups preserve their exact subject through durable Pi delivery", async () => {
+test("subject-bearing PR watch wakeups preserve their exact subject through durable Pi delivery", async (t) => {
   const message = envelope("message-1", { to: "pr-watch", subject: "PR watch wakeup" });
 
-test("post-compaction handoff message includes bounded note and compact status without summary text", () => {
-  const message = postCompactionNotificationMessage("Resume the validation checklist.", {
-    tokensBefore: 123_456,
-    estimatedTokensAfter: 12_345,
-    firstKeptEntryId: "entry-1",
-    summary: "secret summary text",
-  });
-  assert.match(message, /Resume the validation checklist/);
-  assert.match(message, /tokens before: 123,456/);
-  assert.match(message, /estimated tokens after: 12,345/);
-});
-
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const sent = [];
   const client = receiptClient();
   const statuses = [];
@@ -894,6 +897,168 @@ test("post-compaction handoff message includes bounded note and compact status w
   ]);
   assert.deepEqual(statuses.slice(-1), [["mecha-mailbox", "mailbox: connected"]]);
   coordinator.close();
+  await session.close();
+});
+
+test("post-compaction handoff message includes bounded note and compact status without summary text", () => {
+  const message = postCompactionNotificationMessage("Resume the validation checklist.", {
+    tokensBefore: 123_456,
+    estimatedTokensAfter: 12_345,
+    firstKeptEntryId: "entry-1",
+    summary: "secret summary text",
+  });
+  assert.match(message, /Resume the validation checklist/);
+  assert.match(message, /tokens before: 123,456/);
+  assert.match(message, /estimated tokens after: 12,345/);
+});
+
+test("direct delivery coordinator module preserves mailbox injection", async (t) => {
+  const message = envelope("direct-coordinator");
+  const session = await durableSession(message.id, t);
+  const sent = [];
+  const client = receiptClient();
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: { sessionManager: session.manager, ui: { setStatus() {} } },
+    client,
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0].customType, "mecha-agent-message");
+  assert.deepEqual(sent[0][1], { deliverAs: "steer", triggerTurn: true });
+  assert.deepEqual(client.receipts.map(({ type }) => type), ["injection_requested"]);
+  coordinator.close();
+  await session.close();
+});
+
+test("message_end ignores unrelated messages without ACKs or checkpoint timers", async (t) => {
+  const message = envelope("message-end-negative");
+  const session = await durableSession(message.id, t);
+  const client = receiptClient();
+  const deferred = [];
+  const timers = [];
+  const context = { sessionManager: session.manager, ui: { setStatus() {} } };
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: context,
+    client,
+    defer: (callback) => deferred.push(callback),
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+  });
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+  const unrelatedEvents = [
+    { message: { role: "custom", customType: "mecha-agent-message", details: { message_id: "other-id" } } },
+    { message: { role: "assistant", customType: "mecha-agent-message", details: { message_id: message.id } } },
+    { message: { role: "custom", customType: "other-message", details: { message_id: message.id } } },
+    { message: { role: "custom", customType: "mecha-agent-message", details: {} } },
+  ];
+  for (const event of unrelatedEvents) coordinator.onMessageEnd(event, context);
+  coordinator.onMessageEnd({
+    message: { role: "custom", customType: "mecha-agent-message", details: { message_id: message.id } },
+  }, { ...context, sessionManager: { ...session.manager, getSessionId: () => "other-session" } });
+
+  assert.equal(deferred.length, 0);
+  assert.equal(timers.length, 0);
+  assert.deepEqual(client.receipts.map(({ type }) => type), ["injection_requested"]);
+  coordinator.close();
+  await session.close();
+});
+
+test("closing the coordinator cancels a pending checkpoint retry", async (t) => {
+  const message = envelope("message-close-retry");
+  const session = await durableSession(message.id, t);
+  const client = receiptClient();
+  const deferred = [];
+  const timers = [];
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: { sessionManager: session.manager, ui: { setStatus() {} } },
+    client,
+    defer: (callback) => deferred.push(callback),
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+  });
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  session.entries.push(sessionEntry(message.id));
+  coordinator.onMessageEnd({
+    message: { role: "custom", customType: "mecha-agent-message", details: { message_id: message.id } },
+  }, { sessionManager: session.manager, ui: { setStatus() {} } });
+  deferred[0]();
+
+  assert.deepEqual(timers.map(({ delay, cleared }) => ({ delay, cleared })), [{ delay: 250, cleared: false }]);
+  coordinator.close();
+  assert.equal(timers[0].cleared, true);
+  timers[0].callback();
+  assert.deepEqual(client.receipts.map(({ type }) => type), ["injection_requested"]);
+  await session.close();
+});
+
+test("durable session history prevents reinjection after a failed checkpoint ACK and reconnect", async (t) => {
+  const message = envelope("message-reconnect-durable");
+  const session = await durableSession(message.id, t);
+  const sent = [];
+  const receipts = [];
+  let failAck = true;
+  const client = {
+    sendReceipt(type, delivery, reason) {
+      if (type === "ack" && failAck) {
+        failAck = false;
+        throw new Error("lost ACK");
+      }
+      receipts.push({ type, attemptNumber: delivery.attemptNumber, reason });
+    },
+  };
+  const deferred = [];
+  const timers = [];
+  const context = { sessionManager: session.manager, ui: { setStatus() {} } };
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: context,
+    client,
+    defer: (callback) => deferred.push(callback),
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+  });
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  session.entries.push(sessionEntry(message.id));
+  coordinator.onMessageEnd({
+    message: { role: "custom", customType: "mecha-agent-message", details: { message_id: message.id } },
+  }, context);
+  deferred[0]();
+  await session.persist();
+  timers[0].callback();
+  coordinator.close();
+
+  const reconnected = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: context,
+    client,
+  });
+  reconnected.onEnvelope(message, { messageId: message.id, attemptNumber: 2 });
+
+  assert.equal(sent.length, 1);
+  assert.deepEqual(receipts.map(({ type, attemptNumber }) => ({ type, attemptNumber })), [
+    { type: "injection_requested", attemptNumber: 1 },
+    { type: "injection_requested", attemptNumber: 2 },
+    { type: "ack", attemptNumber: 2 },
+  ]);
+  reconnected.close();
   await session.close();
 });
 
@@ -1037,7 +1202,19 @@ function settledNotificationFixture(t, {
     else process.env.MECHA_PI_NOTIFY_ON_SETTLED = previousRecipient;
   });
 
-  const handlers = new Map();
+  const registeredHandlers = new Map();
+  const handlers = {
+    get(type) {
+      const list = registeredHandlers.get(type);
+      if (list === undefined) return undefined;
+      return (...args) => {
+        const invoked = type === "session_shutdown" ? list : list.slice(-1);
+        const results = invoked.map((handler) => handler(...args));
+        return results.length === 1 ? results[0] : Promise.all(results);
+      };
+    },
+    has(type) { return registeredHandlers.has(type); },
+  };
   const childEvents = new Map();
   const tools = new Map();
   const notifications = [];
@@ -1064,7 +1241,11 @@ function settledNotificationFixture(t, {
   };
   const pi = {
     events: { on(type, handler) { childEvents.set(type, handler); } },
-    on(type, handler) { handlers.set(type, handler); },
+    on(type, handler) {
+      const list = registeredHandlers.get(type) ?? [];
+      list.push(handler);
+      registeredHandlers.set(type, list);
+    },
     registerCommand() {},
     registerTool(tool) { tools.set(tool.name, tool); },
     sendMessage: sendMessage ?? ((...args) => sent.push(args)),
@@ -2408,8 +2589,14 @@ test("parent session shutdown disposes armed settled follow-ups", async (t) => {
   await enableSettledNotifications(fixture);
   fixture.handlers.get("agent_start")({}, fixture.context);
   fixture.handlers.get("agent_settled")({}, fixture.context);
-  fixture.handlers.get("session_shutdown")({}, fixture.context);
+  let shutdownBranchReads = 0;
+  fixture.context.sessionManager.getBranch = () => {
+    shutdownBranchReads += 1;
+    throw new Error("capture setup is outside this harness");
+  };
+  await fixture.handlers.get("session_shutdown")({}, fixture.context);
 
+  assert.equal(shutdownBranchReads, 1);
   assert.deepEqual(calls, ["activity", "settled", "dispose"]);
 });
 
@@ -2771,10 +2958,22 @@ test("post-compaction handoff is deferred so send failures do not fail compactio
   assert.doesNotThrow(() => deferred[0].callback());
 });
 
-test("extension forwards Pi message_end into the durable mailbox checkpoint", async () => {
+test("extension forwards Pi message_end into the durable mailbox checkpoint", async (t) => {
   const message = envelope("message-extension-wiring");
-  const session = await durableSession(message.id);
-  const handlers = new Map();
+  const session = await durableSession(message.id, t);
+  const registeredHandlers = new Map();
+  const handlers = {
+    get(type) {
+      const list = registeredHandlers.get(type);
+      if (list === undefined) return undefined;
+      return (...args) => {
+        const invoked = type === "session_shutdown" ? list : list.slice(-1);
+        const results = invoked.map((handler) => handler(...args));
+        return results.length === 1 ? results[0] : Promise.all(results);
+      };
+    },
+    has(type) { return registeredHandlers.has(type); },
+  };
   const childEvents = new Map();
   const sent = [];
   const receipts = [];
@@ -2790,7 +2989,11 @@ test("extension forwards Pi message_end into the durable mailbox checkpoint", as
   };
   const pi = {
     events: { on(type, handler) { childEvents.set(type, handler); } },
-    on(type, handler) { handlers.set(type, handler); },
+    on(type, handler) {
+      const list = registeredHandlers.get(type) ?? [];
+      list.push(handler);
+      registeredHandlers.set(type, list);
+    },
     registerCommand() {},
     registerTool() {},
     sendMessage: (...args) => sent.push(args),
@@ -2837,17 +3040,24 @@ test("extension forwards Pi message_end into the durable mailbox checkpoint", as
     sessionManager: { ...session.manager, getSessionId: () => "child-session" },
   };
   childEvents.get("subagents:child:session-created")({ sessionId: "child-session" });
-  handlers.get("session_shutdown")({}, childContext);
+  await handlers.get("session_shutdown")({}, childContext);
   assert.equal(closeCount, 0);
   childEvents.get("subagents:child:disposed")({ sessionId: "child-session" });
-  handlers.get("session_shutdown")({}, context);
+  const shutdownContext = {
+    ...context,
+    sessionManager: {
+      ...session.manager,
+      getBranch: () => { throw new Error("capture setup is outside this harness"); },
+    },
+  };
+  await handlers.get("session_shutdown")({}, shutdownContext);
   assert.equal(closeCount, 1);
   await session.close();
 });
 
-test("unverified session history is never reinjected or acknowledged", async () => {
+test("unverified session history is never reinjected or acknowledged", async (t) => {
   const message = envelope("message-2");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   session.entries.push(sessionEntry(message.id));
   const sent = [];
   const status = [];
@@ -2873,9 +3083,9 @@ test("unverified session history is never reinjected or acknowledged", async () 
   await session.close();
 });
 
-test("unreadable persisted history is reported without reinjection or ACK", async () => {
+test("unreadable persisted history is reported without reinjection or ACK", async (t) => {
   const message = envelope("message-corrupt-history");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   session.entries.push(sessionEntry(message.id));
   await writeFile(session.sessionFile, "not-json\n");
   const sent = [];
@@ -2906,9 +3116,9 @@ test("unreadable persisted history is reported without reinjection or ACK", asyn
   await session.close();
 });
 
-test("replayed durable delivery ACKs without a second Pi message", async () => {
+test("replayed durable delivery ACKs without a second Pi message", async (t) => {
   const message = envelope("message-3");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   await session.persist();
   const sent = [];
   const client = receiptClient();
@@ -2930,9 +3140,9 @@ test("replayed durable delivery ACKs without a second Pi message", async () => {
   await session.close();
 });
 
-test("post-injection receipt failure retains the pending message for replay", async () => {
+test("post-injection receipt failure retains the pending message for replay", async (t) => {
   const message = envelope("message-receipt-failure");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const sent = [];
   const receipts = [];
   let failReceipt = true;
@@ -2961,9 +3171,9 @@ test("post-injection receipt failure retains the pending message for replay", as
   await session.close();
 });
 
-test("stale pending replay reinjects when no session entry survived", async () => {
+test("stale pending replay reinjects when no session entry survived", async (t) => {
   const message = envelope("message-lost-across-compaction");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const sent = [];
   const client = receiptClient();
   let time = 1_000;
@@ -2991,6 +3201,294 @@ test("stale pending replay reinjects when no session entry survived", async () =
   ]);
   coordinator.close();
   await session.close();
+});
+
+test("mailbox session delivery state fails closed across the durable-state matrix", () => {
+  const entry = sessionEntry("state-matrix");
+  const makeManager = ({ branch = [entry], persisted = true, sessionFile = "/tmp/session.jsonl" } = {}) => ({
+    getBranch: () => branch,
+    isPersisted: () => persisted,
+    getSessionFile: () => sessionFile,
+    getSessionId: () => "session-1",
+  });
+  const cases = [
+    { name: "absent", manager: makeManager({ branch: [] }), expected: "absent" },
+    { name: "unpersisted history", manager: makeManager({ persisted: false }), expected: "history_unverified" },
+    { name: "missing session path", manager: makeManager({ sessionFile: undefined }), expected: "history_unverified" },
+    {
+      name: "persisted file without matching entry",
+      manager: makeManager(),
+      readSessionFile: () => `${JSON.stringify(sessionEntry("other-message"))}\n`,
+      expected: "history_unverified",
+    },
+    {
+      name: "missing persisted file",
+      manager: makeManager(),
+      readSessionFile: () => { throw Object.assign(new Error("session file missing"), { code: "ENOENT" }); },
+      expected: "history_unverified",
+    },
+    {
+      name: "unreadable persisted file",
+      manager: makeManager(),
+      readSessionFile: () => { throw new Error("checkpoint unreadable"); },
+      expected: "history_unverified",
+      persistenceError: "checkpoint unreadable",
+    },
+    {
+      name: "durable matching entry",
+      manager: makeManager(),
+      readSessionFile: () => `${JSON.stringify(entry)}\n`,
+      expected: "durable",
+    },
+  ];
+
+  for (const stateCase of cases) {
+    const persistenceErrors = [];
+    const state = mailboxSessionDeliveryState(stateCase.manager, "state-matrix", {
+      readSessionFile: stateCase.readSessionFile ?? (() => ""),
+      onPersistenceError: (error) => persistenceErrors.push(error.message),
+    });
+    assert.equal(state, stateCase.expected, stateCase.name);
+    assert.deepEqual(persistenceErrors, stateCase.persistenceError === undefined ? [] : [stateCase.persistenceError]);
+  }
+});
+
+test("session disappearance before durable confirmation stays unacknowledged", () => {
+  const message = envelope("message-durable-session-disappears");
+  const entry = sessionEntry(message.id);
+  let reads = 0;
+  const manager = {
+    getBranch: () => [entry],
+    isPersisted: () => true,
+    getSessionFile: () => "/tmp/session.jsonl",
+    getSessionId: () => "session-1",
+  };
+  const receipts = [];
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: { sessionManager: manager, ui: { setStatus() {} } },
+    client: { sendReceipt: (type, delivery) => receipts.push({ type, delivery }) },
+    readSessionFile: () => {
+      reads += 1;
+      if (reads === 1) return `${JSON.stringify(entry)}\n`;
+      throw Object.assign(new Error("session file disappeared"), { code: "ENOENT" });
+    },
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+  assert.equal(reads, 2);
+  assert.deepEqual(receipts, []);
+  coordinator.close();
+});
+
+test("session replacement before durable confirmation leaves the pending delivery unacknowledged", () => {
+  const message = envelope("message-session-replaced");
+  const entries = [];
+  let currentSessionId = "session-1";
+  const manager = {
+    getBranch: () => entries,
+    isPersisted: () => true,
+    getSessionFile: () => "/tmp/session.jsonl",
+    getSessionId: () => currentSessionId,
+  };
+  const deferred = [];
+  const timers = [];
+  const receipts = [];
+  const context = { sessionManager: manager, ui: { setStatus() {} } };
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: context,
+    client: { sendReceipt: (type, delivery) => receipts.push({ type, delivery }) },
+    defer: (callback) => deferred.push(callback),
+    setTimeoutImpl: (callback, delay) => { const timer = { callback, delay }; timers.push(timer); return timer; },
+    clearTimeoutImpl() {},
+    readSessionFile: () => "",
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  entries.push(sessionEntry(message.id));
+  coordinator.onMessageEnd({
+    message: { role: "custom", customType: "mecha-agent-message", details: { message_id: message.id } },
+  }, context);
+  currentSessionId = "session-2";
+  deferred[0]();
+
+  assert.deepEqual(receipts, [{ type: "injection_requested", delivery: { messageId: message.id, attemptNumber: 1 } }]);
+  assert.deepEqual(timers, []);
+  coordinator.close();
+});
+
+test("duplicate message_end callbacks schedule one checkpoint retry", () => {
+  const message = envelope("message-duplicate-checkpoint");
+  const entries = [];
+  const manager = {
+    getBranch: () => entries,
+    isPersisted: () => true,
+    getSessionFile: () => "/tmp/session.jsonl",
+    getSessionId: () => "session-1",
+  };
+  const deferred = [];
+  const timers = [];
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: { sessionManager: manager, ui: { setStatus() {} } },
+    client: receiptClient(),
+    defer: (callback) => deferred.push(callback),
+    setTimeoutImpl: (callback, delay) => { const timer = { callback, delay, cleared: false }; timers.push(timer); return timer; },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+    readSessionFile: () => "",
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  entries.push(sessionEntry(message.id));
+  const event = { message: { role: "custom", customType: "mecha-agent-message", details: { message_id: message.id } } };
+  coordinator.onMessageEnd(event, { sessionManager: manager });
+  coordinator.onMessageEnd(event, { sessionManager: manager });
+  deferred.forEach((callback) => callback());
+
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 250);
+  coordinator.close();
+  assert.equal(timers[0].cleared, true);
+});
+
+test("failed replay injection keeps the pending delivery retryable", () => {
+  const message = envelope("message-failed-replay-injection");
+  const sent = [];
+  let injectionCalls = 0;
+  let time = 1_000;
+  const manager = {
+    getBranch: () => [],
+    isPersisted: () => true,
+    getSessionFile: () => "/tmp/session.jsonl",
+    getSessionId: () => "session-1",
+  };
+  const client = receiptClient();
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: {
+      sendMessage: (...args) => {
+        injectionCalls += 1;
+        if (injectionCalls === 2) throw new Error("Pi rejected replay");
+        sent.push(args);
+      },
+    },
+    sessionContext: { sessionManager: manager, ui: { setStatus() {} } },
+    client,
+    pendingReinjectionDelayMs: 5_000,
+    now: () => time,
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  time = 6_000;
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 2 });
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 3 });
+
+  assert.equal(injectionCalls, 3);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(client.receipts.map(({ type, attemptNumber }) => ({ type, attemptNumber })), [
+    { type: "injection_requested", attemptNumber: 1 },
+    { type: "injection_requested", attemptNumber: 2 },
+    { type: "injection_requested", attemptNumber: 3 },
+  ]);
+  coordinator.close();
+});
+
+test("failed replay injection receipt keeps the pending delivery retryable", () => {
+  const message = envelope("message-failed-replay-receipt");
+  const sent = [];
+  const receipts = [];
+  let time = 1_000;
+  const manager = {
+    getBranch: () => [],
+    isPersisted: () => true,
+    getSessionFile: () => "/tmp/session.jsonl",
+    getSessionId: () => "session-1",
+  };
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: { sessionManager: manager, ui: { setStatus() {} } },
+    client: {
+      sendReceipt(type, delivery) {
+        if (type === "injection_requested" && delivery.attemptNumber === 2) throw new Error("socket closed");
+        receipts.push({ type, attemptNumber: delivery.attemptNumber });
+      },
+    },
+    pendingReinjectionDelayMs: 5_000,
+    now: () => time,
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+  time = 6_000;
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 2 });
+  time = 11_000;
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 3 });
+
+  assert.equal(sent.length, 3);
+  assert.deepEqual(receipts, [
+    { type: "injection_requested", attemptNumber: 1 },
+    { type: "injection_requested", attemptNumber: 3 },
+  ]);
+  coordinator.close();
+});
+
+test("message arrival failure does not suppress the injection receipt", () => {
+  const message = envelope("message-arrival-failure", { source: { kind: "agent" } });
+  const receipts = [];
+  const manager = {
+    getBranch: () => [],
+    isPersisted: () => true,
+    getSessionFile: () => "/tmp/session.jsonl",
+    getSessionId: () => "session-1",
+  };
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() {} },
+    sessionContext: { sessionManager: manager, ui: { setStatus() {} } },
+    client: {
+      sendReceipt: (type, delivery) => receipts.push({ type, attemptNumber: delivery.attemptNumber }),
+      sendMessageArrival() { throw new Error("arrival socket closed"); },
+    },
+  });
+
+  coordinator.onEnvelope(message, { messageId: message.id, attemptNumber: 1 });
+
+  assert.deepEqual(receipts, [{ type: "injection_requested", attemptNumber: 1 }]);
+  coordinator.close();
+});
+
+test("closed coordinator ignores later envelopes", () => {
+  const sent = [];
+  const receipts = [];
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: { sessionManager: { getSessionId: () => "session-1" } },
+    client: { sendReceipt: (...args) => receipts.push(args) },
+  });
+  coordinator.close();
+
+  assert.equal(coordinator.onEnvelope(envelope("message-after-close"), { messageId: "message-after-close", attemptNumber: 1 }), undefined);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(receipts, []);
+});
+
+test("normal injection NACK transport failure is contained", () => {
+  const coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() { throw new Error("Pi rejected message"); } },
+    sessionContext: {
+      sessionManager: {
+        getBranch: () => [],
+        isPersisted: () => true,
+        getSessionFile: () => "/tmp/session.jsonl",
+        getSessionId: () => "session-1",
+      },
+    },
+    client: { sendReceipt() { throw new Error("socket closed"); } },
+  });
+
+  assert.doesNotThrow(() => coordinator.onEnvelope(envelope("message-nack-transport"), {
+    messageId: "message-nack-transport", attemptNumber: 1,
+  }));
+  coordinator.close();
 });
 
 test("lifecycle client negotiates capability, dual-sends legacy activity, and removes only correlated post-commit acknowledgments", async () => {
@@ -3379,11 +3877,11 @@ test("client message arrival preview does not split surrogate pairs at the cap",
   client.close();
 });
 
-test("batched Pi delivery waits for durable checkpoint with every item before ACK", async () => {
+test("batched Pi delivery waits for durable checkpoint with every item before ACK", async (t) => {
   const message = envelope("batch-durable-1", {
     body: "Mailbox message batch\n\nFrom: sender\n\nfirst\n\n[Reply via mailbox to sender.]\n\n---\n\nFrom: sender\n\nsecond\n\n[Reply via mailbox to sender.]",
   });
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const sent = [];
   const client = receiptClient();
   let deferredCheckpoint;
@@ -3455,9 +3953,9 @@ test("batched Pi delivery waits for durable checkpoint with every item before AC
   await session.close();
 });
 
-test("Pi durable replay requires matching delivery item metadata", async () => {
+test("Pi durable replay requires matching delivery item metadata", async (t) => {
   const message = envelope("batch-durable-mismatch");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const sent = [];
   const client = receiptClient();
   const delivery = {
@@ -3681,9 +4179,9 @@ test("client does not NACK a Pi injection when its receipt send fails", async (t
   assert.deepEqual(socket.sent.map(({ type }) => type), ["register"]);
 });
 
-test("Pi injection failure NACKs without acknowledging the delivery", async () => {
+test("Pi injection failure NACKs without acknowledging the delivery", async (t) => {
   const message = envelope("message-injection-failure");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const client = receiptClient();
   const context = { sessionManager: session.manager, ui: { setStatus() {} } };
   const coordinator = createPiMailboxDeliveryCoordinator({
@@ -3701,9 +4199,9 @@ test("Pi injection failure NACKs without acknowledging the delivery", async () =
   await session.close();
 });
 
-test("failed durable ACK is retried from persisted session history without reinjection", async () => {
+test("failed durable ACK is retried from persisted session history without reinjection", async (t) => {
   const message = envelope("message-ack-failure");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   await session.persist();
   const sent = [];
   const receipts = [];
@@ -3737,9 +4235,9 @@ test("failed durable ACK is retried from persisted session history without reinj
   await session.close();
 });
 
-test("message arrival event is emitted when a received message is injected", async () => {
+test("message arrival event is emitted when a received message is injected", async (t) => {
   const message = envelope("arrival-message", { source: { kind: "agent" }, subject: "Hello", body: "hello ".repeat(40) });
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const sent = [];
   const arrivals = [];
   const context = { sessionManager: session.manager, ui: { setStatus() {} } };
@@ -3761,9 +4259,9 @@ test("message arrival event is emitted when a received message is injected", asy
   await session.close();
 });
 
-test("message arrival suppresses self-sender deliveries", async () => {
+test("message arrival suppresses self-sender deliveries", async (t) => {
   const message = envelope("arrival-self-sender", { from: "worker", to: "worker", source: { kind: "agent" } });
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const arrivals = [];
   const coordinator = createPiMailboxDeliveryCoordinator({
     pi: { sendMessage() {} },
@@ -3778,9 +4276,9 @@ test("message arrival suppresses self-sender deliveries", async () => {
   await session.close();
 });
 
-test("message arrival suppresses duplicate delivery for the same message id", async () => {
+test("message arrival suppresses duplicate delivery for the same message id", async (t) => {
   const message = envelope("arrival-duplicate", { source: { kind: "agent" } });
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const arrivals = [];
   const coordinator = createPiMailboxDeliveryCoordinator({
     pi: { sendMessage() {} },
@@ -3796,9 +4294,9 @@ test("message arrival suppresses duplicate delivery for the same message id", as
   await session.close();
 });
 
-test("message arrival dedupe survives retry replay after reconnect within the session", async () => {
+test("message arrival dedupe survives retry replay after reconnect within the session", async (t) => {
   const message = envelope("arrival-reconnect-replay", { source: { kind: "agent" } });
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const arrivals = [];
   const coordinator = createPiMailboxDeliveryCoordinator({
     pi: { sendMessage() {} },
@@ -3817,9 +4315,9 @@ test("message arrival dedupe survives retry replay after reconnect within the se
 });
 
 for (const kind of ["web_ui", "android", "system", "unknown"]) {
-  test(`message arrival suppresses ${kind} source`, async () => {
+  test(`message arrival suppresses ${kind} source`, async (t) => {
     const message = envelope(`arrival-source-${kind.replace("_", "-")}`, { source: { kind } });
-    const session = await durableSession(message.id);
+    const session = await durableSession(message.id, t);
     const arrivals = [];
     const coordinator = createPiMailboxDeliveryCoordinator({
       pi: { sendMessage() {} },
@@ -3835,9 +4333,9 @@ for (const kind of ["web_ui", "android", "system", "unknown"]) {
   });
 }
 
-test("replayed in-flight delivery does not create a second Pi injection", async () => {
+test("replayed in-flight delivery does not create a second Pi injection", async (t) => {
   const message = envelope("message-4");
-  const session = await durableSession(message.id);
+  const session = await durableSession(message.id, t);
   const sent = [];
   const client = receiptClient();
   const context = { sessionManager: session.manager, ui: { setStatus() {} } };
@@ -3863,6 +4361,189 @@ test("replayed in-flight delivery does not create a second Pi injection", async 
   ]);
   coordinator.close();
   await session.close();
+});
+
+test("isolated Mailbox V2 E2E covers durable checkpoints, router restart replay, and Sentinel handoff", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-integration-"));
+  const databasePath = join(directory, "router.sqlite");
+  const sessionFile = join(directory, "session.jsonl");
+  const entries = [];
+  const sockets = [];
+  const events = [];
+  const injections = [];
+  const statusMessages = [];
+  const sentinelCalls = [];
+  const checkpointTimers = [];
+  let repository;
+  let router;
+  let client;
+  let coordinator;
+  let heldFirstAck;
+  let holdFirstAck = true;
+  const manager = {
+    getBranch: () => entries,
+    isPersisted: () => true,
+    getSessionFile: () => sessionFile,
+    getSessionId: () => "integration-session",
+  };
+  const context = { sessionManager: manager, ui: { setStatus() {} } };
+  const persistPiEntry = (message) => {
+    entries.push({ type: "custom_message", ...message });
+    writeFileSync(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+  };
+  const openRouter = (port = 0) => {
+    repository = openMessageRepository({ databasePath });
+    router = createAgentRouter({
+      repository,
+      port,
+      deliveryLeaseDurationMs: 5_000,
+      maxDeliveryAttempts: 1,
+      deliveryOfferCoalesceMs: 0,
+      timeoutSweepIntervalMs: 60_000,
+      eventLogger: (event, fields) => events.push({ event, ...fields }),
+    });
+    return router.listen();
+  };
+
+  t.after(async () => {
+    try { coordinator?.close(); } catch {}
+    try { client?.close(); } catch {}
+    try { await router?.close(); } catch {}
+    try { repository?.close(); } catch {}
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const websocketUrl = await openRouter();
+  const routerUrl = websocketUrl.replace(/^ws:/, "http:").replace(/\/v1\/agents$/, "");
+  const routerPort = Number(new URL(websocketUrl).port);
+  const replayMessage = envelope("integration-replay", { to: "worker", body: "persist this once" });
+  const checkpointMessage = envelope("integration-checkpoint-failure", { to: "worker", body: "retry this checkpoint" });
+  const sentinelSuccess = envelope("integration-sentinel-success", {
+    from: "supervisor", to: "worker", body: "run the successful scheduled task", sentinel: { model: "gpt-5.6-terra" },
+  });
+  const sentinelFailure = envelope("integration-sentinel-failure", {
+    from: "supervisor", to: "worker", body: "run the failed scheduled task", sentinel: { model: "gpt-5.6-terra" },
+  });
+  const pi = {
+    sendMessage(messageToInject, options) {
+      if (messageToInject.customType === "mecha-agent-message") injections.push(messageToInject);
+      else statusMessages.push({ message: messageToInject, options });
+    },
+  };
+  client = createMailboxClient({
+    agentId: "worker",
+    routerUrl,
+    onEnvelope: (envelopeMessage, delivery) => coordinator.onEnvelope(envelopeMessage, delivery),
+    webSocketFactory: (url) => {
+      const socket = new WebSocket(url);
+      const send = socket.send.bind(socket);
+      socket.send = (frame) => {
+        const parsed = JSON.parse(frame.toString());
+        if (parsed.type === "ack" && holdFirstAck) {
+          holdFirstAck = false;
+          heldFirstAck = parsed;
+          return;
+        }
+        send(frame);
+      };
+      sockets.push(socket);
+      return socket;
+    },
+    renewIntervalMs: 60_000,
+    reconnectInitialDelayMs: 60_000,
+    reconnectMaxDelayMs: 60_000,
+    fetchImpl: fetch,
+  });
+  coordinator = createDirectPiMailboxDeliveryCoordinator({
+    pi,
+    sessionContext: context,
+    client,
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay, cleared: false };
+      checkpointTimers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => { timer.cleared = true; },
+    spawnSubagent: async (message) => {
+      sentinelCalls.push(message);
+      if (message.id === sentinelFailure.id) throw new Error("native handoff failed");
+      return "native-success-child";
+    },
+  });
+
+  await client.connect();
+  router.enqueueMessage(replayMessage);
+  await waitFor(() => injections.some(({ details }) => details?.message_id === replayMessage.id), 100);
+  await waitFor(() => repository.messageFor(replayMessage.id)?.state === "injection_requested", 100);
+
+  const replayInjection = injections.find(({ details }) => details?.message_id === replayMessage.id);
+  persistPiEntry(replayInjection);
+  assert.equal(mailboxSessionDeliveryState(manager, replayMessage.id), "durable");
+  coordinator.onMessageEnd({
+    message: { role: "custom", customType: "mecha-agent-message", details: { message_id: replayMessage.id } },
+  }, context);
+  await nextTurn();
+
+  assert.equal(heldFirstAck.type, "ack");
+  assert.equal(repository.messageFor(replayMessage.id).state, "injection_requested");
+  assert.equal(events.filter(({ event, message_id: messageId }) => event === "delivery_acknowledged" && messageId === replayMessage.id).length, 0);
+
+  const firstSocketClosed = once(sockets[0], "close");
+  client.pause();
+  await firstSocketClosed;
+  const previousRouter = router;
+  router = undefined;
+  await previousRouter.close();
+  const previousRepository = repository;
+  repository = undefined;
+  previousRepository.close();
+  await openRouter(routerPort);
+  await client.resume();
+
+  await waitFor(() => sockets.length === 2, 100);
+  await waitFor(() => repository.messageFor(replayMessage.id) === undefined, 100);
+  assert.equal(injections.filter(({ details }) => details?.message_id === replayMessage.id).length, 1);
+  assert.deepEqual(events.filter(({ event, message_id: messageId }) => [
+    "delivery_offered",
+    "delivery_injection_requested",
+    "delivery_acknowledged",
+  ].includes(event) && messageId === replayMessage.id).map(({ event, attempt }) => ({ event, attempt })), [
+    { event: "delivery_offered", attempt: 1 },
+    { event: "delivery_injection_requested", attempt: 1 },
+    { event: "delivery_offered", attempt: 1 },
+    { event: "delivery_injection_requested", attempt: 1 },
+    { event: "delivery_acknowledged", attempt: 1 },
+  ]);
+
+  router.enqueueMessage(checkpointMessage);
+  await waitFor(() => injections.some(({ details }) => details?.message_id === checkpointMessage.id), 100);
+  await waitFor(() => repository.messageFor(checkpointMessage.id)?.state === "injection_requested", 100);
+  coordinator.onMessageEnd({
+    message: { role: "custom", customType: "mecha-agent-message", details: { message_id: checkpointMessage.id } },
+  }, context);
+  await nextTurn();
+  assert.deepEqual(checkpointTimers.map(({ delay, cleared }) => ({ delay, cleared })), [{ delay: 250, cleared: false }]);
+  assert.equal(repository.messageFor(checkpointMessage.id).state, "injection_requested");
+
+  const checkpointInjection = injections.find(({ details }) => details?.message_id === checkpointMessage.id);
+  persistPiEntry(checkpointInjection);
+  assert.equal(mailboxSessionDeliveryState(manager, checkpointMessage.id), "durable");
+  checkpointTimers[0].callback();
+  await waitFor(() => repository.messageFor(checkpointMessage.id) === undefined, 100);
+  assert.equal(injections.filter(({ details }) => details?.message_id === checkpointMessage.id).length, 1);
+
+  router.enqueueMessage(sentinelSuccess);
+  await waitFor(() => sentinelCalls.some(({ id }) => id === sentinelSuccess.id), 100);
+  await waitFor(() => repository.messageFor(sentinelSuccess.id) === undefined, 100);
+  assert.equal(statusMessages.length, 1);
+  assert.equal(statusMessages[0].message.display, false);
+  assert.equal(injections.some(({ details }) => details?.message_id === sentinelSuccess.id), false);
+
+  router.enqueueMessage(sentinelFailure);
+  await waitFor(() => events.some(({ event, message_id: messageId, state }) => event === "delivery_nacked" && messageId === sentinelFailure.id && state === "dead_letter"), 100);
+  assert.equal(sentinelCalls.filter(({ id }) => id === sentinelFailure.id).length, 1);
+  assert.equal(statusMessages.length, 1);
+  assert.equal(repository.messageFor(sentinelFailure.id).state, "dead_letter");
 });
 
 test("mailbox client pause closes without reconnecting until resume", async () => {
@@ -4537,7 +5218,7 @@ test("batched delivery carries per-item reply hints without one global sender fo
   }
 });
 
-test("legacy reconnect can ACK an active multi-item batch without delivery_items support", async () => {
+test("legacy registration accepts exact delivery items for a multi-item batch", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-mailbox-legacy-reconnect-"));
   let now = Date.parse("2026-07-13T00:00:00.000Z");
   const repository = openMessageRepository({ databasePath: join(directory, "router.sqlite"), clock: () => new Date(now) });
@@ -4571,6 +5252,7 @@ test("legacy reconnect can ACK an active multi-item batch without delivery_items
       type: "register",
       agent_id: "worker",
       instance_id: "worker-instance",
+      ack_confirmation: "correlated_v1",
       delivery_receipts: "delivery_items_v1",
     });
     await waitFor(() => capableFrames.some((frame) => frame.type === "message"));
@@ -4585,14 +5267,27 @@ test("legacy reconnect can ACK an active multi-item batch without delivery_items
     });
     const legacyFrames = [];
     legacySocket.on("message", (payload) => legacyFrames.push(JSON.parse(payload.toString("utf8"))));
-    send(legacySocket, { type: "register", agent_id: "worker", instance_id: "worker-instance" });
+    send(legacySocket, {
+      type: "register",
+      agent_id: "worker",
+      instance_id: "worker-instance",
+      delivery_receipts: "delivery_items_v1",
+    });
     await waitFor(() => legacyFrames.some((frame) => frame.type === "registered"));
+    const legacyRegistered = legacyFrames.find((frame) => frame.type === "registered");
+    assert.equal(legacyRegistered.ack_confirmation, undefined);
     await waitFor(() => legacyFrames.some((frame) => frame.type === "message"));
     const replay = legacyFrames.find((frame) => frame.type === "message");
     assert.equal(replay.message.id, "legacy-reconnect-1");
+    assert.equal(replay.message_incarnation_id, undefined);
     assert.equal(replay.delivery_items.length, 2);
+    assert.deepEqual(replay.delivery_items.map(({ message_id }) => message_id), [
+      "legacy-reconnect-1",
+      "legacy-reconnect-2",
+    ]);
     assert.match(replay.message.body, /second/);
     const legacyLeaseId = legacyFrames.find((frame) => frame.type === "registered").lease_id;
+    const deliveryItems = replay.delivery_items;
     send(legacySocket, {
       type: "injection_requested",
       agent_id: "worker",
@@ -4600,6 +5295,7 @@ test("legacy reconnect can ACK an active multi-item batch without delivery_items
       lease_id: legacyLeaseId,
       message_id: replay.message.id,
       attempt_number: replay.attempt_number,
+      delivery_items: deliveryItems,
     });
     send(legacySocket, {
       type: "ack",
@@ -4608,10 +5304,13 @@ test("legacy reconnect can ACK an active multi-item batch without delivery_items
       lease_id: legacyLeaseId,
       message_id: replay.message.id,
       attempt_number: replay.attempt_number,
+      delivery_items: deliveryItems,
     });
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(repository.messageFor("legacy-reconnect-1"), undefined);
     assert.equal(repository.messageFor("legacy-reconnect-2"), undefined);
+    assert.equal(legacyFrames.filter((frame) => frame.type === "message").length, 1);
+    assert.equal(legacyFrames.some((frame) => frame.type === "error"), false);
   } finally {
     capableSocket?.terminate();
     legacySocket?.terminate();

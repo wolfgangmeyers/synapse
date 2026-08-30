@@ -91,3 +91,83 @@ test("a pre-handoff native spawn failure uses the ordinary delivery retry path",
   await coordinator.onEnvelope(sentinelMessage, { messageId: sentinelMessage.id, attemptNumber: 1 });
   assert.deepEqual(receipts.map(({ type, reason }) => ({ type, reason })), [{ type: "nack", reason: "injection_failed" }]);
 });
+
+test("native Sentinel rejects missing or invalid spawn inputs", async () => {
+  const service = { spawn: () => "native-child" };
+  const cases = [
+    { name: "missing service", message: sentinelMessage, resolveService: async () => undefined },
+    { name: "missing spawn function", message: sentinelMessage, resolveService: async () => ({}) },
+    { name: "missing body", message: { ...sentinelMessage, body: undefined }, resolveService: async () => service },
+    { name: "missing Sentinel metadata", message: { ...sentinelMessage, sentinel: undefined }, resolveService: async () => service },
+  ];
+
+  for (const { name, message, resolveService } of cases) {
+    await assert.rejects(() => spawnNativeSentinel(message, resolveService), /service is unavailable/, name);
+  }
+});
+
+test("invalid native child IDs NACK without recording a handoff", async () => {
+  for (const childId of [undefined, ""]) {
+    const receipts = [];
+    const coordinator = createPiMailboxDeliveryCoordinator({
+      pi: { sendMessage() { throw new Error("must not record a handoff"); } },
+      sessionContext: { sessionManager: { getSessionId: () => "parent" } },
+      client: { sendReceipt: (type, delivery, reason) => receipts.push({ type, delivery, reason }) },
+      spawnSubagent: async () => childId,
+    });
+
+    await coordinator.onEnvelope({ ...sentinelMessage, id: `invalid-child-${String(childId)}` }, {
+      messageId: `invalid-child-${String(childId)}`,
+      attemptNumber: 1,
+    });
+    assert.deepEqual(receipts.map(({ type, reason }) => ({ type, reason })), [{ type: "nack", reason: "injection_failed" }]);
+    coordinator.close();
+  }
+});
+
+test("Sentinel spawn failure remains contained when its NACK cannot be sent", async () => {
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() { throw new Error("must not record a handoff"); } },
+    sessionContext: { sessionManager: { getSessionId: () => "parent" } },
+    client: { sendReceipt() { throw new Error("socket closed"); } },
+    spawnSubagent: async () => { throw new Error("service unavailable"); },
+  });
+
+  await assert.doesNotReject(() => coordinator.onEnvelope(sentinelMessage, {
+    messageId: sentinelMessage.id, attemptNumber: 1,
+  }));
+  coordinator.close();
+});
+
+test("Sentinel status failure does not prevent ordinary acknowledgement", async () => {
+  const receipts = [];
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage() { throw new Error("status write failed"); } },
+    sessionContext: { sessionManager: { getSessionId: () => "parent" } },
+    client: { sendReceipt: (type) => receipts.push(type) },
+    spawnSubagent: async () => "native-child",
+  });
+
+  await coordinator.onEnvelope(sentinelMessage, { messageId: sentinelMessage.id, attemptNumber: 1 });
+
+  assert.deepEqual(receipts, ["injection_requested", "ack"]);
+  coordinator.close();
+});
+
+test("Sentinel receipt failure is contained after the child is handed off", async () => {
+  const sent = [];
+  const coordinator = createPiMailboxDeliveryCoordinator({
+    pi: { sendMessage: (...args) => sent.push(args) },
+    sessionContext: { sessionManager: { getSessionId: () => "parent" } },
+    client: { sendReceipt() { throw new Error("socket closed"); } },
+    spawnSubagent: async () => "native-child",
+  });
+
+  await assert.doesNotReject(() => coordinator.onEnvelope(sentinelMessage, {
+    messageId: sentinelMessage.id, attemptNumber: 1,
+  }));
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0].customType, "mecha-sentinel-status");
+  coordinator.close();
+});
