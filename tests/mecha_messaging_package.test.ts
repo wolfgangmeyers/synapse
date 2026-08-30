@@ -91,6 +91,7 @@ test("the TypeScript package exposes the Mecha Messaging export surface", () => 
 test("the Messaging package dependency graph stays within Messaging and extracted Goal packages", async () => {
   const files = (await readdir(PACKAGE_ROOT)).filter((file) => /\.(?:ts|js)$/.test(file)).sort();
   assert.deepEqual(files, [
+    "activity-lifecycle.ts",
     "compaction-policy.ts",
     "delivery-coordinator.ts",
     "index.ts",

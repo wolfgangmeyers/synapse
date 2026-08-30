@@ -15,6 +15,18 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, 
 import { dirname } from "node:path";
 import { createRecallState } from "./recall-state.js";
 import {
+  createActivityLifecycle,
+  createSettledNotificationScheduler,
+  summarizeNativeSubagents,
+} from "./activity-lifecycle.js";
+import type {
+  ActivityContext,
+  ActivityLifecycle,
+  NativeSubagent,
+  NativeSubagentService,
+} from "./activity-lifecycle.js";
+export { createSettledNotificationScheduler, summarizeNativeSubagents } from "./activity-lifecycle.js";
+import {
   captureNativeSentinelSpawner,
   createPiMailboxDeliveryCoordinator,
 } from "./delivery-coordinator.js";
@@ -64,7 +76,6 @@ const MEMORY_CAPTURE_DIAGNOSTIC_MAX_BYTES = 128 * 1024;
 const MEMORY_CAPTURE_DIAGNOSTIC_KEEP_BYTES = 64 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_MAX_BYTES = 256 * 1024;
 const ORPHAN_TOOL_RESULT_DIAGNOSTIC_KEEP_BYTES = 128 * 1024;
-const NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS = 60_000;
 const MAILBOX_SEND_RATE_LIMIT_COUNT = 6;
 const MAILBOX_SEND_RATE_LIMIT_WINDOW_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
@@ -106,15 +117,13 @@ type ModelRegistry = GoalModelRegistry & { getAvailable?: () => unknown[] };
 type SessionManager = { getBranch: () => SessionEntry[]; getSessionId: () => string; isPersisted: () => boolean; getSessionFile: () => string | undefined };
 type Ui = { setStatus: (key: string, value: string | undefined) => void; notify: (message: string, level?: string) => void };
 type PiContext = { sessionManager: SessionManager; model?: ModelInput; modelRegistry?: ModelRegistry; ui: Ui; isIdle?: () => boolean; getContextUsage?: () => ContextUsage | undefined; compact?: (options: CompactOptions) => void; abort?: () => void };
-type ServiceRegistry = { get: (sessionId: string) => SubagentService };
+type ServiceRegistry = { get: (sessionId: string) => NativeSubagentService };
 type RegistryContainer = { services?: ServiceRegistry };
-type SubagentService = { spawn?: (type: string, prompt: string, options: { description: string; model?: ModelInput; inheritContext: boolean }) => Promise<string>; getLifecycleSnapshots?: () => NativeSubagent[]; listAgents?: () => NativeSubagent[]; getRunning?: () => NativeSubagent[]; running?: NativeSubagent[]; runs?: NativeSubagent[]; subagents?: NativeSubagent[] };
-type NativeSubagent = JsonObject & { id?: string; type?: string; description?: string; status?: string; startedAt?: number | string };
+type SubagentService = NativeSubagentService;
 type SessionEntry = JsonObject & { type?: string; customType?: string; details?: JsonObject; message?: JsonObject };
 type ContextUsage = { percent: number | null; tokens: number | null; contextWindow: number; model?: ModelInput };
 type CompactResult = { tokensBefore?: number; estimatedTokensAfter?: number; firstKeptEntryId?: string; summary?: string };
 type CompactOptions = { customInstructions?: string; onComplete?: (result: CompactResult) => void; onError?: (error: ErrorLike) => void };
-type Timer = ReturnType<typeof setTimeout>;
 type ServiceAccessor = (sessionId: string) => SubagentService | undefined;
 type InlineToolName = "bash" | "edit" | "write";
 type InlineAllowanceOptions = { now?: () => number };
@@ -153,7 +162,6 @@ function isRecallChoice(value: RecallControllerSelection): value is RecallContro
   if (!isRecord(value) || !Array.isArray(value.ids) || !Number.isSafeInteger(value.depth)) return false;
   return value.ids.every((id) => typeof id === "string");
 }
-type TimerOptions = { setTimeoutImpl?: typeof setTimeout; clearTimeoutImpl?: typeof clearTimeout };
 type GoalControlRequest = JsonObject & { controlId?: string; targetInstanceId?: string; correlationId?: string; sourceAgentId?: string; revision?: number; action?: string; goal?: JsonValue; settings?: JsonValue; context?: PiContext };
 type GoalControlResult = { accepted: boolean; errorCode?: string; goalState?: GoalControlState };
 type ReminderLock = ReturnType<typeof createReminderLockState>;
@@ -171,9 +179,7 @@ type ExternalTraceValue = Parameters<NonNullable<MailboxClientOptions["onLifecyc
 type PiTool = { name: string; label: string; description: string; parameters: object; execute: (...args: never[]) => Promise<object> };
 type PiRuntime = MessagingPi & { events: PiEvents; on(name: string, handler: (event: PiEvent, context: PiContext) => unknown): void; on(name: string, handler: GoalPi["on"] extends (event: string, handler: infer Handler) => void ? Handler : never): void; registerTool(tool: object): void; registerCommand(name: string, command: object): void; setModel?: (model: ModelInput) => Promise<boolean> | boolean; exec: (file: string, args: string[], options: { timeout: number }) => Promise<{ code: number; stderr: string }>; getSessionId?: () => string | undefined; appendEntry: GoalPi["appendEntry"] };
 type MemoryCapture = ReturnType<typeof createMemoryCaptureLifecycle>;
-type SubagentMetadata = { id: string; type?: string; description?: string; status?: string; startedAtMs: number; lastSeenMs: number; eventTracked?: boolean; serviceTracked?: boolean };
 type ModelSwitchOverride = { sessionId: string; model: ModelMetadata; sourceContext: PiContext | undefined; sourceModel: ModelMetadata | null };
-type ActivitySent = { state: string; subagentCount: number; subagents: Array<{ id: string; type?: string; description: string; status?: string }>; goal?: GoalProjection; currentModel?: ModelMetadata; sentAtMs: number };
 type RateReservation = { timestamp: number };
 type PendingSelfCompaction = { customInstructions?: string; postCompactionNotification?: string };
 type PendingHardCompaction = { thresholdPercent: number };
@@ -185,8 +191,6 @@ type RecallToolInput = { action?: string; stores?: string[] };
 type SettledToolInput = { action?: string };
 type ContextToolInput = CompactionRequest;
 type ModelControlRequestInput = { controlId: string; sourceAgentId: string; action: string; model: ModelInput | undefined };
-type NativeTraceSubagent = NativeSubagent & { id: string };
-type TrackedSubagent = SubagentMetadata;
 type ReminderReservation = { key: string; reservation: RateReservation };
 type RecallState = ReturnType<typeof createRecallState>;
 type RecallPipeline = ReturnType<typeof createPipeline>;
@@ -195,7 +199,7 @@ type CaptureContextInput = Parameters<NonNullable<CaptureLifecycleOptions["conte
 type CaptureApplyInput = Parameters<NonNullable<CaptureLifecycleOptions["apply"]>>[0];
 type OperationalReminderLock = NonNullable<NonNullable<Parameters<typeof registerOperationalTools>[1]>["reminderLock"]>;
 type OperationalMessagingOptions = Omit<Parameters<typeof registerOperationalTools>[1], "reminderLock"> & { reminderLock?: ReminderLock; getCurrentReminder?: Parameters<typeof createReminderLockState>[0]["getCurrentReminder"]; environment?: Environment; fetchImpl?: typeof fetch };
-type ExtensionOptions = { resolveCurrentAgentId?: () => string | undefined; createClient?: typeof createMailboxClient; createSettledScheduler?: () => ReturnType<typeof createSettledNotificationScheduler>; setTimeoutImpl?: typeof setTimeout; clearTimeoutImpl?: typeof clearTimeout; setIntervalImpl?: typeof setInterval; clearIntervalImpl?: typeof clearInterval; nowImpl?: () => number; getSubagentsService?: ServiceAccessor; nativeSubagentTrace?: ExtensionTrace; operationalTools?: OperationalMessagingOptions };
+type ExtensionOptions = { resolveCurrentAgentId?: () => string | undefined; createClient?: typeof createMailboxClient; createCoordinator?: (context: PiContext, mailboxClient: MailboxClient) => DeliveryCoordinator; createSettledScheduler?: () => ReturnType<typeof createSettledNotificationScheduler>; setTimeoutImpl?: typeof setTimeout; clearTimeoutImpl?: typeof clearTimeout; setIntervalImpl?: typeof setInterval; clearIntervalImpl?: typeof clearInterval; nowImpl?: () => number; getSubagentsService?: ServiceAccessor; nativeSubagentTrace?: ExtensionTrace; operationalTools?: OperationalMessagingOptions };
 
 function isRecord<T>(value: T): value is T & DynamicRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -556,18 +560,6 @@ const NATIVE_SUBAGENT_TRACE_BOOLEAN_FIELDS = new Set([
   "accepted", "switched", "truncated",
 ]);
 
-export function summarizeNativeSubagents(subagents: NativeSubagent[] | undefined): Array<{ id: string; type?: string; status?: string; description_length: number }> {
-  if (!Array.isArray(subagents)) return [];
-  return subagents.slice(0, 999).flatMap((subagent) => {
-    const id = typeof subagent?.id === "string" ? subagent.id.trim().slice(0, 128) : "";
-    if (id.length === 0) return [];
-    const type = typeof subagent.type === "string" ? subagent.type.trim().slice(0, 64) : "";
-    const status = typeof subagent.status === "string" ? subagent.status.trim().slice(0, 64) : "";
-    const descriptionLength = typeof subagent.description === "string" ? subagent.description.length : 0;
-    return [{ id, ...(type.length > 0 ? { type } : {}), ...(status.length > 0 ? { status } : {}), description_length: descriptionLength }];
-  });
-}
-
 export function createExtensionTrace({
   environment = process.env,
   path = typeof environment?.[EXTENSION_TRACE_PATH_ENV] === "string" && environment[EXTENSION_TRACE_PATH_ENV].trim().length > 0
@@ -680,87 +672,6 @@ function childSessionId(event: JsonObject | undefined): string | undefined {
   return typeof event?.sessionId === "string" && event.sessionId.length > 0
     ? event.sessionId
     : undefined;
-}
-
-const SETTLED_NOTIFICATION_COOLDOWN_MS = 120_000;
-// Native lifecycle visibility is intentionally polling-only. This cadence bounds how
-// long the web UI can show a stale child without relying on Pi event delivery.
-const ACTIVITY_HEARTBEAT_INTERVAL_MS = 2_000;
-const ACTIVITY_REFRESH_MIN_MS = 10_000;
-const EVENT_TRACKED_MISSING_LIMIT_MS = 60_000;
-// pi-subagents intentionally exposes at most 100 live records. Keep the Mailbox
-// projection at the same bound so an extension cannot turn activity into an
-// unbounded cross-extension data path.
-const MAX_ACTIVITY_SUBAGENTS = 100;
-const MAX_TERMINAL_SUBAGENT_TOMBSTONES = 2048;
-const LIVE_SUBAGENT_STATUSES = new Set(["queued", "running"]);
-const TERMINAL_SUBAGENT_STATUSES = new Set(["completed", "steered", "aborted", "stopped", "error"]);
-
-// Managed workers use background subagents, whose native started and terminal
-// events share a run ID. Foreground runs lack a matching terminal ID, so they
-// remain an upstream lifecycle limitation rather than a heuristic target.
-export function createSettledNotificationScheduler({
-  setTimeoutImpl = setTimeout,
-  clearTimeoutImpl = clearTimeout,
-}: TimerOptions = {}) {
-  if (typeof setTimeoutImpl !== "function" || typeof clearTimeoutImpl !== "function") {
-    throw new TypeError("settled notification timers are required");
-  }
-
-  const children = new Set<string>();
-  const timers = new Set<Timer>();
-  let generation = 0;
-  let parentSettled = false;
-
-  function invalidate() {
-    generation += 1;
-    for (const timer of timers) clearTimeoutImpl(timer);
-    timers.clear();
-  }
-
-  function schedule(delay: number, expectedGeneration: number, send: () => void): void {
-    let timer: Timer;
-    timer = setTimeoutImpl(() => {
-      timers.delete(timer);
-      if (generation !== expectedGeneration || children.size > 0) return;
-      send();
-    }, delay);
-    timers.add(timer);
-    timer?.unref?.();
-  }
-
-  return {
-    onParentActivity() {
-      parentSettled = false;
-      invalidate();
-    },
-    onParentSettled(send: () => void): void {
-      if (parentSettled || typeof send !== "function") return;
-      parentSettled = true;
-      if (children.size > 0) return;
-
-      invalidate();
-      const settledGeneration = generation;
-      schedule(SETTLED_NOTIFICATION_COOLDOWN_MS, settledGeneration, send);
-    },
-    onChildStarted(sessionId: string): void {
-      if (typeof sessionId !== "string" || sessionId.length === 0 || children.has(sessionId)) return;
-      children.add(sessionId);
-      invalidate();
-    },
-    onChildDisposed(sessionId: string): void {
-      if (typeof sessionId !== "string" || sessionId.length === 0) return;
-      children.delete(sessionId);
-    },
-    dispose() {
-      invalidate();
-      children.clear();
-      parentSettled = false;
-    },
-    activeChildCount() {
-      return children.size;
-    },
-  };
 }
 
 export function transientChildAgentId(sessionId: string, generateId: () => string = createNanoId): string {
@@ -911,6 +822,7 @@ export {
 export function createMechaMessagingExtension(pi: PiRuntime, {
   resolveCurrentAgentId = resolveAgentId,
   createClient = createMailboxClient,
+  createCoordinator,
   createSettledScheduler = createSettledNotificationScheduler,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
@@ -1147,42 +1059,11 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   });
   let settledNotificationAgentId: string | undefined;
   let settledNotificationPending = false;
-  let activityHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
-  let activityHeartbeatActive = false;
   // Extension event contexts expose the model as a read-only snapshot. Keep a
   // short-lived per-session override so a successful remote switch is
   // published immediately even if the next event has not supplied a fresh
   // context snapshot yet.
   let modelSwitchOverride: ModelSwitchOverride | undefined;
-  let lastActivitySent: ActivitySent | undefined;
-  let lastNativeSubagentReadDiagnosticMs: number | undefined;
-  function nativeSubagentService(ownerSessionId: string | undefined = parentActivityContext?.sessionManager.getSessionId()) {
-    const available = typeof ownerSessionId === "string";
-    let service;
-    try {
-      service = available ? currentSubagentsServiceAccessor?.(ownerSessionId) : undefined;
-      traceNativeSubagent("extension_service_lookup", {
-        ...(available ? { parent_session_id: ownerSessionId } : {}),
-        available: service !== undefined,
-        registry_available: (() => {
-          const registry = Object.getOwnPropertyDescriptor(globalThis, PI_SUBAGENTS_SERVICE_REGISTRY)?.value;
-          const services = isRecord(registry) ? registry.services : undefined;
-          return isRecord(services) && typeof services.get === "function";
-        })(),
-        lifecycle_service: typeof service?.getLifecycleSnapshots === "function",
-      });
-      return service;
-    } catch (error) {
-      traceNativeSubagent("extension_service_lookup_error", {
-        ...(available ? { parent_session_id: ownerSessionId } : {}),
-        error_name: errorName(error),
-      });
-      return undefined;
-    }
-  }
-
-  const runningSubagents = new Map<string, TrackedSubagent>();
-  const terminalSubagentTombstones = new Map<string, number>();
   let settledNotificationRecipient: string | undefined;
   let settledNotificationEnabled = false;
   let compactionPolicy: CompactionPolicy;
@@ -1192,324 +1073,20 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   let pendingSelfCompaction: PendingSelfCompaction | undefined;
   let pendingHardCompaction: PendingHardCompaction | undefined;
 
-  function normalizeSubagentMetadata(event: NativeSubagent, startedAtMs: number = nowImpl()): TrackedSubagent | undefined {
-    const id = typeof event?.id === "string" ? event.id.trim().slice(0, 128) : "";
-    if (id.length === 0) return undefined;
-    const description = typeof event?.description === "string" ? event.description.trim().slice(0, 512) : "";
-    const type = typeof event?.type === "string" ? event.type.trim().slice(0, 64) : "";
-    const status = typeof event?.status === "string" ? event.status.toLowerCase() : undefined;
-    return {
-      id,
-      ...(type.length > 0 ? { type } : {}),
-      ...(description.length > 0 ? { description } : {}),
-      ...(status === undefined ? {} : { status }),
-      startedAtMs,
-      lastSeenMs: startedAtMs,
-    };
-  }
-
-  function publicSubagentSummaries() {
-    return [...runningSubagents.values()]
-      .filter((item): item is TrackedSubagent & { description: string } => typeof item.description === "string" && item.description.length > 0)
-      .sort((left, right) => left.startedAtMs - right.startedAtMs || left.id.localeCompare(right.id))
-      .slice(0, MAX_ACTIVITY_SUBAGENTS)
-      .map(({ id, type, description, status }) => ({ id, ...(type !== undefined ? { type } : {}), description, ...(status !== undefined ? { status } : {}) }));
-  }
-
-  function lifecycleSubagentSummary(metadata: TrackedSubagent): NativeTraceSubagent | undefined {
-    const id = typeof metadata?.id === "string" ? metadata.id.trim().slice(0, 128) : "";
-    if (id.length === 0) return undefined;
-    const type = typeof metadata?.type === "string" ? metadata.type.trim().slice(0, 64) : "";
-    const description = typeof metadata?.description === "string" ? metadata.description.trim().slice(0, 512) : "";
-    const status = typeof metadata.status === "string" && ["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(metadata.status)
-      ? metadata.status
-      : undefined;
-    return {
-      id,
-      ...(type.length > 0 ? { type } : {}),
-      // Native callers supply this short label specifically for observers. Keep a
-      // stable fallback only for older event shapes that did not carry one.
-      description: description.length > 0 ? description : "Native subagent",
-      ...(status === undefined ? {} : { status }),
-    };
-  }
-
-  function lifecycleSubagentSummaries(): NativeTraceSubagent[] {
-    return [...runningSubagents.values()]
-      .sort((left, right) => left.startedAtMs - right.startedAtMs || left.id.localeCompare(right.id))
-      .slice(0, MAX_ACTIVITY_SUBAGENTS)
-      .map(lifecycleSubagentSummary)
-      .filter((item): item is NativeTraceSubagent => item !== undefined);
-  }
-
-  function publishLifecycleSnapshot(subagents: NativeSubagent[]): void {
-    const summary = summarizeNativeSubagents(subagents);
-    try {
-      const eventId = client?.sendLifecycleSnapshot?.(subagents);
-      traceNativeSubagent("extension_snapshot_publish", {
-        published: typeof eventId === "string",
-        ...(typeof eventId === "string" ? { event_id: eventId } : {}),
-        snapshot_count: summary.length,
-        subagents: summary,
-      });
-    } catch (error) {
-      traceNativeSubagent("extension_snapshot_publish_error", {
-        snapshot_count: summary.length,
-        subagents: summary,
-        error_name: errorName(error),
-      });
-      // lifecycle polling retries on the next tick
-    }
-  }
-
-  function sameSubagentMetadata(left: TrackedSubagent | undefined, right: TrackedSubagent | undefined): boolean {
-    return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description && left.status === right.status;
-  }
-
-  function lifecycleSnapshotSubagentService(service: SubagentService | undefined = nativeSubagentService()): SubagentService | undefined {
-    return typeof service?.getLifecycleSnapshots === "function" ? service : undefined;
-  }
-
-  function reportNativeSubagentReadFailure(error: ErrorLike | JsonValue): void {
-    traceNativeSubagent("extension_snapshot_read_error", { error_name: errorName(error) });
-    const nowMs = nowImpl();
-    if (lastNativeSubagentReadDiagnosticMs !== undefined && nowMs - lastNativeSubagentReadDiagnosticMs < NATIVE_SUBAGENT_DIAGNOSTIC_RATE_LIMIT_MS) return;
-    lastNativeSubagentReadDiagnosticMs = nowMs;
-    try {
-      parentActivityContext?.ui?.notify?.("Native subagent service read failed; polling will retry.", "error");
-    } catch {
-      // A UI notification is only an operational signal; a broken UI must not stop polling retries.
-    }
-  }
-
-  function nativeSubagentRecords(service: SubagentService | undefined = nativeSubagentService()): NativeSubagent[] | undefined {
-    try {
-      // The lifecycle projection is the producer's public, redacted source of truth. listAgents()
-      // retains terminal result records, so it is only the compatibility fallback for older Pi.
-      const source = typeof service?.getLifecycleSnapshots === "function"
-        ? service.getLifecycleSnapshots()
-        : typeof service?.listAgents === "function"
-          ? service.listAgents()
-          : typeof service?.getRunning === "function"
-            ? service.getRunning()
-            : service?.running ?? service?.runs ?? service?.subagents;
-      const records = Array.isArray(source) ? source : undefined;
-      traceNativeSubagent("extension_snapshot_read", {
-        source: typeof service?.getLifecycleSnapshots === "function" ? "lifecycle_snapshot" : typeof service?.listAgents === "function" ? "list_agents" : typeof service?.getRunning === "function" ? "get_running" : "property",
-        available: records !== undefined,
-        snapshot_count: records?.length ?? 0,
-        subagents: summarizeNativeSubagents(records),
-      });
-      return records;
-    } catch (error) {
-      reportNativeSubagentReadFailure(error instanceof Error ? error : new Error(String(error)));
-      return undefined;
-    }
-  }
-
-  function nativeSubagentStatus(record: NativeSubagent): string | undefined {
-    return typeof record?.status === "string" ? record.status.toLowerCase() : record?.status;
-  }
-
-  function isActiveNativeSubagentRecord(record: NativeSubagent, service: SubagentService | undefined = nativeSubagentService()): boolean {
-    const status = nativeSubagentStatus(record);
-    return lifecycleSnapshotSubagentService(service) !== undefined
-      ? status !== undefined && LIVE_SUBAGENT_STATUSES.has(status)
-      : [undefined, "running", "queued", "active"].includes(status);
-  }
-
-  function isTerminalNativeSubagentRecord(record: NativeSubagent, service: SubagentService | undefined = nativeSubagentService()): boolean {
-    const status = nativeSubagentStatus(record);
-    return lifecycleSnapshotSubagentService(service) !== undefined
-      ? status !== undefined && TERMINAL_SUBAGENT_STATUSES.has(status)
-      : [
-        "completed", "complete", "done", "finished", "failed", "failure", "error", "errored",
-        "canceled", "cancelled", "aborted", "terminated", "stopped", "steered",
-      ].includes(status ?? "");
-  }
-
-  function nativeSubagentExplicitStartedAtMs(record: NativeSubagent): number | undefined {
-    if (typeof record.startedAt === "number" && Number.isFinite(record.startedAt)) return record.startedAt;
-    if (typeof record?.startedAt === "string") {
-      const parsed = Date.parse(record.startedAt);
-      if (Number.isFinite(parsed)) return parsed;
-    }
-    return undefined;
-  }
-
-  function nativeSubagentStartedAtMs(record: NativeSubagent, fallbackMs: number): number {
-    return nativeSubagentExplicitStartedAtMs(record) ?? fallbackMs;
-  }
-
-  function rememberTerminalSubagent(id: string | undefined, terminalAtMs: number = nowImpl()): boolean {
-    if (typeof id !== "string" || id.length === 0) return false;
-    terminalSubagentTombstones.delete(id);
-    terminalSubagentTombstones.set(id, terminalAtMs);
-    while (terminalSubagentTombstones.size > MAX_TERMINAL_SUBAGENT_TOMBSTONES) {
-      const oldest = terminalSubagentTombstones.keys().next().value;
-      if (typeof oldest !== "string") break;
-      terminalSubagentTombstones.delete(oldest);
-    }
-    return runningSubagents.delete(id);
-  }
-
-  function clearTerminalSubagentTombstone(id: string | undefined): void {
-    if (typeof id === "string" && id.length > 0) terminalSubagentTombstones.delete(id);
-  }
-
-  function isTerminalTombstonedNativeRecord(id: string, record: NativeSubagent): boolean {
-    const terminalAtMs = terminalSubagentTombstones.get(id);
-    if (terminalAtMs === undefined) return false;
-    const startedAtMs = nativeSubagentExplicitStartedAtMs(record);
-    if (startedAtMs !== undefined && startedAtMs > terminalAtMs) {
-      terminalSubagentTombstones.delete(id);
-      return false;
-    }
-    return true;
-  }
-
-  function mergeNativeSubagentMetadata(existing: TrackedSubagent | undefined, metadata: TrackedSubagent, nowMs: number): TrackedSubagent {
-    if (existing?.eventTracked === true) {
-      return {
-        id: existing.id,
-        type: existing.type ?? metadata.type,
-        description: existing.description ?? metadata.description,
-        status: metadata.status ?? existing.status,
-        eventTracked: true,
-        serviceTracked: true,
-        startedAtMs: existing.startedAtMs ?? metadata.startedAtMs,
-        lastSeenMs: nowMs,
-      };
-    }
-    return {
-      ...metadata,
-      eventTracked: false,
-      serviceTracked: true,
-      startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs,
-      lastSeenMs: nowMs,
-    };
-  }
-
-  function lifecycleSnapshotSummary(record: NativeSubagent): NativeTraceSubagent | undefined {
-    const id = typeof record?.id === "string" ? record.id.trim().slice(0, 128) : "";
-    if (id.length === 0) return undefined;
-    const type = typeof record?.type === "string" ? record.type.trim().slice(0, 64) : "";
-    const description = typeof record?.description === "string" ? record.description.trim().slice(0, 512) : "";
-    const status = nativeSubagentStatus(record);
-    if (status === undefined || !LIVE_SUBAGENT_STATUSES.has(status)) return undefined;
-    // Construct this object instead of spreading native records. Snapshot payloads must
-    // never expose prompts, output, result, error details, or internal timestamps.
-    return {
-      id,
-      type: type.length > 0 ? type : "general-purpose",
-      description: description.length > 0 ? description : "Native subagent",
-      status,
-    };
-  }
-
-  function replaceNativeLifecycleSnapshot(snapshot: NativeTraceSubagent[], nowMs: number): boolean {
-    const next = new Map();
-    for (const record of snapshot) {
-      const existing = runningSubagents.get(record.id);
-      next.set(record.id, {
-        ...record,
-        eventTracked: false,
-        serviceTracked: true,
-        startedAtMs: existing?.startedAtMs ?? nowMs,
-        lastSeenMs: nowMs,
-      });
-    }
-    let changed = next.size !== runningSubagents.size;
-    for (const [id, metadata] of next) {
-      if (!sameSubagentMetadata(runningSubagents.get(id), metadata)) changed = true;
-    }
-    for (const id of runningSubagents.keys()) {
-      if (!next.has(id)) settledNotifications.onChildDisposed(id);
-    }
-    for (const id of next.keys()) {
-      if (!runningSubagents.has(id)) settledNotifications.onChildStarted(id);
-    }
-    runningSubagents.clear();
-    for (const [id, metadata] of next) runningSubagents.set(id, metadata);
-    return changed;
-  }
-
-  function reconcileNativeSubagentService() {
-    const service = nativeSubagentService();
-    const lifecycleSnapshotService = lifecycleSnapshotSubagentService(service);
-    const source = nativeSubagentRecords(service);
-    if (!Array.isArray(source)) return { changed: false };
-    const nowMs = nowImpl();
-    if (lifecycleSnapshotService !== undefined) {
-      const snapshot = source
-        .map(lifecycleSnapshotSummary)
-        .filter((item): item is NativeTraceSubagent => item !== undefined)
-        .slice(0, MAX_ACTIVITY_SUBAGENTS);
-      return { changed: replaceNativeLifecycleSnapshot(snapshot, nowMs), snapshot };
-    }
-
-    const serviceIds = new Set();
-    let changed = false;
-    for (const record of source) {
-      const metadata = normalizeSubagentMetadata(record, nativeSubagentStartedAtMs(record, nowMs));
-      if (metadata === undefined) continue;
-      // Older service shapes did not expose a typed lifecycle contract.
-      if (lifecycleSnapshotService === undefined) delete metadata.status;
-      serviceIds.add(metadata.id);
-      if (isTerminalNativeSubagentRecord(record, service)) {
-        if (rememberTerminalSubagent(metadata.id, nowMs)) changed = true;
-        settledNotifications.onChildDisposed(metadata.id);
-        continue;
-      }
-      if (!isActiveNativeSubagentRecord(record, service)) continue;
-      if (isTerminalTombstonedNativeRecord(metadata.id, record)) {
-        if (runningSubagents.delete(metadata.id)) changed = true;
-        continue;
-      }
-      const existing = runningSubagents.get(metadata.id);
-      const merged = mergeNativeSubagentMetadata(existing, metadata, nowMs);
-      if (sameSubagentMetadata(existing, merged)) {
-        if (existing === undefined) continue;
-        existing.lastSeenMs = nowMs;
-        existing.serviceTracked = true;
-        continue;
-      }
-      runningSubagents.set(metadata.id, merged);
-      changed = true;
-    }
-    for (const [id, metadata] of runningSubagents.entries()) {
-      if (!serviceIds.has(id) && metadata?.serviceTracked === true && metadata?.eventTracked !== true) {
-        runningSubagents.delete(id);
-        changed = true;
-      } else if (!serviceIds.has(id) && metadata?.eventTracked === true
-        && nowMs - metadata.lastSeenMs >= EVENT_TRACKED_MISSING_LIMIT_MS) {
-        runningSubagents.delete(id);
-        settledNotifications.onChildDisposed(id);
-        changed = true;
-      }
-    }
-    return { changed };
-  }
-
-  function pollNativeLifecycleSnapshot() {
-    if (lifecycleSnapshotSubagentService() === undefined) {
-      traceNativeSubagent("extension_snapshot_poll_skipped", { reason: "lifecycle_service_unavailable" });
-      return false;
-    }
-    const { changed, snapshot } = reconcileNativeSubagentService();
-    if (snapshot === undefined) {
-      traceNativeSubagent("extension_snapshot_poll_failed", { reason: "snapshot_unavailable" });
-      return false;
-    }
-    traceNativeSubagent("extension_snapshot_reconciled", {
-      state: changed ? "changed" : "unchanged", snapshot_count: snapshot.length, subagents: summarizeNativeSubagents(snapshot),
-    });
-    publishLifecycleSnapshot(snapshot);
-    return changed;
-  }
-
   function rememberParentActivityContext(context: PiContext | undefined) {
     if (context !== undefined) parentActivityContext = context;
+  }
+
+  function isPiContext(context: ActivityContext | undefined): context is PiContext {
+    const sessionManager = context?.sessionManager;
+    const ui = context?.ui;
+    return context !== undefined
+      && isRecord(sessionManager)
+      && typeof sessionManager.getBranch === "function"
+      && typeof sessionManager.isPersisted === "function"
+      && typeof sessionManager.getSessionFile === "function"
+      && isRecord(ui)
+      && typeof ui.setStatus === "function";
   }
 
   function contextSessionId(context: PiContext | undefined): string | undefined {
@@ -1551,138 +1128,13 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     }
   }
 
-  function parentActivityStateFromPiContext() {
-    // Precedence is deliberate: compaction masks ordinary work, Pi's live idle
-    // bit wins when available, and the latch is only the older-context fallback.
-    if (mailboxPausedForCompaction) return "compacting";
-    if (typeof parentActivityContext?.isIdle === "function") {
-      return parentActivityContext.isIdle() ? "settled" : "active";
-    }
-    return undefined;
-  }
-
-  function parentActivityStateFromContext() {
-    return parentActivityStateFromPiContext() ?? (activityHeartbeatActive ? "active" : "settled");
-  }
-
-  function sendActivityState(state: string, { force = false, reconcile = true }: { force?: boolean; reconcile?: boolean } = {}) {
-    // Compaction owns the visible state until its lifecycle resumes or cancels;
-    // ordinary settled/active frames must not clear that pause early.
-    if (mailboxPausedForCompaction && state !== "compacting") return;
-    const nowMs = nowImpl();
-    // Native lifecycle state changes only in the timer-driven snapshot poll. Activity
-    // events must not produce lifecycle frames or read the native lifecycle projection.
-    const reconciliation = reconcile && lifecycleSnapshotSubagentService() === undefined
-      ? reconcileNativeSubagentService()
-      : undefined;
-    const reconciled = reconciliation?.changed === true;
-    const subagents = publicSubagentSummaries();
-    const subagentCount = Math.min(runningSubagents.size, MAX_ACTIVITY_SUBAGENTS);
-    const model = effectiveModelProjection(parentActivityContext);
-    const currentModel = model.current ?? undefined;
-    const unchanged = lastActivitySent !== undefined
-      && lastActivitySent.state === state
-      && lastActivitySent.subagentCount === subagentCount
-      && JSON.stringify(lastActivitySent.subagents) === JSON.stringify(subagents)
-      && JSON.stringify(lastActivitySent.goal) === JSON.stringify(goalProjectionReceived ? goalProjection : undefined)
-      && JSON.stringify(lastActivitySent.currentModel) === JSON.stringify(currentModel);
-    // Settled with no subagents is terminal until reconciliation changes it; unlike
-    // active work and settled subagents, it does not need a TTL refresh frame.
-    if (unchanged && state === "settled" && subagentCount === 0 && !force && !reconciled) return false;
-    if (unchanged && lastActivitySent !== undefined && !force && !reconciled && nowMs - lastActivitySent.sentAtMs < ACTIVITY_REFRESH_MIN_MS) {
-      return false;
-    }
-    try {
-      client?.sendActivity?.(state, {
-        subagentCount,
-        subagents,
-        ...(goalProjectionReceived ? { goal: goalProjection } : {}),
-        currentModel,
-      });
-      lastActivitySent = {
-        state,
-        subagentCount,
-        subagents,
-        goal: goalProjectionReceived ? goalProjection : undefined,
-        currentModel,
-        sentAtMs: nowMs,
-      };
-      return true;
-    } catch(e) {
-      // console.error(e);
-      // Activity is an ephemeral UI hint; mailbox delivery and reconnect behavior own real work.
-      return false;
-    }
-  }
-
-  function ensureActivityHeartbeatTimer() {
-    if (activityHeartbeatTimer !== undefined) return;
-    // Keep polling after the parent settles so lifecycle snapshots repair missed changes.
-    activityHeartbeatTimer = setIntervalImpl(() => {
-      // This is the only path that reads and publishes the native lifecycle projection.
-      const changed = pollNativeLifecycleSnapshot();
-      const state = parentActivityStateFromContext();
-      const activitySent = sendActivityState(state);
-      traceNativeSubagent("extension_lifecycle_heartbeat", {
-        state, subagent_count: runningSubagents.size, published: activitySent, available: changed,
-        heartbeat_interval_ms: ACTIVITY_HEARTBEAT_INTERVAL_MS,
-      });
-    }, ACTIVITY_HEARTBEAT_INTERVAL_MS);
-    activityHeartbeatTimer?.unref?.();
-  }
-
-  function clearActivityHeartbeatTimer() {
-    if (activityHeartbeatTimer !== undefined) {
-      clearIntervalImpl(activityHeartbeatTimer);
-      activityHeartbeatTimer = undefined;
-    }
-  }
-
-  function stopActivityHeartbeat({ settle = false, context }: { settle?: boolean; context?: PiContext } = {}) {
-    rememberParentActivityContext(context);
-    if (settle && parentActivityStateFromPiContext() === "active") {
-      // A settled event can race a queued retry or continuation. If Pi still
-      // reports active, keep polling instead of publishing a stale stop.
-      activityHeartbeatActive = true;
-      ensureActivityHeartbeatTimer();
-      return;
-    }
-    const wasActive = activityHeartbeatActive;
-    activityHeartbeatActive = false;
-    if (wasActive && settle && !mailboxPausedForCompaction) {
-      sendActivityState(parentActivityStateFromContext(), { force: true });
-    }
-    // Keep polling while the parent is settled or waiting for native subagent results; the
-    // native service remains the source of truth when lifecycle events are missed.
-  }
-
-  function clearRunningSubagentsForBoundary() {
-    runningSubagents.clear();
-    activityHeartbeatActive = false;
-    if (!mailboxPausedForCompaction) sendActivityState("settled", { force: true, reconcile: false });
-    clearActivityHeartbeatTimer();
-  }
-
-  function startActivityHeartbeat(context: PiContext) {
-    rememberParentActivityContext(context);
-    activityHeartbeatActive = true;
-    sendActivityState(parentActivityStateFromContext(), { force: true });
-    ensureActivityHeartbeatTimer();
-  }
-
-  function refreshActivityState(context: PiContext | undefined = undefined) {
-    rememberParentActivityContext(context);
-    sendActivityState(parentActivityStateFromContext(), { force: true });
-    if (runningSubagents.size > 0) ensureActivityHeartbeatTimer();
-    else if (!activityHeartbeatActive) stopActivityHeartbeat();
-  }
-
   function createMailboxCoordinator(context: PiContext, mailboxClient: MailboxClient) {
+    if (createCoordinator !== undefined) return createCoordinator(context, mailboxClient);
     return createPiMailboxDeliveryCoordinator({
       pi,
       sessionContext: context,
       client: mailboxClient,
-      spawnSubagent: captureNativeSentinelSpawner(async () => nativeSubagentService(context.sessionManager.getSessionId())),
+      spawnSubagent: captureNativeSentinelSpawner(async () => activityLifecycle.getNativeService(context.sessionManager.getSessionId())),
     });
   }
 
@@ -1690,8 +1142,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined || mailboxPausedForCompaction) return;
     rememberParentActivityContext(context);
     mailboxPausedForCompaction = true;
-    clearRunningSubagentsForBoundary();
-    sendActivityState("compacting", { force: true, reconcile: false });
+    activityLifecycle.onCompactionStarted(context);
     context.ui?.setStatus("mecha-mailbox", "mailbox: compacting");
   }
 
@@ -1699,8 +1150,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     if (children.has(context.sessionManager.getSessionId()) || client === undefined || !mailboxPausedForCompaction) return;
     rememberParentActivityContext(context);
     mailboxPausedForCompaction = false;
-    refreshActivityState();
-    ensureActivityHeartbeatTimer();
+    activityLifecycle.onCompactionResumed(context);
     context.ui?.setStatus("mecha-mailbox", "mailbox: connected");
   }
 
@@ -1847,7 +1297,26 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     // The launcher rejects invalid values; a manually configured Pi stays disabled.
   }
   const children = childSessionIds();
-  const settledNotifications = createSettledScheduler();
+  const activityLifecycle: ActivityLifecycle = createActivityLifecycle({
+    getClient: () => client,
+    getParentContext: () => parentActivityContext,
+    isCompacting: () => mailboxPausedForCompaction,
+    getGoalProjection: () => goalProjectionReceived ? goalProjection : undefined,
+    getCurrentModel: () => effectiveModelProjection(parentActivityContext).current ?? undefined,
+    getNativeService: (ownerSessionId) => currentSubagentsServiceAccessor?.(ownerSessionId),
+    notify: (message, level) => { parentActivityContext?.ui?.notify?.(message, level); },
+    trace: traceNativeSubagent,
+    createSettledScheduler,
+    rememberParentContext: (context) => {
+      if (context !== undefined && isPiContext(context)) rememberParentActivityContext(context);
+    },
+    setTimeoutImpl,
+    clearTimeoutImpl,
+    setIntervalImpl,
+    clearIntervalImpl,
+    nowImpl,
+  });
+  const settledNotifications = activityLifecycle.settledNotifications;
   const childReplyClients = new Map<string, MailboxClient | undefined>();
   const childReplyClientAgentIds = new Map<string, string>();
   const inlineToolPolicy = createInlineToolPolicy({ now: nowImpl });
@@ -1991,7 +1460,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       if (parentActivityContext === undefined) throw new ModelControlError("model_switch_unavailable", "Pi model switching is unavailable");
       const switchedModel = await switchPiModel(model ?? {}, parentActivityContext);
       rememberSuccessfulModelSwitch(parentActivityContext, switchedModel);
-      refreshActivityState(parentActivityContext);
+      activityLifecycle.refresh(parentActivityContext);
       const projection = effectiveModelProjection(parentActivityContext);
       traceNativeSubagent("extension_model_control_completed", {
         control_id: controlId,
@@ -2163,46 +1632,15 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     // A launch is a concrete worker action. This signal is intentionally emitted from the
     // launch event itself, never inferred from lifecycle polling or liveness refreshes.
     emitMeaningfulActivity("native-subagent-launch", event?.id, parentActivityContext);
-    // Native lifecycle visibility is timer-driven. Keep this hook only for settled
-    // notifications, which do not publish router lifecycle state.
-    if (lifecycleSnapshotSubagentService() !== undefined) {
-      traceNativeSubagent("extension_native_event_started", { subagent_id: event?.id, source: "event_snapshot_mode" });
-      if (event.id !== undefined) settledNotifications.onChildStarted(event.id);
-      return;
-    }
-    const metadata = normalizeSubagentMetadata(event);
-    clearTerminalSubagentTombstone(metadata?.id);
-    const existing = metadata === undefined ? undefined : runningSubagents.get(metadata.id);
-    const tracked = metadata === undefined ? undefined : {
-      ...metadata,
-      eventTracked: true,
-      serviceTracked: existing?.serviceTracked === true,
-      startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs,
-    };
-    const changed = tracked !== undefined && !sameSubagentMetadata(existing, tracked);
-    if (changed && metadata !== undefined) runningSubagents.set(metadata.id, tracked);
-    else if (existing !== undefined) existing.eventTracked = true;
-    settledNotifications.onChildStarted(metadata?.id ?? event.id ?? "");
-    if (changed) refreshActivityState();
+    activityLifecycle.onNativeStarted(event);
   });
-  function publishTerminalLifecycleEvent(event: NativeSubagent) {
-    if (lifecycleSnapshotSubagentService() !== undefined) {
-      traceNativeSubagent("extension_native_event_terminal", { subagent_id: event?.id, status: event?.status, source: "event_snapshot_mode" });
-      if (event.id !== undefined) settledNotifications.onChildDisposed(event.id);
-      return;
-    }
-    const id = event?.id;
-    const changed = rememberTerminalSubagent(id);
-    if (id !== undefined) settledNotifications.onChildDisposed(id);
-    if (changed) refreshActivityState();
-  }
-  // Pi versions expose different terminal event names. Treat each as terminal so a queued
-  // child cannot remain visible after a cancellation, steering action, or native shutdown.
+  // Pi versions expose different terminal event names. Delegate every alias to the
+  // lifecycle owner so legacy removal and typed polling retention stay consistent.
   for (const eventName of [
     "subagents:completed", "subagents:failed", "subagents:canceled", "subagents:cancelled",
     "subagents:aborted", "subagents:terminated", "subagents:stopped", "subagents:steered",
   ]) {
-    pi.events.on(eventName, (event: NativeSubagent) => publishTerminalLifecycleEvent(event));
+    pi.events.on(eventName, (event: NativeSubagent) => activityLifecycle.onNativeTerminal(event));
   }
 
   function settledNotificationStatus() {
@@ -2211,7 +1649,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       enabled: settledNotificationEnabled,
       recipient: settledNotificationRecipient,
       pending: settledNotificationPending,
-      cooldownMs: SETTLED_NOTIFICATION_COOLDOWN_MS,
+      cooldownMs: 120_000,
     };
   }
 
@@ -2432,7 +1870,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   pi.on("message_start", async (_event: PiEvent, context: PiContext) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_start", (_event: PiEvent, context: PiContext) => {
     if (children.has(context.sessionManager.getSessionId())) return;
-    startActivityHeartbeat(context);
+    activityLifecycle.onAgentStart(context);
     if (settledNotificationEnabled && settledNotificationRecipient !== undefined) {
       settledNotificationPending = true;
       settledNotifications.onParentActivity();
@@ -2442,7 +1880,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   pi.on("agent_settled", (_event: PiEvent, context: PiContext) => { monitorContextThreshold(context); });
   pi.on("session_compact", (_event: PiEvent, context: PiContext) => { if (!children.has(context.sessionManager.getSessionId())) { notifiedCompactionPercent = 0; resumeMailboxAfterCompaction(context); } });
   pi.on("agent_settled", (_event: PiEvent, context: PiContext) => {
-    if (!children.has(context.sessionManager.getSessionId())) stopActivityHeartbeat({ settle: true, context });
+    if (!children.has(context.sessionManager.getSessionId())) activityLifecycle.onAgentSettled(context);
     if (pendingSelfCompaction !== undefined) settledNotificationPending = false;
     runPendingSelfCompaction(context);
     if (children.has(context.sessionManager.getSessionId()) || !settledNotificationEnabled || !settledNotificationPending) return;
@@ -2601,7 +2039,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       client = mailboxClient;
       publishGoalState(mailboxClient);
       coordinator = createMailboxCoordinator(context, mailboxClient);
-      ensureActivityHeartbeatTimer();
+      activityLifecycle.ensureHeartbeat();
       void mailboxClient.connect().catch((error: ErrorLike) => {
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${errorMessage(error)}`, "error");
       });
@@ -2620,7 +2058,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     }
     mailboxSendRateLimits.clear();
     rememberParentActivityContext(context);
-    clearRunningSubagentsForBoundary();
+    activityLifecycle.onSessionBoundary();
     parentActivityContext = undefined;
     settledNotificationPending = false;
     settledNotificationAgentId = undefined;

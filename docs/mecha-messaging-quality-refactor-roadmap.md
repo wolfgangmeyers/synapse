@@ -6,11 +6,18 @@ The goal is to reduce the size and coupling of that composition root without cha
 
 ## Update status
 
-This update was checked against base commit `db14fc40c3d1c2a74afb82c15c920f1f0a5933c3` and base tree `6054261fc8c5eaee2be96490f85a6771fcf31712`. The completed target contains the delivery coordinator, root wiring, and isolated delivery E2E. All are present, completed, and validated. Their current file hashes are `delivery-coordinator.ts` `9e7cf9e5578e0139b23f6e1c017c1aac430b00d8`, `index.ts` `3deeacf97fe3b9e7044bb2472765dd7f0cab2df6`, and `tests/mailbox_v2_delivery.test.ts` `8450f1b7cef575b53ae4b5a98cdb9a65ee2b010b`.
+The scoped lifecycle refactor is complete in the current working tree. This document records validation evidence for the current files; no immutable final commit or tree hash is claimed yet.
 
-Validation for this exact state is complete: the focused isolated E2E passed three consecutive runs; the exact command with `MECHA_PI_PACKAGE_ROOT` reported 398 passed, 0 failed, and 0 skipped; `npm run check:mecha-messaging` passed TypeScript typecheck, lint, and generated mailbox-client drift checks; and `git diff --check` passed.
+Final evidence:
 
-Every roadmap update must name the exact checked base commit and tree. This update records the base identity and refreshed status, evidence, tests, and sequencing for the committed target.
+- 23 focused lifecycle, differential, native-Pi, package-discovery, and export tests passed.
+- The isolated native E2E passed once using TSX, a temporary packaged native `19.2.2` fork at source commit `3be57...`, and installed Pi `0.84.3`.
+- The full TypeScript suite passed 411 tests with 3 skipped. The JavaScript compatibility suite passed 386 tests with 2 skipped.
+- Typecheck, lint, generated mailbox-client drift checks, and `git diff --check` passed.
+- Focused coverage was 94.69% lines, 64.78% branches, and 93.65% functions. The measurement does not aggregate child-process coverage.
+- Mutation testing and independent review are complete.
+
+These results describe the measured current working tree. The roadmap does not require 100% coverage.
 
 ## Root public exports
 
@@ -75,7 +82,7 @@ Evidence: commit `2b27be8b0` (`Extract compaction policy module`) and `tests/mec
 
 ### Delivery coordinator
 
-The delivery coordinator is implemented locally in `pi-extensions/mecha-messaging/delivery-coordinator.ts` and wired from `index.ts`. The local implementation and root wiring are identified by the file hashes in Update status above. The coordinator tests and isolated E2E validation listed below passed.
+The delivery coordinator is implemented locally in `pi-extensions/mecha-messaging/delivery-coordinator.ts` and wired from `index.ts`. The coordinator tests and isolated E2E validation listed below passed.
 
 **Behavior and contracts to preserve.**
 
@@ -99,7 +106,11 @@ The delivery coordinator is implemented locally in `pi-extensions/mecha-messagin
 
 Each slice should move existing code with the smallest possible adapter. Keep the current exports until callers and tests have moved. Do not combine an extraction with a protocol change, a timing change, or a new feature.
 
-### 1. Activity lifecycle
+### 1. Activity lifecycle — completed locally
+
+**Status and evidence.** The approved boundary is implemented in the current working tree. `pi-extensions/mecha-messaging/activity-lifecycle.ts` owns the settled-notification scheduler, owner-scoped native service reads, native child tracking and tombstones, lifecycle snapshot reconciliation, activity heartbeat, and activity projection assembly. `index.ts` remains the composition root: it keeps Pi event registration, Goal activity, mailbox pause state, compaction orchestration, model and diagnostics behavior, and the existing root adapters. The extraction does not add a lifecycle publication path: typed lifecycle frames still come from heartbeat polling.
+
+The differential harness used the pre-extraction TypeScript baseline and passed with no unlisted mismatch. The focused lifecycle, differential, native-Pi, package-discovery, and export tests passed: 23 passed, 0 failed, 0 skipped. The isolated native-Pi E2E passed once using TSX, temporary module-resolution, router SQLite, and session paths, the packaged Wolfgang fork native `19.2.2` artifact at source commit `3be57...`, and installed Pi `@earendil-works/pi-coding-agent` `0.84.3`. Full-suite, compatibility, typecheck, lint, generated mailbox-client drift, diff, coverage, mutation, and independent-review results are recorded in Update status above. No immutable final target hash is recorded.
 
 **Scope.** Extract the settled-notification scheduler, native subagent tracking, lifecycle snapshot reconciliation, activity heartbeat, and activity projection assembly. The Goal meaningful-activity adapter can remain in the composition root until its dependency on the Goal package is explicitly separated.
 
@@ -117,9 +128,9 @@ Each slice should move existing code with the smallest possible adapter. Keep th
 
 **Risks.** This area has several time-based sources: Pi events, native lifecycle events, snapshot polling, queued timers, and compaction boundaries. Duplicate starts, unmatched terminal events, stale snapshots, and a reused child ID can all produce misleading UI state. Do not make event handlers publish lifecycle state if the current polling contract says only the timer may do so.
 
-**Tests.** Move focused scheduler and projection tests with the module. Keep `tests/mailbox_v2_delivery.test.ts` coverage for settled notifications and activity frames, `tests/pi_extension_standalone.test.ts` coverage for extension activity, and `tests/native_subagent_trace.test.ts` coverage for redacted trace fields. Retain router compatibility coverage in `tests/subagent_lifecycle_rollout.test.mjs`. Add direct tests for snapshot replacement, old-service fallback, tombstone reuse, missing-event expiry, bounds, and compaction masking.
+**Tests.** The focused scheduler, projection, differential, native-Pi, package-discovery, export, settled-notification, activity-frame, and redacted-trace coverage passed as part of the 23-test focused run. Router compatibility coverage also passed in the JavaScript compatibility suite. The completed tests cover snapshot replacement, old-service fallback, tombstone reuse, missing-event expiry, bounds, and compaction masking.
 
-**Isolated E2E validation.** Run the extension against a temporary router with a fake native service that supports both lifecycle snapshots and older list methods. Drive start, terminal, missed-event, snapshot-replacement, and parent-settled sequences through controlled timers. Assert the WebSocket activity and lifecycle frames, child count, ordering, redaction, and recovery after a router restart. Include a compaction interval with an interleaved settle event and verify that the router keeps delivery paused.
+**Isolated E2E validation.** This validation passed once against a temporary router with a fake native service supporting lifecycle snapshots and older list methods. It covered start, terminal, missed-event, snapshot-replacement, parent-settled, controlled-timer, WebSocket frame, child-count, ordering, redaction, router-restart, and compaction-mask behavior.
 
 ### 2. Compaction orchestration
 
@@ -184,7 +195,7 @@ Each slice should move existing code with the smallest possible adapter. Keep th
 
 ## Recommended sequencing
 
-1. **Activity lifecycle.** It has a large state surface but a narrow output: activity and lifecycle projections. The delivery coordinator is locally complete and validated.
+1. **Activity lifecycle.** Complete and validated in the current working tree. The delivery coordinator and activity lifecycle now have separate, documented boundaries.
 2. **Compaction orchestration.** It depends on the delivery and activity boundaries and has the most timing risk. Extract it after those interfaces are explicit.
 3. **Diagnostics and history sanitation.** It is mostly a pure transformation and a best-effort sink. Doing it after the timing work keeps provider-input changes separate from lifecycle changes.
 4. **Model and control projection.** It has the broadest public surface across Pi, the router, the web UI, and Goal. Leave it until the other composition-root state has clearer ownership.
