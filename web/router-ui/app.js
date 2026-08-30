@@ -25,6 +25,7 @@ import { formatReminderCountdown, reminderRecurrenceLabel } from "./reminders.js
 import {
   parsePromptTemplateImport,
   parsePromptTemplateTokens,
+  planPromptTemplateImport,
   promptTemplateExportPayload,
   renderPromptTemplate,
 } from "./prompt-templates.js";
@@ -2036,7 +2037,8 @@ function handlePromptTemplateCrudResult(event) {
     const importState = state.promptTemplateImport;
     if (importState?.phase === "refreshing") {
       const confirmedNames = new Set(importState.confirmedConflictNames);
-      importState.conflicts = promptTemplateImportConflicts(importState.templates);
+      importState.plan = planPromptTemplateImport(importState.templates, state.promptTemplates);
+      importState.conflicts = importState.plan.filter((item) => item.action === "update").map((item) => item.template);
       const newlyConflicted = importState.conflicts.some((template) => !confirmedNames.has(template.name));
       if (newlyConflicted) {
         importState.phase = "confirm";
@@ -2047,6 +2049,8 @@ function handlePromptTemplateCrudResult(event) {
         importState.phase = "running";
         importState.index = 0;
         importState.completed = 0;
+        importState.imported = 0;
+        importState.skipped = 0;
         sendNextPromptTemplateImport();
       }
       return;
@@ -2072,12 +2076,14 @@ function stopPromptTemplateImport(reason, { refresh = false, failure = false } =
   const importState = state.promptTemplateImport;
   if (!importState || !["refreshing", "running"].includes(importState.phase)) return false;
   const completed = importState.completed;
+  const imported = importState.imported;
+  const skipped = importState.skipped;
   const total = importState.templates.length;
   const notice = {
     message: failure
       ? (completed === 0
         ? `Import failed: ${reason}`
-        : `Imported ${completed} of ${total} templates before the failure: ${reason}`)
+        : `Imported ${imported}, skipped ${skipped} of ${total} templates before the failure: ${reason}`)
       : `Import stopped after ${completed} of ${total} templates: ${reason}`,
     error: true,
   };
@@ -2104,31 +2110,28 @@ function startPromptTemplateImport() {
   }
 }
 
-function promptTemplateImportConflicts(templates) {
-  return templates.filter((template) => template.id !== undefined
-    && template.updated_at !== undefined
-    && state.promptTemplates.some((candidate) => candidate.id === template.id));
+function advancePromptTemplateImport(importState, { imported = false, skipped = false } = {}) {
+  if (imported) importState.imported += 1;
+  if (skipped) importState.skipped += 1;
+  importState.index += 1;
+  importState.completed += 1;
+  if (importState.index < importState.templates.length) sendNextPromptTemplateImport();
+  else finishPromptTemplateImport();
 }
 
 function sendNextPromptTemplateImport() {
   const importState = state.promptTemplateImport;
   if (!importState || importState.phase !== "running") return;
-  const template = importState.templates[importState.index];
-  if (!template) return;
-  const existing = template.id === undefined
-    ? undefined
-    : state.promptTemplates.find((candidate) => candidate.id === template.id);
-  if (existing !== undefined && template.updated_at === undefined) {
-    importState.index += 1;
-    importState.completed += 1;
-    if (importState.index < importState.templates.length) sendNextPromptTemplateImport();
-    else finishPromptTemplateImport();
+  const item = importState.plan[importState.index];
+  if (!item) return;
+  if (item.action === "skip") {
+    advancePromptTemplateImport(importState, { skipped: true });
     return;
   }
   const requested = sendPromptTemplateCrud(
-    existing === undefined ? "create" : "update",
-    existing?.id,
-    template,
+    item.action,
+    item.id,
+    item.template,
     {
       promptTemplateImportId: importState.id,
       promptTemplateImportIndex: importState.index,
@@ -2141,10 +2144,11 @@ function sendNextPromptTemplateImport() {
 function finishPromptTemplateImport() {
   const importState = state.promptTemplateImport;
   if (!importState) return;
-  const importedCount = importState.completed;
+  const importedCount = importState.imported;
+  const skippedCount = importState.skipped;
   state.promptTemplateImport = null;
   state.promptTemplateImportNotice = {
-    message: `Imported ${importedCount} template${importedCount === 1 ? "" : "s"}.`,
+    message: `Imported ${importedCount}, skipped ${skippedCount}.`,
     error: false,
   };
   state.promptTemplateListGeneration += 1;
@@ -2157,6 +2161,11 @@ function handlePromptTemplateImportResult(event, pending) {
   if (!importState || importState.id !== pending.promptTemplateImportId
     || importState.phase !== "running" || importState.index !== pending.promptTemplateImportIndex) return;
   if (event.accepted !== true) {
+    const isNameConflict = event.status === 409 && event.body?.error?.code === "prompt_template_name_conflict";
+    if (isNameConflict) {
+      advancePromptTemplateImport(importState, { skipped: true });
+      return;
+    }
     const failure = event.body?.error?.message || event.body?.error?.code || `Import failed (${event.status || "unknown"})`;
     stopPromptTemplateImport(failure, { refresh: true, failure: true });
     return;
@@ -2169,13 +2178,7 @@ function handlePromptTemplateImportResult(event, pending) {
     state.promptTemplatesLoaded = true;
     renderPromptControls(state.agents.find((agent) => agent.agent_id === state.selectedPeer));
   }
-  importState.index += 1;
-  importState.completed += 1;
-  if (importState.index < importState.templates.length) {
-    sendNextPromptTemplateImport();
-    return;
-  }
-  finishPromptTemplateImport();
+  advancePromptTemplateImport(importState, { imported: true });
 }
 
 function normalizePromptTemplates(templates) {
@@ -2314,19 +2317,23 @@ async function handlePromptTemplateImportFile(file) {
       renderPromptTemplateDialog();
       return;
     }
-    const conflicts = promptTemplateImportConflicts(templates);
-    const newCount = templates.filter((template) => !state.promptTemplates.some((candidate) => candidate.id === template.id)).length;
+    const plan = planPromptTemplateImport(templates, state.promptTemplates);
+    const conflicts = plan.filter((item) => item.action === "update").map((item) => item.template);
+    const newCount = plan.filter((item) => item.action === "create").length;
     if (state.promptTemplates.length + newCount > 100) {
       throw new Error("Import would exceed the 100-template limit.");
     }
     state.promptTemplateImport = {
       id: crypto.randomUUID(),
       templates,
+      plan,
       conflicts,
       confirmedConflictNames: [],
       phase: "confirm",
       index: 0,
       completed: 0,
+      imported: 0,
+      skipped: 0,
     };
     state.promptTemplateDialogStatus = null;
     renderPromptTemplateDialog();

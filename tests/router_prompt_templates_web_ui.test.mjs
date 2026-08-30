@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import WebSocket from "ws";
 
-import { openMessageRepository } from "../harness/db.js";
+import { openMessageRepository, PromptTemplateNameConflictError } from "../harness/db.js";
 import { createAgentRouter } from "../harness/router.js";
 import { startRouterWebUi } from "../tools/router_web_ui.mjs";
 
@@ -325,7 +325,7 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
     );
     const ignoredImportCommandStart = await webSocketSendSpyLength(browser);
     await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
-    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 1 template.");
+    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 0, skipped 1.");
     await waitForPromptTemplate(browser, importedTemplateName, overriddenTemplateBody);
     assert.equal(
       (await webSocketPromptTemplateCommands(browser, ignoredImportCommandStart)).some((command) => ["create", "update"].includes(command.operation)),
@@ -345,9 +345,63 @@ test("router WebUI manages and uses shared prompt templates", { concurrency: fal
     await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
     await waitForPromptTemplate(browser, multiImportTemplates[0].name, multiImportTemplates[0].body);
     await waitForPromptTemplate(browser, multiImportTemplates[1].name, multiImportTemplates[1].body);
-    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 2 templates.");
+    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 2, skipped 0.");
 
-    for (const template of multiImportTemplates) {
+    const mixedImportTemplates = [
+      { id: importedTemplateId, name: multiImportTemplates[0].name, body: "Must preserve imported template", updated_at: overriddenTemplateTimestamp },
+      { id: "different-id", name: multiImportTemplates[1].name, body: "Must preserve diagnosis template" },
+      { name: importedTemplateName, body: "Must preserve name-only collision" },
+      { name: "Mixed import fresh", body: "Created after skipped collisions" },
+    ];
+    await setPromptTemplateImportFile(browser, {
+      format: "mecha-prompt-templates",
+      version: 1,
+      templates: mixedImportTemplates,
+    });
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
+    const mixedImportCommandStart = await webSocketSendSpyLength(browser);
+    await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
+    await waitForPromptTemplate(browser, "Mixed import fresh", "Created after skipped collisions");
+    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 1, skipped 3.");
+    assert.equal((await webSocketPromptTemplateCommands(browser, mixedImportCommandStart)).filter((command) => ["create", "update"].includes(command.operation)).length, 1);
+    await waitForPromptTemplate(browser, importedTemplateName, overriddenTemplateBody);
+    await waitForPromptTemplate(browser, multiImportTemplates[0].name, multiImportTemplates[0].body);
+    await waitForPromptTemplate(browser, multiImportTemplates[1].name, multiImportTemplates[1].body);
+
+    const raceTemplateName = "Raced import template";
+    const originalCreatePromptTemplate = repository.createPromptTemplate;
+    let raceRejected = false;
+    repository.createPromptTemplate = (payload) => {
+      if (!raceRejected && payload.name === raceTemplateName) {
+        raceRejected = true;
+        throw new PromptTemplateNameConflictError(payload.name);
+      }
+      return originalCreatePromptTemplate.call(repository, payload);
+    };
+    const raceImportCommandStart = await webSocketSendSpyLength(browser);
+    await setPromptTemplateImportFile(browser, {
+      format: "mecha-prompt-templates",
+      version: 1,
+      templates: [
+        { name: raceTemplateName, body: "Skipped by race" },
+        { name: "After raced import", body: "Created after race" },
+      ],
+    });
+    await waitForDom(browser, () => Boolean(document.querySelector(".prompt-template-import-confirmation")));
+    await browser.evaluate(`(() => document.querySelector('[data-action="confirm-import"]')?.click())()`);
+    await waitForPromptTemplate(browser, "After raced import", "Created after race");
+    await waitForDom(browser, () => document.querySelector("#prompt-template-dialog-status")?.textContent === "Imported 1, skipped 1.");
+    assert.equal(raceRejected, true);
+    assert.equal((await webSocketPromptTemplateCommands(browser, raceImportCommandStart)).filter((command) => command.operation === "create").length, 2);
+    await waitForPromptTemplate(browser, raceTemplateName, "Skipped by race", false);
+    await waitForPromptTemplate(browser, "After raced import", "Created after race");
+    repository.createPromptTemplate = originalCreatePromptTemplate;
+
+    for (const template of [
+      { name: "Mixed import fresh", body: "Created after skipped collisions" },
+      { name: "After raced import", body: "Created after race" },
+      ...multiImportTemplates,
+    ]) {
       await browser.evaluate(`(() => {
         const item = [...document.querySelectorAll('.prompt-template-item')]
           .find((candidate) => candidate.querySelector('strong')?.textContent === ${JSON.stringify(template.name)});
