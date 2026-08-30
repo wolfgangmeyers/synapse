@@ -263,16 +263,23 @@ internal fun sniffImageMime(bytes: ByteArray): String? = when {
 
 internal fun safeImageUrl(routerBase: String, candidate: String): String? = runCatching {
     val base = URI(routerBase)
-    if (base.scheme !in setOf("http", "https") || base.host.isNullOrBlank() || base.userInfo != null || base.fragment != null) return@runCatching null
+    if (base.scheme !in setOf("http", "https") || base.host.isNullOrBlank()
+        || base.userInfo != null || base.query != null || base.fragment != null
+    ) return@runCatching null
     val parsed = URI(candidate)
     val resolved = if (parsed.isAbsolute) parsed else base.resolve(parsed)
-    if (resolved.scheme != base.scheme || resolved.host != base.host || resolved.port != base.port
-        || resolved.userInfo != null || resolved.fragment != null || resolved.path.isNullOrBlank()) return@runCatching null
+    if (resolved.scheme != base.scheme || !resolved.host.equals(base.host, ignoreCase = true)
+        || resolved.port != base.port || resolved.userInfo != null || resolved.fragment != null
+        || resolved.path.isNullOrBlank() || resolved.query != null && resolved.query.length > 512
+    ) return@runCatching null
     resolved.toString()
 }.getOrNull()
 
 internal class OkHttpImageFetcher(client: OkHttpClient) : ImageFetcher {
     private val client = client.newBuilder()
+        .retryOnConnectionFailure(false)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .connectTimeout(REMOTE_IMAGE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .readTimeout(REMOTE_IMAGE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .callTimeout(REMOTE_IMAGE_TIMEOUT_MS, TimeUnit.MILLISECONDS)

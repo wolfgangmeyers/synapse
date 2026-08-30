@@ -94,6 +94,115 @@ class OutboundDeliveryTest {
     }
 
     @Test
+    fun unresolvedTargetAtSendMatchesResolvedHistoryEchoAndProvidesExactDraftData() {
+        val sentImages = listOf(PendingImage("sent.jpg", byteArrayOf(1, 2, 3)))
+        val attachments = sentImages.map { ImageReference("", "local", "image/jpeg", it.bytes.size, it.name) }
+        val operation = operation("message-1", scope.copy(targetInstanceId = null)).copy(
+            requestAttachments = attachments,
+            sentImages = sentImages,
+        )
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation)
+        val echoEvent = OutboundDeliveryEvent.HistoryEcho(
+            scope.copy(targetInstanceId = "instance-a"),
+            operation.message.copy(incarnationId = "router-incarnation", attachments = attachments),
+        )
+
+        assertEquals("body-message-1", outboundDraftClearText(pending, echoEvent))
+        assertTrue(outboundDraftClearImages(pending, echoEvent) === sentImages)
+
+        val settled = reduceOutboundDelivery(pending, echoEvent)
+        assertEquals(OutboundDeliveryStatus.SENT, settled.messagesByPeer["peer"]!!.single().deliveryStatus)
+        assertTrue(settled.pending.isEmpty())
+    }
+
+    @Test
+    fun nonNullTargetInstanceMismatchKeepsPendingAndDraftData() {
+        val sentImages = listOf(PendingImage("sent.jpg", byteArrayOf(1, 2, 3)))
+        val attachments = sentImages.map { ImageReference("", "local", "image/jpeg", it.bytes.size, it.name) }
+        val operation = operation("message-1", scope).copy(
+            requestAttachments = attachments,
+            sentImages = sentImages,
+        )
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation)
+        val mismatchedEcho = OutboundDeliveryEvent.HistoryEcho(
+            scope.copy(targetInstanceId = "instance-b"),
+            operation.message.copy(incarnationId = "router-incarnation", attachments = attachments),
+        )
+        val unresolvedEcho = mismatchedEcho.copy(scope = scope.copy(targetInstanceId = null))
+
+        listOf(mismatchedEcho, unresolvedEcho).forEach { staleEcho ->
+            assertEquals(null, outboundDraftClearText(pending, staleEcho))
+            assertEquals(null, outboundDraftClearImages(pending, staleEcho))
+            assertEquals(pending, reduceOutboundDelivery(pending, staleEcho))
+        }
+    }
+
+    @Test
+    fun matchingHistoryEchoProvidesDraftTextBeforeLateHttpResult() {
+        val operation = operation("message-1", scope)
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation)
+        val echoEvent = OutboundDeliveryEvent.HistoryEcho(
+            scope,
+            operation.message.copy(incarnationId = "router-incarnation"),
+        )
+
+        assertEquals("body-message-1", outboundDraftClearText(pending, echoEvent))
+
+        val settled = reduceOutboundDelivery(pending, echoEvent)
+        val lateHttp = OutboundDeliveryEvent.Accepted(
+            "message-1",
+            "message-1",
+            scope,
+            operation.message.copy(incarnationId = "router-incarnation"),
+        )
+        assertEquals(null, outboundDraftClearText(settled, lateHttp))
+    }
+
+    @Test
+    fun matchingHistoryEchoProvidesExactSentImagesBeforeLateHttpResult() {
+        val sentImages = listOf(PendingImage("sent.jpg", byteArrayOf(1, 2, 3)))
+        val attachments = sentImages.map { ImageReference("", "local", "image/jpeg", it.bytes.size, it.name) }
+        val operation = operation("message-1", scope).copy(
+            requestAttachments = attachments,
+            sentImages = sentImages,
+        )
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation)
+        val echo = operation.message.copy(
+            incarnationId = "router-incarnation",
+            attachments = attachments,
+        )
+        val echoEvent = OutboundDeliveryEvent.HistoryEcho(scope, echo)
+
+        assertTrue(outboundDraftClearImages(pending, echoEvent) === sentImages)
+
+        val settled = reduceOutboundDelivery(pending, echoEvent)
+        val lateHttp = OutboundDeliveryEvent.Accepted("message-1", "message-1", scope, echo)
+        assertEquals(null, outboundDraftClearImages(settled, lateHttp))
+    }
+
+    @Test
+    fun staleRejectedAndUncertainResultsDoNotProvideDraftTextOrImagesToClear() {
+        val sentImages = listOf(PendingImage("sent.jpg", byteArrayOf(1, 2, 3)))
+        val operation = operation("message-1", scope).copy(sentImages = sentImages)
+        val pending = enqueueOutboundDelivery(OutboundReducerState(), operation)
+        val stale = OutboundDeliveryEvent.Accepted(
+            "message-1",
+            "message-1",
+            scope.copy(connectionGeneration = scope.connectionGeneration + 1),
+            operation.message.copy(incarnationId = "router-incarnation"),
+        )
+        val rejected = OutboundDeliveryEvent.Rejected("message-1", "message-1", scope, "rejected")
+        val uncertain = OutboundDeliveryEvent.Uncertain("message-1", "message-1", scope, "uncertain")
+
+        assertEquals(null, outboundDraftClearText(pending, stale))
+        assertEquals(null, outboundDraftClearText(pending, rejected))
+        assertEquals(null, outboundDraftClearText(pending, uncertain))
+        assertEquals(null, outboundDraftClearImages(pending, stale))
+        assertEquals(null, outboundDraftClearImages(pending, rejected))
+        assertEquals(null, outboundDraftClearImages(pending, uncertain))
+    }
+
+    @Test
     fun duplicateEchoDoesNotDuplicateOrchangeSentMessage() {
         val operation = operation("message-1", scope)
         val echo = operation.message.copy(incarnationId = "router-incarnation")
