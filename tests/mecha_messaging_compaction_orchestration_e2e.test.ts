@@ -161,7 +161,7 @@ async function installFakePi() {
     "  if (typeof logPath !== \"string\" || logPath.length === 0) { fail(\"fake pi call log is missing\"); return; }",
     "  if (statSync(logPath, { throwIfNoEntry: false })?.size > 65_536) { fail(\"fake pi call log is too large\"); return; }",
     "  appendFileSync(logPath, JSON.stringify(args) + \"\\n\", { encoding: \"utf8\", flag: \"a\" });",
-    "  if (!Array.isArray(expected) || JSON.stringify(args) !== JSON.stringify(expected)) { fail(\"unexpected fake pi arguments\"); return; }", 
+    "  if (!Array.isArray(expected) || JSON.stringify(args) !== JSON.stringify(expected)) { fail(\"unexpected fake pi arguments\"); return; }",
     "  process.stdout.write(\"{\\\"decision\\\":\\\"noop\\\",\\\"records\\\":[]}\");",
     "})().catch((error) => { process.stderr.write(String(error).slice(0, 512)); process.exitCode = 2; });",
   ].join("\n");
