@@ -55,6 +55,24 @@ class DraftStoreTest {
     }
 
     @Test
+    fun successfulSendClearsLegacyEscapedNewlineDraft() {
+        val drafts = DraftStore(FakeSharedPreferences())
+        drafts.save("donuts:8765", "supervisor", "first\\nsecond")
+
+        assertEquals(true, drafts.clearIfUnchanged("donuts:8765", "supervisor", "first\nsecond"))
+        assertEquals("", drafts.get("donuts:8765", "supervisor"))
+    }
+
+    @Test
+    fun clearIfUnchangedKeepsLiteralSentTextDistinctFromStoredNewlines() {
+        val drafts = DraftStore(FakeSharedPreferences())
+        drafts.save("donuts:8765", "supervisor", "first\nsecond")
+
+        assertEquals(false, drafts.clearIfUnchanged("donuts:8765", "supervisor", "first\\nsecond"))
+        assertEquals("first\nsecond", drafts.get("donuts:8765", "supervisor"))
+    }
+
+    @Test
     fun retainsOnlyTheMostRecentFiftyDraftsPerRouter() {
         val drafts = DraftStore(FakeSharedPreferences())
         drafts.save("other:8765", "peer-1", "other router draft")

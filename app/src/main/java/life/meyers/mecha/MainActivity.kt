@@ -515,7 +515,10 @@ internal class DraftStore(private val preferences: SharedPreferences) {
     }
 
     fun clearIfUnchanged(router: String, peer: String, sent: String): Boolean {
-        if (get(router, peer) != sent) return false
+        val stored = get(router, peer)
+        // Older drafts may retain escaped newlines. Compare that legacy form to the
+        // already-normalized sent text without changing the meaning of a literal sent value.
+        if (stored != sent && normalizeEscapedNewlines(stored) != sent) return false
         clear(router, peer)
         return true
     }
@@ -558,7 +561,7 @@ class MainActivity : ComponentActivity() {
     private var messages by mutableStateOf(emptyList<ChatMessage>())
     private var outboundState by mutableStateOf(OutboundReducerState())
     private var images by mutableStateOf(emptyList<PendingImage>())
-    private var draft by mutableStateOf("")
+    private var draftValue by mutableStateOf(TextFieldValue())
     private var showProfileEditor by mutableStateOf(false)
     private var showRouterManager by mutableStateOf(false)
     private var routerRevision by mutableStateOf(0)
@@ -681,10 +684,21 @@ class MainActivity : ComponentActivity() {
 
     private fun draftFor(peer: String) = drafts.get(activeRouter, peer)
 
-    private fun updateDraft(value: String) {
-        val normalized = normalizeEscapedNewlines(value)
-        draft = normalized
-        if (selectedPeer.isNotBlank()) drafts.save(activeRouter, selectedPeer, normalized)
+    private fun updateDraft(value: TextFieldValue) {
+        val normalized = normalizeComposerValue(value)
+        draftValue = normalized
+        if (selectedPeer.isNotBlank()) drafts.save(activeRouter, selectedPeer, normalized.text)
+    }
+
+    private fun clearDraftIfUnchanged(router: String, peer: String, sentText: String) {
+        drafts.clearIfUnchanged(router, peer, sentText)
+        if (activeRouter == router && selectedPeer == peer && draftValue.text == sentText) {
+            draftValue = TextFieldValue()
+        }
+    }
+
+    private fun clearImagesIfUnchanged(router: String, peer: String, sentImages: List<PendingImage>) {
+        if (activeRouter == router && selectedPeer == peer && images === sentImages) images = emptyList()
     }
 
     private fun knownPeersKey() = knownPeersKeyFor(activeRouter)
@@ -2202,14 +2216,16 @@ class MainActivity : ComponentActivity() {
             return@withLock HistoryAppendResult(HistoryAppendStatus.IGNORED, current)
         }
         var next = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (peer to current))
+        var draftClearText: String? = null
+        var draftClearImages: List<PendingImage>? = null
         if (message.direction == Direction.OUTGOING) {
-            next = reduceOutboundDelivery(
-                next,
-                OutboundDeliveryEvent.HistoryEcho(
-                    OutboundScope(activeRouter, connectionGeneration, peer, currentTarget),
-                    message,
-                ),
+            val echoEvent = OutboundDeliveryEvent.HistoryEcho(
+                OutboundScope(activeRouter, connectionGeneration, peer, currentTarget),
+                message,
             )
+            draftClearText = outboundDraftClearText(next, echoEvent)
+            draftClearImages = outboundDraftClearImages(next, echoEvent)
+            next = reduceOutboundDelivery(next, echoEvent)
         }
         val result = appendLiveConversationMessage(
             existing = next.messagesByPeer[peer].orEmpty(),
@@ -2245,6 +2261,8 @@ class MainActivity : ComponentActivity() {
             if (selectedPeer == peer) messages = durableResult.messages
             reportHistoryPersistenceFailureUnlocked(peer, activeRouter, connectionGeneration)
         }
+        draftClearText?.let { clearDraftIfUnchanged(activeRouter, peer, it) }
+        draftClearImages?.let { clearImagesIfUnchanged(activeRouter, peer, it) }
         durableResult
     }
 
@@ -2417,14 +2435,16 @@ class MainActivity : ComponentActivity() {
                                     nowMs,
                                 )
                                 var next = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (request.peer to merged))
+                                val draftClearTexts = mutableListOf<String>()
+                                val draftClearImages = mutableListOf<List<PendingImage>>()
                                 hydrated.filter { it.direction == Direction.OUTGOING }.forEach { echo ->
-                                    next = reduceOutboundDelivery(
-                                        next,
-                                        OutboundDeliveryEvent.HistoryEcho(
-                                            OutboundScope(request.router, request.connectionGeneration, request.peer, peers.firstOrNull { it.id == request.peer }?.instanceId),
-                                            echo,
-                                        ),
+                                    val echoEvent = OutboundDeliveryEvent.HistoryEcho(
+                                        OutboundScope(request.router, request.connectionGeneration, request.peer, peers.firstOrNull { it.id == request.peer }?.instanceId),
+                                        echo,
                                     )
+                                    outboundDraftClearText(next, echoEvent)?.let(draftClearTexts::add)
+                                    outboundDraftClearImages(next, echoEvent)?.let(draftClearImages::add)
+                                    next = reduceOutboundDelivery(next, echoEvent)
                                 }
                                 val finalMessages = next.messagesByPeer[request.peer].orEmpty()
                                 val persisted = persistHistoryProofUnlocked(
@@ -2441,6 +2461,12 @@ class MainActivity : ComponentActivity() {
                                 }
                                 outboundState = next
                                 messages = finalMessages
+                                draftClearTexts.forEach { sentText ->
+                                    clearDraftIfUnchanged(request.router, request.peer, sentText)
+                                }
+                                draftClearImages.forEach { sentImages ->
+                                    clearImagesIfUnchanged(request.router, request.peer, sentImages)
+                                }
                                 cancelHistoryRecoveryUnlocked(request.peer)
                                 historyUiState = HistoryUiState()
                             } catch (_: Exception) {
@@ -2520,7 +2546,7 @@ class MainActivity : ComponentActivity() {
         }
         agentFilter = ""
         selectedPeer = peer
-        draft = draftFor(peer)
+        draftValue = restoredComposerValue(draftFor(peer))
         images = emptyList()
         messages = historyFor(peer)
         outboundState = outboundState.copy(messagesByPeer = outboundState.messagesByPeer + (peer to messages))
@@ -2558,7 +2584,7 @@ class MainActivity : ComponentActivity() {
         selectedPeer = ""
         messages = emptyList()
         images = emptyList()
-        draft = ""
+        draftValue = TextFieldValue()
     }
 
     private fun addImages(uris: List<Uri>) {
@@ -2599,8 +2625,7 @@ class MainActivity : ComponentActivity() {
     private fun send() {
         val router = activeRouter
         val recipient = selectedPeer
-        val text = normalizeEscapedNewlines(draft)
-        if (text != draft) updateDraft(text)
+        val text = draftValue.text
         val sentImages = images
         if (recipient.isBlank() || (text.isBlank() && sentImages.isEmpty())) return
         val messageId = UUID.randomUUID().toString()
@@ -2640,6 +2665,7 @@ class MainActivity : ComponentActivity() {
             message = message,
             requestBody = text,
             requestAttachments = localAttachments,
+            sentImages = sentImages,
             deadlineAtMs = System.currentTimeMillis() + OUTBOUND_DELIVERY_TIMEOUT_MS,
         )
         var optimisticPersisted = false
@@ -2711,8 +2737,8 @@ class MainActivity : ComponentActivity() {
                                     val applied = applyOutboundEvent(OutboundDeliveryEvent.Accepted(messageId, operation.requestId, scope, accepted))
                                     if (!applied) return@runOnUiThread
                                     drafts.clearIfUnchanged(router, recipient, text)
-                                    if (activeRouter == router && selectedPeer == recipient && draft == text) draft = ""
-                                    if (activeRouter == router && selectedPeer == recipient && images === sentImages) images = emptyList()
+                                    if (activeRouter == router && selectedPeer == recipient && draftValue.text == text) draftValue = TextFieldValue()
+                                    clearImagesIfUnchanged(router, recipient, sentImages)
                                     if (activeRouter == router) refreshPeers()
                                 }
                             }
@@ -3057,7 +3083,7 @@ class MainActivity : ComponentActivity() {
                             peers.firstOrNull { it.id == selectedPeer } ?: PeerStatus(selectedPeer),
                             messages,
                             images,
-                            draft,
+                            draftValue,
                             ::updateDraft,
                             ::addImages,
                             { index -> images = images.filterIndexed { current, _ -> current != index } },
@@ -3381,8 +3407,8 @@ private fun Conversation(
     peerStatus: PeerStatus,
     messages: List<ChatMessage>,
     pendingImages: List<PendingImage>,
-    draft: String,
-    onDraft: (String) -> Unit,
+    draftValue: TextFieldValue,
+    onDraft: (TextFieldValue) -> Unit,
     onImages: (List<Uri>) -> Unit,
     onRemoveImage: (Int) -> Unit,
     onSend: () -> Unit,
@@ -3438,10 +3464,6 @@ private fun Conversation(
     var reminderDeleteConfirmation by remember(peer) { mutableStateOf<ReminderSummary?>(null) }
     var modelSearch by remember(peer) { mutableStateOf("") }
     var goalDraft by remember(peerStatus.goalState) { mutableStateOf(GoalEditorDraft.from(peerStatus.goalState)) }
-    var composerValue by remember(peer) { mutableStateOf(TextFieldValue(draft)) }
-    LaunchedEffect(draft) {
-        if (composerValue.text != draft) composerValue = TextFieldValue(draft)
-    }
     LaunchedEffect(promptRequestState.successSerial) {
         if (promptRequestState.successSerial > 0) {
             promptEditor = null
@@ -3503,7 +3525,7 @@ private fun Conversation(
                         // Keep prompt invocation visible on phones. The overflow menu remains available for the other controls.
                         IconButton(
                             onClick = {
-                                promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
+                                promptSelection = PromptTemplateSelection(draftValue.selection.start, draftValue.selection.end)
                                 promptPickerOpen = true
                                 onLoadPromptTemplates()
                             },
@@ -3523,7 +3545,7 @@ private fun Conversation(
                                 onRefreshReminders()
                             },
                             onPrompt = {
-                                promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
+                                promptSelection = PromptTemplateSelection(draftValue.selection.start, draftValue.selection.end)
                                 promptPickerOpen = true
                                 onLoadPromptTemplates()
                             },
@@ -3550,7 +3572,7 @@ private fun Conversation(
                         ) { Text("Reminders", color = if (visibleRemindersForPeer(reminders, peer).isEmpty()) TextMuted else Teal) }
                         TextButton(
                             onClick = {
-                                promptSelection = PromptTemplateSelection(composerValue.selection.start, composerValue.selection.end)
+                                promptSelection = PromptTemplateSelection(draftValue.selection.start, draftValue.selection.end)
                                 promptPickerOpen = true
                                 onLoadPromptTemplates()
                             },
@@ -3609,8 +3631,8 @@ private fun Conversation(
                     modifier = Modifier.size(56.dp),
                 ) { Icon(PaperclipIcon, "Attach images", tint = Periwinkle) }
                 OutlinedTextField(
-                    value = composerValue,
-                    onValueChange = { next -> composerValue = next; onDraft(next.text) },
+                    value = draftValue,
+                    onValueChange = onDraft,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp).contentReceiver(receiveImages),
                     singleLine = false,
                     maxLines = 5,
@@ -3620,7 +3642,7 @@ private fun Conversation(
                 Spacer(Modifier.width(10.dp))
                 Button(
                     onClick = onSend,
-                    enabled = draft.isNotBlank() || pendingImages.isNotEmpty(),
+                    enabled = draftValue.text.isNotBlank() || pendingImages.isNotEmpty(),
                     modifier = Modifier.height(56.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Periwinkle, contentColor = Ink),
@@ -3700,11 +3722,10 @@ private fun Conversation(
     promptUse?.let { template ->
         PromptTemplateUseDialog(
             template = template,
-            draft = composerValue.text,
+            draft = draftValue.text,
             selection = promptSelection,
             onPaste = { result ->
-                composerValue = TextFieldValue(result.text, TextRange(result.caret))
-                onDraft(result.text)
+                onDraft(TextFieldValue(result.text, TextRange(result.caret)))
                 promptUse = null
                 promptSelection = null
             },

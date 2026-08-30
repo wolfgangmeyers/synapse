@@ -23,6 +23,8 @@ internal data class OutboundOperation(
     val requestBody: String,
     /** Attachment metadata for correlation; local data URLs stay out of persisted history. */
     val requestAttachments: List<ImageReference> = message.attachments,
+    /** The exact pending-image list captured for UI cleanup; never persisted. */
+    val sentImages: List<PendingImage> = emptyList(),
     val deadlineAtMs: Long,
 )
 
@@ -255,11 +257,40 @@ internal fun acceptedOutboundEventApplied(
 ): Boolean = event is OutboundDeliveryEvent.Accepted
     && reduceOutboundDelivery(state, event) != state
 
+/** Returns the operation's draft data only when this event settles that exact operation. */
+private fun outboundDraftClearOperation(
+    state: OutboundReducerState,
+    event: OutboundDeliveryEvent,
+): OutboundOperation? {
+    val operation = when (event) {
+        is OutboundDeliveryEvent.Accepted -> state.pending[event.localId]
+        is OutboundDeliveryEvent.HistoryEcho -> matchingHistoryEchoOperation(state, event.scope, event.message)
+        is OutboundDeliveryEvent.Rejected,
+        is OutboundDeliveryEvent.Uncertain,
+        is OutboundDeliveryEvent.Timeout,
+        OutboundDeliveryEvent.ConnectionChanged,
+        -> null
+    } ?: return null
+    return operation.takeIf { reduceOutboundDelivery(state, event) != state }
+}
+
+internal fun outboundDraftClearText(
+    state: OutboundReducerState,
+    event: OutboundDeliveryEvent,
+): String? = outboundDraftClearOperation(state, event)?.requestBody
+
+internal fun outboundDraftClearImages(
+    state: OutboundReducerState,
+    event: OutboundDeliveryEvent,
+): List<PendingImage>? = outboundDraftClearOperation(state, event)?.sentImages
+
 internal fun sameOutboundScope(left: OutboundScope, right: OutboundScope): Boolean =
     left.router == right.router
         && left.connectionGeneration == right.connectionGeneration
         && left.peer == right.peer
-        && (right.targetInstanceId == null || left.targetInstanceId == right.targetInstanceId)
+        // A send may begin before peer discovery resolves its instance. Once the send has a
+        // target instance, a missing or different event target must remain stale.
+        && (left.targetInstanceId == null || left.targetInstanceId == right.targetInstanceId)
 
 internal fun sameOutgoingEnvelope(expected: ChatMessage, actual: ChatMessage): Boolean =
     expected.id == actual.id
@@ -332,35 +363,40 @@ private fun acceptHistoryEcho(
     scope: OutboundScope,
     echo: ChatMessage,
 ): OutboundReducerState {
-    val pending = state.pending.values.firstOrNull { operation ->
-        operation.message.id == echo.id
-            && sameOutboundScope(operation.scope, scope)
-            && matchesOutboundEnvelope(operation, echo)
-    }
-    if (pending != null) {
+    val matching = matchingHistoryEchoOperation(state, scope, echo) ?: return state
+    if (state.pending.containsKey(matching.localId)) {
         return settleOutbound(
             state,
-            pending.localId,
-            pending.requestId,
-            pending.frameId,
+            matching.localId,
+            matching.requestId,
+            matching.frameId,
             scope,
             echo,
             OutboundDeliveryStatus.SENT,
             null,
         )
     }
-    val settled = state.settled.values.firstOrNull { operation ->
-        operation.message.id == echo.id
-            && operation.message.deliveryStatus == OutboundDeliveryStatus.UNCERTAIN
-            && sameOutboundScope(operation.scope, scope)
-            && matchesOutboundEnvelope(operation, echo)
-    } ?: return state
     val canonical = echo.copy(deliveryStatus = OutboundDeliveryStatus.SENT)
     return state.copy(
         messagesByPeer = state.messagesByPeer + (scope.peer to replaceLocalMessage(state.messagesByPeer[scope.peer].orEmpty(), canonical)),
-        settled = state.settled - settled.localId,
+        settled = state.settled - matching.localId,
         error = null,
     )
+}
+
+private fun matchingHistoryEchoOperation(
+    state: OutboundReducerState,
+    scope: OutboundScope,
+    echo: ChatMessage,
+): OutboundOperation? = state.pending.values.firstOrNull { operation ->
+    operation.message.id == echo.id
+        && sameOutboundScope(operation.scope, scope)
+        && matchesOutboundEnvelope(operation, echo)
+} ?: state.settled.values.firstOrNull { operation ->
+    operation.message.id == echo.id
+        && operation.message.deliveryStatus == OutboundDeliveryStatus.UNCERTAIN
+        && sameOutboundScope(operation.scope, scope)
+        && matchesOutboundEnvelope(operation, echo)
 }
 
 private fun boundedSettled(values: Map<String, OutboundOperation>): Map<String, OutboundOperation> =

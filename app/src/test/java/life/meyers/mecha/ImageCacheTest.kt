@@ -1,5 +1,11 @@
 package life.meyers.mecha
 
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -116,6 +122,31 @@ class ImageCacheTest {
         assertNull(safeImageUrl("https://router.example", "https://attacker.example/v1/attachments/a.jpg"))
         assertNull(safeImageUrl("https://router.example", "data:image/jpeg;base64,AAAA"))
         assertEquals("https://router.example/v1/attachments/a.jpg", safeImageUrl("https://router.example", "/v1/attachments/a.jpg"))
+    }
+
+    @Test
+    fun imageFetcherDoesNotFollowARedirectToAnotherOrigin() {
+        val origin = MockWebServer()
+        val destination = MockWebServer()
+        origin.start()
+        destination.start()
+        try {
+            origin.enqueue(MockResponse().setResponseCode(307).setHeader("Location", destination.url("/v1/attachments/leaked")))
+            val result = AtomicReference<ImageFetchResult>()
+            val completed = CountDownLatch(1)
+            OkHttpImageFetcher(OkHttpClient()).fetch(origin.url("/v1/attachments/image").toString()) {
+                result.set(it)
+                completed.countDown()
+            }
+
+            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertEquals(ImageLoadError.HTTP, (result.get() as ImageFetchResult.Failure).error)
+            assertNotNull(origin.takeRequest(1, TimeUnit.SECONDS))
+            assertNull(destination.takeRequest(200, TimeUnit.MILLISECONDS))
+        } finally {
+            origin.shutdown()
+            destination.shutdown()
+        }
     }
 
     @Test
