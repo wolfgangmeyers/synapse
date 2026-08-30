@@ -628,7 +628,7 @@ Every mutation must make at least one test fail. A mutation that leaves the suit
 
 ## Completion record
 
-The compaction orchestration extraction and its focused tests are complete in commit `6b752c4e5b8aeb90572755e0d8db3738207d5d26`, tree `042c04a378430c6ba6f36504ee6c9e8351678ea6`. Validation stayed local: no service was started, no live router was contacted, and no production runtime was changed.
+The compaction orchestration extraction and its focused tests are complete in commit `a63bb49203a670c0d6b5dc0531621f5fe35bb04c`, tree `cee1e5c7a78f04125a1b21d537ef2f8ca65f6f93`. Validation stayed local: no service was started, no live router was contacted, and no production runtime was changed.
 
 Validation evidence for the completed target:
 
