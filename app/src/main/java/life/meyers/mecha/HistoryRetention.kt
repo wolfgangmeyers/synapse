@@ -183,6 +183,7 @@ private fun hasPairedSurrogates(value: String): Boolean {
 internal fun validateLiveMessageFrame(
     frame: JSONObject,
     kind: LiveMessageFrameKind,
+    requireIncarnation: Boolean = true,
 ): ValidatedLiveMessage? = runCatching {
     val baseRequired = setOf("version", "frame_id", "type", "message")
     val allowed = when (kind) {
@@ -203,8 +204,13 @@ internal fun validateLiveMessageFrame(
     val parsed = validateLiveMessagePayload(payload, kind) ?: return@runCatching null
     if (kind == LiveMessageFrameKind.CONVERSATION_MESSAGE) return@runCatching parsed
 
-    val incarnation = strictHistoryString(frame, "message_incarnation_id", 36, 36) ?: return@runCatching null
-    if (!HISTORY_INCARNATION_ID.matches(incarnation)) return@runCatching null
+    val hasIncarnation = frame.has("message_incarnation_id")
+    if (hasIncarnation && frame.isNull("message_incarnation_id")) return@runCatching null
+    val incarnation = if (hasIncarnation) {
+        strictHistoryString(frame, "message_incarnation_id", 36, 36) ?: return@runCatching null
+    } else ""
+    if (requireIncarnation && incarnation.isBlank()) return@runCatching null
+    if (incarnation.isNotBlank() && !HISTORY_INCARNATION_ID.matches(incarnation)) return@runCatching null
     val attempt = strictHistoryInt(frame, "attempt_number", 1) ?: return@runCatching null
     val expiresAt = strictHistoryString(frame, "delivery_expires_at", 24, 24) ?: return@runCatching null
     if (!HISTORY_UTC_MILLIS.matches(expiresAt) || parseHistoryTimestamp(expiresAt) == null) return@runCatching null
@@ -217,7 +223,7 @@ internal fun validateLiveMessageFrame(
         }.also { parsedItems ->
             val first = parsedItems.first()
             if (first.messageId != parsed.payload.getString("id")
-                || first.messageIncarnationId != incarnation
+                || incarnation.isNotBlank() && first.messageIncarnationId != incarnation
                 || first.attemptNumber != attempt
                 || first.deliveryExpiresAt != expiresAt
                 || parsedItems.map(ValidatedDeliveryItem::messageId).toSet().size != parsedItems.size

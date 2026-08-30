@@ -361,8 +361,13 @@ internal fun settleIncomingDelivery(
     persistMessage: (String, ChatMessage) -> Boolean,
     sendInjection: (JSONObject) -> Unit,
     sendAck: (JSONObject) -> Unit,
+    correlatedAck: Boolean = true,
 ): Boolean {
-    val validated = validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) ?: return false
+    val validated = validateLiveMessageFrame(
+        frame,
+        LiveMessageFrameKind.DELIVERY_MESSAGE,
+        requireIncarnation = correlatedAck,
+    ) ?: return false
     val messages = validated.deliveryMessages.map { deliveryMessage ->
         val item = deliveryMessage.item
         val payload = deliveryMessage.payload
@@ -390,9 +395,13 @@ internal fun settleIncomingDelivery(
         .put("instance_id", instanceId)
         .put("lease_id", leaseId)
         .put("message_id", first.messageId)
-        .put("message_incarnation_id", first.messageIncarnationId)
         .put("attempt_number", first.attemptNumber)
-        .put("delivery_items", JSONArray(validated.deliveryItems.map(::deliveryItemJson)))
+        .apply {
+            if (correlatedAck) {
+                put("message_incarnation_id", first.messageIncarnationId)
+                put("delivery_items", JSONArray(validated.deliveryItems.map(::deliveryItemJson)))
+            }
+        }
     // Receipt transport is best effort after persistence. A failed send must not undo saved history.
     runCatching { sendInjection(receipt("injection_requested")) }
     runCatching { sendAck(receipt("ack")) }
@@ -404,8 +413,13 @@ internal fun captureDeliveryForSettlement(
     connection: DeliveryConnectionIdentity,
     parseMessage: (ValidatedLiveMessage, String, String) -> ChatMessage?,
     targetInstanceId: (String) -> String?,
+    correlatedAck: Boolean = true,
 ): CapturedDelivery? {
-    val validated = validateLiveMessageFrame(frame, LiveMessageFrameKind.DELIVERY_MESSAGE) ?: return null
+    val validated = validateLiveMessageFrame(
+        frame,
+        LiveMessageFrameKind.DELIVERY_MESSAGE,
+        requireIncarnation = correlatedAck,
+    ) ?: return null
     val messages = validated.deliveryMessages.map { deliveryMessage ->
         val item = deliveryMessage.item
         val payload = deliveryMessage.payload
@@ -438,6 +452,7 @@ internal fun captureDeliveryForSettlement(
         peer = peers.first(),
         targetInstanceId = targetInstanceId(peers.first()),
         message = messages.first(),
+        correlatedAck = correlatedAck,
         attemptNumber = validated.deliveryItems.first().attemptNumber,
         messages = messages,
         deliveryItems = validated.deliveryItems,
@@ -1791,6 +1806,7 @@ class MainActivity : ComponentActivity() {
                 connection = connection,
                 parseMessage = { validated, router, owner -> chatMessage(validated, router, owner) },
                 targetInstanceId = { peer -> peers.firstOrNull { it.id == peer }?.instanceId },
+                correlatedAck = correlatedAck,
             )
         } ?: return
         val settled = deliveryCoordinator.settle(captured, ::appendCapturedDelivery) ?: return
@@ -1802,7 +1818,7 @@ class MainActivity : ComponentActivity() {
         // connection identity returned by it for both receipts.
         val items = settled.deliveryItems
         if (items.isEmpty() || settled.messages.size != items.size) return
-        val ledgerKeys = items.mapIndexed { index, item ->
+        val ledgerKeys = if (settled.correlatedAck) items.mapIndexed { index, item ->
             DeliveryLedgerKey(
                 router = settled.connection.router,
                 ownerAgentId = settled.connection.agentId,
@@ -1811,7 +1827,7 @@ class MainActivity : ComponentActivity() {
                 messageId = item.messageId,
                 messageIncarnationId = item.messageIncarnationId,
             )
-        }
+        } else emptyList()
         val first = items.first()
         val deliveryItems = JSONArray(items.map(::deliveryItemJson))
         val injection = JSONObject()
@@ -1823,7 +1839,9 @@ class MainActivity : ComponentActivity() {
             .put("lease_id", settled.connection.leaseId)
             .put("message_id", first.messageId)
             .put("attempt_number", first.attemptNumber)
-            .put("delivery_items", deliveryItems)
+            .apply {
+                if (settled.correlatedAck) put("delivery_items", deliveryItems)
+            }
         runCatching { webSocket.send(injection.toString()) }
 
         val ackRequestId = UUID.randomUUID().toString()
@@ -1835,9 +1853,13 @@ class MainActivity : ComponentActivity() {
             .put("instance_id", settled.connection.instanceId)
             .put("lease_id", settled.connection.leaseId)
             .put("message_id", first.messageId)
-            .put("message_incarnation_id", first.messageIncarnationId)
             .put("attempt_number", first.attemptNumber)
-            .put("delivery_items", deliveryItems)
+            .apply {
+                if (settled.correlatedAck) {
+                    put("message_incarnation_id", first.messageIncarnationId)
+                    put("delivery_items", deliveryItems)
+                }
+            }
         historyLock.withLock {
             if (settled.connection == DeliveryConnectionIdentity(
                     activeRouter,
@@ -1845,7 +1867,7 @@ class MainActivity : ComponentActivity() {
                     instanceId,
                     connectionGeneration,
                     leaseId,
-                ) && correlatedAck
+                ) && settled.correlatedAck
             ) {
                 pendingDeliveryAcknowledgements[ackRequestId] = PendingDeliveryAcknowledgement(
                     ledgerKeys,
@@ -1856,8 +1878,8 @@ class MainActivity : ComponentActivity() {
         }
         val ackSent = runCatching { webSocket.send(ack.toString()) }.getOrDefault(false)
         if (!ackSent) {
-            if (correlatedAck) historyLock.withLock { pendingDeliveryAcknowledgements.remove(ackRequestId) }
-        } else if (!correlatedAck) {
+            if (settled.correlatedAck) historyLock.withLock { pendingDeliveryAcknowledgements.remove(ackRequestId) }
+        } else if (!settled.correlatedAck) {
             historyLock.withLock {
                 if (settled.connection == DeliveryConnectionIdentity(
                         activeRouter,
@@ -2057,7 +2079,7 @@ class MainActivity : ComponentActivity() {
             }
         ) return DeliveryPersistenceProof(false)
         val nowMs = System.currentTimeMillis()
-        val ledgerStatusesByKey = deliveredMessages.associate { message ->
+        val ledgerStatusesByKey = if (delivery.correlatedAck) deliveredMessages.associate { message ->
             message.key to deliveryReplayLedger.status(
                 DeliveryLedgerKey(
                     connection.router,
@@ -2069,7 +2091,7 @@ class MainActivity : ComponentActivity() {
                 ),
                 nowMs,
             )
-        }
+        } else emptyMap()
         if (deliveredMessages.any {
                 !isRetainedConversationMessage(it, nowMs) && ledgerStatusesByKey[it.key] == null
             }
@@ -2124,7 +2146,7 @@ class MainActivity : ComponentActivity() {
                 return DeliveryPersistenceProof(false, retainedKeys)
             }
             peerMessages.forEach { message ->
-                if (ledgerStatuses[message.key] == null && !deliveryReplayLedger.markPersisted(
+                if (delivery.correlatedAck && ledgerStatuses[message.key] == null && !deliveryReplayLedger.markPersisted(
                         DeliveryLedgerKey(connection.router, connection.agentId, connection.instanceId, peer, message.id, message.incarnationId),
                         nowMs,
                     )
