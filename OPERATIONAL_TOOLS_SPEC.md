@@ -9,7 +9,7 @@ Pi exposes the common supervisor operations as grouped native tools. Each call n
 - `mecha_state`: query, create, and update task state.
 - `mecha_priority`: create or update a priority and change its status.
 - `mecha_verification_handoff`: record a verification handoff.
-- `mecha_reminder`: list, create, and delete reminders.
+- `mecha_reminder`: list, create, update, and delete reminders. Create derives the reminder target from the current tmux window; update changes reminder content or timing without accepting a target.
 - `mecha_worker`: list workers, launch or clean up a state-recorded managed worker by alias, and send a worker a message. `send` is messaging-only; it does not create, restart, or recover a worker.
 - `mecha_pr`: read status for numeric pull request identifiers.
 - `mecha_git`: read git status for supervisor tasks.

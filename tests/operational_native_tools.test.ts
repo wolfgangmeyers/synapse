@@ -117,6 +117,38 @@ test("uses action-specific closed schemas for every approved action", () => {
   assert.deepEqual(tools.get("mecha_worker").parameters.properties.alias.pattern, "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$");
   assert.deepEqual(tools.get("mecha_pr").parameters.properties.pullRequest, { type: "integer", minimum: 1 });
   assert.ok(tools.get("mecha_git").parameters.properties.task);
+  assert.equal(tools.get("mecha_reminder").parameters.properties.target, undefined);
+});
+
+test("native reminder create derives its target from the current identity and fails closed without it", async () => {
+  const requests = [];
+  const fetchImpl = async (url, request = {}) => {
+    requests.push({ url, request });
+    return { ok: true, status: 201, json: async () => ({ reminder: { id: "reminder-1" } }) };
+  };
+  const tools = registered({
+    resolveCurrentAgentId: () => "current-window",
+    fetchImpl,
+    environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765" },
+    now: () => new Date("2030-01-01T00:00:00.000Z"),
+    generateId: () => "reminder-1",
+  });
+  const created = await execute(tools.get("mecha_reminder"), { action: "create", message: "hello", delayMinutes: 1 });
+  assert.equal(created.isError, undefined);
+  assert.equal(JSON.parse(requests[0].request.body).target, "current-window");
+
+  const failedRequests = [];
+  const failedTools = registered({
+    resolveCurrentAgentId: () => undefined,
+    fetchImpl: async (url, request = {}) => {
+      failedRequests.push({ url, request });
+      return { ok: true, status: 201, json: async () => ({}) };
+    },
+  });
+  const failed = await execute(failedTools.get("mecha_reminder"), { action: "create", message: "hello", delayMinutes: 1 });
+  assert.equal(failed.isError, true);
+  assert.equal(failed.content[0].text, "Reminder target is unavailable: current tmux window identity could not be resolved.");
+  assert.deepEqual(failedRequests, []);
 });
 
 test("matches the approved actions exactly", () => {
@@ -250,6 +282,8 @@ test("rejects unknown actions, missing fields, wrong types, and extras before ad
     ["mecha_verification_handoff", { action: "record", task: "x", reminderId: "r1", successor: "w1", remoteVerified: "yes" }, /remoteVerified must be one of/],
     ["mecha_git", { action: "status", task: "x", repo: "/tmp" }, /unsupported field/],
     ["mecha_router", { action: "retry", messageId: "x", command: "curl" }, /unsupported field/],
+    ["mecha_reminder", { action: "create", target: "other", message: "x", delayMinutes: 1 }, /unsupported field/],
+    ["mecha_reminder", { action: "update", reminderId: "r1", target: "other", message: "x" }, /unsupported field/],
   ]) {
     const result = await execute(tools.get(name), input);
     assert.equal(result.isError, true, name);

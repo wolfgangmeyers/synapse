@@ -549,7 +549,11 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     now: nowImpl,
   });
   const operationalReminderLock: OperationalReminderLock = { guard: async (reminderId: string, reminder: Parameters<NonNullable<OperationalReminderLock["guard"]>>[1]) => reminderLock.guard(reminderId, isRecord(reminder) ? reminder : undefined), clear: (reminderId: string) => reminderLock.clear(reminderId) };
-  registerOperationalTools(pi, { ...operationalTools, reminderLock: operationalReminderLock });
+  registerOperationalTools(pi, {
+    ...operationalTools,
+    reminderLock: operationalReminderLock,
+    resolveCurrentAgentId,
+  });
   if (nativeSubagentTrace === undefined || typeof nativeSubagentTrace.record !== "function") {
     throw new TypeError("nativeSubagentTrace must provide record");
   }

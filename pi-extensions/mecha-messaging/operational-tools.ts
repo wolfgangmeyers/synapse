@@ -67,7 +67,7 @@ type Schema = Record<string, unknown>;
 type ActionDefinition = { properties: Schema; required: string[] };
 type Variant = { type: "object"; additionalProperties: false; required: string[]; properties: Schema };
 type ToolDefinition = { name: string; label: string; description: string; parameters: Schema; promptSnippet?: string; promptGuidelines?: string[]; execute: (toolCallId: string, input: unknown) => Promise<unknown> };
-type OperationalOptions = { runFile?: RunFile; fetchImpl?: FetchLike; environment?: NodeJS.ProcessEnv; now?: () => Date; generateId?: () => string; reminderLock?: ReminderLock };
+type OperationalOptions = { runFile?: RunFile; fetchImpl?: FetchLike; environment?: NodeJS.ProcessEnv; now?: () => Date; generateId?: () => string; reminderLock?: ReminderLock; resolveCurrentAgentId?: () => string | undefined };
 type Pi = { registerTool: (tool: ToolDefinition) => void };
 
 const SCRIPT_PATHS = Object.freeze({
@@ -162,6 +162,23 @@ function id(value: unknown, name = "identifier"): string {
   const normalized = text(value, name, 120);
   if (!ID.test(normalized)) throw new OperationalInputError(`${name} contains unsupported characters`);
   return normalized;
+}
+
+function currentReminderTarget(resolveCurrentAgentId: () => string | undefined): string {
+  let agentId: string | undefined;
+  try {
+    agentId = resolveCurrentAgentId();
+  } catch {
+    agentId = undefined;
+  }
+  if (typeof agentId !== "string" || agentId.trim().length === 0) {
+    throw new OperationalActionError("Reminder target is unavailable: current tmux window identity could not be resolved.");
+  }
+  try {
+    return id(agentId, "current reminder target");
+  } catch {
+    throw new OperationalActionError("Reminder target is unavailable: current tmux window identity could not be resolved.");
+  }
 }
 
 function workerId(value: unknown, name = "worker alias"): string {
@@ -516,6 +533,7 @@ export function createOperationalToolDefinitions({
   now = () => new Date(),
   generateId = randomUUID,
   reminderLock,
+  resolveCurrentAgentId = () => undefined,
 }: OperationalOptions = {}): ToolDefinition[] {
   if (typeof runFile !== "function") throw new TypeError("runFile must be a function");
   if (typeof now !== "function") throw new TypeError("now must be a function");
@@ -690,14 +708,14 @@ export function createOperationalToolDefinitions({
 
     descriptor("mecha_reminder", "Mailbox reminder", [
       variant("list"),
-      variant("create", { target: task, message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["target", "message", "delayMinutes"]),
-      variant("update", { reminderId: task, target: task, message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["reminderId"]),
+      variant("create", { message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["message", "delayMinutes"]),
+      variant("update", { reminderId: task, message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["reminderId"]),
       variant("delete", { reminderId: task }, ["reminderId"]),
     ], async (input) => {
       const definitions = {
         list: { properties: {}, required: [] },
-        create: { properties: { target: true, message: true, subject: true, delayMinutes: true }, required: ["target", "message", "delayMinutes"] },
-        update: { properties: { reminderId: true, target: true, message: true, subject: true, delayMinutes: true }, required: ["reminderId"] },
+        create: { properties: { message: true, subject: true, delayMinutes: true }, required: ["message", "delayMinutes"] },
+        update: { properties: { reminderId: true, message: true, subject: true, delayMinutes: true }, required: ["reminderId"] },
         delete: { properties: { reminderId: true }, required: ["reminderId"] },
       };
       validateAction(input, definitions);
@@ -715,7 +733,6 @@ export function createOperationalToolDefinitions({
       if (input.action === "update") {
         const reminderId = id(input.reminderId, "reminderId");
         const patch: JsonObject = {};
-        if (input.target !== undefined) patch.target = id(input.target, "target");
         if (input.message !== undefined) patch.body = text(input.message, "message");
         if (input.subject !== undefined) patch.subject = text(input.subject, "subject", 200);
         const minutes = input.delayMinutes === undefined
@@ -737,12 +754,13 @@ export function createOperationalToolDefinitions({
           return success("Reminder updated.", result);
         });
       }
+      const target = currentReminderTarget(resolveCurrentAgentId);
       const minutes = integer(input.delayMinutes, "delayMinutes", 1, 10_080);
       const created = now();
       if (!(created instanceof Date) || Number.isNaN(created.getTime())) throw new OperationalActionError("Operational clock is unavailable.");
       const payload: JsonObject = {
         id: id(generateId(), "generated reminder ID"),
-        target: id(input.target, "target"),
+        target,
         creator: id(environment.MECHA_AGENT_ID || "pi", "creator"),
         body: text(input.message, "message"),
         created_at: created.toISOString(),
