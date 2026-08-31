@@ -86,7 +86,7 @@ export function createActivityState() {
     }
 
     // Compacting absorbs everything except its own exits. The router pauses mail delivery while
-    // an agent is compacting (harness/router.js:1095) and gives that state no expiry, and any
+    // an agent is compacting (router-proxy Go router:1095) and gives that state no expiry, and any
     // non-compacting frame releases the pause. So a stray settle here would end the pause early,
     // which is the failure the whole compacting path exists to respect.
     //
@@ -145,7 +145,7 @@ export function createActivityState() {
       case "subagent_start": {
         const launch = queue.shift();
         // The router drops any summary whose description is blank (normalizeSubagents,
-        // harness/router.js:1033) while still counting it, so an unnamed subagent shows as part
+        // router-proxy Go router:1033) while still counting it, so an unnamed subagent shows as part
         // of the count with no label. Omitting the summary produces the same display honestly.
         const label = launch?.description || record.agentType || undefined;
         running.set(record.subagentId, label);

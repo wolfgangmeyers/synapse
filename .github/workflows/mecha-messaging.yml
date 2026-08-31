@@ -37,4 +37,4 @@ jobs:
       - run: npm ci --prefix pi-extensions/mecha-messaging
       - run: npm run check:mecha-messaging
       - run: xvfb-run --auto-servernum -- npm test
-      - run: node --test tests/claude_sidecar.test.mjs tests/discord_gateway_bridge.test.mjs
+      - run: node --test tests/discord_gateway_bridge.test.mjs

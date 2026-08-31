@@ -1,12 +1,12 @@
 # Visual parity checklist
 
-Compare the React page with the legacy page using the same isolated Go router, deterministic fixture data, and stable timestamps. Run the legacy reference on its own temporary loopback port. The React page connects directly to the isolated Go URL. Do not connect either page to the live router during this test slice.
+Compare the React page with the supported page using the same isolated Go router, deterministic fixture data, and stable timestamps. Run the supported React page on its own temporary loopback port. The React page connects directly to the isolated Go URL. Do not connect either page to the live router during this test slice.
 
 ## Mechanical checks
 
 - Text in `index.html` and visible labels match the reference behavior.
 - Control names, dialog titles, empty states, error text, and accessibility names are present.
-- The React page has no dependency on `tools/router_web_ui.mjs` at runtime.
+- The React page connects directly to the Go router at runtime.
 - Both pages use the same fixture agent IDs, message IDs, attachments, timestamps, activity states, model catalogs, goals, reminders, arrivals, and lifecycle data.
 - Differences are recorded with the source-backed reason. Do not add behavior to make a screenshot match.
 

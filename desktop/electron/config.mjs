@@ -5,11 +5,11 @@ export const APP_NAME = "Mecha";
 export const BUNDLE_ID = "life.meyers.mecha";
 export const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
 export const DESKTOP_DEFAULT_AGENT_ID = "wolfgang";
-export const DESKTOP_UI_PORT = 8788;
+export const DESKTOP_UI_PORT = 8787;
 export const WINDOW_WIDTH = 1180;
 export const WINDOW_HEIGHT = 820;
 
-export const iconPngPath = fileURLToPath(new URL("../../web/router-ui/mecha-icon.png", import.meta.url));
+export const iconPngPath = fileURLToPath(new URL("../../web/router-ui-react/public/mecha-icon.png", import.meta.url));
 export const iconIcnsPath = fileURLToPath(new URL("./assets/Mecha.icns", import.meta.url));
 
 export function parseDesktopArguments(argv = []) {
@@ -74,7 +74,8 @@ export function desktopPackageOptions({ arch = process.arch } = {}) {
       /^\/pi-extensions(?:\/|$)/,
       /^\/protocol(?:\/|$)/,
       /^\/tests(?:\/|$)/,
-      /^\/tools\/(?!router_web_ui\.mjs$)/,
+      /^\/tools\//,
+      /^\/web\/router-ui-react(?:\/|$)/,
       /^\/[^/]+\.md$/,
       /^\/build\.gradle\.kts$/,
       /^\/package-lock\.json$/,

@@ -17,7 +17,7 @@ test("desktop config keeps the Mac app as a web UI client only", () => {
   assert.equal(BUNDLE_ID, "life.meyers.mecha");
   assert.equal(DEFAULT_ROUTER_URL, "http://127.0.0.1:8765");
   assert.equal(DESKTOP_DEFAULT_AGENT_ID, "wolfgang");
-  assert.equal(DESKTOP_UI_PORT, 8788);
+  assert.equal(DESKTOP_UI_PORT, 8787);
   assert.equal(parseDesktopArguments([]).router, DEFAULT_ROUTER_URL);
   assert.equal(parseDesktopArguments(["--router", "https://router.example.test:8765/path?debug=1"]).router, "https://router.example.test:8765");
 });
@@ -51,7 +51,7 @@ test("desktop package options target local unsigned macOS app packaging", () => 
   assert.ok(options.ignore.some((pattern) => pattern.test("/.gradle/caches/modules-2")));
   assert.ok(options.ignore.some((pattern) => pattern.test("/node_modules/electron/index.js")));
   assert.ok(options.ignore.every((pattern) => !pattern.test("/node_modules/ws/index.js")));
-  assert.ok(options.ignore.every((pattern) => !pattern.test("/tools/router_web_ui.mjs")));
-  assert.ok(options.ignore.every((pattern) => !pattern.test("/web/router-ui/app.js")));
+  assert.ok(options.ignore.some((pattern) => pattern.test("/tools/run_router.sh")));
+  assert.ok(options.ignore.some((pattern) => pattern.test("/web/router-ui-react/src/App.tsx")));
   assert.throws(() => desktopPackageOptions({ arch: "riscv64" }), /unsupported macOS desktop architecture/);
 });
