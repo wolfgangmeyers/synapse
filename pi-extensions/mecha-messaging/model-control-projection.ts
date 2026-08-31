@@ -363,7 +363,7 @@ export function createModelControlProjection({
       });
       return { accepted: true, currentModel: projection.current };
     } catch (error) {
-      const projection = currentForContext(context);
+      const projection = currentForContext(getParentContext());
       trace("extension_model_control_completed", {
         control_id: controlId,
         source_agent_id: sourceAgentId,

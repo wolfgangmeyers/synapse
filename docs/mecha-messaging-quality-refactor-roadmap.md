@@ -99,6 +99,31 @@ The delivery coordinator is implemented locally in `pi-extensions/mecha-messagin
 
 **Isolated E2E validation.** Use a temporary SQLite router, a temporary session file, a fake Pi `sendMessage`, and a real WebSocket mailbox client. Enqueue a message, deliver it, append the custom session entry, and verify the receipt order. Restart the router and replay the same message. Verify that the durable entry is acknowledged without a second Pi injection. Repeat with a failed checkpoint and with a sentinel whose spawn succeeds and fails. No live router, settings file, or service is needed.
 
+## Implemented locally; final validation pending
+
+### Model and control projection
+
+**Status and evidence.** The extraction is implemented in commit `fa184bec3beb188e54dda5ae2184cee29b2f37db`. The current working tree adds the validated correction for an asynchronous `setModel` rejection after the active context changes: the failure result now reports the active context's model, matching the baseline catch behavior. The focused direct suite passed 20 tests, the differential suite passed 1 test, and Mecha Messaging typecheck, lint, and `git diff --check` passed. Full-suite validation, installed-Pi E2E, mutation testing, independent review, a final correction commit, and push were not run in this task. No final approval is claimed.
+
+**Scope.** Extract model metadata normalization, catalog projection, current-model projection, model selection and switching, the short-lived post-switch override, model-control result normalization, and the adjacent Goal control bridge adapters. Keep the Goal state machine in `mecha-goal` and keep wire serialization in `mailbox-client.ts`.
+
+**Behavior and contracts to preserve.**
+
+- Provider and model IDs are required for a usable model projection. Optional names and numeric limits are retained only when valid and bounded.
+- Malformed registry entries are ignored. The current model is `null` when it cannot be projected. The catalog remains bounded at the current maximum and reports truncation through the mailbox client.
+- A model switch checks the registry before calling `pi.setModel`. It preserves the existing error codes for invalid input, unavailable registry, unavailable model, rejected switch, and failed switch.
+- A Pi implementation that mutates the model and throws afterward is recognized when the post-call projection confirms the requested model.
+- An asynchronous switch failure that arrives after the active context changes returns the current active context's model in the failure result, matching the baseline catch behavior.
+- The short-lived override publishes a successful switch before a fresh Pi context snapshot arrives. It clears when the context changes, the native projection reflects the switch, or the model changes locally.
+- Remote control responses are matched to the requested control and target. Control-plane state cannot be confused with ordinary activity or Goal state.
+- Goal controls retain the one-second response bound, full-state fallback, revision checks, and separate typed event channel.
+
+**Risks.** This slice crosses the Pi model registry, mailbox-client frames, router control fencing, UI projections, and the Goal bridge. The main failure is returning an optimistic model forever or accepting a model that the registry did not provide. Keep identity comparisons on provider plus ID, and keep wire contracts in the client layer.
+
+**Tests.** `tests/model_control_projection.test.ts` covers malformed catalogs, one-thousand-item bounds, provider-plus-ID identity, throw-after-mutation, stale context clearing, the asynchronous stale-context rejection regression, control timeout, and Goal bridge fallback. `tests/mecha_messaging_model_control_projection_differential.test.ts` compares the extracted extension against the exact baseline fixture. Client and router control coverage remains in `tests/model_catalog_transport.test.mjs`, `tests/mailbox_client_goal_control.test.mjs`, `tests/router_web_ui.test.mjs`, and `tests/goal_transport.test.ts`.
+
+**Isolated E2E validation.** The planned temporary-router and installed-Pi validation remains pending. It must use a temporary router and WebSocket clients, a fake Pi registry with malformed and valid entries, and a fake `setModel`; it must not use the live router, browser settings, credentials, or a shared session.
+
 ## Remaining slices
 
 Each slice should move existing code with the smallest possible adapter. Keep the current exports until callers and tests have moved. Do not combine an extraction with a protocol change, a timing change, or a new feature.
@@ -180,32 +205,12 @@ The focused direct suite passed 15 tests with 100 percent lines, functions, stat
 
 **Isolated E2E validation.** Feed a fake installed-Pi context handler an adversarial history and capture the exact messages passed to the fake provider. Use a temporary `HOME` and diagnostic paths. Assert that invalid calls and orphan results disappear, valid history keeps its order, repeated events produce one diagnostic, files stay within their byte bounds, and sensitive source text does not appear. Run the same check with diagnostics unavailable and verify the provider request still completes.
 
-### 4. Model and control projection
-
-**Scope.** Extract model metadata normalization, catalog projection, current-model projection, model selection and switching, the short-lived post-switch override, model-control result normalization, and the adjacent Goal control bridge adapters. Keep the Goal state machine in `mecha-goal` and keep wire serialization in `mailbox-client.ts`.
-
-**Behavior and contracts to preserve.**
-
-- Provider and model IDs are required for a usable model projection. Optional names and numeric limits are retained only when valid and bounded.
-- Malformed registry entries are ignored. The current model is `null` when it cannot be projected. The catalog remains bounded at the current maximum and reports truncation through the mailbox client.
-- A model switch checks the registry before calling `pi.setModel`. It preserves the existing error codes for invalid input, unavailable registry, unavailable model, rejected switch, and failed switch.
-- A Pi implementation that mutates the model and throws afterward is recognized when the post-call projection confirms the requested model.
-- The short-lived override publishes a successful switch before a fresh Pi context snapshot arrives. It clears when the context changes, the native projection reflects the switch, or the model changes locally.
-- Remote control responses are matched to the requested control and target. Control-plane state cannot be confused with ordinary activity or Goal state.
-- Goal controls retain the one-second response bound, full-state fallback, revision checks, and separate typed event channel.
-
-**Risks.** This slice crosses the Pi model registry, mailbox-client frames, router control fencing, UI projections, and the Goal bridge. The main failure is returning an optimistic model forever or accepting a model that the registry did not provide. Keep identity comparisons on provider plus ID, and keep wire contracts in the client layer.
-
-**Tests.** Keep model projection and extension tests in `tests/pi_extension_standalone.test.ts` and `tests/mecha_messaging_package.test.ts`. Keep client and router control coverage in `tests/model_catalog_transport.test.mjs`, `tests/mailbox_client_goal_control.test.mjs`, `tests/router_web_ui.test.mjs`, and `tests/goal_transport.test.ts`. Add direct tests for malformed catalogs, one-thousand-item bounds, throw-after-mutation, stale context clearing, control timeout, and cross-target response rejection.
-
-**Isolated E2E validation.** Use a temporary router and WebSocket clients, a fake Pi registry with malformed and valid entries, and a fake `setModel`. Verify catalog frames, activity projection, a successful switch, a rejected switch, a switch that throws after mutation, reconnect behavior, and a Goal control request through the EventBus. Assert the exact provider/ID projection and error code. Do not use the live router or browser settings.
-
 ## Recommended sequencing
 
 1. **Activity lifecycle.** Complete and validated in the current working tree. The delivery coordinator and activity lifecycle now have separate, documented boundaries.
 2. **Compaction orchestration.** It depends on the delivery and activity boundaries and has the most timing risk. Extract it after those interfaces are explicit.
 3. **Diagnostics and history sanitation.** It is mostly a pure transformation and a best-effort sink. Doing it after the timing work keeps provider-input changes separate from lifecycle changes.
-4. **Model and control projection.** It has the broadest public surface across Pi, the router, the web UI, and Goal. Leave it until the other composition-root state has clearer ownership.
+4. **Model and control projection.** Implemented locally; final validation and independent review remain pending as recorded above.
 
 For every slice: move code without changing behavior, add or preserve module-level tests, run package typecheck and lint, run the relevant isolated E2E, then run the full Mecha Messaging test command. Compare the public export list and protocol fixtures before and after. Stop if a diff changes a wire field, event name, timing bound, or error code without a separate product decision.
 

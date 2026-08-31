@@ -381,6 +381,36 @@ test("model control returns an empty current projection for a stale context with
   assert.equal(result.currentModel, null);
 });
 
+test("model control reports the active context after an async switch rejection", async () => {
+  const modelA = { provider: "provider", id: "model-a" };
+  const target = { provider: "provider", id: "target" };
+  const modelB = { provider: "provider", id: "model-b" };
+  const contextA = context([modelA, target], modelA);
+  contextA.sessionManager = { getSessionId: () => "session-a" };
+  const contextB = context([modelB, target], modelB);
+  contextB.sessionManager = { getSessionId: () => "session-b" };
+  let activeContext: Context = contextA;
+  let rejectSwitch: ((error: Error) => void) | undefined;
+  const projection = createModelControlProjection({
+    getParentContext: () => activeContext,
+    setModel: () => new Promise<boolean>((_resolve, reject) => { rejectSwitch = reject; }),
+    refresh() {},
+  });
+
+  const pending = projection.handleControl({
+    controlId: "control", sourceAgentId: "source", action: "set_model", model: target,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  activeContext = contextB;
+  rejectSwitch?.(new Error("switch failed"));
+
+  const result = await pending;
+  assert.equal(result.accepted, false);
+  assert.equal(result.errorCode, "model_switch_failed");
+  assert.deepEqual(result.currentModel, modelB);
+  assert.deepEqual(projection.current(), modelB);
+});
+
 test("model control does not refresh a stale context after an async switch", async () => {
   const modelA = { provider: "provider", id: "model-a" };
   const target = { provider: "provider", id: "target" };
