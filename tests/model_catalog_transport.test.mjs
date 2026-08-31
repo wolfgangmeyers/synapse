@@ -243,6 +243,68 @@ test("model catalog frames validate and activity frames stay lightweight", () =>
   }));
 });
 
+test("mailbox client marks the catalog boundary at 1000 versus 1001 source models", async () => {
+  const sent = [];
+  const sockets = [];
+  const intervals = [];
+  let catalog = modelCatalog(1_000);
+  let id = 0;
+  const client = createMailboxClient({
+    agentId: "boundary-worker",
+    onEnvelope: () => {},
+    getModelCatalog: () => catalog,
+    getCurrentModel: () => catalog[0],
+    fetchImpl: modelCatalogCapabilityResponse,
+    webSocketFactory: () => {
+      const socket = new FakeSocket(sent);
+      sockets.push(socket);
+      return socket;
+    },
+    generateId: () => `boundary-${++id}`,
+    reconnectInitialDelayMs: 1,
+    reconnectMaxDelayMs: 1,
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl: () => {},
+    setIntervalImpl: (callback) => {
+      intervals.push(callback);
+      return intervals.length;
+    },
+    clearIntervalImpl: () => {},
+    random: () => 0,
+  });
+
+  const connected = client.connect();
+  sockets[0].open();
+  const registered = sent.find((frame) => frame.type === "register");
+  sockets[0].message({
+    version: "v1",
+    frame_id: "boundary-registered",
+    type: "registered",
+    request_id: registered.frame_id,
+    agent_id: "boundary-worker",
+    instance_id: client.instanceId,
+    lease_id: "boundary-lease-1",
+    expires_at: "2030-01-01T00:00:00.000Z",
+    recovered: false,
+    agent_role: "agent",
+  });
+  await connected;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const exact = sent.find((frame) => frame.type === "model_catalog");
+  assert.equal(exact.model_summaries.length, 1_000);
+  assert.equal(exact.total_count, 1_000);
+  assert.equal(exact.truncated, false);
+
+  catalog = modelCatalog(1_001);
+  intervals[1]();
+  const bounded = sent.filter((frame) => frame.type === "model_catalog").at(-1);
+  assert.equal(bounded.model_summaries.length, 1_000);
+  assert.equal(bounded.total_count, 1_001);
+  assert.equal(bounded.truncated, true);
+  client.close();
+});
+
 test("mailbox client sends the full catalog once per registration socket and omits it from activity", async () => {
   const sent = [];
   const sockets = [];

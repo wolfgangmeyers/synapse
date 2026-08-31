@@ -1,13 +1,22 @@
 import { createMailboxClient, createNanoId, assertAgentId, routerHttpUrl, parseReplyArguments } from "./mailbox-client.js";
 import {
   GOAL_ACTIVITY_EVENT,
-  GOAL_CONTROL_REQUEST_EVENT,
   GOAL_CONTROL_STATE_EVENT,
   GOAL_STATE_EVENT,
   GOAL_STATE_REQUEST_EVENT,
   GOAL_WORKER_ID_EVENT,
 } from "../mecha-goal/index.js";
-import type { GoalPi, GoalModelRegistry } from "../mecha-goal/index.js";
+import type { GoalPi } from "../mecha-goal/index.js";
+import {
+  createGoalControlBridge,
+  createModelControlProjection,
+  modelControlErrorCode,
+} from "./model-control-projection.js";
+import type {
+  ModelControlProjection,
+  ModelInput,
+  ModelRegistry,
+} from "./model-control-projection.js";
 export { createMailboxClient } from "./mailbox-client.js";
 export {
   appendMemoryCaptureDiagnostic,
@@ -87,7 +96,6 @@ const MAILBOX_SEND_RATE_LIMIT_COUNT = 6;
 const MAILBOX_SEND_RATE_LIMIT_WINDOW_MS = 60_000;
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const MAX_GOAL_CHARS = 4_000;
-const GOAL_CONTROL_RESPONSE_TIMEOUT_MS = 1_000;
 const GOAL_OUTCOME_KEYS = ["COMPLETED", "NOT_DONE"];
 const MAX_MEANINGFUL_ACTIVITY_IDS = 1_024;
 // These tools change Mecha/control-plane state or move messages; their successful completion
@@ -118,9 +126,6 @@ type GoalControlState = GoalProjection & {
   snoozeRefillElapsedMs: number;
   outcomeCounts: Record<string, number>;
 };
-type ModelInput = { provider?: string; id?: string; name?: string; contextWindow?: number; maxTokens?: number };
-type ModelMetadata = { provider: string; id: string; name?: string; contextWindow?: number; maxTokens?: number };
-type ModelRegistry = GoalModelRegistry & { getAvailable?: () => unknown[] };
 type SessionManager = { getBranch: () => SessionEntry[]; getSessionId: () => string; isPersisted: () => boolean; getSessionFile: () => string | undefined };
 type Ui = { setStatus: (key: string, value: string | undefined) => void; notify: (message: string, level?: string) => void };
 type PiContext = { sessionManager: SessionManager; model?: ModelInput; modelRegistry?: ModelRegistry; ui: Ui; isIdle?: () => boolean; getContextUsage?: () => ContextUsage | undefined; compact?: (options: CompactOptions) => void; abort?: () => void };
@@ -181,7 +186,6 @@ type ExternalTraceValue = Parameters<NonNullable<MailboxClientOptions["onLifecyc
 type PiTool = { name: string; label: string; description: string; parameters: object; execute: (...args: never[]) => Promise<object> };
 type PiRuntime = MessagingPi & { events: PiEvents; on(name: string, handler: (event: PiEvent, context: PiContext) => unknown): void; on(name: string, handler: GoalPi["on"] extends (event: string, handler: infer Handler) => void ? Handler : never): void; registerTool(tool: object): void; registerCommand(name: string, command: object): void; setModel?: (model: ModelInput) => Promise<boolean> | boolean; exec: (file: string, args: string[], options: { timeout: number }) => Promise<{ code: number; stderr: string }>; getSessionId?: () => string | undefined; appendEntry: GoalPi["appendEntry"] };
 type MemoryCapture = ReturnType<typeof createMemoryCaptureLifecycle>;
-type ModelSwitchOverride = { sessionId: string; model: ModelMetadata; sourceContext: PiContext | undefined; sourceModel: ModelMetadata | null };
 type RateReservation = { timestamp: number };
 type CompactionRequest = { action?: string; policy?: CompactionPolicyInput | readonly CompactionLevelInput[]; customInstructions?: string; postCompactionNotification?: string };
 type ParentMessageInput = { message?: string };
@@ -190,7 +194,6 @@ type InlineAllowanceInput = { toolName?: string; usageCount?: number };
 type RecallToolInput = { action?: string; stores?: string[] };
 type SettledToolInput = { action?: string };
 type ContextToolInput = CompactionRequest;
-type ModelControlRequestInput = { controlId: string; sourceAgentId: string; action: string; model: ModelInput | undefined };
 type ReminderReservation = { key: string; reservation: RateReservation };
 type RecallState = ReturnType<typeof createRecallState>;
 type RecallPipeline = ReturnType<typeof createPipeline>;
@@ -221,7 +224,7 @@ function isServiceRegistry(value: object | JsonValue | undefined): value is Serv
   return isRecord(value) && typeof value.get === "function";
 }
 
-function normalizeGoalProjection(value: JsonValue): GoalProjection | undefined {
+function normalizeGoalProjection(value: unknown): GoalProjection | undefined {
   if (!isRecord(value) || typeof value.enabled !== "boolean" || typeof value.goal !== "string"
     || value.goal.length > MAX_GOAL_CHARS) return undefined;
   if (!value.enabled && value.goal !== "") return undefined;
@@ -238,7 +241,7 @@ function defaultGoalControlState(): GoalControlState {
   };
 }
 
-function isGoalControlInput(value: JsonValue): value is GoalControlInput {
+function isGoalControlInput(value: unknown): value is GoalControlInput {
   return isRecord(value) && typeof value.enabled === "boolean" && typeof value.goal === "string"
     && typeof value.goalLockEnabled === "boolean" && typeof value.snoozeEnabled === "boolean"
     && typeof value.snoozeDurationMs === "number"
@@ -248,7 +251,7 @@ function isGoalControlInput(value: JsonValue): value is GoalControlInput {
     && isRecord(value.outcomeCounts);
 }
 
-function normalizeGoalControlState(value: JsonValue): GoalControlState | undefined {
+function normalizeGoalControlState(value: unknown): GoalControlState | undefined {
   if (!isGoalControlInput(value) || value.goal.length > MAX_GOAL_CHARS || (!value.enabled && value.goal !== "") || (value.enabled && value.goal.length === 0)
     || !Number.isSafeInteger(value.snoozeDurationMs) || value.snoozeDurationMs <= 0
     || (value.snoozeTurnLimit !== null && (!Number.isSafeInteger(value.snoozeTurnLimit) || value.snoozeTurnLimit < 1))
@@ -271,60 +274,6 @@ function normalizeGoalControlState(value: JsonValue): GoalControlState | undefin
 
 function cloneGoalControlState(state: GoalControlState): GoalControlState {
   return { ...state, outcomeCounts: { ...state.outcomeCounts } };
-}
-
-function boundedModelString(value: unknown, maximum: number): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim();
-  return normalized.length > 0 && [...normalized].length <= maximum ? normalized : undefined;
-}
-
-function projectModelMetadata(model: unknown): ModelMetadata | undefined {
-  if (!isRecord(model)) return undefined;
-  const provider = boundedModelString(model.provider, MAX_MODEL_PROVIDER_CHARS);
-  const id = boundedModelString(model.id, MAX_MODEL_ID_CHARS);
-  const name = boundedModelString(model.name, MAX_MODEL_NAME_CHARS);
-  const contextWindow = typeof model.contextWindow === "number" && Number.isSafeInteger(model.contextWindow) && model.contextWindow >= 0 ? model.contextWindow : undefined;
-  const maxTokens = typeof model.maxTokens === "number" && Number.isSafeInteger(model.maxTokens) && model.maxTokens >= 0 ? model.maxTokens : undefined;
-  if (provider === undefined || id === undefined) return undefined;
-  return { provider, id, ...(name === undefined ? {} : { name }), ...(contextWindow === undefined ? {} : { contextWindow }), ...(maxTokens === undefined ? {} : { maxTokens }) };
-}
-
-function isModelInput(value: unknown): value is ModelInput {
-  return isRecord(value)
-    && (value.provider === undefined || typeof value.provider === "string")
-    && (value.id === undefined || typeof value.id === "string")
-    && (value.name === undefined || typeof value.name === "string")
-    && (value.contextWindow === undefined || typeof value.contextWindow === "number")
-    && (value.maxTokens === undefined || typeof value.maxTokens === "number");
-}
-
-function availableModelsForContext(context: PiContext | undefined): unknown[] | undefined {
-  try { const available = context?.modelRegistry?.getAvailable?.(); return Array.isArray(available) ? available : undefined; } catch { return undefined; }
-}
-
-class ModelControlError extends Error {
-  code: string;
-  constructor(code: string, message: string, options: { cause?: ErrorLike } = {}) { super(message, options); this.name = "ModelControlError"; this.code = code; }
-}
-
-function readAvailableModelsForContext(context: PiContext): unknown[] {
-  const getAvailable = context.modelRegistry?.getAvailable;
-  if (typeof getAvailable !== "function") throw new ModelControlError("model_registry_unavailable", "Pi model registry is unavailable");
-  let available: unknown[];
-  try { available = getAvailable.call(context.modelRegistry); }
-  catch (error) { throw new ModelControlError("model_registry_failed", errorMessage(error), { cause: error instanceof Error ? error : undefined }); }
-  if (!Array.isArray(available)) throw new ModelControlError("model_registry_unavailable", "Pi model registry is unavailable");
-  return available;
-}
-
-function projectAvailableModels(context: PiContext): ModelMetadata[] {
-  return readAvailableModelsForContext(context).slice(0, 1_000_000).map(projectModelMetadata).filter((model): model is ModelMetadata => model !== undefined);
-}
-
-function modelProjection(context: PiContext | undefined): { current: ModelMetadata | null; available: ModelMetadata[] } {
-  const availableModels = availableModelsForContext(context);
-  return { current: projectModelMetadata(context?.model) ?? null, available: (availableModels ?? []).slice(0, MAX_MODEL_METADATA_ITEMS).map(projectModelMetadata).filter((model): model is ModelMetadata => model !== undefined) };
 }
 
 function getOwnerSubagentsService(ownerSessionId: string | undefined): SubagentService | undefined {
@@ -384,10 +333,6 @@ const INLINE_TOOL_REPLENISHMENT_INTERVAL_MS = 60_000;
 const INLINE_TOOL_BLOCK_REASON = "Top-level inline write-ish tool calls are blocked by default. Subagents are mandatory for this work. Only when genuinely necessary, use mecha_request_inline_tool_allowance to request a temporary allowance; that is an exceptional path, not the normal workaround.";
 // Keep the catalog bounded while allowing the configured Pi registry to reach
 // the UI instead of silently dropping the models after the first page.
-const MAX_MODEL_METADATA_ITEMS = 1_000;
-const MAX_MODEL_PROVIDER_CHARS = 128;
-const MAX_MODEL_ID_CHARS = 256;
-const MAX_MODEL_NAME_CHARS = 256;
 
 function normalizeInlineToolName(toolName: string): InlineToolName {
   if (typeof toolName !== "string" || toolName.trim().length === 0) throw new TypeError("toolName must be a non-empty string");
@@ -621,6 +566,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   let coordinator: DeliveryCoordinator | undefined;
   let parentAgentId: string | undefined;
   let parentActivityContext: PiContext | undefined;
+  let modelControlProjection: ModelControlProjection | undefined;
   let goalProjection: GoalProjection | undefined;
   let goalProjectionReceived = false;
   let meaningfulActivityRevision = 0;
@@ -688,76 +634,18 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       return false;
     }
   };
-  const safeGoalControlRejection = (errorCode = "unavailable"): GoalControlResult => ({
-    accepted: false,
-    errorCode,
-    goalState: cloneGoalControlState(goalControlState),
-  });
-  const normalizeGoalControlResult = (result: JsonValue): GoalControlResult => {
-    if (result === null || typeof result !== "object" || Array.isArray(result) || typeof result.accepted !== "boolean") {
-      return safeGoalControlRejection("malformed_response");
-    }
-    if (result.accepted === true && result.goalState === undefined) {
-      return safeGoalControlRejection("malformed_response");
-    }
-    const responseState = result.goalState === undefined
-      ? cloneGoalControlState(goalControlState)
-      : normalizeGoalControlState(result.goalState);
-    if (responseState === undefined) return safeGoalControlRejection("malformed_response");
-    goalControlState = responseState;
-    publishGoalState();
-    return {
-      accepted: result.accepted,
-      ...(typeof result.errorCode === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(result.errorCode)
-        ? { errorCode: result.errorCode }
-        : {}),
-      goalState: cloneGoalControlState(responseState),
-    };
-  };
   const handleReminderLockControl = async (control: ExternalReminderControl) => reminderLock.control(control);
-  const handleGoalControl = async (control: ExternalGoalControl): Promise<GoalControlResult> => {
-    const request = isRecord(control)
-      ? {
-        correlationId: control.correlationId ?? control.controlId,
-        controlId: control.controlId,
-        sourceAgentId: control.sourceAgentId,
-        targetInstanceId: control.targetInstanceId ?? control.instanceId,
-        revision: control.revision,
-        action: control.action,
-        goal: control.goal,
-        settings: control.settings,
-        context: parentActivityContext,
-      }
-      : undefined;
-    if (request?.controlId === undefined || request?.targetInstanceId === undefined) {
-      return safeGoalControlRejection("invalid_control");
-    }
-    let timer;
-    let response;
-    let responded = false;
-    let resolveResponse: (value: JsonValue | undefined) => void = () => {};
-      const responsePromise = new Promise<JsonValue | undefined>((resolve) => { resolveResponse = resolve; });
-    const respond = (value: JsonValue | undefined) => {
-      if (responded) return;
-      responded = true;
-      resolveResponse(value);
-    };
-    try {
-      pi.events?.emit?.(GOAL_CONTROL_REQUEST_EVENT, { ...request, respond });
-    } catch {
-      return safeGoalControlRejection("unavailable");
-    }
-    if (!responded) {
-      timer = setTimeoutImpl(() => respond(undefined), GOAL_CONTROL_RESPONSE_TIMEOUT_MS);
-      timer?.unref?.();
-      response = await responsePromise;
-      clearTimeoutImpl(timer);
-    } else {
-      response = await responsePromise;
-    }
-    if (!responded || response === undefined) return safeGoalControlRejection("unavailable");
-    return normalizeGoalControlResult(response);
-  };
+  const handleGoalControl = createGoalControlBridge<GoalControlState>({
+    emit: (event, value) => { pi.events?.emit?.(event, value); },
+    getContext: () => parentActivityContext,
+    getState: () => goalControlState,
+    normalizeState: (value) => normalizeGoalControlState(value),
+    setState: (state) => { goalControlState = state; },
+    publish: () => { publishGoalState(); },
+    cloneState: cloneGoalControlState,
+    setTimeoutImpl,
+    clearTimeoutImpl,
+  });
   pi.events?.on?.(GOAL_STATE_EVENT, receiveGoalProjection);
   pi.events?.on?.(GOAL_CONTROL_STATE_EVENT, receiveGoalControlState);
   try { pi.events?.emit?.(GOAL_STATE_REQUEST_EVENT); } catch { /* optional goal bridge is best-effort */ }
@@ -787,11 +675,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   });
   let settledNotificationAgentId: string | undefined;
   let settledNotificationPending = false;
-  // Extension event contexts expose the model as a read-only snapshot. Keep a
-  // short-lived per-session override so a successful remote switch is
-  // published immediately even if the next event has not supplied a fresh
-  // context snapshot yet.
-  let modelSwitchOverride: ModelSwitchOverride | undefined;
   let settledNotificationRecipient: string | undefined;
   let settledNotificationEnabled = false;
   let initialCompactionPolicy: CompactionPolicy;
@@ -800,7 +683,10 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   let compaction: CompactionOrchestration | undefined;
 
   function rememberParentActivityContext(context: PiContext | undefined) {
-    if (context !== undefined) parentActivityContext = context;
+    if (context !== undefined) {
+      parentActivityContext = context;
+      modelControlProjection?.onContext(context);
+    }
   }
 
   function isPiContext(context: ActivityContext | undefined): context is PiContext {
@@ -817,41 +703,6 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
 
   function contextSessionId(context: PiContext | undefined): string | undefined {
     return context?.sessionManager?.getSessionId?.();
-  }
-
-  function effectiveModelProjection(context: PiContext | undefined) {
-    const projection = modelProjection(context);
-    const sessionId = contextSessionId(context);
-    if (modelSwitchOverride?.sessionId !== undefined
-      && modelSwitchOverride.sessionId === sessionId
-      && modelSwitchOverride.model !== undefined) {
-      const contextChanged = context !== modelSwitchOverride.sourceContext;
-      const reflected = sameModelIdentity(projection.current, modelSwitchOverride.model);
-      const locallyChanged = !sameModelIdentity(projection.current, modelSwitchOverride.sourceModel);
-      if (contextChanged || reflected || locallyChanged) {
-        modelSwitchOverride = undefined;
-        return projection;
-      }
-      return { ...projection, current: modelSwitchOverride.model };
-    }
-    return projection;
-  }
-
-  function sameModelIdentity(left: ModelMetadata | null | undefined, right: ModelMetadata | null | undefined) {
-    return left?.provider === right?.provider && left?.id === right?.id;
-  }
-
-  function rememberSuccessfulModelSwitch(context: PiContext, model: ModelInput) {
-    const projected = projectModelMetadata(model);
-    const sessionId = contextSessionId(context);
-    if (projected !== undefined && sessionId !== undefined) {
-      modelSwitchOverride = {
-        sessionId,
-        model: projected,
-        sourceContext: context,
-        sourceModel: modelProjection(context).current,
-      };
-    }
   }
 
   function createMailboxCoordinator(context: PiContext, mailboxClient: MailboxClient) {
@@ -879,7 +730,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     getParentContext: () => parentActivityContext,
     isCompacting: () => compaction?.isMailboxPaused() ?? false,
     getGoalProjection: () => goalProjectionReceived ? goalProjection : undefined,
-    getCurrentModel: () => effectiveModelProjection(parentActivityContext).current ?? undefined,
+    getCurrentModel: () => modelControlProjection?.current() ?? undefined,
     getNativeService: (ownerSessionId) => currentSubagentsServiceAccessor?.(ownerSessionId),
     notify: (message, level) => { parentActivityContext?.ui?.notify?.(message, level); },
     trace: traceNativeSubagent,
@@ -892,6 +743,14 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     setIntervalImpl,
     clearIntervalImpl,
     nowImpl,
+  });
+  modelControlProjection = createModelControlProjection({
+    getParentContext: () => parentActivityContext,
+    setModel: (model) => pi.setModel?.call(pi, model) ?? false,
+    isModelSwitchAvailable: () => typeof pi.setModel === "function",
+    refresh: (context) => activityLifecycle.refresh(context),
+    trace: traceNativeSubagent,
+    getCurrentModel: (context) => context?.model,
   });
   compaction = createCompactionOrchestration({
     getClient: () => client === undefined ? undefined : {},
@@ -954,141 +813,10 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       : client;
   }
 
-  function modelSelector(input: ModelInput): { provider: string; id: string } {
-    if (input === null || typeof input !== "object" || Array.isArray(input)
-      || Object.keys(input).some((key) => !["provider", "id", "name"].includes(key))) {
-      throw new ModelControlError("invalid_model", "model provider and id are required");
-    }
-    const provider = typeof input.provider === "string" ? input.provider.trim() : "";
-    const id = typeof input.id === "string" ? input.id.trim() : "";
-    if (provider.length === 0 || [...provider].length > MAX_MODEL_PROVIDER_CHARS
-      || id.length === 0 || [...id].length > MAX_MODEL_ID_CHARS) {
-      throw new ModelControlError(
-        "invalid_model",
-        `model provider and id must be non-empty strings of at most ${MAX_MODEL_PROVIDER_CHARS} and ${MAX_MODEL_ID_CHARS} characters`,
-      );
-    }
-    return { provider, id };
-  }
-
-  async function switchPiModel(input: ModelInput, context: PiContext): Promise<ModelInput> {
-    const requested = modelSelector(input);
-    const before = effectiveModelProjection(context);
-    const nativeBefore = modelProjection(context);
-    traceNativeSubagent("extension_model_switch_started", {
-      requested_provider: requested.provider,
-      requested_model_id: requested.id,
-      ...(before.current?.provider === undefined ? {} : { current_provider: before.current.provider }),
-      ...(before.current?.id === undefined ? {} : { current_model_id: before.current.id }),
-    });
-    if (typeof pi.setModel !== "function") {
-      throw new ModelControlError("model_switch_unavailable", "Pi model switching is unavailable");
-    }
-    const availableModels = readAvailableModelsForContext(context);
-    traceNativeSubagent("extension_model_registry_read", {
-      requested_provider: requested.provider,
-      requested_model_id: requested.id,
-      available_count: availableModels.length,
-    });
-    const selectedModel = availableModels.find((candidate): candidate is ModelInput => {
-      if (!isModelInput(candidate)) return false;
-      const projected = projectModelMetadata(candidate);
-      return projected?.provider === requested.provider && projected?.id === requested.id;
-    });
-    if (selectedModel === undefined) {
-      throw new ModelControlError("model_unavailable", `Model ${requested.provider}/${requested.id} is not available`);
-    }
-    let switched;
-    try {
-      switched = await pi.setModel(selectedModel);
-    } catch (error) {
-      const after = modelProjection(context);
-      if (!sameModelIdentity(nativeBefore.current, projectModelMetadata(selectedModel))
-        && sameModelIdentity(after.current, projectModelMetadata(selectedModel))) {
-        traceNativeSubagent("extension_model_set_result", {
-          requested_provider: requested.provider,
-          requested_model_id: requested.id,
-          switched: true,
-          mutation_before_throw: true,
-        });
-        return selectedModel;
-      }
-      throw error;
-    }
-    traceNativeSubagent("extension_model_set_result", {
-      requested_provider: requested.provider,
-      requested_model_id: requested.id,
-      switched: switched === true,
-    });
-    if (switched !== true) {
-      throw new ModelControlError("model_switch_rejected", `Pi rejected model ${requested.provider}/${requested.id}`);
-    }
-    return selectedModel;
-  }
-
-  function modelControlErrorCode<T>(error: T) {
-    return [
-      "invalid_model",
-      "unsupported_model_control",
-      "model_registry_unavailable",
-      "model_registry_failed",
-      "model_unavailable",
-      "model_switch_unavailable",
-      "model_switch_rejected",
-    ].includes(errorCode(error) ?? "") ? errorCode(error) : "model_switch_failed";
-  }
-
-  async function performModelControl({ controlId, sourceAgentId, action, model }: ModelControlRequestInput) {
-    traceNativeSubagent("extension_model_control_entered", {
-      control_id: controlId,
-      source_agent_id: sourceAgentId,
-      action,
-      ...(model?.provider === undefined ? {} : { requested_provider: model.provider }),
-      ...(model?.id === undefined ? {} : { requested_model_id: model.id }),
-      available: parentActivityContext !== undefined,
-    });
-    try {
-      if (action !== "set_model") {
-        throw new ModelControlError("unsupported_model_control", "unsupported model control action");
-      }
-      if (parentActivityContext === undefined) throw new ModelControlError("model_switch_unavailable", "Pi model switching is unavailable");
-      const switchedModel = await switchPiModel(model ?? {}, parentActivityContext);
-      rememberSuccessfulModelSwitch(parentActivityContext, switchedModel);
-      activityLifecycle.refresh(parentActivityContext);
-      const projection = effectiveModelProjection(parentActivityContext);
-      traceNativeSubagent("extension_model_control_completed", {
-        control_id: controlId,
-        source_agent_id: sourceAgentId,
-        accepted: true,
-        ...(projection.current?.provider === undefined ? {} : { current_provider: projection.current.provider }),
-        ...(projection.current?.id === undefined ? {} : { current_model_id: projection.current.id }),
-      });
-      return {
-        accepted: true,
-        currentModel: projection.current,
-      };
-    } catch (error) {
-      const projection = effectiveModelProjection(parentActivityContext);
-      traceNativeSubagent("extension_model_control_completed", {
-        control_id: controlId,
-        source_agent_id: sourceAgentId,
-        accepted: false,
-        error_code: modelControlErrorCode(error),
-        error_name: errorName(error),
-        ...(projection.current?.provider === undefined ? {} : { current_provider: projection.current.provider }),
-        ...(projection.current?.id === undefined ? {} : { current_model_id: projection.current.id }),
-      });
-      return {
-        accepted: false,
-        errorCode: modelControlErrorCode(error),
-        currentModel: projection.current,
-      };
-    }
-  }
-
-  function handleModelControl(control: { controlId: string; sourceAgentId: string; action: string; model: ModelInput | undefined }) {
-    return performModelControl(control);
-  }
+  const handleModelControl = (control: { controlId: string; sourceAgentId: string; action: string; model: ModelInput | undefined }) => {
+    if (modelControlProjection === undefined) throw new Error("model control is not initialized");
+    return modelControlProjection.handleControl(control);
+  };
 
   pi.registerTool({
     name: "mecha_parent_message",
@@ -1516,7 +1244,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     }
     mailboxSendRateLimits.clear();
     reminderLock.clear();
-    modelSwitchOverride = undefined;
+    modelControlProjection?.reset();
     // Keep allowance state across agent runs; a parent session owns one pool for its lifetime.
     inlineToolPolicy.reset();
     mailboxSendRateLimits.clear();
@@ -1579,8 +1307,8 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         getGoalState: () => cloneGoalControlState(goalControlState),
         getModelCatalog: () => {
           try {
-            if (parentActivityContext === undefined) throw new Error("Pi context is unavailable");
-            return projectAvailableModels(parentActivityContext);
+            if (modelControlProjection === undefined) throw new Error("model control is not initialized");
+            return modelControlProjection.catalog();
           } catch (error) {
             traceNativeSubagent("extension_model_catalog_read_failed", {
               error_code: modelControlErrorCode(error),
@@ -1589,7 +1317,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
             throw error;
           }
         },
-        getCurrentModel: () => effectiveModelProjection(parentActivityContext).current,
+        getCurrentModel: () => modelControlProjection?.current() ?? null,
         onLifecycleReady: (value) => { if (isRecord(value)) traceNativeSubagent("extension_client_lifecycle_ready", { router_version: value.routerVersion, reconnect: value.reconnect }); },
         onLifecycleTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
         kickstart: async () => {
