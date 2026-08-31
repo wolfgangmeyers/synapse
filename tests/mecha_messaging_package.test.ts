@@ -100,6 +100,7 @@ test("the Messaging package dependency graph stays within Messaging and extracte
     "mailbox-client.js",
     "mailbox-client.ts",
     "memory-capture.ts",
+    "model-control-projection.ts",
     "operational-tools.ts",
     "recall-controller.ts",
     "recall-evaluator.ts",
