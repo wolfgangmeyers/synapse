@@ -4,15 +4,15 @@
   "templates": [
     {
       "name": "PR Review",
-      "body": "Review the PR at ${URL}. Use the PR skill. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 2-3 focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.",
-      "id": "01231aba-fe0a-4fca-99fe-267bd96421cd",
-      "updated_at": "2026-08-29T04:01:45.060Z"
+      "body": "Review the PR at ${URL}. Use the PR skill. If you have previously reviewed the PR, take into account all previous comments and their replies. First decide which focus areas apply to the PR - for each focus area that you skip, it must be justified. A reviewer should review 2-3 focus areas. Each reviewer must be a different subagent, and needs to be assigned a reviewer persona - just point the subagent to the persona to load as its identity before reviewing. Make sure to map reviewers to matching focus areas. Feedback from each reviewer must be validated by a different reviewer with a different persona. Multiple reviewers with the same persona can be created. Approve the PR unless there is a good reason not to. Comment only if you don't think it should be approved, be clear why.",
+      "id": "e7125012-691c-4e9a-ad74-505004dbba49",
+      "updated_at": "2026-08-29T02:14:29.936Z"
     },
     {
       "name": "Subagent guidance",
-      "body": "Important: Subagent Guidance\n\nUse subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. Do not abuse the inline tool allowance, or it will be disabled.\n\nAlso please set a 15 minute recurring reminder with the subagent guidance. Don't delete any existing reminders, just start this one up.",
-      "id": "ab33b08c-2a0d-405b-87fa-b2f033f88775",
-      "updated_at": "2026-08-30T18:32:59.420Z"
+      "body": "Use subagents for your work. These should be general purpose subagents, not \"explore\" subagents. When doing research or implementing, plan out your work in a way so that you can break it up into manageable steps, and then delegate each of those steps to a subagent. This keeps your context from bloating and is very important to reduce costs and compactions. It also keeps you responsive to any coordination while the tasks are running in the background. Do not abuse the inline tool allowance, or it will be disabled.",
+      "id": "3dcefc43-fe77-435c-975e-98b324171962",
+      "updated_at": "2026-08-29T02:14:29.941Z"
     },
     {
       "name": "Set Goal",
