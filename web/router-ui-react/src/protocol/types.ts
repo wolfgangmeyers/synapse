@@ -563,6 +563,12 @@ export interface ConversationMessageFrame {
   message: ConversationMessage;
 }
 
+export interface RemindersChangedFrame {
+  version: "v1";
+  frame_id: FrameId;
+  type: "reminders_changed";
+}
+
 export interface AgentGoalStateFrame {
   version: "v1";
   frame_id: FrameId;
@@ -687,6 +693,7 @@ export type ServerFrame =
   | PongFrame
   | MessageFrame
   | ConversationMessageFrame
+  | RemindersChangedFrame
   | ModelControlForwardFrame
   | ModelControlResultFrame
   | GoalControlForwardFrame

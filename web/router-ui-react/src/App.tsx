@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type Dispatch, type FormEvent, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactElement } from "react";
 import "./app.css";
 import { createInitialState, type AppState } from "./state/app-state";
 import { selectAgent, selectArrival, selectMessages, selectModels } from "./state/selectors";
@@ -7,7 +7,6 @@ import { normalizeModelSummary } from "./domain/models";
 import { mergeMessages, pendingMessage, reconcileHistoryMessages, settlePendingMessages, type HistoryMessage } from "./domain/history";
 import { normalizeRouterUrl, persistedActiveRouter, createSettingsRepository, setActiveRouter, setAgentId, setRouterAlias, LEGACY_AGENT_ID_KEY, setSelectedPeer as persistSelectedPeer, selectedPeerFor, removeRouter as removeSavedRouter, type SettingsState, type StorageAdapter } from "./persistence/settings-repository";
 import { type RouterTransport, type RouterTransportOptions } from "./transport/router-transport";
-import type { AppAction } from "./state/reducer";
 import { isRecord } from "./protocol/guards";
 import { useRouterSession } from "./hooks/use-router-session";
 import { useAgentReconciliation } from "./hooks/use-agent-reconciliation";
@@ -233,12 +232,13 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
   }, [historyRepository, scope, session.dispatch]);
   useEffect(() => {
     if (session.state.connection !== "connected") return;
-    void session.transport.http.reminders().then((result) => session.dispatch({ type: "reminders/set", scope, reminders: result.reminders })).catch((cause: unknown) => setReminderStatus(cause instanceof Error ? cause.message : "Reminders could not be loaded."));
+    void session.transport.refreshReminders().catch((cause: unknown) => setReminderStatus(cause instanceof Error ? cause.message : "Reminders could not be loaded."));
     void refreshTemplates().catch(() => undefined);
   }, [scope, session.state.connection, session.transport, session.dispatch]);
   useEffect(() => {
     const unsubscribe = session.transport.subscribe((event) => {
       if (event.type === "status") { if (event.status !== "connected") setGoalControlAvailable(false); return; }
+      if (event.type === "reminders") { session.dispatch({ type: "reminders/set", scope, reminders: event.reminders }); return; }
       if (event.type === "capabilities") { setGoalControlAvailable(event.goalControlAvailable); return; }
       if (event.type === "control-error") {
         if (event.pending.kind === "goal") {
@@ -330,7 +330,7 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
     session.dispatch({ type: "reminders/set", scope, reminders: [...sessionStateRef.current.reminders, result.reminder] });
     let refreshed = false;
     try {
-      await refreshReminders(session.transport, scope, session.dispatch);
+      await refreshReminders(session.transport);
       refreshed = true;
     } catch {
       setReminderStatus("Reminder created, but the list could not be refreshed.");
@@ -351,14 +351,14 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
     try {
       const result = await session.transport.http.updateReminder(id, payload);
       session.dispatch({ type: "reminders/set", scope, reminders: sessionStateRef.current.reminders.map((reminder) => reminder.id === id ? result.reminder : reminder) });
-      try { await refreshReminders(session.transport, scope, session.dispatch); } catch { setReminderStatus("Reminder updated, but the list could not be refreshed."); }
+      try { await refreshReminders(session.transport); } catch { setReminderStatus("Reminder updated, but the list could not be refreshed."); }
     } catch (cause) { setReminderStatus(cause instanceof Error ? cause.message : "Reminder could not be updated."); }
   };
   const deleteReminder = async (id: string): Promise<void> => {
     try {
       await session.transport.http.deleteReminder(id);
       session.dispatch({ type: "reminders/set", scope, reminders: sessionStateRef.current.reminders.filter((reminder) => reminder.id !== id) });
-      try { await refreshReminders(session.transport, scope, session.dispatch); } catch { setReminderStatus("Reminder deleted, but the list could not be refreshed."); }
+      try { await refreshReminders(session.transport); } catch { setReminderStatus("Reminder deleted, but the list could not be refreshed."); }
     } catch (cause) { setReminderStatus(cause instanceof Error ? cause.message : "Reminder could not be deleted."); }
   };
   const lockReminder = (reminder: Reminder, action: ReminderLockAction): void => {
@@ -420,7 +420,7 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
   </>;
 }
 
-async function refreshReminders(transport: RouterTransport, scope: { routerUrl: string; agentId: string }, dispatch: Dispatch<AppAction>): Promise<void> { const result = await transport.http.reminders(); dispatch({ type: "reminders/set", scope, reminders: result.reminders }); }
+async function refreshReminders(transport: RouterTransport): Promise<void> { await transport.refreshReminders(); }
 
 export default App;
 export { AppShell } from "./components/AppShell";

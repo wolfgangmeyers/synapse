@@ -50,6 +50,17 @@ describe("protocol guards", () => {
     expect(isEnvelope({ ...validEnvelope, unexpected: true })).toBe(false);
   });
 
+  it("accepts a valid reminders_changed server frame", () => {
+    const frame = {
+      version: "v1",
+      frame_id: "reminders-changed-1",
+      type: "reminders_changed",
+    };
+
+    expect(isServerFrame(frame)).toBe(true);
+    expect(parseServerFrame(frame).ok).toBe(true);
+  });
+
   it("rejects malformed IDs, timestamps, nulls, and unpaired surrogates", () => {
     expect(isEnvelope({ ...validEnvelope, id: "bad id" })).toBe(false);
     expect(isEnvelope({ ...validEnvelope, created_at: "2026-08-30T12:00:00Z" })).toBe(false);

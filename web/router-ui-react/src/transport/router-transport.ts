@@ -2,6 +2,7 @@ import { buildAckFrame, buildActivityFrame, buildGoalControlFrame, buildInjectio
 import { isDeliveryItem, isRecord } from "../protocol/guards";
 import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
+import type { Reminder } from "../domain/reminders";
 import type { ModelSummary } from "../domain/models";
 import type { GoalControlSettings } from "../domain/goals";
 import type { RouterHttpClient } from "./http-client";
@@ -69,6 +70,7 @@ export type TransportEvent =
   | { type: "frame"; frame: ServerFrame; identity: WebSocketIdentity }
   | { type: "agents"; agents: Agent[]; generatedAt?: string; activitySnapshotVersion?: number }
   | { type: "conversation"; message: HistoryMessage }
+  | { type: "reminders"; reminders: Reminder[] }
   | { type: "delivery"; message: HistoryMessage; messages: HistoryMessage[]; receipt: DeliveryReceiptPayload }
   | { type: "capabilities"; goalControlAvailable: boolean }
   | { type: "control-pending"; pending: PendingControl }
@@ -97,6 +99,7 @@ export interface RouterTransport {
   connect(): void;
   close(): void;
   refreshAgents(): Promise<void>;
+  refreshReminders(): Promise<void>;
   conversation(owner: string, peer: string): Promise<{ owner: string; peer: string; high_water_sequence: number; messages: HistoryMessage[] }>;
   sendMessage(message: unknown): Promise<Record<string, unknown>>;
   sendActivity(activityState: "active" | "settled" | "compacting", details?: Pick<Agent, "subagent_count" | "subagents" | "goal" | "current_model">): boolean;
@@ -112,7 +115,7 @@ function controlFor(kind: ControlKind, id: string, targetAgentId: string, target
 export function createRouterTransport(options: RouterTransportOptions): RouterTransport {
   const http = createHttpClient(options.routerUrl, options.fetchImpl);
   const listeners = new Set<TransportListener>(); const controls = createControlRegistry(); const lifecycle = createLifecycleTracker();
-  let refreshGeneration = 0; let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let refreshGeneration = 0; let remindersRefreshGeneration = 0; let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let goalControlAvailable = false;
   let controlTimeoutMs = 30_000;
   const controlTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -169,6 +172,10 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); void refreshAgents(); return; }
     if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state") { void refreshAgents(); return; }
     if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); void refreshAgents(); return; }
+    if (frame.type === "reminders_changed") {
+      void refreshReminders();
+      return;
+    }
     if (frame.type === "message") {
       try {
         const prepared = prepareDelivery(frame);
@@ -199,6 +206,13 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     if (frame.type === "subagent_state_update") { if (lifecycle.accept(frame.router_version, "update")) emit({ type: "frame", frame, identity }); return; }
     if (frame.type === "subagent_state_replay") { if (lifecycle.accept(frame.router_version, "replay")) emit({ type: "frame", frame, identity }); }
   };
+  const refreshReminders = async (): Promise<void> => {
+    const generation = ++remindersRefreshGeneration;
+    const connectionGeneration = socket.identity.generation;
+    const result = await http.reminders();
+    if (generation !== remindersRefreshGeneration || socket.identity.generation !== connectionGeneration || !socket.registered) return;
+    emit({ type: "reminders", reminders: result.reminders });
+  };
   const invalidateControls = (): void => { const invalidated = controls.invalidate(); for (const timer of controlTimers.values()) clearTimeout(timer); controlTimers.clear(); if (invalidated.length > 0) emit({ type: "controls-invalidated", reason: "router_reconnecting" }); };
   const socketOptions: WebSocketClientOptions = { routerUrl: options.routerUrl, ...(options.agentId === undefined ? {} : { agentId: options.agentId }), ...(options.defaultAgentId === undefined ? {} : { defaultAgentId: options.defaultAgentId }), ...(options.storage === undefined ? {} : { storage: options.storage }), ...(options.webSocketFactory === undefined ? {} : { webSocketFactory: options.webSocketFactory }), ...(options.autoReconnect === undefined ? {} : { autoReconnect: options.autoReconnect }), onStatus: (status, identity) => { if (status !== "connected") { invalidateControls(); if (goalControlAvailable) { goalControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false }); } } emit({ type: "status", status, identity }); }, onFrame, onProtocolError: (error) => emit({ type: "error", error }), onInvalidate: () => { invalidateControls(); if (goalControlAvailable) { goalControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false }); } } };
   const socket = createWebSocketClient(socketOptions);
@@ -219,6 +233,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     connect: socket.connect,
     close() { clearInterval(refreshTimer); refreshGeneration += 1; goalControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
+    refreshReminders,
     conversation: (owner, peer) => http.conversations(owner, peer),
     async sendMessage(message) { const result = await http.sendMessage(message); void refreshAgents(); return result; },
     sendActivity(activityState, details = {}) { if (!socket.registered) return false; return socket.send(buildActivityFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, activityState, ...details })); },

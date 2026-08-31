@@ -25,7 +25,7 @@ export const clientFrameNames = [
 ] as const satisfies readonly string[];
 
 export const serverFrameNames = [
-  "registered", "lease_rejected", "error", "pong", "message", "conversation_message",
+  "registered", "lease_rejected", "error", "pong", "message", "conversation_message", "reminders_changed",
   "model_control", "model_control_result", "goal_control", "goal_control_result",
   "reminder_lock_control", "reminder_lock_control_result", "agent_goal_state", "delivery_acknowledged",
   "agent_activity", "agent_model_catalog", "message_arrival", "subagent_state_snapshot",

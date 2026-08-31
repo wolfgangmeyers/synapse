@@ -220,6 +220,35 @@ func registerTestSession(t *testing.T, wsURL, agentID, instanceID, conversationS
 	return conn, readJSON(t, conn)
 }
 
+func TestPostReminderBroadcastsLiveInvalidation(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+	subscriber, _ := registerTestSession(t, wsURL, "reminder-subscriber", "instance", "v1")
+	defer subscriber.Close(websocket.StatusNormalClosure, "test done")
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	payload := []byte(`{"id":"live-reminder","target":"reminder-target","creator":"creator","body":"body","created_at":"2026-08-29T12:00:00.000Z","next_due_at":"2026-08-29T12:01:00.000Z"}`)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/reminders", bytesReader(payload))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	response.Body.Close()
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+
+	invalidation := readJSON(t, subscriber)
+	require.Equal(t, "v1", invalidation["version"])
+	require.NotEmpty(t, invalidation["frame_id"])
+	require.Equal(t, "reminders_changed", invalidation["type"])
+}
+
 func TestLiveProjectionsOnlyReachNodeProjectedRecipients(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))

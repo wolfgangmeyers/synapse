@@ -906,6 +906,16 @@
         "message": { "$ref": "#/$defs/conversationMessage" }
       }
     },
+    "remindersChangedFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "frame_id", "type"],
+      "properties": {
+        "version": { "const": "v1" },
+        "frame_id": { "$ref": "#/$defs/frameId" },
+        "type": { "const": "reminders_changed" }
+      }
+    },
     "agentActivityFrame": {
       "type": "object",
       "additionalProperties": false,
@@ -1021,6 +1031,7 @@
         { "$ref": "#/$defs/pongFrame" },
         { "$ref": "#/$defs/messageFrame" },
         { "$ref": "#/$defs/conversationMessageFrame" },
+        { "$ref": "#/$defs/remindersChangedFrame" },
         { "$ref": "#/$defs/modelControlForwardFrame" },
         { "$ref": "#/$defs/modelControlResultFrame" },
         { "$ref": "#/$defs/goalControlForwardFrame" },
