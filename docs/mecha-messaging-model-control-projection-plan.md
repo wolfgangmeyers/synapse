@@ -2,7 +2,7 @@
 
 ## Status and baseline
 
-Implementation status: complete. The extraction and focused regression tests are in place. This document records the implementation scope and validation plan; it does not cover service startup, commits, or pushes.
+Implementation status: implemented atop commit `fa184bec3beb188e54dda5ae2184cee29b2f37db`. The current correction covers an asynchronous `setModel` rejection after the active context changes, with a direct regression test. Final validation and independent review remain pending until this correction closes. This document records the implementation scope and validation plan; it does not claim final approval, a final commit, a push, service startup, E2E, mutation testing, or review.
 
 The exact implementation baseline is commit `3c9bfb53a3112d0fd4a7a42ba835dc484021de91`. The target is `pi-extensions/mecha-messaging/index.ts`. The baseline source, existing tests, and established seam map are authoritative. Use a clean isolated copy of this commit for differential work. Preserve unrelated dirty and untracked files in the checkout.
 
@@ -55,6 +55,7 @@ These rules are acceptance criteria for a behavior-preserving move:
 - An unprojectable current model is `null`. Do not substitute a registry item or retain stale optimistic data.
 - Validate the requested provider and ID against the available registry before calling `pi.setModel`. Preserve the existing invalid-input, unavailable-registry, unavailable-model, rejected-switch, and failed-switch error codes.
 - Capture the native current identity immediately before `setModel`. If `setModel` throws, accept the switch only when that pre-call identity differs from the requested identity and the post-call native provider and ID both match the request. Otherwise retain the failure result.
+- If an asynchronous `setModel` failure arrives after the active context changes, return the current active context's model in the failure result, matching the baseline catch behavior.
 - A successful switch may use the short-lived override until a fresh Pi context arrives. Clear it when the context changes, when the native projection reflects the requested model, or when the model changes locally. It must not become permanent optimistic state.
 - For an accepted switch, the order is activity refresh, forced catalog publication, then model-control wire-result serialization and send. Preserve this order even when the returned result is normalized at the client boundary.
 - Goal request and transition validation remains in `mecha-goal`; wire correlation fencing remains in mailbox/router; the Messaging bridge only performs its stated untyped-result normalization and cached-state fallback.
@@ -81,4 +82,4 @@ Do not change `mailbox-client.ts`, generated JavaScript, `mecha-goal`, protocol/
 
 4. **Quality gates.** Run the explicit standalone and Goal-bridge tests, focused tests, changed-source coverage, mutation checks, package typecheck and lint, the complete Mecha Messaging test command, export/package-file checks, and the repository's full validation command. Mutation checks must invert representative assertions and prove the focused suite fails before restoration. Run Robot Review plus supervisor review, validate findings, and resolve every real finding before readiness.
 
-5. **Completion record.** Update the roadmap with the final commit, exact validation results, differential allowlist, installed-Pi runtime identity, and rejected review findings. Push only the scoped implementation after required review and validation gates. The present task does none of those implementation actions.
+5. **Completion record.** Update the roadmap with the final commit, exact validation results, differential allowlist, installed-Pi runtime identity, and rejected review findings. Push only the scoped implementation after required review and validation gates. This correction task records focused test evidence but does not perform the final commit or push, installed-Pi E2E, mutation testing, or independent review.
