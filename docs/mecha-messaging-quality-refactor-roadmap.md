@@ -158,7 +158,11 @@ Typecheck, Mecha Messaging lint, and `git diff --check` passed. A 29-mutation pr
 
 ### 3. Diagnostics and history sanitation
 
-**Scope.** Extract the bounded JSONL diagnostic writers, native trace field filtering, malformed tool-call quarantine, orphan tool-result quarantine, and their context-event adapters. Keep the context hook in `index.ts` until the extracted module has a clear return contract.
+**Status and evidence.** The extraction is complete in this committed slice. `diagnostics-history.ts` now owns the sanitation adapter and bounded diagnostic writers. The root calls `sanitizeContextHistory`, keeps Pi's malformed-filtered `event.messages` assignment, and passes the final orphan-filtered list to provider work. The differential fixture records the orphan-file visibility at assignment, so moving the orphan writer ahead of assignment fails.
+
+The focused direct suite passed 15 tests with 100 percent lines, functions, statements, and branches in `/tmp/mecha-diagnostics-history-coverage/coverage-summary.json`. The differential suite passed 2 tests. The focused package run passed 209 tests, including the installed-Pi E2E with `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` `0.84.3`. The full Mecha Messaging run passed 451 tests with 3 unrelated installed-Pi compaction skips. Typecheck, lint, generated-client drift, and `git diff --check` passed. A temporary, uncommitted mutation proof killed all 40 direct/root mutations and restored both source files after every mutation; the complete sets and restored hashes are recorded in `docs/mecha-messaging-diagnostics-history-sanitization-plan.md`.
+
+**Scope.** Extract the bounded JSONL diagnostic writers, native trace field filtering, malformed tool-call quarantine, orphan tool-result quarantine, and their context-event adapters. Keep the context hook in `index.ts` as the Pi composition root.
 
 **Behavior and contracts to preserve.**
 

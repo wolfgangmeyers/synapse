@@ -577,6 +577,66 @@ test("errored assistant tool calls do not make following tool results safe", () 
   assert.equal(result.orphaned[0].nearestAssistantStopReason, "error");
 });
 
+test("context hook applies the sanitation adapter in two passes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-context-adapter-"));
+  const path = join(directory, "orphan-tool-results.jsonl");
+  const previousPath = process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH;
+  process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH = path;
+  const handlers = new Map();
+  const notices = [];
+  const traces = [];
+  const pi = {
+    events: new EventEmitter(),
+    on(event, handler) { handlers.set(event, handler); },
+    registerTool() {},
+    registerCommand() {},
+    sendMessage() {},
+  };
+  createMechaMessagingExtension(pi, {
+    createClient: () => ({ connect: async () => {}, close: () => {} }),
+    nativeSubagentTrace: { enabled: true, record: (event, fields) => { traces.push({ event, fields }); return true; } },
+  });
+  const validCall = { type: "toolCall", id: "call-valid", name: "bash", arguments: {} };
+  const malformedCall = { type: "toolCall", id: "call-malformed", name: "bad name", arguments: {} };
+  const assistant = { role: "assistant", content: [validCall, malformedCall] };
+  const malformedResult = { role: "toolResult", toolCallId: "call-malformed", toolName: "bash", content: [] };
+  const validResult = { role: "toolResult", toolCallId: "call-valid", toolName: "bash", content: [] };
+  const event = { messages: [assistant, malformedResult, validResult] };
+
+  try {
+    const result = handlers.get("context")(
+      event,
+      {
+        sessionManager: { getSessionId: () => "session-adapter", getSessionFile: () => "/tmp/session-adapter.jsonl" },
+        model: "openai-codex/gpt-5.5",
+        ui: { notify: (...args) => notices.push(args) },
+      },
+    );
+
+    assert.deepEqual(event.messages, [
+      { role: "assistant", content: [validCall] },
+      malformedResult,
+      validResult,
+    ]);
+    assert.deepEqual(result.messages, [
+      { role: "assistant", content: [validCall] },
+      validResult,
+    ]);
+    assert.deepEqual(notices, [
+      ["Quarantined malformed tool call(s): bad name", "error"],
+      ["Quarantined orphan tool result(s) before provider request: call-malformed", "error"],
+    ]);
+    assert.equal(traces.find(({ event }) => event === "malformed-tool-call")?.event, "malformed-tool-call");
+    const records = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(records.length, 1);
+    assert.equal(records[0].orphans[0].tool_call_id, "call-malformed");
+  } finally {
+    if (previousPath === undefined) delete process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH;
+    else process.env.MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH = previousPath;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("context hook drops orphan tool results before the provider request", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mecha-orphan-diagnostics-"));
   const path = join(directory, "orphan-tool-results.jsonl");
@@ -597,8 +657,9 @@ test("context hook drops orphan tool results before the provider request", async
   const orphanResult = { role: "toolResult", toolCallId: "call-orphan", toolName: "bash", content: [] };
 
   try {
+    const event = { messages: [assistant, validResult, orphanResult] };
     const result = handlers.get("context")(
-      { messages: [assistant, validResult, orphanResult] },
+      event,
       {
         sessionManager: { getSessionId: () => "session-1", getSessionFile: () => "/tmp/session.jsonl" },
         model: "openai-codex/gpt-5.5",
@@ -606,6 +667,8 @@ test("context hook drops orphan tool results before the provider request", async
       },
     );
 
+    // Pi retains the malformed-filtered event history; the returned list excludes orphan results.
+    assert.deepEqual(event.messages, [assistant, validResult, orphanResult]);
     assert.deepEqual(result.messages, [assistant, validResult]);
     assert.deepEqual(notices, [["Quarantined orphan tool result(s) before provider request: call-orphan", "error"]]);
     const records = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
@@ -613,6 +676,8 @@ test("context hook drops orphan tool results before the provider request", async
     assert.equal(records[0].session_id, "session-1");
     assert.equal(records[0].session_file, "/tmp/session.jsonl");
     assert.equal(records[0].model, "openai-codex/gpt-5.5");
+    // The count is measured before orphan removal, matching the baseline history grain.
+    assert.equal(records[0].total_messages, 3);
     assert.equal(records[0].quarantined_count, 1);
     assert.equal(records[0].orphans[0].tool_call_id, "call-orphan");
     assert.equal(records[0].orphans[0].message_index, 2);
