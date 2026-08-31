@@ -7,15 +7,12 @@
     "websocket": "router-proxy/internal/transport/websocket.go",
     "protocol": "protocol/v1/schema.json",
     "database": ["router-proxy/internal/store/", "router-proxy/internal/store/migrations/"],
-    "launcher": "tools/run_router.sh",
-    "legacy_node_sources": ["harness/router.js", "harness/db.js", "harness/migrations/"],
-    "node_rollback_launcher": "tools/run_router.mjs"
+    "launcher": "tools/run_router.sh"
   },
   "cors": {
     "status": "verified",
     "recorded": true,
     "source_behavior": "The supported Go router gives Origin-bearing API requests wildcard CORS headers and returns 204 for Origin preflight.",
-    "test_conflict": "retired in tests/model_catalog_transport.test.mjs",
     "go_implementation": "implemented"
   },
   "http": [

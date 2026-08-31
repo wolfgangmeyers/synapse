@@ -561,34 +561,8 @@ async function run() {
       const snapshot = await browserSnapshot(resources.bcb, resources.tabId);
       requireDesktopViewport(snapshot.viewport);
       const path = await screenshot(resources.bcb, resources.tabId, join(outputRoot, "visual-desktop.png"));
-      await writeArtifact("visual-desktop-proof", { viewport: snapshot.viewport, screenshot: path, legacy_reference: "web/router-ui/index.html + styles.css" });
+      await writeArtifact("visual-desktop-proof", { viewport: snapshot.viewport, screenshot: path, supported_ui: "web/router-ui-react" });
       return { viewport: snapshot.viewport, screenshot: path };
-    });
-
-    await step("visual-430-legacy", async () => {
-      const legacyPort = await allocateLoopbackPort();
-      resources.legacy = spawnLogged("python3", ["-m", "http.server", String(legacyPort), "--bind", "127.0.0.1"], { cwd: resolve(REPOSITORY, "web/router-ui") });
-      resources.legacy.url = `http://127.0.0.1:${legacyPort}`;
-      await withTimeout((async () => { for (;;) { try { if ((await fetch(`${resources.legacy.url}/index.html`)).ok) return; } catch { /* startup */ } await new Promise((resolveWait) => setTimeout(resolveWait, 100)); } })(), TIMEOUTS.startup, "legacy UI startup");
-      const legacyUrl = `${resources.legacy.url}/index.html`;
-      // BCB execution has no user gesture. Create the tab through the isolated
-      // CfT browser's CDP target API, then require BCB to observe that exact URL.
-      resources.legacyTargetId = await createBrowserTab(resources.chrome.cdpPort, legacyUrl);
-      const legacyTab = await waitForExactTabUrl(resources.bcb, legacyUrl);
-      resources.legacyTabId = legacyTab.id;
-      if (resources.legacyTabId === undefined) throw new Error(`legacy comparison tab did not open at exact URL ${legacyUrl}`);
-      await setViewport(resources.chrome.cdpPort, await currentBcbTab(resources.bcb, resources.legacyTabId), NARROW_VIEWPORT.width, NARROW_VIEWPORT.height);
-      await setViewport(resources.chrome.cdpPort, await currentBcbTab(resources.bcb, resources.tabId), NARROW_VIEWPORT.width, NARROW_VIEWPORT.height);
-      await waitBrowser(resources.bcb, resources.legacyTabId, "document.body.innerText.includes('Mecha')", "legacy 430 page");
-      const legacy = await browserSnapshot(resources.bcb, resources.legacyTabId);
-      requireNarrowViewport(legacy.viewport);
-      const legacyPath = await screenshot(resources.bcb, resources.legacyTabId, join(outputRoot, "visual-legacy-430.png"));
-      await execBrowser(resources.bcb, resources.tabId, `location.href = ${JSON.stringify(resources.vite.url)}; true`);
-      await waitBrowser(resources.bcb, resources.tabId, `document.querySelector('[data-testid="app-shell"]')`, "React 430 page");
-      const react = await browserSnapshot(resources.bcb, resources.tabId);
-      requireNarrowViewport(react.viewport);
-      const reactPath = await screenshot(resources.bcb, resources.tabId, join(outputRoot, "visual-react-430.png"));
-      return { viewport: { legacy: legacy.viewport, react: react.viewport }, screenshots: { legacy: legacyPath, react: reactPath } };
     });
 
     await step("final-console-import-network", async () => {

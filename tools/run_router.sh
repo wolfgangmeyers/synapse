@@ -9,25 +9,12 @@ PORT="${MECHA_ROUTER_PORT:-8765}"
 MAX_BATCH_CHARS="${MECHA_ROUTER_MAX_BATCH_CHARS:-4096}"
 
 usage() {
-  printf '%s\n' "Usage: tools/run_router.sh [--node]" "" "Runs the Go Mailbox router through router-proxy/Makefile." "Use --node to run the Node router as an explicit rollback path."
+  printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." ""
 }
 
 case "${1:-}" in
   --help|-h)
     usage
-    ;;
-  --node)
-    if (($# != 1)); then
-      printf '%s\n' "run_router.sh: --node does not accept additional arguments" >&2
-      usage >&2
-      exit 2
-    fi
-    exec node "$ROOT_DIR/tools/run_router.mjs" \
-      --database "$DATABASE" \
-      --host "$HOST" \
-      --port "$PORT" \
-      --log "$LOG" \
-      --max-batch-chars "$MAX_BATCH_CHARS"
     ;;
   "")
     exec make -C "$ROOT_DIR/router-proxy" run-router \

@@ -20,12 +20,6 @@ make -C router-proxy run-router
 
 The launcher uses `~/.mecha-developer/router.sqlite`, `~/.mecha-developer/router.jsonl`, `127.0.0.1`, port `8765`, and a 4096-character batch limit by default. Set `MECHA_ROUTER_DATABASE`, `MECHA_ROUTER_LOG`, `MECHA_ROUTER_HOST`, `MECHA_ROUTER_PORT`, or `MECHA_ROUTER_MAX_BATCH_CHARS` to override them.
 
-The Node implementation remains available as an explicit rollback path:
-
-```bash
-tools/run_router.sh --node
-```
-
 ## Build and run the proxy
 
 ```bash

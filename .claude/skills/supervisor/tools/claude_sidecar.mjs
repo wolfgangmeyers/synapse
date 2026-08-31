@@ -13,7 +13,7 @@ import { createTmuxRestClient } from "../../../../harness/tmux-rest-client.js";
 export const DEFAULT_LOG_DIR = "~/.mecha-developer/claude-sidecars";
 export const DEFAULT_MAX_LOG_BYTES = 256 * 1024;
 export const DEFAULT_ROUTER_URL = "http://127.0.0.1:8765";
-// The router expires activity after 15s (activityTtlMs, harness/router.js:101), so the current
+// The router expires activity after 15s (activityTtlMs, router-proxy Go router:101), so the current
 // state has to be re-sent well inside that. 5s matches the Pi extension's cadence.
 export const ACTIVITY_REFRESH_MS = 5_000;
 export const ACTIVITY_MIN_RESEND_MS = 10_000;
@@ -30,7 +30,7 @@ export const ACTIVITY_POLL_MS = 1_000;
 export const PRESENCE_CONNECT_TIMEOUT_MS = 15_000;
 // How often a registered presence session re-asks whether a managed sidecar has taken over its
 // window. Nothing in the router retires a duplicate on its own: connectedAgentsSnapshot
-// (harness/router.js:1140) lists every session with an open socket and a live lease, filtering at
+// (router-proxy Go router:1140) lists every session with an open socket and a live lease, filtering at
 // :1145, so a duplicate stays visible for as long as it is connected and this is its only bound.
 export const PRESENCE_COVERAGE_POLL_MS = 10_000;
 // Bounds the GET so a wedged router cannot stall the sidecar's own startup.

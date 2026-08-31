@@ -43,7 +43,7 @@ The following are requirements, not open design questions:
 
 ## 3. Existing router analysis
 
-This section describes the supported Go router in `router-proxy/internal/transport/`, its SQLite store in `router-proxy/internal/store/`, the shared protocol schema in `protocol/v1/schema.json`, and the Android-facing client contract. It is the integration baseline. The Node implementation in `harness/router.js` and `harness/db.js` remains only as an explicit rollback and differential-test reference; it is not the default router.
+This section describes the supported Go router in `router-proxy/internal/transport/`, its SQLite store in `router-proxy/internal/store/`, the shared protocol schema in `protocol/v1/schema.json`, and the Android-facing client contract. It is the integration baseline.
 
 ### 3.1 Current transport and endpoints
 

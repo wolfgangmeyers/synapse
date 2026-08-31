@@ -22,7 +22,7 @@ is the mechanism underneath it and reports nothing; new shutdown paths want
 
 Killing the sidecar is enough to clear the router's view of the agent: the process
 death closes its WebSocket, and the router releases the lease and emits
-`agent_disconnected` from its socket-close handler (`harness/router.js`). No
+`agent_disconnected` from its socket-close handler (`router-proxy Go router`). No
 router-side call is needed here.
 """
 

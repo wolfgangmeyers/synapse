@@ -1,9 +1,7 @@
 import { app, BrowserWindow } from "electron";
 
-import { startRouterWebUi } from "../../tools/router_web_ui.mjs";
 import { APP_NAME, DESKTOP_DEFAULT_AGENT_ID, DESKTOP_UI_PORT, iconPngPath, parseDesktopArguments, WINDOW_HEIGHT, WINDOW_WIDTH } from "./config.mjs";
 
-let uiServer;
 let mainWindow;
 
 function usage() {
@@ -18,7 +16,6 @@ async function createMainWindow() {
     return;
   }
 
-  uiServer = await startRouterWebUi({ host: "127.0.0.1", port: DESKTOP_UI_PORT, router: options.router, defaultAgentId: DESKTOP_DEFAULT_AGENT_ID, output: console.log });
   mainWindow = new BrowserWindow({
     title: APP_NAME,
     width: WINDOW_WIDTH,
@@ -35,7 +32,7 @@ async function createMainWindow() {
   });
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   mainWindow.on("closed", () => { mainWindow = undefined; });
-  await mainWindow.loadURL(uiServer.httpUrl);
+  await mainWindow.loadURL(process.env.MECHA_WEBUI_URL || `http://127.0.0.1:${process.env.MECHA_WEBUI_PORT || DESKTOP_UI_PORT}?router=${encodeURIComponent(options.router)}&agent=${encodeURIComponent(DESKTOP_DEFAULT_AGENT_ID)}`);
 }
 
 app.name = APP_NAME;
@@ -59,18 +56,4 @@ app.on("activate", () => {
 
 app.on("window-all-closed", () => {
   app.quit();
-});
-
-app.on("before-quit", async (event) => {
-  if (uiServer === undefined) return;
-  event.preventDefault();
-  const server = uiServer;
-  uiServer = undefined;
-  try {
-    await server.close();
-  } catch (error) {
-    console.error(`Mecha UI server shutdown failed: ${error.message}`);
-  } finally {
-    app.quit();
-  }
 });
