@@ -271,7 +271,10 @@ test("installed Pi exercises the isolated model and Goal control projection", { 
     await waitFor(() => connectionStates.find((state) => state.state === "connected"), "installed Messaging client connection");
     assert.ok(client);
 
-    const initialAgent = await waitFor(async () => await agentSnapshot(httpUrl), "isolated router agent registration");
+    const initialAgent = await waitFor(async () => {
+      const agent = await agentSnapshot(httpUrl);
+      return agent?.model_catalog_total_count === modelDefinitions.length ? agent : undefined;
+    }, "isolated router agent registration and model catalog");
     assert.equal(initialAgent?.agent_id, AGENT_ID);
     const initialCatalog = initialAgent?.available_models;
     assert.ok(Array.isArray(initialCatalog));

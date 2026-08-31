@@ -2,7 +2,7 @@
 
 ## Status and baseline
 
-This is an implementation plan only. The current task writes this document. It does not edit source or tests, start services, commit, or push.
+Implementation status: complete. The extraction and focused regression tests are in place. This document records the implementation scope and validation plan; it does not cover service startup, commits, or pushes.
 
 The exact implementation baseline is commit `3c9bfb53a3112d0fd4a7a42ba835dc484021de91`. The target is `pi-extensions/mecha-messaging/index.ts`. The baseline source, existing tests, and established seam map are authoritative. Use a clean isolated copy of this commit for differential work. Preserve unrelated dirty and untracked files in the checkout.
 
