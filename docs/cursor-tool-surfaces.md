@@ -42,7 +42,7 @@ Goal tool (registered by `pi-extensions/mecha-goal/index.ts`):
 
 Each tool carries `promptSnippet` and `promptGuidelines` so pi-cursor-sdk can include them in the bootstrap manifest and MCP descriptions.
 
-Operational tools use a flat `action` object schema (not top-level JSON Schema `oneOf`) so the bridge forwards useful MCP input schemas to Cursor.
+Operational tools use a flat `action` object schema (not top-level JSON Schema `oneOf`) so the bridge forwards useful MCP input schemas to Cursor. `pi__mecha_reminder` derives create targets from the current tmux window and does not accept a target field for create or update.
 
 ## Local test recipe
 

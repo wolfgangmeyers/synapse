@@ -248,13 +248,14 @@ test("native create/list/unrelated paths remain unchanged when no lock guard is 
       return { ok: true, status: 200, json: async () => ({ reminders: [], healthy: true }) };
     },
     environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765", MECHA_AGENT_ID: "worker" },
+    resolveCurrentAgentId: () => "worker",
     now: () => new Date("2030-01-01T00:00:00.000Z"),
     generateId: () => "reminder-2",
   });
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const run = (name, input) => byName.get(name).execute("call", input);
   await run("mecha_reminder", { action: "list" });
-  await run("mecha_reminder", { action: "create", target: "worker", message: "hello", delayMinutes: 1 });
+  await run("mecha_reminder", { action: "create", message: "hello", delayMinutes: 1 });
   await run("mecha_router", { action: "health" });
   assert.deepEqual(requests.map(({ url, request }) => [url, request.method ?? "GET"]), [
     ["http://127.0.0.1:8765/v1/reminders", "GET"],

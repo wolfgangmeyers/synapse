@@ -2027,7 +2027,7 @@ test("checkout-source Pi extension executes operational actions without installe
       ["mecha_pr", { action: "status", pullRequest: 42 }],
       ["mecha_git", { action: "status", task: "git-task" }],
       ["mecha_reminder", { action: "list" }],
-      ["mecha_reminder", { action: "create", target: "supervisor", message: "Standalone reminder fixture", delayMinutes: 5 }],
+      ["mecha_reminder", { action: "create", message: "Standalone reminder fixture", delayMinutes: 5 }],
       ["mecha_router", { action: "health" }],
       ["mecha_router", { action: "retry", messageId: "standalone-message" }],
       ["mecha_router", { action: "dismiss", messageId: "standalone-message" }],
