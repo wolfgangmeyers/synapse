@@ -31,6 +31,8 @@ Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls b
 
 ## Shell fallbacks and service scripts
 
+The Go Mailbox V2 router is the official router and the default local service. From the repository root, start it with `tools/run_router.sh`. The legacy Node implementation is available only through the explicit `tools/run_router.sh --node` rollback path.
+
 Use the managed Python tools first. When a model-session tool is unavailable, these shell-invoked fallbacks have narrow roles:
 
 | Script | Use | Required setup and boundary |
@@ -62,7 +64,7 @@ The broken `mecha_reload` tool and `/mecha-reload-runtime` command are retired. 
 
 Mailbox V2 keeps each recipient's active mailbox bounded. By default, at most 15 live messages (`queued`, `leased`, or `injection_requested`) are allowed per recipient; when the cap is reached, the router rejects the send with `queue_full`, and `mailbox_send.py` exits non-zero with instructions to back off and wait for the mailbox to clear.
 
-Small non-sentinel messages to the same recipient stay as separate queued rows, then the router combines the currently deliverable rows that fit the delivery limits into one batch when the recipient pulls. Batches can include different senders or subjects, and the combined body includes per-message sender, subject, and reply hints so the recipient can respond to the right agent. Delivery batching is capped by both `maxBatchBodyChars` (default `4096` characters) and the mailbox body byte limit (`maxBodyBytes`); `maxBatchBodyChars` is configurable in `openMessageRepository({ maxBatchBodyChars })` or with `tools/run_router.mjs --max-batch-chars <chars>` / `MECHA_MAILBOX_MAX_BATCH_CHARS`. Set `maxBatchBodyChars` to `0` to disable delivery batching.
+Small non-sentinel messages to the same recipient stay as separate queued rows, then the router combines the currently deliverable rows that fit the delivery limits into one batch when the recipient pulls. Batches can include different senders or subjects, and the combined body includes per-message sender, subject, and reply hints so the recipient can respond to the right agent. Delivery batching is capped by both `maxBatchBodyChars` (default `4096` characters) and the mailbox body byte limit (`maxBodyBytes`). Configure the supported Go router with `MECHA_ROUTER_MAX_BATCH_CHARS` when launching `tools/run_router.sh`; set it to `0` to disable delivery batching. The legacy Node rollback reads the same environment variable through that launcher.
 
 ## Shared conversation history
 

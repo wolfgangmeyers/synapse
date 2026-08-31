@@ -9,6 +9,11 @@ residuals are open, and its reasoning is what someone changing that code needs.
 Read `tests/fixtures/claude-hooks/README.md` first. The fixtures are real captured payloads, and
 most of these are testable against them.
 
+The dated source citations in this document refer to the legacy Node router where they name
+`harness/router.js`. The supported router is Go; use `tools/run_router.sh` and the current Go
+transport sources when checking live behavior. Keep Node references only for explicit rollback or
+differential testing.
+
 **Test anything protocol-shaped against the running router, not against the schema file.** On
 2026-08-09 the router rejected every `compacting` activity frame with `invalid_frame` and closed
 the socket. `protocol/v1/schema.json` was correct and had been for a day. The stale thing was the
