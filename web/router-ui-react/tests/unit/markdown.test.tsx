@@ -1,0 +1,3 @@
+import { describe, expect, it } from "vitest";
+import { isAllowedMarkdownLink, markdownToReact, markdownToSafeHtml, textWithoutMarkdownImages } from "../../src/domain/markdown";
+describe("safe markdown", () => { it("allows only safe links", () => { expect(isAllowedMarkdownLink("https://example.com")).toBe(true); expect(isAllowedMarkdownLink("javascript:alert(1)")).toBe(false); expect(isAllowedMarkdownLink("mailto:user@example.com")).toBe(true); }); it("escapes fallback content and image syntax", () => { expect(markdownToSafeHtml("<script>alert(1)</script> `x`")).not.toContain("<script>"); expect(textWithoutMarkdownImages("hello ![x](pic.png)")).toBe("hello "); expect(markdownToReact("hello")).toBeTruthy(); }); });
