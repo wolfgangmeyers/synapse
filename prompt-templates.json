@@ -31,6 +31,18 @@
       "body": "Create a recurring 30-minute reminder on the supervisor window, not on any worker window. Don't delete any existing reminders, just add this new one. Target the active long-running priority and the workers coordinating on it, rather than a single task. The priority is: ${project_goal}.\n\nBefore setting it, write the reminder body so its FIRST sentence is exactly:\n\nLAUNCH A READ-ONLY LUNA SUBAGENT NOW.\n\nThe subagent must inspect the supervisor tmux window, the active priority record, every assigned worker’s window and state, recent mailbox handoffs, commits, current diffs, and test results. It must say whether the priority’s orchestration is on track for ${project_goal}. It must flag unnecessary robot-review/fix loops, idle or misassigned workers, duplicated or conflicting work, unrelated work, scope drift, a different approach than ${project_goal} requires, missing handoffs or dependencies, lack of progress toward the remaining deliverables, stale or unverified claims, or anything that could disrupt a live or shared system.\n\nAfter that opening instruction, summarize the project/goal and its exact requirements and current explicit product decisions: ${project_goal}. The audit should keep every worker aligned to that priority and should not invent adjacent scope.\n\nAfter the audit, take one concrete supervisor action if needed: send the right worker a focused next step, resolve a dependency, stop a needless loop, or identify the owner and next verification point for a blocker. Do not modify code, disturb a live or shared system, or claim progress without evidence. Keep the reminder practical and motivating: protect the priority, keep workers moving, and name what should happen before the next 30-minute check.\n\nAfter creating it, immediately list the reminder and show its exact body so I can verify that the subagent instruction is visibly first. Do not just say it was created.",
       "id": "46ca47b1-fd8f-46a1-97e7-d20f3381815c",
       "updated_at": "2026-08-30T18:34:03.634Z"
+    },
+    {
+      "name": "Scope Creep Check",
+      "body": "Have a subagent double-check that all of the changes in this PR are in support of the ticket, and that no additional scope has crept in.",
+      "id": "a118b74d-b3e5-4762-a0fd-3ba54df4180d",
+      "updated_at": "2026-08-31T15:16:30.800Z"
+    },
+    {
+      "name": "Consistency Check",
+      "body": "Have a subagent go through an audit to see if we are using existing patterns for this PR. Check each individual file in the PR to make sure that it uses existing patterns and doesn't invent any new ones. The key priority here is consistency with the existing codebase.",
+      "id": "cb1611c4-fc1f-425d-a849-8412cab82d9c",
+      "updated_at": "2026-08-31T15:19:47.808Z"
     }
   ]
 }
