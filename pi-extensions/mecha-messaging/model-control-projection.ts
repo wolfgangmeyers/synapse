@@ -333,6 +333,18 @@ export function createModelControlProjection({
         throw new ModelControlError("model_switch_unavailable", "Pi model switching is unavailable");
       }
       const switchedModel = await switchModel(model ?? {}, context);
+      const activeContext = getParentContext();
+      if (activeContext !== context) {
+        const projection = currentForContext(activeContext);
+        trace("extension_model_control_completed", {
+          control_id: controlId,
+          source_agent_id: sourceAgentId,
+          accepted: true,
+          ...(projection.current?.provider === undefined ? {} : { current_provider: projection.current.provider }),
+          ...(projection.current?.id === undefined ? {} : { current_model_id: projection.current.id }),
+        });
+        return { accepted: true, currentModel: projection.current };
+      }
       rememberSuccessfulModelSwitch(context, switchedModel);
       refresh(context);
       const projection = currentForContext(context);
