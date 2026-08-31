@@ -233,6 +233,38 @@ test("model control rejects a throw after mutation when the model was already cu
   assert.equal(result.errorCode, "model_switch_failed");
 });
 
+test("model control does not refresh a stale context after an async switch", async () => {
+  const modelA = { provider: "provider", id: "model-a" };
+  const target = { provider: "provider", id: "target" };
+  const modelB = { provider: "provider", id: "model-b" };
+  const contextA = context([modelA, target], modelA);
+  contextA.sessionManager = { getSessionId: () => "session-a" };
+  const contextB = context([modelB, target], modelB);
+  contextB.sessionManager = { getSessionId: () => "session-b" };
+  let activeContext: Context = contextA;
+  let resolveSwitch: ((switched: boolean) => void) | undefined;
+  const published: Context[] = [];
+  const projection = createModelControlProjection({
+    getParentContext: () => activeContext,
+    setModel: () => new Promise<boolean>((resolve) => { resolveSwitch = resolve; }),
+    refresh: (value) => { published.push(value); },
+  });
+
+  const pending = projection.handleControl({
+    controlId: "control", sourceAgentId: "source", action: "set_model", model: target,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  activeContext = contextB;
+  resolveSwitch?.(true);
+
+  const result = await pending;
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.currentModel, modelB);
+  assert.equal(activeContext, contextB);
+  assert.deepEqual(published, []);
+  assert.deepEqual(projection.current(), modelB);
+});
+
 test("model control override clears on reset or context change and refresh runs before result", async () => {
   let current = context([{ provider: "provider", id: "current" }, { provider: "provider", id: "target" }]);
   const events: string[] = [];
