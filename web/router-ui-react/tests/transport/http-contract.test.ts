@@ -1,0 +1,48 @@
+import { describe, expect, it, vi } from "vitest";
+import { createHttpClient, HttpRequestError } from "../../src/transport/http-client";
+import { httpRoutes } from "../../src/protocol/manifest";
+
+function response(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+}
+
+describe("direct HTTP transport", () => {
+  it("uses canonical URLs, JSON writes, and validates responses", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://router.test/v1/messages");
+      expect(init?.credentials).toBeUndefined();
+      expect(init?.headers).toEqual({ "content-type": "application/json" });
+      return response({ message: { enqueue_sequence: 1, id: "m1", from: "web", to: "peer", body: "hello", created_at: "2030-01-01T00:00:00.000Z", expires_at: "2030-01-02T00:00:00.000Z", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174000", state: "queued", source: { kind: "web_ui" } } }, 201);
+    });
+    const client = createHttpClient("http://router.test/path", fetchImpl);
+    await expect(client.sendMessage({ id: "m1", from: "web", to: "peer", body: "hello", created_at: "2030-01-01T00:00:00.000Z" })).resolves.toMatchObject({ message: { id: "m1", enqueue_sequence: 1 } });
+  });
+
+  it("preserves router error code, status, and correlation", async () => {
+    const fetchImpl = vi.fn(async () => response({ error: { code: "queue_full", message: "full" } }, 429, { "x-correlation-id": "corr-1" }));
+    await expect(createHttpClient("http://router.test", fetchImpl).health()).rejects.toMatchObject({ code: "queue_full", status: 429, correlationId: "corr-1", message: "full" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the complete manifest route inventory and can issue origin preflight", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { expect(String(input)).toBe("http://router.test/"); expect(init?.method).toBe("OPTIONS"); return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*" } }); });
+    await expect(createHttpClient("http://router.test", fetchImpl).request("/", { method: "OPTIONS" })).resolves.toEqual({});
+    expect(httpRoutes.map((route) => route.path)).toContain("/v1/tmux/windows/{window}/{action}");
+    expect(httpRoutes.map((route) => route.path)).toContain("/v1/messages/{message_id}/retry");
+  });
+
+  it("normalizes a null conversation message collection to an empty list", async () => {
+    const fetchImpl = vi.fn(async () => response({ owner: "web-ui", peer: "worker", high_water_sequence: 4, messages: null }));
+    await expect(createHttpClient("http://router.test", fetchImpl).conversations("web-ui", "worker")).resolves.toMatchObject({ messages: [] });
+  });
+
+  it("normalizes the Go router's null empty reminder collection to an empty list", async () => {
+    const fetchImpl = vi.fn(async () => response({ reminders: null }));
+    await expect(createHttpClient("http://router.test", fetchImpl).reminders()).resolves.toEqual({ reminders: [] });
+  });
+
+  it("rejects malformed successful JSON", async () => {
+    const fetchImpl = vi.fn(async () => response(null));
+    await expect(createHttpClient("http://router.test", fetchImpl).capabilities()).rejects.toBeInstanceOf(HttpRequestError);
+  });
+});

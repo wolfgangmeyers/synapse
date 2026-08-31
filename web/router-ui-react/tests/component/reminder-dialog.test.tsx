@@ -1,0 +1,19 @@
+import { describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach } from "vitest";
+import "@testing-library/jest-dom/vitest";
+import userEvent from "@testing-library/user-event";
+import { ReminderDialog } from "../../src/components/ReminderDialog";
+import type { Reminder } from "../../src/domain/reminders";
+
+afterEach(cleanup);
+
+const reminder: Reminder = { id: "r1", target: "agent-one", creator: "web", body: "Check this", subject: "Check", state: "scheduled", enabled: true, next_due_at: new Date(Date.now() + 60_000).toISOString(), interval_ms: null };
+const base = { open: true, peer: "agent-one", creator: "web", reminders: [reminder], onClose: vi.fn(), onCreate: vi.fn(), onUpdate: vi.fn(), onDelete: vi.fn(), onLock: vi.fn() };
+
+describe("ReminderDialog", () => {
+  it("lists countdown, recurrence, and supports lock and delete", async () => { const user = userEvent.setup(); const onLock = vi.fn(); const onDelete = vi.fn(); render(<ReminderDialog {...base} onLock={onLock} onDelete={onDelete} />); expect(screen.getByText("One-shot")).toBeInTheDocument(); await user.click(screen.getByRole("button", { name: "Lock" })); expect(onLock).toHaveBeenCalledWith(reminder, "set"); await user.click(screen.getByRole("button", { name: "Delete" })); expect(onDelete).toHaveBeenCalledWith("r1"); });
+  it("rejects blank body and invalid delay", async () => { const user = userEvent.setup(); const onCreate = vi.fn(); render(<ReminderDialog {...base} reminders={[]} onCreate={onCreate} />); await user.click(screen.getByRole("button", { name: "Add reminder" })); await user.click(screen.getByRole("button", { name: "Create reminder" })); expect(screen.getByRole("alert")).toHaveTextContent("Enter reminder text"); await user.type(screen.getByRole("textbox", { name: "Reminder" }), "Do it"); const delay = screen.getByRole("spinbutton"); await user.clear(delay); await user.type(delay, "10081"); await user.click(screen.getByRole("button", { name: "Create reminder" })); expect(onCreate).not.toHaveBeenCalled(); expect(screen.getByRole("alert")).toHaveTextContent("1 to 10080"); });
+  it("contains rejected delete requests and shows the reminder error", async () => { const user = userEvent.setup(); const onDelete = vi.fn().mockRejectedValue(new Error("Delete failed")); render(<ReminderDialog {...base} onDelete={onDelete} />); await user.click(screen.getByRole("button", { name: "Delete" })); await expect(screen.findByRole("alert")).resolves.toHaveTextContent("Delete failed"); expect(screen.getByText("Check this")).toBeInTheDocument(); });
+  it("shows refresh errors while keeping the current reminder list visible", () => { render(<ReminderDialog {...base} status="Reminder deleted, but the list could not be refreshed." />); expect(screen.getByRole("status")).toHaveTextContent("list could not be refreshed"); expect(screen.getByText("Check this")).toBeInTheDocument(); });
+});
