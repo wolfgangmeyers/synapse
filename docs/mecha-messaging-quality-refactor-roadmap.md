@@ -99,11 +99,11 @@ The delivery coordinator is implemented locally in `pi-extensions/mecha-messagin
 
 **Isolated E2E validation.** Use a temporary SQLite router, a temporary session file, a fake Pi `sendMessage`, and a real WebSocket mailbox client. Enqueue a message, deliver it, append the custom session entry, and verify the receipt order. Restart the router and replay the same message. Verify that the durable entry is acknowledged without a second Pi injection. Repeat with a failed checkpoint and with a sentinel whose spawn succeeds and fails. No live router, settings file, or service is needed.
 
-## Implemented locally; final validation pending
+## Implemented; final validation and push pending
 
 ### Model and control projection
 
-**Status and evidence.** The extraction is implemented in commit `fa184bec3beb188e54dda5ae2184cee29b2f37db`. The current working tree adds the validated correction for an asynchronous `setModel` rejection after the active context changes: the failure result now reports the active context's model, matching the baseline catch behavior. The focused direct suite passed 20 tests, the differential suite passed 1 test, and Mecha Messaging typecheck, lint, and `git diff --check` passed. Full-suite validation, installed-Pi E2E, mutation testing, independent review, a final correction commit, and push were not run in this task. No final approval is claimed.
+**Status and evidence.** The extraction is implemented in commit `fa184bec3beb188e54dda5ae2184cee29b2f37db`. The final correction for an asynchronous `setModel` rejection after the active context changes was performed in commit `66b78d0a4ca340fe9639481ae49281e1836a54ab`: the failure result now reports the active context's model, matching the baseline catch behavior. The focused direct suite passed 20 tests, the differential suite passed 1 test, and Mecha Messaging typecheck, lint, and `git diff --check` passed. Only final validation and push gates remain pending.
 
 **Scope.** Extract model metadata normalization, catalog projection, current-model projection, model selection and switching, the short-lived post-switch override, model-control result normalization, and the adjacent Goal control bridge adapters. Keep the Goal state machine in `mecha-goal` and keep wire serialization in `mailbox-client.ts`.
 
@@ -122,7 +122,7 @@ The delivery coordinator is implemented locally in `pi-extensions/mecha-messagin
 
 **Tests.** `tests/model_control_projection.test.ts` covers malformed catalogs, one-thousand-item bounds, provider-plus-ID identity, throw-after-mutation, stale context clearing, the asynchronous stale-context rejection regression, control timeout, and Goal bridge fallback. `tests/mecha_messaging_model_control_projection_differential.test.ts` compares the extracted extension against the exact baseline fixture. Client and router control coverage remains in `tests/model_catalog_transport.test.mjs`, `tests/mailbox_client_goal_control.test.mjs`, `tests/router_web_ui.test.mjs`, and `tests/goal_transport.test.ts`.
 
-**Isolated E2E validation.** The planned temporary-router and installed-Pi validation remains pending. It must use a temporary router and WebSocket clients, a fake Pi registry with malformed and valid entries, and a fake `setModel`; it must not use the live router, browser settings, credentials, or a shared session.
+**Isolated E2E validation.** Final validation remains pending. It must use a temporary router and WebSocket clients, a fake Pi registry with malformed and valid entries, and a fake `setModel`; it must not use the live router, browser settings, credentials, or a shared session.
 
 ## Remaining slices
 
@@ -207,10 +207,10 @@ The focused direct suite passed 15 tests with 100 percent lines, functions, stat
 
 ## Recommended sequencing
 
-1. **Activity lifecycle.** Complete and validated in the current working tree. The delivery coordinator and activity lifecycle now have separate, documented boundaries.
+1. **Activity lifecycle.** Complete and validated. The delivery coordinator and activity lifecycle now have separate, documented boundaries.
 2. **Compaction orchestration.** It depends on the delivery and activity boundaries and has the most timing risk. Extract it after those interfaces are explicit.
 3. **Diagnostics and history sanitation.** It is mostly a pure transformation and a best-effort sink. Doing it after the timing work keeps provider-input changes separate from lifecycle changes.
-4. **Model and control projection.** Implemented locally; final validation and independent review remain pending as recorded above.
+4. **Model and control projection.** Implemented in commit `66b78d0a4ca340fe9639481ae49281e1836a54ab`. Final validation and push remain pending.
 
 For every slice: move code without changing behavior, add or preserve module-level tests, run package typecheck and lint, run the relevant isolated E2E, then run the full Mecha Messaging test command. Compare the public export list and protocol fixtures before and after. Stop if a diff changes a wire field, event name, timing bound, or error code without a separate product decision.
 

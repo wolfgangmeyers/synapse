@@ -2,7 +2,7 @@
 
 ## Status and baseline
 
-Implementation status: implemented atop commit `fa184bec3beb188e54dda5ae2184cee29b2f37db`. The current correction covers an asynchronous `setModel` rejection after the active context changes, with a direct regression test. Final validation and independent review remain pending until this correction closes. This document records the implementation scope and validation plan; it does not claim final approval, a final commit, a push, service startup, E2E, mutation testing, or review.
+Implementation status: implemented atop commit `fa184bec3beb188e54dda5ae2184cee29b2f37db`. The final correction for an asynchronous `setModel` rejection after the active context changes was performed in commit `66b78d0a4ca340fe9639481ae49281e1836a54ab`, with a direct regression test. Only final validation and push gates remain pending.
 
 The exact implementation baseline is commit `3c9bfb53a3112d0fd4a7a42ba835dc484021de91`. The target is `pi-extensions/mecha-messaging/index.ts`. The baseline source, existing tests, and established seam map are authoritative. Use a clean isolated copy of this commit for differential work. Preserve unrelated dirty and untracked files in the checkout.
 
@@ -82,4 +82,4 @@ Do not change `mailbox-client.ts`, generated JavaScript, `mecha-goal`, protocol/
 
 4. **Quality gates.** Run the explicit standalone and Goal-bridge tests, focused tests, changed-source coverage, mutation checks, package typecheck and lint, the complete Mecha Messaging test command, export/package-file checks, and the repository's full validation command. Mutation checks must invert representative assertions and prove the focused suite fails before restoration. Run Robot Review plus supervisor review, validate findings, and resolve every real finding before readiness.
 
-5. **Completion record.** Update the roadmap with the final commit, exact validation results, differential allowlist, installed-Pi runtime identity, and rejected review findings. Push only the scoped implementation after required review and validation gates. This correction task records focused test evidence but does not perform the final commit or push, installed-Pi E2E, mutation testing, or independent review.
+5. **Completion record.** Update the roadmap with the final correction commit, exact validation results, differential allowlist, installed-Pi runtime identity, and rejected review findings. Push only the scoped implementation after required review and validation gates. Final validation and push remain pending.
