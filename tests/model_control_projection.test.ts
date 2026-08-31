@@ -101,9 +101,31 @@ test("model projection requires provider and id and preserves bounded optional m
   assert.deepEqual(projectAvailableModels(context([
     { provider: "provider", id: "valid" }, null, { provider: "provider" },
   ])), [{ provider: "provider", id: "valid" }]);
+  assert.deepEqual(projectAvailableModels(context([
+    null,
+    { provider: "provider", id: "numeric", contextWindow: 4, maxTokens: 2 },
+  ])), [{ provider: "provider", id: "numeric", contextWindow: 4, maxTokens: 2 }]);
   assert.throws(() => projectAvailableModels({
     sessionManager: { getSessionId: () => "session" },
   }), (error: unknown) => error instanceof ModelControlError && error.code === "model_registry_unavailable");
+  assert.throws(() => projectAvailableModels({
+    modelRegistry: { getAvailable: () => undefined as never },
+    sessionManager: { getSessionId: () => "session" },
+  }), (error: unknown) => error instanceof ModelControlError && error.code === "model_registry_unavailable");
+  assert.throws(() => projectAvailableModels({
+    modelRegistry: { getAvailable: () => { throw "registry failed"; } },
+    sessionManager: { getSessionId: () => "session" },
+  }), (error: unknown) => error instanceof ModelControlError
+    && error.code === "model_registry_failed"
+    && error.message === "registry failed"
+    && error.cause === undefined);
+  assert.throws(() => projectAvailableModels({
+    modelRegistry: { getAvailable: () => { throw { message: "registry failed" }; } },
+    sessionManager: { getSessionId: () => "session" },
+  }), (error: unknown) => error instanceof ModelControlError
+    && error.code === "model_registry_failed"
+    && error.message === "registry failed"
+    && error.cause === undefined);
 });
 
 test("model control validates before switching and uses provider plus id", async () => {
@@ -119,6 +141,20 @@ test("model control validates before switching and uses provider plus id", async
   const invalid = await projection.handleControl({ controlId: "invalid", sourceAgentId: "source", action: "set_model", model: { provider: "provider", id: "target", contextWindow: 1 } });
   assert.equal(invalid.accepted, false);
   assert.equal(invalid.errorCode, "invalid_model");
+  assert.equal(switched.length, 0);
+
+  const invalidProviderModel = { provider: "provider", id: "target" };
+  Object.defineProperty(invalidProviderModel, "provider", { value: 1 });
+  const invalidProvider = await projection.handleControl({
+    controlId: "invalid-provider", sourceAgentId: "source", action: "set_model", model: invalidProviderModel,
+  });
+  assert.equal(invalidProvider.errorCode, "invalid_model");
+  const invalidIdModel = { provider: "provider", id: "target" };
+  Object.defineProperty(invalidIdModel, "id", { value: 1 });
+  const invalidId = await projection.handleControl({
+    controlId: "invalid-id", sourceAgentId: "source", action: "set_model", model: invalidIdModel,
+  });
+  assert.equal(invalidId.errorCode, "invalid_model");
   assert.equal(switched.length, 0);
 
   const unavailableProjection = createModelControlProjection({
@@ -154,6 +190,28 @@ test("model control selects a colliding id by provider and id", async () => {
   });
   assert.equal(result.accepted, true);
   assert.deepEqual(switched, [models[1]]);
+});
+
+test("model control skips malformed candidates before a valid numeric model", async () => {
+  const models: unknown[] = [
+    { provider: "provider", id: "bad-name", name: 1 },
+    { provider: "provider", id: "bad-context", name: "name", contextWindow: "bad" },
+    { provider: "provider", id: "bad-max", name: "name", contextWindow: 1, maxTokens: "bad" },
+    { provider: "provider", id: "target", name: "target", contextWindow: 4, maxTokens: 2 },
+  ];
+  const switched: unknown[] = [];
+  const projection = createModelControlProjection({
+    getParentContext: () => context(models),
+    setModel: (model) => { switched.push(model); return true; },
+    refresh() {},
+  });
+
+  const result = await projection.handleControl({
+    controlId: "control", sourceAgentId: "source", action: "set_model",
+    model: { provider: "provider", id: "target" },
+  });
+  assert.equal(result.accepted, true);
+  assert.deepEqual(switched, [models[3]]);
 });
 
 test("model control accepts a native mutation that throws only when identity changed", async () => {
@@ -217,6 +275,10 @@ test("model control maps all expected errors and outcomes", async () => {
     getParentContext: () => context(models), setModel: () => false, refresh() {},
   });
   assert.equal((await rejected.handleControl(request)).errorCode, "model_switch_rejected");
+  const nonErrorFailure = createModelControlProjection({
+    getParentContext: () => context(models), setModel: () => { throw "switch failed"; }, refresh() {},
+  });
+  assert.equal((await nonErrorFailure.handleControl(request)).errorCode, "model_switch_failed");
 });
 
 test("model control rejects a throw after mutation when the model was already current", async () => {
@@ -231,6 +293,63 @@ test("model control rejects a throw after mutation when the model was already cu
   });
   assert.equal(result.accepted, false);
   assert.equal(result.errorCode, "model_switch_failed");
+});
+
+test("model control leaves current null when a successful switch has no session identity", async () => {
+  const current: Context = {
+    modelRegistry: { getAvailable: () => [{ provider: "provider", id: "target" }] },
+    sessionManager: { getSessionId: () => "session" },
+  };
+  Object.defineProperty(current.sessionManager, "getSessionId", { value: () => undefined });
+  const projection = createModelControlProjection({
+    getParentContext: () => current,
+    setModel: () => true,
+    refresh() {},
+  });
+
+  const result = await projection.handleControl({
+    controlId: "control", sourceAgentId: "source", action: "set_model",
+    model: { provider: "provider", id: "target" },
+  });
+  assert.equal(result.accepted, true);
+  assert.equal(result.currentModel, null);
+  assert.equal(projection.current(), null);
+
+  const omittedModel = await projection.handleControl({
+    controlId: "omitted", sourceAgentId: "source", action: "set_model", model: undefined,
+  });
+  assert.equal(omittedModel.accepted, false);
+  assert.equal(omittedModel.errorCode, "invalid_model");
+  assert.equal(omittedModel.currentModel, null);
+});
+
+test("model control returns an empty current projection for a stale context without a model", async () => {
+  const modelA = { provider: "provider", id: "model-a" };
+  const target = { provider: "provider", id: "target" };
+  const contextA = context([modelA, target], modelA);
+  contextA.sessionManager = { getSessionId: () => "session-a" };
+  const contextB: Context = {
+    modelRegistry: { getAvailable: () => [target] },
+    sessionManager: { getSessionId: () => "session-b" },
+  };
+  let activeContext: Context = contextA;
+  let resolveSwitch: ((switched: boolean) => void) | undefined;
+  const projection = createModelControlProjection({
+    getParentContext: () => activeContext,
+    setModel: () => new Promise<boolean>((resolve) => { resolveSwitch = resolve; }),
+    refresh() {},
+  });
+
+  const pending = projection.handleControl({
+    controlId: "control", sourceAgentId: "source", action: "set_model", model: target,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  activeContext = contextB;
+  resolveSwitch?.(true);
+
+  const result = await pending;
+  assert.equal(result.accepted, true);
+  assert.equal(result.currentModel, null);
 });
 
 test("model control does not refresh a stale context after an async switch", async () => {
@@ -268,14 +387,25 @@ test("model control does not refresh a stale context after an async switch", asy
 test("model control override clears on reset or context change and refresh runs before result", async () => {
   let current = context([{ provider: "provider", id: "current" }, { provider: "provider", id: "target" }]);
   const events: string[] = [];
+  let refreshCompleted = false;
+  let projectedAfterRefresh = false;
   const projection = createModelControlProjection({
     getParentContext: () => current,
+    getCurrentModel: (value) => {
+      if (refreshCompleted) projectedAfterRefresh = true;
+      return value?.model;
+    },
     setModel: () => { events.push("set"); return true; },
-    refresh: (value) => { events.push("refresh"); value.model = { provider: "provider", id: "target" }; },
+    refresh: (value) => {
+      events.push("refresh");
+      refreshCompleted = true;
+      value.model = { provider: "provider", id: "target" };
+    },
   });
   const request = { controlId: "control", sourceAgentId: "source", action: "set_model", model: { provider: "provider", id: "target" } };
   const result = await projection.handleControl(request);
   assert.deepEqual(events, ["set", "refresh"]);
+  assert.equal(projectedAfterRefresh, true);
   assert.deepEqual(result.currentModel, { provider: "provider", id: "target" });
 
   current = context([{ provider: "provider", id: "current" }, { provider: "provider", id: "target" }]);
@@ -428,10 +558,46 @@ test("Goal bridge bounds missing responses and distinguishes malformed and no-st
   assert.equal(publications, 1);
 });
 
+test("model control catalog requires a parent context", () => {
+  const projection = createModelControlProjection({ getParentContext: () => undefined, refresh() {} });
+  assert.throws(() => projection.catalog(), /Pi context is unavailable/);
+  const availableProjection = createModelControlProjection({
+    getParentContext: () => context([{ provider: "provider", id: "model" }]),
+    refresh() {},
+  });
+  assert.deepEqual(availableProjection.catalog(), [{ provider: "provider", id: "model" }]);
+});
+
+test("Goal bridge preserves the first valid response when respond is called twice", async () => {
+  let state = goalTestState();
+  const bridge = createGoalControlBridge<GoalTestState>({
+    emit: (_event, request) => {
+      const respond = request.respond;
+      if (typeof respond === "function") {
+        respond({ accepted: false, errorCode: "temporarily_unavailable" });
+        respond({ accepted: true, goalState: goalTestState({ goal: "stale" }) });
+      }
+    },
+    getContext: () => undefined,
+    getState: () => state,
+    normalizeState: normalizeGoalTestState,
+    setState: (value) => { state = value; },
+    publish: () => {},
+    cloneState: cloneGoalTestState,
+  });
+
+  const result = await bridge({ controlId: "control", targetInstanceId: "instance" });
+  assert.equal(result.accepted, false);
+  assert.equal(result.errorCode, "temporarily_unavailable");
+  assert.deepEqual(result.goalState, state);
+});
+
 test("Goal bridge returns unavailable after the response timeout", async () => {
   let state = goalTestState();
   let timeoutCallback: (() => void) | undefined;
   let cleared: unknown;
+  let unrefCount = 0;
+  const fakeTimer = { unref: () => { unrefCount += 1; } };
   const bridge = createGoalControlBridge<GoalTestState>({
     emit: () => {},
     getContext: () => undefined,
@@ -440,15 +606,16 @@ test("Goal bridge returns unavailable after the response timeout", async () => {
     setState: (value) => { state = value; },
     publish: () => {},
     cloneState: cloneGoalTestState,
-    setTimeoutImpl: ((callback: () => void) => { timeoutCallback = callback; return 1; }) as typeof setTimeout,
+    setTimeoutImpl: ((callback: () => void) => { timeoutCallback = callback; return fakeTimer; }) as typeof setTimeout,
     clearTimeoutImpl: (timer) => { cleared = timer; },
   });
   const pending = bridge({ controlId: "control", targetInstanceId: "instance" });
   assert.equal(typeof timeoutCallback, "function");
   timeoutCallback?.();
   const result = await pending;
+  assert.equal(unrefCount, 1);
   assert.equal(result.accepted, false);
   assert.equal(result.errorCode, "unavailable");
-  assert.equal(cleared, 1);
+  assert.equal(cleared, fakeTimer);
   assert.deepEqual(result.goalState, state);
 });
