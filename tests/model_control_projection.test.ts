@@ -158,16 +158,18 @@ test("model control selects a colliding id by provider and id", async () => {
 
 test("model control accepts a native mutation that throws only when identity changed", async () => {
   let current = context([{ provider: "provider", id: "current" }, { provider: "provider", id: "target" }]);
+  let refreshCount = 0;
   const projection = createModelControlProjection({
     getParentContext: () => current,
     setModel: (model) => {
       current.model = model;
       throw new Error("updated before reporting failure");
     },
-    refresh() {},
+    refresh() { refreshCount += 1; },
   });
   const accepted = await projection.handleControl({ controlId: "control", sourceAgentId: "source", action: "set_model", model: { provider: "provider", id: "target" } });
   assert.equal(accepted.accepted, true);
+  assert.equal(refreshCount, 1);
 
   current = context([{ provider: "provider", id: "current" }, { provider: "provider", id: "target" }]);
   const rejectedProjection = createModelControlProjection({
