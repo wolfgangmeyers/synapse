@@ -627,7 +627,11 @@ test("real mailbox model-control delivery switches the Pi model", async () => {
         ...options,
         routerUrl: "http://127.0.0.1:8765",
         webSocketFactory: () => socket,
-        fetchImpl: async () => ({ ok: false, json: async () => ({}) }),
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({ model_catalog_v1: true, model_catalog_limits: { frame_bytes: 60 * 1024 } }),
+        }),
         generateId: (() => {
           let id = 0;
           return () => `model-control-${++id}`;
@@ -657,6 +661,7 @@ test("real mailbox model-control delivery switches the Pi model", async () => {
   }));
   await new Promise((resolve) => setImmediate(resolve));
 
+  const sentBeforeControl = socket.sent.length;
   socket.dispatchEvent(new MessageEvent("message", {
     data: JSON.stringify({
       version: "v1",
@@ -675,6 +680,13 @@ test("real mailbox model-control delivery switches the Pi model", async () => {
 
   assert.deepEqual(fixture.modelSwitches, [target]);
   assert.deepEqual(fixture.context.model, target);
+  const controlFrames = socket.sent.slice(sentBeforeControl);
+  const refreshIndex = controlFrames.findIndex((frame) => frame.type === "activity" && frame.current_model?.provider === target.provider && frame.current_model?.id === target.id);
+  const forcedCatalogIndex = controlFrames.findIndex((frame) => frame.type === "model_catalog" && frame.current_model?.provider === target.provider && frame.current_model?.id === target.id);
+  const resultIndex = controlFrames.findIndex((frame) => frame.type === "model_control_result" && frame.control_id === "control-1");
+  assert.ok(refreshIndex >= 0);
+  assert.ok(forcedCatalogIndex > refreshIndex);
+  assert.ok(resultIndex > forcedCatalogIndex);
   const modelControlResult = socket.sent.find((frame) => frame.type === "model_control_result");
   assert.deepEqual({ ...modelControlResult, frame_id: "ignored" }, {
     version: "v1",

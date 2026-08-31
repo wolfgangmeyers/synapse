@@ -295,6 +295,7 @@ test("mailbox client marks the catalog boundary at 1000 versus 1001 source model
   assert.equal(exact.model_summaries.length, 1_000);
   assert.equal(exact.total_count, 1_000);
   assert.equal(exact.truncated, false);
+  assert.deepEqual(exact.model_summaries.map(({ provider, id }) => ({ provider, id })), catalog.map(({ provider, id }) => ({ provider, id })));
 
   catalog = modelCatalog(1_001);
   intervals[1]();
@@ -302,6 +303,8 @@ test("mailbox client marks the catalog boundary at 1000 versus 1001 source model
   assert.equal(bounded.model_summaries.length, 1_000);
   assert.equal(bounded.total_count, 1_001);
   assert.equal(bounded.truncated, true);
+  assert.deepEqual(bounded.model_summaries.map(({ provider, id }) => ({ provider, id })), catalog.slice(0, 1_000).map(({ provider, id }) => ({ provider, id })));
+  assert.equal(bounded.model_summaries.some(({ id }) => id === catalog[1_000].id), false);
   client.close();
 });
 
