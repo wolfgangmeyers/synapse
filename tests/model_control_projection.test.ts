@@ -240,6 +240,35 @@ test("model control accepts a native mutation that throws only when identity cha
   assert.equal(rejected.errorCode, "model_switch_failed");
 });
 
+test("model control preserves string error names in diagnostics", async () => {
+  const traces: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+  const models = [{ provider: "provider", id: "current" }, { provider: "provider", id: "target" }];
+  const projection = createModelControlProjection({
+    getParentContext: () => context(models),
+    setModel: () => { throw { name: "NamedSwitchFailure" }; },
+    refresh() {},
+    trace: (event, fields) => { traces.push({ event, fields }); },
+  });
+
+  const result = await projection.handleControl({
+    controlId: "control", sourceAgentId: "source", action: "set_model", model: models[1],
+  });
+
+  assert.equal(result.accepted, false);
+  assert.deepEqual(traces.at(-1), {
+    event: "extension_model_control_completed",
+    fields: {
+      control_id: "control",
+      source_agent_id: "source",
+      accepted: false,
+      error_code: "model_switch_failed",
+      error_name: "NamedSwitchFailure",
+      current_provider: "provider",
+      current_model_id: "current",
+    },
+  });
+});
+
 test("model control maps all expected errors and outcomes", async () => {
   const codes = [
     "invalid_model", "unsupported_model_control", "model_registry_unavailable", "model_registry_failed",

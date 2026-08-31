@@ -49,6 +49,16 @@ async function connect(wsUrl, { agentId, instanceId, sync = false, agentRole } =
   return { socket, registered: await registered };
 }
 
+async function waitFor(read, description, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
 function closeSocket(socket) {
   if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -660,6 +670,10 @@ test("router fences model control by source lease and connected target", async (
     sockets.push(replacementSource.socket);
     await closeSocket(target.socket);
     sockets.splice(sockets.indexOf(target.socket), 1);
+    await waitFor(async () => {
+      const snapshot = await (await fetch(`${app.httpUrl}/v1/agents`)).json();
+      return snapshot.agents.some((agent) => agent.agent_id === "target-agent") ? undefined : true;
+    }, "target agent disconnect");
 
     const disconnectedError = nextFrame(replacementSource.socket, (frame) => frame.type === "error");
     replacementSource.socket.send(JSON.stringify({

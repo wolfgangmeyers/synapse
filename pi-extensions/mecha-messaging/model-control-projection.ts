@@ -56,6 +56,12 @@ function errorMessage(error: unknown): string {
     : isRecord(error) && typeof error.message === "string" ? error.message : String(error);
 }
 
+function errorName(error: unknown): string {
+  return error instanceof Error
+    ? error.name
+    : isRecord(error) && typeof error.name === "string" ? error.name : "Error";
+}
+
 function errorCode(error: unknown): string | undefined {
   return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
 }
@@ -363,7 +369,7 @@ export function createModelControlProjection({
         source_agent_id: sourceAgentId,
         accepted: false,
         error_code: modelControlErrorCode(error),
-        error_name: error instanceof Error ? error.name : "Error",
+        error_name: errorName(error),
         ...(projection.current?.provider === undefined ? {} : { current_provider: projection.current.provider }),
         ...(projection.current?.id === undefined ? {} : { current_model_id: projection.current.id }),
       });
