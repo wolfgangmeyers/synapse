@@ -95,6 +95,7 @@ test("the Messaging package dependency graph stays within Messaging and extracte
     "compaction-orchestration.ts",
     "compaction-policy.ts",
     "delivery-coordinator.ts",
+    "diagnostics-history.ts",
     "index.ts",
     "mailbox-client.js",
     "mailbox-client.ts",
