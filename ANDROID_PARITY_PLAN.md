@@ -14,15 +14,8 @@ The current Android implementation is concentrated in:
 
 The Web UI contract is in:
 
-- `web/router-ui/index.html`: control hierarchy and dialog/accessibility IDs.
-- `web/router-ui/app.js`: state, event dispatch, router scope changes, model/goal/reminder/prompt controls, arrivals, optimistic messages, history, image caching, drafts, lifecycle projection, and rendering.
-- `web/router-ui/state.js`: scope/correlation, model projection, optimistic message, and lifecycle helpers.
-- `web/router-ui/history.js`: message keys, merge/reconciliation, 200-row and 30-day retention.
-- `web/router-ui/reminders.js`: countdown and one-shot/recurring labels.
-- `web/router-ui/prompt-templates.js`: import/export format, byte validation, token parsing, and substitution.
-- `web/router-ui/markdown.js`: safe Markdown, allowed links, and removal of Markdown image fetches.
-- `web/router-ui/styles.css`: palette, 4px rhythm, shapes, minimum targets, indicators, dialogs, responsive states, and reduced-motion rules.
-- `tools/router_web_ui.mjs`: the existing Web UI transport adapter and exact HTTP/WebSocket request fields.
+- `web/router-ui-react/src/`: the TypeScript React implementation, including state, transport, persistence, controls, rendering, history, reminders, prompt templates, and safe Markdown behavior.
+- `web/router-ui-react/index.html` and `web/router-ui-react/src/app.css`: control hierarchy, styling, and accessibility identifiers.
 - `protocol/v1/schema.json`, `contract/manifest.json`, `contract/v1.md`, and the current router/Go transport code: wire shapes and available HTTP/WebSocket operations.
 
 The old commits are evidence only:
@@ -64,7 +57,7 @@ Each slice below has a compile/test gate that uses pure Kotlin fakes or local fi
 1. Record the baseline commit, current Android files, current Web UI files, protocol schema, and old commit SHAs in the implementation task notes.
 2. Preserve the existing untracked files `ANDROID_PARITY_SPEC.md`, `PLAN.md`, `PROMPT_TEMPLATE_TIMESTAMPS_SPEC.md`, and `SPEC.md`. They are not part of this plan's implementation diff.
 3. Build a behavior ledger from Sections 4, 5, 6, 8, 9, and 11 of `ANDROID_PARITY_SPEC.md`. Every row in the ledger must name a current Web UI symbol, Android symbol/file, unit test, and emulator/browser checkpoint.
-4. Treat `tools/router_web_ui.mjs` and `protocol/v1/schema.json` as the wire reference. Do not infer a new endpoint from a UI label.
+4. Treat `web/router-ui-react` and `protocol/v1/schema.json` as the wire reference. Do not infer a new endpoint from a UI label.
 
 **Gate:** `git status --short --untracked-files=all` is saved before implementation and the final diff contains only approved Android files and tests. No router-proxy file is touched.
 
@@ -72,7 +65,7 @@ Each slice below has a compile/test gate that uses pure Kotlin fakes or local fi
 
 **Current Android seams:** `RouterConfig`, `normalizeRouterEndpointCandidate`, `parseRouterConfig`, `upsertRouterConfig`, `activeRouterAfterRouterSave`, `routerHttp`, `routerWs`, `connect`, `cancelConnection`, `startLeaseRenewal`, `scheduleReconnect`, `saveAgentId`, `switchRouter`, and `removeRouter` in `MainActivity.kt`.
 
-**Web/protocol references:** `state.ownerScope`, `state.peerScope`, `state.draftScope`, `state.matchesActiveScope`, `app.connectUiSocket`, `app.handleEvent`, `app.switchRouter`, `app.setStatus`, `tools/router_web_ui.mjs` registration/reconnect code, and schema `register`, `registered`, `lease_rejected`, `error`, and `lease_renew` frames.
+**Web/protocol references:** `state.ownerScope`, `state.peerScope`, `state.draftScope`, `state.matchesActiveScope`, `app.connectUiSocket`, `app.handleEvent`, `app.switchRouter`, `app.setStatus`, `web/router-ui-react` registration/reconnect code, and schema `register`, `registered`, `lease_rejected`, `error`, and `lease_renew` frames.
 
 **Implementation:**
 
@@ -135,7 +128,7 @@ Add `AndroidTransportSecurityTest.kt` or equivalent source test for release HTTP
 
 **Current Android seams:** `send`, `updateDraft`, `draftFor`, `DraftStore.clearIfUnchanged`, `appendMessage`, `ChatMessage`, and the direct `POST /v1/messages` in `MainActivity.kt`.
 
-**Web references:** `app.sendDraft`, `app.pendingMessageBody`, `app.settleOutgoing`, `state.canSendDraft`, `state.settlePendingMessages`, `state.replacePendingMessage`, and `tools/router_web_ui.mjs` `sendMessage`.
+**Web references:** `app.sendDraft`, `app.pendingMessageBody`, `app.settleOutgoing`, `state.canSendDraft`, `state.settlePendingMessages`, `state.replacePendingMessage`, and `web/router-ui-react` `sendMessage`.
 
 **Implementation:**
 
@@ -153,7 +146,7 @@ Add `AndroidTransportSecurityTest.kt` or equivalent source test for release HTTP
 
 **Current Android additions:** typed `ModelSummary`, catalog projection, pending model control, and picker behavior in `MainActivity.kt` or the narrow protocol/state helper selected in Slice 1. Compose surface belongs in `Conversation` beside the peer header.
 
-**Web references:** `state.normalizeModelSummary`, `normalizeModelSummaries`, `mergeAgentModelProjection`, `mergeAgentModelSnapshot`, `matchingPendingModelControl`, `consumePendingModelControl`, `modelControlStatusTitle`; `app.updateAgentModelCatalog`, `app.mergeAgentSnapshot`, `app.selectModel`, `app.renderModelOptions`, `app.renderModelControls`, `app.showModelControlStatus`, and `tools/router_web_ui.mjs` model control forwarding.
+**Web references:** `state.normalizeModelSummary`, `normalizeModelSummaries`, `mergeAgentModelProjection`, `mergeAgentModelSnapshot`, `matchingPendingModelControl`, `consumePendingModelControl`, `modelControlStatusTitle`; `app.updateAgentModelCatalog`, `app.mergeAgentSnapshot`, `app.selectModel`, `app.renderModelOptions`, `app.renderModelControls`, `app.showModelControlStatus`, and `web/router-ui-react` model control forwarding.
 
 **Implementation:**
 
@@ -189,7 +182,7 @@ Add `AndroidTransportSecurityTest.kt` or equivalent source test for release HTTP
 
 **Current Android additions:** typed `ReminderSummary`, reminder list/editor state, pending CRUD and lock maps, countdown timer, and reminder dialogs in `MainActivity.kt`.
 
-**Web/protocol references:** `app.reminderRowsForPeer`, `renderReminderDialog`, `renderReminderItem`, `renderReminderEditor`, `sendReminderCrud`, `sendReminderLockControl`, `handleReminderCrudResult`, `handleReminderLockControlResult`, `clearPendingReminderLockControls`, `clearReminderLockState`; `reminders.formatReminderCountdown` and `reminderRecurrenceLabel`; `tools/router_web_ui.mjs.sendReminderCrud`; contract HTTP routes `/v1/reminders` and `/v1/reminders/{id}`; schema lock frames.
+**Web/protocol references:** `app.reminderRowsForPeer`, `renderReminderDialog`, `renderReminderItem`, `renderReminderEditor`, `sendReminderCrud`, `sendReminderLockControl`, `handleReminderCrudResult`, `handleReminderLockControlResult`, `clearPendingReminderLockControls`, `clearReminderLockState`; `reminders.formatReminderCountdown` and `reminderRecurrenceLabel`; `web/router-ui-react.sendReminderCrud`; contract HTTP routes `/v1/reminders` and `/v1/reminders/{id}`; schema lock frames.
 
 **Implementation:**
 
@@ -271,16 +264,16 @@ Create a shared, deterministic scenario fixture format under the test sources or
 
 The scenario set must cover router profile add/edit/alias/select/remove; discovery/filter/activity/subagents/compacting/lifecycle replay; history merge/clear/read/unread; message arrival; Markdown/images; optimistic send outcomes; model catalog/search/truncation/switch/rejection/uncertainty; every goal field and failure; reminder CRUD/recurrence/countdown/lock/stale target; prompt CRUD/use/tokens/paste/import/export/conflicts/partial failure; reconnect and scope changes.
 
-Implement the Android side as a pure state adapter driven by the same fixture events. The Web UI side can call the existing exported pure helpers from `state.js`, `history.js`, `reminders.js`, `prompt-templates.js`, and `markdown.js`; it must not call a live browser or router in the unit differential test. Compare body text, field presence, order, error category, and state transitions exactly.
+Implement the Android side as a pure state adapter driven by the same fixture events. The React Web UI side uses the exported pure helpers under `web/router-ui-react/src/`; it must not call a live browser or router in unit tests. Compare body text, field presence, order, error category, and state transitions exactly.
 
-**Differential gate:** `tests/android_parity_scenarios.test.mjs` (or the existing parity test file if keeping one file is clearer) runs the shared fixtures against both adapters. A passing scenario does not waive the emulator/browser proof below.
+**Differential gate:** The Android and React test suites run their shared contract scenarios independently; a passing scenario does not waive the emulator/browser proof below.
 
 ## Isolated router, Web UI, and emulator verification
 
 ### Environment creation
 
 1. Allocate a unique task directory, temporary SQLite database, attachment directory, router HTTP/WebSocket port, Web UI port, emulator AVD/device identity, and task-named processes. Never use the live router or its database/attachments.
-2. Start the current router implementation against the temporary database. Start unchanged `tools/router_web_ui.mjs` against that router and the task Web UI port. If a proxy is required for the emulator, start a task-owned proxy with its own listen port and verify its upstream is the task router.
+2. Start the current router implementation against the temporary database. Start unchanged `web/router-ui-react` against that router and the task Web UI port. If a proxy is required for the emulator, start a task-owned proxy with its own listen port and verify its upstream is the task router.
 3. Record exact router/UI revisions, process command/cwd ownership, ports, database and attachment paths, and emulator endpoint. Prove that the app's endpoint is the isolated endpoint before each run. Keep the live router untouched.
 4. Open a fresh Browser Console Bridge tab for the task. Do not reuse a live-router tab or browser storage.
 
