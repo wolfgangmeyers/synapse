@@ -52,13 +52,20 @@ describe("AppShell", () => {
       "peer-name-label",
       "working-indicator inline",
       "goal-header-button ",
-      "reminder-indicator",
+      "reminder-indicator empty",
     ]);
     expect(heading.querySelector("button[aria-label='Set goal']")).toBeInTheDocument();
 
     expect(banner.querySelector("button[aria-label='Add reminder']")).toBeInTheDocument();
     expect(banner.querySelector(".peer-heading > p")).toHaveClass("peer-activity");
     expect(banner.querySelector(".peer-heading > p")).not.toHaveTextContent("fixture-peer");
+  });
+
+  it("marks the reminder button active when the selected agent has a reminder", () => {
+    const agent: Agent = { agent_id: "fixture-peer", activity_state: "idle", subagent_count: 0, subagents: [] };
+    render(<ConversationHeader agent={agent} activeReminderCount={1} />);
+    expect(screen.getByRole("button", { name: "Add reminder" })).toHaveClass("reminder-indicator");
+    expect(screen.getByRole("button", { name: "Add reminder" })).not.toHaveClass("empty");
   });
 
   it("renders legacy activity and subagent content in the header detail line", () => {
