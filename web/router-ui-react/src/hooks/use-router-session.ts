@@ -33,6 +33,7 @@ function eventAction(event: TransportEvent, scope: RouterScope): Parameters<type
   if (event.type === "control" || event.type === "control-error") return { type: "control/clear", scope, id: event.pending.controlId };
   if (event.type === "controls-invalidated") return { type: "control/invalidate", scope };
   if (event.type === "agents") return { type: "agents/set", scope, agents: event.agents };
+  if (event.type === "reminders") return { type: "reminders/set", scope, reminders: event.reminders };
   if (event.type === "conversation" || event.type === "delivery") {
     const message = event.message; const peer = peerFor(message, scope.agentId); if (peer === undefined) return undefined;
     return { type: "message/append", scope, peer, message };

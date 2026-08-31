@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import type { ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { AttachmentGallery } from "../../src/components/AttachmentGallery";
 import { createHistoryThumbnail } from "../../src/domain/images";
 import { mergeMessages } from "../../src/domain/history";
@@ -39,6 +39,12 @@ function ConversationProbe({ transport }: { transport: RouterTransport }): React
   return <output data-testid="conversation-refresh-count">{conversation.messages.length}</output>;
 }
 
+function ReminderProbe({ transport }: { transport: RouterTransport }): ReactElement {
+  const [reminders, setReminders] = useState<string[]>([]);
+  useEffect(() => transport.subscribe((event) => { if (event.type === "reminders") setReminders(event.reminders.map((reminder) => reminder.id)); }), [transport]);
+  return <output data-testid="reminder-ids">{reminders.join(",")}</output>;
+}
+
 function requiredFrame(socket: Socket, index = 0): Record<string, unknown> {
   const frame = socket.sent[index];
   if (frame === undefined) throw new Error("Expected a sent frame");
@@ -59,6 +65,41 @@ function fakeTransportHarness(capabilities: Record<string, unknown>, persistDeli
 }
 
 describe("validated post-E2E reliability repairs", () => {
+  it("applies the newest reminder refresh when an older websocket-triggered fetch finishes later", async () => {
+    const socket = new Socket();
+    const reminderRequests: Array<{ resolve: (response: Response) => void }> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/reminders")) return await new Promise<Response>((resolve) => { reminderRequests.push({ resolve }); });
+      if (url.endsWith("/v1/capabilities")) return new Response(JSON.stringify({ goal_control_v1: false }));
+      if (url.endsWith("/v1/agents")) return new Response(JSON.stringify({ agents: [] }));
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const transport = createRouterTransport({ routerUrl: "http://router.test:4000", agentId: "web", fetchImpl, webSocketFactory: () => socket, autoReconnect: false });
+    render(<ReminderProbe transport={transport} />);
+    transport.connect();
+    socket.readyState = 1;
+    socket.emit("open", {});
+    const register = requiredFrame(socket);
+    socket.emit("message", { data: JSON.stringify(registered(String(register.frame_id), String(register.instance_id))) });
+    await waitFor(() => expect(socket.sent).toHaveLength(1));
+
+    const changed = { version: "v1", frame_id: "reminders-changed-1", type: "reminders_changed" };
+    socket.emit("message", { data: JSON.stringify(changed) });
+    await waitFor(() => expect(reminderRequests).toHaveLength(1));
+    socket.emit("message", { data: JSON.stringify({ ...changed, frame_id: "reminders-changed-2" }) });
+    await waitFor(() => expect(reminderRequests).toHaveLength(2));
+
+    const reminder = (id: string) => ({ id, target: "worker", creator: "web", body: id, state: "scheduled", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:01:00.000Z", interval_ms: null, occurrence_number: 0, attempt_count: 0 });
+    reminderRequests[1]?.resolve(new Response(JSON.stringify({ reminders: [reminder("current-reminder")] })));
+    await waitFor(() => expect(screen.getByTestId("reminder-ids")).toHaveTextContent("current-reminder"));
+    reminderRequests[0]?.resolve(new Response(JSON.stringify({ reminders: [reminder("older-reminder")] })));
+    await waitFor(() => expect(screen.getByTestId("reminder-ids")).toHaveTextContent("current-reminder"));
+    expect(screen.getByTestId("reminder-ids")).not.toHaveTextContent("older-reminder");
+    expect(fetchImpl.mock.calls.filter(([input]) => String(input).endsWith("/v1/reminders"))).toHaveLength(2);
+    transport.close();
+  });
+
   it("lets lifecycle sync enable provide the authoritative snapshot or replay", async () => {
     const { transport, socket } = fakeTransportHarness({ subagent_lifecycle_v2: true });
     const register = requiredFrame(socket);

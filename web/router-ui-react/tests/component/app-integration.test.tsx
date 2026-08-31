@@ -176,6 +176,45 @@ describe("App integration", () => {
     expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/v1/prompt-templates/template-1") && init?.method === "DELETE")).toBe(true);
   });
 
+  it("refreshes the open reminder list after a remote reminders change", async () => {
+    const user = (await import("@testing-library/user-event")).default.setup();
+    const remoteReminder = { id: "remote-reminder", target: "worker-one", creator: "another-agent", subject: "Remote reminder", body: "Arrived remotely", state: "scheduled", enabled: true, created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:05:00.000Z", interval_ms: null, occurrence_number: 0, attempt_count: 0 };
+    let reminderRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [peer] });
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({});
+      if (url.endsWith("/v1/reminders")) {
+        reminderRequests += 1;
+        return jsonResponse({ reminders: reminderRequests === 1 ? [] : [remoteReminder] });
+      }
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const sockets: AppSocket[] = [];
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      sockets.push(socket);
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory }} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument());
+    await waitFor(() => expect(reminderRequests).toBe(1));
+    await user.click(screen.getByRole("button", { name: "Worker One (worker-one)" }));
+    await user.click(screen.getByRole("button", { name: "Add reminder" }));
+    expect(screen.getByRole("heading", { name: "Reminders" })).toBeInTheDocument();
+    expect(screen.queryByText("Arrived remotely")).not.toBeInTheDocument();
+
+    sockets[0]?.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "reminders-changed-1", type: "reminders_changed" }) });
+
+    await waitFor(() => expect(reminderRequests).toBe(2));
+    expect(await screen.findByText("Arrived remotely")).toBeInTheDocument();
+    expect(screen.getByText("Remote reminder")).toBeInTheDocument();
+  });
+
   it("connects the configured transport to the application components", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

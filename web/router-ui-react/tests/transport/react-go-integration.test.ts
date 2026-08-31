@@ -156,6 +156,33 @@ describe("React transport against an isolated Go router", () => {
     await delay(250);
   }, 60_000);
 
+  it("refetches reminders through React transport after a Go reminder broadcast", async () => {
+    const router = await startIsolatedGoRouter();
+    routers.push(router);
+    const outgoing: JsonRecord[] = [];
+    const sockets: globalThis.WebSocket[] = [];
+    const transport = createRouterTransport({
+      routerUrl: router.httpUrl,
+      agentId: "integration-ui",
+      webSocketFactory: instrumentedWebSocketFactory(outgoing, sockets),
+    });
+    transports.push(transport);
+
+    const connected = waitForEvent(transport, (event) => event.type === "status" && event.status === "connected");
+    transport.connect();
+    await connected;
+    const remindersChanged = waitForEvent(transport, (event) => event.type === "reminders");
+    const response = await fetch(new URL("/v1/reminders", router.httpUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "react-live-reminder", target: "reminder-target", creator: "creator", body: "React reminder", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:01:00.000Z" }),
+    });
+    expect(response.status).toBe(201);
+    const event = await remindersChanged;
+    if (event.type !== "reminders") throw new Error("reminders event narrowing failed");
+    expect(event.reminders.map((reminder) => reminder.id)).toContain("react-live-reminder");
+  }, 60_000);
+
   it("correlates a real Go control response and reports a malformed server frame through the guard", async () => {
     const router = await startIsolatedGoRouter();
     routers.push(router);

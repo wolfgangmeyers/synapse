@@ -854,6 +854,7 @@ func (r *Router) handleReminderCollection(w http.ResponseWriter, req *http.Reque
 		}
 		if created {
 			r.sweepReminders(req.Context())
+			r.broadcast(map[string]any{"type": "reminders_changed"})
 		}
 		item, _ = r.store.ReminderFor(req.Context(), candidate.ID)
 		if item == nil {
