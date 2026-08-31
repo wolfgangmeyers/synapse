@@ -43,20 +43,20 @@ The following are requirements, not open design questions:
 
 ## 3. Existing router analysis
 
-This section describes the current implementation in `harness/router.js`, `harness/db.js`, `protocol/v1/schema.json`, and `pi-extensions/mecha-messaging/index.ts`. It is the integration baseline.
+This section describes the supported Go router in `router-proxy/internal/transport/`, its SQLite store in `router-proxy/internal/store/`, the shared protocol schema in `protocol/v1/schema.json`, and the Android-facing client contract. It is the integration baseline. The Node implementation in `harness/router.js` and `harness/db.js` remains only as an explicit rollback and differential-test reference; it is not the default router.
 
 ### 3.1 Current transport and endpoints
 
-The router has one Node HTTP server and a `ws` WebSocket server:
+The supported router has one Go HTTP server and WebSocket server:
 
 - HTTP base URL defaults to `http://127.0.0.1:8765`.
 - WebSocket registration is at `/v1/agents`.
 - `POST /v1/messages` validates and durably enqueues an envelope.
 - `GET /v1/messages/{id}` inspects a message while the router still retains it.
 - `GET /v1/health` currently returns only status, protocol version, and schema migration IDs.
-- A normal HTTP `GET /v1/agents` is not implemented. It currently returns `404`, even though the earlier router proposal listed it as a diagnostic endpoint.
+- A normal HTTP `GET /v1/agents` returns the current connected-agent snapshot.
 
-HTTP and WebSocket can share `/v1/agents`: normal HTTP requests go through the HTTP handler, while WebSocket upgrades go through `WebSocketServer`.
+HTTP and WebSocket share `/v1/agents`: normal HTTP requests go through the Go HTTP handler, while WebSocket upgrades go through the Go WebSocket handler.
 
 ### 3.2 Current envelope
 
@@ -108,25 +108,25 @@ A delivery frame contains the complete envelope, an attempt number, and a delive
 1. `injection_requested`
 2. `ack`
 
-The current router sends no positive response to `ack`. It may delete the queued row and lose the socket before Android can observe any later frame, so successful ACK transmission is not ACK certainty. Section 9.3 adds an Android-requested confirmation frame and a bounded recovery check for this uncertainty; legacy Pi receipts keep their current behavior.
+The supported Go router sends one correlated `delivery_acknowledged` response after a negotiated `ack` commits deletion. Android still treats an absent confirmation as delivery unknown and uses the bounded recovery check in Section 9.3; legacy Pi receipts keep their current behavior.
 
 The router deletes an acknowledged message and its delivery attempts. Router storage is a queue, not message history. Unclaimed queued messages expire after one hour. Agent resources are removed after one hour disconnected. The app therefore cannot reconstruct its conversation from the router.
 
 Delivery attempts time out after 30 seconds and dead-letter after three failed attempts by default. A client must persist quickly and return receipts before that deadline.
 
-The current router calculates an unclaimed message's `expires_at` as one hour after the sender-claimed `created_at`. That lets a skewed or malicious sender shorten or extend queue retention. Before Android integration, enqueue must instead set `expires_at` to one hour after the router's `firstSeenAt` clock on the first successful insert. The envelope's `created_at` remains unchanged and remains part of the field-by-field idempotency comparison. Existing queued rows keep their stored expiry; this behavioral fix needs regression tests, not a table rewrite.
+The supported Go router calculates an unclaimed message's `expires_at` as one hour after the router's first successful enqueue time. A sender's claimed `created_at` remains unchanged and remains part of the field-by-field idempotency comparison; it does not control queue retention. Existing queued rows keep their stored expiry.
 
 ### 3.4 Current protocol gaps for Android
 
 The existing registration schema has no agent role or client type. It also uses `additionalProperties: false`, so Android cannot add metadata without a schema and router change.
 
-The router also lacks a connected-agent listing. The app cannot implement a correct agent picker by guessing tmux names or reading router SQLite directly.
+The router exposes a connected-agent listing. The app uses that snapshot for its agent picker and does not guess tmux names or read router SQLite directly.
 
 Envelope `from` is only a one-to-128-character string. Unlike `to`, it does not use the `agentId` grammar. Android therefore cannot treat every claimed sender as a valid reply target or put the raw value into a label, notification identity, deep link, URI, or Android resource name.
 
-The current sender-claimed timestamp also controls queue expiry. Section 3.3 makes the required server-enqueue expiry correction explicit; Android must not ship against the old behavior.
+The supported Go router uses its enqueue clock for queue expiry. Android must preserve that server-owned expiry behavior.
 
-The current delivery frame has only the reusable envelope message ID. After `ack` deletes the row, the same ID can identify a later queued occurrence, while Android currently has no durable occurrence identity with which to distinguish it from a retry. A unique key on a visible message row would still be insufficient because retention and clear actions can delete that row before an uncertain ACK is resolved. Section 9.3 adds the required router-generated message incarnation and ACK confirmation, while Section 8.4 defines a separate bounded evidence ledger and exact duplicate-versus-conflict handling.
+The supported Go delivery frame includes a router-generated `message_incarnation_id` alongside the reusable envelope message ID. The incarnation distinguishes queued delivery occurrences while the row exists and changes after deletion; it is not a tombstone or permission to retry an ambiguous outbound POST. Section 9.3 defines the ACK confirmation and Section 8.4 defines the separate bounded evidence ledger and exact duplicate-versus-conflict handling.
 
 JSON parsers on Node and Android can also produce strings containing unpaired UTF-16 surrogates from escaped JSON even when the wire bytes were valid UTF-8. Such strings do not have a strict UTF-8 encoding and cannot safely enter fingerprints, byte accounting, SQLite, or receipts. Section 8.4 validates the strings Android can actually observe. OkHttp's WebSocket text callback does not expose the original frame bytes, so Android does not claim that it can distinguish malformed wire UTF-8 repaired by the library from a literal U+FFFD scalar. Section 9.3 applies the stronger raw-byte gate where the router owns the bytes.
 
@@ -136,10 +136,10 @@ The state name `injection_requested` is Pi-specific. Android does not inject int
 
 The current router security model is endpoint-reachability trust, not authenticated local-process trust:
 
-- It hard-rejects listener hosts other than `127.0.0.1` and `::1`.
+- It binds to the configured host, which defaults to `127.0.0.1`; the supported transport allowlist also includes `::1` and `0.0.0.0` for explicit local configuration.
 - It has no application authentication or authorization.
-- It rejects any HTTP request with an `Origin` header.
-- It rejects WebSocket clients that send an `Origin` header.
+- It accepts HTTP requests with an `Origin` header and returns the contract's wildcard, no-credential CORS headers.
+- It accepts WebSocket clients that send an `Origin` header.
 - It validates exact JSON shapes and caps request, frame, body, queue, and request-rate sizes.
 - State files are user-only.
 - Message bodies are not included in structured router logs.
@@ -693,7 +693,7 @@ Endpoint behavior is exact:
 - Sort by exact `agent_id` code-unit order, ascending.
 - Include the requesting mobile agent if active; Android filters its own exact ID from the picker.
 - Treat the response as a snapshot. It does not promise the agent remains connected after the response.
-- Preserve browser `Origin` rejection and normal no-body logging.
+- Preserve the Go router's browser `Origin` CORS behavior and normal no-body logging.
 
 Android validates the entire response against this shape before replacing presence. One invalid response leaves the previous snapshot marked stale. It refreshes after registration, foreground resume, reconnect, manual refresh, and every 10 seconds while the home screen is visible. It does not poll presence continuously in the background.
 
@@ -1073,10 +1073,10 @@ Do not log mobile notification content or local unread state on the router.
 
 Keep deterministic contract tests separate from the live two-Pi and visual gates:
 
-1. **Router/Node contract tests**
+1. **Router contract tests** (Go implementation; legacy Node parity tests only where explicitly identified)
    - Legacy Pi register without metadata/capability and Android register with exact role, client type, and `ack_confirmation: "correlated_v1"` both validate. Legacy responses omit the mode; Android initial and renewal responses echo it.
    - Every `registered` frame contains the effective role and preserves request correlation. Android refuses a missing or downgraded ACK-confirmation echo.
-   - Discovery includes only open, current, unexpired sessions; sorts exactly; updates renewal expiry; defaults legacy role; excludes client/instance/lease IDs; rejects browser Origin; and returns no-store.
+   - Discovery includes only open, current, unexpired sessions; sorts exactly; updates renewal expiry; defaults legacy role; excludes client/instance/lease IDs; follows the Go router's wildcard CORS behavior; and returns no-store.
    - Past and future sender-claimed timestamps cannot change the one-hour server-enqueue expiry. An identical retry while the row exists keeps its original expiry. Any changed idempotency field conflicts.
    - Migration `005_message_incarnation` backfills distinct valid UUIDv4 values. A first insert creates one incarnation; identical POST and delivery retries preserve it; every `message` frame and successful POST/GET representation requires it; `ack` deletes the row; GET then returns 404; and a later POST of the same envelope ID creates a different incarnation. Legacy Pi receives and receipts the extended frame unchanged.
    - A negotiated successful ACK commits deletion before exactly one fully correlated `delivery_acknowledged`, and the confirmation is sent before the next offer. Drop the confirmation after deletion to prove no rollback or false replay guarantee. Stale/duplicate/failed ACKs get no confirmation. A legacy Pi ACK gets no new frame.
@@ -1307,7 +1307,7 @@ MVP is accepted when:
 3. A new live debug or release install generates exactly one valid random `android-<UUID>` identity; restart/update preserves it, backup/uninstall behavior is documented, and post-setup DataStore failure never rotates it silently. Reset writes its DataStore marker before Room destruction, resumes before every normal startup gate, verifies fresh Room before atomically clearing DataStore, and passes every crash point without mixed old/new state. Fixed identities and providers exist only in test artifacts and are absent from installable APKs.
 4. Debug reaches only loopback through ADB reverse. Release accepts only `https://donuts.tailcdfd89.ts.net:8443`, derives the four HTTP/WSS routes exactly, and rejects redirects, cleartext, and non-allowlisted endpoints. The security contract and tests explicitly treat loopback/ADB reverse as unauthenticated reachability with no same-user or app guarantee.
 5. Legacy and Android registration fixtures validate under the exact schema. Android sends `user_interaction`/`android` and requests `correlated_v1`; old Pi omits all three; every registration response returns the effective role; and Android enters connected state only when initial and renewal responses echo the ACK-confirmation mode.
-6. Discovery returns only open, current, unexpired sessions with exact role/timestamps and no client, instance, or lease ID. Presence sorting, staleness, self-filtering, Origin rejection, and no-store pass tests.
+6. Discovery returns only open, current, unexpired sessions with exact role/timestamps and no client, instance, or lease ID. Presence sorting, staleness, self-filtering, the Go router's CORS behavior, and no-store pass tests.
 7. Router unclaimed expiry is exactly one hour after first server enqueue, unaffected by past/future sender timestamps. Migration `005_message_incarnation` gives every queued row one unique UUIDv4 that stays fixed across identical POSTs, GET, and delivery retries; negotiated successful ACK deletes before a fully correlated confirmation; lost confirmation does not undo deletion; legacy Pi behavior is unchanged; `ack` still leaves no server tombstone; and a later enqueue of the same message ID receives a fresh incarnation.
 8. The composer preserves valid nonblank input, enforces the exact 4,096-byte strict-UTF-8 body and 32-KiB serialized-request limits, and persists exact UTC-millisecond envelope bytes once. Every HTTP operation has the 15-second whole-call deadline and response cap. OkHttp transparent retries and redirects are disabled, every enqueue body is one-shot, and one `Call` produces at most one network request. Only a new app-level `Call` after a proven pre-body failure or defined 429 non-enqueue retries the exact BLOB, for at most eight accounted attempts. Any potentially committed attempt without an exact success becomes delivery unknown and never POSTs that ID again.
 9. Android fatally decodes bounded HTTP bytes and validates every Unicode string it can observe before schema lengths, sender fingerprints, UTF-8 accounting, logging, persistence, notification work, or receipts. Callback/parsed unpaired surrogates create no durable state or success receipt. OkHttp text callbacks expose no raw frame bytes, so tests characterize malformed wire UTF-8 without claiming app-level detection; callback U+FFFD remains valid and indistinguishable from library repair. Scalar-valid control/bidirectional senders remain exact `sender_key` values but never reach unsafe product/platform identities.
@@ -1323,7 +1323,7 @@ MVP is accepted when:
 19. Background Home delivery, notification denial, force-stop, short offline pickup, one-hour server-enqueue expiry, duplicate identity, queue/rate/body errors, storage suspension, and no-remote-push boundary are represented and tested honestly.
 20. Router and Android adversarial logging tests prove that bodies, subjects, exact envelope JSON, notification previews, raw/escaped invalid sender values, and payload-derived exception messages never enter diagnostic events. Router `message_enqueued` omits `from`. The normal UI contains no raw frames, transport-only IDs, JSON, debug tables, or admin-console layout.
 21. Physical rollout remains blocked until the exact 8443 Serve listener preserves existing services, the phone-only Tailnet rule denies another node, and the recorded Galaxy Note20 build passes the complete foreground-service, watchdog, outbox, Room, notification, network-transition, Doze, and privacy gate.
-22. The router remains loopback-only and no path exposes it through LAN, public internet, Funnel, port 443 replacement, or Tailscale port 8765. Neither loopback, ADB reverse, Origin rejection, nor user-only state permissions are represented as same-user/process/app authentication.
+22. The router remains loopback-only by default and no path exposes it through LAN, public internet, Funnel, port 443 replacement, or Tailscale port 8765. Neither loopback, ADB reverse, CORS behavior, nor user-only state permissions are represented as same-user/process/app authentication.
 
 ## 19. Non-goals
 

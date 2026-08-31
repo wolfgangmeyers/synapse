@@ -13,6 +13,10 @@ Decisions that were made and then overturned are marked **Reversed**, with the o
 kept. Read those first. The first answer was reasonable every time and the evidence still went the
 other way.
 
+The `harness/router.js` citations below record legacy Node-router behavior from this dated decision
+record. The supported router is Go; use `tools/run_router.sh` and the current Go transport sources
+for live behavior. The Node implementation remains only an explicit rollback/differential path.
+
 ## Getting activity to the router
 
 **An HTTP activity route on the router. Rejected.** `harness/router.js` has no token, header or
