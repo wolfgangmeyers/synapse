@@ -1,7 +1,7 @@
 {
   "version": "v1",
   "status": "verified",
-  "scope": "isolated Node and Go transport smoke",
+  "scope": "isolated Go transport smoke",
   "normalization": ["server-generated frame IDs", "lease IDs", "message incarnation IDs"],
   "steps": [
     {"request": "GET /v1/agents", "origin": "https://diff.example", "status": 200, "access_control_allow_origin": "*"},

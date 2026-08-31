@@ -4,7 +4,7 @@ Status: Phase 1 specification
 
 Target: the Kotlin and Jetpack Compose Android Mailbox client
 
-Source of truth: the current router Web UI in `web/router-ui/`, `tools/router_web_ui.mjs`, and the current router protocol. The implementation must match the Web UI's end-user behavior and visual language. Android may change layout for a small screen. It may not remove, reinterpret, or postpone a Web UI feature.
+Source of truth: the current router Web UI in `web/router-ui-react/`, `web/router-ui-react`, and the current router protocol. The implementation must match the Web UI's end-user behavior and visual language. Android may change layout for a small screen. It may not remove, reinterpret, or postpone a Web UI feature.
 
 ## 1. Goal
 
@@ -30,12 +30,9 @@ This specification covers the product and verification contract. It does not cha
 
 The baseline is commit `ce701fe6f` (`Repair router transport safety invariants`). A direct inspection of `app/src/main/java/life/meyers/mecha/MainActivity.kt` and the Android tests at that commit finds no model, goal, reminder, or prompt-template UI or state. The current Web UI does contain those surfaces:
 
-- `web/router-ui/index.html` declares model and prompt pickers plus goal, reminder, arrival, and prompt-template dialogs.
-- `web/router-ui/app.js` handles lifecycle snapshots and updates, model catalogs and controls, goal controls, reminder CRUD and locks, arrivals, optimistic messages, history, and prompt-template operations.
-- `web/router-ui/reminders.js` defines countdown and recurrence display.
-- `web/router-ui/prompt-templates.js` defines token parsing, substitution, validation, import, and export.
-- `web/router-ui/markdown.js` defines safe Markdown rendering and link policy.
-- `web/router-ui/styles.css` defines the reviewed palette, spacing, shapes, typography, loading states, indicators, dialogs, and responsive behavior.
+- `web/router-ui-react/index.html` declares model and prompt pickers plus goal, reminder, arrival, and prompt-template dialogs.
+- `web/router-ui-react/src/` handles lifecycle snapshots and updates, model catalogs and controls, goal controls, reminder CRUD and locks, arrivals, optimistic messages, history, prompt-template operations, safe Markdown, and rendering.
+- `web/router-ui-react/src/app.css` defines the reviewed palette, spacing, shapes, typography, loading states, indicators, dialogs, and responsive behavior.
 
 The missing Android parity work exists only in non-merged commits `3deb7bd15` (`Implement Android WebUI parity state safety`) and `420d99a94` (`Implement Android goal-control and orbit parity`). Those commits are evidence and implementation history. They are not the current source of truth and must not be assumed to match the current Web UI or router contract.
 
@@ -225,7 +222,7 @@ Motion is restrained and honors reduced-motion settings. Android must not use an
 
 ## 5. Visual parity
 
-Use the current Web UI tokens from `web/router-ui/styles.css` as the Android theme baseline:
+Use the current Web UI tokens from `web/router-ui-react/styles.css` as the Android theme baseline:
 
 | Role | Value |
 |---|---|
@@ -290,9 +287,9 @@ Local persistence is per router and per install identity. History, drafts, selec
 
 | Collection | Bound | Eviction or rejection |
 |---|---:|---|
-| Message history | 200 per conversation; 30 days | Prune by age, then keep the newest 200, matching `web/router-ui/history.js`. |
+| Message history | 200 per conversation; 30 days | Prune by age, then keep the newest 200, matching the history helpers under `web/router-ui-react/src/`. |
 | New draft entries | Existing Android limit of 50 per router; prune entries older than 30 days | Evict oldest entries. Keep this existing Android behavior; the Web UI's separate draft helper uses 200 entries. |
-| Model summaries | 1,000 per peer | De-duplicate, then keep the first 1,000, matching `state.js` and the protocol schema. |
+| Model summaries | 1,000 per peer | De-duplicate, then keep the first 1,000, matching the state helpers under `web/router-ui-react/src/` and the protocol schema. |
 | Subagent summaries | 999 per peer | Keep the first 999; reject or mark an oversized payload invalid before mutation. |
 | Prompt templates | 100 stored templates | Reject new/imported entries at capacity. Never evict user templates. |
 | Active reminders in an Android projection | 1,000 per router response | Reject an oversized response as invalid. Do not silently hide reminders. |
@@ -319,7 +316,7 @@ Every implementation and verification run uses an isolated router runtime:
 - its own test agent identities and data;
 - no reads, writes, restarts, or traffic against the live router.
 
-The unchanged `tools/router_web_ui.mjs` runs against that isolated router. Browser Console Bridge opens a fresh isolated task tab and proves the Web UI before Android comparison. The run records the isolated tab, exact router/UI revisions, process ownership, ports, database and attachment paths, screenshots, and browser console output. The live router remains untouched.
+The unchanged `web/router-ui-react` runs against that isolated router. Browser Console Bridge opens a fresh isolated task tab and proves the Web UI before Android comparison. The run records the isolated tab, exact router/UI revisions, process ownership, ports, database and attachment paths, screenshots, and browser console output. The live router remains untouched.
 
 ## 8. Test requirements
 
@@ -349,7 +346,7 @@ The canonical fixtures live under `tests/fixtures/android-parity/*.json`. Each f
 
 The Kotlin adapter is a pure test-source adapter. It accepts one fixture and returns JSON with exactly `{ "id", "projection", "outgoing", "error" }`; `projection` contains visible feature availability and state, `outgoing` is an ordered array of typed HTTP/WebSocket operations, and `error` is a normalized product error or `null`. The JavaScript adapter returns the same shape. Only UUIDs, frame IDs, message IDs, and timestamps use explicit placeholders. Body text, field presence, ordering, error category, and transitions remain exact.
 
-Run the Kotlin adapter with `./gradlew :app:runAndroidParityFixtures --args="--fixtures $PWD/tests/fixtures/android-parity --output $PWD/app/build/reports/android-parity/android.json"`. Run the differential comparison with `node --test tests/android_parity_scenarios.test.mjs`; it reads the Kotlin output and compares it with the Web UI output. The task must fail on a missing fixture, adapter error, schema mismatch, or unexpected normalization.
+Run the Android adapter with `./gradlew :app:runAndroidParityFixtures --args="--fixtures $PWD/tests/fixtures/android-parity --output $PWD/app/build/reports/android-parity/android.json"`. The task must fail on a missing fixture, adapter error, schema mismatch, or unexpected normalization.
 
 The runner compares:
 
