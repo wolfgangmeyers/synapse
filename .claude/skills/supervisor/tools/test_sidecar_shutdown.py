@@ -156,8 +156,8 @@ class MatcherPrecisionTest(SidecarTestCase):
         # An agent invoked with a prompt that quotes the command line.
         (203, "pi --print run node /tools/claude_sidecar.mjs --agent-id worker-1 for me"),
         # The router and web UI, which must never match.
-        (204, "node tools/run_router.mjs --database /r.sqlite --log /r.jsonl"),
-        (205, "node tools/router_web_ui.mjs --port 8787"),
+        (204, "tools/run_router.sh"),
+        (205, "tools/run_webui.sh"),
         # The script appears in argv but is not what node runs — it is another
         # program's option value. Matching this would SIGKILL the watcher.
         (207, "node watcher.mjs --watch /tools/claude_sidecar.mjs --agent-id worker-1"),

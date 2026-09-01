@@ -52,7 +52,7 @@ private val timestampFormatter = DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm
     .withZone(ZoneOffset.UTC)
 private val promptTemplateImportKeys = setOf("name", "body", "id", "updated_at")
 
-/** Builds the same portable payload as web/router-ui/prompt-templates.js. */
+/** Builds the same portable payload as web/router-ui-react prompt-template domain. */
 internal fun promptTemplateExportPayload(templates: List<PromptTemplate>?): PromptTemplateExportPayload =
     PromptTemplateExportPayload(PROMPT_TEMPLATE_EXPORT_FORMAT, PROMPT_TEMPLATE_EXPORT_VERSION, templates.orEmpty().map { template ->
         template.copy(updatedAt = template.updatedAt?.takeIf(::isCanonicalPromptTemplateTimestamp))

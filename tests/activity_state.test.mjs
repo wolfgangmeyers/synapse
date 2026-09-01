@@ -171,7 +171,7 @@ test("silence settles only when no tool is in flight", () => {
 
 test("a settle arriving during compaction does not end the hold", () => {
   // The one that protects mail delivery. The router pauses delivery while an agent is compacting
-  // and releases it on any non-compacting frame (harness/router.js:1095), so a Stop, a SessionEnd
+  // and releases it on any non-compacting frame (the retired router implementation), so a Stop, a SessionEnd
   // or a notification landing between PreCompact and PostCompact would release the pause early and
   // the worker's queued mail would be delivered into a compacting session.
   //
