@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 const DEFAULT_SESSION_CHECKPOINT_RETRY_MS = 250;
 const DEFAULT_PENDING_REINJECTION_DELAY_MS = 5_000;
 const MAILBOX_MESSAGE_TYPE = "mecha-agent-message";
+const SENTINEL_STATUS_TYPE = "mecha-sentinel-status";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonObject | JsonValue[] | undefined;
@@ -60,6 +61,16 @@ type NativeSubagentService = {
 };
 type ServiceResolver = () => Promise<NativeSubagentService | undefined>;
 type SpawnSubagent = (message: MailboxMessage) => Promise<string>;
+type SentinelHandoff = {
+  key: string;
+  messageId: string;
+  messageIncarnationId: string | undefined;
+  delivery: MailboxDelivery;
+  cleanupTimer?: Timer;
+  subagentId: string;
+  statusRecorded: boolean;
+  promise?: Promise<void>;
+};
 
 export type DeliveryCoordinator = {
   onEnvelope: (message: MailboxMessage, delivery: MailboxDelivery) => void | Promise<void>;
@@ -108,15 +119,36 @@ function sameDeliveryItem(left: DeliveryItem | undefined, right: DeliveryItem | 
     && left?.deliveryExpiresAt === right?.deliveryExpiresAt;
 }
 
+function sameDeliveryIdentity(left: DeliveryItem | undefined, right: DeliveryItem | undefined): boolean {
+  return left?.messageId === right?.messageId
+    && left?.messageIncarnationId === right?.messageIncarnationId;
+}
+
+function legacyMessageIncarnationId(entry: SessionEntry): string | undefined {
+  const detailsValue = entry.details?.message_incarnation_id;
+  if (typeof detailsValue === "string") return detailsValue;
+  const entryValue = entry.message_incarnation_id;
+  return typeof entryValue === "string" ? entryValue : undefined;
+}
+
 function isMailboxSessionEntry(entry: SessionEntry, messageId: string, deliveryItems: DeliveryItem[] | undefined = undefined): boolean {
   if (entry?.type !== "custom_message"
     || entry.customType !== MAILBOX_MESSAGE_TYPE
     || entry.details?.message_id !== messageId) return false;
-  if (!Array.isArray(deliveryItems) || deliveryItems.length === 0) return true;
+  if (deliveryItems === undefined) return true;
+  if (deliveryItems.length === 0) return false;
   const persistedItems = entry.details?.delivery_items;
-  return Array.isArray(persistedItems)
-    && persistedItems.length === deliveryItems.length
-    && deliveryItems.every((item, index) => sameDeliveryItem(isDeliveryItem(persistedItems[index]) ? persistedItems[index] : undefined, item));
+  if (Array.isArray(persistedItems)) {
+    return persistedItems.length === deliveryItems.length
+      && deliveryItems.every((item, index) => sameDeliveryItem(isDeliveryItem(persistedItems[index]) ? persistedItems[index] : undefined, item));
+  }
+  // Old single-message entries had no item array. Their ID alone is not enough:
+  // an enqueue can reuse that ID after settlement, so require the incarnation
+  // carried by the current delivery and the legacy entry.
+  const item = deliveryItems.length === 1 ? deliveryItems[0] : undefined;
+  return item?.messageId === messageId
+    && typeof item.messageIncarnationId === "string"
+    && legacyMessageIncarnationId(entry) === item.messageIncarnationId;
 }
 
 function readPersistedSessionEntries(sessionFile: string, readSessionFile: SessionFileReader): SessionEntry[] {
@@ -124,6 +156,23 @@ function readPersistedSessionEntries(sessionFile: string, readSessionFile: Sessi
   return source.split("\n")
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line));
+}
+
+function isRetryOfPersistedDelivery(entry: SessionEntry, messageId: string, deliveryItems: DeliveryItem[]): boolean {
+  if (!isMailboxSessionEntry(entry, messageId)) return false;
+  const persistedItems = entry.details?.delivery_items;
+  if (persistedItems === undefined) {
+    const item = deliveryItems.length === 1 ? deliveryItems[0] : undefined;
+    return item?.messageId === messageId
+      && typeof item.messageIncarnationId === "string"
+      && legacyMessageIncarnationId(entry) === item.messageIncarnationId;
+  }
+  return Array.isArray(persistedItems)
+    && persistedItems.length === deliveryItems.length
+    && deliveryItems.every((item, index) => sameDeliveryIdentity(
+      isDeliveryItem(persistedItems[index]) ? persistedItems[index] : undefined,
+      item,
+    ));
 }
 
 export function mailboxSessionDeliveryState(sessionManager: SessionManager, messageId: string, {
@@ -162,6 +211,8 @@ function mailboxCustomMessage(message: MailboxMessage, delivery: MailboxDelivery
     details: {
       message_id: message.id,
       ...(Array.isArray(delivery?.items) && delivery.items.length > 0 ? { delivery_items: delivery.items } : {}),
+      ...(delivery?.items?.length === 1 && typeof delivery.items[0]?.messageIncarnationId === "string"
+        ? { message_incarnation_id: delivery.items[0].messageIncarnationId } : {}),
       from: message.from,
       to: message.to,
       ...(message.subject === undefined ? {} : { subject: message.subject }),
@@ -233,7 +284,10 @@ export function createPiMailboxDeliveryCoordinator({
   const sessionId = sessionContext.sessionManager.getSessionId();
   const pending = new Map<string, PendingDelivery>();
   const announcedArrivals = new Set<string>();
-  const sentinelInFlight = new Map<string, Promise<void>>();
+  // Keep a successful handoff until the router's retry can be acknowledged and
+  // the ownership marker is durable. The key includes the message incarnation
+  // so a later enqueue that reuses an ID can still create a new child.
+  const sentinelHandoffs = new Map<string, SentinelHandoff>();
   const reportedPersistenceErrors = new Set<string>();
   let active = true;
 
@@ -257,12 +311,7 @@ export function createPiMailboxDeliveryCoordinator({
     });
   }
 
-  function confirmExistingDelivery(delivery: MailboxDelivery, context: PiContext): boolean {
-    const state = sessionDeliveryState(context, delivery.messageId, delivery.items);
-    if (state !== "durable") {
-      persistenceUnavailable(context);
-      return false;
-    }
+  function acknowledgeKnownDelivery(delivery: MailboxDelivery, context: PiContext): boolean {
     try {
       receipt("injection_requested", delivery);
       receipt("ack", delivery);
@@ -270,6 +319,27 @@ export function createPiMailboxDeliveryCoordinator({
       return true;
     } catch {
       // The persisted session entry makes the next router replay safe to acknowledge.
+      return false;
+    }
+  }
+
+  function hasDurableRetryEntry(context: PiContext, delivery: MailboxDelivery): boolean {
+    const manager = context.sessionManager;
+    if (!manager.getBranch().some((entry) => isMailboxSessionEntry(entry, delivery.messageId))) return false;
+    if (!manager.isPersisted()) return false;
+    const sessionFile = manager.getSessionFile();
+    if (typeof sessionFile !== "string" || sessionFile.length === 0) return false;
+    try {
+      return readPersistedSessionEntries(sessionFile, readSessionFile)
+        .some((entry) => isRetryOfPersistedDelivery(entry, delivery.messageId, delivery.items));
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") {
+        const reported = reportedPersistenceErrors.has(delivery.messageId);
+        if (!reported) {
+          reportedPersistenceErrors.add(delivery.messageId);
+          context.ui?.notify(`Mailbox v2 session checkpoint unreadable: ${errorMessage(error)}`, "error");
+        }
+      }
       return false;
     }
   }
@@ -286,7 +356,8 @@ export function createPiMailboxDeliveryCoordinator({
     const latest = pending.get(messageId);
     if (latest === undefined) return;
     const state = sessionDeliveryState(context, messageId, latest.delivery.items);
-    if (state === "durable") {
+    const retryEntryKnown = state === "history_unverified" && hasDurableRetryEntry(context, latest.delivery);
+    if (state === "durable" || retryEntryKnown) {
       clearCheckpointTimer(latest);
       pending.delete(messageId);
       reportedPersistenceErrors.delete(messageId);
@@ -331,46 +402,179 @@ export function createPiMailboxDeliveryCoordinator({
       && now() - pendingDelivery.lastInjectedAt >= pendingReinjectionDelayMs;
   }
 
-  function recordSentinelStatus(message: MailboxMessage, subagentId: string): void {
+  function deliveryIncarnationId(messageId: string, delivery: MailboxDelivery): string | undefined {
+    const items = Array.isArray(delivery?.items) ? delivery.items : [];
+    const item = items.find((candidate) => candidate.messageId === messageId)
+      ?? (items.length === 1 ? items[0] : undefined);
+    return typeof item?.messageIncarnationId === "string" ? item.messageIncarnationId : undefined;
+  }
+
+  function sentinelDeliveryKey(messageId: string, delivery: MailboxDelivery): string {
+    return `${messageId}\u0000${deliveryIncarnationId(messageId, delivery) ?? ""}`;
+  }
+
+  function isSentinelStatusEntry(entry: SessionEntry, messageId: string, messageIncarnationId: string | undefined): boolean {
+    if (entry?.type !== "custom_message" || entry.customType !== SENTINEL_STATUS_TYPE) return false;
+    const details = entry.details;
+    if (details?.message_id !== messageId || details.state !== "handed_off" || typeof details.subagent_id !== "string") return false;
+    const persistedIncarnation = typeof details.message_incarnation_id === "string" ? details.message_incarnation_id : undefined;
+    return persistedIncarnation === messageIncarnationId;
+  }
+
+  function sentinelOwnershipDurable(messageId: string, delivery: MailboxDelivery): boolean {
+    const manager = sessionContext.sessionManager;
+    if (typeof manager.getBranch !== "function" || typeof manager.isPersisted !== "function"
+      || typeof manager.getSessionFile !== "function") return false;
+    const messageIncarnationId = deliveryIncarnationId(messageId, delivery);
+    if (!manager.getBranch().some((entry) => isSentinelStatusEntry(entry, messageId, messageIncarnationId))) return false;
+    if (!manager.isPersisted()) return false;
+    const sessionFile = manager.getSessionFile();
+    if (typeof sessionFile !== "string" || sessionFile.length === 0) return false;
+    try {
+      return readPersistedSessionEntries(sessionFile, readSessionFile)
+        .some((entry) => isSentinelStatusEntry(entry, messageId, messageIncarnationId));
+    } catch {
+      // Ownership is only confirmed when the session file can be read and matches.
+      return false;
+    }
+  }
+
+  function recordSentinelStatus(message: MailboxMessage, delivery: MailboxDelivery, subagentId: string): boolean {
     // The receipt identifies the handoff. This hidden status deliberately carries
     // neither the scheduled prompt nor derived text from the native child.
-    pi.sendMessage({
-      customType: "mecha-sentinel-status",
-      content: "Sentinel work handed off to a native subagent.",
-      display: false,
-      details: { message_id: message.id, subagent_id: subagentId, state: "handed_off" },
-    }, { deliverAs: "followUp", triggerTurn: false });
+    const messageIncarnationId = deliveryIncarnationId(message.id, delivery);
+    try {
+      pi.sendMessage({
+        customType: SENTINEL_STATUS_TYPE,
+        content: "Sentinel work handed off to a native subagent.",
+        display: false,
+        details: {
+          message_id: message.id,
+          ...(messageIncarnationId === undefined ? {} : { message_incarnation_id: messageIncarnationId }),
+          subagent_id: subagentId,
+          state: "handed_off",
+        },
+      }, { deliverAs: "followUp", triggerTurn: false });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function clearSentinelCleanupTimer(record: SentinelHandoff): void {
+    if (record.cleanupTimer !== undefined) {
+      clearTimeoutImpl(record.cleanupTimer);
+      record.cleanupTimer = undefined;
+    }
+  }
+
+  function forgetSentinelHandoff(record: SentinelHandoff): void {
+    clearSentinelCleanupTimer(record);
+    if (sentinelHandoffs.get(record.key) === record) sentinelHandoffs.delete(record.key);
+  }
+
+  function scheduleSentinelCleanup(record: SentinelHandoff): void {
+    if (!active || sentinelHandoffs.get(record.key) !== record || record.cleanupTimer !== undefined) return;
+    let timer: Timer;
+    timer = setTimeoutImpl(() => {
+      if (record.cleanupTimer === timer) record.cleanupTimer = undefined;
+      if (!active || sentinelHandoffs.get(record.key) !== record) return;
+      if (sentinelOwnershipDurable(record.messageId, record.delivery)) {
+        forgetSentinelHandoff(record);
+        return;
+      }
+      scheduleSentinelCleanup(record);
+    }, checkpointRetryDelayMs);
+    record.cleanupTimer = timer;
+    timer?.unref?.();
+  }
+
+  function maybeForgetSentinelHandoff(record: SentinelHandoff): void {
+    // Keep the fence while the ownership marker is still in flight. A lost ACK
+    // can replay before that marker is durable, so cleanup must wait for proof.
+    if (sentinelOwnershipDurable(record.messageId, record.delivery)) {
+      forgetSentinelHandoff(record);
+      return;
+    }
+    scheduleSentinelCleanup(record);
+  }
+
+  function checkSentinelHandoff(messageId: string, messageIncarnationId: string | undefined): void {
+    const record = [...sentinelHandoffs.values()].find((candidate) => candidate.messageId === messageId
+      && candidate.messageIncarnationId === messageIncarnationId);
+    if (record !== undefined) maybeForgetSentinelHandoff(record);
+  }
+
+  async function acknowledgeSentinelHandoff(record: SentinelHandoff, message: MailboxMessage, delivery: MailboxDelivery): Promise<void> {
+    if (!active) return;
+    if (!record.statusRecorded) record.statusRecorded = recordSentinelStatus(message, delivery, record.subagentId);
+    if (!active) return;
+    try {
+      receipt("injection_requested", delivery);
+      if (!active) return;
+      receipt("ack", delivery);
+    } catch {
+      // The native child already exists. Keep the handoff for the router retry.
+    }
+    maybeForgetSentinelHandoff(record);
   }
 
   async function onSentinelEnvelope(message: MailboxMessage, delivery: MailboxDelivery): Promise<void> {
-    const existing = sentinelInFlight.get(message.id);
-    if (existing !== undefined) return existing;
-    // Keep one promise per message ID so router retries cannot create two native
-    // children while the first handoff is still running.
-    const handoff = (async () => {
-      let subagentId;
+    const key = sentinelDeliveryKey(message.id, delivery);
+    const existing = sentinelHandoffs.get(key);
+    if (existing !== undefined) {
+      existing.delivery = delivery;
+      if (existing.promise !== undefined) return existing.promise;
+      return acknowledgeSentinelHandoff(existing, message, delivery);
+    }
+    // A coordinator can be recreated after the first receipt was lost. A durable
+    // status entry proves that this exact incarnation already owns a child.
+    if (sentinelOwnershipDurable(message.id, delivery)) {
       try {
-        subagentId = await spawnSubagent(message);
-      } catch {
-        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
-        return;
-      }
-      if (typeof subagentId !== "string" || subagentId.length === 0) {
-        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
-        return;
-      }
-      try { recordSentinelStatus(message, subagentId); } catch { /* a local status must not duplicate a handed-off child */ }
-      try {
-        // Redacted status is written before these receipts. A lost receipt leaves
-        // the lease to replay, while the existing native child remains the owner.
         receipt("injection_requested", delivery);
         receipt("ack", delivery);
       } catch {
-        // The native child already exists. The normal router delivery lifecycle decides any replay.
+        // The durable status makes a future retry safe even when this receipt is lost.
       }
+      return;
+    }
+
+    const handoff: SentinelHandoff = {
+      key,
+      messageId: message.id,
+      messageIncarnationId: deliveryIncarnationId(message.id, delivery),
+      delivery,
+      subagentId: "",
+      statusRecorded: false,
+    };
+    // Register before awaiting spawn so concurrent deliveries of this exact
+    // incarnation share one native child. A different incarnation gets a new key.
+    sentinelHandoffs.set(key, handoff);
+    let promise: Promise<void>;
+    promise = (async () => {
+      let subagentId: string;
+      try {
+        subagentId = await spawnSubagent(message);
+      } catch {
+        sentinelHandoffs.delete(key);
+        if (!active) return;
+        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
+        return;
+      }
+      if (!active) return;
+      if (typeof subagentId !== "string" || subagentId.length === 0) {
+        sentinelHandoffs.delete(key);
+        try { receipt("nack", delivery, "injection_failed"); } catch { /* normal delivery timeout preserves replay */ }
+        return;
+      }
+      handoff.subagentId = subagentId;
+      handoff.statusRecorded = recordSentinelStatus(message, delivery, subagentId);
+      await acknowledgeSentinelHandoff(handoff, message, delivery);
     })();
-    sentinelInFlight.set(message.id, handoff);
-    return handoff;
+    handoff.promise = promise;
+    await promise;
+    handoff.promise = undefined;
+    maybeForgetSentinelHandoff(handoff);
   }
 
   function onEnvelope(message: MailboxMessage, delivery: MailboxDelivery): void | Promise<void> {
@@ -378,8 +582,15 @@ export function createPiMailboxDeliveryCoordinator({
     if (message.sentinel !== undefined) return onSentinelEnvelope(message, delivery);
     const currentContext = sessionContext;
     const state = sessionDeliveryState(currentContext, message.id, delivery.items);
-    if (state === "durable") {
-      confirmExistingDelivery(delivery, currentContext);
+    const retryEntryKnown = state === "history_unverified" && hasDurableRetryEntry(currentContext, delivery);
+    if (state === "durable" || retryEntryKnown) {
+      const existing = pending.get(message.id);
+      if (acknowledgeKnownDelivery(delivery, currentContext)) {
+        if (existing !== undefined) {
+          clearCheckpointTimer(existing);
+          pending.delete(message.id);
+        }
+      }
       return;
     }
 
@@ -440,13 +651,18 @@ export function createPiMailboxDeliveryCoordinator({
   function onMessageEnd(event: MessageEndEvent, context: PiContext): void {
     const details = isRecord(event.message?.details) ? event.message.details : undefined;
     const messageId = typeof details?.message_id === "string" ? details.message_id : undefined;
-    if (event.message?.role !== "custom" || event.message.customType !== MAILBOX_MESSAGE_TYPE
-      || typeof messageId !== "string") {
+    if (event.message?.role !== "custom" || typeof messageId !== "string") return;
+    // Pi can deliver a late event from another session. The fence prevents it
+    // from acknowledging state owned by this coordinator.
+    if (context.sessionManager.getSessionId() !== sessionId) return;
+    if (event.message.customType === SENTINEL_STATUS_TYPE) {
+      // The status event can precede the session-file append. Check after the
+      // event returns so ownership is tested against the durable entry.
+      const messageIncarnationId = typeof details?.message_incarnation_id === "string" ? details.message_incarnation_id : undefined;
+      defer(() => checkSentinelHandoff(messageId, messageIncarnationId));
       return;
     }
-    // Pi can deliver a late event from another session. The fence prevents it
-    // from acknowledging a pending delivery owned by this coordinator.
-    if (context.sessionManager.getSessionId() !== sessionId) return;
+    if (event.message.customType !== MAILBOX_MESSAGE_TYPE) return;
     const pendingDelivery = pending.get(messageId);
     if (pendingDelivery === undefined) return;
 
@@ -462,9 +678,10 @@ export function createPiMailboxDeliveryCoordinator({
       // active=false makes them harmless and clears all retained delivery state.
       active = false;
       for (const pendingDelivery of pending.values()) clearCheckpointTimer(pendingDelivery);
+      for (const handoff of sentinelHandoffs.values()) clearSentinelCleanupTimer(handoff);
       pending.clear();
       announcedArrivals.clear();
-      sentinelInFlight.clear();
+      sentinelHandoffs.clear();
       reportedPersistenceErrors.clear();
     },
   };

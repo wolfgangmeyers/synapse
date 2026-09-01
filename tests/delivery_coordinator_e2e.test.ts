@@ -78,25 +78,48 @@ function censor(value: unknown, secrets: string[]): unknown {
   return value;
 }
 
+function requiredField(record: Record<string, unknown>, key: string, label: string): unknown {
+  assert.equal(Object.hasOwn(record, key), true, `${label} must include ${key}`);
+  return record[key];
+}
+
+function requiredRecord(value: unknown, label: string): Record<string, unknown> {
+  assert.ok(isRecord(value), `${label} must be an object`);
+  return value;
+}
+
+function assertEnvelopeFields(value: unknown, label: string): Record<string, unknown> {
+  const envelope = requiredRecord(value, label);
+  for (const field of ["id", "from", "to", "body", "created_at"]) {
+    requiredField(envelope, field, label);
+  }
+  return envelope;
+}
+
+function assertSentinelMetadata(value: unknown, expectedModel: string, label: string): void {
+  const envelope = assertEnvelopeFields(value, label);
+  const sentinel = requiredRecord(requiredField(envelope, "sentinel", label), `${label}.sentinel`);
+  assert.equal(requiredField(sentinel, "model", `${label}.sentinel`), expectedModel);
+}
+
 function replayContract(frame: Record<string, unknown>): Record<string, unknown> {
-  assert.ok(isRecord(frame.message));
-  const message = frame.message;
+  const message = assertEnvelopeFields(requiredField(frame, "message", "message frame"), "message frame.message");
   return {
     message: {
-      id: message.id,
-      from: message.from,
-      to: message.to,
+      id: requiredField(message, "id", "message frame.message"),
+      from: requiredField(message, "from", "message frame.message"),
+      to: requiredField(message, "to", "message frame.message"),
       subject: message.subject,
-      body: message.body,
-      created_at: message.created_at,
+      body: requiredField(message, "body", "message frame.message"),
+      created_at: requiredField(message, "created_at", "message frame.message"),
       source: message.source,
       sentinel: message.sentinel,
     },
-    message_incarnation_id: frame.message_incarnation_id,
-    attempt_number: frame.attempt_number,
-    delivery_expires_at: frame.delivery_expires_at,
-    delivery_items: frame.delivery_items,
-    delivery_messages: frame.delivery_messages,
+    message_incarnation_id: requiredField(frame, "message_incarnation_id", "message frame"),
+    attempt_number: requiredField(frame, "attempt_number", "message frame"),
+    delivery_expires_at: requiredField(frame, "delivery_expires_at", "message frame"),
+    ...(Object.hasOwn(frame, "delivery_items") ? { delivery_items: frame.delivery_items } : {}),
+    ...(Object.hasOwn(frame, "delivery_messages") ? { delivery_messages: frame.delivery_messages } : {}),
   };
 }
 
@@ -119,6 +142,8 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
   let routerClosed = false;
   let failurePaused = false;
   let failureNackCount = 0;
+  let releaseSentinelReplay: (() => void) | undefined;
+  const sentinelReplayGate = new Promise<void>((resolve) => { releaseSentinelReplay = resolve; });
 
   const context = {
     sessionManager: {
@@ -153,6 +178,11 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
       if (isRecord(parsed)) {
         frames.push({ direction: "client", raw, frame: parsed });
         const messageId = messageIdFromFrame(parsed);
+        if (parsed.type === "register") {
+          // Exercise the correlated delivery contract so every required frame field is present.
+          originalSend(JSON.stringify({ ...parsed, ack_confirmation: "correlated_v1" }));
+          return;
+        }
         if (parsed.type === "nack" && messageId === "sentinel-failure") {
           failurePaused = true;
           failureNackCount += 1;
@@ -186,6 +216,7 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
     spawnSubagent: async (message) => {
       sentinelCalls.push(message);
       if (message.id === "sentinel-failure") throw new Error("PRIVATE native failure error");
+      if (message.id === "sentinel-replay") await sentinelReplayGate;
       return "native-child";
     },
   });
@@ -254,8 +285,19 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
 
   const firstBatchFrame = frames.find(({ direction, frame }) => direction === "router" && frame.type === "message" && messageIdFromFrame(frame) === ordinary.id);
   assert.ok(firstBatchFrame);
-  assert.equal(isRecord(firstBatchFrame.frame.message) ? firstBatchFrame.frame.message.body : undefined, `Mailbox message batch\n\nFrom: sender\nSubject: ${ordinary.subject}\n\n${ordinary.body}\n\n[Reply via mailbox to sender.]\n\n---\n\nFrom: sender\nSubject: ${ordinaryFollowup.subject}\n\n${ordinaryFollowup.body}\n\n[Reply via mailbox to sender.]`);
-  assert.equal(Array.isArray(firstBatchFrame.frame.delivery_items), true);
+  for (const field of ["message", "message_incarnation_id", "attempt_number", "delivery_expires_at", "delivery_items", "delivery_messages"]) {
+    requiredField(firstBatchFrame.frame, field, "ordinary batch frame");
+  }
+  const firstBatchMessage = assertEnvelopeFields(firstBatchFrame.frame.message, "ordinary batch frame.message");
+  assert.equal(firstBatchMessage.body, `Mailbox message batch\n\nFrom: sender\nSubject: ${ordinary.subject}\n\n${ordinary.body}\n\n[Reply via mailbox to sender.]\n\n---\n\nFrom: sender\nSubject: ${ordinaryFollowup.subject}\n\n${ordinaryFollowup.body}\n\n[Reply via mailbox to sender.]`);
+  const firstBatchItems = firstBatchFrame.frame.delivery_items;
+  assert.ok(Array.isArray(firstBatchItems));
+  assert.equal(firstBatchItems.length, 2);
+  const firstBatchMessages = firstBatchFrame.frame.delivery_messages;
+  assert.ok(Array.isArray(firstBatchMessages));
+  assert.equal(firstBatchMessages.length, 2);
+  firstBatchMessages.forEach((message, index) => assertEnvelopeFields(message, `ordinary batch frame.delivery_messages[${index}]`));
+  assert.deepEqual(firstBatchMessages, [ordinary, ordinaryFollowup]);
 
   client.pause();
   await waitFor(() => sockets[0]?.readyState === WebSocket.CLOSED, "client should disconnect before router restart");
@@ -266,6 +308,16 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
   assert.equal(injections.length, 1, "history-unverified replay must not fabricate a second entry");
   const replayFrames = frames.filter(({ direction, frame }) => direction === "router" && frame.type === "message" && messageIdFromFrame(frame) === ordinary.id);
   assert.equal(replayFrames.length, 2);
+  for (const [index, replayFrame] of replayFrames.entries()) {
+    for (const field of ["message", "message_incarnation_id", "attempt_number", "delivery_expires_at", "delivery_items", "delivery_messages"]) {
+      requiredField(replayFrame.frame, field, `ordinary replay frame ${index}`);
+    }
+    const deliveryMessages = replayFrame.frame.delivery_messages;
+    assert.ok(Array.isArray(deliveryMessages));
+    assert.equal(deliveryMessages.length, 2);
+    deliveryMessages.forEach((message, messageIndex) => assertEnvelopeFields(message, `ordinary replay frame ${index}.delivery_messages[${messageIndex}]`));
+    assert.deepEqual(deliveryMessages, [ordinary, ordinaryFollowup]);
+  }
   assert.deepEqual(replayContract(replayFrames[1].frame), replayContract(replayFrames[0].frame), "replay must preserve every message and delivery contract field");
   assert.deepEqual((replayFrames[0].frame.delivery_items as unknown[]).map((item) => isRecord(item) ? item.message_id : undefined), [ordinary.id, ordinaryFollowup.id]);
   assert.deepEqual((replayFrames[1].frame.delivery_items as unknown[]).map((item) => isRecord(item) ? item.message_id : undefined), [ordinary.id, ordinaryFollowup.id]);
@@ -282,6 +334,68 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
   assert.equal((await messageRecord(router.httpUrl, ordinary.id)), undefined);
   assert.equal((await messageRecord(router.httpUrl, ordinaryFollowup.id)), undefined);
 
+  const sentinelReplaySecret = "PRIVATE scheduled replay prompt";
+  const sentinelReplayModelSecret = "PRIVATE-replay-model";
+  await postMessage(router.httpUrl, {
+    id: "sentinel-replay", from: "scheduler", to: "isolated-delivery", body: sentinelReplaySecret,
+    sentinel: { model: sentinelReplayModelSecret }, created_at: "2030-01-01T00:00:00.000Z",
+  });
+  await waitFor(() => frames.some(({ direction, frame }) => direction === "router" && frame.type === "message" && messageIdFromFrame(frame) === "sentinel-replay"), "Sentinel replay delivery should arrive");
+  const sentinelReplayFirst = frames.find(({ direction, frame }) => direction === "router" && frame.type === "message" && messageIdFromFrame(frame) === "sentinel-replay");
+  assert.ok(sentinelReplayFirst);
+  assertSentinelMetadata(sentinelReplayFirst.frame.message, sentinelReplayModelSecret, "Sentinel replay frame.message");
+  assert.equal(requiredField(sentinelReplayFirst.frame, "message_incarnation_id", "Sentinel replay frame") !== undefined, true);
+  assert.equal(requiredField(sentinelReplayFirst.frame, "attempt_number", "Sentinel replay frame"), 1);
+  assert.equal(requiredField(sentinelReplayFirst.frame, "delivery_expires_at", "Sentinel replay frame") !== undefined, true);
+
+  client.pause();
+  await waitFor(() => sockets[0]?.readyState === WebSocket.CLOSED, "client should disconnect before Sentinel replay");
+  await router.restart();
+  await client.resume();
+  await waitFor(() => frames.filter(({ direction, frame }) => direction === "router" && frame.type === "message" && messageIdFromFrame(frame) === "sentinel-replay").length >= 2, "restart should replay the Sentinel delivery");
+  const sentinelReplayFrames = frames.filter(({ direction, frame }) => direction === "router" && frame.type === "message" && messageIdFromFrame(frame) === "sentinel-replay");
+  assert.equal(sentinelReplayFrames.length, 2);
+  for (const [index, replayFrame] of sentinelReplayFrames.entries()) {
+    assertSentinelMetadata(replayFrame.frame.message, sentinelReplayModelSecret, `Sentinel replay frame ${index}.message`);
+    for (const field of ["message", "message_incarnation_id", "attempt_number", "delivery_expires_at"]) {
+      requiredField(replayFrame.frame, field, `Sentinel replay frame ${index}`);
+    }
+  }
+  assert.deepEqual(replayContract(sentinelReplayFrames[1].frame), replayContract(sentinelReplayFrames[0].frame), "Sentinel replay must preserve metadata and delivery contract fields");
+  releaseSentinelReplay?.();
+  await waitFor(() => frames.some(({ direction, frame }) => direction === "client" && frame.type === "ack" && messageIdFromFrame(frame) === "sentinel-replay"), "replayed Sentinel should ACK");
+
+  const lostAckSecret = "PRIVATE scheduled lost-ack prompt";
+  const lostAckModelSecret = "PRIVATE-lost-ack-model";
+  let lostAck = true;
+  await postMessage(router.httpUrl, {
+    id: "sentinel-lost-ack", from: "scheduler", to: "isolated-delivery", body: lostAckSecret,
+    sentinel: { model: lostAckModelSecret }, created_at: "2030-01-01T00:00:00.000Z",
+  });
+  // The child is already owned when this first ACK disappears. Reconnect the
+  // same unsettled delivery and prove the retry does not spawn a second child.
+  const originalSendReceipt = client?.sendReceipt.bind(client);
+  if (client !== undefined) {
+    client.sendReceipt = (type, delivery, reason) => {
+      if (type === "ack" && delivery.messageId === "sentinel-lost-ack" && lostAck) {
+        lostAck = false;
+        throw new Error("lost ACK");
+      }
+      originalSendReceipt?.(type, delivery, reason);
+    };
+  }
+  await waitFor(() => statuses.some((message) => isRecord(message) && isRecord(message.details) && message.details.message_id === "sentinel-lost-ack"), "lost-ACK Sentinel should record hidden status");
+  await waitFor(() => lostAck === false, "lost-ACK Sentinel should exercise the dropped acknowledgement");
+  const lostAckCalls = sentinelCalls.filter(({ id }) => id === "sentinel-lost-ack");
+  assert.equal(lostAckCalls.length, 1);
+  client?.pause();
+  await waitFor(() => sockets.at(-1)?.readyState === WebSocket.CLOSED, "client should disconnect after the lost ACK");
+  await router.restart();
+  await client?.resume();
+  await waitFor(() => frames.filter(({ direction, frame }) => direction === "router" && frame.type === "message" && messageIdFromFrame(frame) === "sentinel-lost-ack").length >= 2, "restart should replay the lost-ACK Sentinel delivery");
+  await waitFor(() => frames.some(({ direction, frame }) => direction === "client" && frame.type === "ack" && messageIdFromFrame(frame) === "sentinel-lost-ack"), "retried Sentinel should ACK");
+  assert.equal(sentinelCalls.filter(({ id }) => id === "sentinel-lost-ack").length, 1);
+
   const successSecret = "PRIVATE scheduled success prompt";
   const successModelSecret = "PRIVATE-success-model";
   await postMessage(router.httpUrl, {
@@ -291,7 +405,14 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
   await waitFor(() => statuses.some((message) => isRecord(message) && isRecord(message.details) && message.details.message_id === "sentinel-success"), "successful Sentinel should record hidden status");
   const successStatus = statuses.find((message) => isRecord(message) && isRecord(message.details) && message.details.message_id === "sentinel-success");
   assert.equal(isRecord(successStatus) ? successStatus.display : undefined, false);
-  assert.deepEqual(isRecord(successStatus) ? successStatus.details : undefined, { message_id: "sentinel-success", subagent_id: "native-child", state: "handed_off" });
+  const successStatusDetails = isRecord(successStatus) ? requiredRecord(successStatus.details, "Sentinel success status details") : {};
+  assert.equal(typeof requiredField(successStatusDetails, "message_incarnation_id", "Sentinel success status"), "string");
+  assert.deepEqual(successStatusDetails, {
+    message_id: "sentinel-success",
+    message_incarnation_id: successStatusDetails.message_incarnation_id,
+    subagent_id: "native-child",
+    state: "handed_off",
+  });
   await waitFor(() => frames.some(({ direction, frame }) => direction === "client" && frame.type === "ack" && messageIdFromFrame(frame) === "sentinel-success"), "successful Sentinel should ACK");
 
   const failureSecret = "PRIVATE scheduled failure prompt";
@@ -326,7 +447,7 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
   assert.equal(isRecord(failedCall?.sentinel) ? failedCall.sentinel.model : undefined, failureModelSecret);
 
   const observableFrames = frames.filter(({ frame }) => frame.type !== "message").map(({ raw, frame }) => ({ raw, frame }));
-  const secrets = [successSecret, successModelSecret, failureSecret, failureModelSecret, failureErrorSecret, outputSecret, resultSecret];
+  const secrets = [successSecret, successModelSecret, failureSecret, failureModelSecret, failureErrorSecret, outputSecret, resultSecret, sentinelReplaySecret, sentinelReplayModelSecret, lostAckSecret, lostAckModelSecret];
   const evidenceSecrets = [...secrets, ordinary.body, ordinaryFollowup.body];
   assertRedacted([...observableFrames, statuses, uiStatuses, traces, connectionStates, logs], secrets);
   const routerLog = await readFile(router.logPath, "utf8");
