@@ -17,6 +17,43 @@ describe("strict external HTTP endpoint validation", () => {
     }
   });
 
+  it("accepts scheduled reminders with nullable router fields and rejects malformed non-null values", async () => {
+    const scheduledReminder = {
+      id: "reminder-1",
+      target: "worker-one",
+      creator: "web-ui",
+      body: "Check the deployment",
+      subject: null,
+      linked_message_id: null,
+      linked_message_state: null,
+      last_attempt_at: null,
+      state: "scheduled",
+      created_at: "2030-01-01T00:00:00.000Z",
+      next_due_at: "2030-01-01T00:05:00.000Z",
+      interval_ms: null,
+      occurrence_number: 0,
+      attempt_count: 0,
+    };
+    const validClient = createHttpClient("http://router.test", vi.fn(async () => new Response(JSON.stringify({ reminders: [scheduledReminder] }), { status: 200 })));
+    await expect(validClient.reminders()).resolves.toEqual({ reminders: [scheduledReminder] });
+
+    for (const malformed of [
+      { subject: 42 },
+      { linked_message_id: "" },
+      { linked_message_state: 42 },
+      { last_attempt_at: "not-a-timestamp" },
+    ]) {
+      const client = createHttpClient("http://router.test", vi.fn(async () => new Response(JSON.stringify({ reminders: [{ ...scheduledReminder, ...malformed }] }), { status: 200 })));
+      await expect(client.reminders()).rejects.toMatchObject({ code: "invalid_response" });
+    }
+  });
+
+  it("accepts a nullable reminder nested in a create response", async () => {
+    const reminder = { id: "reminder-1", target: "worker-one", creator: "web-ui", body: "Check the deployment", subject: null, linked_message_id: null, linked_message_state: null, last_attempt_at: null, state: "scheduled", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:05:00.000Z", interval_ms: null, occurrence_number: 0, attempt_count: 0 };
+    const client = createHttpClient("http://router.test", vi.fn(async () => new Response(JSON.stringify({ reminder }), { status: 200 })));
+    await expect(client.createReminder({})).resolves.toEqual({ reminder });
+  });
+
   it("fails closed when capability fields are malformed or unavailable", async () => {
     const malformed = createHttpClient("http://router.test", vi.fn(async () => new Response(JSON.stringify({ goal_control_v1: "yes" }), { status: 200 })));
     await expect(malformed.capabilities()).rejects.toMatchObject({ code: "invalid_response" });
