@@ -13,7 +13,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-const connectedAgent = (goalState = DEFAULT_GOAL_STATE) => ({ agent_id: "worker-one", instance_id: "peer-instance", agent_role: "agent", connected_at: "2030-01-01T00:00:00.000Z", lease_expires_at: "2030-01-02T00:00:00.000Z", activity_state: "idle" as const, subagent_count: 0, subagents: [], available_models: [], model_catalog_total_count: 0, model_catalog_truncated: false, goal_state: goalState });
+const connectedAgent = (goalState = DEFAULT_GOAL_STATE, agentId = "worker-one") => ({ agent_id: agentId, instance_id: agentId === "worker-one" ? "peer-instance" : `${agentId}-instance`, agent_role: "agent", connected_at: "2030-01-01T00:00:00.000Z", lease_expires_at: "2030-01-02T00:00:00.000Z", activity_state: "idle" as const, subagent_count: 0, subagents: [], available_models: [], model_catalog_total_count: 0, model_catalog_truncated: false, goal_state: goalState });
 const storedMessage = { enqueue_sequence: 1, id: "message-1", from: "web-ui", to: "worker-one", body: "hello", created_at: "2030-01-01T00:00:00.000Z", expires_at: "2030-01-02T00:00:00.000Z", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174000", state: "queued", source: { kind: "web_ui" } };
 const reminderResponse: Reminder = { id: "reminder-1", target: "worker-one", creator: "web-ui", body: "Check this", subject: "Check", state: "scheduled", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:01:00.000Z", interval_ms: null, occurrence_number: 0, attempt_count: 0 };
 
@@ -62,13 +62,13 @@ class ResultSocket implements WebSocketLike {
   }
 }
 
-function renderConnectedApp({ initialGoalState = DEFAULT_GOAL_STATE, initialReminders = [], onGoal, onReminders, onSelectAgent }: { initialGoalState?: typeof DEFAULT_GOAL_STATE; initialReminders?: Array<typeof reminderResponse>; onGoal?: (peer: string) => void; onReminders?: (peer: string) => void; onSelectAgent?: (peer: string) => void } = {}) {
+function renderConnectedApp({ initialGoalState = DEFAULT_GOAL_STATE, initialReminders = [], agents, onGoal, onReminders, onSelectAgent }: { initialGoalState?: typeof DEFAULT_GOAL_STATE; initialReminders?: Array<typeof reminderResponse>; agents?: Array<ReturnType<typeof connectedAgent>>; onGoal?: (peer: string) => void; onReminders?: (peer: string) => void; onSelectAgent?: (peer: string) => void } = {}) {
   let goalState = { ...initialGoalState };
   const reminder = { ...reminderResponse, enabled: true };
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith("/v1/capabilities")) return jsonResponse({ goal_control_v1: true });
-    if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [connectedAgent(goalState)] });
+    if (url.endsWith("/v1/agents")) return jsonResponse({ agents: agents ?? [connectedAgent(goalState)] });
     if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: "worker-one", high_water_sequence: 0, messages: [] });
     if (url.endsWith("/v1/reminders") && (init?.method ?? "GET") === "POST") return jsonResponse({ reminder }, 201);
     if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: initialReminders });
@@ -145,30 +145,41 @@ describe("source-backed isolated app behaviors", () => {
     const user = userEvent.setup();
     const onGoal = vi.fn();
     const onSelectAgent = vi.fn();
-    renderConnectedApp({ initialGoalState: { ...DEFAULT_GOAL_STATE, enabled: true, goal: "Existing goal" }, onGoal, onSelectAgent });
-    await waitFor(() => expect(within(screen.getByRole("list")).getByRole("button", { name: "Set goal" })).toBeInTheDocument());
-
+    renderConnectedApp({
+      agents: [connectedAgent(undefined, "agent-a"), connectedAgent({ ...DEFAULT_GOAL_STATE, enabled: true, goal: "B's goal" }, "agent-b")],
+      onGoal,
+      onSelectAgent,
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Agent A (agent-a)" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Agent A (agent-a)" }));
     await user.click(within(screen.getByRole("list")).getByRole("button", { name: "Set goal" }));
 
-    expect(onGoal).toHaveBeenCalledWith("worker-one");
-    expect(onSelectAgent).toHaveBeenCalledWith("worker-one");
-    expect(await screen.findByRole("heading", { name: "Goal for worker-one" })).toBeInTheDocument();
-    expect(screen.getByRole("listitem")).toHaveAttribute("aria-selected", "true");
+    expect(onGoal).toHaveBeenCalledTimes(1);
+    expect(onGoal).toHaveBeenCalledWith("agent-b");
+    expect(onSelectAgent.mock.calls.filter(([peer]) => peer === "agent-b")).toHaveLength(1);
+    expect(await screen.findByRole("heading", { name: "Goal for agent-b" })).toBeInTheDocument();
+    expect(screen.getByText("B's goal")).toBeInTheDocument();
   });
 
   it("opens the sidebar reminder action for its target and reports the selected agent", async () => {
     const user = userEvent.setup();
     const onReminders = vi.fn();
     const onSelectAgent = vi.fn();
-    renderConnectedApp({ initialReminders: [{ ...reminderResponse, enabled: true }], onReminders, onSelectAgent });
-    await waitFor(() => expect(within(screen.getByRole("list")).getByRole("button", { name: "Add reminder" })).toBeInTheDocument());
-
+    renderConnectedApp({
+      agents: [connectedAgent(undefined, "agent-a"), connectedAgent(undefined, "agent-b")],
+      initialReminders: [{ ...reminderResponse, target: "agent-b", subject: "B's reminder", body: "Reminder for agent-b", enabled: true }],
+      onReminders,
+      onSelectAgent,
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Agent A (agent-a)" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Agent A (agent-a)" }));
     await user.click(within(screen.getByRole("list")).getByRole("button", { name: "Add reminder" }));
 
-    expect(onReminders).toHaveBeenCalledWith("worker-one");
-    expect(onSelectAgent).toHaveBeenCalledWith("worker-one");
+    expect(onReminders).toHaveBeenCalledTimes(1);
+    expect(onReminders).toHaveBeenCalledWith("agent-b");
+    expect(onSelectAgent.mock.calls.filter(([peer]) => peer === "agent-b")).toHaveLength(1);
     expect(await screen.findByRole("heading", { name: "Reminders" })).toBeInTheDocument();
-    expect(screen.getByRole("listitem")).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("Reminder for agent-b")).toBeInTheDocument();
   });
 
   it("fails closed in the goal dialog when the websocket reconnects", async () => {
