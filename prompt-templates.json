@@ -40,13 +40,13 @@
     },
     {
       "name": "Consistency Check",
-      "body": "Have a subagent go through an audit to see if we are using existing patterns for this PR. Check each individual file in the PR to make sure that it uses existing patterns and doesn't invent any new ones. The key priority here is consistency with the existing codebase.",
+      "body": "Have a subagent go through an audit to see if we are using existing patterns for this PR. Check each individual file in the PR to make sure that it uses existing patterns and doesn't invent any new ones - there should be at least one or two places in the codebase that use the same pattern. The key priority here is consistency with the existing codebase, it outweighs \"doing it better\".",
       "id": "cb1611c4-fc1f-425d-a849-8412cab82d9c",
       "updated_at": "2026-08-31T15:19:47.808Z"
     },
     {
       "name": "Address Feedback",
-      "body": "Take a look at open threads on this PR. Address any feedback that should be addressed, then get the changes pushed up. Once changes are pushed up, reply to each thread and resolve them if the feedback was addressed.\n\nAlso remember that ideally we would have caught any issues already. Make sure to improve robot review heuristics and capture any domain knowledge in the KB. Make sure any new heuristics aren't too narrow, they should be generally applicable.\n\nSet a goal to get this done, and make sure it spells out the success criteria clearly and in enough detail that it will be easy to know when you're done.",
+      "body": "Take a look at open threads on this PR. Address any feedback that should be addressed, then get the changes pushed up. Once changes are pushed up, reply to each thread and resolve them if the feedback was addressed.\n\nAlso remember that ideally we would have caught any issues already. Make sure to improve robot review heuristics and capture any domain knowledge in the KB. Make sure any new heuristics aren't too narrow, they should be generally applicable. DO NOT RUN robot review, just update heuristics based on the PR feedback.\n\nSet a goal to get this done, and make sure it spells out the success criteria clearly and in enough detail that it will be easy to know when you're done.",
       "id": "67bc2175-de3f-4861-90ed-1d22b094d34b",
       "updated_at": "2026-08-31T15:26:37.675Z"
     },
@@ -55,6 +55,12 @@
       "body": "Get a worker started on ${ticket}. Make sure that the worker name is both descriptive and begins with the ticket number (the same thing as the tmux window name), and inform the worker by mailbox what their window name is. Create a new worktree, then start a new window in that worktree and hand off the task to the worker. Make sure to include instructions for the worker to set a goal with clear success criteria. Also get the ticket marked as in progress (if applicable). Make sure the worker loads the worker skill.",
       "id": "a6fd1989-441d-485d-803f-0e28ed5ac5f7",
       "updated_at": "2026-08-31T18:23:07.286Z"
+    },
+    {
+      "name": "Green CI",
+      "body": "Check your PR for CI failures or merge conflicts. If any are found, set a goal to get these fixed. You need to get your PR free of merge conflicts and CI failures, CI must be green. Also set a 15 minute recurring reminder to keep checking it. You can remove the reminder and goal once it's green. Inform me once it is.",
+      "id": "c791788d-a6d6-4470-9e0f-6c8d40da10ac",
+      "updated_at": "2026-09-01T21:13:26.302Z"
     }
   ]
 }
