@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { AgentRow } from "../../src/components/AgentRow";
 import "../../src/app.css";
 
@@ -33,6 +34,39 @@ describe("AgentRow", () => {
     fireEvent.click(screen.getByRole("button", { name: "1 subagent" }));
     expect(onToggle).toHaveBeenCalledWith("build-agent");
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("opens goal and reminder actions without selecting the row", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onGoal = vi.fn();
+    const onReminders = vi.fn();
+    render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle", goal: { enabled: true, goal: "goal" } }} reminderCount={1} onSelect={onSelect} onGoal={onGoal} onReminders={onReminders} />);
+
+    const goal = screen.getByRole("button", { name: "Set goal" });
+    const reminders = screen.getByRole("button", { name: "Add reminder" });
+    expect(goal.closest(".agent-row-select")).toBeNull();
+    await user.click(goal);
+    reminders.focus();
+    await user.keyboard("{Enter}");
+
+    expect(onGoal).toHaveBeenCalledWith("build-agent");
+    expect(onReminders).toHaveBeenCalledWith("build-agent");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("keeps applicable indicators static without action callbacks", () => {
+    render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle", goal: { enabled: true, goal: "goal" } }} reminderCount={1} />);
+    expect(screen.queryByRole("button", { name: "Set goal" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add reminder" })).not.toBeInTheDocument();
+    expect(document.querySelector(".goal-indicator")).toBeInTheDocument();
+    expect(document.querySelector(".reminder-row-indicator")).toBeInTheDocument();
+  });
+
+  it("omits action controls when the corresponding indicator does not apply", () => {
+    render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle" }} onGoal={vi.fn()} onReminders={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Set goal" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add reminder" })).not.toBeInTheDocument();
   });
 
   it("uses the compacting indicator in place of subagent details", () => {
