@@ -55,6 +55,20 @@ describe("AgentRow", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it("activates the goal control from the keyboard without selecting the row", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onGoal = vi.fn();
+    render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle", goal: { enabled: true, goal: "goal" } }} onSelect={onSelect} onGoal={onGoal} />);
+
+    const goal = screen.getByRole("button", { name: "Set goal" });
+    goal.focus();
+    await user.keyboard("{Enter}");
+
+    expect(onGoal).toHaveBeenCalledWith("build-agent");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it("keeps applicable indicators static without action callbacks", () => {
     render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle", goal: { enabled: true, goal: "goal" } }} reminderCount={1} />);
     expect(screen.queryByRole("button", { name: "Set goal" })).not.toBeInTheDocument();
