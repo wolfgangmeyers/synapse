@@ -4,17 +4,13 @@ This is the replacement for the missing quality-refactor audit. It is a behavior
 
 The goal is to reduce the size and coupling of that composition root without changing the Mailbox V2 protocol, Pi event behavior, public exports, or the data shown to the router and its clients.
 
-## Update status
+## Audit status at current base
 
-The scoped lifecycle refactor was completed in lifecycle commit `cbbeedcb16902457fa8c21241c452201a21a7e8d`, with tree `ed2dd944b08186a02df90b8d02fac1fff4de4aa8`. This status is checked against extraction base commit `0cdcaf74f54dc961abd16aa3be2fec8c433647d1` and base tree `a8101f1c45b7385f7a0694cd8b25c56c2b0df39e`.
+The current base includes test commit `0f9b48b7488d8cb23907317a53fd700eb9cf5ea9`, tree `f778050a00582b55fe555188076ac604d96629e8`. Completion records below cite earlier immutable commits and trees unless they identify the current scoped validation explicitly.
 
-Validation evidence:
+The current working tree has an uncommitted Mecha Messaging diff. It adds delivery retry and Sentinel handoff fencing, lifecycle bounds and start/terminal race handling, typed snapshot handling across compaction, and the parent-only failed-compaction resume path. The changed source and test files are outside the documentation changes listed below.
 
-- 23 focused lifecycle, differential, native-Pi, package-discovery, and export tests passed.
-- The isolated native-Pi E2E passed 1/1 with TSX, temporary module-resolution, router SQLite, and session paths, a packaged Wolfgang fork native `19.2.2` artifact from source commit `3be57...`, and installed Pi `0.84.3`.
-- Typecheck, lint, generated mailbox-client drift checks, and `git diff --check` passed.
-- The differential comparator and representative lifecycle mutation assertions passed. This is mutation coverage for the stated assertions, not a complete mutation-testing run.
-- Full-suite validation, aggregate coverage, and independent review have not been completed. These results do not claim final review or commit.
+Final validation is complete. Validation passed with 350 TypeScript tests, 137 JavaScript tests, and 176 Android tests. Six installed-Pi E2Es passed on Pi `0.84.3`. Strict coverage for the extracted activity-lifecycle module was 100%; this does not claim complete coverage of the composition-root wiring in `index.ts`. TypeScript, lint, checks, generated-client drift, and `git diff --check` passed. Delivery mutation proof passed 51/51 against the 47-case baseline. Lifecycle mutation proof passed 22/22 against the 51-case baseline. Delivery E2E, lifecycle E2E, and source final review are approved. The final diff was read back and matched the scoped changes. The remaining scoped changes are still uncommitted.
 
 ## Root public exports
 
@@ -77,9 +73,11 @@ Evidence: commit `2b27be8b0` (`Extract compaction policy module`) and `tests/mec
 
 ## Completed and validated locally
 
-### Delivery coordinator
+### Delivery coordinator — current working-tree corrections with scoped validation complete
 
-The delivery coordinator is implemented locally in `pi-extensions/mecha-messaging/delivery-coordinator.ts` and wired from `index.ts`. The coordinator tests and isolated E2E validation listed below passed.
+The immutable delivery extraction is recorded in the earlier extraction history. The current uncommitted diff in `pi-extensions/mecha-messaging/delivery-coordinator.ts` adds two retry corrections: a persisted earlier attempt can acknowledge a later retry without reinjecting it, and a pending delivery is reinjected only after the retry delay when the persisted entry is still absent. Sentinel handoffs now clear completed in-flight state, fence continuations after close, and leave later retries eligible after a lost handoff or acknowledgment.
+
+The current-working-tree tests cover these paths. Final validation passed: delivery mutation proof 51/51 against the 47-case baseline, six installed-Pi E2Es on Pi `0.84.3`, and the focused coverage and repository checks recorded in the audit status. Delivery E2E and source final review are approved. The scoped delivery changes remain uncommitted.
 
 **Behavior and contracts to preserve.**
 
@@ -95,15 +93,15 @@ The delivery coordinator is implemented locally in `pi-extensions/mecha-messagin
 
 **Risks.** The important ordering is spread across the router lease, the Pi session branch, the persisted JSONL file, and `message_end`. A seemingly harmless reorder can acknowledge a message before it can be recovered, reinject a message into the wrong session, or create a second native child. Keep delivery-item identity, attempt numbers, and timer injection points unchanged.
 
-**Tests.** Keep the direct coordinator and state tests in `tests/mailbox_v2_delivery.test.ts`. Keep sentinel coverage in `tests/sentinel_native_subagent.test.ts` and the protocol/client tests that assert receipt fields. Add a small module-level matrix for: durable duplicate, unpersisted history, unreadable session file, checkpoint retry, new-attempt reinjection, receipt-send failure, close during retry, and duplicate sentinel delivery.
+**Tests.** Current focused coverage is in `tests/sentinel_native_subagent.test.ts` and the coordinator assertions in the current Messaging test suite. It covers durable retry identity, unverified history, checkpoint retry, delayed reinjection, receipt failures, close fencing, and duplicate Sentinel delivery.
 
-**Isolated E2E validation.** Use a temporary SQLite router, a temporary session file, a fake Pi `sendMessage`, and a real WebSocket mailbox client. Enqueue a message, deliver it, append the custom session entry, and verify the receipt order. Restart the router and replay the same message. Verify that the durable entry is acknowledged without a second Pi injection. Repeat with a failed checkpoint and with a sentinel whose spawn succeeds and fails. No live router, settings file, or service is needed.
+**E2E status.** The current delivery E2E is approved. It verifies persisted retry behavior, receipt ordering, router restart replay, checkpoint failure, and successful and failed Sentinel handoffs without using a shared router or session.
 
 ## Completed and pushed through `dee834077`
 
-### Model and control projection
+### Model and control projection — historical immutable evidence
 
-**Status and evidence.** The extraction is complete and pushed through commit `dee8340775886b77aa39ae9360c5ee6564c168a4`. The final correction for an asynchronous `setModel` rejection after the active context changes was performed in commit `66b78d0a4ca340fe9639481ae49281e1836a54ab`: the failure result now reports the active context's model, matching the baseline catch behavior. The focused direct suite passed 20 tests, the differential suite passed 1 test, and the full Mecha Messaging and repository validation suites passed. Changed-source coverage reached 100 percent for lines, functions, statements, and branches. The isolated installed-Pi E2E passed against the identified installed Pi runtime. Robot Review and independent validation signed off on the final target, and the mutation proof killed every listed mutation.
+**Status and evidence.** The extraction is complete in historical commit `dee8340775886b77aa39ae9360c5ee6564c168a4`. The final correction for an asynchronous `setModel` rejection after the active context changes was performed in commit `66b78d0a4ca340fe9639481ae49281e1836a54ab`: the failure result now reports the active context's model, matching the baseline catch behavior. The focused direct suite passed 20 tests, the differential suite passed 1 test, and the full Mecha Messaging and repository validation suites passed. Changed-source coverage reached 100 percent for lines, functions, statements, and branches. The isolated installed-Pi E2E passed against the identified installed Pi runtime. Robot Review and independent validation signed off on the final target, and the mutation proof killed every listed mutation.
 
 **Scope.** Extract model metadata normalization, catalog projection, current-model projection, model selection and switching, the short-lived post-switch override, model-control result normalization, and the adjacent Goal control bridge adapters. Keep the Goal state machine in `mecha-goal` and keep wire serialization in `mailbox-client.ts`.
 
@@ -120,19 +118,19 @@ The delivery coordinator is implemented locally in `pi-extensions/mecha-messagin
 
 **Risks.** This slice crosses the Pi model registry, mailbox-client frames, router control fencing, UI projections, and the Goal bridge. The main failure is returning an optimistic model forever or accepting a model that the registry did not provide. Keep identity comparisons on provider plus ID, and keep wire contracts in the client layer.
 
-**Tests.** `tests/model_control_projection.test.ts` covers malformed catalogs, one-thousand-item bounds, provider-plus-ID identity, throw-after-mutation, stale context clearing, the asynchronous stale-context rejection regression, control timeout, and Goal bridge fallback. `tests/mecha_messaging_model_control_projection_differential.test.ts` compares the extracted extension against the exact baseline fixture. Client and router control coverage remains in `tests/model_catalog_transport.test.mjs`, `tests/mailbox_client_goal_control.test.mjs`, `tests/router_web_ui.test.mjs`, and `tests/goal_transport.test.ts`.
+**Tests.** `tests/model_control_projection.test.ts` covers malformed catalogs, one-thousand-item bounds, provider-plus-ID identity, throw-after-mutation, stale context clearing, the asynchronous stale-context rejection regression, control timeout, and Goal bridge fallback. `tests/mecha_messaging_model_control_projection_differential.test.ts` compares the extracted extension against the exact baseline fixture. Current-base transport coverage remains in the tests present in the repository; retired router and Web UI test paths are not part of current validation.
 
 **Isolated E2E validation.** This passed against a temporary router and WebSocket clients, a fake Pi registry with malformed and valid entries, and a fake `setModel` in the isolated installed-Pi runtime. It covered catalog and current-model projections, successful, rejected, and throw-after-mutation switches, reconnect behavior, and a Goal control request. It did not use the live router, browser settings, credentials, or a shared session.
 
-## Remaining slices
+## Scoped changes in the current working tree
 
-Each slice should move existing code with the smallest possible adapter. Keep the current exports until callers and tests have moved. Do not combine an extraction with a protocol change, a timing change, or a new feature.
+The current scoped changes have completed validation but remain uncommitted. Each slice should move existing code with the smallest possible adapter. Keep the current exports until callers and tests have moved. Do not combine an extraction with a protocol change, a timing change, or a new feature.
 
-### 1. Activity lifecycle — completed locally
+### 1. Activity lifecycle — current fixes with scoped validation complete
 
-**Status and evidence.** The approved boundary is implemented in the current working tree. `pi-extensions/mecha-messaging/activity-lifecycle.ts` owns the settled-notification scheduler, owner-scoped native service reads, native child tracking and tombstones, lifecycle snapshot reconciliation, activity heartbeat, and activity projection assembly. `index.ts` remains the composition root: it keeps Pi event registration, Goal activity, mailbox pause state, compaction orchestration, model and diagnostics behavior, and the existing root adapters. The extraction does not add a lifecycle publication path: typed lifecycle frames still come from heartbeat polling.
+**Status and evidence.** The extraction is recorded in immutable commit `cbbeedcb16902457fa8c21241c452201a21a7e8d`, tree `ed2dd944b08186a02df90b8d02fac1fff4de4aa8`. The current working tree adds bounded settled-child state, typed snapshot caps, start/terminal identity fences, compaction-resume reconciliation, and removal of the unsupported `steered` event registration. `pi-extensions/mecha-messaging/activity-lifecycle.ts` remains the lifecycle owner and `index.ts` remains the composition root.
 
-The differential harness used the pre-extraction TypeScript baseline and passed with no unlisted mismatch. The focused lifecycle, differential, native-Pi, package-discovery, and export tests passed: 23 passed, 0 failed, 0 skipped. The isolated native-Pi E2E passed 1/1 using TSX, temporary module-resolution, router SQLite, and session paths, the packaged Wolfgang fork native `19.2.2` artifact at source commit `3be57...`, and installed Pi `@earendil-works/pi-coding-agent` `0.84.3`. The differential comparator and representative lifecycle mutation assertions passed. Full-suite validation, aggregate coverage, complete mutation testing, and independent review remain outstanding. The implementation is recorded in lifecycle commit `cbbeedcb16902457fa8c21241c452201a21a7e8d`.
+Final validation passed: lifecycle mutation proof 22/22 against the 51-case baseline, six installed-Pi E2Es on Pi `0.84.3`, strict activity-lifecycle module coverage at 100%, and the focused coverage and repository checks recorded in the audit status. This module figure does not represent complete coverage of all composition-root wiring in `index.ts`. Lifecycle E2E and source final review are approved. The scoped lifecycle changes remain uncommitted.
 
 **Scope.** Extract the settled-notification scheduler, native subagent tracking, lifecycle snapshot reconciliation, activity heartbeat, and activity projection assembly. The Goal meaningful-activity adapter can remain in the composition root until its dependency on the Goal package is explicitly separated.
 
@@ -150,17 +148,15 @@ The differential harness used the pre-extraction TypeScript baseline and passed 
 
 **Risks.** This area has several time-based sources: Pi events, native lifecycle events, snapshot polling, queued timers, and compaction boundaries. Duplicate starts, unmatched terminal events, stale snapshots, and a reused child ID can all produce misleading UI state. Do not make event handlers publish lifecycle state if the current polling contract says only the timer may do so.
 
-**Tests.** The focused scheduler, projection, differential, native-Pi, package-discovery, export, settled-notification, activity-frame, and redacted-trace coverage passed as part of the 23-test focused run. Router compatibility coverage also passed in the JavaScript compatibility suite. The completed tests cover snapshot replacement, old-service fallback, tombstone reuse, missing-event expiry, bounds, and compaction masking.
+**Tests.** Current focused coverage is in `tests/mecha_messaging_activity_lifecycle.test.ts` and `tests/mecha_messaging_activity_lifecycle_differential.test.ts`, with package and compatibility checks in the current test inventory. It covers snapshot replacement, typed and legacy terminal handling, stale-ID reuse, bounds, compaction masking, and startup/shutdown ordering.
 
-**Isolated E2E validation.** This validation passed once against a temporary router with a fake native service supporting lifecycle snapshots and older list methods. It covered start, terminal, missed-event, snapshot-replacement, parent-settled, controlled-timer, WebSocket frame, child-count, ordering, redaction, router-restart, and compaction-mask behavior.
+**E2E status.** The current lifecycle E2E is approved. The historical native-runtime evidence remains tied to the earlier immutable target.
 
-### 2. Compaction orchestration — completed locally
+### 2. Compaction orchestration — current fixes validated; commit pending
 
-**Status and completion evidence.** Commit `a63bb49203a670c0d6b5dc0531621f5fe35bb04c` (tree `cee1e5c7a78f04125a1b21d537ef2f8ca65f6f93`) adds `pi-extensions/mecha-messaging/compaction-orchestration.ts`, which now owns the compaction request slots, logical mailbox pause, policy state, threshold watermark, capture boundary, hard-compaction guard, and post-compaction handoff. `index.ts` remains the composition root and keeps Pi event registration, client/coordinator ownership, settled-notification ordering, and shutdown ordering.
+**Status and completion evidence.** The extraction is recorded in immutable commit `a63bb49203a670c0d6b5dc0531621f5fe35bb04c`, tree `cee1e5c7a78f04125a1b21d537ef2f8ca65f6f93`. The current working tree adds the parent-only `session_compact_failed` recovery path. It resumes activity without resetting the advisory watermark or changing pending self or hard requests. Final validation is complete; the scoped compaction change is still awaiting its commit.
 
-The actual focused compaction command passed 24 tests: 15 direct orchestration tests, 4 differential-harness tests, 1 isolated fake-Pi E2E test, and 4 installed-Pi tests. The fake-Pi E2E covered seven scenarios: self-compaction success, non-idle self-compaction, child-armed self-compaction, hard-threshold handling, capture with a successful tool result, mailbox gating while logically paused, and shutdown cleanup. It did not exercise advisory-threshold notification, an active Pi stream, or a cancellation-insensitive tool. Advisory-threshold notification is covered by the direct orchestration tests. Active-stream compaction and the cancellation-insensitive tool are covered only by the optional installed-Pi tests when an installed package is available. Plain `npm test` exited successfully: 432 package tests passed with 3 expected installed-Pi skips, and 391 JavaScript tests passed with 2 unrelated environment skips. With `MECHA_PI_PACKAGE_ROOT` explicitly set to the installed package, all four tests in `tests/pi_hard_compaction_e2e.test.ts` passed. With no installed package, the three runtime-dependent tests skipped; the unrelated router-startup test still ran. A configured missing or wrong-identity package root failed those three runtime-dependent tests; it did not skip.
-
-Typecheck, Mecha Messaging lint, and `git diff --check` passed. A 29-mutation proof also passed against temporary copies of the extracted module and root fixture. All 29 mutations were killed, including self-compaction request and completion state, hard-compaction guards and callbacks, logical pause and capture/handoff behavior, policy and model forwarding, root tool/event ordering, and shutdown ownership and ordering. Each temporary mutation was reverted before the next one; the temporary directory was removed. No mutation runner, permanent mutation dependency, or mutated source was left in the repository. This proof does not claim live-router, provider, or native-Pi behavior beyond the separate installed-Pi test run.
+Historical focused compaction evidence remains tied to the immutable commit above. Current final validation includes the failed-compaction recovery assertion, the six installed-Pi E2Es, and the totals and checks recorded in the audit status above. The scoped compaction change remains uncommitted.
 
 **Scope.** Extract the lifecycle and request code around `pauseMailboxForCompaction`, `resumeMailboxAfterCompaction`, `requestSelfCompaction`, `runPendingSelfCompaction`, `enforceHardCompaction`, `monitorContextThreshold`, and post-compaction handoff publication. Import the already-extracted policy module. Do not move policy parsing back into this module.
 
@@ -177,9 +173,9 @@ Typecheck, Mecha Messaging lint, and `git diff --check` passed. A 29-mutation pr
 
 **Risks.** Compaction is the highest-coupling extraction. It touches delivery, activity, memory capture, Pi abort semantics, event ordering, and user-visible messages. The dangerous cases are cancellation before `session_compact`, a callback that fires after a newer request, an unavailable `compact` function, and a tool that never observes its abort signal. Preserve the pending-request identity checks and callback behavior before simplifying anything.
 
-**Tests.** `tests/mecha_messaging_compaction_policy.test.ts` remains the pure policy suite. `tests/pi_hard_compaction_e2e.test.ts` optionally covers installed-Pi stream abort, hard-guard ordering, and a cancellation-insensitive tool when an installed package is available. `tests/mecha_messaging_compaction_orchestration.test.ts` covers the extracted state machine. `tests/mecha_messaging_compaction_orchestration_differential.test.ts` compares ordered baseline behavior. `tests/mecha_messaging_compaction_orchestration_e2e.test.ts` covers the isolated fake-Pi path. `tests/memory_capture_e2e.test.ts` and `tests/memory_capture_e2e.test.mjs` retain capture deadline, source-bound, and apply coverage.
+**Tests.** `tests/mecha_messaging_compaction_policy.test.ts`, `tests/mecha_messaging_compaction_orchestration.test.ts`, and `tests/mecha_messaging_compaction_orchestration_differential.test.ts` remain the direct and differential coverage. Installed-Pi behavior is covered by the six approved E2Es recorded in the audit status. Retired extraction-E2E paths are not current validation inputs.
 
-**Isolated E2E validation.** The extraction E2E uses a child process, temporary HOME, Pi settings, project, session, SQLite, memory, and fake-`pi` paths. It does not require a router, network, credentials, or installed Pi. It covers self-compaction success, non-idle and child-armed self-compaction, hard-threshold handling, capture with a successful tool result, logical mailbox gating, and shutdown cleanup. It does not cover advisory-threshold notification, an active Pi stream, or a cancellation-insensitive tool. Advisory-threshold notification is covered by the direct orchestration tests. The separate installed-Pi tests optionally cover active-stream compaction and the cancellation-insensitive tool when the package is available; missing packages skip for CI compatibility, while configured or discovered invalid package roots fail.
+**E2E status.** The current compaction behavior was included in the six approved installed-Pi E2Es on Pi `0.84.3`, recorded in the audit status above. The scoped compaction change remains uncommitted.
 
 ### 3. Diagnostics and history sanitation
 
@@ -201,16 +197,16 @@ The focused direct suite passed 15 tests with 100 percent lines, functions, stat
 
 **Risks.** Sanitation changes the provider input, so object identity, array order, tool-call ownership, and “valid but unusual” content matter. The diagnostic path is also a privacy boundary. Do not spread raw event objects into logs, and do not make a best-effort logger capable of throwing into the context handler.
 
-**Tests.** Keep quarantine and diagnostic assertions in `tests/mailbox_v2_delivery.test.ts` and `tests/mecha_messaging_package.test.ts`. Add a focused table for null blocks, `tool_use` aliases, invalid names, provider-suffixed IDs, orphan results after errors, later matching calls, repeated context events, file rotation, malformed metadata, and secret text exclusion. Keep memory-capture validation in `tests/memory_capture.test.ts` and its E2E tests.
+**Tests.** Keep quarantine and diagnostic assertions in `tests/mecha_messaging_diagnostics_history.test.ts`, `tests/mecha_messaging_diagnostics_history_differential.test.ts`, and `tests/mecha_messaging_package.test.ts`. Add a focused table for null blocks, `tool_use` aliases, invalid names, provider-suffixed IDs, orphan results after errors, later matching calls, repeated context events, file rotation, malformed metadata, and secret text exclusion. Keep memory-capture validation in `tests/memory_capture.test.ts` and the current installed-Pi diagnostics test.
 
 **Isolated E2E validation.** Feed a fake installed-Pi context handler an adversarial history and capture the exact messages passed to the fake provider. Use a temporary `HOME` and diagnostic paths. Assert that invalid calls and orphan results disappear, valid history keeps its order, repeated events produce one diagnostic, files stay within their byte bounds, and sensitive source text does not appear. Run the same check with diagnostics unavailable and verify the provider request still completes.
 
 ## Recommended sequencing
 
-1. **Activity lifecycle.** Complete and validated. The delivery coordinator and activity lifecycle now have separate, documented boundaries.
-2. **Compaction orchestration.** It depends on the delivery and activity boundaries and has the most timing risk. Extract it after those interfaces are explicit.
-3. **Diagnostics and history sanitation.** It is mostly a pure transformation and a best-effort sink. Doing it after the timing work keeps provider-input changes separate from lifecycle changes.
-4. **Model and control projection.** Complete and pushed through commit `dee8340775886b77aa39ae9360c5ee6564c168a4`, with full-suite, coverage, differential, isolated installed-Pi E2E, review, and mutation validation recorded above.
+1. **Activity lifecycle.** The extraction and current bounds, race, and compaction fixes are validated. The scoped changes remain uncommitted.
+2. **Compaction orchestration.** The extraction and current failed-compaction recovery are validated. The scoped changes remain uncommitted.
+3. **Diagnostics and history sanitation.** The extraction is complete and its historical evidence remains tied to its immutable commit.
+4. **Model and control projection.** The extraction is complete and its historical evidence remains tied to commit `dee8340775886b77aa39ae9360c5ee6564c168a4`.
 
 For every slice: move code without changing behavior, add or preserve module-level tests, run package typecheck and lint, run the relevant isolated E2E, then run the full Mecha Messaging test command. Compare the public export list and protocol fixtures before and after. Stop if a diff changes a wire field, event name, timing bound, or error code without a separate product decision.
 
