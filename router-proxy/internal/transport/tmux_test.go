@@ -18,21 +18,27 @@ import (
 )
 
 type recordedTmux struct {
-	mu              sync.Mutex
-	sessions        []string
-	windows         []transport.TmuxWindow
-	calls           []string
-	block           chan struct{}
-	started         chan struct{}
-	provisions      int
-	secondProvision chan struct{}
-	windowsErr      error
-	provisionErr    error
-	keysErr         error
+	mu                  sync.Mutex
+	sessions            []string
+	windows             []transport.TmuxWindow
+	calls               []string
+	block               chan struct{}
+	started             chan struct{}
+	provisions          int
+	secondProvision     chan struct{}
+	windowsErr          error
+	provisionErr        error
+	keysErr             error
+	provisionSessionErr error
 }
 
 func (tmux *recordedTmux) Sessions(context.Context) ([]string, error) {
 	return tmux.sessions, nil
+}
+
+func (tmux *recordedTmux) ProvisionSession(_ context.Context, session, name string) error {
+	tmux.record("provision-session:" + session + ":" + name)
+	return tmux.provisionSessionErr
 }
 
 func (tmux *recordedTmux) Windows(_ context.Context, session string) ([]transport.TmuxWindow, error) {
@@ -209,8 +215,17 @@ func TestTmuxRoutesMapAdapterFailuresAndRecoverProvision(t *testing.T) {
 	require.Equal(t, []string{"windows:mecha", "windows:mecha", "provision:mecha:worker", "provision:mecha:worker", "keys:mecha:worker:start"}, tmux.Calls())
 }
 
+func TestTmuxRoutesProvisionTheInitialManagedSession(t *testing.T) {
+	tmux := &recordedTmux{}
+	server := newTmuxServer(t, tmux)
+	response := tmuxRequest(t, server.URL, http.MethodGet, "", "")
+	require.Equal(t, http.StatusOK, response.Code)
+	require.JSONEq(t, `{"session":"mecha","windows":null}`, response.Body.String())
+	require.Equal(t, []string{"provision-session:mecha:supervisor", "windows:mecha"}, tmux.Calls())
+}
+
 func TestTmuxRoutesRejectUnavailableAndInvalidNames(t *testing.T) {
-	unavailable := newTmuxServer(t, &recordedTmux{})
+	unavailable := newTmuxServer(t, &recordedTmux{provisionSessionErr: transport.ErrTmuxUnavailable})
 	response := tmuxRequest(t, unavailable.URL, http.MethodGet, "", "")
 	require.Equal(t, http.StatusNotFound, response.Code)
 	require.Contains(t, response.Body.String(), `"tmux_unavailable"`)

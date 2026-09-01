@@ -22,17 +22,13 @@ func newTmuxAdapter(binary string) *tmuxAdapter {
 		if err == nil {
 			return strings.TrimSpace(string(output)), nil
 		}
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
-			return "", fmt.Errorf("%w: %v", transport.ErrTmuxUnavailable, err)
-		}
 		return "", err
 	}}
 }
 
 func (adapter *tmuxAdapter) Sessions(ctx context.Context) ([]string, error) {
 	output, err := adapter.run(ctx, "list-sessions", "-F", "#{session_name}")
-	if errors.Is(err, transport.ErrTmuxUnavailable) {
+	if exitCode(err, 1) {
 		// tmux uses exit 1 for an empty server. It is an empty inventory, so the
 		// transport can report its normal unavailable selection state.
 		return nil, nil
@@ -43,8 +39,16 @@ func (adapter *tmuxAdapter) Sessions(ctx context.Context) ([]string, error) {
 	return splitTmuxLines(output), nil
 }
 
+func (adapter *tmuxAdapter) ProvisionSession(ctx context.Context, session, name string) error {
+	_, err := adapter.run(ctx, "new-session", "-d", "-s", session, "-n", name)
+	return err
+}
+
 func (adapter *tmuxAdapter) Windows(ctx context.Context, session string) ([]transport.TmuxWindow, error) {
 	output, err := adapter.run(ctx, "list-windows", "-t", session, "-F", "#{window_name}")
+	if exitCode(err, 1) {
+		return nil, fmt.Errorf("%w: %v", transport.ErrTmuxUnavailable, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +105,11 @@ func (adapter *tmuxAdapter) Restart(ctx context.Context, session, name, sessionI
 func (adapter *tmuxAdapter) Resume(ctx context.Context, session, name, sessionID string) (string, string, error) {
 	_, err := adapter.run(ctx, "send-keys", "-t", session+":"+name, "resume", sessionID, "Enter")
 	return name, "resumed", err
+}
+
+func exitCode(err error, code int) bool {
+	var exitError *exec.ExitError
+	return errors.As(err, &exitError) && exitError.ExitCode() == code
 }
 
 func splitTmuxLines(output string) []string {

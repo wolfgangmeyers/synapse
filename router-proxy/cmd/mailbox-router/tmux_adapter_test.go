@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,6 +30,7 @@ func TestTmuxAdapterUsesEstablishedCommands(t *testing.T) {
 	windows, err := adapter.Windows(context.Background(), "mecha")
 	require.NoError(t, err)
 	require.Equal(t, []transport.TmuxWindow{{Name: "supervisor", Target: "mecha:supervisor"}, {Name: "worker", Target: "mecha:worker"}}, windows)
+	require.NoError(t, adapter.ProvisionSession(context.Background(), "mecha", "supervisor"))
 	require.NoError(t, adapter.Provision(context.Background(), "mecha", "worker"))
 	require.NoError(t, adapter.Rename(context.Background(), "mecha", "worker", "renamed"))
 	require.NoError(t, adapter.SendKeys(context.Background(), "mecha", "worker", "echo hi", "ignored"))
@@ -45,6 +45,7 @@ func TestTmuxAdapterUsesEstablishedCommands(t *testing.T) {
 	require.Equal(t, [][]string{
 		{"list-sessions", "-F", "#{session_name}"},
 		{"list-windows", "-t", "mecha", "-F", "#{window_name}"},
+		{"new-session", "-d", "-s", "mecha", "-n", "supervisor"},
 		{"new-window", "-d", "-t", "mecha", "-n", "worker"},
 		{"rename-window", "-t", "mecha:worker", "renamed"},
 		{"send-keys", "-t", "mecha:worker", "-l", "echo hi"},
@@ -57,20 +58,15 @@ func TestTmuxAdapterUsesEstablishedCommands(t *testing.T) {
 
 func TestNewTmuxAdapterNormalizesExitOneAndPreservesOtherFailures(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "tmux")
-	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\ncase \"$1\" in\nlist-sessions) exit 1 ;;\n*) exit 2 ;;\nesac\n"), 0o700))
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\ncase \"$1\" in\nlist-sessions|list-windows) exit 1 ;;\n*) exit 2 ;;\nesac\n"), 0o700))
 	adapter := newTmuxAdapter(binary)
 
 	sessions, err := adapter.Sessions(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, sessions)
-	require.Error(t, adapter.Provision(context.Background(), "mecha", "worker"))
-}
-
-func TestTmuxAdapterTreatsAnEmptyServerAsNoSessions(t *testing.T) {
-	adapter := &tmuxAdapter{run: func(context.Context, ...string) (string, error) {
-		return "", fmt.Errorf("%w: empty server", transport.ErrTmuxUnavailable)
-	}}
-	sessions, err := adapter.Sessions(context.Background())
-	require.NoError(t, err)
-	require.Empty(t, sessions)
+	_, err = adapter.Windows(context.Background(), "mecha")
+	require.ErrorIs(t, err, transport.ErrTmuxUnavailable)
+	err = adapter.Provision(context.Background(), "mecha", "worker")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, transport.ErrTmuxUnavailable)
 }
