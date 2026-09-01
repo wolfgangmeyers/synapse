@@ -755,7 +755,40 @@ func (r *Router) tmuxSession(ctx context.Context) (string, error) {
 			return selected, nil
 		}
 	}
-	return "", ErrTmuxUnavailable
+
+	// The launcher checks the inventory before it asks to create a worker. When
+	// tmux has no sessions, that check must establish the managed session first
+	// or every fresh-machine launch fails before it reaches provision.
+	r.mu.Lock()
+	pending := r.tmuxSessionProvisioning
+	if pending == nil {
+		pending = &tmuxProvisioning{done: make(chan struct{})}
+		r.tmuxSessionProvisioning = pending
+		r.mu.Unlock()
+		err := r.tmux.ProvisionSession(ctx, "mecha", "supervisor")
+		r.mu.Lock()
+		pending.err = err
+		if err == nil {
+			r.selectedTmux = "mecha"
+		}
+		r.tmuxSessionProvisioning = nil
+		close(pending.done)
+		selected = r.selectedTmux
+		r.mu.Unlock()
+		return selected, err
+	}
+	r.mu.Unlock()
+	<-pending.done
+	if pending.err != nil {
+		return "", pending.err
+	}
+	r.mu.RLock()
+	selected = r.selectedTmux
+	r.mu.RUnlock()
+	if selected == "" {
+		return "", ErrTmuxUnavailable
+	}
+	return selected, nil
 }
 
 func (r *Router) provisionTmux(ctx context.Context, session, name, sessionID string) (string, error) {

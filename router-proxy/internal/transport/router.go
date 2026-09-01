@@ -73,6 +73,7 @@ type TmuxWindow struct {
 // router needs.
 type TmuxAdapter interface {
 	Sessions(context.Context) ([]string, error)
+	ProvisionSession(context.Context, string, string) error
 	Windows(context.Context, string) ([]TmuxWindow, error)
 	Provision(context.Context, string, string) error
 	Remove(context.Context, string, string) error
@@ -158,37 +159,38 @@ type Router struct {
 	ownershipGeneration uint64
 	// deliveryOfferMu protects one coalescing timer per agent. Close marks the
 	// timer set closed before waiting so no callback can be added concurrently.
-	deliveryOfferMu       sync.Mutex
-	pendingDeliveryOffers map[string]*pendingDeliveryOffer
-	deliveryOfferWG       sync.WaitGroup
-	deliveryStoreWG       sync.WaitGroup
-	deliveryOffersClosed  bool
-	deliveryOffersCancel  context.CancelFunc
-	server                *http.Server
-	listener              net.Listener
-	serveDone             chan struct{}
-	sweepCancel           context.CancelFunc
-	sweepDone             chan struct{}
-	closed                bool
-	sessions              map[string]*session
-	convos                map[string]map[string]*session
-	conversationOrder     map[string][]string
-	activities            map[string]activity
-	models                map[string]modelProjection
-	goals                 map[string]goalState
-	latestGoalRevision    map[string]int64
-	lastSweepRecord       time.Time
-	pendingMod            map[string]*pendingControl
-	pendingGoal           map[string]*pendingControl
-	pendingLock           map[string]*pendingControl
-	lifecycleState        map[string]lifecycleAgent
-	nextVersion           int64
-	rates                 map[string][]time.Time
-	selectedTmux          string
-	windowIDs             map[string]string
-	tmuxProvisionals      map[string]*tmuxProvisioning
-	goalAvailable         bool
-	lifecycleAvailable    bool
+	deliveryOfferMu         sync.Mutex
+	pendingDeliveryOffers   map[string]*pendingDeliveryOffer
+	deliveryOfferWG         sync.WaitGroup
+	deliveryStoreWG         sync.WaitGroup
+	deliveryOffersClosed    bool
+	deliveryOffersCancel    context.CancelFunc
+	server                  *http.Server
+	listener                net.Listener
+	serveDone               chan struct{}
+	sweepCancel             context.CancelFunc
+	sweepDone               chan struct{}
+	closed                  bool
+	sessions                map[string]*session
+	convos                  map[string]map[string]*session
+	conversationOrder       map[string][]string
+	activities              map[string]activity
+	models                  map[string]modelProjection
+	goals                   map[string]goalState
+	latestGoalRevision      map[string]int64
+	lastSweepRecord         time.Time
+	pendingMod              map[string]*pendingControl
+	pendingGoal             map[string]*pendingControl
+	pendingLock             map[string]*pendingControl
+	lifecycleState          map[string]lifecycleAgent
+	nextVersion             int64
+	rates                   map[string][]time.Time
+	selectedTmux            string
+	windowIDs               map[string]string
+	tmuxProvisionals        map[string]*tmuxProvisioning
+	tmuxSessionProvisioning *tmuxProvisioning
+	goalAvailable           bool
+	lifecycleAvailable      bool
 }
 
 type session struct {
