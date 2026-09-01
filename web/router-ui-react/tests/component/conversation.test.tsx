@@ -118,6 +118,43 @@ describe("Conversation", () => {
     expect(list.scrollTop).toBe(30);
   });
 
+  it("does not focus the disabled textarea when no peer is selected", () => {
+    render(<Conversation messages={[]} />);
+    const composer = screen.getByRole("textbox");
+
+    expect(composer).toHaveProperty("disabled", true);
+    expect(document.activeElement).not.toBe(composer);
+  });
+
+  it("focuses the message textarea for an agent and a new peer without stealing focus on same-peer updates", () => {
+    const { rerender } = render(<Conversation peer={{ agent_id: "one" }} messages={[]} />);
+    const composer = screen.getByRole("textbox");
+
+    expect(document.activeElement).toBe(composer);
+
+    composer.blur();
+    expect(document.activeElement).not.toBe(composer);
+
+    rerender(<Conversation peer={{ agent_id: "two" }} messages={[]} />);
+    expect(document.activeElement).toBe(composer);
+
+    composer.blur();
+    rerender(<Conversation peer={{ agent_id: "two" }} messages={[{ id: "1", from: "two", to: "ui", body: "Updated" }]} />);
+    expect(document.activeElement).not.toBe(composer);
+  });
+
+  it("does not steal focus after a same-peer controlled value update", () => {
+    const { rerender } = render(<Conversation peer={{ agent_id: "one" }} value="Draft" messages={[]} />);
+    const composer = screen.getByRole("textbox");
+
+    expect(document.activeElement).toBe(composer);
+    composer.blur();
+    expect(document.activeElement).not.toBe(composer);
+
+    rerender(<Conversation peer={{ agent_id: "one" }} value="Updated draft" messages={[]} />);
+    expect(document.activeElement).not.toBe(composer);
+  });
+
   it("renders safe markdown and sends through the composer", () => {
     const onSend = vi.fn();
     const { container } = render(<Conversation peer={{ agent_id: "helper" }} messages={[{ id: "1", from: "helper", to: "ui", body: "**Hello**" }]} onSend={onSend} />);
