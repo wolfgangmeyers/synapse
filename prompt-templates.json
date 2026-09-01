@@ -46,7 +46,7 @@
     },
     {
       "name": "Address Feedback",
-      "body": "Take a look at open threads on this PR. Address any feedback that should be addressed, then get the changes pushed up. Once changes are pushed up, reply to each thread and resolve them if the feedback was addressed.\n\nSet a goal to get this done, and make sure it spells out the success criteria clearly and in enough detail that it will be easy to know when you're done.",
+      "body": "Take a look at open threads on this PR. Address any feedback that should be addressed, then get the changes pushed up. Once changes are pushed up, reply to each thread and resolve them if the feedback was addressed.\n\nAlso remember that ideally we would have caught any issues already. Make sure to improve robot review heuristics and capture any domain knowledge in the KB. Make sure any new heuristics aren't too narrow, they should be generally applicable.\n\nSet a goal to get this done, and make sure it spells out the success criteria clearly and in enough detail that it will be easy to know when you're done.",
       "id": "67bc2175-de3f-4861-90ed-1d22b094d34b",
       "updated_at": "2026-08-31T15:26:37.675Z"
     },
