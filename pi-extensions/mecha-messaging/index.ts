@@ -960,11 +960,12 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     emitMeaningfulActivity("native-subagent-launch", event?.id, parentActivityContext);
     activityLifecycle.onNativeStarted(event);
   });
-  // Pi versions expose different terminal event names. Delegate every alias to the
-  // lifecycle owner so legacy removal and typed polling retention stay consistent.
+  // Pi versions expose different terminal event names. Delegate each terminal alias to
+  // the lifecycle owner. `subagents:steered` reports a queued or delivered steering
+  // request, so it must not tombstone the still-running child.
   for (const eventName of [
     "subagents:completed", "subagents:failed", "subagents:canceled", "subagents:cancelled",
-    "subagents:aborted", "subagents:terminated", "subagents:stopped", "subagents:steered",
+    "subagents:aborted", "subagents:terminated", "subagents:stopped",
   ]) {
     pi.events.on(eventName, (event: NativeSubagent) => activityLifecycle.onNativeTerminal(event));
   }
@@ -1197,6 +1198,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   pi.on("agent_settled", async (_event: PiEvent, context: PiContext) => { if (children.has(context.sessionManager.getSessionId()) || !recall.status().enabled) return; recallController.activity(); try { await ensureRecallPolicy(); } catch { /* Fail closed: the scheduled evaluation will not receive policy. */ } });
   pi.on("agent_settled", (_event: PiEvent, context: PiContext) => { compactionState().monitorContextThreshold(context); });
   pi.on("session_compact", (_event: PiEvent, context: PiContext) => { if (!children.has(context.sessionManager.getSessionId())) compactionState().onSessionCompact(context); });
+  pi.on("session_compact_failed", (_event: PiEvent, context: PiContext) => { if (!children.has(context.sessionManager.getSessionId())) compactionState().onSessionCompactFailed(context); });
   pi.on("agent_settled", (_event: PiEvent, context: PiContext) => {
     if (!children.has(context.sessionManager.getSessionId())) activityLifecycle.onAgentSettled(context);
     if (compactionState().hasPendingSelfCompaction()) settledNotificationPending = false;

@@ -12,25 +12,28 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = resolve(ROOT, "pi-extensions/mecha-messaging/node_modules/tsx/dist/cli.mjs");
 const BASELINE = "0cdcaf74f";
 
-// The differential fixture injects fixed IDs, clocks, and contexts. Array indexes are
-// observation ordering, so they are removed before comparing against these exact object paths.
+// The differential fixture injects fixed IDs, clocks, and contexts. Keep the
+// normalization exceptions tied to the operation and observation kind that owns
+// each injected value. A matching field name elsewhere is a real difference.
 const INJECTED_PROCESS_FIELDS = new Set(["timestamp", "lease_id", "producer_epoch", "instance_id", "temporary_path"]);
 const APPROVED_INJECTED_OBSERVATION_PATHS = new Set([
-  ".fields.timestamp",
-  ".fields.lease_id",
-  ".fields.producer_epoch",
-  ".fields.instance_id",
-  ".fields.temporary_path",
+  "scheduler\u0000normalization-fixture\u0000trace\u0000.fields.timestamp",
+  "scheduler\u0000normalization-fixture\u0000trace\u0000.fields.lease_id",
+  "scheduler\u0000normalization-fixture\u0000trace\u0000.fields.producer_epoch",
+  "scheduler\u0000normalization-fixture\u0000trace\u0000.fields.instance_id",
+  "scheduler\u0000normalization-fixture\u0000trace\u0000.fields.temporary_path",
 ]);
-function isApprovedInjectedObservationPath(path: string): boolean {
-  return APPROVED_INJECTED_OBSERVATION_PATHS.has(path.replace(/^\[\d+\]/, ""));
+function isApprovedInjectedObservationPath(
+  scenario: string,
+  operation: string | undefined,
+  kind: string | undefined,
+  path: string,
+): boolean {
+  return operation !== undefined && kind !== undefined
+    && APPROVED_INJECTED_OBSERVATION_PATHS.has(`${scenario}\u0000${operation}\u0000${kind}\u0000${path}`);
 }
 
 const INTENTIONAL_DIFFERENCE_ALLOWLIST = Object.freeze([
-  {
-    name: "injected process values",
-    matches: (_scenario: string, path: string) => isApprovedInjectedObservationPath(path),
-  },
   {
     name: "documented malformed TypeScript boundary",
     matches: (scenario: string, path: string) => scenario.startsWith("malformed-input:") && path === ".malformed",
@@ -177,7 +180,9 @@ function createPi() {
         sendActivity(state, payload) { observe({ kind: "activity", state, payload }); },
         sendLifecycleSnapshot(subagents) {
           const eventId = "fixed-snapshot-" + (++lifecycleNumber);
-          observe({ kind: "lifecycle-snapshot", eventId, subagents });
+          // The real client records the normalized public frame. Keep the
+          // producer input beside it so redaction remains independently tested.
+          observe({ kind: "lifecycle-snapshot", eventId, input: clone(subagents), subagents: normalizePublicSubagents(subagents) });
           return eventId;
         },
         sendLifecycleEvent(event) {
@@ -209,6 +214,22 @@ function createContext(sessionId, state) {
     },
     isIdle: () => state.idle,
   };
+}
+
+function normalizePublicSubagents(subagents) {
+  if (!Array.isArray(subagents)) return [];
+  return subagents.map((record) => {
+    if (record === null || typeof record !== "object" || Array.isArray(record)) return undefined;
+    const id = typeof record.id === "string" ? record.id.trim().slice(0, 128) : "";
+    const description = typeof record.description === "string" ? record.description.trim().slice(0, 512) : "";
+    if (id.length === 0 || description.length === 0) return undefined;
+    const type = typeof record.type === "string" ? record.type.trim().slice(0, 64) : "";
+    const normalized = { id, ...(type.length > 0 ? { type } : {}), description };
+    const status = typeof record.status === "string" ? record.status : undefined;
+    return status !== undefined && ["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(status)
+      ? { ...normalized, status }
+      : normalized;
+  }).filter((record) => record !== undefined).slice(0, 999);
 }
 
 function serviceWithShape(shape, records, state) {
@@ -279,14 +300,14 @@ async function settledScheduler() {
 }
 
 async function typedTerminal() {
-  const records = [{ id: "typed-child", type: "worker", status: "running", description: "typed label", prompt: "private prompt", output: "private output", error: "private error", startedAt: 100 }];
+  const records = [{ id: "typed-child", type: "worker", status: "running", description: "typed label", prompt: "private prompt", output: "private output", error: "private error" }];
   const harness = createHarness({ "parent-session": { getLifecycleSnapshots: () => records } });
   await operation("session-start", () => harness.root("session_start", {}));
   await operation("goal-projection", () => harness.pi.events.emit("goal:state", { enabled: true, goal: "ship lifecycle parity" }));
   await operation("agent-start", () => harness.root("agent_start", {}));
   await operation("heartbeat-before-terminal", () => harness.clock.heartbeat());
   await operation("native-start", () => harness.native("subagents:started", { id: "typed-child", type: "worker", status: "running", description: "typed label" }));
-  await operation("native-terminal", () => harness.native("subagents:completed", { id: "typed-child", status: "completed", output: "private output" }));
+  await operation("native-terminal", () => harness.native("subagents:completed", { id: "typed-child", type: "worker", description: "typed label", status: "completed", output: "private output" }));
   await operation("pre-heartbeat-terminal-observation", () => {});
   records.length = 0;
   await operation("heartbeat-omits-terminal", () => harness.clock.heartbeat());
@@ -446,23 +467,66 @@ function collectDifferences(left: unknown, right: unknown, path = "", difference
   return differences;
 }
 
-function normalize(value: unknown, path = ""): unknown {
-  if (Array.isArray(value)) return value.map((item, index) => normalize(item, `${path}[${index}]`));
+function normalizeValue(
+  value: unknown,
+  path: string,
+  scenario: string,
+  operation: string | undefined,
+  kind: string | undefined,
+): unknown {
+  if (Array.isArray(value)) return value.map((item, index) => normalizeValue(item, `${path}[${index}]`, scenario, operation, kind));
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(Object.entries(value).map(([entryKey, entryValue]) => {
       const entryPath = `${path}.${entryKey}`;
       const normalized = typeof entryValue === "string"
-        && isApprovedInjectedObservationPath(entryPath)
+        && isApprovedInjectedObservationPath(scenario, operation, kind, entryPath)
         ? `<${entryKey}>`
-        : normalize(entryValue, entryPath);
+        : normalizeValue(entryValue, entryPath, scenario, operation, kind);
       return [entryKey, normalized];
     }));
   }
   return value;
 }
 
+function normalizeObservations(value: unknown, scenario: string): unknown {
+  if (!Array.isArray(value)) return normalizeValue(value, "", scenario, undefined, undefined);
+  let operation: string | undefined;
+  return value.map((item) => {
+    const record = item !== null && typeof item === "object" && !Array.isArray(item)
+      ? item as Record<string, unknown>
+      : undefined;
+    const kind = typeof record?.kind === "string" ? record.kind : undefined;
+    const normalized = normalizeValue(item, "", scenario, operation, kind);
+    if (kind === "operation" && typeof record?.name === "string") operation = record.name;
+    return normalized;
+  });
+}
+
+function removeTypedTerminalSchedulerDisposal(value: Observation): Observation {
+  if (!Array.isArray(value)) return value;
+  const terminal = value.findIndex((row) => (
+    row !== null && typeof row === "object" && !Array.isArray(row)
+      && (row as Record<string, unknown>).kind === "operation"
+      && (row as Record<string, unknown>).name === "native-terminal"
+  ));
+  if (terminal < 0) return value;
+  const nextOperation = value.findIndex((row, index) => index > terminal
+    && row !== null && typeof row === "object" && !Array.isArray(row)
+    && (row as Record<string, unknown>).kind === "operation");
+  return value.filter((row, index) => {
+    if (index <= terminal || (nextOperation >= 0 && index >= nextOperation)) return true;
+    return !(row !== null && typeof row === "object" && !Array.isArray(row)
+      && (row as Record<string, unknown>).kind === "scheduler"
+      && (row as Record<string, unknown>).action === "child-disposed"
+      && (row as Record<string, unknown>).id === "typed-child");
+  });
+}
+
 function compareScenario(scenario: string, baselineObservations: Observation, currentObservations: Observation): void {
-  const differences = collectDifferences(normalize(baselineObservations), normalize(currentObservations));
+  const baseline = scenario === "typed-terminal"
+    ? removeTypedTerminalSchedulerDisposal(baselineObservations)
+    : baselineObservations;
+  const differences = collectDifferences(normalizeObservations(baseline, scenario), normalizeObservations(currentObservations, scenario));
   const difference = differences.find((candidate) => !INTENTIONAL_DIFFERENCE_ALLOWLIST.some((entry) => entry.matches(scenario, candidate.path)));
   if (difference === undefined) return;
   assert.fail(`unlisted lifecycle mismatch in ${scenario} at ${difference.path}: ${JSON.stringify(difference.left)} != ${JSON.stringify(difference.right)}`);
@@ -499,6 +563,10 @@ function assertScenarioCoverage(scenario: string, value: Observation): void {
     assert.equal(rows.filter((row) => row.kind === "lifecycle-event").length, 0);
     const beforeTerminal = operationSegment(rows, "heartbeat-before-terminal");
     assert.ok(beforeTerminal.some((row) => row.kind === "activity" && JSON.stringify(row.payload).includes("typed-child")));
+    const initialSnapshot = beforeTerminal.find((row) => row.kind === "lifecycle-snapshot");
+    assert.ok(initialSnapshot !== undefined);
+    assert.deepEqual(initialSnapshot.input, initialSnapshot.subagents);
+    assert.deepEqual(initialSnapshot.subagents, [{ id: "typed-child", type: "worker", description: "typed label", status: "running" }]);
     const preHeartbeat = operationSegment(rows, "pre-heartbeat-terminal-observation");
     assert.equal(preHeartbeat.filter((row) => row.kind === "activity" || row.kind === "lifecycle-snapshot").length, 0);
     const omission = operationSegment(rows, "heartbeat-omits-terminal");
@@ -628,27 +696,39 @@ test("pre-extraction TypeScript and current TypeScript lifecycle observations st
   }
 });
 
-test("the differential allowlist accepts only exact injected observation paths", () => {
+test("the differential allowlist accepts only exact operation-owned injected paths", () => {
   for (const field of INJECTED_PROCESS_FIELDS) {
-    compareScenario("scheduler", [{ fields: { [field]: "left" } }], [{ fields: { [field]: "right" } }]);
+    compareScenario(
+      "scheduler",
+      [{ kind: "operation", name: "normalization-fixture" }, { kind: "trace", fields: { [field]: "left" } }],
+      [{ kind: "operation", name: "normalization-fixture" }, { kind: "trace", fields: { [field]: "right" } }],
+    );
   }
 });
 
-test("the differential allowlist rejects unauthorized identity-field mutations", () => {
+test("the differential allowlist rejects unauthorized normalization", () => {
   for (const field of INJECTED_PROCESS_FIELDS) {
     assert.throws(
-      () => compareScenario("scheduler", [{ [field]: "left" }], [{ [field]: "right" }]),
+      () => compareScenario("scheduler", [{ kind: "trace", fields: { [field]: "left" } }], [{ kind: "trace", fields: { [field]: "right" } }]),
       new RegExp(`unlisted lifecycle mismatch.*\\.${field}`),
     );
     assert.throws(
-      () => compareScenario("scheduler", [{ [`foo_${field}`]: "left" }], [{ [`foo_${field}`]: "right" }]),
+      () => compareScenario("scheduler", [{ kind: "operation", name: "wrong-operation" }, { kind: "trace", fields: { [field]: "left" } }], [{ kind: "operation", name: "wrong-operation" }, { kind: "trace", fields: { [field]: "right" } }]),
       /unlisted lifecycle mismatch/,
     );
     assert.throws(
-      () => compareScenario("scheduler", [{ fields: [{ [field]: "left" }] }], [{ fields: [{ [field]: "right" }] }]),
+      () => compareScenario("scheduler", [{ kind: "operation", name: "normalization-fixture" }, { kind: "activity", fields: { [field]: "left" } }], [{ kind: "operation", name: "normalization-fixture" }, { kind: "activity", fields: { [field]: "right" } }]),
+      /unlisted lifecycle mismatch/,
+    );
+    assert.throws(
+      () => compareScenario("scheduler", [{ kind: "operation", name: "normalization-fixture" }, { kind: "trace", fields: [{ [field]: "left" }] }], [{ kind: "operation", name: "normalization-fixture" }, { kind: "trace", fields: [{ [field]: "right" }] }]),
       /unlisted lifecycle mismatch/,
     );
   }
+  assert.throws(
+    () => compareScenario("typed-terminal", [{ kind: "operation", name: "normalization-fixture" }, { kind: "trace", fields: { timestamp: "left" } }], [{ kind: "operation", name: "normalization-fixture" }, { kind: "trace", fields: { timestamp: "right" } }]),
+    /unlisted lifecycle mismatch/,
+  );
 });
 
 test("the differential comparator rejects an unlisted lifecycle publication", async (t) => {
@@ -681,7 +761,12 @@ test("lifecycle coverage assertions fail under representative mutations", async 
 
   const runCurrent = (scenario: string) => runChild(runner, "new", scenario, baselineRoot);
   const typed = observationRecords(JSON.parse(JSON.stringify(await runCurrent("typed-terminal"))) as Observation);
-  const typedBefore = operationSegment(typed, "heartbeat-before-terminal").find((row) => row.kind === "activity");
+  const typedBeforeSegment = operationSegment(typed, "heartbeat-before-terminal");
+  const typedSnapshot = typedBeforeSegment.find((row) => row.kind === "lifecycle-snapshot");
+  assert.ok(typedSnapshot !== undefined);
+  typedSnapshot.input = [{ id: "typed-child", type: "worker", description: "typed label", status: "running", output: "private output" }];
+  assert.throws(() => assertScenarioCoverage("typed-terminal", typed));
+  const typedBefore = typedBeforeSegment.find((row) => row.kind === "activity");
   assert.ok(typedBefore !== undefined);
   typedBefore.payload = { subagentCount: 0, subagents: [] };
   assert.throws(() => assertScenarioCoverage("typed-terminal", typed));

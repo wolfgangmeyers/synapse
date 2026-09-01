@@ -107,6 +107,7 @@ export type CompactionOrchestration = {
   monitorContextThreshold: (context: CompactionContext) => void;
   onSessionBeforeCompact: (event: CompactionEvent, context: CompactionContext) => Promise<void>;
   onSessionCompact: (context: CompactionContext) => void;
+  onSessionCompactFailed: (context: CompactionContext) => void;
   onSessionShutdown: () => void;
 };
 
@@ -333,6 +334,12 @@ export function createCompactionOrchestration(
     resumeMailboxAfterCompaction(context);
   };
 
+  const onSessionCompactFailed = (context: CompactionContext): void => {
+    if (isChild(context)) return;
+    // Failure ends the pause, but keeps watermark and pending requests intact.
+    resumeMailboxAfterCompaction(context);
+  };
+
   const onSessionShutdown = (): void => {
     pendingSelfCompaction = undefined;
     mailboxPausedForCompaction = false;
@@ -355,6 +362,7 @@ export function createCompactionOrchestration(
     monitorContextThreshold,
     onSessionBeforeCompact,
     onSessionCompact,
+    onSessionCompactFailed,
     onSessionShutdown,
   };
 }

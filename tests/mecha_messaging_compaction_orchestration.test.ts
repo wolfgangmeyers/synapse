@@ -230,6 +230,33 @@ test("self completion resets the watermark and handoff is deferred; self errors 
   assert.equal(f.scheduled.length, 1);
 });
 
+test("failed session compaction resumes without resetting the watermark or pending requests", async () => {
+  const f = fixture();
+  Object.assign(f.context, { getContextUsage: () => ({ percent: 25, tokens: 25_000, contextWindow: 100_000 }) });
+  f.orchestration.monitorContextThreshold(f.context);
+  await f.orchestration.onSessionBeforeCompact({ preparation: {} }, f.context);
+  f.orchestration.requestSelfCompaction({}, f.context);
+  Object.assign(f.context, { getContextUsage: () => ({ percent: 70, tokens: 70_000, contextWindow: 100_000 }) });
+  assert.equal(f.orchestration.enforceHardCompaction(f.context), true);
+  assert.equal(f.orchestration.isMailboxPaused(), true);
+  assert.equal(f.orchestration.status(f.context).notifiedThroughPercent, 20);
+
+  f.orchestration.onSessionCompactFailed(f.context);
+
+  assert.equal(f.orchestration.isMailboxPaused(), false);
+  assert.deepEqual(f.statuses.at(-1), ["mecha-mailbox", "mailbox: connected"]);
+  assert.equal(f.orchestration.hasPendingSelfCompaction(), true);
+  assert.equal(f.orchestration.hasPendingHardCompaction(), true);
+  assert.equal(f.orchestration.status(f.context).notifiedThroughPercent, 20);
+  assert.deepEqual(f.activity, ["started", "resumed"]);
+
+  const child = fixture();
+  await child.orchestration.onSessionBeforeCompact({ preparation: {} }, child.context);
+  assert.equal(child.orchestration.isMailboxPaused(), true);
+  child.orchestration.onSessionCompactFailed(child.childContext);
+  assert.equal(child.orchestration.isMailboxPaused(), true);
+});
+
 test("missing self compaction is reported at request and execution boundaries", () => {
   const f = fixture();
   const withoutCompact: CompactionContext = { ...f.context, compact: undefined };
