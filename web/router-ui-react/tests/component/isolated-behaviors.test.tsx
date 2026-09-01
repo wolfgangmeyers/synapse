@@ -1,10 +1,11 @@
 import "@testing-library/jest-dom/vitest";
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/App";
 import { DEFAULT_GOAL_STATE } from "../../src/domain/goals";
+import type { Reminder } from "../../src/domain/reminders";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 import { isRecord } from "../../src/protocol/guards";
 
@@ -14,7 +15,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 const connectedAgent = (goalState = DEFAULT_GOAL_STATE) => ({ agent_id: "worker-one", instance_id: "peer-instance", agent_role: "agent", connected_at: "2030-01-01T00:00:00.000Z", lease_expires_at: "2030-01-02T00:00:00.000Z", activity_state: "idle" as const, subagent_count: 0, subagents: [], available_models: [], model_catalog_total_count: 0, model_catalog_truncated: false, goal_state: goalState });
 const storedMessage = { enqueue_sequence: 1, id: "message-1", from: "web-ui", to: "worker-one", body: "hello", created_at: "2030-01-01T00:00:00.000Z", expires_at: "2030-01-02T00:00:00.000Z", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174000", state: "queued", source: { kind: "web_ui" } };
-const reminderResponse = { id: "reminder-1", target: "worker-one", creator: "web-ui", body: "Check this", subject: "Check", state: "scheduled", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:01:00.000Z", interval_ms: null, occurrence_number: 0, attempt_count: 0 };
+const reminderResponse: Reminder = { id: "reminder-1", target: "worker-one", creator: "web-ui", body: "Check this", subject: "Check", state: "scheduled", created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:01:00.000Z", interval_ms: null, occurrence_number: 0, attempt_count: 0 };
 
 class ResultSocket implements WebSocketLike {
   readonly url: string;
@@ -61,8 +62,8 @@ class ResultSocket implements WebSocketLike {
   }
 }
 
-function renderConnectedApp() {
-  let goalState = { ...DEFAULT_GOAL_STATE };
+function renderConnectedApp({ initialGoalState = DEFAULT_GOAL_STATE, initialReminders = [], onGoal, onReminders, onSelectAgent }: { initialGoalState?: typeof DEFAULT_GOAL_STATE; initialReminders?: Array<typeof reminderResponse>; onGoal?: (peer: string) => void; onReminders?: (peer: string) => void; onSelectAgent?: (peer: string) => void } = {}) {
+  let goalState = { ...initialGoalState };
   const reminder = { ...reminderResponse, enabled: true };
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -70,7 +71,7 @@ function renderConnectedApp() {
     if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [connectedAgent(goalState)] });
     if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: "worker-one", high_water_sequence: 0, messages: [] });
     if (url.endsWith("/v1/reminders") && (init?.method ?? "GET") === "POST") return jsonResponse({ reminder }, 201);
-    if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+    if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: initialReminders });
     if (url.endsWith("/v1/prompt-templates/template-1") && init?.method === "PATCH") return jsonResponse({ prompt_template: { id: "template-1", name: "Review", body: "Updated", created_at: "2029-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z" } });
     if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [{ id: "template-1", name: "Review", body: "Review this", created_at: "2029-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z" }] });
     throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
@@ -82,7 +83,7 @@ function renderConnectedApp() {
     queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
     return socket;
   };
-  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory }} />);
+  render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" onGoal={onGoal} onReminders={onReminders} onSelectAgent={onSelectAgent} transportOptions={{ fetchImpl, webSocketFactory }} />);
   return { fetchImpl, sockets };
 }
 
@@ -137,7 +138,37 @@ describe("source-backed isolated app behaviors", () => {
     await user.type(screen.getByRole("textbox", { name: "What should this agent work toward?" }), "Ship it");
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Goal for worker-one" })).not.toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Set goal" })).toHaveClass("has-goal");
+    expect(within(within(screen.getByRole("region", { name: "Conversation" })).getByRole("banner")).getByRole("button", { name: "Set goal" })).toHaveClass("has-goal");
+  });
+
+  it("opens the sidebar goal action for its target and reports the selected agent", async () => {
+    const user = userEvent.setup();
+    const onGoal = vi.fn();
+    const onSelectAgent = vi.fn();
+    renderConnectedApp({ initialGoalState: { ...DEFAULT_GOAL_STATE, enabled: true, goal: "Existing goal" }, onGoal, onSelectAgent });
+    await waitFor(() => expect(within(screen.getByRole("list")).getByRole("button", { name: "Set goal" })).toBeInTheDocument());
+
+    await user.click(within(screen.getByRole("list")).getByRole("button", { name: "Set goal" }));
+
+    expect(onGoal).toHaveBeenCalledWith("worker-one");
+    expect(onSelectAgent).toHaveBeenCalledWith("worker-one");
+    expect(await screen.findByRole("heading", { name: "Goal for worker-one" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem")).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("opens the sidebar reminder action for its target and reports the selected agent", async () => {
+    const user = userEvent.setup();
+    const onReminders = vi.fn();
+    const onSelectAgent = vi.fn();
+    renderConnectedApp({ initialReminders: [{ ...reminderResponse, enabled: true }], onReminders, onSelectAgent });
+    await waitFor(() => expect(within(screen.getByRole("list")).getByRole("button", { name: "Add reminder" })).toBeInTheDocument());
+
+    await user.click(within(screen.getByRole("list")).getByRole("button", { name: "Add reminder" }));
+
+    expect(onReminders).toHaveBeenCalledWith("worker-one");
+    expect(onSelectAgent).toHaveBeenCalledWith("worker-one");
+    expect(await screen.findByRole("heading", { name: "Reminders" })).toBeInTheDocument();
+    expect(screen.getByRole("listitem")).toHaveAttribute("aria-selected", "true");
   });
 
   it("fails closed in the goal dialog when the websocket reconnects", async () => {
