@@ -43,6 +43,20 @@ describe("Conversation", () => {
     expect(list.scrollTop).toBe(300);
   });
 
+  it("follows a new message when history pruning keeps the message count unchanged", async () => {
+    const { container, rerender } = render(<MessageList peerId="one" messages={[{ id: "1", body: "One" }, { id: "2", body: "Two" }]} />);
+    const list = container.querySelector<HTMLDivElement>(".messages");
+    if (!list) throw new Error("Message list was not rendered");
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 100 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 200 });
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    list.scrollTop = 20;
+
+    rerender(<MessageList peerId="one" messages={[{ id: "2", body: "Two" }, { id: "3", direction: "incoming", body: "Three" }]} />);
+
+    expect(list.scrollTop).toBe(200);
+  });
+
   it("renders distinct message incarnations with the same message ID as separate bubbles", () => {
     const { container } = render(<MessageList messages={[{ id: "same-id", message_incarnation_id: "first", body: "First incarnation" }, { id: "same-id", message_incarnation_id: "second", body: "Second incarnation" }]} />);
     expect(container.querySelectorAll('[data-message-id="same-id"]')).toHaveLength(2);
