@@ -546,6 +546,9 @@ await (async () => {
   await scenarios[scenario]();
   observe({ kind: "final-runtime", fetch: clone(fetchCalls), fakePi: clone(readFakePiCalls()) });
 })().finally(async () => {
+  const journal = Object.getOwnPropertyDescriptor(globalThis, Symbol.for("mecha.pi.diagnostic-journal.v1"))?.value;
+  const flush = journal !== null && typeof journal === "object" ? Reflect.get(journal, "flush") : undefined;
+  if (typeof flush === "function") await Reflect.apply(flush, journal, []);
   globalThis.fetch = originalFetch;
   process.chdir(originalCwd);
   for (const key of Object.keys(process.env)) {

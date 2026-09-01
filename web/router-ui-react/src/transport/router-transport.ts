@@ -80,6 +80,11 @@ export type TransportEvent =
   | { type: "error"; error: Error; frame?: ServerFrame };
 export type TransportListener = (event: TransportEvent) => void;
 
+export type RouterDiagnostic =
+  | { event: "ui_lifecycle_frame_dropped"; agent_id: string; instance_id: string; frame_type: "subagent_state_snapshot" | "subagent_state_update" | "subagent_state_replay"; router_version: number; count: number; reason: "invalid_version" | "stale_version" | "duplicate" }
+  | { event: "ui_http_refresh_repair"; agent_id: string; instance_id: string; count: number; reason: "registered" | "message_arrival" | "agent_projection_frame" | "conversation_message" | "request_failed" | "stale_response" };
+export type RouterDiagnosticSink = (diagnostic: RouterDiagnostic) => void;
+
 export interface RouterTransportOptions {
   routerUrl: string;
   agentId?: string;
@@ -89,6 +94,7 @@ export interface RouterTransportOptions {
   webSocketFactory?: WebSocketClientOptions["webSocketFactory"];
   autoReconnect?: boolean;
   persistDelivery?: (messages: readonly HistoryMessage[], identity: WebSocketIdentity) => Promise<void>;
+  onDiagnostic?: RouterDiagnosticSink;
 }
 export interface RouterTransport {
   readonly http: RouterHttpClient;
@@ -112,25 +118,50 @@ export interface RouterTransport {
 function controlId(): string { return crypto.randomUUID(); }
 function controlFor(kind: ControlKind, id: string, targetAgentId: string, targetInstanceId: string, socket: WebSocketIdentity, revision?: number, reminderId?: string): PendingControl { return { kind, controlId: id, sourceAgentId: socket.agentId, targetAgentId, targetInstanceId, leaseId: socket.leaseId, sourceInstanceId: socket.instanceId, sourceLeaseId: socket.leaseId, connectionGeneration: socket.generation, ...(revision === undefined ? {} : { revision }), ...(reminderId === undefined ? {} : { reminderId }) }; }
 
+type RefreshRepairReason = "registered" | "message_arrival" | "agent_projection_frame" | "conversation_message";
+const MAX_DIAGNOSTIC_COUNT = 10_000;
+function boundedCount(value: number): number { return Number.isSafeInteger(value) && value >= 0 ? Math.min(value, MAX_DIAGNOSTIC_COUNT) : 0; }
+function defaultDiagnosticSink(diagnostic: RouterDiagnostic): void {
+  if (typeof console !== "undefined" && typeof console.debug === "function") console.debug("Mecha router UI diagnostic", diagnostic);
+}
+function lifecycleFrameCount(frame: Extract<ServerFrame, { type: "subagent_state_snapshot" | "subagent_state_update" | "subagent_state_replay" }>): number {
+  return frame.type === "subagent_state_snapshot" ? frame.agents.length : frame.type === "subagent_state_replay" ? frame.updates.length : 1;
+}
+
 export function createRouterTransport(options: RouterTransportOptions): RouterTransport {
   const http = createHttpClient(options.routerUrl, options.fetchImpl);
   const listeners = new Set<TransportListener>(); const controls = createControlRegistry(); const lifecycle = createLifecycleTracker();
+  const diagnosticSink = options.onDiagnostic ?? defaultDiagnosticSink;
   let refreshGeneration = 0; let remindersRefreshGeneration = 0; let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let goalControlAvailable = false;
   let controlTimeoutMs = 30_000;
   const controlTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const emit = (event: TransportEvent): void => listeners.forEach((listener) => listener(event));
-  const refreshAgents = async (): Promise<void> => {
-    const generation = ++refreshGeneration; const result = await http.agents();
-    if (generation !== refreshGeneration) return;
+  const reportDiagnostic = (diagnostic: RouterDiagnostic): void => {
+    try { diagnosticSink(diagnostic); } catch { /* Diagnostics cannot change transport behavior. */ }
+  };
+  const refreshAgents = async (repairReason?: RefreshRepairReason): Promise<void> => {
+    const generation = ++refreshGeneration;
+    try {
+      const result = await http.agents();
+      if (generation !== refreshGeneration) {
+        if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "stale_response" });
+        return;
+      }
     const invalidated = controls.invalidateMissingAgents(new Set(result.agents.map((agent) => agent.agent_id)));
     for (const control of invalidated) {
       const timer = controlTimers.get(control.controlId);
       if (timer !== undefined) { clearTimeout(timer); controlTimers.delete(control.controlId); }
     }
     if (invalidated.length > 0) emit({ type: "controls-invalidated", reason: "target_not_connected" });
-    emit({ type: "agents", agents: result.agents, ...(result.generated_at === undefined ? {} : { generatedAt: result.generated_at }), ...(result.activity_snapshot_version === undefined ? {} : { activitySnapshotVersion: result.activity_snapshot_version }) });
+      emit({ type: "agents", agents: result.agents, ...(result.generated_at === undefined ? {} : { generatedAt: result.generated_at }), ...(result.activity_snapshot_version === undefined ? {} : { activitySnapshotVersion: result.activity_snapshot_version }) });
+      if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: boundedCount(result.agents.length), reason: repairReason });
+    } catch (error: unknown) {
+      if (repairReason !== undefined) reportDiagnostic({ event: "ui_http_refresh_repair", agent_id: socket.identity.agentId, instance_id: socket.identity.instanceId, count: 0, reason: "request_failed" });
+      throw error;
+    }
   };
+  const scheduleAgentRefresh = (reason: RefreshRepairReason): void => { void refreshAgents(reason).catch(() => undefined); };
   const removeControl = (controlId: string): PendingControl | undefined => {
     const timer = controlTimers.get(controlId);
     if (timer !== undefined) { clearTimeout(timer); controlTimers.delete(controlId); }
@@ -147,8 +178,8 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       goalControlAvailable = false;
       controlTimeoutMs = 30_000;
       emit({ type: "capabilities", goalControlAvailable: false });
-      void refreshAgents();
-      clearInterval(refreshTimer); refreshTimer = setInterval(() => { void refreshAgents(); }, 60_000);
+      scheduleAgentRefresh("registered");
+      clearInterval(refreshTimer); refreshTimer = setInterval(() => { scheduleAgentRefresh("registered"); }, 60_000);
       const capabilityGeneration = identity.generation;
       void http.capabilities().then((capabilities) => {
         if (socket.identity.generation !== capabilityGeneration || !socket.registered) return;
@@ -169,9 +200,9 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       if (pending !== undefined) { removeControl(pending.controlId); emit({ type: "control-error", frame, pending }); }
       return;
     }
-    if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); void refreshAgents(); return; }
-    if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state") { void refreshAgents(); return; }
-    if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); void refreshAgents(); return; }
+    if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); scheduleAgentRefresh("message_arrival"); return; }
+    if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state") { scheduleAgentRefresh("agent_projection_frame"); return; }
+    if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); scheduleAgentRefresh("conversation_message"); return; }
     if (frame.type === "reminders_changed") {
       void refreshReminders();
       return;
@@ -202,9 +233,16 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       if (pending === undefined) return;
       removeControl(frame.control_id); emit({ type: "control", kind: pending.kind, frame, pending }); void refreshAgents(); return;
     }
-    if (frame.type === "subagent_state_snapshot") { if (lifecycle.accept(frame.router_version, "snapshot")) emit({ type: "frame", frame, identity }); return; }
-    if (frame.type === "subagent_state_update") { if (lifecycle.accept(frame.router_version, "update")) emit({ type: "frame", frame, identity }); return; }
-    if (frame.type === "subagent_state_replay") { if (lifecycle.accept(frame.router_version, "replay")) emit({ type: "frame", frame, identity }); }
+    if (frame.type === "subagent_state_snapshot" || frame.type === "subagent_state_update" || frame.type === "subagent_state_replay") {
+      const kind = frame.type === "subagent_state_snapshot" ? "snapshot" : frame.type === "subagent_state_update" ? "update" : "replay";
+      if (lifecycle.accept(frame.router_version, kind)) {
+        emit({ type: "frame", frame, identity });
+      } else {
+        const reason = !Number.isSafeInteger(frame.router_version) ? "invalid_version" : frame.router_version < lifecycle.version ? "stale_version" : "duplicate";
+        reportDiagnostic({ event: "ui_lifecycle_frame_dropped", agent_id: identity.agentId, instance_id: identity.instanceId, frame_type: frame.type, router_version: frame.router_version, count: boundedCount(lifecycleFrameCount(frame)), reason });
+      }
+      return;
+    }
   };
   const refreshReminders = async (): Promise<void> => {
     const generation = ++remindersRefreshGeneration;

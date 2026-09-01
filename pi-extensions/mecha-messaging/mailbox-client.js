@@ -447,6 +447,9 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
     let modelCatalogTimer;
     let reconnectTimer;
     let reconnectAttempt = 0;
+    // A socket generation lets traces distinguish the same durable lifecycle event
+    // being retried under a replacement lease after reconnect.
+    let connectionGeneration = 0;
     let capabilityRetryTimer;
     let capabilityRetryAttempt = 0;
     let stopped = false;
@@ -531,8 +534,13 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
         return {
             phase,
             frame_type: frame.type,
+            frame_id: frame.frame_id,
             event_id: frame.event_id,
+            request_id: frame.request_id,
             client_sequence: frame.client_sequence,
+            lease_id: frame.lease_id,
+            producer_epoch: frame.producer_epoch,
+            connection_generation: connectionGeneration,
             snapshot_count: Array.isArray(frame.subagents) ? frame.subagents.length : undefined,
             subagent_count: frame.subagent === undefined ? undefined : 1,
             subagents: frame.subagents ?? (frame.subagent === undefined ? undefined : [frame.subagent]),
@@ -707,7 +715,7 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             throw new TypeError("subagentCount must be a non-negative safe integer");
         }
         const clampedCount = Math.min(count, MAX_SUBAGENTS);
-        send({
+        const frameId = send({
             type: "activity",
             agent_id: agentId,
             instance_id: instanceId,
@@ -719,6 +727,16 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             ...(!modelCatalogSupported || normalizeModelSummary(currentModel) === undefined
                 ? {}
                 : { current_model: normalizeModelSummary(currentModel) }),
+        });
+        // Activity has no router receipt/ack contract. Record that explicitly rather
+        // than implying durable delivery from a successful local socket write.
+        lifecycleTrace("client_activity_published", {
+            frame_type: "activity", frame_id: frameId, lease_id: leaseId, activity_state: activityState,
+            subagent_count: clampedCount, receipt_state: "not_supported", connection_generation: connectionGeneration,
+        });
+        lifecycleTrace("client_activity_receipt_unavailable", {
+            frame_type: "activity", frame_id: frameId, lease_id: leaseId, activity_state: activityState,
+            receipt_state: "not_supported", connection_generation: connectionGeneration,
         });
     }
     function modelCatalogFrame(modelSummaries, totalCount = modelSummaries.length, currentModel = undefined) {
@@ -1511,7 +1529,10 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
     async function receive(frame) {
         if (frame.type === "registered" && frame.agent_id === agentId && frame.instance_id === instanceId) {
             leaseId = frame.lease_id;
-            lifecycleTrace("client_lifecycle_registered", { connected: true, pending: lifecycleJournal.size });
+            lifecycleTrace("client_lifecycle_registered", {
+                connected: true, pending: lifecycleJournal.size, lease_id: leaseId,
+                connection_generation: connectionGeneration,
+            });
             rebindLifecycleJournalLease();
             reconnectAttempt = 0;
             log(`MECHA_V2_FRAME registered agent=${agentId} lease=${leaseId}`);
@@ -1568,7 +1589,13 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
                 || frame.instance_id !== instanceId
                 || frame.parent_session_id !== parentSessionId
                 || frame.lease_id !== pending.frame.lease_id) {
-                lifecycleTrace("client_lifecycle_ack_ignored", { event_id: frame.event_id, router_version: frame.router_version ?? 0 });
+                lifecycleTrace("client_lifecycle_ack_ignored", {
+                    request_id: frame.request_id, frame_id: frame.frame_id, event_id: frame.event_id,
+                    client_sequence: frame.client_sequence, producer_epoch: frame.producer_epoch,
+                    lease_id: frame.lease_id, router_version: frame.router_version ?? 0,
+                    reason: pending === undefined ? "unknown_request" : "identity_mismatch",
+                    connection_generation: connectionGeneration,
+                });
                 return;
             }
             // The router sends this correlated acknowledgment only after its transaction commits.
@@ -1577,7 +1604,13 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             if (eventId === undefined)
                 return;
             lifecycleJournal.delete(eventId);
-            lifecycleTrace("client_lifecycle_acknowledged", { event_id: frame.event_id, client_sequence: frame.client_sequence, router_version: lifecycleRouterVersion, pending: lifecycleJournal.size });
+            lifecycleTrace("client_lifecycle_acknowledged", {
+                frame_type: pending.frame.type, frame_id: pending.frame.frame_id, request_id: frame.request_id,
+                ack_frame_id: frame.frame_id, event_id: frame.event_id, client_sequence: frame.client_sequence,
+                producer_epoch: frame.producer_epoch, lease_id: frame.lease_id,
+                disposition: frame.disposition, router_version: lifecycleRouterVersion,
+                pending: lifecycleJournal.size, connection_generation: connectionGeneration,
+            });
             return;
         }
         if (frame.type === "model_control") {
@@ -1648,6 +1681,8 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
         try {
             currentSocket = webSocketFactory(routerWebSocketUrl(routerUrl));
             socket = currentSocket;
+            connectionGeneration += 1;
+            lifecycleTrace("client_lifecycle_connection_opening", { connection_generation: connectionGeneration });
             report("connecting");
         }
         catch (error) {

@@ -68,6 +68,7 @@ export type ActivityLifecycleOptions = ActivityLifecycleTimerOptions & {
   getNativeService: (ownerSessionId: string) => NativeSubagentService | undefined;
   notify: (message: string, level?: string) => void;
   trace: (event: string, fields?: object) => unknown;
+  diagnostic?: (event: string, fields?: object) => void;
   createSettledScheduler: (options?: TimerOptions) => SettledNotificationScheduler;
   rememberParentContext?: (context: ActivityContext | undefined) => void;
 };
@@ -218,6 +219,18 @@ function isRecord<T>(value: T): value is T & JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function safeDiagnostic(
+  diagnostic: ((event: string, fields?: object) => void) | undefined,
+  event: string,
+  fields?: object,
+): void {
+  try {
+    if (typeof diagnostic === "function") diagnostic(event, fields);
+  } catch {
+    // Diagnostics are best-effort and must not break lifecycle recovery.
+  }
+}
+
 function serviceRegistryAvailable(): boolean {
   const registry = Object.getOwnPropertyDescriptor(globalThis, PI_SUBAGENTS_SERVICE_REGISTRY)?.value;
   const services = isRecord(registry) ? registry.services : undefined;
@@ -234,6 +247,7 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     getNativeService: resolveNativeService,
     notify,
     trace,
+    diagnostic,
     createSettledScheduler,
     rememberParentContext,
     setIntervalImpl = setInterval,
@@ -308,6 +322,11 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
         ...(available ? { parent_session_id: ownerSessionId } : {}),
         error_name: errorName(error),
       });
+      safeDiagnostic(diagnostic, "owner_service_lookup_failed", {
+        reason: "service_lookup",
+        ...(available ? { session_id: ownerSessionId } : {}),
+        error_name: errorName(error),
+      });
       return undefined;
     }
   }
@@ -347,6 +366,14 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
         subagents: summary,
       });
     } catch (error) {
+      safeDiagnostic(diagnostic, "snapshot_publish_failed", {
+        reason: "snapshot_publish",
+        state: "lifecycle",
+        published: false,
+        ...(contextSessionId(getParentContext()) === undefined ? {} : { session_id: contextSessionId(getParentContext()) }),
+        error_name: errorName(error),
+        snapshot_count: summary.length,
+      });
       trace("extension_snapshot_publish_error", {
         snapshot_count: summary.length,
         subagents: summary,
@@ -510,33 +537,57 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     if (resumed) state.terminalObserved = false;
   }
 
-  function reconcileSettledNotificationChildren(): void {
+  type ReconciliationCounts = {
+    sourceCount: number;
+    startedCount: number;
+    disposedCount: number;
+    trackedCount: number;
+  };
+
+  function reconcileSettledNotificationChildren(): ReconciliationCounts {
+    const trackedBefore = settledNotificationChildIds.size;
     // This is an internal scheduler repair. Read the typed source directly so
     // resume does not add a diagnostic read or lifecycle publication to the
     // extraction's observable event order.
     const ownerSessionId = contextSessionId(getParentContext());
-    if (ownerSessionId === undefined) return;
+    if (ownerSessionId === undefined) return { sourceCount: 0, startedCount: 0, disposedCount: 0, trackedCount: trackedBefore };
     let service: NativeSubagentService | undefined;
     try {
       service = resolveNativeService(ownerSessionId);
-    } catch {
-      return;
+    } catch (error) {
+      safeDiagnostic(diagnostic, "snapshot_service_lookup_failed", {
+        reason: "resolver_error",
+        state: "snapshot",
+        ...(ownerSessionId === undefined ? {} : { session_id: ownerSessionId }),
+        error_name: errorName(error),
+      });
+      return { sourceCount: 0, startedCount: 0, disposedCount: 0, trackedCount: settledNotificationChildIds.size };
     }
-    if (typeof service?.getLifecycleSnapshots !== "function") return;
+    if (typeof service?.getLifecycleSnapshots !== "function") {
+      return { sourceCount: 0, startedCount: 0, disposedCount: 0, trackedCount: settledNotificationChildIds.size };
+    }
     let source: NativeSubagent[] | undefined;
     try {
       source = service.getLifecycleSnapshots();
-    } catch {
-      return;
+    } catch (error) {
+      safeDiagnostic(diagnostic, "snapshot_read_failed", {
+        reason: "lifecycle_snapshot_error",
+        state: "snapshot",
+        ...(ownerSessionId === undefined ? {} : { session_id: ownerSessionId }),
+        error_name: errorName(error),
+      });
+      return { sourceCount: 0, startedCount: 0, disposedCount: 0, trackedCount: settledNotificationChildIds.size };
     }
-    if (!Array.isArray(source)) return;
+    if (!Array.isArray(source)) return { sourceCount: 0, startedCount: 0, disposedCount: 0, trackedCount: settledNotificationChildIds.size };
     const snapshot = typedLifecycleSnapshotRecords(source);
+    let startedCount = 0;
+    let disposedCount = 0;
     const authoritative = source.length < MAX_ACTIVITY_SUBAGENTS;
     const activeIds = new Set(snapshot.map(({ summary }) => summary.id));
     if (authoritative) {
       for (const id of settledNotificationChildIds) {
         if (!activeIds.has(id) && identityFenceFor(id) === undefined) {
-          schedulerChildDisposed(id);
+          if (schedulerChildDisposed(id)) disposedCount += 1;
         }
       }
     }
@@ -549,9 +600,11 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       if ((fence?.mode === "awaiting" || fence?.mode === "terminal")
         && lifecycleFenceMatches(fence.identity, recordIdentity)) continue;
       if (fence?.mode === "expected" && !lifecycleFenceMatches(fence.identity, recordIdentity)) continue;
+      if (!settledNotificationChildIds.has(record.id)) startedCount += 1;
       schedulerChildStarted(record.id);
       settledNotificationIdentityFences.delete(record.id);
     }
+    return { sourceCount: snapshot.length, startedCount, disposedCount, trackedCount: settledNotificationChildIds.size };
   }
 
   function lifecycleSnapshotSubagentService(service: NativeSubagentService | undefined = getNativeService()): NativeSubagentService | undefined {
@@ -561,12 +614,24 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   function reportNativeSubagentReadFailure(error: unknown): void {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
     trace("extension_snapshot_read_error", { error_name: errorName(normalizedError) });
+    safeDiagnostic(diagnostic, "owner_service_failed", {
+      reason: "snapshot_read",
+      state: "snapshot",
+      ...(contextSessionId(getParentContext()) === undefined ? {} : { session_id: contextSessionId(getParentContext()) }),
+      error_name: errorName(normalizedError),
+    });
     const nowMs = nowImpl();
     if (lastNativeSubagentReadDiagnosticMs !== undefined && nowMs - lastNativeSubagentReadDiagnosticMs < 60_000) return;
     lastNativeSubagentReadDiagnosticMs = nowMs;
     try {
       notify("Native subagent service read failed; polling will retry.", "error");
-    } catch {
+    } catch (error) {
+      safeDiagnostic(diagnostic, "snapshot_failure_notice_failed", {
+        reason: "ui_unavailable",
+        state: "snapshot",
+        ...(contextSessionId(getParentContext()) === undefined ? {} : { session_id: contextSessionId(getParentContext()) }),
+        error_name: errorName(error),
+      });
       // An operational notification cannot be allowed to stop later polling retries.
     }
   }
@@ -886,11 +951,13 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   function pollNativeLifecycleSnapshot(): boolean {
     if (lifecycleSnapshotSubagentService() === undefined) {
       trace("extension_snapshot_poll_skipped", { reason: "lifecycle_service_unavailable" });
+      safeDiagnostic(diagnostic, "activity_gate_rejected", { reason: "lifecycle_service_unavailable", state: "snapshot" });
       return false;
     }
     const { changed, snapshot } = reconcileNativeSubagentService();
     if (snapshot === undefined) {
       trace("extension_snapshot_poll_failed", { reason: "snapshot_unavailable" });
+      safeDiagnostic(diagnostic, "activity_gate_rejected", { reason: "snapshot_unavailable", state: "snapshot" });
       return false;
     }
     trace("extension_snapshot_reconciled", {
@@ -924,7 +991,10 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     // frames must not clear that pause early.
     // parentActivityStateFromContext() derives "compacting" from this same latch.
     /* c8 ignore next */
-    if (isCompacting() && state !== "compacting") return false;
+    if (isCompacting() && state !== "compacting") {
+      safeDiagnostic(diagnostic, "activity_gate_rejected", { reason: "compaction_pending", state: "compacting" });
+      return false;
+    }
     const nowMs = nowImpl();
     // Native lifecycle state changes only in the timer-driven snapshot poll. Activity
     // events must not produce lifecycle frames or read the typed lifecycle projection.
@@ -944,8 +1014,14 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       && JSON.stringify(lastActivitySent.currentModel) === JSON.stringify(currentModel);
     // Settled with no children is terminal until reconciliation changes it; it does
     // not need a periodic refresh frame.
-    if (unchanged && state === "settled" && subagentCount === 0 && !force && !reconciled) return false;
-    if (unchanged && lastActivitySent !== undefined && !force && !reconciled && nowMs - lastActivitySent.sentAtMs < ACTIVITY_REFRESH_MIN_MS) return false;
+    if (unchanged && state === "settled" && subagentCount === 0 && !force && !reconciled) {
+      safeDiagnostic(diagnostic, "activity_gate_rejected", { reason: "unchanged_settled", state });
+      return false;
+    }
+    if (unchanged && lastActivitySent !== undefined && !force && !reconciled && nowMs - lastActivitySent.sentAtMs < ACTIVITY_REFRESH_MIN_MS) {
+      safeDiagnostic(diagnostic, "activity_gate_rejected", { reason: "refresh_throttled", state });
+      return false;
+    }
     try {
       getClient()?.sendActivity?.(state, {
         subagentCount,
@@ -962,7 +1038,14 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
         sentAtMs: nowMs,
       };
       return true;
-    } catch {
+    } catch (error) {
+      safeDiagnostic(diagnostic, "activity_publish_failed", {
+        reason: "activity_publish",
+        state,
+        published: false,
+        ...(contextSessionId(getParentContext()) === undefined ? {} : { session_id: contextSessionId(getParentContext()) }),
+        error_name: errorName(error),
+      });
       // Activity is an ephemeral UI hint; mailbox delivery owns durable work.
       return false;
     }
@@ -975,9 +1058,16 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       // A callback may already be queued when session shutdown clears the interval.
       if (nativeEventsBlocked) return;
       // This is the only path that reads and publishes the native lifecycle projection.
-      const changed = pollNativeLifecycleSnapshot();
-      const state = parentActivityStateFromContext();
-      const activitySent = sendActivityState(state);
+      let changed = false;
+      let state = "settled";
+      let activitySent = false;
+      try {
+        changed = pollNativeLifecycleSnapshot();
+        state = parentActivityStateFromContext();
+        activitySent = sendActivityState(state);
+      } catch (error) {
+        safeDiagnostic(diagnostic, "lifecycle_heartbeat_failed", { reason: "heartbeat_error", state, error_name: errorName(error) });
+      }
       trace("extension_lifecycle_heartbeat", {
         state, subagent_count: runningSubagents.size, published: activitySent, available: changed,
         heartbeat_interval_ms: ACTIVITY_HEARTBEAT_INTERVAL_MS,
@@ -1120,8 +1210,15 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     if (changed) refresh();
   }
 
+  let lastCompactionClearedCount = 0;
+
   function onCompactionStarted(_context: ActivityContext): void {
+    lastCompactionClearedCount = runningSubagents.size;
     clearRunningSubagentsForBoundary();
+    safeDiagnostic(diagnostic, "compaction_activity_cleared", {
+      cleared_count: lastCompactionClearedCount,
+      remaining_count: runningSubagents.size,
+    });
     sendActivityState("compacting", { force: true, reconcile: false });
   }
 
@@ -1130,7 +1227,15 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     // Reconcile scheduler ownership before refreshing activity. The projection
     // was cleared at compaction start, so a typed snapshot omission otherwise
     // leaves settled notifications suppressed until the next timer tick.
-    reconcileSettledNotificationChildren();
+    const reconciliation = reconcileSettledNotificationChildren();
+    safeDiagnostic(diagnostic, "compaction_activity_reconciled", {
+      cleared_count: lastCompactionClearedCount,
+      source_count: reconciliation.sourceCount,
+      started_count: reconciliation.startedCount,
+      disposed_count: reconciliation.disposedCount,
+      reconciled_count: reconciliation.trackedCount,
+      remaining_count: runningSubagents.size,
+    });
     refresh();
     ensureHeartbeat();
   }

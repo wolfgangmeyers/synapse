@@ -20,8 +20,10 @@ const CHILD_FLAG = "--mecha-messaging-native-pi-lifecycle-child";
 const PI_VERSION = "0.84.3";
 const NATIVE_VERSION = "19.2.2";
 const NATIVE_SOURCE_ROOT = "/Users/wolfgang/code/pi-packages";
-const NATIVE_SOURCE_COMMIT = "3be57a223462284c078d748b5ac6fd3d935af890";
-const NATIVE_SOURCE_DIGEST = "63424355e369432556fac9b277d66b34434c4a5e951e9c16847a6aa162630edc";
+const NATIVE_SOURCE_COMMIT = "c058820f9437807c626392b53e56081a6477deac";
+// The current source checkout intentionally carries the approved diagnostics instrumentation as
+// uncommitted changes. Keep this digest tied to that exact source, so stale packages still fail.
+const NATIVE_SOURCE_DIGEST = "f7611c2c33d65f584ebd45c88549bb9bd98abe1885bf2df61ba223e957c5d36c";
 const AGENT_ID = "native-lifecycle-e2e";
 const PRIVATE_PROMPT = "PRIVATE_NATIVE_PROMPT_7f13";
 const PRIVATE_MODEL = "PRIVATE_NATIVE_MODEL_4c92";
@@ -97,10 +99,31 @@ function readPackageIdentity(root: string, expectedName: string): PackageIdentit
   const extensionEntry = Array.isArray(extensions) && typeof extensions[0] === "string" ? extensions[0] : "src/index.ts";
   return { root, name, version, peerDependencies: peers, extensionEntry };
 }
+function isTrackedSourceCheckout(root: string): boolean {
+  try {
+    execFileSync("git", ["-C", root, "ls-files", "--error-unmatch", "package.json"], {
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: 5_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function globalNpmRoot(): string {
+  return execFileSync("npm", ["root", "-g"], {
+    encoding: "utf8",
+    timeout: 5_000,
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+  }).trim();
+}
 function resolveInstalledPi(): PackageIdentity {
-  const root = process.env.MECHA_PI_PACKAGE_ROOT ?? join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "@earendil-works", "pi-coding-agent");
+  const configured = process.env.MECHA_PI_PACKAGE_ROOT;
+  const root = configured !== undefined && configured.trim().length > 0
+    ? configured.trim()
+    : join(globalNpmRoot(), "@earendil-works", "pi-coding-agent");
   const resolved = realpathSync(root);
-  if (existsSync(join(resolved, ".git"))) throw new Error(`installed Pi resolves to a source checkout: ${resolved}`);
+  if (isTrackedSourceCheckout(resolved)) throw new Error(`installed Pi resolves to a source checkout: ${resolved}`);
   return readPackageIdentity(resolved, "@earendil-works/pi-coding-agent");
 }
 async function recursiveFiles(root: string): Promise<string[]> {
@@ -559,6 +582,15 @@ async function runChild(binary: string, pi: PackageIdentity, native: PackageIden
     assert.equal(retried.frame.client_sequence, firstRetry.frame.client_sequence);
     assert.notEqual(retried.frame.frame_id, firstRetry.frame.frame_id);
     assert.equal(typeof retried.frame.lease_id, "string");
+    const retryTraces = lifecycleTraces.filter((trace) => trace.event === "client_lifecycle_publish_attempt" && trace.event_id === retryEvent);
+    assert.equal(retryTraces.length >= 2, true, "lifecycle retry identity trace was not recorded");
+    assert.equal(retryTraces[0]?.frame_id, firstRetry.frame.frame_id);
+    assert.equal(retryTraces.at(-1)?.frame_id, retried.frame.frame_id);
+    assert.equal(retryTraces.at(-1)?.producer_epoch, retried.frame.producer_epoch);
+    assert.equal(retryTraces.at(-1)?.lease_id, retried.frame.lease_id);
+    assert.equal((retryTraces.at(-1)?.connection_generation ?? 0) > (retryTraces[0]?.connection_generation ?? 0), true);
+    const retryAckTrace = lifecycleTraces.find((trace) => trace.event === "client_lifecycle_acknowledged" && trace.event_id === retryEvent && trace.request_id === retried.frame.frame_id);
+    assert.equal(retryAckTrace?.ack_frame_id !== undefined, true, "lifecycle ACK identity trace was not recorded");
     assert.equal(Number(replacement.frame.client_sequence) > Number(firstRetry.frame.client_sequence), true);
     const duplicateReceipts = lifecycleWireFrames.filter(({ direction, frame }) => direction === "inbound" && frame.type === "subagent_lifecycle_acknowledged" && frame.disposition === "duplicate");
     if (duplicateReceipts.length === 0) throw new Error("router did not receipt any duplicate lifecycle frame");

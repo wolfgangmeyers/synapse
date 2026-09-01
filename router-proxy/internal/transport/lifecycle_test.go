@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -419,6 +420,167 @@ func TestConcurrentCloseWaitsForRouterStoppedRecord(t *testing.T) {
 	require.NoError(t, <-results)
 	require.NoError(t, <-results)
 	require.Equal(t, []string{"router_stopped"}, events)
+}
+
+func TestLifecycleDiagnosticsUseOnlyBoundedIdentifiersCountsAndReasons(t *testing.T) {
+	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
+	require.NoError(t, err)
+	defer durable.Close()
+	var events []map[string]any
+	router, err := New(Options{Store: durable, Clock: clock, EventLogger: func(event string, fields map[string]any) {
+		record := map[string]any{"event": event}
+		for key, value := range fields {
+			record[key] = value
+		}
+		events = append(events, record)
+	}})
+	require.NoError(t, err)
+	_, err = durable.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: "parent-a", InstanceID: "instance-a", LeaseID: "lease-a", LeaseDuration: time.Minute})
+	require.NoError(t, err)
+	var sent []map[string]any
+	sender := &session{
+		router: router, agentID: "parent-a", instanceID: "instance-a", deliveryInstance: "instance-a", leaseID: "lease-a",
+		lifecycleEnabled: true, sendOverride: func(fields map[string]any) error { sent = append(sent, fields); return nil },
+	}
+	observer := &session{router: router, agentID: "observer", instanceID: "observer-instance", lifecycleEnabled: true, sendOverride: func(map[string]any) error { return errors.New("observer write failed") }}
+	router.mu.Lock()
+	router.sessions[sender.agentID] = sender
+	router.convos[sender.agentID] = map[string]*session{sender.instanceID: sender}
+	router.convos[observer.agentID] = map[string]*session{observer.instanceID: observer}
+	router.mu.Unlock()
+	frame := func(eventID string, sequence int64, kind string) map[string]json.RawMessage {
+		values := map[string]any{
+			"type": "subagent_lifecycle_event", "frame_id": "frame-" + eventID, "agent_id": "parent-a",
+			"instance_id": "instance-a", "parent_session_id": "session-a", "lease_id": "lease-a",
+			"producer_epoch": "123e4567-e89b-42d3-a456-426614174000", "client_sequence": sequence,
+			"event_id": eventID,
+		}
+		if kind == "" {
+			values["subagents"] = []map[string]any{}
+		} else {
+			values["lifecycle_event"] = kind
+			values["subagent"] = map[string]any{"id": "child-a", "type": "worker", "description": "private detail", "status": "running"}
+		}
+		result := make(map[string]json.RawMessage, len(values))
+		for key, value := range values {
+			raw, marshalErr := json.Marshal(value)
+			require.NoError(t, marshalErr)
+			result[key] = raw
+		}
+		return result
+	}
+	require.NoError(t, router.lifecycleFrame(sender, frame("snapshot-1", 1, "")))
+	require.NoError(t, router.lifecycleFrame(sender, frame("event-1", 2, "started")))
+
+	findEvent := func(name string) map[string]any {
+		for _, event := range events {
+			if event["event"] == name {
+				return event
+			}
+		}
+		t.Fatalf("missing event %q", name)
+		return nil
+	}
+	ingested := findEvent("lifecycle_ingested")
+	require.Equal(t, "parent-a", ingested["agent_id"])
+	require.Equal(t, int64(1), ingested["client_sequence"])
+	var persisted, acknowledged map[string]any
+	for _, event := range events {
+		if event["event"] == "lifecycle_persisted" && event["disposition"] == "applied" {
+			persisted = event
+		}
+		if event["event"] == "lifecycle_acknowledged" && event["disposition"] == "applied" {
+			acknowledged = event
+		}
+	}
+	require.NotNil(t, persisted)
+	require.Equal(t, int64(1), persisted["router_version"])
+	require.NotNil(t, acknowledged)
+	broadcast := findEvent("lifecycle_broadcast_failed")
+	require.Equal(t, 2, broadcast["recipient_count"])
+	require.Equal(t, 1, broadcast["failure_count"])
+	require.Equal(t, "send_failed", broadcast["reason"])
+	for _, event := range events {
+		require.NotContains(t, event, "subagents")
+		require.NotContains(t, event, "description")
+		require.NotContains(t, event, "body")
+	}
+	require.NotEmpty(t, sent)
+}
+
+func TestLifecyclePersistenceFailureIsDiagnosticOnly(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	_, err = durable.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: "parent-a", InstanceID: "instance-a", LeaseID: "lease-a", LeaseDuration: time.Minute})
+	require.NoError(t, err)
+	rawDB, err := sql.Open("sqlite", database)
+	require.NoError(t, err)
+	_, err = rawDB.Exec("DROP TABLE subagent_lifecycle_events")
+	require.NoError(t, err)
+	defer rawDB.Close()
+	var events []map[string]any
+	router, err := New(Options{Store: durable, EventLogger: func(event string, fields map[string]any) { events = append(events, map[string]any{"event": event, "fields": fields}) }})
+	require.NoError(t, err)
+	sender := &session{router: router, agentID: "parent-a", instanceID: "instance-a", deliveryInstance: "instance-a", leaseID: "lease-a", sendOverride: func(map[string]any) error { return nil }}
+	router.mu.Lock()
+	router.sessions[sender.agentID] = sender
+	router.mu.Unlock()
+	frame := map[string]json.RawMessage{}
+	for key, value := range map[string]any{
+		"type": "subagent_lifecycle_snapshot", "frame_id": "frame-1", "agent_id": "parent-a", "instance_id": "instance-a", "parent_session_id": "session-a", "lease_id": "lease-a", "producer_epoch": "123e4567-e89b-42d3-a456-426614174000", "client_sequence": 1, "event_id": "snapshot-1", "subagents": []map[string]any{},
+	} {
+		raw, marshalErr := json.Marshal(value)
+		require.NoError(t, marshalErr)
+		frame[key] = raw
+	}
+	require.Error(t, router.lifecycleFrame(sender, frame))
+	found := false
+	for _, event := range events {
+		if event["event"] == "lifecycle_persist_failed" {
+			fields := event["fields"].(map[string]any)
+			require.Equal(t, "store_error", fields["reason"])
+			found = true
+		}
+	}
+	require.True(t, found)
+}
+
+func TestLifecycleAckFailureIsDiagnosticOnly(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	var events []map[string]any
+	router, err := New(Options{Store: durable, EventLogger: func(event string, fields map[string]any) {
+		events = append(events, map[string]any{"event": event, "fields": fields})
+	}})
+	require.NoError(t, err)
+	_, err = durable.AcquireAgentLease(context.Background(), store.LeaseRequest{AgentID: "parent-a", InstanceID: "instance-a", LeaseID: "lease-a", LeaseDuration: time.Minute})
+	require.NoError(t, err)
+	sender := &session{router: router, agentID: "parent-a", instanceID: "instance-a", deliveryInstance: "instance-a", leaseID: "lease-a", sendOverride: func(map[string]any) error { return errors.New("ack write failed") }}
+	router.mu.Lock()
+	router.sessions[sender.agentID] = sender
+	router.mu.Unlock()
+	frame := map[string]json.RawMessage{}
+	for key, value := range map[string]any{
+		"type": "subagent_lifecycle_snapshot", "frame_id": "frame-1", "agent_id": "parent-a", "instance_id": "instance-a", "parent_session_id": "session-a", "lease_id": "lease-a", "producer_epoch": "123e4567-e89b-42d3-a456-426614174000", "client_sequence": 1, "event_id": "snapshot-1", "subagents": []map[string]any{},
+	} {
+		raw, marshalErr := json.Marshal(value)
+		require.NoError(t, marshalErr)
+		frame[key] = raw
+	}
+	require.Error(t, router.lifecycleFrame(sender, frame))
+	found := false
+	for _, event := range events {
+		if event["event"] == "lifecycle_ack_failed" {
+			fields := event["fields"].(map[string]any)
+			require.Equal(t, "send_failed", fields["reason"])
+			found = true
+		}
+	}
+	require.True(t, found)
 }
 
 func seedLifecycleChild(t *testing.T, database string, seenAt time.Time) {

@@ -21,6 +21,7 @@ import {
 } from "../pi-extensions/mecha-messaging/index.ts";
 import goalExtension, { GOAL_ACTIVITY_EVENT, GOAL_STATE_REQUEST_EVENT } from "../pi-extensions/mecha-goal/index.ts";
 import { createMailboxClient } from "../pi-extensions/mecha-messaging/mailbox-client.js";
+import { createDiagnosticJournal } from "../pi-extensions/mecha-messaging/diagnostics-history.js";
 
 const MAX_NOT_DONE_WAKEUPS = 1000;
 
@@ -38,6 +39,7 @@ function createMessagingFixture({
   setModel = () => true,
   updateContextModel = true,
   complete = async () => ({ content: [{ type: "text", text: "VERDICT: NOT_DONE\nREASON: Work remains." }] }),
+  environment,
 } = {}) {
   const handlers = new Map();
   const childHandlers = new Map();
@@ -116,6 +118,7 @@ function createMessagingFixture({
       onChildDisposed() {},
       dispose() {},
     }),
+    ...(environment === undefined ? {} : { operationalTools: { environment } }),
   });
   return { childHandlers, commands, context, createContext, emittedEvents, handlers, mailboxClients, modelSwitches, pi, sent, tools };
 }
@@ -981,6 +984,45 @@ test("mailbox client retries catalog publication after frame-budget and send fai
   transientFailure.client.close();
 });
 
+test("mailbox activity traces its frame identity and explicit lack of receipt support", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const traces = [];
+  const client = createMailboxClient({
+    agentId: "worker",
+    parentSessionId: "parent-session",
+    producerEpoch: "11111111-1111-4111-8111-111111111111",
+    onEnvelope: () => {},
+    onLifecycleTrace: (trace) => traces.push(trace),
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ subagent_lifecycle_v2: false }) }),
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-1",
+  }) }));
+  await connected;
+
+  client.sendActivity("active", { subagentCount: 1, subagents: [{ id: "child", description: "private" }], goal: { enabled: true, goal: "private" } });
+  const activity = socket.sent.find((frame) => frame.type === "activity");
+  const published = traces.find((trace) => trace.event === "client_activity_published");
+  const unavailable = traces.find((trace) => trace.event === "client_activity_receipt_unavailable");
+  assert.equal(typeof activity.frame_id, "string");
+  assert.deepEqual({ frame_id: published.frame_id, lease_id: published.lease_id, connection_generation: published.connection_generation }, {
+    frame_id: activity.frame_id, lease_id: "lease-1", connection_generation: 1,
+  });
+  assert.deepEqual({ frame_id: unavailable.frame_id, receipt_state: unavailable.receipt_state }, {
+    frame_id: activity.frame_id, receipt_state: "not_supported",
+  });
+  assert.equal(JSON.stringify(published).includes("private"), false);
+  client.close();
+});
+
 test("mailbox client publishes no catalog without capability or after registry failure", async () => {
   async function run(capabilities, getModelCatalog, { responseOk = true } = {}) {
     const socket = new EventTarget();
@@ -1828,6 +1870,38 @@ test("disposed child shutdown skips parent capture cleanup", async () => {
     assert.equal(capturePolicyFetches, 0);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("root teardown drains the shared diagnostic journal while child teardown keeps it reusable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-journal-teardown-"));
+  const environment = {
+    HOME: directory,
+    MECHA_TMUX_WINDOW: "journal-teardown-root",
+    MECHA_PI_DIAGNOSTIC_JOURNAL_PATH: join(directory, "diagnostics.jsonl"),
+  };
+  const journal = createDiagnosticJournal({ environment });
+  const fixture = createMessagingFixture({ environment });
+  try {
+    await sessionStart(fixture);
+    fixture.childHandlers.get("subagents:child:session-created")?.({ sessionId: "journal-teardown-child" });
+    const childContext = fixture.createContext("journal-teardown-child");
+    await sessionStart(fixture, childContext);
+    await runHandlers(fixture, "session_shutdown", {}, childContext);
+    assert.equal(createDiagnosticJournal({ environment }), journal);
+
+    const shutdownHandlers = fixture.handlers.get("session_shutdown") ?? [];
+    const rootShutdown = shutdownHandlers.at(-1);
+    assert.equal(typeof rootShutdown, "function");
+    await rootShutdown?.({}, fixture.context);
+    assert.equal(typeof journal.path, "string");
+    if (typeof journal.path !== "string") throw new Error("diagnostic journal path is unavailable");
+    const text = await readFile(journal.path, "utf8");
+    assert.match(text, /extension_initialized/);
+    const laterRoot = createDiagnosticJournal({ environment });
+    assert.notEqual(laterRoot, journal);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

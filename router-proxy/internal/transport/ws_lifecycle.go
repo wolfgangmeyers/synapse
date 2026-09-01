@@ -111,12 +111,20 @@ func (r *Router) lifecycleFrame(s *session, frame map[string]json.RawMessage) er
 	}
 	candidate, err := lifecycleCandidateFromFrame(frame)
 	if err != nil {
+		r.emit("lifecycle_ingest_failed", lifecycleFrameFields(frame, map[string]any{"reason": "invalid_candidate"}))
 		return err
 	}
+	r.emit("lifecycle_ingested", lifecycleCandidateFields(candidate))
 	result, err := r.store.ApplySubagentLifecycle(context.Background(), candidate, candidate.Snapshot)
 	if err != nil {
+		r.emit("lifecycle_persist_failed", lifecycleCandidateFields(candidate, map[string]any{"reason": "store_error"}))
 		return err
 	}
+	r.emit("lifecycle_persisted", lifecycleCandidateFields(candidate, map[string]any{
+		"disposition":    result.Disposition,
+		"router_version": result.RouterVersion,
+		"subagent_count": lifecycleCandidateCount(candidate),
+	}))
 	if result.Disposition == "applied" {
 		r.setLifecycleProjection(candidate.ParentAgentID, result.RouterVersion, result.Snapshot.Subagents)
 	}
@@ -137,8 +145,13 @@ func (r *Router) lifecycleFrame(s *session, frame map[string]json.RawMessage) er
 		ack["applied_version"] = result.AppliedVersion
 	}
 	if err := s.send(ack); err != nil {
+		r.emit("lifecycle_ack_failed", lifecycleCandidateFields(candidate, map[string]any{"reason": "send_failed"}))
 		return err
 	}
+	r.emit("lifecycle_acknowledged", lifecycleCandidateFields(candidate, map[string]any{
+		"disposition":    result.Disposition,
+		"router_version": result.RouterVersion,
+	}))
 	if result.Disposition == "applied" {
 		return r.broadcastLifecycle(candidate.ParentAgentID, result.RouterVersion)
 	}
@@ -296,12 +309,79 @@ func (r *Router) broadcastLifecycle(agentID string, version int64) error {
 		children = []map[string]any{}
 	}
 	projection := map[string]any{"agent_id": agentID, "subagent_version": version, "subagent_count": len(children), "subagents": children}
+	recipientCount, failureCount := 0, 0
 	for _, recipient := range r.conversationRecipients() {
-		if recipient.lifecycleEnabledNow() {
-			_ = recipient.send(map[string]any{"type": "subagent_state_update", "router_version": version, "agent": projection})
+		if !recipient.lifecycleEnabledNow() {
+			continue
+		}
+		recipientCount++
+		if err := recipient.send(map[string]any{"type": "subagent_state_update", "router_version": version, "agent": projection}); err != nil {
+			failureCount++
 		}
 	}
+	if failureCount > 0 {
+		r.emit("lifecycle_broadcast_failed", map[string]any{
+			"agent_id":        agentID,
+			"router_version":  version,
+			"recipient_count": recipientCount,
+			"failure_count":   failureCount,
+			"reason":          "send_failed",
+		})
+	}
 	return nil
+}
+
+func lifecycleFrameFields(frame map[string]json.RawMessage, extra ...map[string]any) map[string]any {
+	fields := map[string]any{}
+	for _, key := range []string{"agent_id", "instance_id", "parent_session_id", "lease_id", "producer_epoch", "event_id", "frame_id", "lifecycle_event"} {
+		if value := frameString(frame, key); value != "" {
+			fields[key] = value
+		}
+	}
+	if sequence, ok := frameInt(frame, "client_sequence"); ok {
+		fields["client_sequence"] = sequence
+	}
+	if raw, ok := frame["subagents"]; ok {
+		var children []store.LifecycleChild
+		if json.Unmarshal(raw, &children) == nil {
+			fields["subagent_count"] = len(children)
+		}
+	}
+	for _, values := range extra {
+		for key, value := range values {
+			fields[key] = value
+		}
+	}
+	return fields
+}
+
+func lifecycleCandidateFields(candidate store.LifecycleCandidate, extra ...map[string]any) map[string]any {
+	fields := map[string]any{
+		"agent_id":          candidate.ParentAgentID,
+		"instance_id":       candidate.InstanceID,
+		"parent_session_id": candidate.ParentSessionID,
+		"lease_id":          candidate.LeaseID,
+		"producer_epoch":    candidate.ProducerEpoch,
+		"event_id":          candidate.EventID,
+		"client_sequence":   candidate.ClientSequence,
+		"subagent_count":    lifecycleCandidateCount(candidate),
+	}
+	if candidate.EventKind != "" {
+		fields["lifecycle_event"] = candidate.EventKind
+	}
+	for _, values := range extra {
+		for key, value := range values {
+			fields[key] = value
+		}
+	}
+	return fields
+}
+
+func lifecycleCandidateCount(candidate store.LifecycleCandidate) int {
+	if candidate.Snapshot {
+		return len(candidate.Subagents)
+	}
+	return 1
 }
 
 // beginOwnership reserves one agent for an ownership transition. The mutex

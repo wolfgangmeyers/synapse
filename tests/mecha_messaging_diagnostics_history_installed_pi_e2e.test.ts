@@ -676,6 +676,9 @@ async function runScenario({ coding, ai, root, dirty, unusableDiagnostics }: Sce
       Object.assign(process.env, originalEnvironment);
       if (originalFetch === undefined) delete globalThis.fetch;
       else globalThis.fetch = originalFetch;
+      const globalJournal = Object.getOwnPropertyDescriptor(globalThis, Symbol.for("mecha.pi.diagnostic-journal.v1"))?.value;
+      const closeJournal = globalJournal !== null && typeof globalJournal === "object" ? Reflect.get(globalJournal, "close") : undefined;
+      if (typeof closeJournal === "function") await Reflect.apply(closeJournal, globalJournal, []);
       await rm(root, { recursive: true, force: true });
     }
     assert.equal(fetchCalls.length, 0, `reject-all fetch received an unexpected request during cleanup: ${JSON.stringify(fetchCalls)}`);

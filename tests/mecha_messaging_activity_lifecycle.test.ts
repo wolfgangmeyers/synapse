@@ -871,6 +871,30 @@ test("legacy terminal tombstones survive compaction and shutdown boundaries", ()
   assert.equal(JSON.stringify(fixture.activities.at(-1)?.payload).includes("legacy-child"), false);
 });
 
+test("compaction instrumentation records cleared and reconciled activity counts", () => {
+  const child = { id: "child", type: "worker", description: "label", status: "running" };
+  const diagnostics: Array<{ event: string; fields?: object }> = [];
+  const f = activityFixture(legacyService([child]), { diagnostic: (event, fields) => diagnostics.push({ event, fields }) });
+  f.lifecycle.onNativeStarted(child);
+  f.traces.length = 0;
+
+  f.lifecycle.onCompactionStarted(f.context);
+  const cleared = diagnostics.find(({ event }) => event === "compaction_activity_cleared");
+  assert.deepEqual(cleared?.fields, { cleared_count: 1, remaining_count: 0 });
+
+  f.setService(typedService([child]));
+  f.lifecycle.onCompactionResumed(f.context);
+  const reconciled = diagnostics.find(({ event }) => event === "compaction_activity_reconciled");
+  assert.deepEqual(reconciled?.fields, {
+    cleared_count: 1,
+    source_count: 1,
+    started_count: 0,
+    disposed_count: 0,
+    reconciled_count: 1,
+    remaining_count: 0,
+  });
+});
+
 test("activity client failures and active settle races stay recoverable", () => {
   const failingClient = activityFixture({}, { getClient: () => ({ sendActivity: () => { throw new Error("client unavailable"); } }) });
   failingClient.lifecycle.onAgentStart(failingClient.context);
@@ -909,10 +933,11 @@ test("lifecycle failure paths remain best effort and retryable", () => {
 
   const notificationFailure = activityFixture({ listAgents: () => { throw new Error("read failed"); } }, {
     notify: () => { throw new Error("notify failed"); },
+    diagnostic: () => { throw new Error("diagnostic sink failed"); },
   });
   notificationFailure.lifecycle.ensureHeartbeat();
-  notificationFailure.intervals[0]?.callback();
-  notificationFailure.intervals[0]?.callback();
+  assert.doesNotThrow(() => notificationFailure.intervals[0]?.callback());
+  assert.doesNotThrow(() => notificationFailure.intervals[0]?.callback());
 });
 
 test("legacy started-at parsing handles valid and invalid strings", () => {
@@ -1302,7 +1327,7 @@ test("root shutdown remembers the context immediately before lifecycle cleanup",
   assert.ok(initialEnd > shutdownStarts[0]);
   const initialHandler = source.slice(shutdownStarts[0], initialEnd);
   assert.doesNotMatch(initialHandler, /rememberParentActivityContext|onSessionBoundary/);
-  assert.match(source.slice(shutdownStarts[1]), /mailboxSendRateLimits\.clear\(\);\s+rememberParentActivityContext\(context\);\s+activityLifecycle\.onSessionBoundary\(\);/);
+  assert.match(source.slice(shutdownStarts[1]), /mailboxSendRateLimits\.clear\(\);\s+diagnosticSessionClosed = true;\s+rememberParentActivityContext\(context\);\s+activityLifecycle\.onSessionBoundary\(\);/);
 });
 
 test("root session startup and shutdown keep client and lifecycle ordering", async () => {

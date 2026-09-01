@@ -140,6 +140,8 @@ const MAX_NOT_DONE_WAKEUPS = 1000;
 const MAX_SNOOZE_TURN_LIMIT = 20;
 const MEANINGFUL_ACTIVITY_EVENTS_TO_REARM = 3;
 const MEANINGFUL_ACTIVITY_KINDS = new Set(["tool-completed", "native-subagent-launch"]);
+// Keep this aligned with pi-subagents' bounded diagnostic-token contract.
+const SAFE_DIAGNOSTIC_KIND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const MAX_SEEN_ACTIVITY_IDS = 512;
 const COMPLETIONS_TO_RESET_WAKEUPS = 3;
 const DEFAULT_SNOOZE_DURATION_MS = 60_000;
@@ -147,6 +149,52 @@ const DEFAULT_SNOOZE_REFILL_YIELD_MS = 30_000;
 const DEFAULT_SNOOZE_REFILL_ELAPSED_MS = 60_000;
 const EVALUATOR_PROMPT = "goal: <goal description> - return exactly two lines: VERDICT: COMPLETED|NOT_DONE and REASON: <concise rationale>";
 const PI_SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
+const DIAGNOSTIC_JOURNAL_GLOBAL = Symbol.for("mecha.pi.diagnostic-journal.v1");
+
+type DiagnosticJournalGlobal = {
+  version: 1;
+  record: (source: string, event: string, fields?: object) => unknown;
+};
+
+const SAFE_DIAGNOSTIC_STRING_FIELDS = new Set([
+  "session_id", "event_id", "worker_id", "producer_epoch", "state", "reason", "kind", "component", "error_name",
+]);
+const SAFE_DIAGNOSTIC_ID_FIELDS = new Set(["session_id", "event_id", "worker_id", "producer_epoch"]);
+const SAFE_DIAGNOSTIC_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const SAFE_DIAGNOSTIC_ERROR_NAMES = new Set([
+  "AggregateError", "AbortError", "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError",
+]);
+const SAFE_DIAGNOSTIC_NUMBER_FIELDS = new Set(["revision"]);
+const SAFE_DIAGNOSTIC_BOOLEAN_FIELDS = new Set(["enabled", "available"]);
+
+function safeGoalIdentity(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_DIAGNOSTIC_ID_PATTERN.test(value) ? value : undefined;
+}
+
+function recordGoalDiagnostic(event: string, fields: object = {}): void {
+  try {
+    const journal = Object.getOwnPropertyDescriptor(globalThis, DIAGNOSTIC_JOURNAL_GLOBAL)?.value as DiagnosticJournalGlobal | undefined;
+    if (journal?.version !== 1 || typeof journal.record !== "function") return;
+    const safeFields: AnyRecord = {};
+    if (fields !== null && typeof fields === "object" && !Array.isArray(fields)) {
+      for (const [key, value] of Object.entries(fields)) {
+        if (SAFE_DIAGNOSTIC_ID_FIELDS.has(key)) {
+          const identity = safeGoalIdentity(value);
+          if (identity !== undefined) safeFields[key] = identity;
+        } else if (key === "kind") {
+          if (typeof value === "string" && SAFE_DIAGNOSTIC_KIND_PATTERN.test(value)) safeFields[key] = value;
+        } else if (key === "error_name") {
+          if (typeof value === "string" && SAFE_DIAGNOSTIC_ERROR_NAMES.has(value)) safeFields[key] = value;
+        } else if (SAFE_DIAGNOSTIC_STRING_FIELDS.has(key) && typeof value === "string" && value.length <= 128) safeFields[key] = value;
+        else if (SAFE_DIAGNOSTIC_NUMBER_FIELDS.has(key) && typeof value === "number" && Number.isSafeInteger(value) && value >= 0) safeFields[key] = value;
+        else if (SAFE_DIAGNOSTIC_BOOLEAN_FIELDS.has(key) && typeof value === "boolean") safeFields[key] = value;
+      }
+    }
+    journal.record("mecha-goal", event, safeFields);
+  } catch {
+    // The shared journal is optional and diagnostics cannot affect goal behavior.
+  }
+}
 
 function isRecord(value: unknown): value is AnyRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -553,6 +601,48 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
   let compactionLifecyclePause = false;
   let lastOwnerGateState = "allowed";
 
+  const diagnosticSessionId = (ctx: GoalContext | undefined) => {
+    const current = safeGoalIdentity(ctx?.sessionManager?.getSessionId?.());
+    return current ?? safeGoalIdentity(sessionId);
+  };
+  const diagnosticState = () => (state.enabled && state.goal.length > 0 ? "enabled" : "disabled");
+  const recordActivityGateRejection = (reason: string, ctx?: GoalContext, fields: AnyRecord = {}) => {
+    recordGoalDiagnostic("activity_gate_rejected", {
+      reason,
+      state: diagnosticState(),
+      enabled: state.enabled,
+      ...(diagnosticSessionId(ctx) === undefined ? {} : { session_id: diagnosticSessionId(ctx) }),
+      ...fields,
+    });
+  };
+  const recordWakeupGateRejection = (reason: string, ctx?: GoalContext, fields: AnyRecord = {}) => {
+    recordGoalDiagnostic("wakeup_gate_rejected", {
+      reason,
+      state: diagnosticState(),
+      enabled: state.enabled,
+      ...(diagnosticSessionId(ctx) === undefined ? {} : { session_id: diagnosticSessionId(ctx) }),
+      ...fields,
+    });
+  };
+  const recordOwnerFailure = (reason: string, ctx?: GoalContext, fields: AnyRecord = {}) => {
+    recordGoalDiagnostic("owner_service_failed", {
+      reason,
+      state: diagnosticState(),
+      enabled: state.enabled,
+      ...(diagnosticSessionId(ctx) === undefined ? {} : { session_id: diagnosticSessionId(ctx) }),
+      ...fields,
+    });
+  };
+  const recordPublicationFailure = (reason: string, ctx?: GoalContext, fields: AnyRecord = {}) => {
+    recordGoalDiagnostic("publication_failed", {
+      reason,
+      state: diagnosticState(),
+      enabled: state.enabled,
+      ...(diagnosticSessionId(ctx) === undefined ? {} : { session_id: diagnosticSessionId(ctx) }),
+      ...fields,
+    });
+  };
+
   const refreshSnoozeBudget = () => {
     if (snoozeBudgetCapMs === undefined || pendingSnooze) return;
     const current = clockNow();
@@ -709,8 +799,14 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
     ...(appliedGoalControl === undefined ? {} : { appliedGoalControl: { ...appliedGoalControl } }),
   });
   const publish = () => {
-    try { pi.events?.emit?.(GOAL_STATE_EVENT, goalProjection(state)); } catch { /* optional UI publication is best-effort */ }
-    try { pi.events?.emit?.(GOAL_CONTROL_STATE_EVENT, goalControlState()); } catch { /* optional control publication is best-effort */ }
+    try { pi.events?.emit?.(GOAL_STATE_EVENT, goalProjection(state)); } catch (error) {
+      recordPublicationFailure("state_event_emit", sessionContext, { component: "goal-state", error_name: error instanceof Error ? error.name : "Error" });
+      /* optional UI publication is best-effort */
+    }
+    try { pi.events?.emit?.(GOAL_CONTROL_STATE_EVENT, goalControlState()); } catch (error) {
+      recordPublicationFailure("control_state_event_emit", sessionContext, { component: "goal-control-state", error_name: error instanceof Error ? error.name : "Error" });
+      /* optional control publication is best-effort */
+    }
   };
   const recordOutcome = (outcome: Outcome) => {
     if (!OUTCOMES.has(outcome)) return;
@@ -719,25 +815,96 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
     publish();
   };
   const recordMeaningfulActivity = (activity: AnyRecord) => {
-    if (!activity || typeof activity !== "object" || Array.isArray(activity)) return;
-    const activityId = typeof activity.activityId === "string" ? activity.activityId : "";
-    const session = typeof activity.sessionId === "string" ? activity.sessionId : "";
-    const worker = typeof activity.workerId === "string" ? activity.workerId : undefined;
-    const producerEpoch = typeof activity.producerEpoch === "string" ? activity.producerEpoch : undefined;
-    const revision = activity.revision;
-    const activityGoal = isRecord(activity.goal) ? activity.goal : undefined;
-    if (typeof activity.kind !== "string" || !MEANINGFUL_ACTIVITY_KINDS.has(activity.kind)
-      || activityId.length === 0 || session.length === 0 || !isSafeNonnegativeInteger(revision) || revision < 1
-      || session !== sessionId
-      || seenActivityIds.has(activityId)
-      || activityGoal?.enabled !== true || normalizeGoal(activityGoal?.goal) !== state.goal
-      || (rearmActive && rearmScope?.workerId !== undefined && worker !== rearmScope.workerId)) return;
+    if (!activity || typeof activity !== "object" || Array.isArray(activity)) {
+      recordActivityGateRejection("invalid_activity");
+      return;
+    }
+    const readActivityField = (key: string): unknown => {
+      try { return activity[key]; } catch { return undefined; }
+    };
+    const rawActivityId = readActivityField("activityId");
+    const rawKind = readActivityField("kind");
+    const rawSession = readActivityField("sessionId");
+    const rawWorker = readActivityField("workerId");
+    const rawProducerEpoch = readActivityField("producerEpoch");
+    const activityId = safeGoalIdentity(rawActivityId);
+    const diagnosticKind = typeof rawKind === "string" && SAFE_DIAGNOSTIC_KIND_PATTERN.test(rawKind) ? rawKind : undefined;
+    const kind = typeof rawKind === "string" && MEANINGFUL_ACTIVITY_KINDS.has(rawKind) ? rawKind : undefined;
+    const session = safeGoalIdentity(rawSession);
+    const worker = rawWorker === undefined ? undefined : safeGoalIdentity(rawWorker);
+    const producerEpoch = rawProducerEpoch === undefined ? undefined : safeGoalIdentity(rawProducerEpoch);
+    const revision = readActivityField("revision");
+    const rawGoal = readActivityField("goal");
+    const activityGoal = isRecord(rawGoal) ? rawGoal : undefined;
+    const identity = {
+      ...(activityId === undefined ? {} : { event_id: activityId }),
+      ...(diagnosticKind === undefined ? {} : { kind: diagnosticKind }),
+      ...(worker === undefined ? {} : { worker_id: worker }),
+      ...(producerEpoch === undefined ? {} : { producer_epoch: producerEpoch }),
+      ...(isSafeNonnegativeInteger(revision) ? { revision } : {}),
+    };
+    if (kind === undefined) {
+      recordActivityGateRejection("invalid_kind", undefined, identity);
+      return;
+    }
+    if (activityId === undefined) {
+      recordActivityGateRejection("missing_activity_id", undefined, identity);
+      return;
+    }
+    if (session === undefined) {
+      recordActivityGateRejection("invalid_session_id", undefined, identity);
+      return;
+    }
+    if (rawWorker !== undefined && worker === undefined) {
+      recordActivityGateRejection("invalid_worker_id", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (rawProducerEpoch !== undefined && producerEpoch === undefined) {
+      recordActivityGateRejection("invalid_producer_epoch", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (!isSafeNonnegativeInteger(revision) || revision < 1) {
+      recordActivityGateRejection("invalid_revision", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (session !== sessionId) {
+      recordActivityGateRejection("stale_session", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (seenActivityIds.has(activityId)) {
+      recordActivityGateRejection("duplicate_activity", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (activityGoal?.enabled !== true || normalizeGoal(activityGoal?.goal) !== state.goal) {
+      recordActivityGateRejection("goal_projection_mismatch", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (rearmActive && rearmScope?.workerId !== undefined && worker !== rearmScope.workerId) {
+      recordActivityGateRejection("worker_mismatch", undefined, { ...identity, session_id: session });
+      return;
+    }
     latestActivityRevision = Math.max(latestActivityRevision, revision);
     rememberActivityId(activityId);
-    if (!rearmActive || !state.enabled || !state.goal || !rearmScope
-      || rearmScope.sessionId !== session || rearmScope.goal !== state.goal
-      || (rearmScope.workerId !== undefined && worker !== rearmScope.workerId)
-      || (rearmScope.producerEpoch !== undefined && producerEpoch !== rearmScope.producerEpoch)) return;
+    if (!rearmActive || !state.enabled || !state.goal || !rearmScope) {
+      recordActivityGateRejection("rearm_inactive", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (rearmScope.sessionId !== session) {
+      recordActivityGateRejection("rearm_session_mismatch", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (rearmScope.goal !== state.goal) {
+      recordActivityGateRejection("rearm_goal_mismatch", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (rearmScope.workerId !== undefined && worker !== rearmScope.workerId) {
+      recordActivityGateRejection("rearm_worker_mismatch", undefined, { ...identity, session_id: session });
+      return;
+    }
+    if (rearmScope.producerEpoch !== undefined && producerEpoch !== rearmScope.producerEpoch) {
+      recordActivityGateRejection("rearm_producer_mismatch", undefined, { ...identity, session_id: session });
+      return;
+    }
     if (rearmScope.workerId === undefined && worker !== undefined) rearmScope.workerId = worker;
     if (rearmScope.producerEpoch === undefined && producerEpoch !== undefined) rearmScope.producerEpoch = producerEpoch;
     rearmActivityCount += 1;
@@ -754,17 +921,27 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
     publish();
   };
   const scheduleSelfWake = (goal: string, ctx: GoalContext) => {
-    if (typeof sessionId !== "string" || sessionId.length === 0) return;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      recordWakeupGateRejection("missing_session_id", ctx, { component: "self-wakeup" });
+      return;
+    }
     const pending: PendingSelfWake = { goal, ctx, runGeneration: generation, timeout: undefined };
     pendingSelfWake = pending;
     pending.timeout = setTimer(() => {
-      if (pendingSelfWake !== pending) return;
+      if (pendingSelfWake !== pending) {
+        recordWakeupGateRejection("superseded", ctx, { component: "self-wakeup" });
+        return;
+      }
       pending.timeout = undefined;
       if (pending.runGeneration !== generation || !state.enabled || state.goal !== goal || !isCurrentSession(undefined, ctx)) {
         pendingSelfWake = undefined;
+        recordWakeupGateRejection("stale_self_wakeup", ctx, { component: "self-wakeup" });
         return;
       }
-      if (compactionPending(ctx)) return;
+      if (compactionPending(ctx)) {
+        recordWakeupGateRejection("compaction_pending", ctx, { component: "self-wakeup", state: "compacting" });
+        return;
+      }
       pendingSelfWake = undefined;
       try {
         pi.sendMessage({
@@ -773,15 +950,25 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
           display: true,
           details: { enabled: true, goal },
         }, { deliverAs: "steer", triggerTurn: true });
-      } catch { /* persistence remains authoritative when the session cannot wake */ }
+      } catch (error) {
+        recordPublicationFailure("self_wakeup_send", ctx, { component: "goal-update", error_name: error instanceof Error ? error.name : "Error" });
+        /* persistence remains authoritative when the session cannot wake */
+      }
     }, 0);
   };
   const notify = (ctx: GoalContext, message: string, level: string = "info") => ctx.ui?.notify?.(message, level);
   const compactionPending = (ctx: GoalContext) => compactionLifecyclePause || hasPendingCompaction(ctx);
   const resumePendingSelfWake = (ctx: GoalContext) => {
     const pending = pendingSelfWake;
-    if (!pending || compactionPending(ctx) || pending.runGeneration !== generation
-      || !state.enabled || state.goal !== pending.goal || !isCurrentSession(undefined, ctx)) return;
+    if (!pending) return;
+    if (compactionPending(ctx)) {
+      recordWakeupGateRejection("compaction_pending", ctx, { component: "self-wakeup-resume", state: "compacting" });
+      return;
+    }
+    if (pending.runGeneration !== generation || !state.enabled || state.goal !== pending.goal || !isCurrentSession(undefined, ctx)) {
+      recordWakeupGateRejection("stale_self_wakeup", ctx, { component: "self-wakeup-resume" });
+      return;
+    }
     pendingSelfWake = undefined;
     try {
       pi.sendMessage({
@@ -790,15 +977,27 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
         display: true,
         details: { enabled: true, goal: pending.goal },
       }, { deliverAs: "steer", triggerTurn: true });
-    } catch { /* persistence remains authoritative when the session cannot wake */ }
+    } catch (error) {
+      recordPublicationFailure("self_wakeup_send", ctx, { component: "goal-update", error_name: error instanceof Error ? error.name : "Error" });
+      /* persistence remains authoritative when the session cannot wake */
+    }
   };
   const scheduleSnoozeAvailability = (ctx: GoalContext) => {
-    if (snoozeAvailabilityInjected || pendingSnoozeAvailability !== undefined) return;
+    if (snoozeAvailabilityInjected || pendingSnoozeAvailability !== undefined) {
+      recordWakeupGateRejection("availability_already_pending", ctx, { component: "snooze-availability" });
+      return;
+    }
     const runGeneration = generation;
     pendingSnoozeAvailability = setTimer(() => {
       pendingSnoozeAvailability = undefined;
       if (runGeneration !== generation || !state.enabled || !state.goal || !snoozeEnabled
-        || notDoneWakeups >= currentWakeupLimit() || compactionPending(ctx)) return;
+        || notDoneWakeups >= currentWakeupLimit() || compactionPending(ctx)) {
+        recordWakeupGateRejection(compactionPending(ctx) ? "compaction_pending" : "stale_snooze_availability", ctx, {
+          component: "snooze-availability",
+          ...(compactionPending(ctx) ? { state: "compacting" } : {}),
+        });
+        return;
+      }
       try {
         pi.sendMessage({
           customType: GOAL_SNOOZE_AVAILABILITY_TYPE,
@@ -807,15 +1006,22 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
           details: { goal: state.goal, durationMs: snoozeDurationMs },
         }, { deliverAs: "steer", triggerTurn: true });
         snoozeAvailabilityInjected = true;
-      } catch { /* availability remains optional when the session cannot wake */ }
+      } catch (error) {
+        recordPublicationFailure("snooze_availability_send", ctx, { component: "goal-snooze-availability", error_name: error instanceof Error ? error.name : "Error" });
+        /* availability remains optional when the session cannot wake */
+      }
     }, 0);
   };
   const scheduleSnoozeWakeup = (goal: string, runGeneration: number, wakeup: string, ctx: GoalContext, allowAfterDisable = false) => {
     const timeout = setTimer(() => {
       if (pendingSnoozeWakeup === timeout) pendingSnoozeWakeup = undefined;
       if (runGeneration !== generation || !state.enabled || state.goal !== goal
-        || !isCurrentSession(undefined, ctx) || (!snoozeEnabled && !allowAfterDisable)) return;
+        || !isCurrentSession(undefined, ctx) || (!snoozeEnabled && !allowAfterDisable)) {
+        recordWakeupGateRejection("stale_snooze_wakeup", ctx, { component: "snooze-wakeup" });
+        return;
+      }
       if (compactionPending(ctx)) {
+        recordWakeupGateRejection("compaction_pending", ctx, { component: "snooze-wakeup", state: "compacting" });
         deferredSnoozeWakeup = { goal, runGeneration, wakeup, ctx, allowAfterDisable };
         return;
       }
@@ -827,7 +1033,7 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
           details: { goal, outcome: "NOT_DONE", rationale: "Work remains." },
         }, { deliverAs: "steer", triggerTurn: true });
       } catch (error) {
-        console.error(error);
+        recordPublicationFailure("snooze_wakeup_send", ctx, { component: "goal-result", error_name: error instanceof Error ? error.name : "Error" });
       }
     }, 0);
     pendingSnoozeWakeup = timeout;
@@ -938,16 +1144,30 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
     const ownerSessionId = ctx?.sessionManager?.getSessionId?.() ?? sessionId;
     const registry = Object.getOwnPropertyDescriptor(globalThis, PI_SUBAGENTS_SERVICE_REGISTRY)?.value;
     const services = isRecord(registry) && isServiceRegistry(registry.services) ? registry.services : undefined;
-    const service = typeof ownerSessionId === "string" && services !== undefined
-      ? services.get(ownerSessionId)
-      : undefined;
+    let service: unknown;
+    try {
+      service = typeof ownerSessionId === "string" && services !== undefined
+        ? services.get(ownerSessionId)
+        : undefined;
+    } catch (error) {
+      recordOwnerFailure("service_lookup", ctx, { error_name: error instanceof Error ? error.name : "Error" });
+      lastOwnerGateState = "allowed";
+      return lastOwnerGateState;
+    }
     if (!isGoalOwnerService(service)) {
       lastOwnerGateState = "allowed";
       return lastOwnerGateState;
     }
     try {
-      lastOwnerGateState = service.hasRunning() === true ? "suppressed" : "allowed";
-    } catch {
+      const running = service.hasRunning();
+      if (typeof running !== "boolean") {
+        recordOwnerFailure("invalid_running_state", ctx);
+        lastOwnerGateState = "allowed";
+      } else {
+        lastOwnerGateState = running ? "suppressed" : "allowed";
+      }
+    } catch (error) {
+      recordOwnerFailure("running_check", ctx, { error_name: error instanceof Error ? error.name : "Error" });
       lastOwnerGateState = "allowed";
     }
     return lastOwnerGateState;
@@ -1054,32 +1274,55 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
     message: AnyRecord,
     beforeSend?: () => (() => void) | undefined,
   ) => {
-    if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx)) return;
+    if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx)) {
+      recordWakeupGateRejection("stale_injection", ctx, { component: "goal-result" });
+      return;
+    }
     setTimer(() => {
-      if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx) || !state.enabled || !state.goal) return;
+      if (runGeneration !== generation || controller.signal.aborted || !isCurrentSession(event, ctx) || !state.enabled || !state.goal) {
+        recordWakeupGateRejection("stale_injection", ctx, { component: "goal-result" });
+        return;
+      }
       // Re-check in the wakeup macrotask. The evaluator result is stale if an
       // owner child was admitted after complete() returned.
-      if (compactionPending(ctx) || ownerActivityState(ctx) === "suppressed") return;
+      if (compactionPending(ctx)) {
+        recordWakeupGateRejection("compaction_pending", ctx, { component: "goal-result", state: "compacting" });
+        return;
+      }
+      if (ownerActivityState(ctx) === "suppressed") {
+        recordWakeupGateRejection("owner_children_running", ctx, { component: "goal-result", state: "suppressed" });
+        return;
+      }
       let undoBeforeSend: (() => void) | undefined;
       try {
         undoBeforeSend = beforeSend?.();
         pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
-      } catch(e) {
+      } catch(error) {
         undoBeforeSend?.();
-        console.error(e);
+        recordPublicationFailure("goal_wakeup_send", ctx, { component: "goal-result", error_name: error instanceof Error ? error.name : "Error" });
       }
     }, 0);
   };
   const scheduleDeferredEvaluation = (event: AnyRecord, ctx: GoalContext, runGeneration: number, goal: string) => {
-    if (deferredEvaluation !== undefined || activeAbort) return;
+    if (deferredEvaluation !== undefined || activeAbort) {
+      recordWakeupGateRejection("evaluation_already_pending", ctx, { component: "evaluation" });
+      return;
+    }
     const pending: PendingEvaluation = { event, ctx, runGeneration, goal };
     deferredEvaluationRequest = pending;
     deferredEvaluation = setTimer(async () => {
       deferredEvaluation = undefined;
-      if (deferredEvaluationRequest !== pending) return;
+      if (deferredEvaluationRequest !== pending) {
+        recordWakeupGateRejection("superseded", ctx, { component: "evaluation" });
+        return;
+      }
       deferredEvaluationRequest = undefined;
-      if (runGeneration !== generation || !isCurrentSession(event, ctx) || !state.enabled || state.goal !== goal || !ctx.model) return;
+      if (runGeneration !== generation || !isCurrentSession(event, ctx) || !state.enabled || state.goal !== goal || !ctx.model) {
+        recordWakeupGateRejection("stale_evaluation", ctx, { component: "evaluation" });
+        return;
+      }
       if (compactionPending(ctx)) {
+        recordWakeupGateRejection("compaction_pending", ctx, { component: "evaluation", state: "compacting" });
         deferredEvaluationRequest = pending;
         return;
       }
@@ -1090,7 +1333,14 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
         // The owner service is authoritative at this boundary. A child can be
         // admitted after the settle event, so the earlier gate cannot protect
         // the evaluator call.
-        if (compactionPending(ctx) || ownerActivityState(ctx) === "suppressed") return;
+        if (compactionPending(ctx)) {
+          recordWakeupGateRejection("compaction_pending", ctx, { component: "evaluation", state: "compacting" });
+          return;
+        }
+        if (ownerActivityState(ctx) === "suppressed") {
+          recordWakeupGateRejection("owner_children_running", ctx, { component: "evaluation", state: "suppressed" });
+          return;
+        }
         evaluatorCalls = Math.min(evaluatorCalls + 1, MAX_EVALUATOR_CALLS);
         const request = {
           systemPrompt: EVALUATOR_PROMPT.replace("<goal description>", goal),
@@ -1101,8 +1351,12 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
           }],
         };
         const response = await completeEvaluator(ctx, request, controller.signal);
-        if (runGeneration !== generation || controller.signal.aborted) return;
+        if (runGeneration !== generation || controller.signal.aborted) {
+          recordWakeupGateRejection("stale_evaluation_result", ctx, { component: "evaluation" });
+          return;
+        }
         if (compactionPending(ctx)) {
+          recordWakeupGateRejection("compaction_pending", ctx, { component: "evaluation", state: "compacting" });
           deferredEvaluationRequest = pending;
           return;
         }
@@ -1119,7 +1373,10 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
           persist();
           publish();
         }
-        if (outcome === "NOT_DONE" && notDoneWakeups >= currentWakeupLimit()) return;
+        if (outcome === "NOT_DONE" && notDoneWakeups >= currentWakeupLimit()) {
+          recordWakeupGateRejection("retry_limit", ctx, { component: "evaluation" });
+          return;
+        }
         let undoNotDoneWakeup: (() => void) | undefined;
         const wakeup = outcome === "NOT_DONE"
           ? (() => {
@@ -1136,12 +1393,26 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
         }, beforeSend);
       } catch(e) {
         if (compactionPending(ctx)) {
+          recordWakeupGateRejection("compaction_pending", ctx, { component: "evaluation", state: "compacting" });
           deferredEvaluationRequest = pending;
           return;
         }
-        if (runGeneration !== generation || controller.signal.aborted) return;
+        if (runGeneration !== generation || controller.signal.aborted) {
+          recordWakeupGateRejection("stale_evaluation_result", ctx, { component: "evaluation" });
+          return;
+        }
+        recordGoalDiagnostic("evaluation_failed", {
+          reason: "evaluator_error",
+          state: diagnosticState(),
+          enabled: state.enabled,
+          ...(diagnosticSessionId(ctx) === undefined ? {} : { session_id: diagnosticSessionId(ctx) }),
+          error_name: e instanceof Error ? e.name : "Error",
+        });
         recordOutcome("NOT_DONE");
-        if (notDoneWakeups >= currentWakeupLimit()) return;
+        if (notDoneWakeups >= currentWakeupLimit()) {
+          recordWakeupGateRejection("retry_limit", ctx, { component: "evaluation" });
+          return;
+        }
         let undoNotDoneWakeup: (() => void) | undefined;
         scheduleInjection(event, ctx, runGeneration, controller, {
           customType: GOAL_RESULT_TYPE,
@@ -1165,9 +1436,17 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
   };
   const resumeDeferredEvaluation = (ctx: GoalContext) => {
     const pending = deferredEvaluationRequest;
-    if (!pending || compactionPending(ctx) || deferredEvaluation !== undefined || activeAbort
+    if (!pending) return;
+    if (compactionPending(ctx)) {
+      recordWakeupGateRejection("compaction_pending", ctx, { component: "evaluation-resume", state: "compacting" });
+      return;
+    }
+    if (deferredEvaluation !== undefined || activeAbort
       || pending.runGeneration !== generation || !isCurrentSession(pending.event, pending.ctx)
-      || !state.enabled || state.goal !== pending.goal) return;
+      || !state.enabled || state.goal !== pending.goal) {
+      recordWakeupGateRejection("stale_evaluation", ctx, { component: "evaluation-resume" });
+      return;
+    }
     deferredEvaluationRequest = undefined;
     scheduleDeferredEvaluation(pending.event, pending.ctx, pending.runGeneration, pending.goal);
   };
@@ -1176,7 +1455,10 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
   pi.events?.on?.(GOAL_WORKER_ID_EVENT, (identity) => {
     if (!identity || typeof identity !== "object" || Array.isArray(identity)
       || (identity.sessionId !== undefined && identity.sessionId !== sessionId)
-      || typeof identity.workerId !== "string" || identity.workerId.length === 0) return;
+      || typeof identity.workerId !== "string" || identity.workerId.length === 0) {
+      recordActivityGateRejection("invalid_worker_identity");
+      return;
+    }
     const producerEpoch = typeof identity.producerEpoch === "string" && identity.producerEpoch.length > 0
       ? identity.producerEpoch
       : undefined;
@@ -1206,11 +1488,17 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
   pi.events?.on?.(GOAL_ACTIVITY_EVENT, recordMeaningfulActivity);
   pi.events?.on?.(GOAL_CONTROL_REQUEST_EVENT, (request) => {
     const context = isGoalContext(request.context) ? request.context : sessionContext;
-    if (context === undefined) return;
+    if (context === undefined) {
+      recordWakeupGateRejection("missing_context", undefined, { component: "goal-control" });
+      return;
+    }
     const result = applyGoalControl(request, context);
     const respond = request.respond;
     if (typeof respond === "function") {
-      try { respond(result); } catch { /* the router can time out a disconnected source */ }
+      try { respond(result); } catch (error) {
+        recordPublicationFailure("control_response", context, { component: "goal-control", error_name: error instanceof Error ? error.name : "Error" });
+        /* the router can time out a disconnected source */
+      }
     }
   });
 
@@ -1299,6 +1587,7 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
     parameters: GOAL_PARAMETERS,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!isCurrentSession(undefined, ctx)) {
+        recordWakeupGateRejection("stale_session", ctx, { component: "goal-tool" });
         return { content: [{ type: "text", text: "Goal is unavailable in this session." }], isError: true };
       }
       const result = applyAction(params?.action, params?.goal, ctx, { programmatic: true });
@@ -1321,32 +1610,45 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
     },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       if (!isCurrentSession(undefined, ctx)) {
+        recordWakeupGateRejection("stale_session", ctx, { component: "goal-snooze" });
         return { content: [{ type: "text", text: "Goal snooze is unavailable in this session." }], isError: true };
       }
       if (!snoozeEnabled) {
+        recordWakeupGateRejection("snooze_disabled", ctx, { component: "goal-snooze" });
         return { content: [{ type: "text", text: "Goal snooze is not enabled. Use /goal-snooze first." }], isError: true };
       }
       if (!state.enabled || !state.goal) {
+        recordWakeupGateRejection("inactive_goal", ctx, { component: "goal-snooze" });
         return { content: [{ type: "text", text: "Goal snooze needs an active goal." }], isError: true };
       }
       if (pendingSnooze || pendingSnoozeWakeup !== undefined || deferredSnoozeWakeup !== undefined) {
+        recordWakeupGateRejection("snooze_already_waiting", ctx, { component: "goal-snooze" });
         return { content: [{ type: "text", text: "Goal snooze is already waiting." }], isError: true };
       }
       refreshSnoozeBudget();
       if (snoozeBudgetCapMs !== undefined && snoozeBudgetAvailableMs <= 0) {
+        recordWakeupGateRejection("snooze_budget_exhausted", ctx, { component: "goal-snooze" });
         return { content: [{ type: "text", text: "Goal snooze budget is exhausted. Wait for a refill." }], isError: true };
       }
       if (notDoneWakeups >= currentWakeupLimit()) {
+        recordWakeupGateRejection("retry_limit", ctx, { component: "goal-snooze" });
         return { content: [{ type: "text", text: "Goal snooze ended. The goal retry limit has been reached." }] };
       }
       const goal = state.goal;
       const runGeneration = generation;
       if (_signal?.aborted) {
+        recordWakeupGateRejection("aborted", ctx, { component: "goal-snooze" });
         return { content: [{ type: "text", text: "Goal snooze was canceled." }], isError: true };
       }
       scheduleSnooze(snoozeDurationMs, _signal, (waited) => {
-        if (!waited || runGeneration !== generation || !snoozeEnabled || !state.enabled || state.goal !== goal) return;
-        if (notDoneWakeups >= currentWakeupLimit()) return;
+        if (!waited || runGeneration !== generation || !snoozeEnabled || !state.enabled || state.goal !== goal) {
+          recordWakeupGateRejection(waited ? "stale_snooze" : "aborted", ctx, { component: "goal-snooze" });
+          return;
+        }
+        if (notDoneWakeups >= currentWakeupLimit()) {
+          recordWakeupGateRejection("retry_limit", ctx, { component: "goal-snooze" });
+          return;
+        }
         recordNotDoneWakeup();
         const reachedCustomLimit = snoozeTurnLimit !== undefined && notDoneWakeups >= snoozeTurnLimit;
         const exhaustedBudget = snoozeBudgetCapMs !== undefined
@@ -1421,14 +1723,33 @@ export function createGoalExtension(pi: GoalPi, options: GoalOptions = {}) {
   });
 
   pi.on("agent_settled", (event, ctx) => {
-    if (!isCurrentSession(event, ctx)) return;
+    if (!isCurrentSession(event, ctx)) {
+      recordWakeupGateRejection("stale_session", ctx, { component: "agent-settled" });
+      return;
+    }
     if (!compactionPending(ctx)) resumePendingSelfWake(ctx);
-    if (!state.enabled || !state.goal || !ctx.model) return;
-    if (compactionPending(ctx)) return;
+    if (!state.enabled || !state.goal || !ctx.model) {
+      recordWakeupGateRejection("inactive_goal_or_model", ctx, { component: "agent-settled" });
+      return;
+    }
+    if (compactionPending(ctx)) {
+      recordWakeupGateRejection("compaction_pending", ctx, { component: "agent-settled", state: "compacting" });
+      return;
+    }
     resumeDeferredSnoozeWakeup(ctx);
-    if (pendingSnooze || pendingSnoozeWakeup !== undefined || deferredSnoozeWakeup !== undefined) return;
+    if (pendingSnooze || pendingSnoozeWakeup !== undefined || deferredSnoozeWakeup !== undefined) {
+      recordWakeupGateRejection("snooze_already_waiting", ctx, { component: "agent-settled" });
+      return;
+    }
     if (snoozeEnabled) scheduleSnoozeAvailability(ctx);
-    if (ownerActivityState(ctx) === "suppressed" || deferredEvaluation !== undefined || activeAbort) return;
+    if (ownerActivityState(ctx) === "suppressed") {
+      recordWakeupGateRejection("owner_children_running", ctx, { component: "agent-settled", state: "suppressed" });
+      return;
+    }
+    if (deferredEvaluation !== undefined || activeAbort) {
+      recordWakeupGateRejection("evaluation_already_pending", ctx, { component: "agent-settled" });
+      return;
+    }
     scheduleDeferredEvaluation(event, ctx, generation, state.goal);
   });
 }

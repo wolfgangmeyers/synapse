@@ -55,10 +55,11 @@ import {
   appendMalformedToolCallDiagnostic,
   appendMemoryCaptureDiagnostic,
   appendOrphanToolResultDiagnostic,
+  createDiagnosticJournal,
   createNativeSubagentTrace,
   sanitizeContextHistory,
 } from "./diagnostics-history.js";
-import type { ExtensionTrace, HistoryMessage } from "./diagnostics-history.js";
+import type { DiagnosticJournal, ExtensionTrace, HistoryMessage } from "./diagnostics-history.js";
 import { registerOperationalTools } from "./operational-tools.js";
 import { createReminderLockState, createRouterReminderReader } from "./reminder-lock.js";
 import {
@@ -98,6 +99,11 @@ const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const MAX_GOAL_CHARS = 4_000;
 const GOAL_OUTCOME_KEYS = ["COMPLETED", "NOT_DONE"];
 const MAX_MEANINGFUL_ACTIVITY_IDS = 1_024;
+const GOAL_ACTIVITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const GOAL_ACTIVITY_KINDS = new Set(["tool-completed", "native-subagent-launch"]);
+function safeGoalActivityIdentity(value: unknown): string | undefined {
+  return typeof value === "string" && GOAL_ACTIVITY_ID_PATTERN.test(value) ? value : undefined;
+}
 // These tools change Mecha/control-plane state or move messages; their successful completion
 // is not proof that the worker advanced its standing goal. Real work tools remain eligible.
 const GOAL_ACTIVITY_EXCLUDED_TOOLS = new Set([
@@ -557,7 +563,31 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   if (nativeSubagentTrace === undefined || typeof nativeSubagentTrace.record !== "function") {
     throw new TypeError("nativeSubagentTrace must provide record");
   }
-  const traceNativeSubagent = (event: string, fields: object = {}) => nativeSubagentTrace.record(event, fields);
+  const diagnosticJournalOptions = { environment: operationalTools.environment ?? process.env };
+  const unavailableDiagnosticJournal = (): DiagnosticJournal => ({
+    path: undefined,
+    closed: false,
+    closing: false,
+    reusable: false,
+    record: () => false,
+    flush: async () => {},
+    close: async () => {},
+    health: () => ({ accepted: 0, written: 0, dropped: 0, writeFailures: 0, queueDepth: 0 }),
+  });
+  const openDiagnosticJournal = (): DiagnosticJournal => {
+    try { return createDiagnosticJournal(diagnosticJournalOptions); } catch { return unavailableDiagnosticJournal(); }
+  };
+  let diagnosticJournal = openDiagnosticJournal();
+  // Stop queueing records after root teardown. Keep the shared journal object reusable for the next root session.
+  let diagnosticSessionClosed = false;
+  const traceNativeSubagent = (event: string, fields: object = {}) => {
+    const result = nativeSubagentTrace.record(event, fields);
+    if (!diagnosticSessionClosed) diagnosticJournal.record("mecha-messaging", event, fields);
+    return result;
+  };
+  const recordDiagnostic = (event: string, fields: object = {}) => {
+    if (!diagnosticSessionClosed) diagnosticJournal.record("mecha-messaging", event, fields);
+  };
   const appendDiagnostic = (event: string, payload: object) => traceNativeSubagent(event, payload);
   traceNativeSubagent("extension_initialized", {
     registry_available: (() => {
@@ -577,36 +607,74 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   const activityProducerEpoch = randomUUID();
   const meaningfulActivityIds = new Set();
   let goalControlState = defaultGoalControlState();
+  const recordGoalBridgeDiagnostic = (event: string, fields: Record<string, JsonValue> = {}, context: PiContext | undefined = parentActivityContext) => {
+    const sessionId = contextSessionId(context);
+    recordDiagnostic(event, {
+      state: goalProjection === undefined ? "unknown" : goalProjection.enabled ? "enabled" : "disabled",
+      enabled: goalProjection?.enabled === true,
+      ...(sessionId === undefined ? {} : { session_id: sessionId }),
+      ...(parentAgentId === undefined ? {} : { agent_id: parentAgentId }),
+      ...fields,
+    });
+  };
   const receiveGoalProjection = (value: JsonValue) => {
     const normalized = normalizeGoalProjection(value);
-    if (normalized === undefined) return;
+    if (normalized === undefined) {
+      recordGoalBridgeDiagnostic("goal_projection_rejected", { reason: "invalid_projection" });
+      return;
+    }
     goalProjection = normalized;
     goalProjectionReceived = true;
     if (parentAgentId !== undefined) emitWorkerIdentity(parentActivityContext, parentAgentId);
   };
   const receiveGoalControlState = (value: JsonValue) => {
     const normalized = normalizeGoalControlState(value);
-    if (normalized === undefined) return;
+    if (normalized === undefined) {
+      recordGoalBridgeDiagnostic("goal_control_state_rejected", { reason: "invalid_state" });
+      return;
+    }
     goalControlState = normalized;
     publishGoalState();
   };
   const emitWorkerIdentity = (context: PiContext | undefined, workerId: string) => {
-    const sessionId = contextSessionId(context);
-    if (typeof workerId !== "string" || workerId.length === 0 || typeof sessionId !== "string" || sessionId.length === 0) return;
+    const safeWorkerId = safeGoalActivityIdentity(workerId);
+    const sessionId = safeGoalActivityIdentity(contextSessionId(context));
+    if (safeWorkerId === undefined || sessionId === undefined) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", {
+        reason: safeWorkerId === undefined ? "invalid_worker_id" : "invalid_session_id",
+        component: "worker-identity",
+      }, context);
+      return;
+    }
     try {
-      pi.events?.emit?.(GOAL_WORKER_ID_EVENT, { workerId, sessionId, producerEpoch: activityProducerEpoch });
-    } catch {
+      pi.events?.emit?.(GOAL_WORKER_ID_EVENT, { workerId: safeWorkerId, sessionId, producerEpoch: activityProducerEpoch });
+    } catch (error) {
+      recordGoalBridgeDiagnostic("publication_failed", { reason: "worker_identity_emit", component: "worker-identity", error_name: errorName(error) }, context);
       // The goal extension is optional; an unavailable local bridge must not block startup.
     }
   };
   const emitMeaningfulActivity = (kind: string, rawActivityId: string | undefined, context: PiContext | undefined) => {
-    if (!goalProjectionReceived || goalProjection?.enabled !== true) return;
-    const activityId = typeof rawActivityId === "string" ? rawActivityId.trim() : "";
-    const sessionId = contextSessionId(context) ?? contextSessionId(parentActivityContext);
-    if (activityId.length === 0 || typeof sessionId !== "string" || sessionId.length === 0
-      || typeof parentAgentId !== "string" || parentAgentId.length === 0
-      || meaningfulActivityIds.has(`${kind}:${activityId}`)) return;
-    const key = `${kind}:${activityId}`;
+    const safeKind = GOAL_ACTIVITY_KINDS.has(kind) ? kind : undefined;
+    if (!goalProjectionReceived || goalProjection?.enabled !== true) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", {
+        reason: "goal_projection_unavailable",
+        ...(safeKind === undefined ? {} : { kind: safeKind }),
+      }, context);
+      return;
+    }
+    const activityId = safeGoalActivityIdentity(rawActivityId);
+    const sessionId = safeGoalActivityIdentity(contextSessionId(context) ?? contextSessionId(parentActivityContext));
+    const workerId = safeGoalActivityIdentity(parentAgentId);
+    const key = safeKind !== undefined && activityId !== undefined ? `${safeKind}:${activityId}` : undefined;
+    if (safeKind === undefined || activityId === undefined || key === undefined || !GOAL_ACTIVITY_ID_PATTERN.test(key)
+      || sessionId === undefined || workerId === undefined || meaningfulActivityIds.has(key)) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", {
+        reason: safeKind === undefined ? "invalid_kind" : activityId === undefined || key === undefined || !GOAL_ACTIVITY_ID_PATTERN.test(key) ? "invalid_activity_id" : sessionId === undefined ? "invalid_session_id" : workerId === undefined ? "invalid_worker_id" : "duplicate_activity",
+        ...(safeKind === undefined ? {} : { kind: safeKind }),
+        ...(activityId === undefined ? {} : { event_id: activityId }),
+      }, context);
+      return;
+    }
     meaningfulActivityIds.add(key);
     while (meaningfulActivityIds.size > MAX_MEANINGFUL_ACTIVITY_IDS) {
       meaningfulActivityIds.delete(meaningfulActivityIds.keys().next().value);
@@ -615,14 +683,15 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     try {
       pi.events?.emit?.(GOAL_ACTIVITY_EVENT, {
         activityId: key,
-        kind,
+        kind: safeKind,
         revision,
         sessionId,
-        workerId: parentAgentId,
+        workerId,
         producerEpoch: activityProducerEpoch,
         goal: { ...goalProjection },
       });
-    } catch {
+    } catch (error) {
+      recordGoalBridgeDiagnostic("publication_failed", { reason: "activity_emit", component: "meaningful-activity", event_id: key, error_name: errorName(error) }, context);
       // Progress observation is best-effort and cannot change the worker action outcome.
     }
   };
@@ -630,11 +699,15 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     return typeof toolName === "string" && toolName.length > 0 && !GOAL_ACTIVITY_EXCLUDED_TOOLS.has(toolName);
   };
   const publishGoalState = (mailboxClient: MailboxClient | undefined = client) => {
-    if (mailboxClient === undefined || typeof mailboxClient.sendGoalState !== "function") return false;
+    if (mailboxClient === undefined || typeof mailboxClient.sendGoalState !== "function") {
+      recordGoalBridgeDiagnostic("publication_failed", { reason: mailboxClient === undefined ? "client_unavailable" : "send_goal_state_unavailable", component: "goal-state" });
+      return false;
+    }
     try {
       mailboxClient.sendGoalState(cloneGoalControlState(goalControlState));
       return true;
-    } catch {
+    } catch (error) {
+      recordGoalBridgeDiagnostic("publication_failed", { reason: "goal_state_publish", component: "goal-state", error_name: errorName(error) });
       return false;
     }
   };
@@ -652,7 +725,9 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   });
   pi.events?.on?.(GOAL_STATE_EVENT, receiveGoalProjection);
   pi.events?.on?.(GOAL_CONTROL_STATE_EVENT, receiveGoalControlState);
-  try { pi.events?.emit?.(GOAL_STATE_REQUEST_EVENT); } catch { /* optional goal bridge is best-effort */ }
+  try { pi.events?.emit?.(GOAL_STATE_REQUEST_EVENT); } catch (error) {
+    recordGoalBridgeDiagnostic("publication_failed", { reason: "state_request_emit", component: "goal-state-request", error_name: errorName(error) });
+  }
   let startupError: ErrorLike | undefined;
   let activeWork = ""; let recallAbort: AbortController | undefined; let recallProcess: ReturnType<typeof execFile> | undefined; let policyAbort: AbortController | undefined; let policyReady: Promise<JsonObject> | undefined; let capture: MemoryCapture | undefined;
   const ensureCapture = async (signal: AbortSignal | undefined): Promise<MemoryCapture> => { if (capture !== undefined) return capture; const response = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/policy`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5_000)]) : AbortSignal.timeout(5_000) }); if (!response.ok) throw new Error("capture policy unavailable"); const { recall: policy } = await response.json(); capture = createMemoryCaptureLifecycle({ policy, context: async ({ signal }: CaptureContextInput) => { const lookup = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/lookup`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify({ stores: ["default"] }) }); if (!lookup.ok) throw new Error("capture destination unavailable"); const { records } = await lookup.json(); return records; }, apply: async (body: CaptureApplyInput, signal: AbortSignal) => { const applied = await fetch(`${routerHttpUrl(process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL)}/v1/memory/apply`, { method: "POST", headers: { "content-type": "application/json" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(policy.capture.router_timeout_ms)]) : AbortSignal.timeout(policy.capture.router_timeout_ms), body: JSON.stringify(body) }); if (!applied.ok) throw new Error("capture apply failed"); return applied.json(); }, diagnostics: appendMemoryCaptureDiagnostic }); return capture; };
@@ -683,7 +758,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   let settledNotificationEnabled = false;
   let initialCompactionPolicy: CompactionPolicy;
   let initialCompactionPolicyError: ErrorLike | undefined;
-  try { initialCompactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { initialCompactionPolicyError = error instanceof Error ? error : new Error(String(error)); initialCompactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
+  try { initialCompactionPolicy = compactionPolicyFromEnvironment(); } catch (error) { recordDiagnostic("compaction_policy_load_failed", { error_name: errorName(error) }); initialCompactionPolicyError = error instanceof Error ? error : new Error(String(error)); initialCompactionPolicy = resolveCompactionPolicy(DEFAULT_COMPACTION_POLICY); }
   let compaction: CompactionOrchestration | undefined;
 
   function rememberParentActivityContext(context: PiContext | undefined) {
@@ -722,6 +797,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   try {
     settledNotificationRecipient = assertAgentId(process.env.MECHA_PI_NOTIFY_ON_SETTLED);
   } catch {
+    recordDiagnostic("settled_recipient_invalid", { reason: "invalid_configuration" });
     // The launcher rejects invalid values; a manually configured Pi stays disabled.
   }
   const children = childSessionIds();
@@ -735,9 +811,22 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     isCompacting: () => compaction?.isMailboxPaused() ?? false,
     getGoalProjection: () => goalProjectionReceived ? goalProjection : undefined,
     getCurrentModel: () => modelControlProjection?.current() ?? undefined,
-    getNativeService: (ownerSessionId) => currentSubagentsServiceAccessor?.(ownerSessionId),
+    getNativeService: (ownerSessionId) => {
+      try {
+        return currentSubagentsServiceAccessor?.(ownerSessionId);
+      } catch (error) {
+        recordGoalBridgeDiagnostic("owner_service_failed", {
+          reason: "service_lookup",
+          component: "native-subagents",
+          ...(ownerSessionId === undefined ? {} : { session_id: ownerSessionId }),
+          error_name: errorName(error),
+        });
+        return undefined;
+      }
+    },
     notify: (message, level) => { parentActivityContext?.ui?.notify?.(message, level); },
     trace: traceNativeSubagent,
+    diagnostic: (event, fields) => diagnosticJournal.record("activity-lifecycle", event, fields),
     createSettledScheduler,
     rememberParentContext: (context) => {
       if (context !== undefined && isPiContext(context)) rememberParentActivityContext(context);
@@ -771,6 +860,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     initialPolicy: initialCompactionPolicy,
     initialPolicyError: initialCompactionPolicyError,
     errorMessage,
+    diagnostic: (event, fields) => diagnosticJournal.record("compaction-orchestration", event, fields),
     setTimeoutImpl,
   });
   const settledNotifications = activityLifecycle.settledNotifications;
@@ -1104,19 +1194,36 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   // These completion hooks are the local action boundary. Count only successful, uniquely
   // identified real tools; intent, output text, failures, and control-plane completions are not progress.
   const recordToolCompletion = (_event: PiEvent, context: PiContext) => {
-    if (children.has(context?.sessionManager?.getSessionId?.())) return;
+    const sessionId = context?.sessionManager?.getSessionId?.();
+    if (children.has(sessionId)) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "child_session", component: "tool-completion", ...(sessionId === undefined ? {} : { session_id: sessionId }) }, context);
+      return;
+    }
     const result = _event?.result ?? _event;
     const explicitlySuccessful = _event?.isError === false || result?.isError === false;
-    if (!explicitlySuccessful
-      || _event?.cancelled === true || _event?.canceled === true || _event?.aborted === true
+    if (!explicitlySuccessful) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "unsuccessful_tool", component: "tool-completion" }, context);
+      return;
+    }
+    if (_event?.cancelled === true || _event?.canceled === true || _event?.aborted === true
       || result?.cancelled === true || result?.canceled === true || result?.aborted === true
       || _event?.details?.cancelled === true || _event?.details?.canceled === true
       || result?.details?.cancelled === true || result?.details?.canceled === true
-      || _event?.error !== undefined || result?.error !== undefined) return;
+      || _event?.error !== undefined || result?.error !== undefined) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "canceled_or_failed_tool", component: "tool-completion" }, context);
+      return;
+    }
     const toolName = _event?.toolName ?? result?.toolName;
-    if (!isConcreteGoalTool(toolName)) return;
+    if (!isConcreteGoalTool(toolName)) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "control_plane_tool", component: "tool-completion" }, context);
+      return;
+    }
     const toolCallId = _event?.toolCallId ?? _event?.tool_call_id ?? _event?.id ?? result?.toolCallId;
-    if (typeof toolCallId === "string") emitMeaningfulActivity("tool-completed", toolCallId, context);
+    if (typeof toolCallId !== "string" || toolCallId.length === 0) {
+      recordGoalBridgeDiagnostic("activity_gate_rejected", { reason: "missing_activity_id", component: "tool-completion" }, context);
+      return;
+    }
+    emitMeaningfulActivity("tool-completed", toolCallId, context);
   };
   pi.on("tool_result", recordToolCompletion);
   pi.on("tool_execution_end", recordToolCompletion);
@@ -1217,9 +1324,11 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
           subject: "Pi worker settled",
           body: `Worker ${worker} has settled and is idle.`,
         })).catch((error: ErrorLike) => {
+          recordDiagnostic("settled_notification_failed", { error_name: errorName(error) });
           context.ui.notify(`Pi settled notification failed: ${errorMessage(error)}`, "error");
         });
       } catch (error) {
+        recordDiagnostic("settled_notification_failed", { error_name: errorName(error) });
         context.ui.notify(`Pi settled notification failed: ${errorMessage(error)}`, "error");
       }
     });
@@ -1228,7 +1337,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     // A disposed child stays in childReplyClients as a tombstone until this cleanup; do not run parent capture cleanup with its context.
     if (children.has(context.sessionManager.getSessionId()) || childReplyClients.has(context.sessionManager.getSessionId())) return;
     mailboxSendRateLimits.clear();
-    recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch {} finally { controller.abort(); clearTimeout(timer); }
+    recallController.stop(); const controller = new AbortController(); const deadlineAt = Date.now() + 10_000; const timer = setTimeout(() => controller.abort(), 10_000); try { const branch = context.sessionManager.getBranch(); const boundary = branch.map(({ type }) => type).lastIndexOf("compaction"); await (await ensureCapture(controller.signal)).shutdown(branch.slice(boundary + 1), { deadlineAt, signal: controller.signal }); } catch { recordDiagnostic("memory_capture_shutdown_failed", { reason: "capture_unavailable" }); } finally { controller.abort(); clearTimeout(timer); try { await diagnosticJournal.flush(); } catch { /* Diagnostics are best-effort at teardown. */ } }
   });
 
   pi.on("session_start", (_event: PiEvent, context: PiContext) => {
@@ -1244,11 +1353,14 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         }));
         childReplyClientAgentIds.set(sessionId, childAgentId);
       } catch {
+        recordDiagnostic("child_mailbox_client_unavailable", { reason: "client_creation_failed" });
         // A child without ordinary Mailbox send capability can still finish natively.
       }
       return;
     }
     mailboxSendRateLimits.clear();
+    diagnosticJournal = openDiagnosticJournal();
+    diagnosticSessionClosed = false;
     reminderLock.clear();
     modelControlProjection?.reset();
     // Keep allowance state across agent runs; a parent session owns one pool for its lifetime.
@@ -1361,15 +1473,17 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       coordinator = createMailboxCoordinator(context, mailboxClient);
       activityLifecycle.ensureHeartbeat();
       void mailboxClient.connect().catch((error: ErrorLike) => {
+        recordDiagnostic("mailbox_connect_failed", { error_name: errorName(error) });
         if (client === mailboxClient) context.ui.notify(`Mailbox v2 unavailable: ${errorMessage(error)}`, "error");
       });
     } catch (error) {
+      recordDiagnostic("mailbox_startup_failed", { error_name: errorName(error) });
       startupError = error instanceof Error ? error : new Error(String(error));
       context.ui.notify(`Mailbox v2 unavailable: ${errorMessage(error)}`, "error");
     }
   });
 
-  pi.on("session_shutdown", (_event: PiEvent, context: PiContext) => {
+  pi.on("session_shutdown", async (_event: PiEvent, context: PiContext) => {
     const sessionId = context.sessionManager.getSessionId();
     if (children.has(sessionId) || childReplyClients.has(sessionId)) {
       childReplyClients.delete(sessionId);
@@ -1377,6 +1491,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       return;
     }
     mailboxSendRateLimits.clear();
+    diagnosticSessionClosed = true;
     rememberParentActivityContext(context);
     activityLifecycle.onSessionBoundary();
     parentActivityContext = undefined;
@@ -1389,6 +1504,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
     client?.close();
     client = undefined;
     context.ui.setStatus("mecha-mailbox", undefined);
+    try { await diagnosticJournal.close(); } catch { /* Diagnostics are best-effort at teardown. */ }
   });
 }
 

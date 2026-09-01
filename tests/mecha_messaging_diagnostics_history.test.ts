@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import {
   appendMalformedToolCallDiagnostic,
   appendMemoryCaptureDiagnostic,
   appendOrphanToolResultDiagnostic,
+  createDiagnosticJournal,
   createExtensionTrace,
   createNativeSubagentTrace,
   quarantineMalformedToolCalls,
@@ -472,4 +473,276 @@ test("diagnostic writers contain nullish events and unusable paths", () => {
   assert.doesNotThrow(() => appendOrphanToolResultDiagnostic(null, { path: directory }));
   assert.doesNotThrow(() => appendOrphanToolResultDiagnostic(undefined, { path: directory }));
   assert.doesNotThrow(() => appendOrphanToolResultDiagnostic({ orphans: [] }, { path: directory }));
+});
+
+test("the process-global diagnostic journal keys writers by path and writes bounded source-labelled records", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-contract-");
+  const firstPath = join(directory, "journal.jsonl");
+  const secondPath = join(directory, "other.jsonl");
+  const windowId = firstPath;
+  try {
+    const first = createDiagnosticJournal({ path: firstPath, windowId, processId: process.pid, queueLimit: 8 });
+    const second = createDiagnosticJournal({ path: secondPath, windowId, processId: process.pid });
+    assert.notEqual(first, second);
+    assert.notEqual(first.path, firstPath);
+    assert.notEqual(second.path, first.path);
+    assert.equal(createDiagnosticJournal({ path: firstPath, windowId, processId: process.pid }), first);
+    const otherWindow = createDiagnosticJournal({ path: firstPath, windowId: `${windowId}:other`, processId: process.pid });
+    assert.notEqual(otherWindow, first);
+    assert.notEqual(otherWindow.path, first.path);
+    const globalValue = Object.getOwnPropertyDescriptor(globalThis, Symbol.for("mecha.pi.diagnostic-journal.v1"))?.value;
+    assert.equal(globalValue !== null && typeof globalValue === "object", true);
+    if (globalValue === null || typeof globalValue !== "object") throw new Error("journal contract was not published");
+    assert.equal(Reflect.get(globalValue, "version"), 1);
+    const globalRecord = Reflect.get(globalValue, "record");
+    assert.equal(typeof globalRecord, "function");
+    if (typeof globalRecord !== "function") throw new Error("journal record contract was not published");
+    assert.equal(Reflect.apply(globalRecord, globalValue, ["activity", "direct_probe"]), true);
+    assert.equal(first.record("activity", "snapshot_read", {
+      state: "running",
+      snapshot_count: 2,
+      frame_id: "frame",
+      request_id: "request",
+      ack_frame_id: "ack",
+      producer_epoch: "11111111-1111-4111-8111-111111111111",
+      connection_generation: 2,
+      prompt: "private prompt",
+      output: "private output",
+      error: "private error",
+      goal: "private goal",
+      path: "/private/path",
+      unknown: "drop me",
+    }), true);
+    assert.equal(second.record("compaction", "capture_failed", { reason: "capture_unavailable" }), true);
+    assert.equal(first.record("bad source", "bad event"), false);
+    await first.flush();
+    await second.flush();
+
+    const journalPath = first.path;
+    assert.equal(typeof journalPath, "string");
+    if (typeof journalPath !== "string") throw new Error("journal path was not derived");
+    const records = recordsAt(journalPath);
+    assert.deepEqual(records.map(({ sequence, source, event, state, snapshot_count, reason }) => ({ sequence, source, event, state, snapshot_count, reason })), [
+      { sequence: 1, source: "activity", event: "direct_probe", state: undefined, snapshot_count: undefined, reason: undefined },
+      { sequence: 2, source: "activity", event: "snapshot_read", state: "running", snapshot_count: 2, reason: undefined },
+    ]);
+    const secondJournalPath = second.path;
+    assert.equal(typeof secondJournalPath, "string");
+    if (typeof secondJournalPath !== "string") throw new Error("second journal path was not derived");
+    assert.deepEqual(recordsAt(secondJournalPath).map(({ sequence, source, event, reason }) => ({ sequence, source, event, reason })), [
+      { sequence: 1, source: "compaction", event: "capture_failed", reason: "capture_unavailable" },
+    ]);
+    assert.deepEqual({
+      frame_id: records[1]?.frame_id,
+      request_id: records[1]?.request_id,
+      ack_frame_id: records[1]?.ack_frame_id,
+      producer_epoch: records[1]?.producer_epoch,
+      connection_generation: records[1]?.connection_generation,
+    }, {
+      frame_id: "frame",
+      request_id: "request",
+      ack_frame_id: "ack",
+      producer_epoch: "11111111-1111-4111-8111-111111111111",
+      connection_generation: 2,
+    });
+    const text = readFileSync(journalPath, "utf8");
+    assert.equal(text.includes("private prompt"), false);
+    assert.equal(text.includes("private output"), false);
+    assert.equal(text.includes("private error"), false);
+    assert.equal(text.includes("private goal"), false);
+    assert.equal(text.includes("/private/path"), false);
+    assert.equal(mode(journalPath), 0o600);
+    assert.equal(mode(directory), 0o700);
+    assert.equal(statSync(secondPath, { throwIfNoEntry: false })?.isFile(), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal key includes path inputs and evicts deleted test roots", async () => {
+  const firstRoot = await temporaryDirectory("mecha-diagnostic-journal-reuse-");
+  const secondRoot = await temporaryDirectory("mecha-diagnostic-journal-reuse-");
+  const windowId = "diagnostic-journal-reuse-window";
+  const firstEnvironment = {
+    HOME: firstRoot,
+    MECHA_TMUX_WINDOW: windowId,
+    MECHA_PI_DIAGNOSTIC_JOURNAL_PATH: join(firstRoot, "journal.jsonl"),
+  };
+  try {
+    const first = createDiagnosticJournal({ environment: firstEnvironment, processId: process.pid });
+    const sibling = createDiagnosticJournal({
+      environment: { ...firstEnvironment, MECHA_PI_DIAGNOSTIC_JOURNAL_PATH: join(firstRoot, "sibling.jsonl") },
+      windowId: `${windowId}:sibling`,
+      processId: process.pid,
+    });
+    assert.notEqual(sibling, first);
+    const differentHome = createDiagnosticJournal({
+      environment: { ...firstEnvironment, HOME: secondRoot },
+      processId: process.pid,
+    });
+    assert.notEqual(differentHome, first);
+    const differentConfiguredPath = createDiagnosticJournal({
+      environment: { ...firstEnvironment, MECHA_PI_DIAGNOSTIC_JOURNAL_PATH: join(secondRoot, "journal.jsonl") },
+      processId: process.pid,
+    });
+    assert.notEqual(differentConfiguredPath, first);
+
+    assert.equal(first.record("activity", "before_cleanup"), true);
+    assert.equal(sibling.record("activity", "before_cleanup"), true);
+    await first.flush();
+    await sibling.flush();
+    await rm(firstRoot, { recursive: true, force: true });
+
+    assert.equal(first.record("activity", "after_cleanup"), false);
+    const globalValue = Object.getOwnPropertyDescriptor(globalThis, Symbol.for("mecha.pi.diagnostic-journal.v1"))?.value;
+    assert.equal(globalValue !== null && typeof globalValue === "object", true);
+    if (globalValue === null || typeof globalValue !== "object") throw new Error("journal contract was not published");
+    const globalRecord = Reflect.get(globalValue, "record");
+    assert.equal(typeof globalRecord, "function");
+    if (typeof globalRecord !== "function") throw new Error("journal record contract was not published");
+    assert.equal(Reflect.apply(globalRecord, globalValue, ["activity", "after_cleanup"]), false);
+
+    const laterRoot = createDiagnosticJournal({ environment: firstEnvironment, processId: process.pid });
+    assert.notEqual(laterRoot, first);
+    assert.equal(sibling.closed, true);
+    assert.equal(laterRoot.record("activity", "after_cleanup"), true);
+    await laterRoot.flush();
+    assert.equal(readFileSync(laterRoot.path ?? "", "utf8").includes("after_cleanup"), true);
+  } finally {
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
+  }
+});
+
+test("a pending diagnostic drain cannot recreate a removed root", async () => {
+  const root = await temporaryDirectory("mecha-diagnostic-journal-race-");
+  const journal = createDiagnosticJournal({
+    path: join(root, "logs", "journal.jsonl"),
+    windowId: "diagnostic-journal-race-window",
+    processId: process.pid,
+  });
+  try {
+    assert.equal(journal.record("activity", "before_cleanup"), true);
+    await rm(root, { recursive: true, force: true });
+    await journal.flush();
+    assert.equal(existsSync(root), false);
+    assert.equal(journal.closed, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal retains bounded pi-subagents kinds", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-kinds-");
+  const path = join(directory, "journal.jsonl");
+  try {
+    const journal = createDiagnosticJournal({ path, windowId: path, processId: process.pid });
+    assert.equal(journal.record("pi-subagents", "subagents.created", {
+      kind: "general-purpose",
+    }), true);
+    assert.equal(journal.record("pi-subagents", "subagents.created", {
+      kind: "Plan",
+    }), true);
+    assert.equal(journal.record("pi-subagents", "subagents.created", {
+      kind: `${"x".repeat(128)}!`,
+    }), true);
+    await journal.flush();
+    const records = recordsAt(journal.path ?? "");
+    assert.equal(records[0]?.kind, "general-purpose");
+    assert.equal(records[1]?.kind, "Plan");
+    assert.equal(Object.hasOwn(records[2] ?? {}, "kind"), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal rejects malformed activity identities, kinds, and error names without truncating them", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-validation-");
+  const basePath = join(directory, "journal.jsonl");
+  try {
+    const journal = createDiagnosticJournal({ path: basePath, windowId: basePath, processId: process.pid });
+    assert.equal(journal.record("mecha-goal", "activity_gate_rejected", {
+      kind: "tool-completed",
+      event_id: "tool-completed:read-1",
+      session_id: "session-1",
+      error_name: "TypeError",
+    }), true);
+    assert.equal(journal.record("mecha-goal", "activity_gate_rejected", {
+      kind: "tool-completed private",
+      event_id: "tool-completed:private id",
+      session_id: "private session",
+      error_name: "PrivateError",
+    }), true);
+    await journal.flush();
+    assert.equal(typeof journal.path, "string");
+    if (typeof journal.path !== "string") throw new Error("diagnostic journal path is unavailable");
+    const records = recordsAt(journal.path);
+    assert.deepEqual(records[0], {
+      timestamp: records[0]?.timestamp,
+      sequence: 1,
+      source: "mecha-goal",
+      event: "activity_gate_rejected",
+      kind: "tool-completed",
+      event_id: "tool-completed:read-1",
+      session_id: "session-1",
+      error_name: "TypeError",
+    });
+    assert.equal(Object.hasOwn(records[1] ?? {}, "kind"), false);
+    assert.equal(Object.hasOwn(records[1] ?? {}, "event_id"), false);
+    assert.equal(Object.hasOwn(records[1] ?? {}, "session_id"), false);
+    assert.equal(Object.hasOwn(records[1] ?? {}, "error_name"), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal reports bounded queue drops and filesystem write failures without leaking errors", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-health-");
+  const saturatedPath = join(directory, "saturated.jsonl");
+  const blockedParent = join(directory, "blocked");
+  try {
+    const saturated = createDiagnosticJournal({ path: saturatedPath, windowId: saturatedPath, processId: process.pid, queueLimit: 2 });
+    // The queue cap is exercised synchronously before the asynchronous drain can run.
+    for (let index = 0; index < 40; index += 1) saturated.record("activity", "heartbeat", { state: "active" });
+    await saturated.flush();
+    const saturatedHealth = saturated.health();
+    assert.equal(saturatedHealth.accepted + saturatedHealth.dropped, 40);
+    assert.ok(saturatedHealth.dropped > 0);
+    assert.equal(saturatedHealth.writeFailures, 0);
+
+    writeFileSync(blockedParent, "not a directory");
+    const failing = createDiagnosticJournal({ path: join(blockedParent, "journal.jsonl"), windowId: blockedParent, processId: process.pid });
+    assert.equal(failing.record("activity", "heartbeat", { state: "active" }), true);
+    await failing.flush();
+    const failedHealth = failing.health();
+    assert.equal(failedHealth.accepted, 1);
+    assert.equal(failedHealth.written, 0);
+    assert.equal(failedHealth.writeFailures, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal rotates and prunes one generation opportunistically", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-retention-");
+  const path = join(directory, "journal.jsonl");
+  try {
+    const journal = createDiagnosticJournal({ path, windowId: path, processId: process.pid });
+    const journalPath = journal.path;
+    assert.equal(typeof journalPath, "string");
+    if (typeof journalPath !== "string") throw new Error("journal path was not derived");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(journalPath, "old-active\\n", { mode: 0o600 });
+    writeFileSync(`${journalPath}.1`, "old-rotated\\n", { mode: 0o600 });
+    const old = Date.now() - (72 * 60 * 60 * 1000);
+    const { utimesSync } = await import("node:fs");
+    utimesSync(journalPath, old / 1000, old / 1000);
+    utimesSync(`${journalPath}.1`, old / 1000, old / 1000);
+    assert.equal(journal.record("activity", "heartbeat", { published: true }), true);
+    await journal.flush();
+    assert.equal(readFileSync(`${journalPath}.1`, "utf8"), "old-active\\n");
+    assert.equal(recordsAt(journalPath)[0]?.event, "heartbeat");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
