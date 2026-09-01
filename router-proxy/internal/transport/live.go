@@ -2,8 +2,12 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -566,31 +570,263 @@ func (r *Router) closeExpiredLeaseSessions(expired []store.ExpiredLease) {
 	}
 }
 
-// handleTmux keeps the route present even when no adapter is configured. The
-// production launcher can inject an adapter; tests can use the same interface.
+// handleTmux owns the router's worker-window contract. The process adapter is
+// deliberately separate, but every mutation is serialized here so a launch can
+// retain its Pi session ID only after tmux has accepted the window.
 func (r *Router) handleTmux(w http.ResponseWriter, req *http.Request) bool {
 	if r.tmux == nil {
 		r.writeError(w, &httpError{status: http.StatusNotFound, code: "tmux_unavailable"})
 		return true
 	}
-	// The adapter-backed operations are intentionally kept behind this boundary.
-	// A configured adapter can be exercised through the collection read path.
-	if req.Method == http.MethodGet && req.URL.Path == "/v1/tmux/windows" {
-		r.mu.Lock()
-		selected := r.selectedTmux
-		r.mu.Unlock()
-		if selected == "" {
-			r.writeError(w, &httpError{status: http.StatusNotFound, code: "tmux_unavailable"})
-			return true
-		}
-		windows, err := r.tmux.Enumerate(req.Context(), selected)
-		if err != nil {
-			r.writeError(w, &httpError{status: 500, code: "tmux_operation_failed"})
-			return true
-		}
-		r.writeJSON(w, http.StatusOK, map[string]any{"session": selected, "windows": windows})
+	name, action, ok := tmuxRoute(req.URL.EscapedPath())
+	if !ok {
+		r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
 		return true
 	}
-	r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
+	if name != "" && !validTmuxName(name) {
+		r.writeError(w, &httpError{status: http.StatusBadRequest, code: "tmux_invalid_name"})
+		return true
+	}
+	session, err := r.tmuxSession(req.Context())
+	if err != nil {
+		r.writeTmuxError(w, err)
+		return true
+	}
+
+	switch {
+	case req.Method == http.MethodGet && name == "" && action == "":
+		windows, err := r.tmux.Windows(req.Context(), session)
+		if err != nil {
+			r.writeTmuxError(w, err)
+			return true
+		}
+		r.writeJSON(w, http.StatusOK, map[string]any{"session": session, "windows": windows})
+	case req.Method == http.MethodPost && name == "" && action == "":
+		payload, err := r.readJSON(req)
+		if err != nil {
+			r.writeError(w, err)
+			return true
+		}
+		name, err := rawString(payload, "name", true)
+		if err != nil || !validTmuxName(name) {
+			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "tmux_invalid_name"})
+			return true
+		}
+		sessionID, err := rawString(payload, "session_id", false)
+		if err != nil {
+			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
+			return true
+		}
+		sessionID, err = r.provisionTmux(req.Context(), session, name, sessionID)
+		if err != nil {
+			r.writeTmuxError(w, err)
+			return true
+		}
+		response := map[string]any{"session": map[string]any{"name": name, "selected": true}, "selected_session": session}
+		if sessionID != "" {
+			response["session_id"] = sessionID
+		}
+		r.writeJSON(w, http.StatusCreated, response)
+	case req.Method == http.MethodDelete && name != "" && action == "":
+		if err := r.tmux.Remove(req.Context(), session, name); err != nil {
+			r.writeTmuxError(w, err)
+			return true
+		}
+		r.mu.Lock()
+		delete(r.windowIDs, tmuxWindowKey(session, name))
+		r.mu.Unlock()
+		r.writeNoContent(w)
+	case (req.Method == http.MethodPatch || req.Method == http.MethodPost && action == "rename") && name != "":
+		payload, err := r.readJSON(req)
+		if err != nil {
+			r.writeError(w, err)
+			return true
+		}
+		nextName, err := rawString(payload, "name", true)
+		if err != nil || !validTmuxName(nextName) {
+			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "tmux_invalid_name"})
+			return true
+		}
+		if err := r.tmux.Rename(req.Context(), session, name, nextName); err != nil {
+			r.writeTmuxError(w, err)
+			return true
+		}
+		r.mu.Lock()
+		if sessionID := r.windowIDs[tmuxWindowKey(session, name)]; sessionID != "" {
+			r.windowIDs[tmuxWindowKey(session, nextName)] = sessionID
+			delete(r.windowIDs, tmuxWindowKey(session, name))
+		}
+		r.mu.Unlock()
+		directive, _ := json.Marshal(struct {
+			Type    string `json:"type"`
+			OldName string `json:"old_name"`
+			NewName string `json:"new_name"`
+		}{Type: "tmux_window_renamed", OldName: name, NewName: nextName})
+		if err := r.tmux.SendKeys(req.Context(), session, nextName, string(directive), "router.tmux.window-renamed.v1"); err != nil {
+			r.writeTmuxError(w, err)
+			return true
+		}
+		r.writeJSON(w, http.StatusOK, map[string]any{"session": map[string]any{"name": nextName}, "selected_session": session})
+	case req.Method == http.MethodPost && name != "" && action != "":
+		r.handleTmuxAction(w, req, session, name, action)
+	default:
+		r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
+	}
 	return true
 }
+
+func (r *Router) handleTmuxAction(w http.ResponseWriter, req *http.Request, session, name, action string) {
+	payload, err := r.readJSON(req)
+	if err != nil {
+		r.writeError(w, err)
+		return
+	}
+	var state string
+	sessionID := r.tmuxWindowID(session, name)
+	switch action {
+	case "keys":
+		keys, keyErr := rawString(payload, "keys", true)
+		if keyErr != nil {
+			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
+			return
+		}
+		err = r.tmux.SendKeys(req.Context(), session, name, keys, "")
+	case "start":
+		if sessionID == "" {
+			sessionID, err = rawString(payload, "session_id", false)
+			if err != nil {
+				r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
+				return
+			}
+		}
+		_, state, err = r.tmux.Start(req.Context(), session, name, sessionID)
+	case "stop":
+		_, state, err = r.tmux.Stop(req.Context(), session, name, sessionID)
+	case "restart":
+		_, state, err = r.tmux.Restart(req.Context(), session, name, sessionID)
+	case "resume":
+		if sessionID == "" {
+			r.writeError(w, &httpError{status: http.StatusBadRequest, code: "invalid_request"})
+			return
+		}
+		_, state, err = r.tmux.Resume(req.Context(), session, name, sessionID)
+	default:
+		r.writeError(w, &httpError{status: http.StatusNotFound, code: "not_found"})
+		return
+	}
+	if err != nil {
+		r.writeTmuxError(w, err)
+		return
+	}
+	if sessionID != "" {
+		r.mu.Lock()
+		r.windowIDs[tmuxWindowKey(session, name)] = sessionID
+		r.mu.Unlock()
+	}
+	response := map[string]any{"session": map[string]any{"name": name}, "action": action, "selected_session": session}
+	if state != "" {
+		response["state"] = state
+	}
+	if sessionID != "" {
+		response["session_id"] = sessionID
+	}
+	r.writeJSON(w, http.StatusOK, response)
+}
+
+func (r *Router) tmuxSession(ctx context.Context) (string, error) {
+	r.mu.RLock()
+	selected := r.selectedTmux
+	r.mu.RUnlock()
+	if selected != "" {
+		return selected, nil
+	}
+	sessions, err := r.tmux.Sessions(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range sessions {
+		if strings.Contains(candidate, "mecha") {
+			r.mu.Lock()
+			if r.selectedTmux == "" {
+				r.selectedTmux = candidate
+			}
+			selected = r.selectedTmux
+			r.mu.Unlock()
+			return selected, nil
+		}
+	}
+	return "", ErrTmuxUnavailable
+}
+
+func (r *Router) provisionTmux(ctx context.Context, session, name, sessionID string) (string, error) {
+	key := tmuxWindowKey(session, name)
+	r.mu.Lock()
+	pending := r.tmuxProvisionals[key]
+	if pending == nil {
+		pending = &tmuxProvisioning{done: make(chan struct{}), sessionID: sessionID}
+		r.tmuxProvisionals[key] = pending
+		r.mu.Unlock()
+		err := r.tmux.Provision(ctx, session, name)
+		r.mu.Lock()
+		pending.err = err
+		if err == nil && pending.sessionID != "" {
+			r.windowIDs[key] = pending.sessionID
+		}
+		delete(r.tmuxProvisionals, key)
+		close(pending.done)
+		r.mu.Unlock()
+		return pending.sessionID, err
+	}
+	r.mu.Unlock()
+	<-pending.done
+	return pending.sessionID, pending.err
+}
+
+func (r *Router) tmuxWindowID(session, name string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.windowIDs[tmuxWindowKey(session, name)]
+}
+
+func (r *Router) writeTmuxError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrTmuxUnavailable) {
+		r.writeError(w, &httpError{status: http.StatusNotFound, code: "tmux_unavailable"})
+		return
+	}
+	r.writeError(w, &httpError{status: http.StatusInternalServerError, code: "tmux_operation_failed"})
+}
+
+func tmuxRoute(path string) (string, string, bool) {
+	const prefix = "/v1/tmux/windows"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	if rest == "" {
+		return "", "", true
+	}
+	if !strings.HasPrefix(rest, "/") {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(rest, "/"), "/")
+	if len(parts) == 0 || len(parts) > 2 || parts[0] == "" {
+		return "", "", false
+	}
+	name, err := url.PathUnescape(parts[0])
+	if err != nil {
+		return "", "", false
+	}
+	if len(parts) == 1 {
+		return name, "", true
+	}
+	if parts[1] == "" {
+		return "", "", false
+	}
+	return name, parts[1], true
+}
+
+func validTmuxName(value string) bool {
+	return len(value) <= 64 && agentIDRE.MatchString(value)
+}
+
+func tmuxWindowKey(session, name string) string { return session + "\x00" + name }

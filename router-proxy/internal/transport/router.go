@@ -55,11 +55,25 @@ type MemoryCatalog interface {
 	Close() error
 }
 
-// TmuxAdapter is deliberately narrow so the router can be tested without a
-// tmux process. A nil adapter reports tmux_unavailable, matching Node when no
-// session is selected.
+// ErrTmuxUnavailable tells the HTTP boundary that tmux has no selected session
+// or that the selected session disappeared. The launcher treats this as a hard
+// failure because provisioning into an unverified inventory can target a
+// different terminal server.
+var ErrTmuxUnavailable = errors.New("tmux unavailable")
+
+// TmuxWindow is the router-owned representation consumed by worker lifecycle
+// clients. Target remains present because existing clients use it for display.
+type TmuxWindow struct {
+	Name   string `json:"name"`
+	Target string `json:"target"`
+}
+
+// TmuxAdapter keeps process control outside the HTTP boundary. The transport
+// owns this interface because it decides which operations and result shape the
+// router needs.
 type TmuxAdapter interface {
-	Enumerate(context.Context, string) ([]string, error)
+	Sessions(context.Context) ([]string, error)
+	Windows(context.Context, string) ([]TmuxWindow, error)
 	Provision(context.Context, string, string) error
 	Remove(context.Context, string, string) error
 	Rename(context.Context, string, string, string) error
@@ -172,6 +186,7 @@ type Router struct {
 	rates                 map[string][]time.Time
 	selectedTmux          string
 	windowIDs             map[string]string
+	tmuxProvisionals      map[string]*tmuxProvisioning
 	goalAvailable         bool
 	lifecycleAvailable    bool
 }
@@ -250,6 +265,12 @@ type ownershipTransition struct {
 type pendingDeliveryOffer struct {
 	timer *time.Timer
 	done  chan struct{}
+}
+
+type tmuxProvisioning struct {
+	done      chan struct{}
+	err       error
+	sessionID string
 }
 
 func wallClock() time.Time { return time.Now() }
@@ -362,7 +383,7 @@ func New(options Options) (*Router, error) {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state") && contains(options.Store.MigrationIDs(), "021_goal_control_revision_history")
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	if lifecycle {
 		projection, err := options.Store.LifecycleProjection(context.Background())
