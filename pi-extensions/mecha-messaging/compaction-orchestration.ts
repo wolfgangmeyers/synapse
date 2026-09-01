@@ -126,11 +126,24 @@ export type CompactionOrchestrationOptions = {
   initialPolicy: CompactionPolicy;
   initialPolicyError?: CompactionErrorLike;
   errorMessage: (error: unknown) => string;
+  diagnostic?: (event: string, fields?: object) => void;
   setTimeoutImpl: typeof setTimeout;
 };
 
 const CONTEXT_THRESHOLD_MESSAGE_TYPE = "mecha-context-threshold";
 const POST_COMPACTION_MESSAGE_TYPE = "mecha-post-compaction-handoff";
+
+function safeDiagnostic(
+  diagnostic: ((event: string, fields?: object) => void) | undefined,
+  event: string,
+  fields?: object,
+): void {
+  try {
+    if (typeof diagnostic === "function") diagnostic(event, fields);
+  } catch {
+    // Diagnostics are best-effort and must not break compaction recovery.
+  }
+}
 
 export function createCompactionOrchestration(
   options: CompactionOrchestrationOptions,
@@ -196,6 +209,7 @@ export function createCompactionOrchestration(
       try {
         options.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
       } catch {
+        safeDiagnostic(options.diagnostic, "post_compaction_handoff_failed", { reason: "send_failed" });
         // A post-compaction handoff must not turn a successful compaction into a failed compact call.
       }
     }, 0);
@@ -219,6 +233,7 @@ export function createCompactionOrchestration(
     if (pendingSelfCompaction === undefined || isChild(context)) return;
     if (typeof context.compact !== "function") {
       pendingSelfCompaction = undefined;
+      safeDiagnostic(options.diagnostic, "self_compaction_unavailable", { reason: "compact_unavailable" });
       context.ui?.notify?.("Self-compaction is unavailable at the idle boundary; use /compact manually.", "error");
       return;
     }
@@ -233,6 +248,7 @@ export function createCompactionOrchestration(
         sendPostCompactionNotification(request.postCompactionNotification, result);
       },
       onError: (error: CompactionErrorLike) => {
+        safeDiagnostic(options.diagnostic, "self_compaction_failed", { error_name: error instanceof Error ? error.name : "Error" });
         resumeMailboxAfterCompaction(context);
         context.ui?.notify?.(`Self-compaction failed: ${options.errorMessage(error)}`, "error");
       },
@@ -249,6 +265,7 @@ export function createCompactionOrchestration(
     const threshold = hardCompactionThreshold(compactionPolicy, usage, undefined, options.getEnvironment());
     if (threshold === undefined) return false;
     if (typeof context.compact !== "function") {
+      safeDiagnostic(options.diagnostic, "hard_compaction_unavailable", { reason: "compact_unavailable" });
       context.abort?.();
       context.ui?.notify?.("Pi context limit reached, but compaction is unavailable.", "error");
       return true;
@@ -268,12 +285,14 @@ export function createCompactionOrchestration(
         },
         onError: (error: CompactionErrorLike) => {
           if (pendingHardCompaction !== request) return;
+          safeDiagnostic(options.diagnostic, "hard_compaction_failed", { error_name: error instanceof Error ? error.name : "Error" });
           pendingHardCompaction = undefined;
           resumeMailboxAfterCompaction(context);
           context.ui?.notify?.(`Hard context compaction failed: ${options.errorMessage(error)}`, "error");
         },
       });
     } catch (error) {
+      safeDiagnostic(options.diagnostic, "hard_compaction_failed", { error_name: error instanceof Error ? error.name : "Error" });
       if (pendingHardCompaction === request) pendingHardCompaction = undefined;
       const message = options.errorMessage(error);
       context.ui?.notify?.(`Hard context compaction failed: ${message}`, "error");
@@ -323,6 +342,7 @@ export function createCompactionOrchestration(
         ...(event.preparation?.turnPrefixMessages ?? []),
       ], { signal: event.signal });
     } catch {
+      safeDiagnostic(options.diagnostic, "compaction_capture_failed", { reason: "capture_unavailable" });
       // Capture is best effort and must not change Pi's compaction outcome.
     }
     if (event.signal?.aborted) resumeIfCanceled();

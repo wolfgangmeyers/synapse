@@ -2,7 +2,9 @@
 
 ## Status, scope, and source of truth
 
-This plan defines the compaction-only extraction contract. The completion record at the end documents the implementation and validation that used this plan.
+This plan defines the compaction-only extraction contract. The completion record at the end is historical evidence for the immutable extraction target.
+
+The current base includes premature scoped E2E commit `0f9b48b7488d8cb23907317a53fd700eb9cf5ea9`, tree `f778050a00582b55fe555188076ac604d96629e8`. Remaining Mecha Messaging work is uncommitted, including the compaction recovery change and delivery/lifecycle fixes tracked by the roadmap. The approved diagnostics instrumentation spans pi-subagents, mecha-messaging, Goal, router, and WebUI diagnostics. Delivery and lifecycle E2E and mutation evidence is recorded in the roadmap; the compaction E2E, mutation, coverage, and final full validation gates remain pending the validation agent.
 
 The implementation baseline is:
 
@@ -25,12 +27,12 @@ The relevant baseline symbols are in `index.ts`:
 | `1229-1268` | mandatory hard-compaction guard | Move with request identity checks and existing error containment. |
 | `1271-1292` | advisory threshold notification | Move with the existing policy calls and message options. |
 | `1801-1810` | `session_before_compact` capture boundary | Move the handler body into the module through an injected capture loader. |
-| `1881` | `session_compact` threshold reset/resume boundary | Keep registration and delegate to the module. |
+| `1881` | `session_compact` threshold reset/resume boundary | Keep registration and delegate to the module. Add the parent-only `session_compact_failed` resume boundary without resetting the watermark. |
 | `1883-1907` | final `agent_settled` ordering and settled suppression | Keep the root ordering; delegate self-request inspection and execution. |
 | `1909-1912` | asynchronous shutdown memory capture | Keep the root's recall and deadline setup and existing catch. |
 | `2055-2072` | final shutdown cleanup | Keep handler order; delegate only the compaction-owned cleanup. |
 
-The direct behavioral tests are in `tests/mailbox_v2_delivery.test.ts`, especially the compaction tests around lines `2250-2310`, `2355-2390`, `2806-2970`, and `4630-4648`. The existing installed-Pi tests are not a deterministic proof for this extraction and are not used as the required E2E gate below.
+The historical direct behavioral tests covered the compaction paths before the extraction. Current direct and differential coverage is in `tests/mecha_messaging_compaction_orchestration.test.ts` and `tests/mecha_messaging_compaction_orchestration_differential.test.ts`. The existing installed-Pi tests are not a deterministic proof for the current working-tree correction and are not used as the required E2E gate below.
 
 ## Explicit exclusions
 
@@ -41,9 +43,9 @@ Do not modify or derive implementation work from:
 - `/Users/wolfgang/code/mecha-developer/REPORT.md`;
 - `compaction-policy.ts` behavior, thresholds, defaults, validation, or message wording;
 - `memory-capture.ts` behavior, storage, extraction, sanitization, or retrieval;
-- `mailbox-client.ts`, generated `mailbox-client.js`, the delivery coordinator, delivery receipts, or session checkpoints;
-- the Goal package, Goal events, or Goal policy;
-- the router, router proxy, protocol, Web UI, Android code, or browser tooling;
+- `mailbox-client.ts` or generated `mailbox-client.js` outside the approved journal instrumentation; the delivery coordinator, delivery receipts, or session checkpoints;
+- the Goal package, Goal events, or Goal policy as part of this extraction;
+- the router, router proxy, protocol, Web UI, Android code, or browser tooling as part of this extraction; the approved diagnostics instrumentation may cover pi-subagents, Goal, router, and WebUI diagnostics;
 - package installation, Pi settings, native-Pi package upgrades, or service deployment;
 - the live router or any running service.
 
@@ -57,11 +59,10 @@ The implementation will create one internal module and wire it into the existing
 - edit `pi-extensions/mecha-messaging/index.ts` only for imports, construction, root adapters, tool delegation, and event-handler delegation;
 - add `tests/mecha_messaging_compaction_orchestration.test.ts` for direct module tests;
 - add `tests/mecha_messaging_compaction_orchestration_differential.test.ts` for the runnable old-versus-new baseline harness;
-- add `tests/mecha_messaging_compaction_orchestration_e2e.test.ts` for the isolated fake-Pi end-to-end path;
 - add `tests/mecha_messaging_package.test.ts` for the hard-coded package file list; it must include the new `compaction-orchestration.ts` file;
-- update the existing root compaction assertions in `tests/mailbox_v2_delivery.test.ts` only when a moved seam requires an assertion to be relocated or extended.
+- update current root compaction assertions only when a moved seam requires an assertion to be relocated or extended.
 
-No new root export is planned. `Object.keys()` of the Messaging package must remain unchanged. No package configuration, lockfile, generated artifact, policy module, memory module, router, or unrelated test is part of this ledger.
+No new root export is planned. `Object.keys()` of the Messaging package must remain unchanged. No package configuration, lockfile, policy module, memory module, router, or unrelated test is part of this ledger. The approved diagnostics instrumentation spans pi-subagents, mecha-messaging, Goal, router, and WebUI diagnostics; its mecha-messaging journal changes may update `diagnostics-history.ts` and the paired `mailbox-client.ts`/generated `mailbox-client.js`, with the generated output required to stay in sync.
 
 ## Design alternatives
 
@@ -71,7 +72,7 @@ Three boundaries were considered:
 2. **Move policy parsing, memory-capture construction, router access, and Pi event registration into a new service.** This would make the new module a second composition root. It would also change the ownership and lifetime of external resources that this plan excludes from behavior changes.
 3. **Use a callback-driven internal orchestration object.** The module owns only compaction state and calls injected activity, capture, UI, message, environment, and error seams. The root retains client/coordinator/capture construction, settled notifications, event registration, and ordering. This is the selected boundary because it gives the extraction a precise API and keeps external resource lifetimes and baseline side effects at their current owners.
 
-The selected design does not add a queue, event bus, request generation, session identity fence, retry loop, or new failure event. Those mechanisms would alter baseline behavior.
+The selected design did not add a queue, event bus, request generation, session identity fence, or retry loop. Those remained outside the historical extraction boundary. The current working-tree recovery path adds `session_compact_failed` handling; it remains part of the uncommitted target pending final full validation.
 
 ## Frozen baseline behavior
 
@@ -99,7 +100,7 @@ These are acceptance requirements. They describe the code at the baseline, not i
 - The hard request object is the existing identity fence: a stale completion or error callback does nothing when the slot no longer points to that request.
 - A successful completion, including `onComplete({})`, clears the matching pending hard request and resumes logical mailbox activity. It does not reset the advisory watermark and does not send a handoff.
 - An asynchronous hard error clears the matching request, resumes activity, and shows `Hard context compaction failed: ...`. A synchronous `context.compact` throw clears the matching request and shows the same error. These errors remain contained at the existing hard-compaction paths.
-- There is no `session_compact_failed` event, no invented failure event, and no new retry policy. `session_compact` remains the existing reset/resume boundary.
+- `session_compact_failed` is a parent-only resume boundary for manual and automatic compaction failures. It does not reset the advisory watermark, alter pending compaction requests, or add a retry policy. `session_compact` remains the successful reset/resume boundary.
 
 ### Capture and handoff errors
 
@@ -114,7 +115,7 @@ These are acceptance requirements. They describe the code at the baseline, not i
 - A parent compaction start sets one logical pause flag and reports `mailbox: compacting`.
 - While the flag is set, the mailbox client's envelope callback ignores normalized mailbox deliveries. This is gating at the callback; it is not client suspension.
 - The client remains connected. The coordinator remains alive. The extraction must not call `client.pause()`, `client.resume()`, `client.close()`, or recreate the coordinator as part of compaction.
-- A successful `session_compact` or an aborted compaction resumes the logical gate and reports `mailbox: connected`.
+- A successful `session_compact` or failed `session_compact_failed` event resumes the logical gate and reports `mailbox: connected`. Failure does not reset the advisory watermark or alter pending compaction requests.
 - A child context cannot change the parent logical pause. The pause-start operation is a no-op with a missing client or an already-paused gate. The surrounding `session_before_compact` handler still registers its abort listener and runs capture.
 
 ### Settled notification suppression
@@ -270,7 +271,7 @@ The exact implementation may use named local aliases instead of inline `import(.
 | `capture` and lazy `ensureCapture` cache | root | first capture use | remains cached | shutdown calls `capture.shutdown`; root does not clear or close it | same cached object, including its existing closed state |
 | local compaction threshold policy | orchestration module | root parses environment once and passes initial value | unchanged except `set_policy` | unchanged | unchanged |
 | initial policy parse error | orchestration module | passed from root fallback path | unchanged | unchanged | unchanged |
-| advisory `notifiedCompactionPercent` | orchestration module | zero at construction | reset by `session_compact` and successful self completion; unchanged by hard success | unchanged | unchanged |
+| advisory `notifiedCompactionPercent` | orchestration module | zero at construction | reset by `session_compact` and successful self completion; unchanged by hard success or `session_compact_failed` | unchanged | unchanged |
 | `pendingSelfCompaction` | orchestration module | empty | consumed before self `compact`; otherwise retained | cleared | empty after shutdown |
 | `pendingHardCompaction` | orchestration module | empty | cleared only by matching callback or synchronous hard error | deliberately not cleared by this cleanup method | retains baseline behavior |
 | `settledNotificationPending` and recipient/enabled flags | root | existing root initialization/session start/tool paths | root behavior unchanged | root clears pending/recipient | root behavior unchanged |
@@ -326,7 +327,8 @@ The child `session_start` path returns before parent mailbox, capture, policy, o
 - `agent_start`: retain the child guard. For a parent, call `activityLifecycle.onAgentStart(context)` first, then arm the existing settled notification state and scheduler exactly as before.
 - First asynchronous `agent_settled`: retain the recall handler and its order.
 - Second `agent_settled`: retain the threshold-monitoring handler and call `compaction.monitorContextThreshold(context)` in its current position.
-- `session_compact`: retain its position between the threshold handler and the final `agent_settled` handler. Keep the parent guard, then call `compaction.onSessionCompact(context)`. The module resets the advisory watermark, logically resumes only when the baseline pause guard permits, invokes `activityLifecycle.onCompactionResumed(context)`, and sets `mailbox: connected`. This is the success/resume boundary; there is no `session_compact_failed` path.
+- `session_compact`: retain its position between the threshold handler and the final `agent_settled` handler. Keep the parent guard, then call `compaction.onSessionCompact(context)`. The module resets the advisory watermark, logically resumes only when the baseline pause guard permits, invokes `activityLifecycle.onCompactionResumed(context)`, and sets `mailbox: connected`.
+- `session_compact_failed`: use the same parent guard and call `compaction.onSessionCompactFailed(context)`. The module resumes the logical gate and activity heartbeat without resetting the advisory watermark or changing pending self/hard compaction state.
 - Final `agent_settled`: retain this exact order:
   1. call `activityLifecycle.onAgentSettled(context)` for a parent;
   2. if `compaction.hasPendingSelfCompaction()`, set root `settledNotificationPending = false` (without a child guard);
@@ -428,7 +430,7 @@ Wire the module after the activity lifecycle exists and before any event can run
 - child guards and child-arm behavior;
 - logical mailbox gating with no client/coordinator pause or restart;
 - hard guard before history sanitation, including the root `tool_call` block driven by `compaction.hasPendingHardCompaction()`;
-- `session_before_compact`, including capture and abort-listener execution when the client is absent or the gate is already paused, plus `session_compact` and both shutdown handlers;
+- `session_before_compact`, including capture and abort-listener execution when the client is absent or the gate is already paused, plus `session_compact`, `session_compact_failed`, and both shutdown handlers;
 - shutdown ordering with `activityLifecycle.onSessionBoundary()` observed before compaction pause and pending-self cleanup;
 - settled-notification suppression and re-arming;
 - client assignment, Goal-state publication, coordinator construction, heartbeat start, and connect ordering;
@@ -477,11 +479,11 @@ The harness must run with this command from the repository root:
 
 The test's child runner may be embedded as a string, as the existing activity differential harness does. It must install the fetch stub and `PATH`/fake-`pi` before the dynamic import in both children, and it must close or remove those temporary resources after each child. It must exit nonzero on any mismatch and must not print a green result when a child exits nonzero. It must not modify the checkout when materializing the baseline.
 
-### Phase 4: isolated native-extension fake-Pi E2E
+### Phase 4: isolated fake-Pi E2E
 
-Do not use the existing `installedPiRuntime()` skip-based test as the required E2E. That test depends on ambient global packages, an ambient package root, and provider/runtime timing; missing packages are currently skipped. Those conditions cannot prove this extraction and are not a valid expected-pair gate.
+The compaction E2E gate is pending. Do not treat the historical installed-Pi or retired extraction-E2E results as current evidence. The gate must use a deterministic child-process harness with explicit temporary paths and no skip branch.
 
-Add `tests/mecha_messaging_compaction_orchestration_e2e.test.ts` with a child-process harness. It must be deterministic and isolated:
+The harness must be deterministic and isolated:
 
 - create a temporary root, `HOME`, `PI_CODING_AGENT_DIR`, project directory, and `PATH` entry;
 - before importing the extension, write an executable temporary `pi` program at `<temp>/bin/pi` and prepend `<temp>/bin` to `PATH`;
@@ -500,7 +502,7 @@ The E2E scenarios are:
 2. non-idle parent settle retaining the request and a later idle settle executing it;
 3. child self request accepted, child settle not executing it, then parent settle executing it;
 4. hard threshold abort, duplicate-trigger suppression, `onComplete({})` unblock, and synchronous/asynchronous hard failure containment;
-5. `session_before_compact` with a successful capturable `toolResult`, asserting the exact fake fetch records and exactly one fake-`pi` invocation with the complete expected argv (including prompt), followed by `session_compact` resume;
+5. `session_before_compact` with a successful capturable `toolResult`, asserting the exact fake fetch records and exactly one fake-`pi` invocation with the complete expected argv (including prompt), followed by `session_compact` resume; failure also resumes without resetting the watermark or changing pending requests;
 6. mailbox delivery while logically paused is ignored while the client and coordinator remain alive;
 7. parent shutdown runs bounded capture cleanup, clears only pending self through the final handler, and leaves the process usable for the asserted baseline behavior.
 
@@ -532,29 +534,22 @@ npm --prefix pi-extensions/mecha-messaging run check:mailbox-client-drift
 git diff --check
 ```
 
-`mailbox-client.js` must remain unchanged. No generated artifact is expected for the new module.
+The approved journal instrumentation may change `mailbox-client.ts` and its generated `mailbox-client.js`; regenerate the JavaScript and require `check:mailbox-client-drift` to pass. No generated artifact is expected for the new compaction module.
 
 ### Focused tests
 
-The originally planned focused command included the existing mailbox suite:
+Historical validation used extraction E2E files that are not part of the current base. The current preliminary command is:
 
 ```text
 ./pi-extensions/mecha-messaging/node_modules/.bin/tsx --test \
   tests/mecha_messaging_compaction_orchestration.test.ts \
   tests/mecha_messaging_compaction_orchestration_differential.test.ts \
-  tests/mecha_messaging_compaction_orchestration_e2e.test.ts \
-  tests/mailbox_v2_delivery.test.ts
+  tests/mecha_messaging_activity_lifecycle.test.ts \
+  tests/mecha_messaging_activity_lifecycle_differential.test.ts \
+  tests/sentinel_native_subagent.test.ts
 ```
 
-The command that produced the 24-test compaction evidence used the installed-Pi E2E file:
-
-```text
-./pi-extensions/mecha-messaging/node_modules/.bin/tsx --test \
-  tests/mecha_messaging_compaction_orchestration.test.ts \
-  tests/mecha_messaging_compaction_orchestration_differential.test.ts \
-  tests/mecha_messaging_compaction_orchestration_e2e.test.ts \
-  tests/pi_hard_compaction_e2e.test.ts
-```
+It passed 72 tests against the current working tree. The compaction E2E gate remains pending and must use only test paths present at the final exact-diff rerun.
 
 ### Full package tests
 
@@ -592,7 +587,7 @@ npx --yes c8@10.1.3 \
 
 The pass bar is 100% lines, functions, statements, and branches for `compaction-orchestration.ts`, with that file present in both the text report and `/tmp/mecha-compaction-coverage/coverage-summary.json`. The direct test command must pass. No branch may be excluded because it is inconvenient. A branch that cannot be reached must have a source invariant and a focused test at the boundary that proves the invariant; otherwise it is a coverage failure.
 
-The root wiring must also be exercised by the focused tests for all of these paths: startup, `mecha_context` policy/status/compact, parent and child settle, `session_before_compact`, `context`, `session_compact`, both shutdown handlers, logical envelope gating, and settled-notification suppression. This is a behavior gate, not part of the extracted-module percentage scope.
+The root wiring must also be exercised by the focused tests for all of these paths: startup, `mecha_context` policy/status/compact, parent and child settle, `session_before_compact`, `context`, `session_compact`, `session_compact_failed`, both shutdown handlers, logical envelope gating, and settled-notification suppression. This is a behavior gate, not part of the extracted-module percentage scope.
 
 ## Mutation proof
 
@@ -629,7 +624,7 @@ The test harness must support an explicit module path argument for the temporary
 | add unconditional resume after a non-aborted capture failure | baseline differential test for capture failure |
 | reset/clear hard pending state during shutdown | shutdown-only-self-clear test |
 | reset policy or watermark at session start | policy lifetime/differential test |
-| add a `session_compact_failed` handler or alternate error event | event registration and differential observation test |
+| omit the `session_compact_failed` handler or resume behavior | root failure-handler recovery, watermark, and pending-state tests |
 | remove `hasPendingHardCompaction()` from the root `tool_call` path | repeated hard-trigger tool-call block test |
 | move settled suppression after self execution or add a child guard | settled-notification suppression and child-arm tests |
 | return early from `session_before_compact` when the client is absent or the gate is already paused | baseline capture/abort-listener differential test |
@@ -644,7 +639,7 @@ The compaction orchestration extraction and its focused tests are complete in co
 
 Validation evidence for the completed target:
 
-- The planned focused command with `tests/mailbox_v2_delivery.test.ts` was retained above as the mailbox-inclusive validation command. The actual 24-test compaction command used `tests/pi_hard_compaction_e2e.test.ts`: 15 direct orchestration tests, 4 differential-harness tests, 1 isolated fake-Pi E2E test, and 4 installed-Pi tests.
+- Historical focused validation passed 24 compaction tests: 15 direct orchestration tests, 4 differential-harness tests, 1 isolated fake-Pi E2E test, and 4 installed-Pi tests. This is evidence for the immutable extraction target only.
 - The isolated fake-Pi E2E ran seven scenarios without a skip: self-compaction success, non-idle self-compaction, child-armed self-compaction, hard-threshold handling, capture with a successful tool result, mailbox gating while logically paused, and shutdown cleanup. It used temporary module-resolution, HOME, Pi settings, project, session, SQLite, memory, and fake-`pi` paths. It verified the exact capture request and complete fake-`pi` argument list. It did not cover advisory-threshold notification, an active Pi stream, or a cancellation-insensitive tool. Advisory-threshold notification is covered by the direct orchestration tests. Active-stream compaction and the cancellation-insensitive tool are covered only by the optional installed-Pi tests when an installed package is available.
 - Plain `npm test` exited successfully. The TypeScript package suite reported 432 passed, 0 failed, and 3 expected installed-Pi skips. The JavaScript suite reported 391 passed, 0 failed, and 2 unrelated environment skips.
 - With the installed package root explicitly configured, all four tests in `tests/pi_hard_compaction_e2e.test.ts` passed: one router-startup test and three installed-Pi scenarios. With no installed package available, the three runtime-dependent scenarios reported the expected skips while the router-startup test still ran. A configured missing root and a configured package with the wrong manifest identity failed the three runtime-dependent scenarios; those cases do not silently skip.
@@ -677,7 +672,7 @@ The plan-level and implementation-level review must explicitly cover:
 The extraction is complete only when:
 
 - `compaction-orchestration.ts` implements the exact internal API and `index.ts` remains the composition root;
-- root exports, tool schema, messages, status text, policy behavior, capture behavior, and generated client remain unchanged;
+- root exports, tool schema, messages, status text, policy behavior, and capture behavior remain unchanged; the approved diagnostics instrumentation spans pi-subagents, mecha-messaging, Goal, router, and WebUI diagnostics, with the paired `mailbox-client.ts`/generated `mailbox-client.js` output passing the generated-client drift check;
 - the root uses `hasPendingHardCompaction()` for the existing pending-hard `tool_call` block, and all three model-dependent paths receive `CompactionContext.model`;
 - the baseline differential harness reports no unallowlisted ordered mismatch, including the exact fake fetch and fake-`pi` capture records;
 - the fake-Pi E2E passes without a router, installed Pi, service, network, or skip;

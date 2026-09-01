@@ -2,7 +2,9 @@
 
 ## Status and source of truth
 
-This is the scoped requirements and evidence record for the diagnostics/history slice. The implementation is committed in this slice; no services were started.
+This is the scoped requirements and historical evidence record for the diagnostics/history slice. The implementation is committed in immutable historical commit `d85c5a8881b2c6d7b72c5e96e93db7c9ee1b14a0`; no services were started.
+
+The current base includes premature scoped E2E commit `0f9b48b7488d8cb23907317a53fd700eb9cf5ea9`, tree `f778050a00582b55fe555188076ac604d96629e8`. The current working tree also contains the approved diagnostics instrumentation. Its scope spans pi-subagents, mecha-messaging, Goal, router, and WebUI diagnostics; the mecha-messaging journal changes are in `diagnostics-history.ts` and the paired `mailbox-client.ts`/generated `mailbox-client.js` output. Historical diagnostics E2E, mutation, coverage, and final review evidence remains tied to its immutable target.
 
 The roadmap identifies this as the next slice after delivery, activity lifecycle, and compaction orchestration. Those completed boundaries stay unchanged. The target is the remaining diagnostics and provider-history code in `pi-extensions/mecha-messaging/index.ts`.
 
@@ -31,9 +33,9 @@ The planning baseline command was run against that checkout state:
 
 ```text
 ./pi-extensions/mecha-messaging/node_modules/.bin/tsx --test \
-  tests/mailbox_v2_delivery.test.ts \
+  tests/mecha_messaging_diagnostics_history.test.ts \
+  tests/mecha_messaging_diagnostics_history_differential.test.ts \
   tests/mecha_messaging_package.test.ts \
-  tests/native_subagent_trace.test.ts \
   tests/memory_capture.test.ts
 ```
 
@@ -41,7 +43,7 @@ Result: 190 passed, 0 failed, 0 skipped. The command covered the current root co
 
 The working tree already contains unrelated dirty and untracked work, including `docs/wolfgang-agent-operating-policy.md`, `tests/android_qol_parity.test.mjs`, `PLAN.md`, `REPORT.md`, `SPEC.md`, `web/router-ui-react/`, and the directory named `~`. Future implementation must use an isolated clean copy for baseline comparison. It must not stage, reset, rewrite, or include those paths.
 
-The current root package export list is asserted in `tests/mecha_messaging_package.test.ts`. It must remain unchanged. The generated `mailbox-client.js` must remain byte-identical.
+The current root package export list is asserted in `tests/mecha_messaging_package.test.ts`. It must remain unchanged. The approved journal instrumentation may modify `diagnostics-history.ts` and the paired `mailbox-client.ts`/generated `mailbox-client.js`; regenerate the JavaScript and require `check:mailbox-client-drift` to pass. Other generated artifacts remain unchanged.
 
 ## Requirements and non-goals
 
@@ -58,8 +60,8 @@ The implementation may:
 
 The implementation must not:
 
-- change `mailbox-client.ts` or generated `mailbox-client.js`;
-- change `memory-capture.ts`, compaction, activity lifecycle, delivery, Goal, router, protocol, Web UI, Android, launcher, settings, or installed packages;
+- change `mailbox-client.ts` or generated `mailbox-client.js`, except for the approved journal instrumentation, which must keep the generated file in sync with its TypeScript source;
+- change `memory-capture.ts`, compaction, activity lifecycle, delivery, or installed packages as part of this extraction; the approved diagnostics instrumentation may also cover pi-subagents, Goal, router, and WebUI diagnostics;
 - add a public root export, event, environment variable, diagnostic file, provider field, or retention policy;
 - change malformed-name validation, tool-call ownership, provider-ID normalization, deduplication, notification text, or context-hook ordering;
 - repair unrelated history records, change persistence, or add a provider-specific workaround;
@@ -78,7 +80,7 @@ This is a pure behavior-preserving extraction. No standalone `SPEC.md` is create
 | `2d21cc1c2` | Migrated this surface to strict TypeScript. | Keep runtime narrowing at the Pi boundary and avoid unsafe assertions. |
 | `0cdcaf74f`, `cbbeedcb1`, `a63bb4920` | Established the current extraction pattern and composition-root ownership. | Keep the root as the event-registration and dependency-composition layer. |
 | `~/.mecha-developer/kb/pi-orphan-tool-result-crash.md` | Pi can persist tool results after an errored assistant call is removed. | Keep the guard immediately before provider work. |
-| `~/.mecha-developer/kb/pi-extension-maintenance.md` | The checkout package is the active extension source and the generated client is the only intentional JavaScript artifact. | Keep package discovery and generated-artifact checks unchanged. |
+| `~/.mecha-developer/kb/pi-extension-maintenance.md` | The checkout package is the active extension source and the generated client is the only intentional JavaScript artifact. | Keep package discovery and require the generated client to stay in sync after the approved journal instrumentation. |
 | `~/.mecha-developer/kb/pi-subagent-runtime.md` | Installed Pi tests need explicit identity checks and do not prove checkout activation by themselves. | Make the installed-Pi E2E identify the runtime and loaded source directly. |
 
 ## Current code ledger
@@ -398,7 +400,7 @@ No handler registration order changes. `context` remains after tool completion h
 
 ## Direct tests
 
-Add `tests/mecha_messaging_diagnostics_history.test.ts` for the new module's direct contract. Keep current root tests in `tests/mailbox_v2_delivery.test.ts`, `tests/mecha_messaging_package.test.ts`, `tests/native_subagent_trace.test.ts`, and `tests/memory_capture.test.ts` as regression coverage. Move a test only when its import path changes and keep a root integration assertion for every root behavior.
+Add `tests/mecha_messaging_diagnostics_history.test.ts` for the module's direct contract. Keep current root tests in `tests/mecha_messaging_package.test.ts` and `tests/memory_capture.test.ts` as regression coverage. Move a test only when its import path changes and keep a root integration assertion for every root behavior.
 
 The direct matrix must cover:
 
@@ -638,9 +640,7 @@ Run the focused package tests:
   tests/mecha_messaging_diagnostics_history.test.ts \
   tests/mecha_messaging_diagnostics_history_differential.test.ts \
   tests/mecha_messaging_diagnostics_history_installed_pi_e2e.test.ts \
-  tests/mailbox_v2_delivery.test.ts \
   tests/mecha_messaging_package.test.ts \
-  tests/native_subagent_trace.test.ts \
   tests/memory_capture.test.ts
 ```
 
@@ -719,7 +719,7 @@ This slice is complete only when:
 
 - `diagnostics-history.ts` owns the agreed pure sanitation and bounded diagnostic code;
 - `index.ts` remains the Pi composition root and preserves context ordering;
-- root exports, messages, statuses, paths, bounds, trace allowlists, and generated artifacts remain unchanged;
+- root exports, messages, statuses, paths, bounds, and trace allowlists remain unchanged; the approved diagnostics instrumentation spans pi-subagents, mecha-messaging, Goal, router, and WebUI diagnostics, with the paired `mailbox-client.ts`/generated `mailbox-client.js` output passing the generated-client drift check;
 - valid history messages and their order survive every direct, differential, and installed-Pi scenario;
 - malformed blocks and orphan results are removed before provider work under the frozen rules;
 - malformed and orphan diagnostics remain bounded, redacted, deduplicated, and best effort;
@@ -731,4 +731,4 @@ This slice is complete only when:
 - Robot Review and independent validation sign off on the immutable final target;
 - the roadmap records the final evidence without adding scope.
 
-The implementation and tests are committed in this slice. No services were started.
+The extraction implementation and tests were committed in the historical slice. The approved diagnostics instrumentation spans pi-subagents, mecha-messaging, Goal, router, and WebUI diagnostics; the mecha-messaging journal changes include the diagnostics/history and paired mailbox-client source/generated files, with generated-client drift checked. No services were started.

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import goalExtension, { GOAL_CONTROL_REQUEST_EVENT } from "../pi-extensions/mecha-goal/index.ts";
 import { createMechaMessagingExtension } from "../pi-extensions/mecha-messaging/index.ts";
+import { createDiagnosticJournal } from "../pi-extensions/mecha-messaging/diagnostics-history.js";
 
 const settings = {
   goalLockEnabled: true,
@@ -14,7 +18,7 @@ const settings = {
   snoozeRefillElapsedMs: 60_000,
 };
 
-function fixture({ installGoal = true, immediateTimeout = false } = {}) {
+function fixture({ installGoal = true, immediateTimeout = false, environment, emitFailure, sendGoalStateFailure } = {}) {
   const handlers = new Map();
   const eventHandlers = new Map();
   const entries = [];
@@ -28,6 +32,7 @@ function fixture({ installGoal = true, immediateTimeout = false } = {}) {
       eventHandlers.set(name, current);
     },
     emit(name, value) {
+      emitFailure?.(name, value);
       for (const handler of eventHandlers.get(name) ?? []) handler(value);
     },
   };
@@ -59,7 +64,10 @@ function fixture({ installGoal = true, immediateTimeout = false } = {}) {
     close() {},
     sendReceipt() {},
     sendActivity() {},
-    sendGoalState(state) { published.push(state); },
+    sendGoalState(state) {
+      if (sendGoalStateFailure) throw new Error("private publication error");
+      published.push(state);
+    },
   };
 
   if (installGoal) goalExtension(pi);
@@ -73,6 +81,7 @@ function fixture({ installGoal = true, immediateTimeout = false } = {}) {
     createSettledScheduler: () => ({
       onParentActivity() {}, onParentSettled() {}, onChildStarted() {}, onChildDisposed() {}, dispose() {},
     }),
+    ...(environment === undefined ? {} : { operationalTools: { environment } }),
     ...(immediateTimeout ? {
       setTimeoutImpl(callback) { callback(); return 1; },
       clearTimeoutImpl() {},
@@ -154,6 +163,42 @@ test("bridges complete goal state and typed parent controls through the EventBus
   assert.equal(rejected.accepted, false);
   assert.equal(rejected.errorCode, "invalid_control");
   assert.deepEqual(rejected.goalState, result.goalState);
+});
+
+test("records bridge activity gates and publication failures without goal text", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-goal-bridge-diagnostic-"));
+  const environment = {
+    HOME: directory,
+    MECHA_TMUX_WINDOW: "goal-bridge-test",
+    MECHA_PI_DIAGNOSTIC_JOURNAL_PATH: join(directory, "journal.jsonl"),
+  };
+  const journal = createDiagnosticJournal({ environment });
+  let failActivityEmit = false;
+  try {
+    const current = fixture({
+      environment,
+      sendGoalStateFailure: true,
+      emitFailure: (name) => {
+        if (failActivityEmit && name === "goal:meaningful-activity") throw new Error("private bridge error");
+      },
+    });
+    await trigger(current, "session_start", { sessionId: "parent-session" });
+    current.bus.emit("goal:state", { enabled: true, goal: "private goal text" });
+    await trigger(current, "tool_result", { toolName: "bash", toolCallId: "tool-1", isError: false });
+    await trigger(current, "tool_result", { toolName: "bash", toolCallId: "tool-1", isError: false });
+    failActivityEmit = true;
+    await trigger(current, "tool_result", { toolName: "edit", toolCallId: "tool-2", isError: false });
+    await journal.flush();
+    assert.equal(typeof journal.path, "string");
+    if (typeof journal.path !== "string") throw new Error("diagnostic journal path is unavailable");
+    const records = (await readFile(journal.path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(records.some(({ event, reason }) => event === "activity_gate_rejected" && reason === "duplicate_activity"));
+    assert.ok(records.some(({ event, reason, error_name }) => event === "publication_failed" && reason === "activity_emit" && error_name === "Error"));
+    assert.ok(records.some(({ event, reason }) => event === "publication_failed" && reason === "goal_state_publish"));
+    assert.doesNotMatch(JSON.stringify(records), /private goal text|private bridge error|private publication error/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("bounds a missing EventBus control response and returns the cached full state", async () => {

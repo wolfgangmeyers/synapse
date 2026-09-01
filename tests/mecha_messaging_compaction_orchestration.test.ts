@@ -39,6 +39,7 @@ function fixture(overrides: Partial<{
   initialPolicyError: Error;
   sendMessageThrows: boolean;
   captureLoaderThrows: boolean;
+  diagnosticThrows: boolean;
 }> = {}): Fixture {
   const compactCalls: CompactCall[] = [];
   const notifications: Array<[string, string | undefined]> = [];
@@ -105,6 +106,7 @@ function fixture(overrides: Partial<{
     initialPolicy,
     initialPolicyError: overrides.initialPolicyError,
     errorMessage: (error) => error instanceof Error ? error.message : String(error),
+    diagnostic: () => { if (overrides.diagnosticThrows) throw new Error("diagnostic sink failed"); },
     setTimeoutImpl,
   };
   const orchestration = createCompactionOrchestration(options);
@@ -305,6 +307,34 @@ test("hard synchronous compact errors are contained and empty completion clears 
   assert.equal(f.orchestration.enforceHardCompaction(f.context), true);
   assert.equal(f.orchestration.hasPendingHardCompaction(), false);
   assert.deepEqual(f.notifications.at(-1), ["Hard context compaction failed: sync hard failure", "error"]);
+});
+
+test("diagnostic callback failures cannot escape compaction recovery paths", async () => {
+  const self = fixture({ diagnosticThrows: true });
+  self.orchestration.requestSelfCompaction({}, self.context);
+  self.orchestration.runPendingSelfCompaction(self.context);
+  assert.doesNotThrow(() => fail(self.compactCalls[0] ?? {}, new Error("self failed")));
+
+  const handoff = fixture({ diagnosticThrows: true, sendMessageThrows: true });
+  handoff.orchestration.requestSelfCompaction({ postCompactionNotification: "handoff" }, handoff.context);
+  handoff.orchestration.runPendingSelfCompaction(handoff.context);
+  complete(handoff.compactCalls[0] ?? {});
+  assert.doesNotThrow(() => handoff.scheduled[0]?.());
+
+  const hard = fixture({ diagnosticThrows: true });
+  Object.assign(hard.context, { getContextUsage: () => ({ percent: 70, tokens: 70_000, contextWindow: 100_000 }) });
+  hard.orchestration.enforceHardCompaction(hard.context);
+  assert.doesNotThrow(() => fail(hard.compactCalls[0] ?? {}, new Error("hard failed")));
+
+  const unavailable = fixture({ diagnosticThrows: true });
+  const missingCompact = { ...unavailable.context, compact: undefined };
+  unavailable.orchestration.requestSelfCompaction({}, unavailable.context);
+  assert.doesNotThrow(() => unavailable.orchestration.runPendingSelfCompaction(missingCompact));
+  Object.assign(unavailable.context, { getContextUsage: () => ({ percent: 70, tokens: 70_000, contextWindow: 100_000 }) });
+  assert.doesNotThrow(() => unavailable.orchestration.enforceHardCompaction({ ...unavailable.context, compact: undefined }));
+
+  const capture = fixture({ diagnosticThrows: true, captureLoaderThrows: true });
+  await assert.doesNotReject(() => capture.orchestration.onSessionBeforeCompact({ preparation: {} }, capture.context));
 });
 
 test("threshold monitoring sends advisory and mandatory options, tracks watermark, and suppresses children", () => {

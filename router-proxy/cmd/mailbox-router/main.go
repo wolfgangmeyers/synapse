@@ -4,14 +4,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -94,7 +92,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer logWriter.Close()
-	logger := func(event string, fields map[string]any) { _ = logWriter.Log(event, fields) }
+	logger := eventLogger(logWriter, os.Stderr)
 	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
@@ -121,40 +119,4 @@ func main() {
 	if err := durable.Close(); err != nil {
 		log.Print(err)
 	}
-}
-
-type logWriter struct {
-	file *os.File
-	lock chan struct{}
-}
-
-func newLogWriter(path string) (*logWriter, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	return &logWriter{file: file, lock: make(chan struct{}, 1)}, nil
-}
-func (w *logWriter) Log(event string, fields map[string]any) error {
-	w.lock <- struct{}{}
-	defer func() { <-w.lock }()
-	record := map[string]any{"event": event, "timestamp": time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
-	for key, value := range fields {
-		record[key] = value
-	}
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	_, err = w.file.Write(append(encoded, '\n'))
-	return err
-}
-func (w *logWriter) Close() error {
-	if w == nil || w.file == nil {
-		return nil
-	}
-	return w.file.Close()
 }

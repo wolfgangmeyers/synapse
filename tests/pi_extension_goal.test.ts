@@ -112,6 +112,23 @@ function publishService(ownerSessionId, service) {
   };
 }
 
+function captureDiagnostics() {
+  const symbol = Symbol.for("mecha.pi.diagnostic-journal.v1");
+  const previous = Object.getOwnPropertyDescriptor(globalThis, symbol);
+  const records = [];
+  Object.defineProperty(globalThis, symbol, {
+    configurable: true,
+    value: { version: 1, record(source, event, fields) { records.push({ source, event, fields }); return true; } },
+  });
+  return {
+    records,
+    restore() {
+      if (previous === undefined) delete globalThis[symbol];
+      else Object.defineProperty(globalThis, symbol, previous);
+    },
+  };
+}
+
 test("evaluator parses only a strict verdict line and bounds the visible rationale", () => {
   assert.deepEqual(responseEvaluation({ content: [{ type: "text", text: "VERDICT: COMPLETED extra\nREASON: This must not change the outcome." }] }), {
     outcome: "NOT_DONE",
@@ -658,6 +675,101 @@ test("stale session settles cannot start an evaluation", async () => {
   await current.handlers.get("agent_settled")({ sessionId: "owner-session" }, current.context);
   await flushDeferred();
   assert.equal(calls.length, 1);
+});
+
+test("activity gate rejections record safe reasons and identities without goal text", async () => {
+  const diagnostics = captureDiagnostics();
+  try {
+    const current = fixture({ sessionId: "owner-session" });
+    await setGoal(current, "private goal text");
+    const activity = current.eventHandlers.get(GOAL_ACTIVITY_EVENT);
+    activity({ kind: "unknown", activityId: "bad-kind", sessionId: "owner-session", revision: 1, goal: { enabled: true, goal: "private goal text" } });
+    activity({ kind: "tool-completed", activityId: "stale", sessionId: "other-session", revision: 1, goal: { enabled: true, goal: "private goal text" } });
+    const valid = { kind: "tool-completed", activityId: "same-id", sessionId: "owner-session", revision: 1, goal: { enabled: true, goal: "private goal text" } };
+    activity(valid);
+    activity(valid);
+    const rejected = diagnostics.records.filter(({ event }) => event === "activity_gate_rejected");
+    assert.deepEqual(rejected.map(({ fields }) => fields.reason), ["invalid_kind", "stale_session", "rearm_inactive", "duplicate_activity"]);
+    assert.ok(rejected.every(({ fields }) => fields.session_id === undefined || typeof fields.session_id === "string"));
+    assert.doesNotMatch(JSON.stringify(rejected), /private goal text/);
+  } finally {
+    diagnostics.restore();
+  }
+});
+
+test("goal diagnostics retain bounded cross-repo subagent kinds", async () => {
+  const diagnostics = captureDiagnostics();
+  try {
+    const current = fixture({ sessionId: "owner-session" });
+    await setGoal(current, "private goal text");
+    const activity = current.eventHandlers.get(GOAL_ACTIVITY_EVENT);
+    activity({
+      kind: "Plan",
+      activityId: "plan-activity",
+      sessionId: "owner-session",
+      workerId: "worker",
+      producerEpoch: "producer-epoch",
+      revision: 1,
+      goal: { enabled: true, goal: "private goal text" },
+    });
+    const acceptedKind = diagnostics.records.find(({ event }) => event === "activity_gate_rejected");
+    assert.equal(acceptedKind?.fields.kind, "Plan");
+
+    activity({ kind: `${"x".repeat(128)}!`, activityId: "long-kind", sessionId: "owner-session" });
+    const rejectedKind = diagnostics.records.filter(({ event }) => event === "activity_gate_rejected").at(-1);
+    assert.equal(Object.hasOwn(rejectedKind?.fields ?? {}, "kind"), false);
+  } finally {
+    diagnostics.restore();
+  }
+});
+
+test("malformed activity identities are rejected before goal diagnostics are recorded", async () => {
+  const diagnostics = captureDiagnostics();
+  try {
+    const current = fixture({ sessionId: "owner-session" });
+    await setGoal(current, "private goal text");
+    const activity = current.eventHandlers.get(GOAL_ACTIVITY_EVENT);
+    activity({
+      kind: "tool-completed private",
+      activityId: "private activity id",
+      sessionId: "private session id",
+      workerId: "private worker id",
+      producerEpoch: "private producer epoch",
+      revision: 1,
+      goal: { enabled: true, goal: "private goal text" },
+    });
+    const rejection = diagnostics.records.find(({ event }) => event === "activity_gate_rejected");
+    assert.equal(rejection?.fields.reason, "invalid_kind");
+    assert.equal(Object.hasOwn(rejection?.fields ?? {}, "event_id"), false);
+    assert.equal(Object.hasOwn(rejection?.fields ?? {}, "worker_id"), false);
+    assert.equal(Object.hasOwn(rejection?.fields ?? {}, "producer_epoch"), false);
+    assert.doesNotMatch(JSON.stringify(rejection), /private/);
+  } finally {
+    diagnostics.restore();
+  }
+});
+
+test("owner and wakeup failures record safe state without changing gates", async () => {
+  const diagnostics = captureDiagnostics();
+  const cleanup = publishService("owner-session", {
+    hasRunning() { throw new Error("private owner error"); },
+  });
+  try {
+    const current = fixture({ sessionId: "owner-session", sendMessage: (message) => {
+      if (message.customType === "goal-update") throw new Error("private wakeup error");
+    } });
+    await setGoal(current, "private goal text");
+    await flushDeferred();
+    await settle(current);
+    await flushDeferred();
+    assert.ok(current.sent.length >= 1, "the failed wakeup still follows the existing send attempt");
+    assert.ok(diagnostics.records.some(({ event, fields }) => event === "publication_failed" && fields.reason === "self_wakeup_send" && fields.error_name === "Error"));
+    assert.ok(diagnostics.records.some(({ event, fields }) => event === "owner_service_failed" && fields.reason === "running_check" && fields.state === "enabled"));
+    assert.doesNotMatch(JSON.stringify(diagnostics.records), /private goal text|private owner error|private wakeup error/);
+  } finally {
+    cleanup();
+    diagnostics.restore();
+  }
 });
 
 test("missing optional subagent service does not break goal evaluation", async () => {

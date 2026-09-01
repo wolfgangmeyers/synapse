@@ -1,4 +1,6 @@
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFile, chmod, mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { summarizeNativeSubagents } from "./activity-lifecycle.js";
@@ -64,15 +66,15 @@ const LEGACY_NATIVE_SUBAGENT_TRACE_PATH_ENV = "MECHA_PI_NATIVE_SUBAGENT_TRACE_PA
 const EXTENSION_TRACE_MAX_BYTES = 512 * 1024;
 
 const NATIVE_SUBAGENT_TRACE_STRING_FIELDS = new Set([
-  "agent_id", "instance_id", "parent_session_id", "session_id", "subagent_id", "event_id",
-  "status", "reason", "error_code", "error_name", "source", "frame_type", "disposition", "state", "phase",
+  "agent_id", "instance_id", "parent_session_id", "session_id", "subagent_id", "event_id", "frame_id", "request_id", "ack_frame_id", "producer_epoch",
+  "status", "reason", "error_code", "error_name", "source", "frame_type", "disposition", "state", "phase", "activity_state", "receipt_state", "lifecycle_event",
   "control_id", "source_agent_id", "target_agent_id", "lease_id", "action",
   "requested_provider", "requested_model_id", "current_provider", "current_model_id",
 ]);
 const NATIVE_SUBAGENT_TRACE_NUMBER_FIELDS = new Set([
   "client_sequence", "router_version", "subagent_count", "snapshot_count", "pending", "bytes", "description_length",
   "recipient_count", "attempt", "heartbeat_interval_ms", "available_count", "model_count", "source_model_count",
-  "frame_bytes",
+  "frame_bytes", "connection_generation", "source_count", "started_count", "disposed_count", "cleared_count", "reconciled_count", "resumed_count", "remaining_count",
 ]);
 const NATIVE_SUBAGENT_TRACE_BOOLEAN_FIELDS = new Set([
   "available", "registry_available", "lifecycle_service", "connected", "ready", "reconnect", "published",
@@ -391,3 +393,473 @@ export function appendMalformedToolCallDiagnostic(
     // A malformed diagnostic cannot affect context sanitation or provider work.
   }
 }
+
+/**
+ * Process-local diagnostics are deliberately separate from provider history. The global data
+ * property gives independently loaded extension instances one writer, sequence, and queue.
+ */
+export type DiagnosticJournalRecord = {
+  timestamp: string;
+  sequence: number;
+  source: string;
+  event: string;
+  [key: string]: JsonValue;
+};
+
+/**
+ * Process-local journal counters. `accepted` counts records queued by record();
+ * `written` counts records successfully appended. Both counters saturate so
+ * long-lived Pi sessions cannot turn health reporting into another unbounded store.
+ */
+export type DiagnosticJournalHealth = {
+  accepted: number;
+  written: number;
+  dropped: number;
+  writeFailures: number;
+  queueDepth: number;
+};
+
+export type DiagnosticJournal = {
+  readonly path: string | undefined;
+  readonly closed: boolean;
+  readonly closing: boolean;
+  readonly reusable: boolean;
+  record: (source: string, event: string, fields?: object) => boolean;
+  flush: () => Promise<void>;
+  close: () => Promise<void>;
+  health: () => DiagnosticJournalHealth;
+};
+
+type DiagnosticJournalOptions = {
+  environment?: Environment;
+  path?: string;
+  windowId?: string;
+  processId?: number;
+  now?: () => Date;
+  maxBytes?: number;
+  queueLimit?: number;
+  rotationAgeMs?: number;
+  pruneAgeMs?: number;
+};
+
+type DiagnosticJournalGlobal = {
+  version: 1;
+  record: (source: string, event: string, fields?: object) => boolean;
+  flush?: () => Promise<void>;
+  close?: () => Promise<void>;
+};
+
+type ManagedDiagnosticJournal = DiagnosticJournal & {
+  readonly stale: boolean;
+  invalidate: () => void;
+};
+
+type DiagnosticJournalState = {
+  journals: Map<string, ManagedDiagnosticJournal>;
+  defaultJournal?: ManagedDiagnosticJournal;
+};
+
+const DIAGNOSTIC_JOURNAL_GLOBAL = Symbol.for("mecha.pi.diagnostic-journal.v1");
+const DIAGNOSTIC_JOURNAL_STATE = Symbol.for("mecha.pi.diagnostic-journal.state.v1");
+const DIAGNOSTIC_JOURNAL_PATH_ENV = "MECHA_PI_DIAGNOSTIC_JOURNAL_PATH";
+const DIAGNOSTIC_JOURNAL_MAX_BYTES = 512 * 1024;
+const DIAGNOSTIC_JOURNAL_QUEUE_LIMIT = 256;
+const DIAGNOSTIC_JOURNAL_ROTATION_AGE_MS = 24 * 60 * 60 * 1000;
+const DIAGNOSTIC_JOURNAL_PRUNE_AGE_MS = 48 * 60 * 60 * 1000;
+const DIAGNOSTIC_STRING_LIMIT = 128;
+const DIAGNOSTIC_SOURCE_PATTERN = /^[a-z][a-z0-9_.-]{0,40}$/;
+const DIAGNOSTIC_EVENT_PATTERN = /^[a-z][a-z0-9_.-]{0,80}$/;
+const DIAGNOSTIC_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+// Keep this aligned with pi-subagents' bounded diagnostic-token contract.
+const DIAGNOSTIC_KIND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const DIAGNOSTIC_ERROR_NAMES = new Set([
+  "AggregateError", "AbortError", "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError",
+]);
+const DIAGNOSTIC_ID_FIELDS = new Set([
+  "agent_id", "instance_id", "parent_session_id", "session_id", "subagent_id", "event_id", "frame_id", "request_id", "ack_frame_id", "producer_epoch",
+  "control_id", "source_agent_id", "target_agent_id", "lease_id", "worker_id",
+]);
+
+const DIAGNOSTIC_STRING_FIELDS = new Set([
+  "agent_id", "instance_id", "parent_session_id", "session_id", "subagent_id", "event_id", "frame_id", "request_id", "ack_frame_id", "producer_epoch",
+  "status", "reason", "error_code", "error_name", "source", "frame_type", "disposition", "state", "phase", "activity_state", "receipt_state", "lifecycle_event",
+  "control_id", "source_agent_id", "target_agent_id", "lease_id", "worker_id", "action", "operation", "component", "kind", "outcome",
+  "requested_provider", "requested_model_id", "current_provider", "current_model_id",
+]);
+const DIAGNOSTIC_NUMBER_FIELDS = new Set([
+  "client_sequence", "router_version", "subagent_count", "snapshot_count", "pending", "bytes", "description_length",
+  "recipient_count", "attempt", "heartbeat_interval_ms", "available_count", "model_count", "source_model_count",
+  "frame_bytes", "revision", "percent", "tokens", "context_window", "threshold_percent", "connection_generation", "source_count", "started_count", "disposed_count", "cleared_count", "reconciled_count", "resumed_count", "remaining_count", "journal_queue_depth", "journal_dropped", "journal_write_failures",
+]);
+const DIAGNOSTIC_BOOLEAN_FIELDS = new Set([
+  "available", "registry_available", "lifecycle_service", "connected", "ready", "reconnect", "published",
+  "accepted", "switched", "truncated", "mandatory", "changed", "enabled",
+]);
+
+function isDiagnosticJournalGlobal(value: unknown): value is DiagnosticJournalGlobal {
+  return value !== null && typeof value === "object"
+    && Object.getOwnPropertyDescriptor(value, "version")?.value === 1
+    && typeof Object.getOwnPropertyDescriptor(value, "record")?.value === "function";
+}
+
+function isDiagnosticJournalState(value: unknown): value is DiagnosticJournalState {
+  return value !== null && typeof value === "object"
+    && Object.getOwnPropertyDescriptor(value, "journals")?.value instanceof Map;
+}
+
+function isManagedDiagnosticJournal(value: unknown): value is ManagedDiagnosticJournal {
+  return value !== null && typeof value === "object"
+    && typeof Object.getOwnPropertyDescriptor(value, "invalidate")?.value === "function"
+    && typeof Object.getOwnPropertyDescriptor(value, "stale")?.get === "function";
+}
+
+function nearestExistingDirectory(path: string): string | undefined {
+  let candidate = path;
+  while (true) {
+    try {
+      if (statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      // Walk toward a stable ancestor when the configured journal directory is new.
+    }
+    const parent = dirname(candidate);
+    if (parent === candidate) return undefined;
+    candidate = parent;
+  }
+}
+
+function discardJournal(state: DiagnosticJournalState, key: string, journal: DiagnosticJournal): void {
+  if (isManagedDiagnosticJournal(journal)) journal.invalidate();
+  else void journal.close();
+  if (state.journals.get(key) === journal) state.journals.delete(key);
+  if (state.defaultJournal === journal) state.defaultJournal = undefined;
+}
+
+function discardStaleJournals(state: DiagnosticJournalState): void {
+  for (const [key, journal] of state.journals) {
+    if (journal.closed || !isManagedDiagnosticJournal(journal) || journal.stale) discardJournal(state, key, journal);
+  }
+  if (state.defaultJournal !== undefined && (state.defaultJournal.closed || state.defaultJournal.stale)) {
+    state.defaultJournal.invalidate();
+    state.defaultJournal = undefined;
+  }
+}
+
+function diagnosticJournalState(): DiagnosticJournalState {
+  const existing = Object.getOwnPropertyDescriptor(globalThis, DIAGNOSTIC_JOURNAL_STATE)?.value;
+  if (isDiagnosticJournalState(existing)) return existing;
+  const state: DiagnosticJournalState = { journals: new Map() };
+  try {
+    Object.defineProperty(globalThis, DIAGNOSTIC_JOURNAL_STATE, {
+      value: state,
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
+  } catch {
+    const installed = Object.getOwnPropertyDescriptor(globalThis, DIAGNOSTIC_JOURNAL_STATE)?.value;
+    if (isDiagnosticJournalState(installed)) return installed;
+  }
+  return state;
+}
+
+function ensureDiagnosticJournalGlobal(state: DiagnosticJournalState): DiagnosticJournalGlobal | undefined {
+  const existing = Object.getOwnPropertyDescriptor(globalThis, DIAGNOSTIC_JOURNAL_GLOBAL)?.value;
+  if (isDiagnosticJournalGlobal(existing)) return existing;
+  const contract: DiagnosticJournalGlobal = {
+    version: 1,
+    record: (source, event, fields = {}) => {
+      try { return state.defaultJournal?.record(source, event, fields) === true; } catch { return false; }
+    },
+    flush: async () => {
+      try { await state.defaultJournal?.flush(); } catch { /* Diagnostics are best-effort at teardown. */ }
+    },
+    close: async () => {
+      try { await state.defaultJournal?.close(); } catch { /* Diagnostics are best-effort at teardown. */ }
+    },
+  };
+  try {
+    Object.defineProperty(globalThis, DIAGNOSTIC_JOURNAL_GLOBAL, {
+      value: contract,
+      configurable: true,
+      enumerable: false,
+      writable: false,
+    });
+    return contract;
+  } catch {
+    const installed = Object.getOwnPropertyDescriptor(globalThis, DIAGNOSTIC_JOURNAL_GLOBAL)?.value;
+    return isDiagnosticJournalGlobal(installed) ? installed : undefined;
+  }
+}
+
+function diagnosticJournalPath(environment: Environment, explicitPath: string | undefined, processId: number, windowId: string): string | undefined {
+  const configured = explicitPath ?? environment[DIAGNOSTIC_JOURNAL_PATH_ENV];
+  const basePath = typeof configured === "string" && configured.trim().length > 0
+    ? configured.trim()
+    : typeof environment.HOME === "string" && environment.HOME.length > 0
+      ? `${environment.HOME}/.mecha-developer/logs/diagnostics-history.jsonl`
+      : undefined;
+  if (basePath === undefined) return undefined;
+  const suffix = createHash("sha256").update(`${processId}\u0000${windowId}`).digest("hex").slice(0, 16);
+  return `${basePath}.${suffix}`;
+}
+
+function diagnosticJournalWindow(environment: Environment, explicitWindow: string | undefined): string {
+  const window = explicitWindow ?? environment.MECHA_TMUX_WINDOW ?? environment.TMUX_PANE ?? environment.TMUX ?? "process";
+  return typeof window === "string" && window.length > 0 ? window : "process";
+}
+
+function diagnosticFields(fields: object | undefined): JsonObject {
+  const output: JsonObject = {};
+  if (fields === undefined || fields === null || typeof fields !== "object" || Array.isArray(fields)) return output;
+  for (const [key, value] of Object.entries(fields)) {
+    if (DIAGNOSTIC_ID_FIELDS.has(key)) {
+      if (typeof value === "string" && DIAGNOSTIC_ID_PATTERN.test(value)) output[key] = value;
+    } else if (key === "kind") {
+      if (typeof value === "string" && DIAGNOSTIC_KIND_PATTERN.test(value)) output[key] = value;
+    } else if (key === "error_name") {
+      if (typeof value === "string" && DIAGNOSTIC_ERROR_NAMES.has(value)) output[key] = value;
+    } else if (DIAGNOSTIC_STRING_FIELDS.has(key) && typeof value === "string") output[key] = value.slice(0, DIAGNOSTIC_STRING_LIMIT);
+    else if (DIAGNOSTIC_NUMBER_FIELDS.has(key) && typeof value === "number" && Number.isSafeInteger(value) && value >= 0) output[key] = value;
+    else if (DIAGNOSTIC_BOOLEAN_FIELDS.has(key) && typeof value === "boolean") output[key] = value;
+    else if (key === "subagents" && Array.isArray(value)) {
+      output.subagents = value.slice(0, 100).flatMap((item): JsonObject[] => {
+        if (!isRecord(item) || typeof item.id !== "string" || !DIAGNOSTIC_ID_PATTERN.test(item.id)) return [];
+        return [{
+          id: item.id,
+          ...(typeof item.type === "string" ? { type: item.type.slice(0, DIAGNOSTIC_STRING_LIMIT) } : {}),
+          ...(typeof item.status === "string" ? { status: item.status.slice(0, DIAGNOSTIC_STRING_LIMIT) } : {}),
+          ...(typeof item.description_length === "number" && Number.isSafeInteger(item.description_length) && item.description_length >= 0
+            ? { description_length: item.description_length } : {}),
+        }];
+      });
+    }
+  }
+  return output;
+}
+
+function createDiagnosticJournal(options: DiagnosticJournalOptions = {}): DiagnosticJournal {
+  const environment = options.environment ?? process.env;
+  const processId = typeof options.processId === "number" && Number.isSafeInteger(options.processId) ? options.processId : process.pid;
+  const windowId = diagnosticJournalWindow(environment, options.windowId);
+  const configuredPath = options.path ?? environment[DIAGNOSTIC_JOURNAL_PATH_ENV];
+  const home = typeof environment.HOME === "string" ? environment.HOME : undefined;
+  const key = JSON.stringify([processId, windowId, home, configuredPath]);
+  const state = diagnosticJournalState();
+  ensureDiagnosticJournalGlobal(state);
+  discardStaleJournals(state);
+  const existing = state.journals.get(key);
+  if (existing !== undefined) return existing;
+
+  const path = diagnosticJournalPath(environment, options.path, processId, windowId);
+  const now = options.now ?? (() => new Date());
+  const maxBytes = options.maxBytes ?? DIAGNOSTIC_JOURNAL_MAX_BYTES;
+  const queueLimit = options.queueLimit ?? DIAGNOSTIC_JOURNAL_QUEUE_LIMIT;
+  const rotationAgeMs = options.rotationAgeMs ?? DIAGNOSTIC_JOURNAL_ROTATION_AGE_MS;
+  const pruneAgeMs = options.pruneAgeMs ?? DIAGNOSTIC_JOURNAL_PRUNE_AGE_MS;
+  if (typeof now !== "function" || !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || !Number.isSafeInteger(queueLimit) || queueLimit <= 0
+    || !Number.isSafeInteger(rotationAgeMs) || rotationAgeMs <= 0 || !Number.isSafeInteger(pruneAgeMs) || pruneAgeMs <= 0) {
+    throw new TypeError("diagnostic journal options are invalid");
+  }
+
+  const rootDirectory = path === undefined ? undefined : nearestExistingDirectory(dirname(path));
+  const rootIdentity = rootDirectory === undefined ? undefined : (() => {
+    try {
+      const rootStat = statSync(rootDirectory);
+      return rootStat.isDirectory() ? { dev: rootStat.dev, ino: rootStat.ino } : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  let sequence = 0;
+  let acceptedCount = 0;
+  let closing = false;
+  let closed = false;
+  let invalidated = false;
+  let hasWritten = false;
+  let writtenCount = 0;
+  let droppedCount = 0;
+  let writeFailureCount = 0;
+  const queue: string[] = [];
+  let draining = false;
+  const increment = (value: number): number => Math.min(Number.MAX_SAFE_INTEGER, value + 1);
+  const waiters: Array<() => void> = [];
+
+  const pathTornDown = (): boolean => {
+    if (path === undefined) return false;
+    try {
+      if (rootDirectory !== undefined) {
+        const currentRoot = statSync(rootDirectory);
+        if (!currentRoot.isDirectory() || rootIdentity === undefined
+          || currentRoot.dev !== rootIdentity.dev || currentRoot.ino !== rootIdentity.ino) return true;
+      }
+    } catch {
+      return true;
+    }
+    // Rotation temporarily removes the active file while the drain owns it.
+    return hasWritten && !draining && !existsSync(path);
+  };
+  const finishWaiters = () => {
+    if (draining || queue.length > 0) return;
+    if (pathTornDown()) journal.invalidate();
+    for (const resolve of waiters.splice(0)) resolve();
+  };
+  const pruneAndRotate = async (timestamp: Date): Promise<void> => {
+    if (path === undefined) return;
+    const active = await stat(path).catch(() => undefined);
+    const rotated = `${path}.1`;
+    const rotatedStat = await stat(rotated).catch(() => undefined);
+    if (rotatedStat !== undefined && timestamp.getTime() - rotatedStat.mtimeMs >= pruneAgeMs) await rm(rotated, { force: true });
+    if (active === undefined) return;
+    if (timestamp.getTime() - active.mtimeMs < rotationAgeMs && active.size < maxBytes) return;
+    await rm(rotated, { force: true });
+    await rename(path, rotated);
+  };
+  function shouldStopDrain(): boolean {
+    if (invalidated || closed) return true;
+    if (pathTornDown()) {
+      journal.invalidate();
+      return true;
+    }
+    return false;
+  }
+  const drain = async (): Promise<void> => {
+    if (draining || path === undefined) return;
+    draining = true;
+    try {
+      while (queue.length > 0) {
+        if (shouldStopDrain()) {
+          queue.length = 0;
+          break;
+        }
+        const line = queue.shift();
+        if (line === undefined) continue;
+        try {
+          if (shouldStopDrain()) {
+            queue.length = 0;
+            break;
+          }
+          const timestamp = now();
+          if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) {
+            droppedCount = increment(droppedCount);
+            continue;
+          }
+          await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+          await chmod(dirname(path), 0o700).catch(() => undefined);
+          if (shouldStopDrain()) continue;
+          await pruneAndRotate(timestamp);
+          if (shouldStopDrain()) continue;
+          await appendFile(path, line, { encoding: "utf8", mode: 0o600 });
+          await chmod(path, 0o600).catch(() => undefined);
+          hasWritten = true;
+          writtenCount = increment(writtenCount);
+        } catch {
+          writeFailureCount = increment(writeFailureCount);
+          // The journal is diagnostic only. A filesystem failure cannot affect Mecha.
+        }
+      }
+    } finally {
+      draining = false;
+      finishWaiters();
+    }
+  };
+  let journal: ManagedDiagnosticJournal;
+  const detach = () => {
+    for (const [entryKey, entry] of state.journals) {
+      if (entry === journal) state.journals.delete(entryKey);
+    }
+    if (state.defaultJournal === journal) state.defaultJournal = undefined;
+  };
+  journal = {
+    path,
+    get closed() { return closed; },
+    get closing() { return closing; },
+    get reusable() { return !closing && !closed && !draining && queue.length === 0; },
+    get stale() { return invalidated || pathTornDown(); },
+    invalidate() {
+      if (closed && invalidated) return;
+      invalidated = true;
+      closing = true;
+      queue.length = 0;
+      closed = true;
+      detach();
+    },
+    record(source, event, fields = {}) {
+      try {
+        if (path === undefined || closing || closed) return false;
+        if (pathTornDown()) {
+          journal.invalidate();
+          return false;
+        }
+        if (!DIAGNOSTIC_SOURCE_PATTERN.test(source) || !DIAGNOSTIC_EVENT_PATTERN.test(event)) {
+          droppedCount = increment(droppedCount);
+          return false;
+        }
+        const timestamp = now();
+        if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) {
+          droppedCount = increment(droppedCount);
+          return false;
+        }
+        if (queue.length >= queueLimit) {
+          droppedCount = increment(droppedCount);
+          return false;
+        }
+        const record: DiagnosticJournalRecord = {
+          timestamp: timestamp.toISOString(),
+          sequence: ++sequence,
+          source,
+          event,
+          ...(droppedCount > 0 ? { journal_dropped: droppedCount } : {}),
+          ...(writeFailureCount > 0 ? { journal_write_failures: writeFailureCount } : {}),
+          ...(queue.length > 0 || droppedCount > 0 || writeFailureCount > 0 ? { journal_queue_depth: queue.length } : {}),
+          ...diagnosticFields(fields),
+        };
+        queue.push(`${JSON.stringify(record)}\n`);
+        acceptedCount = increment(acceptedCount);
+        void drain();
+        return true;
+      } catch {
+        droppedCount = increment(droppedCount);
+        return false;
+      }
+    },
+    flush() {
+      if (!draining && queue.length === 0) {
+        if (pathTornDown()) journal.invalidate();
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => waiters.push(resolve));
+    },
+    async close() {
+      if (closed) {
+        detach();
+        return;
+      }
+      closing = true;
+      if (pathTornDown()) {
+        journal.invalidate();
+        return;
+      }
+      await journal.flush();
+      closed = true;
+      detach();
+    },
+    health() {
+      return {
+        accepted: acceptedCount,
+        written: writtenCount,
+        dropped: droppedCount,
+        writeFailures: writeFailureCount,
+        queueDepth: queue.length,
+      };
+    },
+  };
+  state.journals.set(key, journal);
+  // The data-property contract has no window argument. It points at the first
+  // journal for this process, which is the root/child journal in normal use.
+  if (state.defaultJournal === undefined && path !== undefined) state.defaultJournal = journal;
+  ensureDiagnosticJournalGlobal(state);
+  return journal;
+}
+
+export { createDiagnosticJournal };
+export const getDiagnosticJournal = createDiagnosticJournal;
