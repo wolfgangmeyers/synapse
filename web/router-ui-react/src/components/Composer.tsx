@@ -1,10 +1,11 @@
-import { useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactElement } from "react";
 import { convertImage, hasSendableContent, validateImageBatch, type ImageInput } from "../domain/images";
 import { ImagePreview } from "./ImagePreview";
 import { StatusMessage } from "./StatusMessage";
 
 export interface ComposerProps {
   enabled?: boolean;
+  focusKey?: string;
   value?: string;
   draft?: string;
   onChange?: (value: string) => void;
@@ -16,9 +17,10 @@ export interface ComposerProps {
   convert?: (file: Blob & { name?: string }) => Promise<ImageInput>;
 }
 function normalizeNewlines(value: string): string { return value.replace(/\\r\\n|\\n|\\r/g, "\n"); }
-export function Composer({ enabled = true, value, draft, onChange, onDraftChange, onSelectionChange, images: controlledImages, onImagesChange, onSend, convert = convertImage }: ComposerProps): ReactElement {
+export function Composer({ enabled = true, focusKey, value, draft, onChange, onDraftChange, onSelectionChange, images: controlledImages, onImagesChange, onSend, convert = convertImage }: ComposerProps): ReactElement {
   const [localBody, setLocalBody] = useState(value ?? draft ?? ""); const [localImages, setLocalImages] = useState<ImageInput[]>(controlledImages ?? []); const [dragging, setDragging] = useState(false); const [error, setError] = useState<string>(); const inputRef = useRef<HTMLInputElement>(null); const lastSelection = useRef<{ start: number; end: number } | undefined>(undefined);
-  const body = value ?? draft ?? localBody; const images = controlledImages ?? localImages;
+  const textareaRef = useRef<HTMLTextAreaElement>(null); const body = value ?? draft ?? localBody; const images = controlledImages ?? localImages;
+  useEffect(() => { if (focusKey !== undefined) textareaRef.current?.focus(); }, [focusKey]);
   const setBody = (next: string): void => { setLocalBody(next); onChange?.(next); onDraftChange?.(next); };
   const reportSelection = (selection: { start: number; end: number }): void => { if (lastSelection.current?.start === selection.start && lastSelection.current.end === selection.end) return; lastSelection.current = selection; onSelectionChange?.(selection); };
   const reportTextareaSelection = (target: HTMLTextAreaElement): void => { reportSelection({ start: target.selectionStart, end: target.selectionEnd }); };
@@ -29,6 +31,6 @@ export function Composer({ enabled = true, value, draft, onChange, onDraftChange
   const onFileChange = (event: ChangeEvent<HTMLInputElement>): void => { if (event.currentTarget.files) void addFiles(event.currentTarget.files); event.currentTarget.value = ""; };
   const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => { const files = event.clipboardData ? Array.from(event.clipboardData.files) : []; if (files.length) { event.preventDefault(); void addFiles(files); } };
   const onDrop = (event: DragEvent<HTMLFormElement>): void => { event.preventDefault(); setDragging(false); void addFiles(event.dataTransfer.files); };
-  return <form className={`composer${dragging ? " dragging" : ""}`} onSubmit={submit} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}><ImagePreview images={images} onRemove={(index) => setImages(images.filter((_, candidate) => candidate !== index))} />{error ? <StatusMessage tone="error">{error}</StatusMessage> : null}<div className="composer-row"><button className="secondary attach-image" type="button" disabled={!enabled} onClick={() => inputRef.current?.click()} aria-label="Attach images" title="Attach images"><i className="fa-solid fa-paperclip" aria-hidden="true" /></button><input ref={inputRef} type="file" accept="image/*" multiple hidden onChange={onFileChange} /><textarea data-testid="clipboard-paste-target" aria-label="Message" rows={2} value={body} disabled={!enabled} onChange={(event) => { setBody(event.currentTarget.value); reportTextareaSelection(event.currentTarget); }} onSelect={(event) => reportTextareaSelection(event.currentTarget)} onClick={(event) => reportTextareaSelection(event.currentTarget)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="Message an agent or drop images here" /><button type="submit" disabled={!enabled || (!body.trim() && images.length === 0)}>Send</button></div></form>;
+  return <form className={`composer${dragging ? " dragging" : ""}`} onSubmit={submit} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}><ImagePreview images={images} onRemove={(index) => setImages(images.filter((_, candidate) => candidate !== index))} />{error ? <StatusMessage tone="error">{error}</StatusMessage> : null}<div className="composer-row"><button className="secondary attach-image" type="button" disabled={!enabled} onClick={() => inputRef.current?.click()} aria-label="Attach images" title="Attach images"><i className="fa-solid fa-paperclip" aria-hidden="true" /></button><input ref={inputRef} type="file" accept="image/*" multiple hidden onChange={onFileChange} /><textarea ref={textareaRef} data-testid="clipboard-paste-target" aria-label="Message" rows={2} value={body} disabled={!enabled} onChange={(event) => { setBody(event.currentTarget.value); reportTextareaSelection(event.currentTarget); }} onSelect={(event) => reportTextareaSelection(event.currentTarget)} onClick={(event) => reportTextareaSelection(event.currentTarget)} onKeyDown={onKeyDown} onPaste={onPaste} placeholder="Message an agent or drop images here" /><button type="submit" disabled={!enabled || (!body.trim() && images.length === 0)}>Send</button></div></form>;
 }
 export { normalizeNewlines };
