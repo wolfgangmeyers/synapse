@@ -225,7 +225,7 @@ describe("App integration", () => {
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [reminder] });
       if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
       if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
-      if (init?.method === "PATCH") return jsonResponse({ message: "Update failed" }, 500);
+      if (init?.method === "PATCH") return jsonResponse({ error: { code: "reminder_update_failed", message: "Update failed" } }, 500);
       throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
     });
     const webSocketFactory = (): WebSocketLike => {
@@ -240,9 +240,16 @@ describe("App integration", () => {
     if (!(header instanceof HTMLElement)) throw new Error("Conversation header is missing");
     await user.click(within(header).getByRole("button", { name: "Add reminder" }));
     await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const subject = screen.getByRole("textbox", { name: "Subject" });
+    const body = screen.getByRole("textbox", { name: "Reminder" });
+    await user.clear(subject);
+    await user.type(subject, "Edited subject");
+    await user.clear(body);
+    await user.type(body, "Edited body");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "Edit reminder" })).toBeInTheDocument());
-    expect(screen.getByRole("textbox", { name: "Reminder" })).toHaveValue("Check this");
+    expect(screen.getByRole("textbox", { name: "Subject" })).toHaveValue("Edited subject");
+    expect(screen.getByRole("textbox", { name: "Reminder" })).toHaveValue("Edited body");
     expect(screen.getByRole("alert")).toHaveTextContent("Update failed");
   });
 
