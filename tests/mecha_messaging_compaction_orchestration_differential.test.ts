@@ -103,7 +103,9 @@ function recordFetch(input, init) {
       capture: {
         evaluator: "anthropic/claude-sonnet-5",
         router_timeout_ms: 1000,
-        compaction_deadline_ms: 1000,
+        // The extractor is a separate Node process. Keep its bounded deadline above startup
+        // variance when this differential child runs alongside the rest of the TypeScript suite.
+        compaction_deadline_ms: 5000,
         shutdown_deadline_ms: 1000,
         source_message_max_bytes: 8192,
         source_max_bytes: 98304,
@@ -114,7 +116,7 @@ function recordFetch(input, init) {
         maximum_body_bytes_per_record: 16384,
         maximum_total_body_bytes: 32768,
         maximum_related_ids_per_record: 24,
-        evaluator_timeout_ms: 1000,
+        evaluator_timeout_ms: 5000,
         output_max_bytes: 32768,
       },
     } });
@@ -483,9 +485,9 @@ await (async () => {
       await operation("abort-already-paused-capture", () => alreadyPausedController.abort());
       await operation("delivery-after-abort-resumes", () => deliverEnvelope("resumed"));
       await operation("abort-first-capture", () => activeController.abort());
-      assert.equal(readFakePiCalls().length, 3, "capture path must invoke the fake pi once per real capture call");
+      const expectedFakePiArgs = ["--model", "anthropic/claude-sonnet-5", "--thinking", "off", "--print", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-session", expectedPrompt];
+      assert.deepEqual(readFakePiCalls(), [expectedFakePiArgs, expectedFakePiArgs, expectedFakePiArgs], "capture path must invoke the fake pi once per real capture call with the exact argv");
       assert.ok(fetchCalls.some((call) => call.path === "/v1/memory/lookup" && same(call.body, { stores: ["default"] })), "capture path must perform the exact lookup request");
-      for (const args of readFakePiCalls()) assert.deepEqual(args, ["--model", "anthropic/claude-sonnet-5", "--thinking", "off", "--print", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-session", expectedPrompt]);
     },
     async "hard-guard"() {
       await operation("session-start", () => root("session_start", {}));

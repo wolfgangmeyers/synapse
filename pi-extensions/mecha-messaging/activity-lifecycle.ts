@@ -82,6 +82,7 @@ const EVENT_TRACKED_MISSING_LIMIT_MS = 60_000;
 // Keep activity payloads bounded so a large native service cannot become an
 // unbounded cross-extension data path.
 const MAX_ACTIVITY_SUBAGENTS = 100;
+const MAX_SETTLED_NOTIFICATION_CHILDREN = 2048;
 const MAX_TERMINAL_SUBAGENT_TOMBSTONES = 2048;
 const LIVE_SUBAGENT_STATUSES = new Set(["queued", "running"]);
 const TERMINAL_SUBAGENT_STATUSES = new Set(["completed", "steered", "aborted", "stopped", "error"]);
@@ -114,6 +115,10 @@ export function createSettledNotificationScheduler({
   const timers = new Set<Timer>();
   let generation = 0;
   let parentSettled = false;
+  // Keep a bounded ID set while retaining suppression when more children arrive
+  // than the set can name. Reconciliation or disposal clears the known IDs;
+  // the overflow latch is intentionally conservative until scheduler disposal.
+  let overflowSuppressed = false;
 
   function invalidate() {
     generation += 1;
@@ -125,7 +130,7 @@ export function createSettledNotificationScheduler({
     let timer: Timer;
     timer = setTimeoutImpl(() => {
       timers.delete(timer);
-      if (generation !== expectedGeneration || children.size > 0) return;
+      if (generation !== expectedGeneration || children.size > 0 || overflowSuppressed) return;
       send();
     }, delay);
     timers.add(timer);
@@ -148,7 +153,8 @@ export function createSettledNotificationScheduler({
     },
     onChildStarted(sessionId: string): void {
       if (typeof sessionId !== "string" || sessionId.length === 0 || children.has(sessionId)) return;
-      children.add(sessionId);
+      if (children.size >= MAX_SETTLED_NOTIFICATION_CHILDREN) overflowSuppressed = true;
+      else children.add(sessionId);
       invalidate();
     },
     onChildDisposed(sessionId: string): void {
@@ -158,6 +164,7 @@ export function createSettledNotificationScheduler({
     dispose() {
       invalidate();
       children.clear();
+      overflowSuppressed = false;
       parentSettled = false;
     },
     activeChildCount() {
@@ -177,6 +184,23 @@ type TrackedSubagent = {
   serviceTracked?: boolean;
 };
 type LifecycleSummary = { id: string; type?: string; description: string; status?: string };
+type LifecycleIdentity = { type?: string; description?: string };
+type SettledChildState = {
+  summary?: LifecycleSummary;
+  startFence?: LifecycleIdentity;
+  awaitingIdentity?: boolean;
+  terminalObserved?: boolean;
+  // The native manager creates a new redacted snapshot object from
+  // onResumeStarted, even though its ID and identity stay the same. Retain the
+  // last bounded source object so a resumed run can be distinguished from the
+  // delayed object published before the terminal event.
+  lastSnapshot?: NativeSubagent;
+};
+type TypedLifecycleSnapshot = { summary: LifecycleSummary; source: NativeSubagent };
+type LifecycleIdentityFence = {
+  identity: LifecycleIdentity;
+  mode: "awaiting" | "expected" | "terminal";
+};
 type ActivitySent = {
   state: string;
   subagentCount: number;
@@ -230,6 +254,27 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   const settledNotifications = createSettledScheduler(options);
   const runningSubagents = new Map<string, TrackedSubagent>();
   const terminalSubagentTombstones = new Map<string, number>();
+  // The settled scheduler has its own child set. Keep the IDs and the latest
+  // known run identity here so a late terminal event cannot dispose a reused ID.
+  // Native lifecycle payloads have no run/version field. A start fence holds an
+  // ID through stale omissions until a snapshot confirms the same safe identity.
+  // Keep this map bounded: the native projection itself is capped at 100 IDs.
+  const settledNotificationChildStates = new Map<string, SettledChildState>();
+  // Keep the identity-only part of a fence when its metadata record is evicted.
+  // This is bounded separately from the state map because every state can be
+  // fenced during churn, including the state that protects a reused ID.
+  const settledNotificationIdentityFences = new Map<string, LifecycleIdentityFence>();
+  // Once every bounded fence slot is occupied, quarantine snapshot-only IDs.
+  // This keeps a stale row from becoming a child after its identity fence is
+  // evicted. Explicit starts can still establish a new fence for that ID.
+  let identityFenceOverflowed = false;
+  // This set is the live ownership ledger. Metadata is bounded, but a metadata
+  // eviction must not release suppression for a child that is still running.
+  const settledNotificationChildIds = new Set<string>();
+  const MAX_SETTLED_CHILD_STATES = MAX_SETTLED_NOTIFICATION_CHILDREN;
+  // Session shutdown is terminal for this lifecycle instance. This fence covers
+  // native events plus callbacks already queued by the heartbeat or compaction.
+  let nativeEventsBlocked = false;
   let activityHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let activityHeartbeatActive = false;
   let lastActivitySent: ActivitySent | undefined;
@@ -257,6 +302,9 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       return service;
     } catch (error) {
       trace("extension_service_lookup_error", {
+        // The resolver is called only for a present owner ID, so this spread's
+        // alternate branch is unreachable after the guarded lookup.
+        /* c8 ignore next */
         ...(available ? { parent_session_id: ownerSessionId } : {}),
         error_name: errorName(error),
       });
@@ -288,32 +336,6 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       .map(({ id, type, description, status }) => ({ id, ...(type !== undefined ? { type } : {}), description, ...(status !== undefined ? { status } : {}) }));
   }
 
-  function lifecycleSubagentSummary(metadata: TrackedSubagent): LifecycleSummary | undefined {
-    const id = typeof metadata?.id === "string" ? metadata.id.trim().slice(0, 128) : "";
-    if (id.length === 0) return undefined;
-    const type = typeof metadata?.type === "string" ? metadata.type.trim().slice(0, 64) : "";
-    const description = typeof metadata?.description === "string" ? metadata.description.trim().slice(0, 512) : "";
-    const status = typeof metadata.status === "string" && ["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(metadata.status)
-      ? metadata.status
-      : undefined;
-    return {
-      id,
-      ...(type.length > 0 ? { type } : {}),
-      // Native callers supply this short label specifically for observers. Keep a
-      // stable fallback only for older event shapes that did not carry one.
-      description: description.length > 0 ? description : "Native subagent",
-      ...(status === undefined ? {} : { status }),
-    };
-  }
-
-  function lifecycleSubagentSummaries(): LifecycleSummary[] {
-    return [...runningSubagents.values()]
-      .sort((left, right) => left.startedAtMs - right.startedAtMs || left.id.localeCompare(right.id))
-      .slice(0, MAX_ACTIVITY_SUBAGENTS)
-      .map(lifecycleSubagentSummary)
-      .filter((item): item is LifecycleSummary => item !== undefined);
-  }
-
   function publishLifecycleSnapshot(subagents: NativeSubagent[]): void {
     const summary = summarizeNativeSubagents(subagents);
     try {
@@ -335,7 +357,201 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   }
 
   function sameSubagentMetadata(left: TrackedSubagent | undefined, right: TrackedSubagent | undefined): boolean {
-    return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type && left.description === right.description && left.status === right.status;
+    return left !== undefined && right !== undefined && left.id === right.id && left.type === right.type
+      && left.description === right.description && left.status === right.status;
+  }
+
+  function sameLifecycleIdentity(left: LifecycleIdentity | undefined, right: LifecycleIdentity | undefined): boolean {
+    return left !== undefined && right !== undefined
+      && left.type === right.type && left.description === right.description;
+  }
+
+  function lifecycleFenceMatches(fence: LifecycleIdentity, record: LifecycleIdentity): boolean {
+    return sameLifecycleIdentity(fence, record);
+  }
+
+  function hasLifecycleIdentity(identity: LifecycleIdentity): boolean {
+    return identity.type !== undefined || identity.description !== undefined;
+  }
+
+  function lifecycleIdentity(record: NativeSubagent | LifecycleSummary): LifecycleIdentity {
+    const type = typeof record.type === "string" ? record.type.trim().slice(0, 64) : "";
+    const description = typeof record.description === "string" ? record.description.trim().slice(0, 512) : "";
+    return {
+      ...(type.length > 0 ? { type } : {}),
+      ...(description.length > 0 ? { description } : {}),
+    };
+  }
+
+  function rememberIdentityFence(id: string, fence: LifecycleIdentityFence): void {
+    if (settledNotificationIdentityFences.has(id)) {
+      settledNotificationIdentityFences.delete(id);
+      settledNotificationIdentityFences.set(id, fence);
+      return;
+    }
+    if (identityFenceOverflowed) return;
+    if (settledNotificationIdentityFences.size >= MAX_SETTLED_CHILD_STATES) {
+      // There is no safe fence to evict. Keep the existing bounded fences and
+      // quarantine IDs that have no explicit start after this point.
+      identityFenceOverflowed = true;
+      return;
+    }
+    settledNotificationIdentityFences.set(id, fence);
+  }
+
+  function snapshotIdentityIsBlocked(state: SettledChildState | undefined, fence: LifecycleIdentityFence | undefined): boolean {
+    if (state?.awaitingIdentity === true && state.summary === undefined && state.startFence === undefined) return true;
+    if (fence?.mode === "awaiting" && !hasLifecycleIdentity(fence.identity)) return true;
+    return identityFenceOverflowed && state === undefined && fence === undefined;
+  }
+
+  function stateIdentityFence(state: SettledChildState | undefined): LifecycleIdentityFence | undefined {
+    if (state?.startFence !== undefined) return { identity: state.startFence, mode: "expected" };
+    if (state?.awaitingIdentity === true) {
+      // An event without identity still needs a fence. The empty identity means
+      // that snapshots remain blocked until a later start supplies metadata.
+      return { identity: state.summary === undefined ? {} : lifecycleIdentity(state.summary), mode: "awaiting" };
+    }
+    if (state?.terminalObserved === true && state.summary !== undefined) {
+      return { identity: lifecycleIdentity(state.summary), mode: "terminal" };
+    }
+    return undefined;
+  }
+
+  function identityFenceFor(id: string, state: SettledChildState | undefined = settledNotificationChildStates.get(id)): LifecycleIdentityFence | undefined {
+    return stateIdentityFence(state) ?? settledNotificationIdentityFences.get(id);
+  }
+
+  function summaryFromIdentity(id: string, identity: LifecycleIdentity): LifecycleSummary {
+    // Typed lifecycle summaries always carry both identity fields. These fallbacks
+    // only protect an identity reconstructed from a malformed external event.
+    /* c8 ignore next 6 */
+    return {
+      id,
+      type: identity.type ?? "general-purpose",
+      description: identity.description ?? "Native subagent",
+      status: "running",
+    };
+  }
+
+  function boundedSettledChildState(id: string): SettledChildState {
+    const existing = settledNotificationChildStates.get(id);
+    if (existing !== undefined) return existing;
+    const state: SettledChildState = {};
+    settledNotificationChildStates.set(id, state);
+    while (settledNotificationChildStates.size > MAX_SETTLED_CHILD_STATES) {
+      // Preserve identities that still fence a reused ID. Evict ordinary
+      // metadata first; when every entry is fenced, copy its identity into the
+      // bounded identity-only fence map before evicting the metadata.
+      const evictable = [...settledNotificationChildStates.entries()].find(([candidateId, candidate]) => (
+        candidateId !== id
+        && candidate.startFence === undefined && candidate.awaitingIdentity !== true && candidate.terminalObserved !== true
+      ));
+      // Do not evict the state being initialized; its fence is applied below.
+      const oldest = evictable?.[0] ?? [...settledNotificationChildStates.keys()].find((candidateId) => candidateId !== id);
+      // The map is keyed by strings and the loop runs only while it is nonempty.
+      /* c8 ignore next */
+      if (typeof oldest !== "string") break;
+      const evicted = settledNotificationChildStates.get(oldest);
+      const fence = stateIdentityFence(evicted);
+      if (fence !== undefined) rememberIdentityFence(oldest, fence);
+      settledNotificationChildStates.delete(oldest);
+    }
+    return state;
+  }
+
+  function schedulerChildStarted(id: string | undefined, options: { fence?: LifecycleIdentity; awaitingIdentity?: boolean; force?: boolean } = {}): void {
+    if (typeof id !== "string" || id.length === 0) return;
+    const state = boundedSettledChildState(id);
+    if (options.fence !== undefined) state.startFence = options.fence;
+    if (options.awaitingIdentity === true) state.awaitingIdentity = true;
+    const newlyOwned = !settledNotificationChildIds.has(id);
+    if (newlyOwned && settledNotificationChildIds.size >= MAX_SETTLED_NOTIFICATION_CHILDREN) {
+      const oldest = settledNotificationChildIds.keys().next().value;
+      if (typeof oldest === "string") settledNotificationChildIds.delete(oldest);
+    }
+    settledNotificationChildIds.add(id);
+    if (newlyOwned || options.force) settledNotifications.onChildStarted(id);
+  }
+
+  function schedulerChildDisposed(id: string | undefined): boolean {
+    if (typeof id !== "string" || id.length === 0) return false;
+    const state = settledNotificationChildStates.get(id);
+    // A terminal event carries no run identity. A start fence therefore keeps
+    // the ID alive until a later snapshot confirms the new run.
+    const fence = identityFenceFor(id, state);
+    if (fence?.mode === "expected" || fence?.mode === "awaiting") return false;
+    const wasOwned = settledNotificationChildIds.delete(id);
+    settledNotificationChildStates.delete(id);
+    settledNotificationIdentityFences.delete(id);
+    if (wasOwned || state === undefined) settledNotifications.onChildDisposed(id);
+    return wasOwned;
+  }
+
+  function typedLifecycleSnapshotRecords(source: NativeSubagent[]): TypedLifecycleSnapshot[] {
+    return source.flatMap((sourceRecord) => {
+      const summary = lifecycleSnapshotSummary(sourceRecord);
+      return summary === undefined ? [] : [{ summary, source: sourceRecord }];
+    });
+  }
+
+  function observeTypedSnapshotRecord(state: SettledChildState | undefined, record: LifecycleSummary, source: NativeSubagent): void {
+    if (state === undefined) return;
+    // A terminal callback can race a native resume. Pi does not emit
+    // subagents:started for that resume, but onResumeStarted replaces the
+    // manager's redacted snapshot object. An unchanged source object is the
+    // delayed pre-resume snapshot and stays fenced until omission.
+    const resumed = state.terminalObserved === true
+      && state.lastSnapshot !== undefined
+      && state.lastSnapshot !== source
+      && state.summary !== undefined
+      && sameLifecycleIdentity(lifecycleIdentity(state.summary), lifecycleIdentity(record));
+    state.lastSnapshot = source;
+    if (resumed) state.terminalObserved = false;
+  }
+
+  function reconcileSettledNotificationChildren(): void {
+    // This is an internal scheduler repair. Read the typed source directly so
+    // resume does not add a diagnostic read or lifecycle publication to the
+    // extraction's observable event order.
+    const ownerSessionId = contextSessionId(getParentContext());
+    if (ownerSessionId === undefined) return;
+    let service: NativeSubagentService | undefined;
+    try {
+      service = resolveNativeService(ownerSessionId);
+    } catch {
+      return;
+    }
+    if (typeof service?.getLifecycleSnapshots !== "function") return;
+    let source: NativeSubagent[] | undefined;
+    try {
+      source = service.getLifecycleSnapshots();
+    } catch {
+      return;
+    }
+    if (!Array.isArray(source)) return;
+    const snapshot = typedLifecycleSnapshotRecords(source);
+    const authoritative = source.length < MAX_ACTIVITY_SUBAGENTS;
+    const activeIds = new Set(snapshot.map(({ summary }) => summary.id));
+    if (authoritative) {
+      for (const id of settledNotificationChildIds) {
+        if (!activeIds.has(id) && identityFenceFor(id) === undefined) {
+          schedulerChildDisposed(id);
+        }
+      }
+    }
+    for (const { summary: record, source: sourceRecord } of snapshot) {
+      const state = settledNotificationChildStates.get(record.id);
+      observeTypedSnapshotRecord(state, record, sourceRecord);
+      const fence = identityFenceFor(record.id, state);
+      if (snapshotIdentityIsBlocked(state, fence)) continue;
+      const recordIdentity = lifecycleIdentity(record);
+      if ((fence?.mode === "awaiting" || fence?.mode === "terminal")
+        && lifecycleFenceMatches(fence.identity, recordIdentity)) continue;
+      if (fence?.mode === "expected" && !lifecycleFenceMatches(fence.identity, recordIdentity)) continue;
+      schedulerChildStarted(record.id);
+      settledNotificationIdentityFences.delete(record.id);
+    }
   }
 
   function lifecycleSnapshotSubagentService(service: NativeSubagentService | undefined = getNativeService()): NativeSubagentService | undefined {
@@ -386,6 +602,8 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
 
   function isActiveNativeSubagentRecord(record: NativeSubagent, service: NativeSubagentService | undefined = getNativeService()): boolean {
     const status = nativeSubagentStatus(record);
+    // Typed snapshots are dispatched before this legacy compatibility predicate.
+    /* c8 ignore next 3 */
     return lifecycleSnapshotSubagentService(service) !== undefined
       ? status !== undefined && LIVE_SUBAGENT_STATUSES.has(status)
       : [undefined, "running", "queued", "active"].includes(status);
@@ -393,6 +611,8 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
 
   function isTerminalNativeSubagentRecord(record: NativeSubagent, service: NativeSubagentService | undefined = getNativeService()): boolean {
     const status = nativeSubagentStatus(record);
+    // Typed snapshots are dispatched before this legacy compatibility predicate.
+    /* c8 ignore next 3 */
     return lifecycleSnapshotSubagentService(service) !== undefined
       ? status !== undefined && TERMINAL_SUBAGENT_STATUSES.has(status)
       : LEGACY_TERMINAL_SUBAGENT_STATUSES.includes(status ?? "");
@@ -419,6 +639,8 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     terminalSubagentTombstones.set(id, terminalAtMs);
     while (terminalSubagentTombstones.size > MAX_TERMINAL_SUBAGENT_TOMBSTONES) {
       const oldest = terminalSubagentTombstones.keys().next().value;
+      // The map is keyed by strings and the loop runs only while it is nonempty.
+      /* c8 ignore next */
       if (typeof oldest !== "string") break;
       terminalSubagentTombstones.delete(oldest);
     }
@@ -449,6 +671,8 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
         status: metadata.status ?? existing.status,
         eventTracked: true,
         serviceTracked: true,
+        // Tracked event metadata always receives a numeric start time.
+        /* c8 ignore next */
         startedAtMs: existing.startedAtMs ?? metadata.startedAtMs,
         lastSeenMs: nowMs,
       };
@@ -460,6 +684,21 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       startedAtMs: existing?.startedAtMs ?? metadata.startedAtMs,
       lastSeenMs: nowMs,
     };
+  }
+
+  function enforceActivityRecordCap(): boolean {
+    let evicted = false;
+    while (runningSubagents.size > MAX_ACTIVITY_SUBAGENTS) {
+      const oldest = runningSubagents.keys().next().value;
+      // The map is keyed by strings and the loop runs only while it is nonempty.
+      /* c8 ignore next */
+      if (typeof oldest !== "string") break;
+      // This only bounds the activity payload. Keep scheduler ownership until
+      // a terminal event or an authoritative snapshot proves the child ended.
+      runningSubagents.delete(oldest);
+      evicted = true;
+    }
+    return evicted;
   }
 
   function lifecycleSnapshotSummary(record: NativeSubagent): LifecycleSummary | undefined {
@@ -479,12 +718,35 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     };
   }
 
-  function replaceNativeLifecycleSnapshot(snapshot: LifecycleSummary[], nowMs: number): boolean {
-    // Typed snapshots replace the local projection authoritatively; omission is
-    // the only safe evidence that a typed child left the active set.
-    const next = new Map<string, TrackedSubagent>();
-    for (const record of snapshot) {
-      const existing = runningSubagents.get(record.id);
+  function reconcileTypedLifecycleSnapshot(snapshot: TypedLifecycleSnapshot[], authoritative: boolean, nowMs: number): boolean {
+    // The native projection is capped and carries no cursor. A full-looking
+    // lower snapshot can therefore be stale or partial. Only a snapshot below
+    // the native cap may dispose an omitted ID; start fences protect reuse races.
+    const previous = new Map(runningSubagents);
+    const next = authoritative ? new Map<string, TrackedSubagent>() : new Map(previous);
+    for (const { summary: record, source: sourceRecord } of snapshot) {
+      const childState = settledNotificationChildStates.get(record.id);
+      observeTypedSnapshotRecord(childState, record, sourceRecord);
+      const recordIdentity = lifecycleIdentity(record);
+      const fence = identityFenceFor(record.id, childState);
+      if (snapshotIdentityIsBlocked(childState, fence)) {
+        next.delete(record.id);
+        continue;
+      }
+      if ((fence?.mode === "awaiting" || fence?.mode === "terminal")
+        && lifecycleFenceMatches(fence.identity, recordIdentity)) {
+        // A metadata-less start or terminal event cannot make this delayed old
+        // snapshot a fresh run. Keep the fence for the next heartbeat.
+        next.delete(record.id);
+        continue;
+      }
+      if (fence?.mode === "expected" && !lifecycleFenceMatches(fence.identity, recordIdentity)) {
+        // This is an older snapshot for a reused ID. Keep the scheduler fence,
+        // but remove the old record from the activity projection.
+        next.delete(record.id);
+        continue;
+      }
+      const existing = previous.get(record.id);
       next.set(record.id, {
         ...record,
         eventTracked: false,
@@ -492,20 +754,67 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
         startedAtMs: existing?.startedAtMs ?? nowMs,
         lastSeenMs: nowMs,
       });
+      if (childState !== undefined) {
+        if (!previous.has(record.id)) schedulerChildStarted(record.id, { force: true });
+        childState.summary = record;
+        childState.startFence = undefined;
+        childState.awaitingIdentity = false;
+        childState.terminalObserved = false;
+      } else {
+        schedulerChildStarted(record.id);
+        const state = settledNotificationChildStates.get(record.id);
+        if (state !== undefined) {
+          state.summary = record;
+          state.lastSnapshot = sourceRecord;
+        }
+      }
+      settledNotificationIdentityFences.delete(record.id);
     }
-    let changed = next.size !== runningSubagents.size;
+
+    for (const id of settledNotificationChildIds) {
+      if (next.has(id)) continue;
+      const childState = settledNotificationChildStates.get(id);
+      const fence = identityFenceFor(id, childState);
+      const retainsOwnership = fence?.mode === "expected" || fence?.mode === "awaiting";
+      if (!authoritative || retainsOwnership) {
+        // A partial read still leaves local activity records usable. A reuse
+        // fence keeps scheduler ownership but its old activity record stays out.
+        continue;
+      }
+      schedulerChildDisposed(id);
+    }
+
+    // A capped typed snapshot is partial, so its omissions cannot dispose
+    // scheduler children. Evict only the oldest local activity records when
+    // churn would otherwise grow the projection without changing ownership.
+    while (next.size > MAX_ACTIVITY_SUBAGENTS) {
+      const oldest = next.keys().next().value;
+      // The map is keyed by strings and the loop runs only while it is nonempty.
+      /* c8 ignore next */
+      if (typeof oldest !== "string") break;
+      next.delete(oldest);
+    }
+
+    let changed = next.size !== previous.size;
     for (const [id, metadata] of next) {
-      if (!sameSubagentMetadata(runningSubagents.get(id), metadata)) changed = true;
-    }
-    for (const id of runningSubagents.keys()) {
-      if (!next.has(id)) settledNotifications.onChildDisposed(id);
-    }
-    for (const id of next.keys()) {
-      if (!runningSubagents.has(id)) settledNotifications.onChildStarted(id);
+      if (!sameSubagentMetadata(previous.get(id), metadata)) changed = true;
+      schedulerChildStarted(id);
     }
     runningSubagents.clear();
     for (const [id, metadata] of next) runningSubagents.set(id, metadata);
     return changed;
+  }
+
+  function lifecyclePublicSnapshot(): NativeSubagent[] {
+    return [...runningSubagents.values()].slice(0, MAX_ACTIVITY_SUBAGENTS).map(({ id, type, description, status }) => ({
+      id,
+      // Typed lifecycle summaries always provide these observer-safe fields.
+      /* c8 ignore next */
+      ...(type === undefined ? {} : { type }),
+      description,
+      /* c8 ignore next */
+      ...(status === undefined ? {} : { status }),
+    }));
   }
 
   function reconcileNativeSubagentService(): { changed: boolean; snapshot?: NativeSubagent[] } {
@@ -515,11 +824,10 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     if (!Array.isArray(source)) return { changed: false };
     const nowMs = nowImpl();
     if (lifecycleSnapshotService !== undefined) {
-      const snapshot = source
-        .map(lifecycleSnapshotSummary)
-        .filter((item): item is LifecycleSummary => item !== undefined)
-        .slice(0, MAX_ACTIVITY_SUBAGENTS);
-      return { changed: replaceNativeLifecycleSnapshot(snapshot, nowMs), snapshot };
+      const authoritative = source.length < MAX_ACTIVITY_SUBAGENTS;
+      const snapshot = typedLifecycleSnapshotRecords(source).slice(0, MAX_ACTIVITY_SUBAGENTS);
+      const changed = reconcileTypedLifecycleSnapshot(snapshot, authoritative, nowMs);
+      return { changed, snapshot: authoritative ? lifecyclePublicSnapshot() : undefined };
     }
 
     const serviceIds = new Set<string>();
@@ -532,17 +840,22 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       serviceIds.add(metadata.id);
       if (isTerminalNativeSubagentRecord(record, service)) {
         if (rememberTerminalSubagent(metadata.id, nowMs)) changed = true;
-        settledNotifications.onChildDisposed(metadata.id);
+        schedulerChildDisposed(metadata.id);
         continue;
       }
       if (!isActiveNativeSubagentRecord(record, service)) continue;
       if (isTerminalTombstonedNativeRecord(metadata.id, record)) {
+        // Tombstoned active rows are removed when the tombstone is created.
+        /* c8 ignore next */
         if (runningSubagents.delete(metadata.id)) changed = true;
         continue;
       }
       const existing = runningSubagents.get(metadata.id);
       const merged = mergeNativeSubagentMetadata(existing, metadata, nowMs);
       if (sameSubagentMetadata(existing, merged)) {
+        // sameSubagentMetadata requires both records, so this guard is a type-safe
+        // defensive branch that cannot follow a true comparison.
+        /* c8 ignore next */
         if (existing === undefined) continue;
         existing.lastSeenMs = nowMs;
         existing.serviceTracked = true;
@@ -551,6 +864,7 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       runningSubagents.set(metadata.id, merged);
       changed = true;
     }
+    if (enforceActivityRecordCap()) changed = true;
     for (const [id, metadata] of runningSubagents.entries()) {
       if (!serviceIds.has(id) && metadata?.serviceTracked === true && metadata?.eventTracked !== true) {
         runningSubagents.delete(id);
@@ -558,10 +872,14 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       } else if (!serviceIds.has(id) && metadata?.eventTracked === true
         && nowMs - metadata.lastSeenMs >= EVENT_TRACKED_MISSING_LIMIT_MS) {
         runningSubagents.delete(id);
-        settledNotifications.onChildDisposed(id);
+        schedulerChildDisposed(id);
         changed = true;
       }
     }
+    // The first cap enforcement above leaves this map at or below the cap;
+    // the second pass cannot evict another record without an intervening add.
+    /* c8 ignore next */
+    if (enforceActivityRecordCap()) changed = true;
     return { changed };
   }
 
@@ -604,6 +922,8 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   function sendActivityState(state: string, { force = false, reconcile = true }: { force?: boolean; reconcile?: boolean } = {}): boolean {
     // Compaction owns the visible state until its lifecycle resumes; ordinary
     // frames must not clear that pause early.
+    // parentActivityStateFromContext() derives "compacting" from this same latch.
+    /* c8 ignore next */
     if (isCompacting() && state !== "compacting") return false;
     const nowMs = nowImpl();
     // Native lifecycle state changes only in the timer-driven snapshot poll. Activity
@@ -649,9 +969,11 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   }
 
   function ensureHeartbeat(): void {
-    if (activityHeartbeatTimer !== undefined) return;
+    if (nativeEventsBlocked || activityHeartbeatTimer !== undefined) return;
     // Keep polling after the parent settles so missed native transitions converge.
     activityHeartbeatTimer = setIntervalImpl(() => {
+      // A callback may already be queued when session shutdown clears the interval.
+      if (nativeEventsBlocked) return;
       // This is the only path that reads and publishes the native lifecycle projection.
       const changed = pollNativeLifecycleSnapshot();
       const state = parentActivityStateFromContext();
@@ -694,6 +1016,7 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   }
 
   function startHeartbeat(context: ActivityContext): void {
+    if (nativeEventsBlocked) return;
     remember(context);
     activityHeartbeatActive = true;
     sendActivityState(parentActivityStateFromContext(), { force: true });
@@ -701,6 +1024,7 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   }
 
   function refresh(context: ActivityContext | undefined = undefined): void {
+    if (nativeEventsBlocked) return;
     remember(context);
     sendActivityState(parentActivityStateFromContext(), { force: true });
     if (runningSubagents.size > 0) ensureHeartbeat();
@@ -708,12 +1032,46 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   }
 
   function onNativeStarted(event: NativeSubagent): void {
+    if (nativeEventsBlocked) return;
     const service = getNativeService();
     // Snapshot mode only updates settled-notification suppression. The next timer
     // poll remains authoritative for both local projection and lifecycle frames.
     if (lifecycleSnapshotSubagentService(service) !== undefined) {
       trace("extension_native_event_started", { subagent_id: event?.id, source: "event_snapshot_mode" });
-      if (event.id !== undefined) settledNotifications.onChildStarted(event.id);
+      const id = typeof event?.id === "string" ? event.id.trim().slice(0, 128) : undefined;
+      if (id !== undefined && id.length > 0) {
+        const existing = settledNotificationChildStates.get(id);
+        const savedFence = identityFenceFor(id, existing);
+        const identity = lifecycleIdentity(event);
+        const currentIdentity = existing?.startFence ?? (existing?.summary === undefined ? savedFence?.identity : lifecycleIdentity(existing.summary));
+        const hasIdentity = hasLifecycleIdentity(identity);
+        const isSameAwaitedIdentity = (savedFence?.mode === "awaiting" || savedFence?.mode === "terminal")
+          && sameLifecycleIdentity(savedFence.identity, identity);
+        const isNewRun = existing === undefined || existing.terminalObserved === true
+          || (existing !== undefined && !hasIdentity)
+          || (existing?.awaitingIdentity === true && existing.summary === undefined && hasIdentity)
+          || (currentIdentity !== undefined && hasIdentity && !sameLifecycleIdentity(currentIdentity, identity));
+        const fenceOptions = isSameAwaitedIdentity
+          ? { awaitingIdentity: true }
+          : isNewRun
+            ? {
+              ...(hasIdentity ? { fence: identity } : {}),
+              ...(isNewRun && !hasIdentity ? { awaitingIdentity: true } : {}),
+            }
+            : {};
+        schedulerChildStarted(id, fenceOptions);
+        const state = settledNotificationChildStates.get(id);
+        if (state !== undefined && (savedFence?.mode === "awaiting" || savedFence?.mode === "terminal")
+          && state.summary === undefined && (!hasIdentity || isSameAwaitedIdentity)) {
+          state.summary = summaryFromIdentity(id, savedFence.identity);
+        }
+        if (existing !== undefined) {
+          existing.terminalObserved = false;
+          // Preserve the event callback's existing observable call even though
+          // the scheduler itself ignores duplicate child starts.
+          settledNotifications.onChildStarted(id);
+        }
+      }
       return;
     }
     const metadata = normalizeSubagentMetadata(event);
@@ -728,20 +1086,37 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     const changed = tracked !== undefined && !sameSubagentMetadata(existing, tracked);
     if (changed && metadata !== undefined) runningSubagents.set(metadata.id, tracked);
     else if (existing !== undefined) existing.eventTracked = true;
-    settledNotifications.onChildStarted(metadata?.id ?? event.id ?? "");
-    if (changed) refresh();
+    const capped = enforceActivityRecordCap();
+    schedulerChildStarted(metadata?.id ?? event.id);
+    if (changed || capped) refresh();
   }
 
   function onNativeTerminal(event: NativeSubagent): void {
+    if (nativeEventsBlocked) return;
     const service = getNativeService();
     if (lifecycleSnapshotSubagentService(service) !== undefined) {
       trace("extension_native_event_terminal", { subagent_id: event?.id, status: event?.status, source: "event_snapshot_mode" });
-      if (event.id !== undefined) settledNotifications.onChildDisposed(event.id);
+      // Bare terminal events are intentionally ignored here. They cannot prove
+      // which run an ID refers to after reuse; snapshot omission handles them.
+      const id = typeof event?.id === "string" ? event.id.trim().slice(0, 128) : undefined;
+      if (id !== undefined && id.length > 0) {
+        const state = settledNotificationChildStates.get(id);
+        const fence = identityFenceFor(id, state);
+        const expected = state?.startFence
+          ?? (state?.summary === undefined ? fence?.identity : lifecycleIdentity(state.summary));
+        const observed = lifecycleIdentity(event);
+        // A terminal event without identity cannot select a run after ID reuse.
+        // Snapshot omission remains the only safe terminal evidence in that case.
+        if (hasLifecycleIdentity(observed) && expected !== undefined && lifecycleFenceMatches(expected, observed)) {
+          if (state !== undefined) state.terminalObserved = true;
+          else rememberIdentityFence(id, { identity: observed, mode: "terminal" });
+        }
+      }
       return;
     }
     const id = event?.id;
     const changed = rememberTerminalSubagent(id);
-    if (id !== undefined) settledNotifications.onChildDisposed(id);
+    schedulerChildDisposed(id);
     if (changed) refresh();
   }
 
@@ -751,14 +1126,29 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   }
 
   function onCompactionResumed(_context: ActivityContext): void {
+    if (nativeEventsBlocked) return;
+    // Reconcile scheduler ownership before refreshing activity. The projection
+    // was cleared at compaction start, so a typed snapshot omission otherwise
+    // leaves settled notifications suppressed until the next timer tick.
+    reconcileSettledNotificationChildren();
     refresh();
     ensureHeartbeat();
   }
 
   function onSessionBoundary(): void {
     // Compaction clears transient projections and timers. Tombstones intentionally
-    // survive this boundary so stale native rows remain fenced.
+    // survive this boundary so stale native rows remain fenced. The root owns
+    // scheduler disposal, so clear only this lifecycle's ownership ledger here.
     clearRunningSubagentsForBoundary();
+    for (const [id, state] of settledNotificationChildStates) {
+      const fence = stateIdentityFence(state);
+      if (fence !== undefined) rememberIdentityFence(id, fence);
+    }
+    nativeEventsBlocked = true;
+    settledNotificationChildStates.clear();
+    settledNotificationChildIds.clear();
+    // Identity-only fences survive the session boundary. A delayed typed
+    // snapshot from the old session must not become the next session's child.
   }
 
   return {
