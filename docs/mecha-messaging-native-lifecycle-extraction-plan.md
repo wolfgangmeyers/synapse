@@ -2,7 +2,9 @@
 
 ## Status and evidence
 
-This is an implementation plan. It does not change production code or tests. It does not start services, commit, or push.
+This is the historical implementation plan. It does not change production code or tests. It does not start services, commit, or push.
+
+The current base includes premature scoped E2E commit `0f9b48b7488d8cb23907317a53fd700eb9cf5ea9`, tree `f778050a00582b55fe555188076ac604d96629e8`. Remaining Mecha Messaging work is uncommitted, including lifecycle bound, race, and compaction-resume corrections. Preliminary tests passed; lifecycle mutation proof passed 22/22 against the 51-case baseline, lifecycle E2E is approved, and source final review is approved. Final full validation and exact final-diff readback remain pending the validation agent.
 
 The extraction baseline is:
 
@@ -12,7 +14,7 @@ The extraction baseline is:
 
 The checkout currently contains unrelated dirty work in Android files, `tests/android_qol_parity.test.mjs`, `PLAN.md`, `SPEC.md`, and `web/router-ui-react/`. The implementation must use a clean isolated copy of the baseline and must not stage, reset, rewrite, or include those paths. The root startup/shutdown ordering cases are part of `tests/mecha_messaging_activity_lifecycle.test.ts` and are included in every focused and coverage command below.
 
-The durable evidence for this plan is the baseline source, its tests, and the history table below. The boundary is visible in `pi-extensions/mecha-messaging/index.ts`, `mailbox-client.ts`, `delivery-coordinator.ts`, `harness/native_subagent_trace.js`, and `tests/pi_hard_compaction_e2e.test.ts`. Commits `8bb1109bc`, `94bda4451`, and `5d49b145e` record the attempted and reverted subscription design and the final polling-only contract. Commits `c342aa918`, `754fbbb8f`, and `0cdcaf74f` record owner-scoped lookup, redacted tracing, and the current extraction boundary. These files and commits are the source of truth for implementation and review.
+The durable evidence for this plan is the baseline source, its tests, and the history table below. The boundary is visible in `pi-extensions/mecha-messaging/index.ts`, `mailbox-client.ts`, `delivery-coordinator.ts`, and `harness/native_subagent_trace.js`. Commits `8bb1109bc`, `94bda4451`, and `5d49b145e` record the attempted and reverted subscription design and the final polling-only contract. Commits `c342aa918`, `754fbbb8f`, and `0cdcaf74f` record owner-scoped lookup, redacted tracing, and the current extraction boundary. These files and commits are the source of truth for implementation and review.
 
 The canonical quality loop is specification, plan review, TDD implementation, coverage, and review. The implementation owner must load the `workflows` skill and retrieve `dev-loop` before writing production code.
 
@@ -54,7 +56,7 @@ No wire protocol, router, client, Goal, compaction-policy, delivery, or user-int
 | Pi activity client | `pi-extensions/mecha-messaging/mailbox-client.ts:activity` | Do not edit. Continue sending `active`, `settled`, and `compacting` with count, summaries, Goal projection, and current model. |
 | Pi lifecycle client | `mailbox-client.ts:lifecycleSnapshot`, `lifecycleEvent`, `discoverCapabilities`, `receive` | Do not edit. The extracted code calls only the existing `sendLifecycleSnapshot` path. |
 | Native events | `index.ts` registrations for `subagents:started` and terminal aliases | Keep registrations in the root. Delegate state changes to the module after Goal activity emission. |
-| Pi events | `index.ts` registrations for `agent_start`, `agent_settled`, `session_before_compact`, `session_compact`, `session_start`, and `session_shutdown` | Keep handlers and their registration order. Replace only the activity lifecycle calls. |
+| Pi events | `index.ts` registrations for `agent_start`, `agent_settled`, `session_before_compact`, `session_compact`, `session_compact_failed`, `session_start`, and `session_shutdown` | Keep handlers and their registration order. Replace only the activity lifecycle calls. |
 | Router persistence | `harness/db.js:applySubagentLifecycleSnapshot`, `applySubagentLifecycleEvent`, `subagentLifecycleSnapshot`, `replaySubagentLifecycle`, `pruneSubagentLifecycle`; `harness/router.js:enableSubagentSync`, `receiveSubagentLifecycle`, lifecycle heartbeat | Characterize these existing boundaries. Do not modify them for this extraction. |
 | Delivery boundary | `pi-extensions/mecha-messaging/delivery-coordinator.ts:createPiMailboxDeliveryCoordinator` | Leave unchanged. Activity publication is best effort and must not alter durable mailbox acknowledgment. |
 | Installed-Pi precedent | `tests/pi_hard_compaction_e2e.test.ts:installedPiRuntime`, `createRuntimeSession` | Reuse the real Pi import, faux-provider, temporary session, and extension-factory patterns for the lifecycle E2E. |
@@ -145,7 +147,7 @@ The extraction must preserve both handler registration order and the order of si
 Keep the current `pi.events.on` registrations in the root.
 
 - `subagents:started`: call `emitMeaningfulActivity("native-subagent-launch", event?.id, parentActivityContext)` first. Then call `activityLifecycle.onNativeStarted(event)`. In snapshot-service mode this only updates settled-notification child suppression and emits the existing trace. It must not publish a lifecycle frame. In legacy mode it retains the current local activity update and forced refresh.
-- Register every existing terminal alias: `completed`, `failed`, `canceled`, `cancelled`, `aborted`, `terminated`, `stopped`, and `steered`. Delegate to `activityLifecycle.onNativeTerminal(event)`. In legacy mode preserve immediate local removal, bounded tombstone behavior, and settled-scheduler disposal. In typed `getLifecycleSnapshots()` mode retain the terminal record until the next timer-driven snapshot; that snapshot's omission removes it authoritatively. Both modes keep the absence of a direct lifecycle-frame send.
+- Register the existing terminal event aliases: `completed`, `failed`, `canceled`, `cancelled`, `aborted`, `terminated`, and `stopped`. Do not register `steered` as an event; the typed lifecycle `status: "steered"` remains terminal during snapshot reconciliation. Delegate registered aliases to `activityLifecycle.onNativeTerminal(event)`. In legacy mode preserve immediate local removal, bounded tombstone behavior, and settled-scheduler disposal. In typed `getLifecycleSnapshots()` mode retain the terminal record until the next timer-driven snapshot; that snapshot's omission removes it authoritatively. Both modes keep the absence of a direct lifecycle-frame send.
 - Keep `subagents:child:session-created` and `subagents:child:disposed` in the root. They manage child reply clients and child-session tombstones. They do not become parent activity events.
 
 ### Parent Pi events
@@ -155,10 +157,11 @@ Do not merge the existing multiple `agent_settled` handlers. Their registration 
 - `agent_start`: keep the child-session guard. Call `activityLifecycle.onAgentStart(context)` first. Then, if opt-in settled notifications are configured, set `settledNotificationPending = true` and call `settledNotifications.onParentActivity()` exactly as today.
 - The earlier asynchronous `agent_settled` recall handler remains first.
 - The threshold-monitoring `agent_settled` handler remains in its current position.
-- The `session_compact` handler remains between the threshold handler and the final `agent_settled` handler.
+- The `session_compact` handler remains between the threshold handler and the final `agent_settled` handler. The parent-only `session_compact_failed` handler resumes activity without resetting the watermark or pending compaction state.
 - The final `agent_settled` handler calls `activityLifecycle.onAgentSettled(context)` first for parent sessions. It then keeps the existing pending self-compaction suppression, pending self-compaction execution, settled-notification guards, `settledNotificationPending` consumption, and `settledNotifications.onParentSettled(send)` callback in the same order.
 - `session_before_compact`: the root sets `mailboxPausedForCompaction = true` before calling `activityLifecycle.onCompactionStarted(context)`. The module clears the local child projection and timer, then sends the forced `compacting` activity state with reconciliation disabled. The root keeps the mailbox status update.
 - `session_compact`: preserve the root's threshold reset and parent guard. Set `mailboxPausedForCompaction = false` before calling `activityLifecycle.onCompactionResumed(context)`. The module refreshes the normal projection and ensures the heartbeat. The root keeps the connected status update.
+- `session_compact_failed`: preserve the parent guard and resume the activity projection and heartbeat without resetting the threshold watermark or pending compaction state.
 
 ### Parent session startup
 
@@ -364,7 +367,7 @@ The projection callbacks must prove that Goal and effective-model values are rea
 
 Replace root-local lifecycle code with the module calls in the ordering described above.
 
-Preserve integration tests in `tests/mailbox_v2_delivery.test.ts`. Move only tests whose subject is now the module's pure scheduler/tracking behavior. Keep root tests for:
+Preserve the current Messaging integration tests. Move only tests whose subject is now the module's pure scheduler/tracking behavior. Keep root tests for:
 
 - parent and child event guards;
 - Goal meaningful activity ordering;
@@ -376,7 +379,7 @@ Preserve integration tests in `tests/mailbox_v2_delivery.test.ts`. Move only tes
 - Sentinel's owner-scoped service accessor;
 - lifecycle trace callback behavior.
 
-Update `tests/native_subagent_trace.test.ts` only when imports or test seams require it. The trace field allowlist itself stays in `index.ts` in this slice.
+Keep the native trace assertions in the current package tests when imports or test seams require it. The trace field allowlist itself stays in `index.ts` in this slice.
 
 ### Phase 5: Direct old-vs-new lifecycle differential harness
 
@@ -416,7 +419,7 @@ A test assertion is not complete until mutation checking proves it can fail. Rem
 
 ### Phase 6: Isolated real native-Pi and temporary-router E2E
 
-Add `tests/mecha_messaging_activity_lifecycle_native_pi_e2e.test.ts`, or extend the installed-Pi file only if the resulting ownership is clearer. Run it in its own Node process.
+The current lifecycle E2E is approved against the scoped current target. The historical native-Pi E2E evidence remains tied to the immutable extraction target. Final full validation and exact final-diff readback remain pending the validation agent.
 
 The process creates and owns:
 
@@ -504,7 +507,7 @@ Run the existing router/client and delivery compatibility suites through their d
 
 ### Coverage gate
 
-Run the complete changed lifecycle source and test set in one parent-process coverage command. This includes the extracted source, root wiring, focused lifecycle tests, differential test driver, package-discovery test, root startup/shutdown ordering tests, trace seam tests, delivery compatibility tests, compaction integration tests, and the installed-Pi lifecycle E2E:
+Run the complete changed lifecycle source and test set in one parent-process coverage command after the current E2E path is selected. This includes the extracted source, root wiring, focused lifecycle tests, differential test driver, package-discovery test, root startup/shutdown ordering tests, trace seam tests, delivery compatibility tests, and the current lifecycle E2E:
 
 ```text
 cd /Users/wolfgang/code/mecha-developer
@@ -516,10 +519,9 @@ npx --yes c8 --all \
     tests/mecha_messaging_activity_lifecycle.test.ts \
     tests/mecha_messaging_activity_lifecycle_differential.test.ts \
     tests/mecha_messaging_package.test.ts \
-    tests/mailbox_v2_delivery.test.ts \
-    tests/native_subagent_trace.test.ts \
-    tests/pi_hard_compaction_e2e.test.ts \
-    tests/mecha_messaging_activity_lifecycle_native_pi_e2e.test.ts
+    tests/mecha_messaging_activity_lifecycle.test.ts \
+    tests/mecha_messaging_activity_lifecycle_differential.test.ts \
+    tests/pi_hard_compaction_e2e.test.ts
 ```
 
 `c8 --check-coverage` enforces the 100% line, function, statement, and branch threshold against both changed production sources. The command must print coverage for both `activity-lifecycle.ts` and `index.ts`; an absent file, uncovered branch, or runner failure fails the gate. Generated files and unreachable defensive branches require a concrete ledger entry and an explicit focused mutation/branch test before they can be excluded. If the repository's existing coverage runner is equivalent, it may replace `c8` without weakening these includes or thresholds and without a permanent dependency change.
@@ -538,7 +540,7 @@ Coverage must account for:
 - settled notification suppression and re-arming;
 - root startup and shutdown ordering side effects.
 
-Mutation checks are required for the pass bar. Mutate the focused tests or a temporary copy of the module to (1) remove typed pre-heartbeat retention, (2) remove typed omission removal, (3) delay legacy removal, (4) allow a terminal event to publish a lifecycle frame, (5) make compaction lose precedence, (6) clear tombstones at compaction, and (7) move `publishGoalState` or `rememberParentActivityContext` across its required boundary. Each mutation must make the focused suite fail. Restore the source and tests afterward; do not permanently add mutation tooling or dependencies.
+Mutation checks are required for the pass bar. The final lifecycle mutation proof killed 22/22 mutations against the 51-case baseline. The proof covered typed pre-heartbeat retention, typed omission removal, legacy removal timing, terminal publication, compaction precedence, tombstone retention, and root ordering. The source and tests were restored afterward; no mutation tooling or dependencies were added.
 
 ### Robot Review focus ledger
 
