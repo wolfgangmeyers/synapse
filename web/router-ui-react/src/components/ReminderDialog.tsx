@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { activeRemindersForPeer, createReminderPayload, lockResultState, reminderLockKey, reminderRecurrenceLabel, validateReminderDelay, type Reminder, type ReminderCreateInput, type ReminderLockAction } from "../domain/reminders";
 import { DialogShell } from "./DialogShell";
 import { useCountdown } from "../hooks/use-countdown";
@@ -31,7 +31,13 @@ export function ReminderDialog({ open, peer, creator, reminders, locks, pendingI
   const [lockAfterCreate, setLockAfterCreate] = useState(false);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<string>();
-  useEffect(() => { if (!open) { setMode("list"); setEditing(undefined); setError(""); setBusyId(undefined); } }, [open]);
+  const previousPeer = useRef(peer);
+  useEffect(() => {
+    if (!open || previousPeer.current !== peer) {
+      setMode("list"); setEditing(undefined); setSubject(""); setBody(""); setDelay(1); setRecurring(false); setLockAfterCreate(false); setError(""); setBusyId(undefined);
+    }
+    previousPeer.current = peer;
+  }, [open, peer]);
   const active = activeRemindersForPeer(reminders, peer);
   const startCreate = () => { setMode("create"); setEditing(undefined); setSubject(""); setBody(""); setDelay(1); setRecurring(false); setLockAfterCreate(false); setError(""); };
   const startEdit = (reminder: Reminder) => { setMode("edit"); setEditing(reminder); setSubject(reminder.subject ?? ""); setBody(reminder.body); setError(""); };
