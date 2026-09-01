@@ -39,7 +39,8 @@ export function GoalEditorDialog({ open, peer, goalState, value, capabilityAvail
   const [draft, setDraft] = useState<GoalEditorValues>(editorFromState(value ?? goalState ?? DEFAULT_GOAL_STATE));
   const [validationError, setValidationError] = useState("");
   const source = value ?? goalState;
-  useEffect(() => { if (open) { setDraft(editorFromState(source ?? DEFAULT_GOAL_STATE)); setValidationError(""); } }, [open, source]);
+  const sourceKey = JSON.stringify(editorFromState(source ?? DEFAULT_GOAL_STATE));
+  useEffect(() => { if (open) { setDraft(editorFromState(source ?? DEFAULT_GOAL_STATE)); setValidationError(""); } }, [open, peer, sourceKey]);
   const set = <K extends keyof GoalEditorValues>(key: K, next: GoalEditorValues[K]) => setDraft((current) => ({ ...current, [key]: next }));
   const save = () => {
     const positive = (item: number): boolean => Number.isSafeInteger(item) && item > 0;

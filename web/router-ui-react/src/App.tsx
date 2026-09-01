@@ -354,7 +354,7 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
       const result = await session.transport.http.updateReminder(id, payload);
       session.dispatch({ type: "reminders/set", scope, reminders: sessionStateRef.current.reminders.map((reminder) => reminder.id === id ? result.reminder : reminder) });
       try { await refreshReminders(session.transport); } catch { setReminderStatus("Reminder updated, but the list could not be refreshed."); }
-    } catch (cause) { setReminderStatus(cause instanceof Error ? cause.message : "Reminder could not be updated."); }
+    } catch (cause) { setReminderStatus(cause instanceof Error ? cause.message : "Reminder could not be updated."); throw cause; }
   };
   const deleteReminder = async (id: string): Promise<void> => {
     try {
