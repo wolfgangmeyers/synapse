@@ -240,20 +240,35 @@ export async function startIsolatedGoRouter({ repositoryRoot = REPOSITORY_ROOT, 
     await assertPrivatePath(processInfo.databasePath, "isolated router database");
     await assertPrivatePath(processInfo.logPath, "isolated router log");
     await assertPrivatePath(processInfo.attachmentsPath, "isolated router attachments");
+    let currentProcessInfo = processInfo;
     let closed = false;
-    return {
+    const runtime = {
       ...processInfo,
       rootPath: root,
       health: verified.health,
       capabilities: verified.capabilities,
+      async restart() {
+        if (closed) throw new Error("cannot restart a closed isolated router");
+        await stopRouterProcess(currentProcessInfo);
+        currentProcessInfo = await spawnRouterProcess({
+          command: processInfo.command,
+          args: processInfo.args,
+          cwd: processInfo.cwd,
+          root,
+          expectedPort: processInfo.port,
+          timeoutMs,
+        });
+        const restarted = await verifyRouterReadiness(currentProcessInfo.httpUrl);
+        Object.assign(runtime, currentProcessInfo, restarted, { rootPath: root, health: restarted.health, capabilities: restarted.capabilities });
+      },
       async close() {
         if (closed) return { alreadyClosed: true };
         closed = true;
-        const stop = await stopRouterProcess(processInfo);
+        const stop = await stopRouterProcess(currentProcessInfo);
         let logText = "";
         let shutdownError;
         try {
-          logText = await readFile(processInfo.logPath, "utf8");
+          logText = await readFile(currentProcessInfo.logPath, "utf8");
           if (!logText.includes('"event":"router_stopped"')) shutdownError = new Error("isolated Go router log lacks router_stopped");
         } catch (error) {
           shutdownError = error;
@@ -264,6 +279,7 @@ export async function startIsolatedGoRouter({ repositoryRoot = REPOSITORY_ROOT, 
         return { stop, logText, rootRemoved: true };
       },
     };
+    return runtime;
   } catch (error) {
     if (processInfo !== undefined) {
       try { await stopRouterProcess(processInfo); } catch { /* cleanup below owns only this task root */ }
