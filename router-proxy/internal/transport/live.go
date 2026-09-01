@@ -571,8 +571,8 @@ func (r *Router) closeExpiredLeaseSessions(expired []store.ExpiredLease) {
 }
 
 // handleTmux owns the router's worker-window contract. The process adapter is
-// deliberately separate, but every mutation is serialized here so a launch can
-// retain its Pi session ID only after tmux has accepted the window.
+// deliberately separate, and concurrent provision requests share one tmux
+// operation before the router retains the Pi session ID.
 func (r *Router) handleTmux(w http.ResponseWriter, req *http.Request) bool {
 	if r.tmux == nil {
 		r.writeError(w, &httpError{status: http.StatusNotFound, code: "tmux_unavailable"})
