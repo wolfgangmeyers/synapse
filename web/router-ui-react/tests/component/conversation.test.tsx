@@ -43,6 +43,67 @@ describe("Conversation", () => {
     expect(list.scrollTop).toBe(300);
   });
 
+  it("renders distinct message incarnations with the same message ID as separate bubbles", () => {
+    const { container } = render(<MessageList messages={[{ id: "same-id", message_incarnation_id: "first", body: "First incarnation" }, { id: "same-id", message_incarnation_id: "second", body: "Second incarnation" }]} />);
+    expect(container.querySelectorAll('[data-message-id="same-id"]')).toHaveLength(2);
+    expect(screen.getByText("First incarnation")).toBeTruthy();
+    expect(screen.getByText("Second incarnation")).toBeTruthy();
+  });
+
+  it("keeps a selected message subtree and browser selection stable across routine updates", () => {
+    const { container, rerender } = render(<MessageList messages={[{ id: "1", body: "Selected message" }, { id: "2", body: "Other message" }]} />);
+    const selectedBubble = container.querySelector<HTMLElement>('[data-message-id="1"]');
+    const selectedBody = selectedBubble?.querySelector<HTMLElement>(".markdown-body");
+    const selectedText = selectedBody?.querySelector("p")?.firstChild;
+    if (!(selectedBubble && selectedBody && selectedText instanceof Text)) throw new Error("Selected message was not rendered");
+
+    const range = document.createRange();
+    range.setStart(selectedText, 0);
+    range.setEnd(selectedText, 8);
+    const selection = window.getSelection();
+    if (!selection) throw new Error("Browser selection is unavailable");
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const anchorNode = selection.anchorNode;
+    const focusNode = selection.focusNode;
+
+    rerender(<MessageList messages={[{ id: "1", body: "Selected message" }, { id: "2", body: "Updated message" }]} />);
+
+    expect(container.querySelector('[data-message-id="1"]')).toBe(selectedBubble);
+    expect(container.querySelector('[data-message-id="1"] .markdown-body')).toBe(selectedBody);
+    expect(selection.anchorNode).toBe(anchorNode);
+    expect(selection.focusNode).toBe(focusNode);
+    expect(selection.anchorOffset).toBe(0);
+    expect(selection.focusOffset).toBe(8);
+  });
+
+  it("updates a selected message body and removes stale rendered text", () => {
+    const { container, rerender } = render(<MessageList messages={[{ id: "1", body: "Old message" }]} />);
+    rerender(<MessageList messages={[{ id: "1", body: "New message" }]} />);
+    const body = container.querySelector('[data-message-id="1"] .markdown-body');
+    expect(body?.textContent).toContain("New message");
+    expect(body?.textContent).not.toContain("Old message");
+  });
+
+  it("preserves scroll position without writing or churning on a same-length message update", () => {
+    const { container, rerender } = render(<MessageList peerId="one" messages={[{ id: "1", body: "One" }]} />);
+    const list = container.querySelector<HTMLDivElement>(".messages");
+    if (!list) throw new Error("Message list was not rendered");
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 200 });
+    let scrollTop = 30;
+    let writes = 0;
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { writes += 1; scrollTop = value; },
+    });
+
+    rerender(<MessageList peerId="one" messages={[{ id: "1", body: "Two" }]} />);
+
+    expect(writes).toBe(0);
+    expect(list.scrollTop).toBe(30);
+  });
+
   it("renders safe markdown and sends through the composer", () => {
     const onSend = vi.fn();
     const { container } = render(<Conversation peer={{ agent_id: "helper" }} messages={[{ id: "1", from: "helper", to: "ui", body: "**Hello**" }]} onSend={onSend} />);

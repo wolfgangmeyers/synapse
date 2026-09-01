@@ -22,34 +22,96 @@ export function textWithoutMarkdownImages(body: unknown): string {
 }
 
 function escapeHtml(value: string): string { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;"); }
+function extractFallbackCodeBlocks(body: string, blocks: string[]): string {
+  const lines = body.split("\n");
+  const output: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index] ?? "";
+    if (!/^\s*```[^\n]*$/.test(line) || index === lines.length - 1) {
+      output.push(line);
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < lines.length && !/^\s*```\s*$/.test(lines[end] ?? "")) end += 1;
+    const code = lines.slice(index + 1, end).join("\n").replace(/\n$/, "");
+    const token = `\u0000BLOCK${blocks.length}\u0000`;
+    blocks.push(`<pre><code>${escapeHtml(code)}</code></pre>`);
+    output.push(token);
+    index = end < lines.length ? end + 1 : lines.length;
+  }
+  return output.join("\n");
+}
+function replaceFallbackMarkdownLinks(value: string, links: string[]): string {
+  const pattern = /(!?)\[([^\]\n]+)\]\(/g;
+  let output = "";
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    if (match[1] === "!" || (match.index > 0 && value[match.index - 1] === "\\")) continue;
+    const destinationStart = pattern.lastIndex;
+    let destinationEnd = destinationStart;
+    if (value[destinationStart] === "<") {
+      const bracketEnd = value.indexOf(">", destinationStart + 1);
+      if (bracketEnd < 0 || value[bracketEnd + 1] !== ")") continue;
+      destinationEnd = bracketEnd + 1;
+    } else {
+      let parentheses = 0;
+      while (destinationEnd < value.length) {
+        const character = value[destinationEnd];
+        if (character === "(") parentheses += 1;
+        if (character === ")") {
+          if (parentheses === 0) break;
+          parentheses -= 1;
+        }
+        destinationEnd += 1;
+      }
+      if (destinationEnd === value.length || value[destinationEnd] !== ")" || parentheses !== 0) continue;
+    }
+    const label = match[2] ?? "";
+    const href = value.slice(destinationStart, destinationEnd);
+    const token = `\u0000LINK${links.length}\u0000`;
+    links.push(isAllowedMarkdownLink(href.replace(/&amp;/g, "&")) ? `<a target="_blank" rel="noopener noreferrer" href="${href}">${label}</a>` : value.slice(match.index, destinationEnd + 1));
+    output += `${value.slice(cursor, match.index)}${token}`;
+    cursor = destinationEnd + 1;
+    pattern.lastIndex = cursor;
+  }
+  return `${output}${value.slice(cursor)}`;
+}
 function fallbackMarkdown(body: string): string {
   const blocks: string[] = [];
-  const source = body.replace(/^\s*```[^\n]*\n([\s\S]*?)^\s*```\s*$/gm, (_match, code: string) => { const token = `\u0000BLOCK${blocks.length}\u0000`; blocks.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`); return token; });
+  const source = extractFallbackCodeBlocks(body, blocks);
   const inlineCode: string[] = [];
+  const links: string[] = [];
   const lines = source.split("\n").map((line) => {
     let html = escapeHtml(line);
     html = html.replace(/`([^`\n]+)`/g, (_match, value: string) => { const token = `\u0000CODE${inlineCode.length}\u0000`; inlineCode.push(`<code>${escapeHtml(value)}</code>`); return token; });
     html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    html = html.replace(/\[([^\]]+)\]\(([^)\n]+)\)/g, (match: string, label: string, href: string) => isAllowedMarkdownLink(href) ? `<a target="_blank" rel="noopener noreferrer" href="${escapeHtml(href)}">${label}</a>` : match);
+    html = replaceFallbackMarkdownLinks(html, links);
     return html;
   });
   let html = lines.join("<br>");
+  for (const [index, value] of links.entries()) html = html.replace(`\u0000LINK${index}\u0000`, value);
   for (const [index, value] of inlineCode.entries()) html = html.replace(`\u0000CODE${index}\u0000`, value);
   for (const [index, value] of blocks.entries()) html = html.replace(`\u0000BLOCK${index}\u0000`, value);
   return html;
 }
 interface MarkdownToken { content: string; attrGet(name: string): string | null }
-interface MarkdownRenderer { validateLink: (value: string) => boolean; render: (value: string) => string; renderer?: { rules: Record<string, (tokens: MarkdownToken[], index: number) => string>; utils: { escapeHtml(value: string): string } } }
+interface Linkify { set(options: { fuzzyLink: boolean; fuzzyEmail: boolean }): Linkify; add(schema: string, definition: null): Linkify }
+interface MarkdownRendererSelf { utils: { escapeHtml(value: string): string } }
+type MarkdownRendererRule = (tokens: MarkdownToken[], index: number, options: unknown, env: unknown, self: MarkdownRendererSelf) => string;
+interface MarkdownRenderer { validateLink: (value: string) => boolean; render: (value: string) => string; linkify?: Linkify; renderer?: { rules: Record<string, MarkdownRendererRule> } }
 type MarkdownConstructor = new (options: { html: boolean; breaks: boolean; linkify: boolean }) => MarkdownRenderer;
 function isMarkdownConstructor(value: unknown): value is MarkdownConstructor { return typeof value === "function"; }
 function createMarkdownRenderer(MarkdownItCtor: MarkdownConstructor): MarkdownRenderer {
-  const renderer = new MarkdownItCtor({ html: false, breaks: true, linkify: false });
+  const renderer = new MarkdownItCtor({ html: false, breaks: true, linkify: true });
   renderer.validateLink = isAllowedMarkdownLink;
+  renderer.linkify?.set({ fuzzyLink: false, fuzzyEmail: false }).add("ftp:", null).add("//", null).add("mailto:", null);
   if (renderer.renderer !== undefined) {
     renderer.renderer.rules.image = (tokens, index) => {
       const token = tokens[index];
-      const alt = renderer.renderer?.utils.escapeHtml(token?.content ?? "") ?? "";
-      const src = renderer.renderer?.utils.escapeHtml(token?.attrGet("src") ?? "") ?? "";
+      const alt = escapeHtml(token?.content ?? "");
+      const src = escapeHtml(token?.attrGet("src") ?? "");
       return `![${alt}](${src})`;
     };
   }
@@ -62,11 +124,12 @@ export function markdownToSafeHtml(body: unknown, MarkdownItCtor?: unknown): str
     const renderer = createMarkdownRenderer(ctor);
     return renderer.render(source).replace(/<a href=/g, '<a target="_blank" rel="noopener noreferrer" href=').replace(/\n$/, "");
   }
+  // Fallback is selected only when tests inject a non-constructor. Production bundles MarkdownIt and does not use this path to recover from a missing or failed runtime.
   return fallbackMarkdown(source);
 }
 
-/** Markdown-it is configured with raw HTML disabled and its output is sanitized above. */
+/** Markdown-it disables raw HTML and validates rendered links before this component inserts the markup. */
 export function markdownToReact(body: unknown): React.ReactElement {
   return React.createElement("div", { className: "markdown-body", dangerouslySetInnerHTML: { __html: markdownToSafeHtml(body) } });
 }
-export const MarkdownBody = ({ body }: { body: string }): React.ReactElement => markdownToReact(body);
+export const MarkdownBody = React.memo(({ body }: { body: string }): React.ReactElement => markdownToReact(body));

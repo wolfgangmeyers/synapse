@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, type ReactElement } from "react";
-import type { HistoryMessage } from "../domain/history";
+import { messageKey, type HistoryMessage } from "../domain/history";
 import { shouldFollowToBottom } from "../state/conversation-projection";
 import { EmptyState } from "./EmptyState";
 import { MessageBubble } from "./MessageBubble";
@@ -16,5 +16,5 @@ export function MessageList({ messages, peerId, ownerId, routerUrl, loading = fa
   }, [conversationKey, messages.length]);
   const onScroll = (): void => { const element = ref.current; if (!element) return; onNearBottomChange?.(shouldFollowToBottom(element.scrollTop, element.clientHeight, element.scrollHeight)); };
   const hasMessages = messages.length > 0;
-  return <div ref={ref} className="messages" onScroll={onScroll} aria-live="polite">{hasMessages ? messages.map((message) => <MessageBubble key={`${message.id}-${message.message_incarnation_id ?? ""}`} message={message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} />) : loading ? <EmptyState title="Loading conversation…" /> : error ? <p className="error" role="alert">{error}</p> : <EmptyState title="No messages yet" description="Send a message to start the conversation." />}{hasMessages && error ? <p className="error" role="alert">{error}</p> : null}</div>;
+  return <div ref={ref} className="messages" onScroll={onScroll} aria-live="polite">{hasMessages ? messages.map((message) => <MessageBubble key={messageKey(message)} message={message} {...(ownerId !== undefined ? { ownerId } : {})} {...(routerUrl !== undefined ? { routerUrl } : {})} />) : loading ? <EmptyState title="Loading conversation…" /> : error ? <p className="error" role="alert">{error}</p> : <EmptyState title="No messages yet" description="Send a message to start the conversation." />}{hasMessages && error ? <p className="error" role="alert">{error}</p> : null}</div>;
 }
