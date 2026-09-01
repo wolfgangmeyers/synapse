@@ -78,7 +78,7 @@ function validAgent(value: unknown, includeModels = true): value is Agent {
 function validReminder(value: unknown): value is Reminder {
   const item = recordValue(value);
   if (!item || !nonEmptyString(item.id) || !isAgentId(item.target) || !isAgentId(item.creator) || !nonEmptyString(item.body) || !timestamp(item.created_at) || !timestamp(item.next_due_at) || (item.interval_ms !== null && !safeInteger(item.interval_ms, 1)) || !["scheduled", "due", "message_queued", "queued", "leased", "injection_requested", "acknowledged", "failed", "dead_letter"].includes(String(item.state)) || !safeInteger(item.occurrence_number) || !safeInteger(item.attempt_count)) return false;
-  if ((Object.hasOwn(item, "subject") && typeof item.subject !== "string") || (Object.hasOwn(item, "linked_message_id") && !nonEmptyString(item.linked_message_id)) || (Object.hasOwn(item, "linked_message_state") && !nonEmptyString(item.linked_message_state)) || (Object.hasOwn(item, "last_attempt_at") && !timestamp(item.last_attempt_at))) return false;
+  if ((Object.hasOwn(item, "subject") && item.subject !== null && typeof item.subject !== "string") || (Object.hasOwn(item, "linked_message_id") && item.linked_message_id !== null && !nonEmptyString(item.linked_message_id)) || (Object.hasOwn(item, "linked_message_state") && item.linked_message_state !== null && !nonEmptyString(item.linked_message_state)) || (Object.hasOwn(item, "last_attempt_at") && item.last_attempt_at !== null && !timestamp(item.last_attempt_at))) return false;
   return true;
 }
 function validTemplate(value: unknown): value is PromptTemplate {
