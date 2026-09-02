@@ -316,6 +316,10 @@ func (r *Router) connectedAgents(includeModels bool) map[string]any {
 	for key, value := range r.goals {
 		goals[key] = value
 	}
+	inlineToolStates := make(map[string]inlineToolState, len(r.inlineToolStates))
+	for key, value := range r.inlineToolStates {
+		inlineToolStates[key] = value
+	}
 	lifecycle := make(map[string]lifecycleAgent, len(r.lifecycleState))
 	for key, value := range r.lifecycleState {
 		lifecycle[key] = value
@@ -328,7 +332,10 @@ func (r *Router) connectedAgents(includeModels bool) map[string]any {
 		if err != nil || lease == nil || lease.LeaseID != s.leaseID || lease.InstanceID != s.deliveryInstance || lease.ExpiresAt <= timestamp(now) {
 			continue
 		}
-		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}}
+		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "inline_tool_control_available": s.inlineToolControl}
+		if inlineToolState, ok := inlineToolStates[s.agentID]; ok && inlineToolState.instanceID == s.instanceID && inlineToolState.leaseID == lease.LeaseID {
+			item["inline_tool_enabled"] = inlineToolState.enabled
+		}
 		activity, activityOK := activities[s.agentID]
 		if activityOK && activity.instanceID == s.instanceID && activity.leaseID == lease.LeaseID && activity.expires.After(now) {
 			item["activity_state"] = activity.state

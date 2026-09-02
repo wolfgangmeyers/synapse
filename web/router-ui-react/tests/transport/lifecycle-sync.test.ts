@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLifecycleTracker, createRouterTransport, type RouterDiagnostic, type RouterTransport } from "../../src/transport/router-transport";
+import { createLifecycleTracker, createRouterTransport, type RouterDiagnostic, type RouterTransport, type TransportEvent } from "../../src/transport/router-transport";
 import type { SocketEvent, WebSocketFactory, WebSocketLike } from "../../src/transport/websocket-client";
 
 class FakeSocket implements WebSocketLike {
@@ -18,13 +18,13 @@ function record(value: unknown): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value));
 }
 
-function fakeTransport(diagnostics: RouterDiagnostic[], failAgents = false): { transport: RouterTransport; socket: FakeSocket } {
+function fakeTransport(diagnostics: RouterDiagnostic[], failAgents = false, inline = false): { transport: RouterTransport; socket: FakeSocket } {
   let socket: FakeSocket | undefined;
   const webSocketFactory: WebSocketFactory = (url) => { socket = new FakeSocket(url); return socket; };
   const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
     const path = new URL(String(input)).pathname;
     if (path === "/v1/agents" && failAgents) throw new Error("agents unavailable");
-    const body = path === "/v1/agents" ? { agents: [] } : { subagent_lifecycle_v2: true };
+    const body = path === "/v1/agents" ? { agents: [] } : { subagent_lifecycle_v2: true, ...(inline ? { inline_tool_control_v1: true } : {}) };
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   };
   const transport = createRouterTransport({ routerUrl: "http://router.test", agentId: "web", webSocketFactory, fetchImpl, onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
@@ -45,6 +45,20 @@ describe("lifecycle synchronization", () => {
   });
   it("does not infer resync from a version gap", () => {
     const tracker = createLifecycleTracker(2); expect(tracker.shouldResync()).toBe(false); expect(tracker.shouldResync("recovery")).toBe(true);
+  });
+
+  it("sends and correlates an inline tool control", async () => {
+    const transportFixture = fakeTransport([], false, true);
+    const { transport, socket } = transportFixture;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const events: TransportEvent[] = [];
+    transport.subscribe((event) => events.push(event));
+    expect(transport.inlineToolControlAvailable).toBe(true);
+    expect(transport.sendInlineToolControl("peer", "peer-instance", true, "inline-control")).toBe(true);
+    expect(socket.sent.at(-1)).toMatchObject({ type: "inline_tool_control", target_agent_id: "peer", target_instance_id: "peer-instance", control_id: "inline-control", enabled: true });
+    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "inline-result", type: "inline_tool_control_result", agent_id: "peer", instance_id: "peer-instance", lease_id: "peer-lease", source_agent_id: "web", control_id: "inline-control", accepted: true, enabled: true }) });
+    expect(events.some((event) => event.type === "control" && event.kind === "inline-tool")).toBe(true);
+    transport.close();
   });
 
   it("reports dropped lifecycle frames with bounded identifiers, counts, and reasons", () => {

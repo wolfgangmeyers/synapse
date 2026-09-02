@@ -3,6 +3,8 @@ import {
   buildAckFrame,
   buildBatchReceipts,
   buildGoalControlFrame,
+  buildInlineToolControlFrame,
+  buildInlineToolStateFrame,
   buildModelControlFrame,
   buildNackFrame,
   buildRegisterFrame,
@@ -56,8 +58,14 @@ describe("protocol frame builders", () => {
       ack_confirmation: "correlated_v1",
       conversation_sync: "v1",
       delivery_receipts: "delivery_items_v1",
+      inline_tool_control: "v1",
     });
     expect(isClientFrame(frame)).toBe(true);
+  });
+
+  it("builds inline tool state and control frames", () => {
+    expect(buildInlineToolStateFrame({ ...receiptIdentity, enabled: false })).toMatchObject({ type: "inline_tool_state", agent_id: "ui-agent", enabled: false });
+    expect(buildInlineToolControlFrame({ ...receiptIdentity, targetAgentId: "worker-a", targetInstanceId: "worker-instance", controlId: "inline-control", enabled: true })).toEqual({ version: "v1", frame_id: expect.any(String), type: "inline_tool_control", agent_id: "ui-agent", instance_id: "instance-1", lease_id: "lease-1", target_agent_id: "worker-a", target_instance_id: "worker-instance", control_id: "inline-control", enabled: true });
   });
 
   it("builds controls with target identity and preserves goal set/off semantics", () => {

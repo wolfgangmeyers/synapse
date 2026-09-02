@@ -6,6 +6,8 @@ import {
   isGoalSettings,
   isGoalStateFrame,
   isInjectionRequestedFrame,
+  isInlineToolControlFrame,
+  isInlineToolStateFrame,
   isLeaseRenewFrame,
   isModelCatalogFrame,
   isModelControlFrame,
@@ -28,6 +30,8 @@ import type {
   GoalControlFrame,
   GoalStateFrame,
   InjectionRequestedFrame,
+  InlineToolControlFrame,
+  InlineToolStateFrame,
   LeaseRenewFrame,
   MessageArrivalClientFrame,
   ModelCatalogFrame,
@@ -142,6 +146,7 @@ export function buildRegisterFrame(input: unknown): RegisterFrame {
     ack_confirmation: "correlated_v1",
     conversation_sync: "v1",
     delivery_receipts: "delivery_items_v1",
+    inline_tool_control: "v1",
   }, isRegisterFrame);
 }
 
@@ -180,6 +185,25 @@ export function buildModelCatalogFrame(input: unknown): ModelCatalogFrame {
     if (value !== undefined) candidate[outputKey] = value;
   }
   return valid(candidate, isModelCatalogFrame);
+}
+
+export function buildInlineToolStateFrame(input: unknown): InlineToolStateFrame {
+  const record = inputRecord(input);
+  return valid({ version: "v1", frame_id: suppliedFrameId(record), type: "inline_tool_state", ...identity(record), enabled: requiredValue(record, "enabled") }, isInlineToolStateFrame);
+}
+
+export function buildInlineToolControlFrame(input: unknown): InlineToolControlFrame {
+  const record = inputRecord(input);
+  return valid({
+    version: "v1",
+    frame_id: suppliedFrameId(record),
+    type: "inline_tool_control",
+    ...identity(record),
+    target_agent_id: requiredValue(record, "targetAgentId"),
+    target_instance_id: requiredValue(record, "targetInstanceId"),
+    control_id: requiredValue(record, "controlId"),
+    enabled: requiredValue(record, "enabled"),
+  }, isInlineToolControlFrame);
 }
 
 export function buildModelControlFrame(input: unknown): ModelControlFrame {

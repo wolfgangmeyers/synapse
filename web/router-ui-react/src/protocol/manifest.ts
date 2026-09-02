@@ -19,6 +19,7 @@ export interface ProtocolManifest {
 
 export const clientFrameNames = [
   "register", "lease_renew", "activity", "model_catalog", "model_control", "model_control_result",
+  "inline_tool_state", "inline_tool_control", "inline_tool_control_result",
   "goal_control", "goal_control_result", "reminder_lock_control", "reminder_lock_control_result",
   "goal_state", "message_arrival", "injection_requested", "ack", "nack", "ping",
   "subagent_sync_enable", "subagent_lifecycle_snapshot", "subagent_lifecycle_event", "subagent_state_resync",
@@ -26,8 +27,8 @@ export const clientFrameNames = [
 
 export const serverFrameNames = [
   "registered", "lease_rejected", "error", "pong", "message", "conversation_message", "reminders_changed",
-  "model_control", "model_control_result", "goal_control", "goal_control_result",
-  "reminder_lock_control", "reminder_lock_control_result", "agent_goal_state", "delivery_acknowledged",
+  "model_control", "model_control_result", "inline_tool_state", "inline_tool_control", "inline_tool_control_result",
+  "goal_control", "goal_control_result", "reminder_lock_control", "reminder_lock_control_result", "agent_goal_state", "delivery_acknowledged",
   "agent_activity", "agent_model_catalog", "message_arrival", "subagent_state_snapshot",
   "subagent_state_update", "subagent_state_replay", "subagent_lifecycle_acknowledged",
 ] as const satisfies readonly string[];

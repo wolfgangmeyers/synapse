@@ -1,4 +1,4 @@
-import { buildAckFrame, buildActivityFrame, buildGoalControlFrame, buildInjectionRequestedFrame, buildModelControlFrame, buildNackFrame, buildReminderLockControlFrame, buildSubagentStateResyncFrame, buildSubagentSyncEnableFrame } from "../protocol/frame-builders";
+import { buildAckFrame, buildActivityFrame, buildGoalControlFrame, buildInjectionRequestedFrame, buildInlineToolControlFrame, buildModelControlFrame, buildNackFrame, buildReminderLockControlFrame, buildSubagentStateResyncFrame, buildSubagentSyncEnableFrame } from "../protocol/frame-builders";
 import { isDeliveryItem, isRecord } from "../protocol/guards";
 import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
@@ -72,9 +72,9 @@ export type TransportEvent =
   | { type: "conversation"; message: HistoryMessage }
   | { type: "reminders"; reminders: Reminder[] }
   | { type: "delivery"; message: HistoryMessage; messages: HistoryMessage[]; receipt: DeliveryReceiptPayload }
-  | { type: "capabilities"; goalControlAvailable: boolean }
+  | { type: "capabilities"; goalControlAvailable: boolean; inlineToolControlAvailable: boolean }
   | { type: "control-pending"; pending: PendingControl }
-  | { type: "control"; kind: ControlKind; frame: Extract<ServerFrame, { type: "model_control_result" | "goal_control_result" | "reminder_lock_control_result" }>; pending: PendingControl }
+  | { type: "control"; kind: ControlKind; frame: Extract<ServerFrame, { type: "model_control_result" | "goal_control_result" | "reminder_lock_control_result" | "inline_tool_control_result" }>; pending: PendingControl }
   | { type: "control-error"; frame: ErrorFrame; pending: PendingControl }
   | { type: "controls-invalidated"; reason?: "router_reconnecting" | "target_not_connected" | "control_timeout" }
   | { type: "error"; error: Error; frame?: ServerFrame };
@@ -100,6 +100,7 @@ export interface RouterTransport {
   readonly http: RouterHttpClient;
   readonly socket: WebSocketClient;
   readonly goalControlAvailable: boolean;
+  readonly inlineToolControlAvailable: boolean;
   readonly lifecycle: LifecycleTracker;
   subscribe(listener: TransportListener): () => void;
   connect(): void;
@@ -111,6 +112,7 @@ export interface RouterTransport {
   sendActivity(activityState: "active" | "settled" | "compacting", details?: Pick<Agent, "subagent_count" | "subagents" | "goal" | "current_model">): boolean;
   sendModelControl(targetAgentId: string, targetInstanceId: string, model: ModelSummary, controlId?: string): boolean;
   sendGoalControl(targetAgentId: string, targetInstanceId: string, control: { controlId: string; action: "set" | "off"; goal: string; settings: GoalControlSettings; revision?: number }): boolean;
+  sendInlineToolControl(targetAgentId: string, targetInstanceId: string, enabled: boolean, controlId?: string): boolean;
   sendReminderLockControl(targetAgentId: string, targetInstanceId: string, reminderId: string, action: "set" | "clear", controlId?: string): boolean;
   sendLifecycleResync(afterVersion: number): boolean;
 }
@@ -134,6 +136,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const diagnosticSink = options.onDiagnostic ?? defaultDiagnosticSink;
   let refreshGeneration = 0; let remindersRefreshGeneration = 0; let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let goalControlAvailable = false;
+  let inlineToolControlAvailable = false;
   let controlTimeoutMs = 30_000;
   const controlTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const emit = (event: TransportEvent): void => listeners.forEach((listener) => listener(event));
@@ -176,22 +179,24 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const onFrame = (frame: ServerFrame, identity: WebSocketIdentity): void => {
     if (frame.type === "registered") {
       goalControlAvailable = false;
+      inlineToolControlAvailable = false;
       controlTimeoutMs = 30_000;
-      emit({ type: "capabilities", goalControlAvailable: false });
+      emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false });
       scheduleAgentRefresh("registered");
       clearInterval(refreshTimer); refreshTimer = setInterval(() => { scheduleAgentRefresh("registered"); }, 60_000);
       const capabilityGeneration = identity.generation;
       void http.capabilities().then((capabilities) => {
         if (socket.identity.generation !== capabilityGeneration || !socket.registered) return;
         goalControlAvailable = capabilities.goal_control_v1 === true;
+        inlineToolControlAvailable = capabilities.inline_tool_control_v1 === true;
         const limits = record(capabilities.model_control_limits);
         if (limits !== undefined && typeof limits.pending_ttl_ms === "number" && Number.isSafeInteger(limits.pending_ttl_ms) && limits.pending_ttl_ms > 0) controlTimeoutMs = Math.min(limits.pending_ttl_ms, 600_000);
-        emit({ type: "capabilities", goalControlAvailable });
+        emit({ type: "capabilities", goalControlAvailable, inlineToolControlAvailable });
         if (capabilities.subagent_lifecycle_v2 !== true) return;
         // Sync enable returns the authoritative snapshot/replay. A resync is an explicit recovery action only.
         socket.send(buildSubagentSyncEnableFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, ...(lifecycle.version > 0 ? { afterVersion: lifecycle.version } : {}) }));
       }).catch(() => {
-        if (socket.identity.generation === capabilityGeneration && socket.registered) { goalControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false }); }
+        if (socket.identity.generation === capabilityGeneration && socket.registered) { goalControlAvailable = false; inlineToolControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false }); }
       });
       return;
     }
@@ -201,7 +206,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       return;
     }
     if (frame.type === "message_arrival") { emit({ type: "frame", frame, identity }); scheduleAgentRefresh("message_arrival"); return; }
-    if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state") { scheduleAgentRefresh("agent_projection_frame"); return; }
+    if (frame.type === "agent_activity" || frame.type === "agent_model_catalog" || frame.type === "agent_goal_state" || frame.type === "inline_tool_state") { scheduleAgentRefresh("agent_projection_frame"); return; }
     if (frame.type === "conversation_message") { emit({ type: "conversation", message: withAbsoluteAttachmentUrls({ ...frame.message }, http.routerUrl) }); scheduleAgentRefresh("conversation_message"); return; }
     if (frame.type === "reminders_changed") {
       void refreshReminders();
@@ -228,7 +233,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
       }
       return;
     }
-    if (frame.type === "model_control_result" || frame.type === "goal_control_result" || frame.type === "reminder_lock_control_result") {
+    if (frame.type === "model_control_result" || frame.type === "goal_control_result" || frame.type === "reminder_lock_control_result" || frame.type === "inline_tool_control_result") {
       const pending = controls.match(frame, { generation: identity.generation, agentId: identity.agentId });
       if (pending === undefined) return;
       removeControl(frame.control_id); emit({ type: "control", kind: pending.kind, frame, pending }); void refreshAgents(); return;
@@ -252,7 +257,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     emit({ type: "reminders", reminders: result.reminders });
   };
   const invalidateControls = (): void => { const invalidated = controls.invalidate(); for (const timer of controlTimers.values()) clearTimeout(timer); controlTimers.clear(); if (invalidated.length > 0) emit({ type: "controls-invalidated", reason: "router_reconnecting" }); };
-  const socketOptions: WebSocketClientOptions = { routerUrl: options.routerUrl, ...(options.agentId === undefined ? {} : { agentId: options.agentId }), ...(options.defaultAgentId === undefined ? {} : { defaultAgentId: options.defaultAgentId }), ...(options.storage === undefined ? {} : { storage: options.storage }), ...(options.webSocketFactory === undefined ? {} : { webSocketFactory: options.webSocketFactory }), ...(options.autoReconnect === undefined ? {} : { autoReconnect: options.autoReconnect }), onStatus: (status, identity) => { if (status !== "connected") { invalidateControls(); if (goalControlAvailable) { goalControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false }); } } emit({ type: "status", status, identity }); }, onFrame, onProtocolError: (error) => emit({ type: "error", error }), onInvalidate: () => { invalidateControls(); if (goalControlAvailable) { goalControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false }); } } };
+  const socketOptions: WebSocketClientOptions = { routerUrl: options.routerUrl, ...(options.agentId === undefined ? {} : { agentId: options.agentId }), ...(options.defaultAgentId === undefined ? {} : { defaultAgentId: options.defaultAgentId }), ...(options.storage === undefined ? {} : { storage: options.storage }), ...(options.webSocketFactory === undefined ? {} : { webSocketFactory: options.webSocketFactory }), ...(options.autoReconnect === undefined ? {} : { autoReconnect: options.autoReconnect }), onStatus: (status, identity) => { if (status !== "connected") { invalidateControls(); if (goalControlAvailable || inlineToolControlAvailable) { goalControlAvailable = false; inlineToolControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false }); } } emit({ type: "status", status, identity }); }, onFrame, onProtocolError: (error) => emit({ type: "error", error }), onInvalidate: () => { invalidateControls(); if (goalControlAvailable || inlineToolControlAvailable) { goalControlAvailable = false; inlineToolControlAvailable = false; emit({ type: "capabilities", goalControlAvailable: false, inlineToolControlAvailable: false }); } } };
   const socket = createWebSocketClient(socketOptions);
   const sendControl = (frame: ClientFrame, pending: PendingControl): boolean => {
     controls.add({ ...pending, requestId: frame.frame_id });
@@ -267,9 +272,10 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
   const transport: RouterTransport = {
     http, socket, lifecycle,
     get goalControlAvailable() { return goalControlAvailable; },
+    get inlineToolControlAvailable() { return inlineToolControlAvailable; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     connect: socket.connect,
-    close() { clearInterval(refreshTimer); refreshGeneration += 1; goalControlAvailable = false; invalidateControls(); socket.close(); },
+    close() { clearInterval(refreshTimer); refreshGeneration += 1; goalControlAvailable = false; inlineToolControlAvailable = false; invalidateControls(); socket.close(); },
     refreshAgents,
     refreshReminders,
     conversation: (owner, peer) => http.conversations(owner, peer),
@@ -277,6 +283,7 @@ export function createRouterTransport(options: RouterTransportOptions): RouterTr
     sendActivity(activityState, details = {}) { if (!socket.registered) return false; return socket.send(buildActivityFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, activityState, ...details })); },
     sendModelControl(targetAgentId, targetInstanceId, model, requestedControlId = controlId()) { if (!socket.registered) return false; const frame = buildModelControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: requestedControlId, model }); return sendControl(frame, controlFor("model", requestedControlId, targetAgentId, targetInstanceId, socket.identity)); },
     sendGoalControl(targetAgentId, targetInstanceId, control) { if (!socket.registered || !goalControlAvailable) return false; const frame = buildGoalControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: control.controlId, action: control.action, goal: control.goal, settings: control.settings }); return sendControl(frame, controlFor("goal", control.controlId, targetAgentId, targetInstanceId, socket.identity, control.revision)); },
+    sendInlineToolControl(targetAgentId, targetInstanceId, enabled, requestedControlId = controlId()) { if (!socket.registered || !inlineToolControlAvailable) return false; const frame = buildInlineToolControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, controlId: requestedControlId, enabled }); return sendControl(frame, controlFor("inline-tool", requestedControlId, targetAgentId, targetInstanceId, socket.identity)); },
     sendReminderLockControl(targetAgentId, targetInstanceId, reminderId, action, requestedControlId = controlId()) { if (!socket.registered) return false; const frame = buildReminderLockControlFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, targetAgentId, targetInstanceId, reminderId, action, controlId: requestedControlId }); return sendControl(frame, controlFor("reminder-lock", requestedControlId, targetAgentId, targetInstanceId, socket.identity, undefined, reminderId)); },
     sendLifecycleResync(afterVersion) { if (!socket.registered) return false; return socket.send(buildSubagentStateResyncFrame({ agentId: socket.identity.agentId, instanceId: socket.identity.instanceId, leaseId: socket.identity.leaseId, afterVersion })); },
   };

@@ -177,11 +177,13 @@ type Router struct {
 	activities              map[string]activity
 	models                  map[string]modelProjection
 	goals                   map[string]goalState
+	inlineToolStates        map[string]inlineToolState
 	latestGoalRevision      map[string]int64
 	lastSweepRecord         time.Time
 	pendingMod              map[string]*pendingControl
 	pendingGoal             map[string]*pendingControl
 	pendingLock             map[string]*pendingControl
+	pendingInlineTool       map[string]*pendingControl
 	lifecycleState          map[string]lifecycleAgent
 	nextVersion             int64
 	rates                   map[string][]time.Time
@@ -194,24 +196,25 @@ type Router struct {
 }
 
 type session struct {
-	router           *Router
-	conn             *websocket.Conn
-	agentID          string
-	instanceID       string
-	deliveryInstance string
-	leaseID          string
-	role             string
-	clientType       string
-	ackConfirmation  string
-	conversationSync string
-	deliveryReceipts string
-	paused           bool
-	lifecycleEnabled bool
-	writeMu          sync.Mutex
-	stateMu          sync.RWMutex
-	closeOnce        sync.Once
-	sendOverride     func(map[string]any) error
-	closeOverride    func(websocket.StatusCode, string) error
+	router            *Router
+	conn              *websocket.Conn
+	agentID           string
+	instanceID        string
+	deliveryInstance  string
+	leaseID           string
+	role              string
+	clientType        string
+	ackConfirmation   string
+	conversationSync  string
+	deliveryReceipts  string
+	inlineToolControl bool
+	paused            bool
+	lifecycleEnabled  bool
+	writeMu           sync.Mutex
+	stateMu           sync.RWMutex
+	closeOnce         sync.Once
+	sendOverride      func(map[string]any) error
+	closeOverride     func(websocket.StatusCode, string) error
 }
 
 type activity struct {
@@ -232,6 +235,11 @@ type modelProjection struct {
 	available  []map[string]any
 	total      int
 	truncated  bool
+}
+type inlineToolState struct {
+	instanceID string
+	leaseID    string
+	enabled    bool
 }
 type goalState struct {
 	instanceID string
@@ -385,7 +393,7 @@ func New(options Options) (*Router, error) {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state") && contains(options.Store.MigrationIDs(), "021_goal_control_revision_history")
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	if lifecycle {
 		projection, err := options.Store.LifecycleProjection(context.Background())

@@ -195,7 +195,7 @@ func routeID(path, prefix string) (string, string, bool) {
 }
 
 func (r *Router) capabilities() map[string]any {
-	result := map[string]any{"model_catalog_v1": true, "model_catalog_limits": map[string]any{"frame_bytes": min(60*1024, r.maxFrame)}, "model_control_limits": map[string]any{"pending_ttl_ms": r.controlTTL.Milliseconds()}, "goal_control_v1": r.goalAvailable, "subagent_lifecycle_v2": r.lifecycleAvailable}
+	result := map[string]any{"model_catalog_v1": true, "model_catalog_limits": map[string]any{"frame_bytes": min(60*1024, r.maxFrame)}, "model_control_limits": map[string]any{"pending_ttl_ms": r.controlTTL.Milliseconds()}, "inline_tool_control_v1": true, "goal_control_v1": r.goalAvailable, "subagent_lifecycle_v2": r.lifecycleAvailable}
 	if r.goalAvailable {
 		result["goal_control_limits"] = map[string]any{"desired_ttl_ms": 600000}
 	} else {

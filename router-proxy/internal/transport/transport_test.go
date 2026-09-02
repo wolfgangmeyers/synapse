@@ -399,6 +399,83 @@ func TestModelControlFastResultIsCorrelatedBeforeForward(t *testing.T) {
 	require.Equal(t, "control-1", result["control_id"])
 }
 
+func TestInlineToolControlForwardsResultAndProjectsConnectionState(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	source, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	defer source.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, source, map[string]any{
+		"version": "v1", "frame_id": "operator-register", "type": "register", "agent_id": "operator",
+		"instance_id": "operator-instance", "agent_role": "user_interaction", "conversation_sync": "v1",
+	})
+	sourceRegistration := readJSON(t, source)
+	target, targetRegistration := registerInlineToolTarget(t, wsURL, "inline-target", "target-instance")
+	defer target.Close(websocket.StatusNormalClosure, "test done")
+
+	sendJSON(t, target, map[string]any{
+		"version": "v1", "frame_id": "state-frame", "type": "inline_tool_state", "agent_id": "inline-target",
+		"instance_id": "target-instance", "lease_id": targetRegistration["lease_id"], "enabled": false,
+	})
+	require.Equal(t, "inline_tool_state", readJSON(t, source)["type"])
+	require.Equal(t, "inline_tool_state", readJSON(t, target)["type"])
+
+	sendJSON(t, source, map[string]any{
+		"version": "v1", "frame_id": "control-frame", "type": "inline_tool_control", "agent_id": "operator",
+		"instance_id": "operator-instance", "lease_id": sourceRegistration["lease_id"], "target_agent_id": "inline-target",
+		"target_instance_id": "target-instance", "control_id": "control-1", "enabled": true,
+	})
+	forwarded := readJSON(t, target)
+	require.Equal(t, "inline_tool_control", forwarded["type"])
+	require.Equal(t, "operator", forwarded["source_agent_id"])
+	require.Equal(t, "set", forwarded["action"])
+	require.Equal(t, true, forwarded["enabled"])
+	sendJSON(t, target, map[string]any{
+		"version": "v1", "frame_id": "result-frame", "type": "inline_tool_control_result", "agent_id": "inline-target",
+		"instance_id": "target-instance", "lease_id": targetRegistration["lease_id"], "source_agent_id": "operator",
+		"control_id": "control-1", "accepted": true, "enabled": true,
+	})
+	result := readJSON(t, source)
+	require.Equal(t, "inline_tool_control_result", result["type"])
+	require.Equal(t, "control-1", result["control_id"])
+	require.Equal(t, true, result["enabled"])
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	response, err := http.Get(server.URL + "/v1/agents")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	var snapshot map[string]any
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&snapshot))
+	var projected map[string]any
+	for _, candidate := range snapshot["agents"].([]any) {
+		item := candidate.(map[string]any)
+		if item["agent_id"] == "inline-target" {
+			projected = item
+		}
+	}
+	require.Equal(t, true, projected["inline_tool_control_available"])
+	require.Equal(t, true, projected["inline_tool_enabled"])
+}
+
+func registerInlineToolTarget(t *testing.T, wsURL, agentID, instanceID string) (*websocket.Conn, map[string]any) {
+	t.Helper()
+	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	sendJSON(t, conn, map[string]any{
+		"version": "v1", "frame_id": "register-" + agentID, "type": "register", "agent_id": agentID,
+		"instance_id": instanceID, "conversation_sync": "v1", "inline_tool_control": "v1",
+	})
+	return conn, readJSON(t, conn)
+}
+
 func TestModelControlResultProjectsCurrentModelAndPreservesCatalog(t *testing.T) {
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)

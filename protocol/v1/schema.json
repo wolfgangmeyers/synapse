@@ -172,7 +172,8 @@
         "client_type": { "$ref": "#/$defs/clientType" },
         "ack_confirmation": { "$ref": "#/$defs/ackConfirmationMode" },
         "conversation_sync": { "$ref": "#/$defs/conversationSyncMode" },
-        "delivery_receipts": { "$ref": "#/$defs/deliveryReceiptMode" }
+        "delivery_receipts": { "$ref": "#/$defs/deliveryReceiptMode" },
+        "inline_tool_control": { "const": "v1" }
       }
     },
     "leaseRenewFrame": {
@@ -322,6 +323,50 @@
           "properties": { "accepted": { "const": false } },
           "required": ["error_code", "current_model"]
         }
+      ]
+    },
+    "inlineToolStateFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "enabled"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "inline_tool_state" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "inlineToolControlFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "enabled"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "inline_tool_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "target_agent_id": { "$ref": "#/$defs/agentId" }, "target_instance_id": { "$ref": "#/$defs/instanceId" },
+        "control_id": { "$ref": "#/$defs/frameId" }, "enabled": { "type": "boolean" }
+      }
+    },
+    "inlineToolControlForwardFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "action", "enabled", "expires_at"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "inline_tool_control" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" }, "control_id": { "$ref": "#/$defs/frameId" },
+        "action": { "const": "set" }, "enabled": { "type": "boolean" }, "expires_at": { "$ref": "#/$defs/utcMillis" }
+      }
+    },
+    "inlineToolControlResultFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "accepted", "enabled"],
+      "properties": {
+        "version": { "const": "v1" }, "frame_id": { "$ref": "#/$defs/frameId" }, "type": { "const": "inline_tool_control_result" },
+        "agent_id": { "$ref": "#/$defs/agentId" }, "instance_id": { "$ref": "#/$defs/instanceId" }, "lease_id": { "$ref": "#/$defs/leaseId" },
+        "source_agent_id": { "$ref": "#/$defs/agentId" }, "control_id": { "$ref": "#/$defs/frameId" },
+        "accepted": { "type": "boolean" }, "enabled": { "type": "boolean" },
+        "error_code": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "oneOf": [
+        { "properties": { "accepted": { "const": true } }, "not": { "required": ["error_code"] } },
+        { "properties": { "accepted": { "const": false } }, "required": ["error_code"] }
       ]
     },
     "goalOutcomeCounts": {
@@ -693,6 +738,15 @@
           "$ref": "#/$defs/modelControlResultFrame"
         },
         {
+          "$ref": "#/$defs/inlineToolStateFrame"
+        },
+        {
+          "$ref": "#/$defs/inlineToolControlFrame"
+        },
+        {
+          "$ref": "#/$defs/inlineToolControlResultFrame"
+        },
+        {
           "$ref": "#/$defs/goalControlFrame"
         },
         {
@@ -1034,6 +1088,9 @@
         { "$ref": "#/$defs/remindersChangedFrame" },
         { "$ref": "#/$defs/modelControlForwardFrame" },
         { "$ref": "#/$defs/modelControlResultFrame" },
+        { "$ref": "#/$defs/inlineToolStateFrame" },
+        { "$ref": "#/$defs/inlineToolControlForwardFrame" },
+        { "$ref": "#/$defs/inlineToolControlResultFrame" },
         { "$ref": "#/$defs/goalControlForwardFrame" },
         { "$ref": "#/$defs/goalControlResultFrame" },
         { "$ref": "#/$defs/reminderLockControlForwardFrame" },

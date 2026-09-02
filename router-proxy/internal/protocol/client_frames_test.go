@@ -77,6 +77,41 @@ func TestSanitizeClientFrameStripsModelArrayAndGoalStateFields(t *testing.T) {
 	require.NotContains(t, current, "future")
 }
 
+func TestValidateInlineToolFramesAndRegistrationCapability(t *testing.T) {
+	register := map[string]any{
+		"version": "v1", "frame_id": "register", "type": "register",
+		"agent_id": "worker", "instance_id": "instance", "inline_tool_control": "v1",
+	}
+	require.NoError(t, ValidateClientFrame(frame(t, register)))
+	register["inline_tool_control"] = "v2"
+	require.Error(t, ValidateClientFrame(frame(t, register)))
+
+	state := map[string]any{
+		"version": "v1", "frame_id": "state", "type": "inline_tool_state",
+		"agent_id": "worker", "instance_id": "instance", "lease_id": "lease", "enabled": false,
+	}
+	require.NoError(t, ValidateClientFrame(frame(t, state)))
+	state["enabled"] = "false"
+	require.Error(t, ValidateClientFrame(frame(t, state)))
+
+	control := map[string]any{
+		"version": "v1", "frame_id": "request", "type": "inline_tool_control",
+		"agent_id": "operator", "instance_id": "operator-instance", "lease_id": "operator-lease",
+		"target_agent_id": "worker", "target_instance_id": "instance", "control_id": "control", "enabled": true,
+	}
+	require.NoError(t, ValidateClientFrame(frame(t, control)))
+	result := map[string]any{
+		"version": "v1", "frame_id": "result", "type": "inline_tool_control_result",
+		"agent_id": "worker", "instance_id": "instance", "lease_id": "lease", "source_agent_id": "operator",
+		"control_id": "control", "accepted": true, "enabled": true,
+	}
+	require.NoError(t, ValidateClientFrame(frame(t, result)))
+	result["accepted"] = false
+	require.Error(t, ValidateClientFrame(frame(t, result)))
+	result["error_code"] = "rejected"
+	require.NoError(t, ValidateClientFrame(frame(t, result)))
+}
+
 func TestValidateClientFrameAcceptsNullableGoalSettingsAndRejectsUnsafeIntegers(t *testing.T) {
 	settings := map[string]any{
 		"goal_lock_enabled": true, "snooze_enabled": true, "snooze_duration_ms": 1,
