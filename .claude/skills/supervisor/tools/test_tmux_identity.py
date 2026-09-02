@@ -46,6 +46,22 @@ class CurrentAgentIdTest(unittest.TestCase):
         self.assertIsNone(current_agent_id({"TMUX_PANE": "%7"}))
         self.assertIsNone(current_agent_id({"TMUX": "x", "TMUX_PANE": "invalid"}))
 
+    def test_capture_pane_uses_read_only_mecha_target_and_timeout(self):
+        calls = []
+
+        def fake_run(args, check=True, capture=True, timeout=None):
+            calls.append((args, check, capture, timeout))
+            return subprocess.CompletedProcess(args, 0, stdout="pane output")
+
+        original_run = _tmux.run
+        try:
+            _tmux.run = fake_run
+            self.assertEqual(_tmux.capture_pane("worker", lines=80, timeout=1.5), "pane output")
+        finally:
+            _tmux.run = original_run
+
+        self.assertEqual(calls, [(["capture-pane", "-t", "mecha:worker", "-p", "-S", "-80"], False, True, 1.5)])
+
     def test_rejects_invalid_window_names_and_lookup_failures(self):
         environment = {"TMUX": "x", "TMUX_PANE": "%7"}
         self.assertIsNone(

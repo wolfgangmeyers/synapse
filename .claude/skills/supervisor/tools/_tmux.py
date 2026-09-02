@@ -31,7 +31,7 @@ LARGE_TEXT_THRESHOLD = 500
 LARGE_TEXT_ENTER_DELAY = 5  # seconds
 
 
-def run(args, check=True, capture=True):
+def run(args, check=True, capture=True, timeout=None):
     """Run a tmux command and return the result."""
     cmd = ["tmux"] + args
     return subprocess.run(
@@ -39,6 +39,7 @@ def run(args, check=True, capture=True):
         capture_output=capture,
         text=True,
         check=check,
+        timeout=timeout,
     )
 
 
@@ -208,15 +209,19 @@ def send_special_key(window, key):
     run(["send-keys", "-t", f"{SESSION}:{window}", key])
 
 
-def capture_pane(window, lines=50):
-    """Capture terminal output from a window.
+def capture_pane(window, lines=50, timeout=None):
+    """Capture terminal output from a window without sending input.
 
     Returns the captured text, or None if the window doesn't exist.
-    *lines* controls how many lines of scrollback to capture.
+    *lines* controls how many lines of scrollback to capture. *timeout* bounds
+    the subprocess when a caller needs a fail-fast diagnostic operation.
     """
+    kwargs = {"check": False}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     result = run(
         ["capture-pane", "-t", f"{SESSION}:{window}", "-p", "-S", f"-{lines}"],
-        check=False,
+        **kwargs,
     )
     if result.returncode != 0:
         return None
