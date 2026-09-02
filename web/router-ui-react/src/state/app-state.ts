@@ -22,10 +22,13 @@ export interface AppState extends RouterScope {
   pendingControls: Map<string, PendingControl>;
   modelProjections: Map<string, Agent>;
   lifecycleVersion: number;
+  // Replay can arrive before the initial HTTP agent list. Keep those rows until
+  // the corresponding connected agent is projected into state.
+  pendingLifecycle?: Map<string, Agent>;
   arrivals: Map<string, Arrival>;
   expandedSubagents: Set<string>;
   openDialog?: string;
   drafts: Record<string, string>;
   reminderLocks: Map<string, boolean>;
 }
-export function createInitialState(scope: RouterScope, connection: ConnectionStatus = "disconnected"): AppState { return { ...scope, connection, connectionGeneration: 0, agents: [], reminders: [], templates: [], filter: "", messagesByPeer: {}, pendingSends: {}, pendingControls: new Map(), modelProjections: new Map(), lifecycleVersion: 0, arrivals: new Map(), expandedSubagents: new Set(), drafts: {}, reminderLocks: new Map() }; }
+export function createInitialState(scope: RouterScope, connection: ConnectionStatus = "disconnected"): AppState { return { ...scope, connection, connectionGeneration: 0, agents: [], reminders: [], templates: [], filter: "", messagesByPeer: {}, pendingSends: {}, pendingControls: new Map(), modelProjections: new Map(), lifecycleVersion: 0, pendingLifecycle: new Map(), arrivals: new Map(), expandedSubagents: new Set(), drafts: {}, reminderLocks: new Map() }; }

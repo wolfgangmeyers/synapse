@@ -66,6 +66,41 @@ describe("App integration", () => {
     expect(screen.queryByText(/8765/)).not.toBeInTheDocument();
   });
 
+  it("renders a replayed lifecycle badge when replay arrives before HTTP agents", async () => {
+    const supervisor = { ...peer, agent_id: "supervisor", instance_id: "supervisor-instance", subagent_count: 0, subagents: [] };
+    let agentRequests = 0;
+    const releaseInitialAgents: Array<(response: Response) => void> = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) {
+        agentRequests += 1;
+        if (agentRequests <= 2) return new Promise<Response>((resolve) => { releaseInitialAgents.push(resolve); });
+        return jsonResponse({ agents: [supervisor, peer] });
+      }
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({});
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const sockets: AppSocket[] = [];
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      sockets.push(socket);
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory }} />);
+    await waitFor(() => expect(agentRequests).toBeGreaterThanOrEqual(1));
+    const socket = sockets[0];
+    if (socket === undefined) throw new Error("lifecycle socket is missing");
+    const lifecycleAgent = (agentId: string, version: number, count: number, subagents: Array<{ id: string; description: string }>) => ({ agent_id: agentId, subagent_version: version, subagent_count: count, subagents });
+    socket.emit("message", { data: JSON.stringify({ version: "v1", frame_id: "replay-18249", type: "subagent_state_replay", router_version: 18249, updates: [lifecycleAgent("supervisor", 18249, 1, [{ id: "child", description: "Supervisor child" }])] }) });
+    for (const release of releaseInitialAgents) release(jsonResponse({ agents: [supervisor, peer] }));
+    await waitFor(() => expect(document.querySelector('[data-agent-id="supervisor"]')).toHaveTextContent("1 subagent"));
+  });
+
   it("restores the persisted active router when bootstrapping after reload", async () => {
     const storage = new MemoryStorage();
     const routerUrl = "http://persisted-router.test:43123";

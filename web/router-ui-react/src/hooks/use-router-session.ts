@@ -44,7 +44,7 @@ function eventAction(event: TransportEvent, scope: RouterScope): Parameters<type
   }
   if (event.type === "frame" && event.frame.type === "subagent_state_snapshot") return { type: "lifecycle/snapshot", scope, agents: event.frame.agents.map(lifecycleAgent), version: event.frame.router_version };
   if (event.type === "frame" && event.frame.type === "subagent_state_update") return { type: "lifecycle/update", scope, agent: lifecycleAgent(event.frame.agent), version: event.frame.router_version };
-  if (event.type === "frame" && event.frame.type === "subagent_state_replay") return { type: "lifecycle/snapshot", scope, agents: event.frame.updates.map(lifecycleAgent), version: event.frame.router_version };
+  if (event.type === "frame" && event.frame.type === "subagent_state_replay") return { type: "lifecycle/replay", scope, agents: event.frame.updates.map(lifecycleAgent), version: event.frame.router_version };
   return undefined;
 }
 

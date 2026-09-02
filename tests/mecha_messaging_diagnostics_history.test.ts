@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -723,25 +723,155 @@ test("the diagnostic journal reports bounded queue drops and filesystem write fa
   }
 });
 
-test("the diagnostic journal rotates and prunes one generation opportunistically", async () => {
-  const directory = await temporaryDirectory("mecha-diagnostic-journal-retention-");
+test("the diagnostic journal prunes prior-process active and segment files in the same journal directory", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-prior-process-");
   const path = join(directory, "journal.jsonl");
+  const nowMs = Date.parse("2026-03-03T00:00:00.000Z");
+  const oldMs = nowMs - (49 * 60 * 60 * 1000);
+  const now = () => new Date(nowMs);
   try {
-    const journal = createDiagnosticJournal({ path, windowId: path, processId: process.pid });
+    const prior = createDiagnosticJournal({ path, windowId: "same-window", processId: 41001, now });
+    const priorPath = prior.path;
+    assert.equal(typeof priorPath, "string");
+    if (typeof priorPath !== "string") throw new Error("prior journal path was not derived");
+    writeFileSync(priorPath, `${JSON.stringify({ timestamp: new Date(oldMs).toISOString(), event: "prior-active" })}\n`, { mode: 0o600 });
+    const priorSegment = `${priorPath}.segment-${oldMs}`;
+    writeFileSync(priorSegment, `${JSON.stringify({ timestamp: new Date(oldMs).toISOString(), event: "prior-segment" })}\n`, { mode: 0o600 });
+    await prior.close();
+
+    const current = createDiagnosticJournal({ path, windowId: "same-window", processId: 41002, now });
+    assert.equal(current.record("activity", "current"), true);
+    await current.flush();
+    assert.equal(existsSync(priorPath), false);
+    assert.equal(existsSync(priorSegment), false);
+    assert.match(readFileSync(current.path ?? "", "utf8"), /\"event\":\"current\"/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal drops expired active data before appending a new record", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-expired-active-");
+  const path = join(directory, "journal.jsonl");
+  const nowMs = Date.parse("2026-03-03T00:00:00.000Z");
+  const oldMs = nowMs - (49 * 60 * 60 * 1000);
+  try {
+    const journal = createDiagnosticJournal({ path, windowId: "expired-active", processId: 41003, now: () => new Date(nowMs) });
     const journalPath = journal.path;
     assert.equal(typeof journalPath, "string");
     if (typeof journalPath !== "string") throw new Error("journal path was not derived");
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(journalPath, "old-active\\n", { mode: 0o600 });
-    writeFileSync(`${journalPath}.1`, "old-rotated\\n", { mode: 0o600 });
-    const old = Date.now() - (72 * 60 * 60 * 1000);
-    const { utimesSync } = await import("node:fs");
-    utimesSync(journalPath, old / 1000, old / 1000);
-    utimesSync(`${journalPath}.1`, old / 1000, old / 1000);
-    assert.equal(journal.record("activity", "heartbeat", { published: true }), true);
+    writeFileSync(journalPath, `${JSON.stringify({ timestamp: new Date(oldMs).toISOString(), event: "expired" })}\n`, { mode: 0o600 });
+    assert.equal(journal.record("activity", "fresh"), true);
     await journal.flush();
-    assert.equal(readFileSync(`${journalPath}.1`, "utf8"), "old-active\\n");
-    assert.equal(recordsAt(journalPath)[0]?.event, "heartbeat");
+    const contents = readFileSync(journalPath, "utf8");
+    assert.equal(contents.includes('"event":"expired"'), false);
+    assert.match(contents, /\"event\":\"fresh\"/);
+    assert.equal(readdirSync(directory).some((entry) => entry.includes(".segment-")), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal keeps high-rate incident segments readable for 48 hours", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-retention-");
+  const path = join(directory, "journal.jsonl");
+  let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
+  const now = () => new Date(nowMs);
+  try {
+    const journal = createDiagnosticJournal({
+      path,
+      windowId: path,
+      processId: process.pid,
+      maxBytes: 256,
+      rotationAgeMs: 24 * 60 * 60 * 1000,
+      pruneAgeMs: 48 * 60 * 60 * 1000,
+      now,
+    });
+    const journalPath = journal.path;
+    assert.equal(typeof journalPath, "string");
+    if (typeof journalPath !== "string") throw new Error("journal path was not derived");
+
+    assert.equal(journal.record("activity", "incident", { state: "active" }), true);
+    await journal.flush();
+    for (let index = 0; index < 120; index += 1) {
+      nowMs += 60 * 1000;
+      assert.equal(journal.record("activity", "heartbeat", { state: "active" }), true);
+      await journal.flush();
+    }
+
+    const segmentPrefix = `${basename(journalPath)}.segment-`;
+    const segments = () => readdirSync(directory)
+      .filter((entry) => entry.startsWith(segmentPrefix))
+      .map((entry) => join(directory, entry));
+    const segmentsBeforeExpiry = segments();
+    const incidentSegment = segmentsBeforeExpiry.find((segment) => readFileSync(segment, "utf8").includes('"event":"incident"'));
+    assert.equal(typeof incidentSegment, "string", "the incident must be in a rotated segment");
+    if (typeof incidentSegment !== "string") throw new Error("incident segment was not created");
+    assert.equal(mode(incidentSegment), 0o600);
+    assert.equal(mode(directory), 0o700);
+    assert.ok(segments().length > 10, "the test must exercise repeated size rotation");
+
+    nowMs = Date.parse("2026-01-02T23:59:00.000Z");
+    assert.equal(journal.record("activity", "before_expiry", { state: "active" }), true);
+    await journal.flush();
+    assert.ok(segmentsBeforeExpiry.every((segment) => existsSync(segment)), "all segments must remain during the 48-hour window");
+    assert.equal(existsSync(incidentSegment), true, "the incident segment must remain during the 48-hour window");
+    assert.match(readFileSync(incidentSegment, "utf8"), /\"event\":\"incident\"/);
+
+    nowMs = Date.parse("2026-01-03T00:00:00.000Z");
+    assert.equal(journal.record("activity", "after_expiry", { state: "active" }), true);
+    await journal.flush();
+    assert.equal(existsSync(incidentSegment), false, "segments at the retention boundary must be pruned");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the diagnostic journal ages the active segment from its first record, not mtime", async () => {
+  const directory = await temporaryDirectory("mecha-diagnostic-journal-active-age-");
+  const path = join(directory, "journal.jsonl");
+  let nowMs = Date.parse("2026-02-01T00:00:00.000Z");
+  const now = () => new Date(nowMs);
+  try {
+    const journal = createDiagnosticJournal({
+      path,
+      windowId: path,
+      processId: process.pid,
+      maxBytes: 4096,
+      rotationAgeMs: 24 * 60 * 60 * 1000,
+      pruneAgeMs: 48 * 60 * 60 * 1000,
+      now,
+    });
+    const journalPath = journal.path;
+    assert.equal(typeof journalPath, "string");
+    if (typeof journalPath !== "string") throw new Error("journal path was not derived");
+
+    assert.equal(journal.record("activity", "first", { state: "active" }), true);
+    await journal.flush();
+    const oldMtime = (nowMs - (72 * 60 * 60 * 1000)) / 1000;
+    utimesSync(journalPath, oldMtime, oldMtime);
+    await journal.close();
+    const reopened = createDiagnosticJournal({
+      path,
+      windowId: path,
+      processId: process.pid,
+      maxBytes: 4096,
+      rotationAgeMs: 24 * 60 * 60 * 1000,
+      pruneAgeMs: 48 * 60 * 60 * 1000,
+      now,
+    });
+
+    nowMs += 60 * 60 * 1000;
+    assert.equal(reopened.record("activity", "still_active", { state: "active" }), true);
+    await reopened.flush();
+    assert.equal(readdirSync(directory).some((entry) => entry.startsWith(`${basename(journalPath)}.segment-`)), false);
+
+    nowMs += 23 * 60 * 60 * 1000;
+    assert.equal(reopened.record("activity", "aged_out", { state: "active" }), true);
+    await reopened.flush();
+    const rotated = readdirSync(directory).filter((entry) => entry.startsWith(`${basename(journalPath)}.segment-`));
+    assert.equal(rotated.length, 1, "the active segment should rotate at 24 hours from its first record");
+    assert.match(readFileSync(join(directory, rotated[0] ?? ""), "utf8"), /\"event\":\"first\"/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
