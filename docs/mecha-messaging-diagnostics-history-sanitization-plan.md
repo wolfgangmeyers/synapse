@@ -304,7 +304,7 @@ Move `appendBoundedJsonl` without changing its operational behavior. This shared
 - catch directory, append, stat, read, and write errors;
 - never allow a diagnostic failure to escape into Pi or provider flow.
 
-The shared helper retains a tail in the active file. It does not remove or rename a `.1` file. Trace rotation is separate: `createExtensionTrace` alone removes the old `.1` and renames the active trace to `.1` before appending. The trace writer does not call `appendBoundedJsonl`, and the bounded JSONL writers do not rotate.
+The shared helper retains a tail in the active file. It does not remove or rename a `.1` file. Trace rotation is separate: `createExtensionTrace` alone removes the old `.1` and renames the active trace to `.1` before appending. The trace writer does not call `appendBoundedJsonl`, and the bounded JSONL writers do not rotate. The diagnostic journal uses its own rotation: `createDiagnosticJournal` keeps one active file and renames full active segments to timestamped files before appending. Size rotation can create many bounded segments; segments are pruned only at the 48-hour retention boundary. The active segment also rotates after 24 hours measured from its open/first-record time, not filesystem mtime.
 
 Keep these current limits:
 
@@ -313,8 +313,9 @@ Keep these current limits:
 | Memory capture (shared JSONL writer) | 128 KiB | 64 KiB tail in the active file; no rename | `$HOME/.mecha-developer/logs/memory-capture.jsonl` or `MECHA_MEMORY_CAPTURE_DIAGNOSTICS_PATH` |
 | Orphan results (shared JSONL writer) | 256 KiB | 128 KiB tail in the active file; no rename | `$HOME/.mecha-developer/logs/orphan-tool-results.jsonl` or `MECHA_ORPHAN_TOOL_RESULT_DIAGNOSTICS_PATH` |
 | Extension trace (trace writer) | 512 KiB before rotation | one `.1` generation; no tail rewrite | `MECHA_PI_EXTENSION_TRACE_PATH`, then legacy `MECHA_PI_NATIVE_SUBAGENT_TRACE_PATH` |
+| Diagnostic journal | 512 KiB active segment | timestamped bounded segments retained for 48 hours; active segment rotates after 24 hours from open/first-record time | `MECHA_PI_DIAGNOSTIC_JOURNAL_PATH` or `$HOME/.mecha-developer/logs/diagnostics-history.jsonl` with per-process/window suffix |
 
-Do not add an unbounded archive or a second rotated generation.
+Do not add an unbounded archive or a second rotated generation to the trace or shared JSONL writers. Journal segments are bounded by the 48-hour prune window.
 
 ### Memory capture records
 
@@ -373,6 +374,7 @@ The extension path wins over the legacy native-subagent path when both are confi
 | Sanitized messages and incident arrays | New module call | Stateless per context event. No cross-event cache. |
 | Shared JSONL append/tail behavior | New module | Used only by memory and orphan writers. One active file with tail retention; no `.1` rename. |
 | Trace path, limit, and file rotation | Trace closure in new module | One closure per trace instance. The trace writer alone owns one active file plus `.1` rotation/rename; it does not use the shared tail writer. |
+| Diagnostic journal active/segment timestamps and retention | Journal closure in new module | One active file per process/window key; timestamped bounded segments rotate on size or after 24 hours from open/first-record time and prune at 48 hours. |
 | Diagnostic file paths | New module | Resolve explicit options first, then current environment at call time, then current HOME fallback. |
 | Memory/orphan record limits | New module constants | Preserve 128/64 KiB and 256/128 KiB values. |
 | `reportedMalformedToolCalls` | Root | One extension-instance set keyed by raw session and raw call ID. No reset added. |

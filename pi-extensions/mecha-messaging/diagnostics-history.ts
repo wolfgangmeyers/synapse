@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { appendFile, chmod, mkdir, rename, rm, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { appendFile, chmod, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import { summarizeNativeSubagents } from "./activity-lifecycle.js";
 import type { NativeSubagent } from "./activity-lifecycle.js";
@@ -466,6 +466,7 @@ const DIAGNOSTIC_JOURNAL_MAX_BYTES = 512 * 1024;
 const DIAGNOSTIC_JOURNAL_QUEUE_LIMIT = 256;
 const DIAGNOSTIC_JOURNAL_ROTATION_AGE_MS = 24 * 60 * 60 * 1000;
 const DIAGNOSTIC_JOURNAL_PRUNE_AGE_MS = 48 * 60 * 60 * 1000;
+// Segment names carry their open time because active-file mtime changes on every append.
 const DIAGNOSTIC_STRING_LIMIT = 128;
 const DIAGNOSTIC_SOURCE_PATTERN = /^[a-z][a-z0-9_.-]{0,40}$/;
 const DIAGNOSTIC_EVENT_PATTERN = /^[a-z][a-z0-9_.-]{0,80}$/;
@@ -637,6 +638,60 @@ function diagnosticFields(fields: object | undefined): JsonObject {
   return output;
 }
 
+function recordTimestamp(line: string): number | undefined {
+  try {
+    const record: unknown = JSON.parse(line);
+    if (!isRecord(record) || typeof record.timestamp !== "string") return undefined;
+    const timestamp = Date.parse(record.timestamp);
+    return Number.isFinite(timestamp) ? timestamp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function firstRecordTimestamp(path: string): Promise<number | undefined> {
+  const contents = await readFile(path, "utf8").catch(() => undefined);
+  if (contents === undefined) return undefined;
+  const firstLine = contents.split("\n", 1)[0];
+  return firstLine.length > 0 ? recordTimestamp(firstLine) : undefined;
+}
+
+function escapedRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function journalFilePatterns(path: string): { active: RegExp; segment: RegExp } {
+  // The process/window hash is the final 16-character component. Matching the
+  // base lets a new process retain and prune files left in this journal directory.
+  const base = basename(path).replace(/[a-f0-9]{16}$/, "");
+  const escapedBase = escapedRegExp(base);
+  return {
+    active: new RegExp(`^${escapedBase}([a-f0-9]{16})$`),
+    segment: new RegExp(`^${escapedBase}[a-f0-9]{16}\\.segment-(-?\\d+)(?:-\\d+)?$`),
+  };
+}
+
+async function pruneTimestampedSegments(path: string, nowMs: number, pruneAgeMs: number): Promise<void> {
+  const { segment } = journalFilePatterns(path);
+  const entries = await readdir(dirname(path));
+  for (const entry of entries) {
+    const match = segment.exec(entry);
+    if (match === null) continue;
+    const openedAtMs = Number(match[1]);
+    if (!Number.isSafeInteger(openedAtMs) || nowMs - openedAtMs < pruneAgeMs) continue;
+    const segmentPath = join(dirname(path), entry);
+    const segmentStat = await stat(segmentPath).catch(() => undefined);
+    if (segmentStat?.isFile() === true) await rm(segmentPath, { force: true });
+  }
+}
+
+async function nextSegmentPath(path: string, openedAtMs: number, nextSequence: () => number): Promise<string> {
+  const stem = `${path}.segment-${openedAtMs}`;
+  let candidate = stem;
+  while (await stat(candidate).then(() => true).catch(() => false)) candidate = `${stem}-${nextSequence()}`;
+  return candidate;
+}
+
 function createDiagnosticJournal(options: DiagnosticJournalOptions = {}): DiagnosticJournal {
   const environment = options.environment ?? process.env;
   const processId = typeof options.processId === "number" && Number.isSafeInteger(options.processId) ? options.processId : process.pid;
@@ -676,6 +731,8 @@ function createDiagnosticJournal(options: DiagnosticJournalOptions = {}): Diagno
   let closed = false;
   let invalidated = false;
   let hasWritten = false;
+  let activeOpenedAtMs: number | undefined;
+  let rotationSequence = 0;
   let writtenCount = 0;
   let droppedCount = 0;
   let writeFailureCount = 0;
@@ -705,14 +762,34 @@ function createDiagnosticJournal(options: DiagnosticJournalOptions = {}): Diagno
   };
   const pruneAndRotate = async (timestamp: Date): Promise<void> => {
     if (path === undefined) return;
-    const active = await stat(path).catch(() => undefined);
-    const rotated = `${path}.1`;
-    const rotatedStat = await stat(rotated).catch(() => undefined);
-    if (rotatedStat !== undefined && timestamp.getTime() - rotatedStat.mtimeMs >= pruneAgeMs) await rm(rotated, { force: true });
-    if (active === undefined) return;
-    if (timestamp.getTime() - active.mtimeMs < rotationAgeMs && active.size < maxBytes) return;
-    await rm(rotated, { force: true });
-    await rename(path, rotated);
+    const timestampMs = timestamp.getTime();
+    await pruneTimestampedSegments(path, timestampMs, pruneAgeMs);
+    const { active } = journalFilePatterns(path);
+    const entries = await readdir(dirname(path));
+    for (const entry of entries) {
+      const match = active.exec(entry);
+      if (match === null) continue;
+      const activePath = join(dirname(path), entry);
+      const activeStat = await stat(activePath).catch(() => undefined);
+      if (activeStat?.isFile() !== true) continue;
+      const openedAtMs = activePath === path && activeOpenedAtMs !== undefined
+        ? activeOpenedAtMs
+        : await firstRecordTimestamp(activePath) ?? activeStat.mtimeMs;
+      if (!Number.isFinite(openedAtMs)) continue;
+      if (activePath === path) activeOpenedAtMs = openedAtMs;
+      const ageMs = timestampMs - openedAtMs;
+      if (ageMs >= pruneAgeMs) {
+        await rm(activePath, { force: true });
+        if (activePath === path) activeOpenedAtMs = undefined;
+      } else if (ageMs >= rotationAgeMs || activeStat.size >= maxBytes) {
+        const rotated = await nextSegmentPath(activePath, openedAtMs, () => rotationSequence++);
+        await rename(activePath, rotated);
+        await chmod(rotated, 0o600).catch(() => undefined);
+        if (activePath === path) activeOpenedAtMs = undefined;
+      }
+    }
+    // A newly rotated active file can already be outside retention.
+    await pruneTimestampedSegments(path, timestampMs, pruneAgeMs);
   };
   function shouldStopDrain(): boolean {
     if (invalidated || closed) return true;
@@ -733,6 +810,7 @@ function createDiagnosticJournal(options: DiagnosticJournalOptions = {}): Diagno
         }
         const line = queue.shift();
         if (line === undefined) continue;
+        const queuedRecordTimestamp = recordTimestamp(line);
         try {
           if (shouldStopDrain()) {
             queue.length = 0;
@@ -750,6 +828,7 @@ function createDiagnosticJournal(options: DiagnosticJournalOptions = {}): Diagno
           if (shouldStopDrain()) continue;
           await appendFile(path, line, { encoding: "utf8", mode: 0o600 });
           await chmod(path, 0o600).catch(() => undefined);
+          if (activeOpenedAtMs === undefined) activeOpenedAtMs = queuedRecordTimestamp ?? timestamp.getTime();
           hasWritten = true;
           writtenCount = increment(writtenCount);
         } catch {
