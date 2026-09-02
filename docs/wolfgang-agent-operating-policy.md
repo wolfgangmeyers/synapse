@@ -276,6 +276,7 @@ This is a sharper case of checking the facts you inherit. A rule recalled from m
 ## Communication
 
 - Use the same channel the person used. If Wolfgang contacts an agent by mailbox, reply by mailbox.
+- For urgent external actions assigned by mailbox, send the instruction to the exact active worker identity and confirm that worker has started before reporting the action as underway. A generic or guessed recipient does not prove delivery.
 - Never echo, render, or repeatedly poll malformed tool or task notification fragments into the human conversation. Treat them as harness noise, stop the loop, and give a plain-English status only when it changes the user's decision.
 - Send concise status updates when async work is red, pending, blocked, or materially changed. Include links, owner, current state, and next action.
 - When a reminder asks you to take action and the work is viable to delegate, run it in a background subagent by default. This keeps the supervisor responsive and allows independent checks to proceed in parallel. When creating or updating an action-oriented reminder, include that guidance in the reminder body so the receiving supervisor or worker is steered toward background delegation instead of doing status/audit work inline.
