@@ -468,6 +468,7 @@ func (r *Router) sessionClosedSerialized(s *session) {
 		delete(r.conversationOrder, s.agentID)
 		delete(r.models, s.agentID)
 		delete(r.goals, s.agentID)
+		delete(r.inlineToolStates, s.agentID)
 		for key := range r.latestGoalRevision {
 			if strings.HasPrefix(key, s.agentID+"\x00") {
 				delete(r.latestGoalRevision, key)
@@ -524,6 +525,11 @@ func (r *Router) removePendingForSessionLocked(s *session) {
 	for key, pending := range r.pendingLock {
 		if pending.source == s || pending.target == s {
 			delete(r.pendingLock, key)
+		}
+	}
+	for key, pending := range r.pendingInlineTool {
+		if pending.source == s || pending.target == s {
+			delete(r.pendingInlineTool, key)
 		}
 	}
 }

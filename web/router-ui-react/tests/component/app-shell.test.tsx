@@ -53,10 +53,12 @@ describe("AppShell", () => {
       "working-indicator inline",
       "goal-header-button ",
       "reminder-indicator empty",
+      "inline-tool-settings-button",
     ]);
     expect(heading.querySelector("button[aria-label='Set goal']")).toBeInTheDocument();
 
     expect(banner.querySelector("button[aria-label='Add reminder']")).toBeInTheDocument();
+    expect(banner.querySelector("button[aria-label='Inline tool settings']")).toBeInTheDocument();
     expect(banner.querySelector(".peer-heading > p")).toHaveClass("peer-activity");
     expect(banner.querySelector(".peer-heading > p")).not.toHaveTextContent("fixture-peer");
   });

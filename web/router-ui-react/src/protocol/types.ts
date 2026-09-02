@@ -68,6 +68,8 @@ export interface Agent {
   current_model?: ModelSummary;
   goal?: GoalProjection;
   goal_state?: GoalState;
+  inline_tool_control_available?: boolean;
+  inline_tool_enabled?: boolean;
   subagent_version?: number;
 }
 
@@ -163,6 +165,7 @@ export interface RegisterFrame {
   ack_confirmation?: "correlated_v1";
   conversation_sync?: "v1";
   delivery_receipts?: DeliveryReceiptMode;
+  inline_tool_control?: "v1";
 }
 
 export interface LeaseRenewFrame {
@@ -206,6 +209,72 @@ export interface ModelCatalogFrame {
   truncated?: boolean;
   current_model?: ModelSummary;
 }
+
+export interface InlineToolStateFrame {
+  version: "v1";
+  frame_id: FrameId;
+  type: "inline_tool_state";
+  agent_id: AgentId;
+  instance_id: InstanceId;
+  lease_id: LeaseId;
+  enabled: boolean;
+}
+
+export interface InlineToolControlFrame {
+  version: "v1";
+  frame_id: FrameId;
+  type: "inline_tool_control";
+  agent_id: AgentId;
+  instance_id: InstanceId;
+  lease_id: LeaseId;
+  target_agent_id: AgentId;
+  target_instance_id: InstanceId;
+  control_id: FrameId;
+  enabled: boolean;
+}
+
+export interface InlineToolControlForwardFrame {
+  version: "v1";
+  frame_id: FrameId;
+  type: "inline_tool_control";
+  agent_id: AgentId;
+  instance_id: InstanceId;
+  lease_id: LeaseId;
+  source_agent_id: AgentId;
+  control_id: FrameId;
+  action: "set";
+  enabled: boolean;
+  expires_at: UtcMillis;
+}
+
+export interface InlineToolControlAcceptedResultFrame {
+  version: "v1";
+  frame_id: FrameId;
+  type: "inline_tool_control_result";
+  agent_id: AgentId;
+  instance_id: InstanceId;
+  lease_id: LeaseId;
+  source_agent_id: AgentId;
+  control_id: FrameId;
+  accepted: true;
+  enabled: boolean;
+}
+
+export interface InlineToolControlRejectedResultFrame {
+  version: "v1";
+  frame_id: FrameId;
+  type: "inline_tool_control_result";
+  agent_id: AgentId;
+  instance_id: InstanceId;
+  lease_id: LeaseId;
+  source_agent_id: AgentId;
+  control_id: FrameId;
+  accepted: false;
+  error_code: string;
+  enabled: boolean;
+}
+
+export type InlineToolControlResultFrame = InlineToolControlAcceptedResultFrame | InlineToolControlRejectedResultFrame;
 
 export interface ModelControlFrame {
   version: "v1";
@@ -669,6 +738,9 @@ export type ClientFrame =
   | LeaseRenewFrame
   | ActivityFrame
   | ModelCatalogFrame
+  | InlineToolStateFrame
+  | InlineToolControlFrame
+  | InlineToolControlResultFrame
   | ModelControlFrame
   | ModelControlResultFrame
   | GoalControlFrame
@@ -704,6 +776,9 @@ export type ServerFrame =
   | DeliveryAcknowledgedFrame
   | AgentActivityFrame
   | AgentModelCatalogFrame
+  | InlineToolStateFrame
+  | InlineToolControlForwardFrame
+  | InlineToolControlResultFrame
   | MessageArrivalServerFrame
   | SubagentStateSnapshotFrame
   | SubagentStateUpdateFrame

@@ -33,7 +33,7 @@ func ValidateClientFrame(frame map[string]json.RawMessage) error {
 		if !required(frame, "agent_id", "instance_id") || !agentValue(frame["agent_id"]) || !frameIDValue(frame["instance_id"]) {
 			return &ValidationError{}
 		}
-		if !optionalEnum(frame, "agent_role", "agent", "user_interaction") || !optionalPatternString(frame, "client_type", 1, 32, regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)) || !optionalConst(frame, "ack_confirmation", "correlated_v1") || !optionalConst(frame, "conversation_sync", "v1") || !optionalConst(frame, "delivery_receipts", "delivery_items_v1") {
+		if !optionalEnum(frame, "agent_role", "agent", "user_interaction") || !optionalPatternString(frame, "client_type", 1, 32, regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)) || !optionalConst(frame, "ack_confirmation", "correlated_v1") || !optionalConst(frame, "conversation_sync", "v1") || !optionalConst(frame, "delivery_receipts", "delivery_items_v1") || !optionalConst(frame, "inline_tool_control", "v1") {
 			return &ValidationError{}
 		}
 	case "ping":
@@ -55,6 +55,26 @@ func ValidateClientFrame(frame map[string]json.RawMessage) error {
 		}
 	case "model_control":
 		if !required(frame, "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "action", "model") || !validateLeaseFields(frame) || !agentValue(frame["target_agent_id"]) || !frameIDValue(frame["target_instance_id"]) || !frameIDValue(frame["control_id"]) || !constValue(frame["action"], "set_model") || !modelValue(frame["model"]) {
+			return &ValidationError{}
+		}
+	case "inline_tool_state":
+		if !required(frame, "agent_id", "instance_id", "lease_id", "enabled") || !validateLeaseFields(frame) || !boolValue(frame["enabled"]) {
+			return &ValidationError{}
+		}
+	case "inline_tool_control":
+		if !required(frame, "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "enabled") || !validateLeaseFields(frame) || !agentValue(frame["target_agent_id"]) || !frameIDValue(frame["target_instance_id"]) || !frameIDValue(frame["control_id"]) || !boolValue(frame["enabled"]) {
+			return &ValidationError{}
+		}
+	case "inline_tool_control_result":
+		if !required(frame, "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "accepted", "enabled") || !validateLeaseFields(frame) || !agentValue(frame["source_agent_id"]) || !frameIDValue(frame["control_id"]) || !boolValue(frame["accepted"]) || !boolValue(frame["enabled"]) {
+			return &ValidationError{}
+		}
+		accepted, _ := boolParsed(frame["accepted"])
+		if accepted {
+			if has(frame, "error_code") {
+				return &ValidationError{}
+			}
+		} else if !stringRange(frame["error_code"], 1, 128) {
 			return &ValidationError{}
 		}
 	case "model_control_result":

@@ -73,6 +73,8 @@ function validAgent(value: unknown, includeModels = true): value is Agent {
     if (!goal || typeof goal.enabled !== "boolean" || typeof goal.goal !== "string" || goal.goal.length > 4000 || (goal.enabled ? goal.goal.length === 0 : goal.goal !== "")) return false;
   }
   if (Object.hasOwn(item, "goal_state") && normalizeGoalState(item.goal_state) === undefined) return false;
+  if (Object.hasOwn(item, "inline_tool_control_available") && typeof item.inline_tool_control_available !== "boolean") return false;
+  if (Object.hasOwn(item, "inline_tool_enabled") && typeof item.inline_tool_enabled !== "boolean") return false;
   return true;
 }
 function validReminder(value: unknown): value is Reminder {
@@ -190,7 +192,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     },
     capabilities: async () => {
       const body = recordValue(await request("/v1/capabilities"));
-      if (!body || (Object.hasOwn(body, "goal_control_v1") && typeof body.goal_control_v1 !== "boolean") || (Object.hasOwn(body, "subagent_lifecycle_v2") && typeof body.subagent_lifecycle_v2 !== "boolean")) throw invalidResponse("Router returned invalid capabilities", body);
+      if (!body || (Object.hasOwn(body, "goal_control_v1") && typeof body.goal_control_v1 !== "boolean") || (Object.hasOwn(body, "inline_tool_control_v1") && typeof body.inline_tool_control_v1 !== "boolean") || (Object.hasOwn(body, "subagent_lifecycle_v2") && typeof body.subagent_lifecycle_v2 !== "boolean")) throw invalidResponse("Router returned invalid capabilities", body);
       return body;
     },
     agents: async (options = {}) => { const includeModels = typeof options === "boolean" ? options : options.includeModels !== false; return agentList(await request(includeModels ? "/v1/agents" : "/v1/agents?models=omit"), includeModels); },

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   isEnvelope,
   isGoalControlFrame,
+  isInlineToolControlFrame,
+  isInlineToolControlResultFrame,
+  isInlineToolStateFrame,
   isModelControlResultFrame,
   isServerFrame,
   parseServerFrame,
@@ -93,6 +96,14 @@ describe("protocol guards", () => {
       error_code: "unavailable",
       goal_state: { ...goalState, enabled: false, goal: "" },
     })).toBe(true);
+  });
+
+  it("validates inline tool state and control results", () => {
+    const state = { version: "v1", frame_id: "inline-state", type: "inline_tool_state", agent_id: "worker-a", instance_id: "worker-instance", lease_id: "lease-1", enabled: false };
+    expect(isInlineToolStateFrame(state)).toBe(true);
+    expect(isInlineToolControlFrame({ ...identity, type: "inline_tool_control", enabled: true })).toBe(true);
+    expect(isInlineToolControlResultFrame({ version: "v1", frame_id: "inline-result", type: "inline_tool_control_result", agent_id: "worker-a", instance_id: "worker-instance", lease_id: "lease-1", source_agent_id: "ui-agent", control_id: "control-1", accepted: true, enabled: true })).toBe(true);
+    expect(isInlineToolControlResultFrame({ version: "v1", frame_id: "inline-result", type: "inline_tool_control_result", agent_id: "worker-a", instance_id: "worker-instance", lease_id: "lease-1", source_agent_id: "ui-agent", control_id: "control-1", accepted: false, enabled: false })).toBe(false);
   });
 
   it("requires the schema's accepted/rejected result fields", () => {
