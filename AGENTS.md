@@ -61,6 +61,10 @@ The proxy preserves upstream response headers and status codes, supports request
 
 When adding or updating a skill, keep this `CLAUDE.md`'s skill table current.
 
+### Subagent visibility checker
+
+`.claude/skills/supervisor/tools/subagent_visibility_checker.py` independently captures visible active subagent rows from one or more tmux windows and compares them with router lifecycle state. Its comparison findings are limited to no description overlap and children visible only in tmux. See `python3 .claude/skills/supervisor/tools/subagent_visibility_checker.py --help` for usage.
+
 ## Supervisor Mailbox And Compaction
 
 In a Pi supervisor session with the Mailbox V2 extension, use the native top-level `mecha_mailbox_send` tool for supervisor replies. It returns the accepted message ID and state through the existing router client. Use the Mailbox V2 router sender below as the fallback for runtimes without the native tool or launcher-side sends:
