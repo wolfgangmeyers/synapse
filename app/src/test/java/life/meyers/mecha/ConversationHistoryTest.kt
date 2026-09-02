@@ -32,6 +32,18 @@ class ConversationHistoryTest {
     }
 
     @Test
+    fun routerEmptyHistoryNullMessagesIsAcceptedAsAnEmptyConversation() {
+        val empty = parseHistoryResponse(
+            "{\"owner\":\"android-owner\",\"peer\":\"peer\",\"messages\":null,\"high_water_sequence\":0}",
+            "android-owner",
+            "peer",
+        )
+
+        assertNotNull(empty)
+        assertEquals(0, empty?.messages?.length())
+    }
+
+    @Test
     fun malformedHistoryResponsesAreRejectedBeforeTheyCanBeApplied() {
         val valid = parseHistoryResponse("{\"owner\":\"android-owner\",\"peer\":\"peer\",\"messages\":[],\"high_water_sequence\":0}", "android-owner", "peer")
         assertNotNull(valid)

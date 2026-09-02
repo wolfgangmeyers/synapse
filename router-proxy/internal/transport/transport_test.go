@@ -75,6 +75,27 @@ func TestHTTPEnvelopeParityRejectsNullEscapedNewlineAndGoOnlyDedupField(t *testi
 	require.False(t, hasDeduped)
 }
 
+func TestConversationHistoryEmitsAnArrayForAnEmptyConversation(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/v1/conversations?owner=android&peer=worker")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var history struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&history))
+	require.NotNil(t, history.Messages)
+	require.Empty(t, history.Messages)
+}
+
 func TestHTTPOriginAndPreflightMatchCurrentNodeContract(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
