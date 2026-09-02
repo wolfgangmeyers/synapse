@@ -311,6 +311,9 @@ func (r *Router) handleConversation(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	high, _ := r.store.ConversationHighWaterSequence(req.Context())
+	if messages == nil {
+		messages = []domain.ConversationMessage{}
+	}
 	r.writeJSON(w, 200, map[string]any{"owner": owner, "peer": peer, "high_water_sequence": high, "messages": messages})
 }
 
