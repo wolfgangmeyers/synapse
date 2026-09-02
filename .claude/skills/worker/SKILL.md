@@ -134,7 +134,7 @@ Never kill your own worker or tmux window. Send the structured completion mail a
 
    Do not use subagents as a way to avoid supervisor approval, commit authorization, PR state rules, or live acceptance proof. Do not spawn open-ended subagents, duplicate workers, or separate long-lived agent runtimes. If a subtask needs durable ownership across turns or independent runtime state, ask the supervisor for a managed worker instead.
 
-   Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals; request them from the supervisor if absent. Before touching a new component or adding diagnostics, proof, or review beyond the task, mail the supervisor the exact acceptance criterion and failed direct-path evidence. Without both, use the existing path, verify once, and finish.
+   Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals; request them from the supervisor if absent. Mail the supervisor before expanding product scope or adding a new product component. Routine diagnostics, test triage, and proof required for accepted work are autonomous; use the existing path, recover safely, and verify.
 
 2. **Maintain your todo list**: Track what you're doing. Update constantly.
 
@@ -150,9 +150,9 @@ Never kill your own worker or tmux window. Send the structured completion mail a
 
    **Never propose changing product code to work around an automation limitation.** Tests and automation adapt to the product — the product is never changed to accommodate the test approach. If a UI component cannot be driven programmatically, document it as a limitation and escalate. Do not blame Pi or a model without controlled evidence separating it from the harness, prompt, extension, configuration, and process control.
 
-5. **Treat unexpected environment state as an escalation signal**: If something you expected to exist doesn't — data, files, config, running services — stop and understand why before proceeding. The absence of expected state is itself information. Do not treat it as a symptom to fix; treat it as a reason to pause. This is especially important for persistent shared resources (databases, volumes, deployed services) where unexpected state is harder to recover from and may indicate you're operating on the wrong environment entirely.
+5. **Own environment diagnosis**: When expected local test state is missing or wrong, diagnose it. For a task-owned, reversible local test environment, document the smallest safe recovery, apply it, and rerun the affected check. A generic test failure is not a task hold.
 
-   When the cause of unexpected state is unclear, do not reach for destructive workarounds. Running migrations, seeding data, dropping and recreating data, or modifying deployed state are high-blast-radius operations that warrant escalation if you can't explain why the state is anomalous. Fix the cause, not the symptom — and if you can't identify the cause, escalate.
+   Do not use destructive workarounds on shared or deployed state. If a shared runtime cannot safely change, record that specific evidence, continue every independent validation slice, and use the established CI equivalent when permitted. Escalate only the actual external, irreversible, security, legal, credential, spending, production or shared runtime outside Wolfgang's trusted-local control, or materially ambiguous owner decision.
 
 6. **Do not use tmux directly for dev-environment process/session management**: Don't run raw `tmux` to start/stop/manage dev environments. That is done via provided scripts that wrap tmux internally. Each dev environment skill provides a `bin/` directory of named scripts:
    - Each project's dev-env skill: `~/.claude/skills/<project>-dev-env/bin/` (e.g. `<project>-dev-start`, `<project>-dev-stop`)
@@ -181,7 +181,7 @@ Never kill your own worker or tmux window. Send the structured completion mail a
     grep '^AGENT_WEBHOOK_SECRET=' .env.development.local
     grep '^WEBHOOK_SECRET=' ../glue-agent-<alias>/.env.development.local  # or wherever the paired service lives
     ```
-    If a required file is missing OR a paired secret is missing/mismatched, **mail the supervisor immediately** with the specific file/var name + what you expected and what you observed — do not silently generate or guess. The supervisor can copy from the base repo or escalate to Wolfgang.
+    If a required file is missing or a paired secret is missing/mismatched, mail the supervisor with the specific file/var name and observed state. Do not generate or guess secrets. Continue every unaffected validation slice. The supervisor recovers documented local config; escalate only a true credential or account decision.
 
 12. **When a factual claim about prior code state is challenged, answer from git, not memory.** If the user, supervisor, or a reviewer questions a claim like "X used to work", "Y regressed", "this has always been this way", or "did Z ever exist?" — your first move is direct git evidence, not argument from conversation memory. Conversation memory is derived and lossy; git is ground truth. Use `git log --all --diff-filter=D -- <path>` to find deletions, `git show <ref>:<file>` to inspect prior content, `git log -S '<symbol>'` or `git log -G '<pattern>'` to locate when code appeared or disappeared, and `git blame` to identify when a line last changed. For anything beyond a quick lookup, spawn a background subagent to investigate and report back — it keeps your main context clean and returns evidence faster than you can argue. Do NOT restate your premise, justify from what you remember writing, or speculate. Check the history, cite commits, then respond.
 
@@ -241,7 +241,7 @@ For production-code work, load the `workflows` skill and fetch `dev-loop` with `
    - Apply validated feedback from the batch
 6. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
 7. Run pre-commit checklist (below).
-8. Signal ready for human review. State what was done, what the reviewers found, and that the pre-commit checklist passes. Then **wait** — do not commit, push, or create a PR until explicitly told to.
+8. Commit and push scoped changes to a draft PR when the checks pass. Do not wait for supervisor approval. Wait for explicit authorization only to make a draft PR ready, merge it, or change another external PR state.
 
 ### Pre-commit Checklist
 
@@ -262,7 +262,7 @@ If you are running as a Codex worker:
 - **Subagents**: If `multi_agent = true` is enabled in `~/.codex/config.toml`, you can spawn subagents for review, exploration, and other parallel tasks. Use them the same way Claude Code workers use the Task tool — one subagent per reviewer persona, etc.
 - **If subagents are NOT available**: Follow the canonical dev-loop through implementation and direct primary-behavior validation. The supervisor will run the required implementation robot-review on the stable candidate and send findings back.
 - **Reference skills by plain name**: Say "run robot-review" not slash-prefixed in your workflow.
-- **Do not push**: Mail the supervisor when ready. The supervisor pushes after verifying.
+- **Push normally when the runtime and task allow it**: scoped commits and draft-PR pushes are autonomous. Mail the supervisor only when the delivery path cannot push or an external PR-state gate applies.
 
 Everything else in this skill (mailbox, rules, requirements, escalation) applies equally to Codex workers.
 

@@ -12,7 +12,7 @@ Project facts, credentials guidance, machine paths, and product-specific rules b
 - **Stay inside the ticket.** Every code change must directly serve the ticket's stated purpose or accepted requirements. Do not include adjacent cleanup, refactors, defensive changes, style work, or other “improvements” merely because they look worthwhile. If you cannot explain the direct connection, leave it out and raise it separately; only Wolfgang can explicitly approve an exception.
 - Treat worker or subagent summaries as claims until checked against direct evidence.
 - Before accepting a blocker, ask what requirement, external contract, safety risk, data-loss risk, or irreversible boundary makes it real.
-- Do not convert reversible local setup work into a user-approval gate. Use documented local setup, seed, auth, browser, service restart, or dependency recovery paths when they are safe and scoped.
+- **Routine validation recovery is autonomous.** A local test or validation failure is not a supervisor-approval or hold gate. Diagnose it, use the smallest documented safe local recovery, rerun the affected check, and continue independent validation. Escalate only an external or irreversible boundary: security, legal, credential, spending, production or shared runtime outside Wolfgang's trusted-local control, or a materially ambiguous owner decision.
 - If the requested outcome needs missing local developer tooling, install the necessary minimal tools that unblock the work. Local virtualenv and package installs are allowed when they are needed for the requested task. Do minimal provenance and version checks, keep the install local and reversible, and report exactly what changed. Escalate only for credentials, spending, external service enablement, security-boundary changes, production/shared-runtime changes, or non-local/global dependency effects.
 - If the same blocker or failure repeats, stop re-reporting it. Check durable knowledge, find or create a workaround, or escalate the exact external boundary.
 - Do not shrink required work into vague follow-ups. If the remaining work is needed for the requested artifact to be reviewable, demoable, repeatable, or merged, it stays in scope with an owner and next action.
@@ -37,7 +37,8 @@ follow-up changes, and push them. This includes every follow-up push after revie
 Wolfgang must explicitly authorize making a draft PR ready for review (undrafting it) and merging it. Required
 tests, review, voice, exact-head, and CI gates still apply. This rule does not authorize deployment,
 IAM or ruleset changes, or unrelated external changes unless another existing policy explicitly
-authorizes that action.
+authorizes that action. Local validation failures do not suspend this draft-PR autonomy; recover safely,
+rerun the affected check, and continue other independent checks.
 
 This rule supersedes any contrary wording that requires Wolfgang authorization before a scoped
 commit or push to a draft PR, including follow-up pushes after review feedback.
