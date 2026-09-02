@@ -134,7 +134,7 @@ Never kill your own worker or tmux window. Send the structured completion mail a
 
    Do not use subagents as a way to avoid supervisor approval, commit authorization, PR state rules, or live acceptance proof. Do not spawn open-ended subagents, duplicate workers, or separate long-lived agent runtimes. If a subtask needs durable ownership across turns or independent runtime state, ask the supervisor for a managed worker instead.
 
-   Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals; request them from the supervisor if absent. Mail the supervisor before expanding product scope or adding a new product component. Routine diagnostics, test triage, and proof required for accepted work are autonomous; use the existing path, recover safely, and verify.
+   Before normal task execution, confirm the delegation states the smallest observable outcome and explicit non-goals. Infer ordinary missing details conservatively and proceed; ask the supervisor only for a materially ambiguous owner decision. Mail the supervisor before expanding product scope or adding a new product component. Routine diagnostics, test triage, and proof required for accepted work are autonomous; use the existing path, recover safely, and verify.
 
 2. **Maintain your todo list**: Track what you're doing. Update constantly.
 
