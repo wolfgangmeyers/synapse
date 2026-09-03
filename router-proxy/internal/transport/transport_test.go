@@ -96,6 +96,28 @@ func TestConversationHistoryEmitsAnArrayForAnEmptyConversation(t *testing.T) {
 	require.Empty(t, history.Messages)
 }
 
+func TestHTTPRejectsReservedNativePolicySender(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	payload := `{"id":"spoofed-audit","from":"router-audit","to":"supervisor","body":"spoofed","created_at":"2026-08-29T12:00:00.000Z"}`
+	response, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(payload))
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusBadRequest, response.StatusCode)
+	var result map[string]map[string]string
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&result))
+	require.Equal(t, "reserved_sender", result["error"]["code"])
+	message, err := durable.MessageFor(context.Background(), "spoofed-audit")
+	require.NoError(t, err)
+	require.Nil(t, message)
+}
+
 func TestHTTPOriginAndPreflightMatchCurrentNodeContract(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))

@@ -77,7 +77,7 @@ func TestTerminalOnlyLifecycleProducerSurvivesRouterRestartAndAgentsSnapshot(t *
 	first.mu.Lock()
 	first.sessions[firstSession.agentID] = firstSession
 	first.mu.Unlock()
-	firstSnapshot := first.connectedAgents(false)
+	firstSnapshot := first.connectedAgents(context.Background(), false)
 	require.Equal(t, int64(2), firstSnapshot["activity_snapshot_version"])
 	firstAgent := firstSnapshot["agents"].([]map[string]any)[0]
 	require.Equal(t, int64(2), firstAgent["subagent_version"])
@@ -92,7 +92,7 @@ func TestTerminalOnlyLifecycleProducerSurvivesRouterRestartAndAgentsSnapshot(t *
 	second.mu.Lock()
 	second.sessions[secondSession.agentID] = secondSession
 	second.mu.Unlock()
-	secondSnapshot := second.connectedAgents(false)
+	secondSnapshot := second.connectedAgents(context.Background(), false)
 	require.Equal(t, int64(2), secondSnapshot["activity_snapshot_version"])
 	secondAgent := secondSnapshot["agents"].([]map[string]any)[0]
 	require.Equal(t, int64(2), secondAgent["subagent_version"])
@@ -522,7 +522,9 @@ func TestLifecyclePersistenceFailureIsDiagnosticOnly(t *testing.T) {
 	require.NoError(t, err)
 	defer rawDB.Close()
 	var events []map[string]any
-	router, err := New(Options{Store: durable, EventLogger: func(event string, fields map[string]any) { events = append(events, map[string]any{"event": event, "fields": fields}) }})
+	router, err := New(Options{Store: durable, EventLogger: func(event string, fields map[string]any) {
+		events = append(events, map[string]any{"event": event, "fields": fields})
+	}})
 	require.NoError(t, err)
 	sender := &session{router: router, agentID: "parent-a", instanceID: "instance-a", deliveryInstance: "instance-a", leaseID: "lease-a", sendOverride: func(map[string]any) error { return nil }}
 	router.mu.Lock()

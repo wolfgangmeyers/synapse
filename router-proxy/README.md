@@ -20,6 +20,8 @@ make -C router-proxy run-router
 
 The launcher uses `~/.mecha-developer/router.sqlite`, `~/.mecha-developer/router.jsonl`, `127.0.0.1`, port `8765`, and a 4096-character batch limit by default. Set `MECHA_ROUTER_DATABASE`, `MECHA_ROUTER_LOG`, `MECHA_ROUTER_HOST`, `MECHA_ROUTER_PORT`, or `MECHA_ROUTER_MAX_BATCH_CHARS` to override them. The event log rotates after 24 hours or 16 MiB and removes rotated files older than 48 hours; retained log files stay within 32 MiB.
 
+The launcher also enables the read-only tmux/router audit. It checks the existing `mecha` tmux session every 30 minutes and durably sends a summary to `supervisor` when it finds unmapped windows or live agents without a goal or recurring reminder. It never provisions tmux. Set `MECHA_ROUTER_AUDIT_SUPERVISOR_TARGET`, `MECHA_ROUTER_AUDIT_TMUX_SESSION`, or `MECHA_ROUTER_POLICY_TIMEOUT` to override the delivery target, observed session, or per-run policy timeout. Only one unsettled audit message is retained, so changed findings do not build a queue while the target is away.
+
 ## Build and run the proxy
 
 ```bash
