@@ -289,6 +289,10 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   // Session shutdown is terminal for this lifecycle instance. This fence covers
   // native events plus callbacks already queued by the heartbeat or compaction.
   let nativeEventsBlocked = false;
+  // Each heartbeat captures the lifecycle generation in which it was queued.
+  // Session boundaries advance it so a callback released by the old session
+  // cannot touch the new session's projection or client.
+  let lifecycleGeneration = 0;
   let activityHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let activityHeartbeatActive = false;
   let lastActivitySent: ActivitySent | undefined;
@@ -1054,9 +1058,10 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   function ensureHeartbeat(): void {
     if (nativeEventsBlocked || activityHeartbeatTimer !== undefined) return;
     // Keep polling after the parent settles so missed native transitions converge.
+    const heartbeatGeneration = lifecycleGeneration;
     activityHeartbeatTimer = setIntervalImpl(() => {
       // A callback may already be queued when session shutdown clears the interval.
-      if (nativeEventsBlocked) return;
+      if (nativeEventsBlocked || heartbeatGeneration !== lifecycleGeneration) return;
       // This is the only path that reads and publishes the native lifecycle projection.
       let changed = false;
       let state = "settled";
@@ -1241,6 +1246,10 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
   }
 
   function onSessionBoundary(): void {
+    // Advance the generation before clearing the timer. A callback already queued
+    // by the old session must be fenced even if the timer clear cannot retract it.
+    lifecycleGeneration += 1;
+    nativeEventsBlocked = true;
     // Compaction clears transient projections and timers. Tombstones intentionally
     // survive this boundary so stale native rows remain fenced. The root owns
     // scheduler disposal, so clear only this lifecycle's ownership ledger here.
@@ -1249,11 +1258,18 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
       const fence = stateIdentityFence(state);
       if (fence !== undefined) rememberIdentityFence(id, fence);
     }
-    nativeEventsBlocked = true;
     settledNotificationChildStates.clear();
     settledNotificationChildIds.clear();
     // Identity-only fences survive the session boundary. A delayed typed
     // snapshot from the old session must not become the next session's child.
+  }
+
+  function onSessionStart(): void {
+    // The extension instance survives /new and /resume. Reactivate this lifecycle
+    // and discard the previous client's last-frame cache before its new heartbeat.
+    lifecycleGeneration += 1;
+    nativeEventsBlocked = false;
+    lastActivitySent = undefined;
   }
 
   return {
@@ -1268,6 +1284,7 @@ export function createActivityLifecycle(options: ActivityLifecycleOptions): Acti
     refresh,
     ensureHeartbeat,
     onSessionBoundary,
+    onSessionStart,
   };
 }
 
@@ -1283,4 +1300,5 @@ export type ActivityLifecycle = {
   refresh: (context?: ActivityContext) => void;
   ensureHeartbeat: () => void;
   onSessionBoundary: () => void;
+  onSessionStart: () => void;
 };

@@ -1530,6 +1530,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       client = mailboxClient;
       publishGoalState(mailboxClient);
       coordinator = createMailboxCoordinator(context, mailboxClient);
+      activityLifecycle.onSessionStart();
       activityLifecycle.ensureHeartbeat();
       void mailboxClient.connect().catch((error: ErrorLike) => {
         recordDiagnostic("mailbox_connect_failed", { error_name: errorName(error) });

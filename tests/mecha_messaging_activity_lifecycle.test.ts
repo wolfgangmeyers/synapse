@@ -620,6 +620,29 @@ test("session boundaries fence queued heartbeats and late compaction reconciliat
   assert.equal(JSON.stringify(fixture.activities.at(-1)?.payload).includes("late-child"), false);
 });
 
+test("session start reactivates polling while fencing an old queued heartbeat", () => {
+  const records: NativeSubagent[] = [{ id: "resumed-child", type: "worker", status: "running", description: "resumed child" }];
+  const fixture = activityFixture(typedService(records));
+  fixture.lifecycle.onAgentStart(fixture.context);
+  const oldHeartbeat = fixture.intervals[0]?.callback;
+  oldHeartbeat?.();
+  const snapshotsBeforeBoundary = fixture.snapshots.length;
+  const activitiesBeforeBoundary = fixture.activities.length;
+
+  fixture.lifecycle.onSessionBoundary();
+  fixture.lifecycle.onSessionStart();
+  fixture.lifecycle.ensureHeartbeat();
+  const newHeartbeat = fixture.intervals.at(-1)?.callback;
+
+  oldHeartbeat?.();
+  assert.equal(fixture.snapshots.length, snapshotsBeforeBoundary);
+  assert.equal(fixture.activities.length, activitiesBeforeBoundary + 1);
+
+  newHeartbeat?.();
+  assert.equal(fixture.snapshots.length, snapshotsBeforeBoundary + 1);
+  assert.equal(JSON.stringify(fixture.activities.at(-1)?.payload).includes("resumed-child"), true);
+});
+
 test("typed capped snapshots do not dispose a retained child omitted by the partial read", () => {
   const records: NativeSubagent[] = [{ id: "aaa-retained-child", type: "worker", status: "running", description: "retained label" }];
   const fixture = activityFixture(typedService(records));
@@ -1328,6 +1351,10 @@ test("root shutdown remembers the context immediately before lifecycle cleanup",
   const initialHandler = source.slice(shutdownStarts[0], initialEnd);
   assert.doesNotMatch(initialHandler, /rememberParentActivityContext|onSessionBoundary/);
   assert.match(source.slice(shutdownStarts[1]), /mailboxSendRateLimits\.clear\(\);\s+diagnosticSessionClosed = true;\s+rememberParentActivityContext\(context\);\s+activityLifecycle\.onSessionBoundary\(\);/);
+  const sessionStart = source.indexOf('  pi.on("session_start"');
+  const heartbeat = source.indexOf("activityLifecycle.ensureHeartbeat();", sessionStart);
+  const reactivation = source.indexOf("activityLifecycle.onSessionStart();", sessionStart);
+  assert.ok(sessionStart >= 0 && reactivation >= sessionStart && reactivation < heartbeat);
 });
 
 test("root session startup and shutdown keep client and lifecycle ordering", async () => {
@@ -1413,4 +1440,13 @@ test("root session startup and shutdown keep client and lifecycle ordering", asy
   const sessionShutdown = shutdownHandlers.at(-1);
   await sessionShutdown?.({}, shutdownContext);
   assert.deepEqual(order.slice(-4), ["activity:settled", "scheduler-dispose", "coordinator-close", "client-close"]);
+
+  const oldHeartbeat = heartbeat;
+  await sessionStart?.({}, context);
+  const orderAfterRestart = [...order];
+  oldHeartbeat?.();
+  assert.deepEqual(order, orderAfterRestart);
+  heartbeat?.();
+  assert.equal(order.at(-1), "activity:active");
+  await sessionShutdown?.({}, shutdownContext);
 });
