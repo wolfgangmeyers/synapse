@@ -10,6 +10,8 @@ Disposition: blocking findings: none confirmed in the audit target. Should-add: 
 
 Rebase validation: `cd router-proxy && go test ./...` passes. `cd router-proxy && go test -v ./internal/transport -run '^(TestRouterDoesNotRegisterTmuxAuditWithoutConfiguration|TestTmuxRouterAudit.*|TestNativePolicy.*|TestDefaultPolicySender.*|TestRunAndStopPoliciesAcceptNilContexts|TestRouterCloseCancelsPoliciesBeforeReturning|TestAuditCoveragePredicates|TestRouterCloseBoundsNoncooperativePolicy|TestHTTPRejectsReservedNativePolicySender)$' -count=1` passes. `cd router-proxy && go vet ./...`, `git diff --check origin/main...HEAD`, and `gofmt -l` over all changed Go paths pass. `cd router-proxy && go test -race ./internal/transport -run '^(TestTmuxRouterAudit.*|TestNativePolicy.*|TestDefaultPolicySender.*|TestRunAndStopPoliciesAcceptNilContexts|TestRouterCloseCancelsPoliciesBeforeReturning|TestAuditCoveragePredicates|TestRouterCloseBoundsNoncooperativePolicy|TestHTTPRejectsReservedNativePolicySender)$' -count=3` passes. The target hash `8aa491896d6c72770b0eef1b1e069f9e9d7925ae22f2526520069aadbdc3d633` (`paths=610`) matches `./tools/hash_audit_target.sh`. The successful `make coverage` retry reports 67.8% total statement coverage.
 
+Prior package-only coverage runs: 74.7% and 62.1%. These are historical package measurements, not the authoritative rebased `make coverage` result.
+
 | Focus | Reviewer/persona | Result |
 | --- | --- | --- |
 | requirements | Readiness audit / requirements reviewer | Pass: audit inventories tmux windows and live agents, checks goal or recurring-reminder coverage, and sends only a summary. |
@@ -34,9 +36,11 @@ Rebase validation: `cd router-proxy && go test ./...` passes. `cd router-proxy &
 | architectural-seams | Readiness audit / seams reviewer | Pass: `PolicyContext` exposes only tmux inventory, live agents, reminders, clock/ID, and sender seams. |
 | configuration-safety | Readiness audit / configuration reviewer | Pass: target, session, and timeout defaults are explicit; invalid empty or nonpositive values are rejected. |
 | production-risks | Readiness audit / production-risk reviewer | Pass: audit does not provision tmux and cannot hold durable lifecycle recovery. |
-| test-coverage | Readiness audit / test reviewer | Pass: final authoritative `make coverage` result is 67.3%; named audit tests cover success, isolation, cadence, delivery, dedupe, privacy, and shutdown. |
+| test-coverage | Readiness audit / test reviewer | Pass: final authoritative rebased `make coverage` result is 67.8%; prior 74.7% and 62.1% figures are package-only measurements; named audit tests cover success, isolation, cadence, delivery, dedupe, privacy, and shutdown. |
 | documentation | Readiness audit / documentation reviewer | Pass: README documents defaults, environment overrides, cadence, delivery, and dedupe. |
 | visual-consistency | Readiness audit / visual reviewer | Skipped: no UI or visual surface. |
+
+Concurrent-load transient: the initial concurrent-load run of `TestNativePolicyFailuresDoNotBlockCleanupOrFollowingPolicies` timed out. Required isolated rerun: `cd router-proxy && go test -v ./internal/transport -run '^TestNativePolicyFailuresDoNotBlockCleanupOrFollowingPolicies$' -count=1` passed in 0.052s (test 0.04s): `PASS`, `ok github.com/reflexivity/mecha-developer/router-proxy/internal/transport 0.052s`. This test is added by the audit target, so clean-base evidence cannot establish the timeout as pre-existing. Disposition: transient validation event, not a confirmed audit-target regression.
 
 Pre-existing lifecycle flake: the first rebased `make coverage` run failed after 24.548s at `TestDifferentInstanceReplacementClearsStaleCompactingPause` line 1027 with `failed to get reader: use of closed network connection`; the immediate retry passed and reported 67.8%. The focused race command `cd router-proxy && go test -race ./internal/transport -run '^TestDifferentInstanceReplacementClearsStaleCompactingPause$' -count=3` also failed once at the same assertion with `context deadline exceeded`. `git blame` assigns lines 1020–1030 to `327d5c61`, and `origin/main...HEAD` has no diff hunk in that test body. The audit does not change this behavior.
 
