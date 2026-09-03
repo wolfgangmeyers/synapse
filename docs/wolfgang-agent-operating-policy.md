@@ -161,6 +161,10 @@ Do not write the review process, the findings list, or a narrative of the PR. No
 
 For a PR sweep, include every PR where the target reviewer previously posted a review and the current head differs from the head reviewed, regardless of current review-request assignment, other reviewers, stack or cross-PR comments, replacement PR numbers, or whether the PR is open, closed, or re-pushed. Review-request metadata is additional signal, not a gate.
 
+### Describe stack relationships by actual dependency
+
+When Wolfgang asks whether PRs are stacked, answer from their actual commit and diff dependency and the review and merge order. Do not rely on base-branch metadata when it creates a misleading formal distinction.
+
 ### Check stacked blockers against later work
 
 Before posting a blocker on a stacked PR, read its existing threads and inspect later stack tips or replacement PRs. A defect can be real in the exact mid-stack head without being an unresolved stack blocker. If an existing thread documents a later fix, do not post a duplicate changes-requested review. Either scope the finding to that exact PR head or do not post it.
