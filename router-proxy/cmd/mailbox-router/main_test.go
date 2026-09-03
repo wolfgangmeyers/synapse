@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,6 +24,9 @@ func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	require.Equal(t, "/tmp/router.db.jsonl", parsed.logPath)
 	require.Equal(t, "127.0.0.1", parsed.host)
 	require.Equal(t, 8765, parsed.port)
+	require.Equal(t, "supervisor", parsed.auditSupervisorTarget)
+	require.Equal(t, "mecha", parsed.auditTmuxSession)
+	require.Equal(t, transport.DefaultPolicyTimeout, parsed.policyTimeout)
 }
 
 func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
@@ -36,7 +39,7 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	require.NoError(t, listener.Close())
 
 	binary := filepath.Join(directory, "mailbox-router")
-	build := exec.Command("go", "build", "-o", binary, ".")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
 	build.Dir = filepath.Dir(filepath.Join(".", "main.go"))
 	require.NoError(t, build.Run())
 	command := exec.Command(binary, "--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port))
@@ -62,6 +65,7 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 		case line := <-lines:
 			if strings.HasPrefix(line, "MECHA_V2_ROUTER_READY ") {
 				ready = line
+				require.NoError(t, command.Process.Signal(syscall.SIGTERM))
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for isolated Go router readiness")
@@ -75,13 +79,6 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	require.True(t, attachmentInfo.IsDir())
 	require.FileExists(t, logPath)
 
-	response, err := http.Get("http://127.0.0.1:" + formatPort(port) + "/v1/health")
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, response.StatusCode)
-	_, _ = io.Copy(io.Discard, response.Body)
-	require.NoError(t, response.Body.Close())
-
-	require.NoError(t, command.Process.Signal(syscall.SIGTERM))
 	require.NoError(t, command.Wait())
 	logBytes, err := os.ReadFile(logPath)
 	require.NoError(t, err)

@@ -51,6 +51,7 @@ var errorMessages = map[string]string{
 	"payload_too_large":                 "Request exceeds local mailbox limits.",
 	"queue_full":                        "Recipient queue is full.",
 	"rate_limited":                      "Sender rate limit exceeded.",
+	"reserved_sender":                   "Sender is reserved for native router policy messages.",
 	"idempotency_conflict":              "Message ID already belongs to a different request.",
 	"dead_letter_required":              "Message is not a dead letter.",
 	"invalid_reminder":                  "Reminder request is invalid.",
@@ -137,7 +138,7 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleMemory(w, req)
 		return
 	case req.Method == http.MethodGet && path == "/v1/agents":
-		r.writeJSON(w, http.StatusOK, r.connectedAgents(req.URL.Query().Get("models") != "omit"))
+		r.writeJSON(w, http.StatusOK, r.connectedAgents(req.Context(), req.URL.Query().Get("models") != "omit"))
 		return
 	case req.Method == http.MethodGet && path == "/v1/conversations":
 		r.handleConversation(w, req)
@@ -448,6 +449,9 @@ func (r *Router) parseMessage(payload map[string]json.RawMessage) (protocol.Enve
 	from, err := rawString(payload, "from", true)
 	if err != nil {
 		return protocol.Envelope{}, parsedConversation{}, nil, err
+	}
+	if from == routerAuditSender {
+		return protocol.Envelope{}, parsedConversation{}, nil, &httpError{status: http.StatusBadRequest, code: "reserved_sender"}
 	}
 	to, err := rawString(payload, "to", true)
 	if err != nil {

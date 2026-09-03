@@ -106,7 +106,7 @@ func TestConversationSyncRegistrationClearsModelBeforeRegistered(t *testing.T) {
 	replacement := &session{
 		router: router,
 		sendOverride: func(fields map[string]any) error {
-			snapshot := router.connectedAgents(true)
+			snapshot := router.connectedAgents(context.Background(), true)
 			agent := snapshot["agents"].([]map[string]any)[0]
 			_, hasCurrentModel := agent["current_model"]
 			seenRegistered <- fields["type"] == "registered" && !hasCurrentModel

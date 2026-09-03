@@ -677,6 +677,16 @@ func (s *Store) DismissDeadLetter(ctx context.Context, messageID string) (bool, 
 func (s *Store) MessageFor(ctx context.Context, messageID string) (*domain.Message, error) {
 	return s.messageForTx(ctx, messageID)
 }
+
+// HasLiveMessage reports whether one sender already has an unsettled message
+// for a recipient. Native audit reports use one durable slot so changing audit
+// findings cannot accumulate a queue while the supervisor is away.
+func (s *Store) HasLiveMessage(ctx context.Context, sender, recipient string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE sender = ? AND recipient = ? AND state IN ('queued','leased','injection_requested'))`, sender, recipient).Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) LeaseFor(ctx context.Context, agentID string) (*domain.Lease, error) {
 	return s.leaseForTx(ctx, agentID)
 }

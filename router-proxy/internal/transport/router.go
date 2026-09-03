@@ -34,6 +34,8 @@ const (
 	DefaultPendingControlTTL     = 30 * time.Second
 	DefaultDeliveryOfferCoalesce = 25 * time.Millisecond
 	DefaultSweepHeartbeat        = time.Hour
+	DefaultPolicyTimeout         = 5 * time.Second
+	DefaultTmuxRouterAuditPeriod = 30 * time.Minute
 )
 
 var (
@@ -111,6 +113,12 @@ type Options struct {
 	GoalControlAvailable   bool
 	LifecycleAvailable     bool
 	EventLogger            func(string, map[string]any)
+	NativePolicies         []NativePolicy
+	EnableTmuxRouterAudit  bool
+	AuditSupervisorTarget  string
+	AuditTmuxSession       string
+	PolicyTimeout          time.Duration
+	PolicySender           PolicySender
 }
 
 type Router struct {
@@ -135,6 +143,17 @@ type Router struct {
 	tmux           TmuxAdapter
 	attachments    *attachments.Store
 	log            func(string, map[string]any)
+	policies       []NativePolicy
+	policyTimeout  time.Duration
+	policySender   PolicySender
+	policyMu       sync.Mutex
+	policyRunning  map[string]bool
+	policyWG       sync.WaitGroup
+	policyRunWG    sync.WaitGroup
+	policyLastRun  map[string]time.Time
+	policiesClosed bool
+	policyContext  context.Context
+	policyCancel   context.CancelFunc
 
 	mu sync.RWMutex
 	// lifecycleMu serializes listener startup with the transition to closed.
@@ -380,6 +399,35 @@ func New(options Options) (*Router, error) {
 	if maxFrame <= 0 || maxFrame > 64*1024 || maxRequest <= 0 || maxRequest > DefaultMaxRequestBytes || attempts <= 0 || maxPerSrc <= 0 || maxControls < maxPerSrc {
 		return nil, errors.New("invalid router limits")
 	}
+	policyTimeout := options.PolicyTimeout
+	if policyTimeout == 0 {
+		policyTimeout = DefaultPolicyTimeout
+	}
+	if policyTimeout <= 0 {
+		return nil, errors.New("policy timeout must be positive")
+	}
+	auditTarget := options.AuditSupervisorTarget
+	if auditTarget == "" {
+		auditTarget = "supervisor"
+	}
+	if !agentIDRE.MatchString(auditTarget) {
+		return nil, errors.New("audit supervisor target is invalid")
+	}
+	auditTmux := options.AuditTmuxSession
+	if auditTmux == "" {
+		auditTmux = "mecha"
+	}
+	if strings.TrimSpace(auditTmux) == "" {
+		return nil, errors.New("audit tmux session is required")
+	}
+	policies := append([]NativePolicy(nil), options.NativePolicies...)
+	if options.EnableTmuxRouterAudit {
+		policies = append(policies, NewTmuxRouterAuditPolicy(auditTarget, auditTmux))
+	}
+	policies, err := nativePolicies(policies)
+	if err != nil {
+		return nil, err
+	}
 	logger := options.EventLogger
 	if logger == nil {
 		logger = func(string, map[string]any) {}
@@ -393,8 +441,12 @@ func New(options Options) (*Router, error) {
 		goal = contains(options.Store.MigrationIDs(), "019_goal_control_desired_state") && contains(options.Store.MigrationIDs(), "021_goal_control_revision_history")
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
+	policyContext, policyCancel := context.WithCancel(context.Background())
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
+	if r.policySender == nil {
+		r.policySender = r.sendPolicyMessage
+	}
 	if lifecycle {
 		projection, err := options.Store.LifecycleProjection(context.Background())
 		if err != nil {
@@ -511,7 +563,11 @@ func (r *Router) Close(ctx context.Context) error {
 		r.lifecycleMu.Unlock()
 		done := r.closeDone
 		if done != nil {
-			<-done
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		r.mu.RLock()
 		err := r.closeErr
@@ -540,13 +596,25 @@ func (r *Router) Close(ctx context.Context) error {
 	if r.deliveryOffersCancel != nil {
 		r.deliveryOffersCancel()
 	}
+	var err error
+	if policyErr := r.stopPolicies(ctx); policyErr != nil {
+		err = policyErr
+	}
 	for _, candidate := range sessions {
 		_ = candidate.close(websocket.StatusGoingAway, "router shutdown")
 	}
-	err := r.stopPendingDeliveryOffers(ctx)
+	if offerErr := r.stopPendingDeliveryOffers(ctx); err == nil {
+		err = offerErr
+	}
 	if sweepCancel != nil && sweepDone != nil {
 		sweepCancel()
-		<-sweepDone
+		select {
+		case <-sweepDone:
+		case <-ctx.Done():
+			if err == nil {
+				err = ctx.Err()
+			}
+		}
 	}
 	if server != nil {
 		if shutdownErr := server.Shutdown(ctx); err == nil {
