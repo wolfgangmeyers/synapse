@@ -598,6 +598,10 @@ So, concretely:
 
 He asked for all of this on 2026-08-07.
 
+### Urgent Linear queue checks use Wolfgang's assignment
+
+Urgent Linear queue checks for Wolfgang include only issues explicitly assigned to Wolfgang. Team-wide or unassigned urgent issues stay out of his launch queue; a newly created issue does not make it his work.
+
 ### If you're apologizing, write the rule down
 
 Any time a reply contains an apology, a correction of your own behavior, or a "you're right, I did X," a rule belongs in the instructions. Add it in the same turn. An acknowledgment does not survive the next context, so the same correction gets paid for again.
