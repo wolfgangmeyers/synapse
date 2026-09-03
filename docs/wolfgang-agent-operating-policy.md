@@ -171,6 +171,8 @@ Before posting a blocker on a stacked PR, read its existing threads and inspect 
 
 ### All PR reviews follow the review-pr skill workflow
 
+Keep repository operations inside the target project: never run `gh pr checkout`, `git checkout`, or equivalent repository-switching commands for another project from the mecha-developer checkout. Inspect or review that PR from the target repository or an isolated worktree for the target project.
+
 Every GitHub PR review must use the `review-pr` skill. No shortcuts, no general-purpose subagents, no manual reads that skip the workflow.
 
 The skill workflow is mandatory:
