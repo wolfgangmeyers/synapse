@@ -11,12 +11,12 @@ configured Discord channel
 
 supervisor
   -> configured bridge agent
-  -> configured Discord channel
+  -> route's Discord channel
 ```
 
-Every accepted Discord message becomes one durable Mailbox message for `supervisor`. Every normal Mailbox message from `supervisor` to that instance's configured agent ID posts its body to that one Discord channel. Subjects do not affect outbound delivery.
+Every accepted Discord message becomes one durable Mailbox message for `supervisor`. Every normal Mailbox message from `supervisor` to that instance's configured agent ID requires a routed subject and posts its body to that route's Discord channel. Inbound filtering remains restricted to the configured channel.
 
-Non-goals: no Discord app, bot, credential, package, connection, router protocol change, Pi-extension change, install, or live test in this task. No reply tokens, message references, per-message routes, channel maps, central registry, or instance coordination. This is not a general Discord client, slash-command integration, multi-user authorization layer, or web service.
+Non-goals: no Discord app, bot, credential, package, connection, router protocol change, install, or production/shared-runtime live test in this task. No reply tokens, message references, channel maps, central registry, or instance coordination. This is not a general Discord client, slash-command integration, multi-user authorization layer, or web service.
 
 ## Instance-local configuration
 
@@ -49,9 +49,10 @@ The bridge accepts only a normal Mailbox message with:
 
 - `from`: exactly `supervisor`
 - `to`: exactly this instance's configured `agentId`
+- `subject`: exactly `pioneer-square.route.v1:pioneer-square:#<lowercase channel-name>:<17–20 decimal digit channel-id>`
 - `body`: message text
 
-Any subject is accepted. Persist the message before ACKing its router delivery, then post the body to the configured channel. Do not add a Discord message reference. A message for another bridge ID is rejected even if it came from `supervisor`.
+Missing or unrelated route metadata is rejected with `missing_discord_route`. A subject with the route prefix but invalid syntax is rejected with `malformed_discord_route`. Invalid routes are NACKed once and never admitted. Persist a valid message before ACKing its router delivery, then post the body to the route's channel. Do not add a Discord message reference. A message for another bridge ID is rejected even if it came from `supervisor`.
 
 Use `allowed_mentions` that disables user, role, and everyone mentions. Never treat Discord content as bridge instructions.
 
@@ -62,7 +63,7 @@ Use `allowed_mentions` that disables user, role, and everyone mentions. Never tr
 3. Accept `MESSAGE_CREATE` only from the configured channel, with a non-bot author and content. Ignore DMs, webhooks, bot messages, and every other channel.
 4. Keep READY session state in memory, resume when possible, and respect the supplied session-start limit.
 5. Serialize outbound REST sends. Honor 429 and transient failure retries. Permanent failures and ambiguous outcomes become concise Mailbox notices to `supervisor`, sent from the configured bridge ID. Never include token or content.
-6. Split outbound text into Unicode-safe chunks within Discord's documented content limit. Every chunk goes to the one configured channel.
+6. Split outbound text into Unicode-safe chunks within Discord's documented content limit. Every chunk goes to the route's channel.
 
 ## Durable state and retention
 
@@ -70,7 +71,8 @@ Use one mode-0600 SQLite file at the configured instance-local `statePath`. No c
 
 - `inbound_outbox`: complete sanitized envelope until router acceptance. Admit at most 100 rows. When full, drop matching events at that explicit boundary and send a rate-limited failure notice after recovery.
 - `inbound_deliveries`: source-message IDs only for duplicate suppression. Expire after 7 days and keep at most 1,024 rows.
-- `outbound`: mailbox message ID, pending body, retry schedule, and terminal Discord status. Admit at most 100 pending rows. Full state NACKs the router delivery as `injection_failed`. Clear the body after success or terminal failure. Retain terminal IDs and status for 7 days and at most 1,024 rows for delivery replay deduplication.
+- `outbound`: mailbox message ID, routed Discord channel ID, pending body, retry schedule, and terminal Discord status. Admit at most 100 pending rows. New rows require a channel ID. Full state NACKs the router delivery as `injection_failed`. Clear the body after success or terminal failure. Retain terminal IDs and status for 7 days and at most 1,024 rows for delivery replay deduplication.
+- Schema version 3 adds nullable `channel_id`. Migration preserves valid destinations. Pending rows without a destination are atomically terminal-failed and raise one pending `discord_route_missing` incident; terminal rows remain terminal.
 
 Prune on startup and after every state change. The durable outbound record is the acceptance point before the router ACK. External delivery remains at-least-once after an ambiguous Discord HTTP outcome.
 
@@ -84,7 +86,7 @@ This stays inside the existing trusted-local boundary. The loopback router is no
 
 1. Test Gateway state transitions, heartbeat, reconnect, intent/event filtering, and self-message rejection.
 2. Test complete inbound byte bounding, one-channel filtering, inbound recovery, duplicate suppression, overflow notices, and absence of Discord route data from supervisor-facing bodies.
-3. Test durable outbound handoff before ACK, replay after restart, rejection of non-supervisor and wrong-recipient messages, arbitrary subjects, one-channel output, mention safety, bounded retention, and failure notices.
+3. Test durable outbound handoff before ACK, replay after restart, rejection of non-supervisor and wrong-recipient messages, route parsing and rejection, routed output, configured-channel inbound filtering, mention safety, bounded retention, and failure notices.
 4. Test two configured instances: distinct agent IDs only accept their own deliveries and post only to their own configured channels.
 5. Test config validation: required valid agent ID, exactly one channel ID, explicit safe state path, protected local config/token files, and no shared default state path.
 6. Run focused suites plus full syntax/check commands. Review the plan and diff for requirements, failure handling, retention, and scope before commit.

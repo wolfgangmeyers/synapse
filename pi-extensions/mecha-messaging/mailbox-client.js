@@ -157,6 +157,30 @@ export function routerWebSocketUrl(routerUrl) {
     url.pathname = "/v1/agents";
     return url.toString();
 }
+const PIONEER_SQUARE_ROUTE_PREFIX = "pioneer-square:";
+const PIONEER_SQUARE_ROUTE_SUBJECT_PREFIX = "pioneer-square.route.v1:";
+export function parsePioneerSquareRoute(route) {
+    if (typeof route !== "string")
+        return undefined;
+    const match = /^pioneer-square:#([a-z0-9][a-z0-9-]{0,98}):(\d{17,20})$/u.exec(route);
+    if (match === null)
+        return undefined;
+    const [, channelName, channelId] = match;
+    return { channelName, channelId, route };
+}
+export function parsePioneerSquareRouteSubject(subject) {
+    if (typeof subject !== "string" || !subject.startsWith(PIONEER_SQUARE_ROUTE_SUBJECT_PREFIX))
+        return undefined;
+    return parsePioneerSquareRoute(subject.slice(PIONEER_SQUARE_ROUTE_SUBJECT_PREFIX.length));
+}
+export function pioneerSquareRouteSubject(route) {
+    if (parsePioneerSquareRoute(route) === undefined)
+        throw new TypeError("invalid Pioneer Square route");
+    return `${PIONEER_SQUARE_ROUTE_SUBJECT_PREFIX}${route}`;
+}
+export function pioneerSquareRouteTarget(route) {
+    return { to: "pioneer-square", subject: pioneerSquareRouteSubject(route) };
+}
 export function parseReplyArguments(argumentsText) {
     const [recipient, ...bodyParts] = argumentsText.trim().split(/\s+/);
     const body = bodyParts.join(" ");
