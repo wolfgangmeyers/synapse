@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { parsePioneerSquareRouteSubject } from "../pi-extensions/mecha-messaging/mailbox-client.js";
+
 export const INBOUND_SUBJECT = "discord.inbound.v1";
 export const DISCORD_CONTENT_LIMIT = 2_000;
 
@@ -61,9 +63,22 @@ export function inboundEnvelope(event, { agentId, id = randomUUID(), now = () =>
   };
 }
 
+const ROUTE_SUBJECT_FORMAT = "pioneer-square.route.v1:pioneer-square:#<channel-name>:<channel-id>";
+const ROUTE_REQUIRED_ERROR = `Discord route metadata is required; provide subject '${ROUTE_SUBJECT_FORMAT}'.`;
+const ROUTE_MALFORMED_ERROR = `Discord route metadata is malformed; provide subject '${ROUTE_SUBJECT_FORMAT}'.`;
+
 export function supervisorMessage(message, agentId) {
   if (message?.from !== "supervisor" || message?.to !== agentId || typeof message.body !== "string") return undefined;
-  return { messageId: message.id, body: message.body };
+  const parsed = parsePioneerSquareRouteSubject(message.subject);
+  if (parsed === undefined) {
+    const malformed = typeof message.subject === "string" && message.subject.startsWith("pioneer-square.route.v1:");
+    return {
+      accepted: false,
+      reason: malformed ? "malformed_discord_route" : "missing_discord_route",
+      error: malformed ? ROUTE_MALFORMED_ERROR : ROUTE_REQUIRED_ERROR,
+    };
+  }
+  return { messageId: message.id, body: message.body, channelId: parsed.channelId };
 }
 
 export function splitDiscordContent(value, maximum = DISCORD_CONTENT_LIMIT) {
@@ -100,6 +115,7 @@ export function createBridge({ state, postEnvelope, discord, agentId, channelId,
     outbound_full: "Discord bridge outbound queue is full; Mailbox will retry or dead-letter the message.",
     discord_ambiguous: "Discord message outcome is ambiguous; inspect the bridge state before retrying.",
     discord_permanent_failure: "Discord rejected a bridge message; inspect the bridge state for IDs and HTTP status.",
+    discord_route_missing: `Discord bridge received a supervisor message without a valid routed destination; provide subject '${ROUTE_SUBJECT_FORMAT}'.`,
   }[kind] ?? "Discord bridge needs attention.");
   const deliverIncident = async (kind, body = incidentBody(kind)) => {
     try {
@@ -108,8 +124,8 @@ export function createBridge({ state, postEnvelope, discord, agentId, channelId,
     } catch { /* The pending incident is retried after router recovery. */ }
   };
   const report = async (kind, body) => {
-    const raised = state.raiseIncident(kind);
-    if (raised || state.pendingIncidents().includes(kind)) await deliverIncident(kind, body);
+    if (state.raiseIncident(kind)) await deliverIncident(kind, body);
+    else if (state.pendingIncidents().includes(kind)) scheduleFlush(1_000);
   };
   const flushIncidentNotices = async () => {
     for (const kind of state.pendingIncidents()) await deliverIncident(kind);
@@ -161,6 +177,10 @@ export function createBridge({ state, postEnvelope, discord, agentId, channelId,
       if (closed) return { accepted: false, reason: "bridge_closed" };
       const outbound = supervisorMessage(message, agentId);
       if (outbound === undefined) return { accepted: false, reason: "rejected_sender_or_recipient" };
+      if (outbound.accepted === false) {
+        void report("discord_route_missing", outbound.error);
+        return outbound;
+      }
       const accepted = state.admitOutbound(outbound);
       if (accepted.accepted) scheduleFlush();
       else if (accepted.reason === "outbound_full") void report("outbound_full");
@@ -173,10 +193,15 @@ export function createBridge({ state, postEnvelope, discord, agentId, channelId,
         try {
           for (const pending of state.pendingOutbound()) {
           try {
+            if (typeof pending.channelId !== "string" || pending.channelId.length === 0) {
+              state.completeOutbound(pending.messageId, { state: "failed" });
+              await report("discord_route_missing");
+              continue;
+            }
             const chunks = splitDiscordContent(pending.body);
             let firstMessageId;
             for (const content of chunks) {
-              const sent = await discord.createMessage({ channelId, content, allowedMentions: safeAllowedMentions });
+              const sent = await discord.createMessage({ channelId: pending.channelId, content, allowedMentions: safeAllowedMentions });
               firstMessageId ??= sent?.id;
             }
             state.completeOutbound(pending.messageId, { state: "succeeded", discordMessageId: firstMessageId });

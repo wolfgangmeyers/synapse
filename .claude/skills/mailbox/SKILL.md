@@ -44,6 +44,10 @@ Skipping a mandatory pre-read update when one is present is a protocol violation
 
 When Wolfgang sends a message by mailbox, assume he may be communicating from his phone or another remote UI. If a response is needed, reply by mailbox instead of printing the substantive response only in the terminal/console. Keep the answer in the same channel he used.
 
+## Discord replies
+
+Replies to Discord use `to: pioneer-square` and subject `pioneer-square.route.v1:<route>` with the displayed canonical route. Omitted or malformed routes are rejected; never rely on the configured inbound channel.
+
 ## Reply discipline: avoid acknowledgment loops
 
 Do **not** reply to messages that are only acknowledgments, confirmations, or promises to stay parked, unless the message also includes a new instruction, new evidence, a blocker, a question, or a state transition that needs routing. Examples that normally need **no reply**: "Acknowledged", "Confirmed", "I'll stay parked", "I'll wait for review", or restating an instruction back to the supervisor.

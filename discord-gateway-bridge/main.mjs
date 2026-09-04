@@ -52,7 +52,11 @@ export async function run(config = loadRuntimeConfig()) {
     agentId: config.agentId,
     onEnvelope: async (message, delivery) => {
       const accepted = bridge.acceptSupervisorMessage(message);
-      if (!accepted.accepted) { client.sendReceipt("nack", delivery, "injection_failed"); return; }
+      if (!accepted.accepted) {
+        if (accepted.error !== undefined) console.error(`discord-gateway-bridge: ${accepted.error}`);
+        client.sendReceipt("nack", delivery, accepted.reason);
+        return;
+      }
       // The SQLite insert is the durable handoff boundary.
       client.sendReceipt("injection_requested", delivery);
       client.sendReceipt("ack", delivery);

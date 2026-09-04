@@ -5,7 +5,12 @@ import { dirname } from "node:path";
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const RETAINED_ROWS = 1_024;
 const MAX_PENDING = 100;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+
+function requiredId(value, name) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128) throw new TypeError(`${name} is required`);
+  return value;
+}
 
 function protect(path) {
   for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
@@ -44,6 +49,7 @@ function createSchema(database) {
     CREATE TABLE IF NOT EXISTS outbound (
       message_id TEXT PRIMARY KEY,
       body TEXT,
+      channel_id TEXT,
       state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed', 'ambiguous')),
       attempts INTEGER NOT NULL DEFAULT 0,
       retry_at INTEGER,
@@ -83,12 +89,29 @@ function directInboundEnvelope(raw, agentId) {
   };
 }
 
-function migrateLegacyState(database, path, agentId) {
+function tableColumns(database, name) {
+  return new Set(database.prepare(`PRAGMA table_info(${name})`).all().map(({ name: column }) => column));
+}
+
+function terminalizeLegacyDestinations(database) {
+  const pending = database.prepare("SELECT 1 FROM outbound WHERE state = 'pending' AND (channel_id IS NULL OR channel_id = '') LIMIT 1").get();
+  if (pending === undefined) return;
+  database.prepare("UPDATE outbound SET body = NULL, state = 'failed', retry_at = NULL, updated_at = ? WHERE state = 'pending' AND (channel_id IS NULL OR channel_id = '')").run(Date.now());
+  database.prepare("INSERT INTO incidents (kind, reported_at, pending) VALUES ('discord_route_missing', 0, 1) ON CONFLICT(kind) DO UPDATE SET reported_at = 0, pending = 1").run();
+}
+
+function migrateLegacyState(database, path, agentId, version) {
   const hasInbound = tableExists(database, "inbound_outbox");
   const hasOutbound = tableExists(database, "outbound");
   if (!hasInbound && !hasOutbound) return;
   if (typeof agentId !== "string" || agentId.length === 0) throw new Error("agentId is required to migrate Discord bridge state");
   transaction(database, path, () => {
+    if (version >= 2 && hasOutbound) {
+      if (!tableColumns(database, "outbound").has("channel_id")) database.exec("ALTER TABLE outbound ADD COLUMN channel_id TEXT");
+      createSchema(database);
+      terminalizeLegacyDestinations(database);
+      return;
+    }
     if (hasInbound) database.exec("ALTER TABLE inbound_outbox RENAME TO legacy_inbound_outbox");
     if (hasOutbound) database.exec("ALTER TABLE outbound RENAME TO legacy_outbound");
     database.exec("DROP TABLE IF EXISTS inbound_routes");
@@ -100,8 +123,10 @@ function migrateLegacyState(database, path, agentId) {
       database.exec("DROP TABLE legacy_inbound_outbox");
     }
     if (hasOutbound) {
-      database.exec(`INSERT INTO outbound (message_id, body, state, attempts, retry_at, discord_message_id, status_code, created_at, updated_at)
-        SELECT message_id, body, state, attempts, retry_at, discord_message_id, status_code, created_at, updated_at FROM legacy_outbound`);
+      const columns = tableColumns(database, "legacy_outbound");
+      const channel = columns.has("channel_id") ? "channel_id" : "NULL";
+      database.exec(`INSERT INTO outbound (message_id, body, channel_id, state, attempts, retry_at, discord_message_id, status_code, created_at, updated_at)
+        SELECT message_id, body, ${channel}, state, attempts, retry_at, discord_message_id, status_code, created_at, updated_at FROM legacy_outbound`);
       database.exec("DROP TABLE legacy_outbound");
     }
   });
@@ -115,7 +140,8 @@ export function openBridgeState({ databasePath, agentId, clock = () => Date.now(
   mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true, timeout: 5_000 });
   database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;");
-  if (database.prepare("PRAGMA user_version").get().user_version < SCHEMA_VERSION) migrateLegacyState(database, databasePath, agentId);
+  const schemaVersion = database.prepare("PRAGMA user_version").get().user_version;
+  if (schemaVersion < SCHEMA_VERSION) migrateLegacyState(database, databasePath, agentId, schemaVersion);
   createSchema(database);
   database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   protect(databasePath);
@@ -162,7 +188,8 @@ export function openBridgeState({ databasePath, agentId, clock = () => Date.now(
       });
       state.prune();
     },
-    admitOutbound({ messageId, body }) {
+    admitOutbound({ messageId, body, channelId }) {
+      requiredId(channelId, "channelId");
       state.prune();
       return transaction(database, databasePath, () => {
         const existing = database.prepare("SELECT state FROM outbound WHERE message_id = ?").get(messageId);
@@ -170,14 +197,14 @@ export function openBridgeState({ databasePath, agentId, clock = () => Date.now(
         const pending = database.prepare("SELECT COUNT(*) AS count FROM outbound WHERE state = 'pending'").get().count;
         if (pending >= MAX_PENDING) return { accepted: false, reason: "outbound_full" };
         const at = now();
-        database.prepare("INSERT INTO outbound (message_id, body, state, retry_at, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?, ?)")
-          .run(messageId, body, at, at, at);
+        database.prepare("INSERT INTO outbound (message_id, body, channel_id, state, retry_at, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)")
+          .run(messageId, body, channelId, at, at, at);
         return { accepted: true, duplicate: false };
       });
     },
     pendingOutbound() {
-      return database.prepare("SELECT message_id, body, attempts FROM outbound WHERE state = 'pending' AND retry_at <= ? ORDER BY created_at ASC")
-        .all(now()).map((row) => ({ messageId: row.message_id, body: row.body, attempts: row.attempts }));
+      return database.prepare("SELECT message_id, body, channel_id, attempts FROM outbound WHERE state = 'pending' AND retry_at <= ? ORDER BY created_at ASC")
+        .all(now()).map((row) => ({ messageId: row.message_id, body: row.body, channelId: row.channel_id, attempts: row.attempts }));
     },
     retryOutbound(messageId, retryAt) {
       transaction(database, databasePath, () => database.prepare("UPDATE outbound SET attempts = attempts + 1, retry_at = ?, updated_at = ? WHERE message_id = ? AND state = 'pending'")
