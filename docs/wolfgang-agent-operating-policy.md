@@ -161,11 +161,17 @@ Do not write the review process, the findings list, or a narrative of the PR. No
 
 For a PR sweep, include every PR where the target reviewer previously posted a review and the current head differs from the head reviewed, regardless of current review-request assignment, other reviewers, stack or cross-PR comments, replacement PR numbers, or whether the PR is open, closed, or re-pushed. Review-request metadata is additional signal, not a gate.
 
+### Describe stack relationships by actual dependency
+
+When Wolfgang asks whether PRs are stacked, answer from their actual commit and diff dependency and the review and merge order. Do not rely on base-branch metadata when it creates a misleading formal distinction.
+
 ### Check stacked blockers against later work
 
 Before posting a blocker on a stacked PR, read its existing threads and inspect later stack tips or replacement PRs. A defect can be real in the exact mid-stack head without being an unresolved stack blocker. If an existing thread documents a later fix, do not post a duplicate changes-requested review. Either scope the finding to that exact PR head or do not post it.
 
 ### All PR reviews follow the review-pr skill workflow
+
+Keep repository operations inside the target project: never run `gh pr checkout`, `git checkout`, or equivalent repository-switching commands for another project from the mecha-developer checkout. Inspect or review that PR from the target repository or an isolated worktree for the target project.
 
 Every GitHub PR review must use the `review-pr` skill. No shortcuts, no general-purpose subagents, no manual reads that skip the workflow.
 
@@ -197,6 +203,7 @@ Key readiness evidence to the immutable base, target tree/head, stated requireme
 - When the active model cannot read images, delegate image reading to a vision-capable model and use its description as the evidence input. Use GPT 5.5 when an OpenAI subscription is available. Ask for the concrete details needed for the task, not a generic caption.
 - For user-facing changes, run the behavior. Code inspection alone is not enough.
 - For CI fixes, inspect the actual failing job, reproduce locally when possible, run the closest CI-equivalent checks, push only scoped fixes, and keep a reminder/status loop until the PR head is green or the next failure is routed.
+- Aggregate PR check summaries do not prove that a preview deployed. When preview evidence matters, inspect the exact deployment run and job, then verify the deployed stage and head before reporting it as available.
 - Never refuse to approve a PR solely because CI fails. Actual code defects remain blockers; CI, infrastructure, and known non-product failures do not.
 - Use source-of-truth history when a claim about prior behavior is challenged. Git evidence beats memory.
 - An author saying they fixed something is a claim. Re-fetch the head, diff the fix commit against what you reviewed, and re-run whatever found the problem in the first place.
@@ -276,6 +283,7 @@ This is a sharper case of checking the facts you inherit. A rule recalled from m
 ## Communication
 
 - Use the same channel the person used. If Wolfgang contacts an agent by mailbox, reply by mailbox.
+- For urgent external actions assigned by mailbox, send the instruction to the exact active worker identity and confirm that worker has started before reporting the action as underway. A generic or guessed recipient does not prove delivery.
 - Never echo, render, or repeatedly poll malformed tool or task notification fragments into the human conversation. Treat them as harness noise, stop the loop, and give a plain-English status only when it changes the user's decision.
 - Send concise status updates when async work is red, pending, blocked, or materially changed. Include links, owner, current state, and next action.
 - When a reminder asks you to take action and the work is viable to delegate, run it in a background subagent by default. This keeps the supervisor responsive and allows independent checks to proceed in parallel. When creating or updating an action-oriented reminder, include that guidance in the reminder body so the receiving supervisor or worker is steered toward background delegation instead of doing status/audit work inline.
@@ -589,6 +597,10 @@ So, concretely:
 **List only what he asked for.** He asked for tickets assigned to him that can be worked on, and got a list that included seven unassigned ones. Check the assignee before listing.
 
 He asked for all of this on 2026-08-07.
+
+### Urgent Linear queue checks use Wolfgang's assignment
+
+Urgent Linear queue checks for Wolfgang include only issues explicitly assigned to Wolfgang. Team-wide or unassigned urgent issues stay out of his launch queue; a newly created issue does not make it his work.
 
 ### If you're apologizing, write the rule down
 

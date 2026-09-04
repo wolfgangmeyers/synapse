@@ -23,6 +23,9 @@ var clientFrameTypes = map[string][]string{
 	"model_catalog":                {"agent_id", "instance_id", "lease_id", "model_summaries"},
 	"model_control":                {"agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "action", "model"},
 	"model_control_result":         {"agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "accepted"},
+	"inline_tool_state":            {"agent_id", "instance_id", "lease_id", "enabled"},
+	"inline_tool_control":          {"agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "enabled"},
+	"inline_tool_control_result":   {"agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "accepted", "enabled"},
 	"goal_control":                 {"agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "action", "goal", "settings"},
 	"goal_control_result":          {"agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "revision", "accepted", "goal_state"},
 	"reminder_lock_control":        {"agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "reminder_id", "action"},
@@ -467,6 +470,8 @@ func (r *Router) configureSession(s *session, frame map[string]json.RawMessage, 
 	s.ackConfirmation = frameString(frame, "ack_confirmation")
 	s.conversationSync = frameString(frame, "conversation_sync")
 	s.deliveryReceipts = frameString(frame, "delivery_receipts")
+	s.inlineToolControl = frameString(frame, "inline_tool_control") == "v1"
+	r.clearInlineToolState(s.agentID)
 }
 
 func (r *Router) sendRegistered(s *session, frame map[string]json.RawMessage, lease domain.Lease) error {
@@ -497,6 +502,12 @@ func (r *Router) replayGoalControlDesired(s *session) {
 		return
 	}
 	_ = s.send(map[string]any{"type": "goal_control", "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": s.leaseID, "source_agent_id": sourceAgent, "control_id": controlID, "revision": desired.Revision, "action": action, "goal": goal, "settings": settings, "expires_at": desired.ExpiresAt})
+}
+
+func (r *Router) clearInlineToolState(agentID string) {
+	r.mu.Lock()
+	delete(r.inlineToolStates, agentID)
+	r.mu.Unlock()
 }
 
 func (r *Router) clearStaleActivityGeneration(agentID, instanceID string) {
@@ -570,6 +581,12 @@ func (r *Router) dispatch(s *session, frame map[string]json.RawMessage) error {
 		return r.modelControl(s, frame)
 	case "model_control_result":
 		return r.modelControlResult(s, frame)
+	case "inline_tool_state":
+		return r.inlineToolState(s, frame)
+	case "inline_tool_control":
+		return r.inlineToolControl(s, frame)
+	case "inline_tool_control_result":
+		return r.inlineToolControlResult(s, frame)
 	case "goal_control":
 		return r.goalControl(s, frame)
 	case "goal_control_result":
@@ -688,6 +705,7 @@ func (r *Router) pruneExpiredPendingControls(now time.Time) {
 	prune(r.pendingMod, "model_control_expired")
 	prune(r.pendingGoal, "goal_control_expired")
 	prune(r.pendingLock, "reminder_lock_control_expired")
+	prune(r.pendingInlineTool, "inline_tool_control_expired")
 	r.mu.Unlock()
 	for _, item := range expired {
 		if item.pending.source != nil && r.sessionMatchesIdentity(item.pending.source) {
@@ -896,6 +914,103 @@ func (r *Router) broadcastIdle(agentID, instanceID string, now time.Time, model 
 		fields["current_model"] = model
 	}
 	r.broadcast(fields)
+}
+
+func (r *Router) inlineToolState(s *session, frame map[string]json.RawMessage) error {
+	if !r.sessionMatches(s, frame) {
+		return r.leaseError(s, frame)
+	}
+	if !s.inlineToolControl {
+		return s.sendError("inline_tool_control_unsupported", frameString(frame, "frame_id"))
+	}
+	enabled, _ := frameBool(frame, "enabled")
+	if !r.setInlineToolState(s, enabled) {
+		return r.leaseError(s, frame)
+	}
+	r.broadcast(map[string]any{"type": "inline_tool_state", "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": s.leaseID, "enabled": enabled})
+	return nil
+}
+
+func (r *Router) setInlineToolState(s *session, enabled bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.activeSessionLocked(s) {
+		return false
+	}
+	r.inlineToolStates[s.agentID] = inlineToolState{instanceID: s.instanceID, leaseID: s.leaseID, enabled: enabled}
+	return true
+}
+
+func (r *Router) inlineToolControl(s *session, frame map[string]json.RawMessage) error {
+	if !r.sessionMatches(s, frame) {
+		return r.leaseError(s, frame)
+	}
+	if s.role != "user_interaction" {
+		return s.sendError("inline_tool_control_not_allowed", frameString(frame, "frame_id"))
+	}
+	target, targetError := r.findControlTarget(frameString(frame, "target_agent_id"), frameString(frame, "target_instance_id"))
+	if targetError != "" {
+		return s.sendError(targetError, frameString(frame, "frame_id"))
+	}
+	if !target.inlineToolControl {
+		return s.sendError("inline_tool_control_unsupported", frameString(frame, "frame_id"))
+	}
+	r.pruneExpiredPendingControls(r.now())
+	key := s.agentID + "\x00" + frameString(frame, "control_id")
+	r.mu.Lock()
+	if _, ok := r.pendingInlineTool[key]; ok {
+		r.mu.Unlock()
+		return s.sendError("inline_tool_control_already_pending", frameString(frame, "frame_id"))
+	}
+	if pendingCapacityExceeded(r.pendingInlineTool, s, r.maxControls, r.maxPerSrc) {
+		r.mu.Unlock()
+		return s.sendError("inline_tool_control_capacity_exceeded", frameString(frame, "frame_id"))
+	}
+	pending := &pendingControl{controlID: frameString(frame, "control_id"), requestID: frameString(frame, "frame_id"), source: s, target: target, expires: r.now().Add(r.controlTTL)}
+	r.pendingInlineTool[key] = pending
+	r.mu.Unlock()
+	if err := target.send(map[string]any{"type": "inline_tool_control", "agent_id": target.agentID, "instance_id": target.instanceID, "lease_id": target.leaseID, "source_agent_id": s.agentID, "control_id": pending.controlID, "action": "set", "enabled": frameBoolValue(frame, "enabled"), "expires_at": timestamp(pending.expires)}); err != nil {
+		r.mu.Lock()
+		if r.pendingInlineTool[key] == pending {
+			delete(r.pendingInlineTool, key)
+		}
+		r.mu.Unlock()
+		return s.sendError("target_send_failed", frameString(frame, "frame_id"))
+	}
+	return nil
+}
+
+func frameBoolValue(frame map[string]json.RawMessage, key string) bool {
+	value, _ := frameBool(frame, key)
+	return value
+}
+
+func (r *Router) inlineToolControlResult(s *session, frame map[string]json.RawMessage) error {
+	if !r.sessionMatches(s, frame) {
+		return r.leaseError(s, frame)
+	}
+	key := frameString(frame, "source_agent_id") + "\x00" + frameString(frame, "control_id")
+	r.mu.Lock()
+	pending := r.pendingInlineTool[key]
+	if pending != nil && pending.target == s {
+		delete(r.pendingInlineTool, key)
+	}
+	r.mu.Unlock()
+	if pending == nil || pending.target != s {
+		return s.sendError("inline_tool_control_result_not_pending", frameString(frame, "frame_id"))
+	}
+	enabled, _ := frameBool(frame, "enabled")
+	if !r.setInlineToolState(s, enabled) {
+		return r.leaseError(s, frame)
+	}
+	if pending.source == nil || !r.sessionMatchesIdentity(pending.source) {
+		return nil
+	}
+	result := map[string]any{"type": "inline_tool_control_result", "agent_id": s.agentID, "instance_id": s.instanceID, "lease_id": s.leaseID, "source_agent_id": frameString(frame, "source_agent_id"), "control_id": frameString(frame, "control_id"), "accepted": frameBoolValue(frame, "accepted"), "enabled": enabled}
+	if _, ok := frame["error_code"]; ok {
+		result["error_code"] = frameAny(frame, "error_code")
+	}
+	return pending.source.send(result)
 }
 
 func (r *Router) modelControl(s *session, frame map[string]json.RawMessage) error {

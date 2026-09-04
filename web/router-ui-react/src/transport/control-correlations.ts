@@ -1,7 +1,7 @@
 import type { ServerFrame } from "../protocol/types";
 import { isRecord } from "../protocol/guards";
 
-export type ControlKind = "model" | "goal" | "reminder-lock";
+export type ControlKind = "model" | "goal" | "reminder-lock" | "inline-tool";
 export interface PendingControl {
   kind: ControlKind;
   controlId: string;
@@ -17,7 +17,7 @@ export interface PendingControl {
   revision?: number;
 }
 export interface ControlConnectionIdentity { generation: number; agentId?: string; instanceId?: string; leaseId?: string }
-export type ControlResultFrame = Extract<ServerFrame, { type: "model_control_result" | "goal_control_result" | "reminder_lock_control_result" }>;
+export type ControlResultFrame = Extract<ServerFrame, { type: "model_control_result" | "goal_control_result" | "reminder_lock_control_result" | "inline_tool_control_result" }>;
 
 export function matchesPendingControl(pending: PendingControl | undefined, frame: ControlResultFrame | Record<string, unknown>, connection: ControlConnectionIdentity): boolean {
   if (pending === undefined || connection.generation !== pending.connectionGeneration) return false;

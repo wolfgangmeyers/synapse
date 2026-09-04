@@ -47,6 +47,11 @@ function isGoalControlFrame(frame) {
         && typeof frame.instance_id === "string" && typeof frame.lease_id === "string"
         && Number.isSafeInteger(frame.revision);
 }
+function isInlineToolControlFrame(frame) {
+    return isModelControlFrame(frame) && typeof frame.agent_id === "string"
+        && typeof frame.instance_id === "string" && typeof frame.lease_id === "string"
+        && typeof frame.enabled === "boolean";
+}
 function isReminderLockControlFrame(frame) {
     return isModelControlFrame(frame) && typeof frame.agent_id === "string"
         && typeof frame.instance_id === "string" && typeof frame.lease_id === "string"
@@ -94,6 +99,7 @@ const MAX_GOAL_CHARS = 4_000;
 const MAX_MODELS = 1_000;
 const MAX_QUEUED_MODEL_CONTROLS = 256;
 const MAX_QUEUED_GOAL_CONTROLS = 256;
+const MAX_QUEUED_INLINE_TOOL_CONTROLS = 256;
 const MAX_QUEUED_REMINDER_LOCK_CONTROLS = 256;
 const DEFAULT_MODEL_CONTROL_TTL_MS = 30_000;
 const DEFAULT_GOAL_CONTROL_TTL_MS = 30_000;
@@ -240,6 +246,24 @@ function normalizeModelSummary(model) {
         return undefined;
     const name = normalizeModelString(model.name, 256);
     return { provider, id, ...(name.length > 0 ? { name } : {}) };
+}
+function normalizeInlineToolState(value) {
+    if (!isRecord(value) || typeof value.enabled !== "boolean" || Object.keys(value).some((key) => key !== "enabled"))
+        return undefined;
+    return { enabled: value.enabled };
+}
+function inlineToolStateToWire(state) {
+    return { enabled: state.enabled };
+}
+function normalizeInlineToolControlResult(result) {
+    const accepted = isRecord(result) && result.accepted === true;
+    const resultErrorCode = isRecord(result) ? result.errorCode : undefined;
+    const errorCode = typeof resultErrorCode === "string"
+        && /^[a-z][a-z0-9_]{0,127}$/.test(resultErrorCode.trim())
+        ? resultErrorCode.trim()
+        : "inline_tool_control_failed";
+    const enabled = isRecord(result) && typeof result.enabled === "boolean" ? result.enabled : undefined;
+    return { accepted, ...(accepted ? {} : { errorCode }), ...(enabled === undefined ? {} : { enabled }) };
 }
 function normalizeModelControlResult(result) {
     const accepted = isRecord(result) && result.accepted === true;
@@ -416,7 +440,7 @@ function validateReconnectOptions(initialDelayMs, maxDelayMs) {
 }
 // The identity validator selects the id space for this client. Presence-only clients use the
 // complementary validator and lifecycle identity remains process-local across socket replacement.
-export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL, onEnvelope, onConnectionState = () => { }, onKickstartFailure = () => { }, kickstart = () => { }, log = () => { }, webSocketFactory = (url) => new WebSocket(url), fetchImpl = fetch, generateId = createNanoId, renewIntervalMs = 10_000, reconnectInitialDelayMs = DEFAULT_RECONNECT_INITIAL_DELAY_MS, reconnectMaxDelayMs = DEFAULT_RECONNECT_MAX_DELAY_MS, random = Math.random, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval, assertIdentity = assertAgentId, parentSessionId = generateId(), producerEpoch = randomUUID(), capabilityTimeoutMs = DEFAULT_CAPABILITY_TIMEOUT_MS, now = Date.now, onLifecycleReady = () => { }, onLifecycleDiagnostic = () => { }, onLifecycleTrace = () => { }, onModelControlTrace = () => { }, onModelControl = async () => ({ accepted: false, errorCode: "unsupported" }), getModelCatalog = () => [], getCurrentModel = () => undefined, onGoalControlTrace = () => { }, onGoalControl = async () => ({ accepted: false, errorCode: "unsupported" }), getGoalState = defaultGoalState, onReminderLockControl = async () => ({ accepted: false, errorCode: "unsupported" }), onReminderLockReset = () => { }, } = {}) {
+export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.env.MECHA_ROUTER_URL ?? DEFAULT_ROUTER_URL, onEnvelope, onConnectionState = () => { }, onKickstartFailure = () => { }, kickstart = () => { }, log = () => { }, webSocketFactory = (url) => new WebSocket(url), fetchImpl = fetch, generateId = createNanoId, renewIntervalMs = 10_000, reconnectInitialDelayMs = DEFAULT_RECONNECT_INITIAL_DELAY_MS, reconnectMaxDelayMs = DEFAULT_RECONNECT_MAX_DELAY_MS, random = Math.random, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval, assertIdentity = assertAgentId, parentSessionId = generateId(), producerEpoch = randomUUID(), capabilityTimeoutMs = DEFAULT_CAPABILITY_TIMEOUT_MS, now = Date.now, onLifecycleReady = () => { }, onLifecycleDiagnostic = () => { }, onLifecycleTrace = () => { }, onModelControlTrace = () => { }, onModelControl = async () => ({ accepted: false, errorCode: "unsupported" }), getModelCatalog = () => [], getCurrentModel = () => undefined, onGoalControlTrace = () => { }, onGoalControl = async () => ({ accepted: false, errorCode: "unsupported" }), getGoalState = defaultGoalState, onInlineToolControlTrace = () => { }, onInlineToolControl = async () => ({ accepted: false, errorCode: "unsupported" }), getInlineToolState = () => ({ enabled: false }), inlineToolControl = true, onReminderLockControl = async () => ({ accepted: false, errorCode: "unsupported" }), onReminderLockReset = () => { }, } = {}) {
     assertIdentity(rawAgentId);
     if (typeof rawAgentId !== "string") {
         throw new TypeError("Mailbox v2 requires a valid current tmux window name");
@@ -456,6 +480,14 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
         throw new TypeError("onGoalControl must be a function");
     if (typeof getGoalState !== "function")
         throw new TypeError("getGoalState must be a function");
+    if (typeof onInlineToolControlTrace !== "function")
+        throw new TypeError("onInlineToolControlTrace must be a function");
+    if (typeof onInlineToolControl !== "function")
+        throw new TypeError("onInlineToolControl must be a function");
+    if (typeof getInlineToolState !== "function")
+        throw new TypeError("getInlineToolState must be a function");
+    if (typeof inlineToolControl !== "boolean")
+        throw new TypeError("inlineToolControl must be a boolean");
     if (typeof onReminderLockControl !== "function")
         throw new TypeError("onReminderLockControl must be a function");
     if (typeof onReminderLockReset !== "function")
@@ -492,6 +524,9 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
     let lastPublishedModelCatalog;
     let goalControlSupported = false;
     let latestGoalState;
+    let latestInlineToolState;
+    const inlineToolControlQueue = [];
+    let inlineToolControlProcessing = false;
     const modelControlQueue = [];
     let modelControlProcessing = false;
     const goalControlQueue = [];
@@ -552,6 +587,20 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
         }
         catch {
             // Diagnostic callbacks cannot alter goal-control delivery.
+        }
+    }
+    function inlineToolControlTrace(event, fields = {}) {
+        try {
+            onInlineToolControlTrace({
+                event,
+                agent_id: agentId,
+                instance_id: instanceId,
+                lease_id: leaseId,
+                ...fields,
+            });
+        }
+        catch {
+            // Diagnostic callbacks cannot alter inline-tool control delivery.
         }
     }
     function lifecycleFrameTrace(frame, phase) {
@@ -1074,6 +1123,148 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             return false;
         }
     }
+    function readInlineToolState() {
+        try {
+            const normalized = normalizeInlineToolState(getInlineToolState());
+            if (normalized !== undefined) {
+                latestInlineToolState = normalized;
+                return normalized;
+            }
+            inlineToolControlTrace("client_inline_tool_state_read_failed", { error_name: "TypeError" });
+        }
+        catch (error) {
+            inlineToolControlTrace("client_inline_tool_state_read_failed", { error_name: errorName(error) });
+        }
+        return latestInlineToolState ?? { enabled: false };
+    }
+    function publishInlineToolState(state = readInlineToolState()) {
+        if (!socketOpen(socket) || leaseId === undefined)
+            return false;
+        try {
+            socket.send(JSON.stringify({
+                version: "v1",
+                frame_id: generateId(),
+                type: "inline_tool_state",
+                agent_id: agentId,
+                instance_id: instanceId,
+                lease_id: leaseId,
+                ...inlineToolStateToWire(state),
+            }));
+            inlineToolControlTrace("client_inline_tool_state_published", { enabled: state.enabled });
+            return true;
+        }
+        catch (error) {
+            inlineToolControlTrace("client_inline_tool_state_publish_failed", {
+                reason: socketOpen(socket) ? "socket_send_failed" : "client_not_connected",
+                error_name: errorName(error),
+            });
+            return false;
+        }
+    }
+    function inlineToolControlContextIsCurrent(frame, context) {
+        return context.leaseId !== undefined
+            && frame.agent_id === agentId
+            && frame.instance_id === instanceId
+            && frame.lease_id === context.leaseId
+            && socket === context.socket
+            && leaseId === context.leaseId
+            && socketOpen(context.socket)
+            && context.expiresAtMs > now();
+    }
+    async function receiveInlineToolControl(frame, context) {
+        if (!inlineToolControlContextIsCurrent(frame, context)) {
+            inlineToolControlTrace("client_inline_tool_control_dropped", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, reason: context.expiresAtMs <= now() ? "expired" : "stale_connection" });
+            return;
+        }
+        inlineToolControlTrace("client_inline_tool_control_received", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, action: frame.action, enabled: frame.enabled });
+        let result;
+        try {
+            result = await onInlineToolControl({
+                controlId: frame.control_id,
+                sourceAgentId: frame.source_agent_id,
+                targetAgentId: frame.agent_id,
+                targetInstanceId: frame.instance_id,
+                action: frame.action,
+                enabled: frame.enabled,
+            });
+        }
+        catch (error) {
+            inlineToolControlTrace("client_inline_tool_control_callback_failed", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, error_name: errorName(error) });
+            result = { accepted: false, errorCode: "inline_tool_control_failed" };
+        }
+        const normalizedResult = normalizeInlineToolControlResult(result);
+        const state = normalizedResult.enabled === undefined
+            ? readInlineToolState()
+            : { enabled: normalizedResult.enabled };
+        latestInlineToolState = state;
+        publishInlineToolState(state);
+        if (!inlineToolControlContextIsCurrent(frame, context)) {
+            inlineToolControlTrace("client_inline_tool_control_result_failed", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, reason: context.expiresAtMs <= now() ? "expired" : "stale_connection" });
+            return;
+        }
+        try {
+            const currentSocket = context.socket;
+            if (currentSocket === undefined)
+                return;
+            currentSocket.send(JSON.stringify({
+                version: "v1",
+                frame_id: generateId(),
+                type: "inline_tool_control_result",
+                agent_id: agentId,
+                instance_id: instanceId,
+                lease_id: context.leaseId,
+                source_agent_id: frame.source_agent_id,
+                control_id: frame.control_id,
+                accepted: normalizedResult.accepted,
+                ...(normalizedResult.errorCode === undefined ? {} : { error_code: normalizedResult.errorCode }),
+                enabled: state.enabled,
+            }));
+            inlineToolControlTrace("client_inline_tool_control_result_sent", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, accepted: normalizedResult.accepted, enabled: state.enabled });
+        }
+        catch (error) {
+            inlineToolControlTrace("client_inline_tool_control_result_failed", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, reason: socketOpen(context.socket) ? "socket_send_failed" : "client_not_connected", error_name: errorName(error) });
+        }
+    }
+    async function drainInlineToolControlQueue() {
+        if (inlineToolControlProcessing)
+            return;
+        inlineToolControlProcessing = true;
+        try {
+            while (inlineToolControlQueue.length > 0) {
+                const pending = inlineToolControlQueue.shift();
+                if (pending !== undefined)
+                    await receiveInlineToolControl(pending.frame, pending.context);
+            }
+        }
+        finally {
+            inlineToolControlProcessing = false;
+            if (inlineToolControlQueue.length > 0)
+                void drainInlineToolControlQueue();
+        }
+    }
+    function enqueueInlineToolControl(frame) {
+        const parsedExpiry = Date.parse(frame.expires_at ?? "");
+        const context = { socket, leaseId, expiresAtMs: Number.isFinite(parsedExpiry) ? parsedExpiry : now() + DEFAULT_MODEL_CONTROL_TTL_MS };
+        if (!inlineToolControlContextIsCurrent(frame, context)) {
+            inlineToolControlTrace("client_inline_tool_control_dropped", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, reason: "stale_connection" });
+            return;
+        }
+        if (inlineToolControlQueue.length >= MAX_QUEUED_INLINE_TOOL_CONTROLS) {
+            inlineToolControlTrace("client_inline_tool_control_dropped", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, reason: "queue_capacity" });
+            return;
+        }
+        inlineToolControlQueue.push({ frame, context });
+        void drainInlineToolControlQueue().catch((error) => inlineToolControlTrace("client_inline_tool_control_processing_failed", { control_id: frame.control_id, source_agent_id: frame.source_agent_id, error_name: errorName(error) }));
+    }
+    function dropQueuedInlineToolControls(currentSocket, reason) {
+        for (let index = inlineToolControlQueue.length - 1; index >= 0; index -= 1) {
+            const pending = inlineToolControlQueue[index];
+            if (pending.context.socket !== currentSocket)
+                continue;
+            inlineToolControlQueue.splice(index, 1);
+            inlineToolControlTrace("client_inline_tool_control_dropped", { control_id: pending.frame.control_id, source_agent_id: pending.frame.source_agent_id, reason });
+        }
+    }
     function goalControlContextIsCurrent(context) {
         return context.leaseId !== undefined
             && socket === context.socket
@@ -1432,6 +1623,7 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             return;
         dropQueuedModelControls(currentSocket, "disconnected");
         dropQueuedGoalControls(currentSocket, "disconnected");
+        dropQueuedInlineToolControls(currentSocket, "disconnected");
         dropQueuedReminderLockControls(currentSocket);
         try {
             onReminderLockReset();
@@ -1560,6 +1752,10 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             rebindLifecycleJournalLease();
             reconnectAttempt = 0;
             log(`MECHA_V2_FRAME registered agent=${agentId} lease=${leaseId}`);
+            if (inlineToolControl) {
+                latestInlineToolState = readInlineToolState();
+                publishInlineToolState();
+            }
             if (renewTimer === undefined) {
                 renewTimer = setIntervalImpl(() => {
                     try {
@@ -1647,6 +1843,11 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
                 enqueueGoalControl(frame);
             return;
         }
+        if (frame.type === "inline_tool_control") {
+            if (isInlineToolControlFrame(frame))
+                enqueueInlineToolControl(frame);
+            return;
+        }
         if (frame.type === "reminder_lock_control") {
             if (isReminderLockControlFrame(frame))
                 enqueueReminderLockControl(frame);
@@ -1719,7 +1920,13 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
                 return;
             opened = true;
             try {
-                send({ type: "register", agent_id: agentId, instance_id: instanceId, delivery_receipts: "delivery_items_v1" });
+                send({
+                    type: "register",
+                    agent_id: agentId,
+                    instance_id: instanceId,
+                    delivery_receipts: "delivery_items_v1",
+                    ...(inlineToolControl ? { inline_tool_control: "v1" } : {}),
+                });
             }
             catch (error) {
                 disconnected(currentSocket, error);
@@ -1790,6 +1997,13 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             latestGoalState = normalized;
             return publishGoalState();
         },
+        sendInlineToolState(state) {
+            const normalized = normalizeInlineToolState(state);
+            if (normalized === undefined)
+                throw new TypeError("a valid inline tool state is required");
+            latestInlineToolState = normalized;
+            return publishInlineToolState(normalized);
+        },
         sendLifecycleSnapshot: lifecycleSnapshot,
         sendLifecycleEvent: lifecycleEvent,
         requestLifecycleResync() {
@@ -1813,6 +2027,7 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             if (currentSocket !== undefined) {
                 dropQueuedModelControls(currentSocket, "paused");
                 dropQueuedGoalControls(currentSocket, "paused");
+                dropQueuedInlineToolControls(currentSocket, "paused");
                 dropQueuedReminderLockControls(currentSocket);
             }
             socket = undefined;
@@ -1866,6 +2081,7 @@ export function createMailboxClient({ agentId: rawAgentId, routerUrl = process.e
             if (currentSocket !== undefined) {
                 dropQueuedModelControls(currentSocket, "closed");
                 dropQueuedGoalControls(currentSocket, "closed");
+                dropQueuedInlineToolControls(currentSocket, "closed");
                 dropQueuedReminderLockControls(currentSocket);
             }
             socket = undefined;

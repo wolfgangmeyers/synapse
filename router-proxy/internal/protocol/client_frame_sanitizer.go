@@ -76,7 +76,7 @@ func clientFrameFields(typ string) map[string]clientFieldKind {
 	lease := map[string]clientFieldKind{"agent_id": clientScalar, "instance_id": clientScalar, "lease_id": clientScalar}
 	switch typ {
 	case "register":
-		add(map[string]clientFieldKind{"agent_id": clientScalar, "instance_id": clientScalar, "agent_role": clientScalar, "client_type": clientScalar, "ack_confirmation": clientScalar, "conversation_sync": clientScalar, "delivery_receipts": clientScalar})
+		add(map[string]clientFieldKind{"agent_id": clientScalar, "instance_id": clientScalar, "agent_role": clientScalar, "client_type": clientScalar, "ack_confirmation": clientScalar, "conversation_sync": clientScalar, "delivery_receipts": clientScalar, "inline_tool_control": clientScalar})
 	case "ping":
 		return fields
 	default:
@@ -89,6 +89,12 @@ func clientFrameFields(typ string) map[string]clientFieldKind {
 		add(map[string]clientFieldKind{"activity_state": clientScalar, "subagent_count": clientScalar, "subagents": clientSubagentArray, "goal": clientGoalProjection, "current_model": clientModel})
 	case "model_catalog":
 		add(map[string]clientFieldKind{"model_summaries": clientModelArray, "total_count": clientScalar, "truncated": clientScalar, "current_model": clientModel})
+	case "inline_tool_state":
+		add(map[string]clientFieldKind{"enabled": clientScalar})
+	case "inline_tool_control":
+		add(map[string]clientFieldKind{"target_agent_id": clientScalar, "target_instance_id": clientScalar, "control_id": clientScalar, "enabled": clientScalar})
+	case "inline_tool_control_result":
+		add(map[string]clientFieldKind{"source_agent_id": clientScalar, "control_id": clientScalar, "accepted": clientScalar, "enabled": clientScalar, "error_code": clientScalar})
 	case "model_control":
 		add(map[string]clientFieldKind{"target_agent_id": clientScalar, "target_instance_id": clientScalar, "control_id": clientScalar, "action": clientScalar, "model": clientModel})
 	case "model_control_result":

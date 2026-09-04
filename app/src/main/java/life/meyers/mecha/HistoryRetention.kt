@@ -89,7 +89,12 @@ internal fun parseHistoryResponse(
     if (expectedOwner != null && owner != expectedOwner) return@runCatching null
     if (expectedPeer != null && peer != expectedPeer) return@runCatching null
     if (!HISTORY_AGENT_ID.matches(owner)) return@runCatching null
-    val messages = payload.get("messages") as? JSONArray ?: return@runCatching null
+    // Go's JSON encoder emits a nil slice as null for an empty conversation.
+    // Treat that wire representation as the router's empty history, while still
+    // rejecting every other non-array value.
+    val messages = if (payload.isNull("messages")) JSONArray() else {
+        payload.get("messages") as? JSONArray ?: return@runCatching null
+    }
     if (messages.length() > MAX_HISTORY_MESSAGES) return@runCatching null
     val highWaterSequence = strictHistoryLong(payload, "high_water_sequence", 0L) ?: return@runCatching null
     for (index in 0 until messages.length()) {
