@@ -32,6 +32,18 @@ class ConversationHistoryTest {
     }
 
     @Test
+    fun routerEmptyHistoryNullMessagesIsAcceptedAsAnEmptyConversation() {
+        val empty = parseHistoryResponse(
+            "{\"owner\":\"android-owner\",\"peer\":\"peer\",\"messages\":null,\"high_water_sequence\":0}",
+            "android-owner",
+            "peer",
+        )
+
+        assertNotNull(empty)
+        assertEquals(0, empty?.messages?.length())
+    }
+
+    @Test
     fun malformedHistoryResponsesAreRejectedBeforeTheyCanBeApplied() {
         val valid = parseHistoryResponse("{\"owner\":\"android-owner\",\"peer\":\"peer\",\"messages\":[],\"high_water_sequence\":0}", "android-owner", "peer")
         assertNotNull(valid)
@@ -52,7 +64,13 @@ class ConversationHistoryTest {
     @Test
     fun historyParserRequiresRequestEchoAndTheCompleteProtocolMessageSchema() {
         val valid = validHistoryResponse()
-        assertNotNull(parseHistoryResponse(valid.toString(), "android-owner", "peer"))
+        val parsed = parseHistoryResponse(valid.toString(), "android-owner", "peer")
+        assertNotNull(parsed)
+        val parsedMessage = parsed?.messages?.getJSONObject(0)
+        assertEquals("message-1", parsedMessage?.getString("id"))
+        assertEquals("body", parsedMessage?.getString("body"))
+        assertEquals("peer", parsedMessage?.getString("from"))
+        assertEquals("android-owner", parsedMessage?.getString("to"))
 
         val wrongOwner = JSONObject(valid.toString()).put("owner", "other-owner")
         val wrongPeer = JSONObject(valid.toString()).put("peer", "other-peer")

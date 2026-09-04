@@ -23,6 +23,10 @@ import type {
   GoalState,
   GoalStateFrame,
   InjectionRequestedFrame,
+  InlineToolControlForwardFrame,
+  InlineToolControlFrame,
+  InlineToolControlResultFrame,
+  InlineToolStateFrame,
   LeaseRejectedFrame,
   LeaseRenewFrame,
   LifecycleChild,
@@ -223,7 +227,7 @@ function isCommonLeaseFrame(value: unknown, type: string, keys: readonly string[
 }
 
 export function isRegisterFrame(value: unknown): value is RegisterFrame {
-  return isFrame(value, "register", ["version", "frame_id", "type", "agent_id", "instance_id", "agent_role", "client_type", "ack_confirmation", "conversation_sync", "delivery_receipts"]) && isAgentId(value.agent_id) && isFrameId(value.instance_id) && (value.agent_role === undefined || isAgentRole(value.agent_role)) && (value.client_type === undefined || isPatternString(value.client_type, /^[a-z][a-z0-9_-]{0,31}$/, 1, 32)) && (value.ack_confirmation === undefined || value.ack_confirmation === "correlated_v1") && (value.conversation_sync === undefined || value.conversation_sync === "v1") && (value.delivery_receipts === undefined || value.delivery_receipts === "delivery_items_v1");
+  return isFrame(value, "register", ["version", "frame_id", "type", "agent_id", "instance_id", "agent_role", "client_type", "ack_confirmation", "conversation_sync", "delivery_receipts", "inline_tool_control"]) && isAgentId(value.agent_id) && isFrameId(value.instance_id) && (value.agent_role === undefined || isAgentRole(value.agent_role)) && (value.client_type === undefined || isPatternString(value.client_type, /^[a-z][a-z0-9_-]{0,31}$/, 1, 32)) && (value.ack_confirmation === undefined || value.ack_confirmation === "correlated_v1") && (value.conversation_sync === undefined || value.conversation_sync === "v1") && (value.delivery_receipts === undefined || value.delivery_receipts === "delivery_items_v1") && (value.inline_tool_control === undefined || value.inline_tool_control === "v1");
 }
 
 export function isLeaseRenewFrame(value: unknown): value is LeaseRenewFrame { return isCommonLeaseFrame(value, "lease_renew", ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id"]); }
@@ -235,6 +239,23 @@ export function isActivityFrame(value: unknown): value is ActivityFrame {
 
 export function isModelCatalogFrame(value: unknown): value is ModelCatalogFrame {
   return isCommonLeaseFrame(value, "model_catalog", ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "model_summaries", "total_count", "truncated", "current_model"]) && isModelSummaries(value.model_summaries) && (value.total_count === undefined || isSafeInteger(value.total_count, 0, 1_000_000)) && (value.truncated === undefined || typeof value.truncated === "boolean") && (value.current_model === undefined || isModelSummary(value.current_model));
+}
+
+export function isInlineToolStateFrame(value: unknown): value is InlineToolStateFrame {
+  return isCommonLeaseFrame(value, "inline_tool_state", ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "enabled"]) && typeof value.enabled === "boolean";
+}
+
+export function isInlineToolControlFrame(value: unknown): value is InlineToolControlFrame {
+  return isCommonLeaseFrame(value, "inline_tool_control", ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "target_agent_id", "target_instance_id", "control_id", "enabled"]) && isTargetFields(value) && typeof value.enabled === "boolean";
+}
+
+export function isInlineToolControlForwardFrame(value: unknown): value is InlineToolControlForwardFrame {
+  return isCommonLeaseFrame(value, "inline_tool_control", ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "action", "enabled", "expires_at"]) && isAgentId(value.source_agent_id) && isFrameId(value.control_id) && value.action === "set" && typeof value.enabled === "boolean" && isUtcMillis(value.expires_at);
+}
+
+export function isInlineToolControlResultFrame(value: unknown): value is InlineToolControlResultFrame {
+  if (!isCommonLeaseFrame(value, "inline_tool_control_result", ["version", "frame_id", "type", "agent_id", "instance_id", "lease_id", "source_agent_id", "control_id", "accepted", "error_code", "enabled"]) || !isAgentId(value.source_agent_id) || !isFrameId(value.control_id) || typeof value.accepted !== "boolean" || typeof value.enabled !== "boolean") return false;
+  return value.accepted ? value.error_code === undefined : isSafeString(value.error_code, 1, 128);
 }
 
 export function isModelControlFrame(value: unknown): value is ModelControlFrame {
@@ -360,8 +381,8 @@ export function isDeliveryAcknowledgedFrame(value: unknown): value is DeliveryAc
 function isLifecycleDisposition(value: unknown): value is SubagentLifecycleAcknowledgedFrame["disposition"] { return value === "applied" || value === "accepted_noop" || value === "duplicate" || value === "stale" || value === "conflict"; }
 export function isSubagentLifecycleAcknowledgedFrame(value: unknown): value is SubagentLifecycleAcknowledgedFrame { return isFrame(value, "subagent_lifecycle_acknowledged", ["version", "frame_id", "type", "request_id", "event_id", "client_sequence", "producer_epoch", "agent_id", "instance_id", "parent_session_id", "lease_id", "disposition", "router_version", "applied_version"]) && isFrameId(value.request_id) && isFrameId(value.event_id) && isSafeInteger(value.client_sequence, 1) && isPatternString(value.producer_epoch, lifecycleEpochPattern, 36, 36) && isAgentId(value.agent_id) && isFrameId(value.instance_id) && isFrameId(value.parent_session_id) && isFrameId(value.lease_id) && isLifecycleDisposition(value.disposition) && isSafeInteger(value.router_version, 0) && (value.applied_version === undefined || isSafeInteger(value.applied_version, 0)); }
 
-const clientFrameGuards: Array<(value: unknown) => value is ClientFrame> = [isRegisterFrame, isLeaseRenewFrame, isActivityFrame, isModelCatalogFrame, isModelControlFrame, isModelControlResultFrame, isGoalControlFrame, isGoalControlResultFrame, isReminderLockControlFrame, isReminderLockControlResultFrame, isGoalStateFrame, isMessageArrivalClientFrame, isInjectionRequestedFrame, isAckFrame, isNackFrame, isPingFrame, isSubagentSyncEnableFrame, isSubagentLifecycleSnapshotFrame, isSubagentLifecycleEventFrame, isSubagentStateResyncFrame];
-const serverFrameGuards: Array<(value: unknown) => value is ServerFrame> = [isRegisteredFrame, isLeaseRejectedFrame, isErrorFrame, isPongFrame, isMessageFrame, isConversationMessageFrame, isRemindersChangedFrame, isModelControlForwardFrame, isModelControlResultFrame, isGoalControlForwardFrame, isGoalControlResultFrame, isReminderLockControlForwardFrame, isReminderLockControlResultFrame, isAgentGoalStateFrame, isDeliveryAcknowledgedFrame, isAgentActivityFrame, isAgentModelCatalogFrame, isMessageArrivalServerFrame, isSubagentStateSnapshotFrame, isSubagentStateUpdateFrame, isSubagentStateReplayFrame, isSubagentLifecycleAcknowledgedFrame];
+const clientFrameGuards: Array<(value: unknown) => value is ClientFrame> = [isRegisterFrame, isLeaseRenewFrame, isActivityFrame, isModelCatalogFrame, isInlineToolStateFrame, isInlineToolControlFrame, isInlineToolControlResultFrame, isModelControlFrame, isModelControlResultFrame, isGoalControlFrame, isGoalControlResultFrame, isReminderLockControlFrame, isReminderLockControlResultFrame, isGoalStateFrame, isMessageArrivalClientFrame, isInjectionRequestedFrame, isAckFrame, isNackFrame, isPingFrame, isSubagentSyncEnableFrame, isSubagentLifecycleSnapshotFrame, isSubagentLifecycleEventFrame, isSubagentStateResyncFrame];
+const serverFrameGuards: Array<(value: unknown) => value is ServerFrame> = [isRegisteredFrame, isLeaseRejectedFrame, isErrorFrame, isPongFrame, isMessageFrame, isConversationMessageFrame, isRemindersChangedFrame, isInlineToolStateFrame, isInlineToolControlForwardFrame, isInlineToolControlResultFrame, isModelControlForwardFrame, isModelControlResultFrame, isGoalControlForwardFrame, isGoalControlResultFrame, isReminderLockControlForwardFrame, isReminderLockControlResultFrame, isAgentGoalStateFrame, isDeliveryAcknowledgedFrame, isAgentActivityFrame, isAgentModelCatalogFrame, isMessageArrivalServerFrame, isSubagentStateSnapshotFrame, isSubagentStateUpdateFrame, isSubagentStateReplayFrame, isSubagentLifecycleAcknowledgedFrame];
 
 export function isClientFrame(value: unknown): value is ClientFrame { return clientFrameGuards.some((guard) => guard(value)); }
 export function isServerFrame(value: unknown): value is ServerFrame { return serverFrameGuards.some((guard) => guard(value)); }

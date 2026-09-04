@@ -178,9 +178,15 @@ func (r *Router) sweepLoop(ctx context.Context, done chan struct{}) {
 
 func (r *Router) runSweep(ctx context.Context) error {
 	r.sweepMu.Lock()
-	defer r.sweepMu.Unlock()
 	_, err := r.sweep(ctx)
-	return err
+	r.sweepMu.Unlock()
+	if err != nil {
+		return err
+	}
+	// Policies are observational and must not hold the lifecycle sweep mutex.
+	// A timed-out or noncooperative policy cannot delay durable recovery.
+	r.runPoliciesAsync(ctx)
+	return nil
 }
 
 func (r *Router) sweepLiveState() {
@@ -297,7 +303,10 @@ func (r *Router) rateLimit(sender string) error {
 	return nil
 }
 
-func (r *Router) connectedAgents(includeModels bool) map[string]any {
+func (r *Router) connectedAgents(ctx context.Context, includeModels bool) map[string]any {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	now := r.now()
 	r.mu.Lock()
 	candidates := make([]*session, 0, len(r.sessions))
@@ -316,6 +325,10 @@ func (r *Router) connectedAgents(includeModels bool) map[string]any {
 	for key, value := range r.goals {
 		goals[key] = value
 	}
+	inlineToolStates := make(map[string]inlineToolState, len(r.inlineToolStates))
+	for key, value := range r.inlineToolStates {
+		inlineToolStates[key] = value
+	}
 	lifecycle := make(map[string]lifecycleAgent, len(r.lifecycleState))
 	for key, value := range r.lifecycleState {
 		lifecycle[key] = value
@@ -324,11 +337,14 @@ func (r *Router) connectedAgents(includeModels bool) map[string]any {
 	r.mu.Unlock()
 	agents := make([]map[string]any, 0, len(candidates))
 	for _, s := range candidates {
-		lease, err := r.store.LeaseFor(context.Background(), s.agentID)
+		lease, err := r.store.LeaseFor(ctx, s.agentID)
 		if err != nil || lease == nil || lease.LeaseID != s.leaseID || lease.InstanceID != s.deliveryInstance || lease.ExpiresAt <= timestamp(now) {
 			continue
 		}
-		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}}
+		item := map[string]any{"agent_id": s.agentID, "instance_id": s.instanceID, "agent_role": s.role, "connected_at": lease.AcquiredAt, "lease_expires_at": lease.ExpiresAt, "activity_state": "idle", "subagent_count": 0, "subagents": []map[string]any{}, "inline_tool_control_available": s.inlineToolControl}
+		if inlineToolState, ok := inlineToolStates[s.agentID]; ok && inlineToolState.instanceID == s.instanceID && inlineToolState.leaseID == lease.LeaseID {
+			item["inline_tool_enabled"] = inlineToolState.enabled
+		}
 		activity, activityOK := activities[s.agentID]
 		if activityOK && activity.instanceID == s.instanceID && activity.leaseID == lease.LeaseID && activity.expires.After(now) {
 			item["activity_state"] = activity.state
@@ -367,9 +383,9 @@ func (r *Router) connectedAgents(includeModels bool) map[string]any {
 		}
 		state, lifecycleOK := lifecycle[s.agentID]
 		if !lifecycleOK && r.lifecycleAvailable {
-			producer, producerErr := r.store.LifecycleProducerFor(context.Background(), s.agentID)
+			producer, producerErr := r.store.LifecycleProducerFor(ctx, s.agentID)
 			if producerErr == nil && producer != nil && producer.Authority == "v2" {
-				agent, projectionErr := r.store.LifecycleAgentProjection(context.Background(), s.agentID)
+				agent, projectionErr := r.store.LifecycleAgentProjection(ctx, s.agentID)
 				if projectionErr == nil {
 					children := make([]map[string]any, 0, len(agent.Subagents))
 					for _, child := range agent.Subagents {

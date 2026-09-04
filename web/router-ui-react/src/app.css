@@ -205,6 +205,14 @@ p:empty { display: none; }
 .goal-header-button:disabled { opacity: 0.55; }
 .goal-header-button:not(:disabled):hover { background: rgba(181,188,208,0.22); }
 .goal-header-button.has-goal:not(:disabled):hover { background: rgba(190,24,93,0.48); }
+.inline-tool-settings-dialog { width: min(520px, calc(100vw - 32px)); }
+.inline-tool-settings-form { display: grid; gap: 16px; }
+.inline-tool-settings-toggle { display: flex; align-items: center; gap: 12px; color: var(--text); font-weight: 700; cursor: pointer; }
+.inline-tool-settings-toggle input { width: 22px; height: 22px; accent-color: var(--primary); }
+.inline-tool-settings-warning { padding: 12px; border-radius: 14px; background: var(--surface-raised); }
+.inline-tool-settings-status { min-height: 1.4em; }
+.inline-tool-settings-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.inline-tool-settings-actions .secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
 .goal-editor-form { display: grid; gap: 14px; }
 .goal-editor-form label, .goal-editor-form legend { color: var(--muted); font-size: 13px; font-weight: 700; }
 .goal-editor-form textarea {
@@ -608,7 +616,26 @@ p:empty { display: none; }
 .peer-heading h2 { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .peer-heading h2 .working-indicator.inline { position: static; transform: none; width: 22px; height: 22px; right: auto; top: auto; flex: 0 0 22px; }
 .peer-heading h2 .goal-header-button,
-.peer-heading h2 .reminder-indicator { flex: 0 0 24px; }
+.peer-heading h2 .reminder-indicator,
+.peer-heading h2 .inline-tool-settings-button { flex: 0 0 24px; }
+.inline-tool-settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(181,188,208,0.34);
+  border-radius: 999px;
+  background: rgba(181,188,208,0.12);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+}
+.inline-tool-settings-button:hover { background: rgba(181,188,208,0.22); }
 .conversation-header-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 
 .prompt-controls {

@@ -187,6 +187,7 @@ type MailboxClientOptions = NonNullable<Parameters<typeof createMailboxClient>[0
 type ExternalMailboxMessage = Parameters<NonNullable<MailboxClientOptions["onEnvelope"]>>[0];
 type ExternalMailboxDelivery = Parameters<NonNullable<MailboxClientOptions["onEnvelope"]>>[1];
 type ExternalGoalControl = Parameters<NonNullable<MailboxClientOptions["onGoalControl"]>>[0];
+type ExternalInlineToolControl = Parameters<NonNullable<MailboxClientOptions["onInlineToolControl"]>>[0];
 type ExternalReminderControl = Parameters<NonNullable<MailboxClientOptions["onReminderLockControl"]>>[0];
 type ExternalTraceValue = Parameters<NonNullable<MailboxClientOptions["onLifecycleTrace"]>>[0];
 type PiTool = { name: string; label: string; description: string; parameters: object; execute: (...args: never[]) => Promise<object> };
@@ -364,6 +365,7 @@ export function createInlineToolPolicy({ now = Date.now }: InlineAllowanceOption
   if (typeof now !== "function") throw new TypeError("now must be a function");
 
   const credits = new Map();
+  let enabled = false;
   let poolRemainingMs = INLINE_TOOL_POOL_CAPACITY * INLINE_TOOL_REPLENISHMENT_INTERVAL_MS;
   let poolUpdatedAt = now();
 
@@ -391,8 +393,20 @@ export function createInlineToolPolicy({ now = Date.now }: InlineAllowanceOption
   return {
     reset() {
       credits.clear();
+      enabled = false;
       poolRemainingMs = INLINE_TOOL_POOL_CAPACITY * INLINE_TOOL_REPLENISHMENT_INTERVAL_MS;
       poolUpdatedAt = now();
+    },
+    setEnabled(value: boolean) {
+      if (typeof value !== "boolean") throw new TypeError("enabled must be a boolean");
+      enabled = value;
+      return enabled;
+    },
+    isEnabled() {
+      return enabled;
+    },
+    state() {
+      return { enabled };
     },
     grant(toolName: string, usageCount: number): InlineAllowanceDetails {
       const normalizedToolName = normalizeInlineToolName(toolName);
@@ -440,6 +454,7 @@ export function createInlineToolPolicy({ now = Date.now }: InlineAllowanceOption
         return undefined;
       }
       // Credits are per-tool and temporary: matching top-level calls spend them, and exhausted entries are removed. The parent session resets this state at session_start.
+      if (enabled) return undefined;
       const remaining = credits.get(normalizedToolName) ?? 0;
       if (remaining > 0) {
         if (remaining === 1) credits.delete(normalizedToolName);
@@ -697,6 +712,25 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
   };
   const isConcreteGoalTool = (toolName: string | undefined) => {
     return typeof toolName === "string" && toolName.length > 0 && !GOAL_ACTIVITY_EXCLUDED_TOOLS.has(toolName);
+  };
+  const publishInlineToolState = (mailboxClient: MailboxClient | undefined = client) => {
+    if (mailboxClient === undefined || typeof mailboxClient.sendInlineToolState !== "function") return false;
+    try {
+      mailboxClient.sendInlineToolState(inlineToolPolicy.state());
+      return true;
+    } catch (error) {
+      recordDiagnostic("inline_tool_state_publish_failed", { error_name: errorName(error) });
+      return false;
+    }
+  };
+  const handleInlineToolControl = async (control: ExternalInlineToolControl) => {
+    if (control.action !== "set") return { accepted: false, errorCode: "unsupported_inline_tool_control", enabled: inlineToolPolicy.isEnabled() };
+    try {
+      inlineToolPolicy.setEnabled(control.enabled);
+      return { accepted: true, enabled: inlineToolPolicy.isEnabled() };
+    } catch {
+      return { accepted: false, errorCode: "invalid_inline_tool_state", enabled: inlineToolPolicy.isEnabled() };
+    }
   };
   const publishGoalState = (mailboxClient: MailboxClient | undefined = client) => {
     if (mailboxClient === undefined || typeof mailboxClient.sendGoalState !== "function") {
@@ -1350,6 +1384,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         childReplyClients.set(sessionId, createClient({
           agentId: childAgentId,
           onEnvelope: () => {},
+          inlineToolControl: false,
         }));
         childReplyClientAgentIds.set(sessionId, childAgentId);
       } catch {
@@ -1397,6 +1432,27 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
           }
         },
       });
+      pi.registerCommand("inline-tools", {
+        description: "Show or change the inline tool policy: /inline-tools [on|off]",
+        handler: async (argumentsText: string, commandContext: PiContext) => {
+          if (children.has(commandContext.sessionManager.getSessionId())) {
+            commandContext.ui.notify("Inline tool settings are available only to the top-level worker.", "error");
+            return;
+          }
+          const argument = argumentsText.trim();
+          if (argument === "") {
+            commandContext.ui.notify(`Inline tools are ${inlineToolPolicy.isEnabled() ? "on" : "off"}.`, "info");
+            return;
+          }
+          if (argument !== "on" && argument !== "off") {
+            commandContext.ui.notify("Usage: /inline-tools [on|off]", "error");
+            return;
+          }
+          inlineToolPolicy.setEnabled(argument === "on");
+          publishInlineToolState();
+          commandContext.ui.notify(`Inline tools are now ${inlineToolPolicy.isEnabled() ? "on" : "off"}.`, "info");
+        },
+      });
       pi.registerCommand("mecha-reply", {
         description: "Send a Mailbox v2 reply: /mecha-reply <recipient> <message>",
         handler: async (argumentsText: string, commandContext: PiContext) => {
@@ -1420,6 +1476,9 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
         onModelControlTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
         onGoalControl: handleGoalControl,
         onGoalControlTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
+        onInlineToolControl: handleInlineToolControl,
+        onInlineToolControlTrace: (value) => { if (isRecord(value) && typeof value.event === "string") traceNativeSubagent(value.event, value); },
+        getInlineToolState: () => inlineToolPolicy.state(),
         onReminderLockControl: handleReminderLockControl,
         onReminderLockReset: () => reminderLock.clear(),
         getGoalState: () => cloneGoalControlState(goalControlState),
@@ -1471,6 +1530,7 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
       client = mailboxClient;
       publishGoalState(mailboxClient);
       coordinator = createMailboxCoordinator(context, mailboxClient);
+      activityLifecycle.onSessionStart();
       activityLifecycle.ensureHeartbeat();
       void mailboxClient.connect().catch((error: ErrorLike) => {
         recordDiagnostic("mailbox_connect_failed", { error_name: errorName(error) });

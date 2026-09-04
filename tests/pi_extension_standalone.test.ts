@@ -48,6 +48,7 @@ function createMessagingFixture({
   const branch = [];
   const emittedEvents = [];
   const sent = [];
+  const notifications = [];
   const modelSwitches = [];
   const mailboxClients = [];
   const createContext = (currentSessionId = sessionId) => ({
@@ -61,7 +62,7 @@ function createMessagingFixture({
     ...(contextUsage === undefined ? {} : { getContextUsage: contextUsage }),
     model,
     modelRegistry: { getAvailable: () => availableModels, complete },
-    ui: { notify() {}, setStatus() {} },
+    ui: { notify(message, level) { notifications.push({ message, level }); }, setStatus() {} },
   });
   const context = createContext();
   const pi = {
@@ -120,7 +121,7 @@ function createMessagingFixture({
     }),
     ...(environment === undefined ? {} : { operationalTools: { environment } }),
   });
-  return { childHandlers, commands, context, createContext, emittedEvents, handlers, mailboxClients, modelSwitches, pi, sent, tools };
+  return { childHandlers, commands, context, createContext, emittedEvents, handlers, mailboxClients, modelSwitches, notifications, pi, sent, tools };
 }
 
 async function emitToolCalls(fixture, toolNames, context = fixture.context) {
@@ -144,6 +145,41 @@ test("inline tool policy validates temporary allowance requests", () => {
   assert.throws(() => policy.grant("edit", 0), /usageCount/);
   assert.throws(() => policy.grant("edit", 1.5), /usageCount/);
   assert.throws(() => policy.grant("edit", 6), /usageCount/);
+});
+
+test("inline tool policy has a session-local enable flag without consuming temporary allowances", () => {
+  const policy = createInlineToolPolicy();
+  assert.deepEqual(policy.state(), { enabled: false });
+  assertBlocked(policy.evaluate("bash"));
+
+  assert.equal(policy.setEnabled(true), true);
+  assert.equal(policy.isEnabled(), true);
+  assert.equal(policy.evaluate("bash"), undefined);
+  assert.equal(policy.setEnabled(false), false);
+  assertBlocked(policy.evaluate("bash"));
+
+  policy.grant("edit", 1);
+  assert.equal(policy.evaluate("edit"), undefined);
+  assertBlocked(policy.evaluate("edit"));
+});
+
+test("inline-tools command reports, changes, and validates the top-level policy", async () => {
+  const fixture = createMessagingFixture();
+  await sessionStart(fixture);
+  const command = fixture.commands.get("inline-tools");
+  assert.ok(command);
+
+  await command.handler("", fixture.context);
+  assert.deepEqual(fixture.notifications.at(-1), { message: "Inline tools are off.", level: "info" });
+  await command.handler("on", fixture.context);
+  assert.deepEqual(fixture.notifications.at(-1), { message: "Inline tools are now on.", level: "info" });
+  assert.equal((await emitToolCalls(fixture, ["bash"]))[0], undefined);
+  await command.handler("invalid", fixture.context);
+  assert.deepEqual(fixture.notifications.at(-1), { message: "Usage: /inline-tools [on|off]", level: "error" });
+  assert.equal((await emitToolCalls(fixture, ["bash"]))[0], undefined);
+  await command.handler("off", fixture.context);
+  assert.deepEqual(fixture.notifications.at(-1), { message: "Inline tools are now off.", level: "info" });
+  assertBlocked((await emitToolCalls(fixture, ["bash"]))[0]);
 });
 
 test("function tool aliases grant usable credits and invalid names grant none", async () => {
@@ -551,6 +587,41 @@ test("activity broadcasts current model metadata without recurring catalog paylo
   });
   assert.equal("availableModels" in activity[0][1], false);
   assert.doesNotThrow(() => JSON.stringify(activity[0][1]));
+});
+
+test("extension exposes inline state and applies mailbox inline controls", async () => {
+  let options;
+  const stateFrames = [];
+  const fixture = createMessagingFixture({
+    createClient: (clientOptions) => {
+      options = clientOptions;
+      return {
+        connect: async () => {},
+        close() {},
+        sendReceipt() {},
+        sendActivity() {},
+        sendInlineToolState(state) { stateFrames.push(state); },
+      };
+    },
+  });
+  await sessionStart(fixture);
+  assert.deepEqual(stateFrames, []);
+  assert.deepEqual(options.getInlineToolState(), { enabled: false });
+
+  const command = fixture.commands.get("inline-tools");
+  await command.handler("on", fixture.context);
+  assert.deepEqual(stateFrames, [{ enabled: true }]);
+
+  const control = await options.onInlineToolControl({
+    controlId: "control-1",
+    sourceAgentId: "controller",
+    targetAgentId: "worker",
+    targetInstanceId: "instance-1",
+    action: "set",
+    enabled: true,
+  });
+  assert.deepEqual(control, { accepted: true, enabled: true });
+  assert.equal((await emitToolCalls(fixture, ["bash"]))[0], undefined);
 });
 
 test("parent model control invokes the distinct mailbox callback", async () => {
@@ -1127,6 +1198,59 @@ test("mailbox client retries transient capability discovery failures", async () 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(capabilityCalls, 2);
   assert.equal(socket.sent.filter((frame) => frame.type === "model_catalog").length, 1);
+  client.close();
+});
+
+test("mailbox client registers inline capability, publishes state, and replies to controls", async () => {
+  const socket = new EventTarget();
+  socket.readyState = 0;
+  socket.sent = [];
+  socket.send = (payload) => socket.sent.push(JSON.parse(payload));
+  socket.close = () => { socket.readyState = 3; };
+  const states = [];
+  const controls = [];
+  const client = createMailboxClient({
+    agentId: "worker",
+    onEnvelope: () => {},
+    getInlineToolState: () => ({ enabled: states.at(-1)?.enabled ?? false }),
+    onInlineToolControl: async (control) => {
+      controls.push(control);
+      states.push({ enabled: control.enabled });
+      return { accepted: true, enabled: control.enabled };
+    },
+    webSocketFactory: () => socket,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+    generateId: (() => { let index = 0; return () => `inline-${++index}`; })(),
+  });
+  const connected = client.connect();
+  socket.readyState = 1;
+  socket.dispatchEvent(new Event("open"));
+  const register = socket.sent.find((frame) => frame.type === "register");
+  assert.equal(register.inline_tool_control, "v1");
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "registered", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-inline", request_id: register.frame_id,
+  }) }));
+  await connected;
+
+  const initialState = socket.sent.find((frame) => frame.type === "inline_tool_state");
+  assert.equal(initialState.enabled, false);
+  socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+    type: "inline_tool_control", agent_id: "worker", instance_id: client.instanceId, lease_id: "lease-inline",
+    source_agent_id: "controller", control_id: "control-inline", action: "set", enabled: true,
+    expires_at: "2030-01-01T00:00:00.000Z",
+  }) }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(controls[0], {
+    controlId: "control-inline", sourceAgentId: "controller", targetAgentId: "worker",
+    targetInstanceId: client.instanceId, action: "set", enabled: true,
+  });
+  assert.equal(socket.sent.filter((frame) => frame.type === "inline_tool_state").at(-1).enabled, true);
+  assert.deepEqual({ ...socket.sent.find((frame) => frame.type === "inline_tool_control_result"), frame_id: "ignored" }, {
+    version: "v1", frame_id: "ignored", type: "inline_tool_control_result", agent_id: "worker",
+    instance_id: client.instanceId, lease_id: "lease-inline", source_agent_id: "controller",
+    control_id: "control-inline", accepted: true, enabled: true,
+  });
   client.close();
 });
 

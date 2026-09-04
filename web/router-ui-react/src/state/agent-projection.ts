@@ -1,7 +1,7 @@
 import { mergeAgentModelSnapshot, normalizeModelSummaries, normalizeModelSummary, type ModelAgent } from "../domain/models";
 import { normalizeGoalProjection, normalizeGoalState, type GoalState } from "../domain/goals";
 export interface SubagentSummary { id: string; description: string; type?: string; status?: string }
-export interface Agent extends ModelAgent { activity_state?: "active" | "idle" | "compacting"; instance_id?: string; subagent_count?: number; subagents?: SubagentSummary[]; subagent_version?: number; goal?: { enabled: boolean; goal: string }; goal_state?: GoalState }
+export interface Agent extends ModelAgent { activity_state?: "active" | "idle" | "compacting"; instance_id?: string; subagent_count?: number; subagents?: SubagentSummary[]; subagent_version?: number; goal?: { enabled: boolean; goal: string }; goal_state?: GoalState; inline_tool_control_available?: boolean; inline_tool_enabled?: boolean }
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function safeInteger(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value); }
 function summaries(value: unknown): SubagentSummary[] { if (!Array.isArray(value)) return []; return value.flatMap((item) => { if (!record(item) || typeof item.id !== "string" || typeof item.description !== "string") return []; const id = item.id.trim().slice(0, 128); const description = item.description.trim().slice(0, 512); if (!id || !description) return []; return [{ id, description, ...(typeof item.type === "string" ? { type: item.type } : {}), ...(typeof item.status === "string" ? { status: item.status } : {}) }]; }); }

@@ -418,6 +418,18 @@ async function startupShutdown() {
   await operation("parent-shutdown", () => harness.root("session_shutdown", {}));
 }
 
+async function shutdownReactivation() {
+  const records = [{ id: "resumed-child", type: "worker", status: "running", description: "resumed label" }];
+  const harness = createHarness({ "parent-session": { getLifecycleSnapshots: () => records } });
+  await operation("initial-session-start", () => harness.root("session_start", {}));
+  await operation("initial-agent-start", () => harness.root("agent_start", {}));
+  const oldHeartbeat = harness.clock.intervals.at(-1)?.callback;
+  await operation("session-shutdown", () => harness.root("session_shutdown", {}));
+  await operation("new-session-start", () => harness.root("session_start", {}));
+  await operation("old-queued-heartbeat", () => oldHeartbeat?.());
+  await operation("new-heartbeat", () => harness.clock.heartbeat());
+}
+
 async function reconnectCapabilityBoundary() {
   const typedRecords = [{ id: "reconnect-child", status: "running", description: "reconnect label" }];
   const typed = createHarness({ "parent-session": { getLifecycleSnapshots: () => typedRecords } });
@@ -434,7 +446,7 @@ async function reconnectCapabilityBoundary() {
   await operation("legacy-heartbeat", () => legacy.clock.heartbeat());
 }
 
-const scenarios = { scheduler: settledScheduler, "typed-terminal": typedTerminal, "legacy-reconciliation": legacyReconciliation, "legacy-fallbacks": legacyFallbacks, "read-failure": readFailure, "owner-scope": ownerScope, "compaction-boundary": compactionBoundary, "startup-shutdown": startupShutdown, "reconnect-capability-boundary": reconnectCapabilityBoundary };
+const scenarios = { scheduler: settledScheduler, "typed-terminal": typedTerminal, "legacy-reconciliation": legacyReconciliation, "legacy-fallbacks": legacyFallbacks, "read-failure": readFailure, "owner-scope": ownerScope, "compaction-boundary": compactionBoundary, "startup-shutdown": startupShutdown, "shutdown-reactivation": shutdownReactivation, "reconnect-capability-boundary": reconnectCapabilityBoundary };
 if (typeof scenarios[scenario] !== "function") throw new Error("unknown scenario: " + scenario);
 await scenarios[scenario]();
 process.stdout.write(JSON.stringify(observations) + "\n");
@@ -694,6 +706,26 @@ test("pre-extraction TypeScript and current TypeScript lifecycle observations st
     assertScenarioCoverage(scenario, baselineObservations);
     assertScenarioCoverage(scenario, currentObservations);
   }
+});
+
+test("session reactivation differs from the pre-extraction shutdown behavior only where required", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mecha-lifecycle-reactivation-differential-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const baselineRoot = await materializeBaseline(directory);
+  const runner = join(directory, "runner.mjs");
+  await writeFile(runner, RUNNER_SOURCE, "utf8");
+  const [baselineObservations, currentObservations] = await Promise.all([
+    runChild(runner, "baseline", "shutdown-reactivation", baselineRoot),
+    runChild(runner, "new", "shutdown-reactivation", baselineRoot),
+  ]);
+
+  const baselineStale = activityRows(operationSegment(observationRecords(baselineObservations), "old-queued-heartbeat"));
+  const currentStale = activityRows(operationSegment(observationRecords(currentObservations), "old-queued-heartbeat"));
+  assert.ok(baselineStale.length > 0, "the pre-fix lifecycle publishes from the queued old callback");
+  assert.equal(currentStale.length, 0, "the old callback must stay fenced after reactivation");
+
+  const resumed = activityRows(operationSegment(observationRecords(currentObservations), "new-heartbeat"));
+  assert.ok(resumed.some((row) => JSON.stringify(row.payload).includes("resumed-child")), "the new heartbeat must resume native polling");
 });
 
 test("the differential allowlist accepts only exact operation-owned injected paths", () => {

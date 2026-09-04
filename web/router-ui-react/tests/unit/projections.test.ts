@@ -10,6 +10,11 @@ describe("agent projections", () => { it("uses connected agents as authority and
     const incoming = [{ agent_id: "peer", instance_id: "instance", available_models: [], model_catalog_total_count: 0, model_catalog_truncated: false }] as Agent[];
     expect(projectConnectedAgents(incoming, "web", current)[0]?.available_models).toEqual([{ provider: "fixture", id: "model" }]);
   });
+  it("resets inline tool state for a new worker instance until it publishes again", () => {
+    const current = [{ ...agent("peer"), inline_tool_control_available: true, inline_tool_enabled: true }] as Agent[];
+    const incoming = [{ ...agent("peer"), instance_id: "new-instance", inline_tool_control_available: true }] as Agent[];
+    expect(projectConnectedAgents(incoming, "web", current)[0]).not.toHaveProperty("inline_tool_enabled");
+  });
   it("ignores lifecycle rows without a connected agent", () => { expect(upsertLifecycleAgent([], agent("peer"))).toEqual([]); });
   it("keeps omitted agents during a partial replay and applies each inner version", () => {
     const supervisor = { ...agent("supervisor", 17844), subagent_count: 1 };

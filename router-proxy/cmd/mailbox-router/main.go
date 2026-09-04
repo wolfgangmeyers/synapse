@@ -19,11 +19,14 @@ import (
 )
 
 type config struct {
-	database string
-	logPath  string
-	host     string
-	port     int
-	maxBatch int
+	database              string
+	logPath               string
+	host                  string
+	port                  int
+	maxBatch              int
+	auditSupervisorTarget string
+	auditTmuxSession      string
+	policyTimeout         time.Duration
 }
 
 func parseConfig(args []string) (config, error) {
@@ -35,6 +38,9 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.host, "host", transport.DefaultHost, "bind host")
 	flags.IntVar(&result.port, "port", transport.DefaultPort, "listen port")
 	flags.IntVar(&result.maxBatch, "max-batch-chars", 4096, "maximum UTF-16 characters in a delivery batch")
+	flags.StringVar(&result.auditSupervisorTarget, "audit-supervisor-target", "supervisor", "supervisor agent ID for tmux/router audit delivery")
+	flags.StringVar(&result.auditTmuxSession, "audit-tmux-session", "mecha", "tmux session for read-only tmux/router audit inventory")
+	flags.DurationVar(&result.policyTimeout, "policy-timeout", transport.DefaultPolicyTimeout, "maximum duration for one native policy run")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -53,12 +59,21 @@ func parseConfig(args []string) (config, error) {
 	if result.maxBatch < 0 {
 		return config{}, errors.New("--max-batch-chars must be a non-negative integer")
 	}
+	if result.auditSupervisorTarget == "" {
+		return config{}, errors.New("--audit-supervisor-target is required")
+	}
+	if result.auditTmuxSession == "" {
+		return config{}, errors.New("--audit-tmux-session is required")
+	}
+	if result.policyTimeout <= 0 {
+		return config{}, errors.New("--policy-timeout must be positive")
+	}
 	return result, nil
 }
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--help" {
-		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--max-batch-chars <chars>]")
+		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--max-batch-chars <chars>] [--audit-supervisor-target <agent-id>] [--audit-tmux-session <session>] [--policy-timeout <duration>]")
 		return
 	}
 	options, err := parseConfig(os.Args[1:])
@@ -93,7 +108,7 @@ func main() {
 	}
 	defer logWriter.Close()
 	logger := eventLogger(logWriter, os.Stderr)
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux")})
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()
@@ -104,11 +119,12 @@ func main() {
 		_ = durable.Close()
 		log.Fatal(err)
 	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+
 	httpURL, websocketURL := router.URLs()
 	fmt.Printf("MECHA_V2_ROUTER_READY http=%s ws=%s database=%s log=%s\n", httpURL, websocketURL, options.database, options.logPath)
 
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-signals
 	fmt.Printf("MECHA_V2_ROUTER_STOP signal=%s\n", sig)
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
