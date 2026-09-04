@@ -198,6 +198,73 @@ test("supports recurring and absolute reminder schedules while preserving delayM
   assert.equal(absolutePayload.interval_ms, null);
 });
 
+test("rejects scheduled times without timezones or valid ISO values before router calls", async () => {
+  const requests = [];
+  const tools = registered({
+    resolveCurrentAgentId: () => "current-window",
+    fetchImpl: async (url, request = {}) => {
+      requests.push({ url, request });
+      return { ok: true, status: 201, json: async () => ({}) };
+    },
+    environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765" },
+  });
+  const reminder = tools.get("mecha_reminder");
+
+  for (const scheduledAt of ["2030-01-01T00:00:00", "not-an-ISO-datetime"]) {
+    const result = await execute(reminder, { action: "create", message: "hello", scheduledAt });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /scheduledAt must/);
+  }
+  assert.deepEqual(requests, []);
+});
+
+test("updates recurring reminders with the next due time and interval", async () => {
+  const requests = [];
+  const tools = registered({
+    resolveCurrentAgentId: () => "current-window",
+    fetchImpl: async (url, request = {}) => {
+      requests.push({ url, request });
+      if ((request.method ?? "GET") === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ reminder: { id: "reminder-1", target: "current-window" } }),
+          headers: { get: () => null },
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ reminder: { id: "reminder-1" } }) };
+    },
+    environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765" },
+    now: () => new Date("2030-01-01T00:00:00.000Z"),
+  });
+
+  const result = await execute(tools.get("mecha_reminder"), {
+    action: "update", reminderId: "reminder-1", intervalMinutes: 15,
+  });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(JSON.parse(requests.at(-1).request.body), {
+    next_due_at: "2030-01-01T00:15:00.000Z",
+    interval_ms: 900_000,
+  });
+});
+
+test("rejects malformed reminder list responses", async () => {
+  const tools = registered({
+    resolveCurrentAgentId: () => "current-window",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ reminders: {} }),
+      headers: { get: () => null },
+    }),
+    environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765" },
+  });
+
+  const result = await execute(tools.get("mecha_reminder"), { action: "list" });
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, "router returned an invalid reminder list");
+});
+
 test("lists only current-target reminders and denies foreign updates and deletes", async () => {
   const requests = [];
   const tools = registered({
@@ -721,6 +788,33 @@ test("preserves ordinary quoted and unquoted identifier fields while redacting c
     api_key: "[redacted credential]",
   });
   assert.doesNotMatch(JSON.stringify(detailResult), /actual-secret-value/);
+});
+
+test("fails closed when ownership reads are non-ok or return the wrong reminder", async () => {
+  for (const ownershipResponse of [
+    { ok: false, status: 404, json: async () => ({}) },
+    { ok: true, status: 200, json: async () => ({}) },
+    { ok: true, status: 200, json: async () => ({ reminder: { id: "another-reminder", target: "worker" } }) },
+  ]) {
+    for (const action of ["update", "delete"]) {
+      const requests = [];
+      const tools = registered({
+        resolveCurrentAgentId: () => "worker",
+        fetchImpl: async (url, request = {}) => {
+          requests.push({ url, request });
+          return ownershipResponse;
+        },
+        environment: { MECHA_ROUTER_URL: "http://127.0.0.1:8765" },
+      });
+      const input = action === "update"
+        ? { action, reminderId: "reminder-1", message: "updated" }
+        : { action, reminderId: "reminder-1" };
+      const result = await execute(tools.get("mecha_reminder"), input);
+      assert.equal(result.isError, true, `${action}:${ownershipResponse.status}`);
+      assert.equal(result.content[0].text, "Reminder ownership could not be verified; mutation denied.");
+      assert.deepEqual(requests.map(({ request }) => request.method ?? "GET"), ["GET"]);
+    }
+  }
 });
 
 test("rejects arbitrary paths, repositories, working directories, and commands", async () => {
