@@ -181,6 +181,16 @@ function currentReminderTarget(resolveCurrentAgentId: () => string | undefined):
   }
 }
 
+function scheduledReminderTime(value: unknown): string {
+  const raw = text(value, "scheduledAt", 64);
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    throw new OperationalInputError("scheduledAt must include an explicit timezone offset or Z");
+  }
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp)) throw new OperationalInputError("scheduledAt must be a valid ISO 8601 datetime");
+  return new Date(timestamp).toISOString();
+}
+
 function workerId(value: unknown, name = "worker alias"): string {
   const normalized = text(value, name, 120);
   if (!WORKER_ID.test(normalized)) throw new OperationalInputError(`${name} contains unsupported characters`);
@@ -567,17 +577,35 @@ export function createOperationalToolDefinitions({
     return payload;
   }
 
-  async function readReminder(reminderId: string): Promise<unknown> {
+  async function readOwnedReminder(reminderId: string, target: string): Promise<unknown> {
+    let responseOk = false;
     const reader = createRouterReminderReader({
-      fetchImpl,
+      fetchImpl: async (input, init) => {
+        if (typeof fetchImpl !== "function") throw new OperationalActionError("router HTTP client is unavailable");
+        const response = await fetchImpl(input, init);
+        responseOk = response.ok;
+        return response;
+      },
       routerUrl: loopbackRouterUrl(environment),
     });
-    return reader(reminderId);
+    let reminder: unknown;
+    try {
+      reminder = await reader(reminderId);
+    } catch {
+      throw new OperationalActionError("Reminder ownership could not be verified; mutation denied.");
+    }
+    if (!responseOk || !isObject(reminder) || reminder.id !== reminderId) {
+      throw new OperationalActionError("Reminder ownership could not be verified; mutation denied.");
+    }
+    if (reminder.target !== target) {
+      throw new OperationalActionError("Reminder belongs to another tmux agent; mutation denied.");
+    }
+    return reminder;
   }
 
-  const guardedMutation = (reminderId: string, mutate: () => unknown | Promise<unknown>) => guardedReminderMutation({
+  const guardedMutation = (reminderId: string, reminder: unknown, mutate: () => unknown | Promise<unknown>) => guardedReminderMutation({
     reminderId,
-    readReminder,
+    readReminder: async () => reminder,
     reminderLock,
     mutate,
   });
@@ -708,64 +736,114 @@ export function createOperationalToolDefinitions({
 
     descriptor("mecha_reminder", "Mailbox reminder", [
       variant("list"),
-      variant("create", { message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["message", "delayMinutes"]),
-      variant("update", { reminderId: task, message: shortText, subject, delayMinutes: { type: "integer", minimum: 1, maximum: 10_080 } }, ["reminderId"]),
+      variant("create", {
+        message: shortText,
+        subject,
+        delayMinutes: { type: "integer", minimum: 1, maximum: 10_080, description: "Minutes from now for a one-shot reminder." },
+        scheduledAt: { type: "string", format: "date-time", description: "Absolute ISO 8601 time with a timezone offset or Z." },
+        intervalMinutes: { type: "integer", minimum: 1, maximum: 10_080, description: "Minutes between recurring reminders." },
+      }, ["message"]),
+      variant("update", {
+        reminderId: task,
+        message: shortText,
+        subject,
+        delayMinutes: { type: "integer", minimum: 1, maximum: 10_080, description: "Minutes from now for a one-shot reminder." },
+        scheduledAt: { type: "string", format: "date-time", description: "Absolute ISO 8601 time with a timezone offset or Z." },
+        intervalMinutes: { type: "integer", minimum: 1, maximum: 10_080, description: "Minutes between recurring reminders." },
+      }, ["reminderId"]),
       variant("delete", { reminderId: task }, ["reminderId"]),
     ], async (input) => {
       const definitions = {
         list: { properties: {}, required: [] },
-        create: { properties: { message: true, subject: true, delayMinutes: true }, required: ["message", "delayMinutes"] },
-        update: { properties: { reminderId: true, message: true, subject: true, delayMinutes: true }, required: ["reminderId"] },
+        create: { properties: { message: true, subject: true, delayMinutes: true, scheduledAt: true, intervalMinutes: true }, required: ["message"] },
+        update: { properties: { reminderId: true, message: true, subject: true, delayMinutes: true, scheduledAt: true, intervalMinutes: true }, required: ["reminderId"] },
         delete: { properties: { reminderId: true }, required: ["reminderId"] },
       };
       validateAction(input, definitions);
+
+      const timingNames = ["delayMinutes", "scheduledAt", "intervalMinutes"];
+      const providedTiming = timingNames.filter((name) => input[name] !== undefined);
+      if (input.action === "create" && providedTiming.length !== 1) {
+        throw new OperationalInputError("create requires exactly one of delayMinutes, scheduledAt, or intervalMinutes");
+      }
+      if (input.action === "update" && providedTiming.length > 1) {
+        throw new OperationalInputError("update accepts at most one of delayMinutes, scheduledAt, or intervalMinutes");
+      }
+
       if (input.action === "list") {
+        const target = currentReminderTarget(resolveCurrentAgentId);
         const payload = await request("/v1/reminders");
-        return success(JSON.stringify(payload), payload);
+        if (!isObject(payload) || (payload.reminders !== null && !Array.isArray(payload.reminders))) {
+          throw new OperationalActionError("router returned an invalid reminder list");
+        }
+        const filtered = (payload.reminders ?? []).filter((reminder) => isObject(reminder) && reminder.target === target);
+        const ownedPayload = { ...payload, reminders: filtered };
+        return success(JSON.stringify(ownedPayload), ownedPayload);
       }
-      if (input.action === "delete") {
-        const reminderId = id(input.reminderId, "reminderId");
-        return guardedMutation(reminderId, async () => {
-          await request(`/v1/reminders/${encodeURIComponent(reminderId)}`, { method: "DELETE" });
-          return success("Reminder canceled.");
-        });
-      }
-      if (input.action === "update") {
-        const reminderId = id(input.reminderId, "reminderId");
+
+      const target = currentReminderTarget(resolveCurrentAgentId);
+      const reminderId = input.action === "create" ? undefined : id(input.reminderId, "reminderId");
+      if (reminderId !== undefined) {
+        const ownedReminder = await readOwnedReminder(reminderId, target);
+        if (input.action === "delete") {
+          return guardedMutation(reminderId, ownedReminder, async () => {
+            await request(`/v1/reminders/${encodeURIComponent(reminderId)}`, { method: "DELETE" });
+            return success("Reminder canceled.");
+          });
+        }
+
         const patch: JsonObject = {};
         if (input.message !== undefined) patch.body = text(input.message, "message");
         if (input.subject !== undefined) patch.subject = text(input.subject, "subject", 200);
-        const minutes = input.delayMinutes === undefined
-          ? undefined
-          : integer(input.delayMinutes, "delayMinutes", 1, 10_080);
-        if (Object.keys(patch).length === 0 && minutes === undefined) {
-          throw new OperationalInputError("update requires at least one field to change");
-        }
-        return guardedMutation(reminderId, async () => {
-          if (minutes !== undefined) {
+        const hasDelay = input.delayMinutes !== undefined;
+        const hasScheduledAt = input.scheduledAt !== undefined;
+        const hasInterval = input.intervalMinutes !== undefined;
+        if (hasDelay || hasInterval) {
+          const minutes = integer(hasDelay ? input.delayMinutes : input.intervalMinutes, hasDelay ? "delayMinutes" : "intervalMinutes", 1, 10_080);
+          if (hasScheduledAt) {
+            patch.next_due_at = scheduledReminderTime(input.scheduledAt);
+          } else {
             const updated = now();
             if (!(updated instanceof Date) || Number.isNaN(updated.getTime())) {
               throw new OperationalActionError("Operational clock is unavailable.");
             }
             patch.next_due_at = new Date(updated.getTime() + minutes * 60_000).toISOString();
-            patch.interval_ms = null;
           }
+          if (hasDelay) patch.interval_ms = null;
+          else patch.interval_ms = minutes * 60_000;
+        } else if (hasScheduledAt) {
+          patch.next_due_at = scheduledReminderTime(input.scheduledAt);
+        }
+        if (Object.keys(patch).length === 0) {
+          throw new OperationalInputError("update requires at least one field to change");
+        }
+        return guardedMutation(reminderId, ownedReminder, async () => {
           const result = await request(`/v1/reminders/${encodeURIComponent(reminderId)}`, { method: "PATCH", body: patch });
           return success("Reminder updated.", result);
         });
       }
-      const target = currentReminderTarget(resolveCurrentAgentId);
-      const minutes = integer(input.delayMinutes, "delayMinutes", 1, 10_080);
+
       const created = now();
       if (!(created instanceof Date) || Number.isNaN(created.getTime())) throw new OperationalActionError("Operational clock is unavailable.");
+      const hasDelay = input.delayMinutes !== undefined;
+      const hasInterval = input.intervalMinutes !== undefined;
+      let nextDueAt: string;
+      let intervalMs: number | null = null;
+      if (hasDelay || hasInterval) {
+        const minutes = integer(hasDelay ? input.delayMinutes : input.intervalMinutes, hasDelay ? "delayMinutes" : "intervalMinutes", 1, 10_080);
+        nextDueAt = new Date(created.getTime() + minutes * 60_000).toISOString();
+        if (hasInterval) intervalMs = minutes * 60_000;
+      } else {
+        nextDueAt = scheduledReminderTime(input.scheduledAt);
+      }
       const payload: JsonObject = {
         id: id(generateId(), "generated reminder ID"),
         target,
         creator: id(environment.MECHA_AGENT_ID || "pi", "creator"),
         body: text(input.message, "message"),
         created_at: created.toISOString(),
-        next_due_at: new Date(created.getTime() + minutes * 60_000).toISOString(),
-        interval_ms: null,
+        next_due_at: nextDueAt,
+        interval_ms: intervalMs,
       };
       if (input.subject !== undefined) payload.subject = text(input.subject, "subject", 200);
       const result = await request("/v1/reminders", { method: "POST", body: payload });
