@@ -541,7 +541,7 @@
           <summary>Closed command and custom-message vocabulary</summary>
           <div class="details-body">
             <p>The thin extension registers exactly these hidden application commands: <code>/mecha-bootstrap-v1</code> (full manifest plus restored request IDs and policy projection), <code>/mecha-install-tools-v1</code> (one supplemental addition), <code>/mecha-control-result-v1</code>, <code>/mecha-mailbox-deliver-v1</code>, <code>/mecha-policy-apply-v1</code>, and <code>/mecha-child-snapshot-v1</code>. They are application commands, never model-selectable tools. Each takes exactly one base64url JSON argument; raw encoded and decoded limits are checked before decode and parse.</p>
-            <p>The only new hidden custom types are <code>mecha.tools.accepted.v1</code>, <code>mecha.tools.rejected.v1</code>, <code>mecha.control.request.v1</code>, <code>mecha.control.result.v1</code>, <code>mecha.mailbox.appended.v1</code>, <code>mecha.policy.applied.v1</code>, <code>mecha.child.snapshot.v1</code>, and <code>mecha.child.delta.v1</code>. Every payload has a closed schema, <code>display:false</code>, <code>triggerTurn:false</code>, and current session/process fences. Unknown command names, custom types, versions, or fields fail closed. Preflight rejects any command or tool collision before registration; the extension never exposes a command in <code>get_active_tools</code>.</p>
+            <p>The only new hidden custom types are <code>mecha.tools.accepted.v1</code>, <code>mecha.tools.rejected.v1</code>, <code>mecha.control.request.v1</code>, <code>mecha.control.result.v1</code>, <code>mecha.mailbox.appended.v1</code>, <code>mecha.policy.applied.v1</code>, <code>mecha.child.snapshot.v1</code>, and <code>mecha.child.delta.v1</code>. Every payload has a closed schema, <code>display:false</code>, and current session/process fences. The seven non-mailbox types use <code>triggerTurn:false</code>. <code>mecha.mailbox.appended.v1</code> is the direct managed-mail session append defined in section 09; it alone uses <code>deliverAs:"followUp"</code> and <code>triggerTurn:true</code>. It is not a history event or an acknowledgment. Unknown command names, custom types, versions, or fields fail closed. Preflight rejects any command or tool collision before registration; the extension never exposes a command in <code>get_active_tools</code>.</p>
           </div>
         </details>
       </section>
@@ -690,8 +690,8 @@
             <h3>Direct managed delivery</h3>
             <ol>
               <li>The existing message API creates the same durable message row for either source.</li>
-              <li>For a current managed recipient, the router sends a bounded <code>/mecha-mailbox-deliver &lt;base64url envelope&gt;</code> RPC prompt, not a Mailbox WebSocket frame.</li>
-              <li>The thin extension appends <code>mecha.mailbox.message.v1</code> with <code>deliverAs:"followUp"</code> and <code>triggerTurn:true</code>.</li>
+              <li>For a current managed recipient, the router sends a bounded <code>/mecha-mailbox-deliver-v1 &lt;base64url envelope&gt;</code> RPC prompt, not a Mailbox WebSocket frame.</li>
+              <li>The thin extension appends <code>mecha.mailbox.appended.v1</code> with <code>display:false</code>, <code>deliverAs:"followUp"</code>, and <code>triggerTurn:true</code>. This is the direct ordinary-mail delivery into Pi's session, not a history event or an acknowledgment; the durable message row remains the source for quiet and complete history.</li>
               <li>The router ACKs only after the matching custom <code>message_end</code>. On recovery it scans session entries by message ID before retry.</li>
             </ol>
           </article>
