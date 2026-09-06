@@ -216,7 +216,7 @@ For production-code work, load the `workflows` skill and fetch `dev-loop` with `
    - Spawn one reviewer subagent per focus area (give them the requirements if requirements were provided)
    - **Cross-validate** blocking/should-address findings: spawn a subagent with a *different* reviewer persona with relevant expertise to verify each finding. Discard false positives. Robot reviewers hallucinate issues.
    - Apply validated feedback from the batch
-7. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
+7. After the planned review batches, retain only findings that trace to accepted requirements or correctness needed to satisfy them. Do not expand product scope, add speculative security or design requirements, or introduce adjacent improvements. Follow the canonical dev-loop cap of three total Robot Review rounds across plan and implementation: run another pass only for a material target or evidence change while a round remains, and stop when valid feedback is addressed and the target is clean. At the cap, report unresolved valid Blocking or Should Address findings; do not claim review success.
 8. Delete the plan file before moving to Phase 2 — do not commit plan artifacts.
 
 ### Local implementation mechanics (within canonical Phases 3 and 4)
@@ -239,7 +239,7 @@ For production-code work, load the `workflows` skill and fetch `dev-loop` with `
    - Spawn one reviewer subagent per focus area, diffing against the base branch (give them the requirements if applicable)
    - **Cross-validate** blocking/should-address findings: spawn a subagent with a *different* reviewer persona with relevant expertise to verify each finding. Discard false positives.
    - Apply validated feedback from the batch
-6. After the planned review batches, retain only findings that name a task requirement or concrete security, data-loss, or existing-behavior risk. Run one final pass after direct fixes; do not add or repeat batches without an unmet stated criterion.
+6. After the planned review batches, retain only findings that trace to accepted requirements or correctness needed to satisfy them. Do not expand product scope, add speculative security or design requirements, or introduce adjacent improvements. Follow the canonical dev-loop cap of three total Robot Review rounds across plan and implementation: run another pass only for a material target or evidence change while a round remains, and stop when valid feedback is addressed and the target is clean. At the cap, report unresolved valid Blocking or Should Address findings; do not claim review success.
 7. Run pre-commit checklist (below).
 8. Commit and push scoped changes to a draft PR when the checks pass. Do not wait for supervisor approval. Wait for explicit authorization only to make a draft PR ready, merge it, or change another external PR state.
 
