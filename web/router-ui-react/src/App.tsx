@@ -19,7 +19,7 @@ import { Conversation } from "./components/Conversation";
 import { RouterManagerDialog } from "./components/RouterManagerDialog";
 import { GoalEditorDialog } from "./components/GoalEditorDialog";
 import { InlineToolSettingsDialog } from "./components/InlineToolSettingsDialog";
-import { ReminderDialog } from "./components/ReminderDialog";
+import { ReminderDialog, type ReminderDialogState } from "./components/ReminderDialog";
 import { PromptControls } from "./components/PromptControls";
 import { PromptTemplateDialog } from "./components/PromptTemplateDialog";
 import { ArrivalDialog } from "./components/ArrivalDialog";
@@ -172,6 +172,11 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
   const [promptImportProgress, setPromptImportProgress] = useState<PromptTemplateImportProgress>();
   const [templateToUse, setTemplateToUse] = useState<PromptTemplate>();
+  const [promptReturnDialog, setPromptReturnDialog] = useState<"reminders">();
+  const [dialogAfterClose, setDialogAfterClose] = useState<"reminders">();
+  const [reminderTemplateToUse, setReminderTemplateToUse] = useState<PromptTemplate>();
+  const [reminderSelection, setReminderSelection] = useState<{ start: number; end: number }>();
+  const [reminderDialogState, setReminderDialogState] = useState<ReminderDialogState>({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false });
   const drafts = useDrafts(activeUrl, resolvedAgentId, selectedPeer, undefined);
   const composerDraft = drafts.draft;
   const setComposerDraft = drafts.setDraft;
@@ -214,7 +219,7 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
     setSelectedPeer((current) => prior.routerUrl === activeUrl ? current ?? persistedPeer : persistedPeer);
     previousScope.current = scope;
     setExpanded(new Set()); setDialog(undefined); setArrivalAgent(undefined); setGoalError(undefined); setReminderStatus(undefined);
-    setGoalControlAvailable(false); setInlineToolControlAvailable(false); setInlineToolError(undefined); setTemplatesLoaded(false); setPromptImportProgress(undefined); setTemplateToUse(undefined); setComposerSelection(undefined);
+    setGoalControlAvailable(false); setInlineToolControlAvailable(false); setInlineToolError(undefined); setTemplatesLoaded(false); setPromptImportProgress(undefined); setTemplateToUse(undefined); setPromptReturnDialog(undefined); setDialogAfterClose(undefined); setReminderTemplateToUse(undefined); setReminderSelection(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setComposerSelection(undefined);
     templateListGeneration.current += 1;
     templateListDirty.current = true;
     latestTemplateRequest.current += 1;
@@ -304,7 +309,7 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
   const arrival = selectedPeer ? selectArrival(session.state, selectedPeer) : undefined;
   const setSelection = (peer: string): void => { setSelectedPeer(peer); onSelectAgent?.(peer); };
   const openGoalForAgent = (peer: string): void => { setSelection(peer); externalGoal?.(peer); setDialog("goal"); };
-  const openRemindersForAgent = (peer: string): void => { setSelection(peer); externalReminders?.(peer); setDialog("reminders"); };
+  const openRemindersForAgent = (peer: string): void => { setSelection(peer); externalReminders?.(peer); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setDialog("reminders"); };
   const openInlineToolSettingsForAgent = (peer: string): void => { setSelection(peer); externalInlineToolSettings?.(peer); setInlineToolError(undefined); setDialog("inline-tools"); };
   const send = async (peer: string, body: string, images: ImageInput[]): Promise<void> => {
     // Use one client message ID for the optimistic row and the HTTP envelope.
@@ -406,6 +411,27 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
     setPromptImportProgress(undefined);
     return result;
   };
+  const useReminderTemplate = (template: PromptTemplate, selection: { start: number; end: number }): void => { setReminderTemplateToUse(template); setTemplateToUse(undefined); setReminderSelection(selection); setPromptReturnDialog("reminders"); setDialog("prompts"); };
+  const closePromptTemplateDialog = (): void => {
+    setDialog(undefined);
+    setDialogAfterClose(promptReturnDialog);
+    setPromptReturnDialog(undefined);
+    setPromptImportProgress(undefined);
+    setTemplateToUse(undefined);
+    setReminderTemplateToUse(undefined);
+    setReminderSelection(undefined);
+  };
+  const reopenDialogAfterPromptClose = (): void => {
+    if (dialogAfterClose !== undefined) setDialog(dialogAfterClose);
+    setDialogAfterClose(undefined);
+  };
+  const insertReminderTemplate = (value: string, selection?: { start: number; end: number }): void => {
+    setReminderDialogState((current) => {
+      const start = Math.max(0, Math.min(selection?.start ?? current.body.length, current.body.length));
+      const end = Math.max(start, Math.min(selection?.end ?? start, current.body.length));
+      return { ...current, body: `${current.body.slice(0, start)}${value}${current.body.slice(end)}` };
+    });
+  };
   const insertTemplate = (value: string, selection?: { start: number; end: number }): void => {
     const start = Math.max(0, Math.min(selection?.start ?? composerDraft.length, composerDraft.length));
     const end = Math.max(start, Math.min(selection?.end ?? start, composerDraft.length));
@@ -436,13 +462,13 @@ function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = 
   return <>
     <AppShell
       sidebar={<Sidebar routerLabel={routerLabel} connection={session.state.connection} connectionIdentity={resolvedAgentId} connectionDetail={reconciliation.error?.message} agents={session.state.agents} {...(selectedPeer === undefined ? {} : { selectedAgentId: selectedPeer })} filter={session.state.filter} arrivals={session.state.arrivals} reminderCounts={Object.fromEntries(session.state.agents.map((agent) => [agent.agent_id, activeRemindersForPeer(session.state.reminders, agent.agent_id).length]))} expandedAgentIds={expanded} onRefresh={() => { void reconciliation.refresh(); onRefresh?.(); }} onRouterClick={() => { setDialog("routers"); onRouterClick?.(); }} onFilterChange={(filter) => { session.dispatch({ type: "filter/set", scope, filter }); onFilterChange?.(filter); }} onSelectAgent={setSelection} onGoal={openGoalForAgent} onReminders={openRemindersForAgent} onToggleSubagents={(id) => { toggleSubagents(id); onToggleSubagents?.(id); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => { session.dispatch({ type: "arrival/remove", scope, agent: id }); onDismissArrival?.(id); }} />}
-      conversation={<div className="conversation-runtime"><Conversation {...(selectedAgent ? { peer: selectedAgent } : {})} activeReminderCount={selectedAgentActiveReminderCount} ownerId={resolvedAgentId} routerUrl={activeUrl} messages={mergeMessages(selectMessages(session.state, selectedPeer), conversation.messages)} value={composerDraft} onChange={setComposerDraft} onSelectionChange={setComposerSelection} {...(modelOptions.length > 0 ? { modelControls: <ModelPicker models={modelOptions} {...(selectedModel ? { currentModel: selectedModel } : {})} pending={pendingModelControl} disabled={session.state.connection !== "connected" || pendingModelControl} onChange={chooseModel} /> } : {})} {...(selectedAgent ? { promptControls: <PromptControls templates={session.state.templates} loaded={templatesLoaded} disabled={session.state.connection !== "connected"} onManage={() => setDialog("prompts")} onUse={(template) => { setTemplateToUse(template); setDialog("prompts"); }} /> } : {})} loading={conversation.loading} {...(conversation.error ? { error: conversation.error.message } : {})} {...(arrival ? { arrival } : {})} onSend={(body, images) => { if (selectedPeer) void send(selectedPeer, body, images).catch(() => undefined); }} onGoal={() => { if (selectedPeer) { setDialog("goal"); externalGoal?.(selectedPeer); } }} onReminders={() => { if (selectedPeer) { setDialog("reminders"); externalReminders?.(selectedPeer); } }} onInlineToolSettings={() => { if (selectedPeer) openInlineToolSettingsForAgent(selectedPeer); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} onToggleSubagents={() => { if (selectedPeer) { toggleSubagents(selectedPeer); onToggleSubagents?.(selectedPeer); } }} expanded={selectedPeer !== undefined && expanded.has(selectedPeer)} /></div>}
+      conversation={<div className="conversation-runtime"><Conversation {...(selectedAgent ? { peer: selectedAgent } : {})} activeReminderCount={selectedAgentActiveReminderCount} ownerId={resolvedAgentId} routerUrl={activeUrl} messages={mergeMessages(selectMessages(session.state, selectedPeer), conversation.messages)} value={composerDraft} onChange={setComposerDraft} onSelectionChange={setComposerSelection} {...(modelOptions.length > 0 ? { modelControls: <ModelPicker models={modelOptions} {...(selectedModel ? { currentModel: selectedModel } : {})} pending={pendingModelControl} disabled={session.state.connection !== "connected" || pendingModelControl} onChange={chooseModel} /> } : {})} {...(selectedAgent ? { promptControls: <PromptControls templates={session.state.templates} loaded={templatesLoaded} disabled={session.state.connection !== "connected"} onManage={() => setDialog("prompts")} onUse={(template) => { setTemplateToUse(template); setDialog("prompts"); }} /> } : {})} loading={conversation.loading} {...(conversation.error ? { error: conversation.error.message } : {})} {...(arrival ? { arrival } : {})} onSend={(body, images) => { if (selectedPeer) void send(selectedPeer, body, images).catch(() => undefined); }} onGoal={() => { if (selectedPeer) { setDialog("goal"); externalGoal?.(selectedPeer); } }} onReminders={() => { if (selectedPeer) { setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setDialog("reminders"); externalReminders?.(selectedPeer); } }} onInlineToolSettings={() => { if (selectedPeer) openInlineToolSettingsForAgent(selectedPeer); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} onToggleSubagents={() => { if (selectedPeer) { toggleSubagents(selectedPeer); onToggleSubagents?.(selectedPeer); } }} expanded={selectedPeer !== undefined && expanded.has(selectedPeer)} /></div>}
     />
     <RouterManagerDialog open={dialog === "routers"} routers={settings.routers.map((url) => ({ url, ...(settings.aliases[url] ? { alias: settings.aliases[url] } : {}), agentId: settings.agentIds[url] ?? (url === activeUrl ? resolvedAgentId : requestedAgentId ?? "wolfgang") }))} activeUrl={activeUrl} defaultAgentId={requestedAgentId ?? "wolfgang"} onClose={() => setDialog(undefined)} onSave={saveRouter} onSelect={selectRouter} onRemove={removeRouter} />
     {selectedPeer && selectedAgent ? <InlineToolSettingsDialog open={dialog === "inline-tools"} peer={selectedPeer} enabled={selectedAgent.inline_tool_enabled === true} capabilityAvailable={inlineToolControlAvailable && selectedAgent.inline_tool_control_available === true} pending={pendingInlineToolControl} {...(inlineToolError ? { error: inlineToolError } : {})} onClose={() => { setDialog(undefined); setInlineToolError(undefined); }} onSave={saveInlineToolSettings} /> : null}
     {selectedPeer && selectedAgent ? <GoalEditorDialog open={dialog === "goal"} peer={selectedPeer} {...(selectedAgent.goal_state ? { goalState: selectedAgent.goal_state } : {})} capabilityAvailable={goalControlAvailable && session.transport.goalControlAvailable} pending={pendingGoalControl} {...(goalError ? { error: goalError } : {})} onClose={() => { setDialog(undefined); }} onSave={saveGoal} /> : null}
-    {selectedPeer ? <ReminderDialog open={dialog === "reminders"} peer={selectedPeer} creator={resolvedAgentId} reminders={session.state.reminders} locks={Object.fromEntries(session.state.reminderLocks)} pendingIds={pendingReminderIds} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => setDialog(undefined)} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={lockReminder} /> : null}
-    <PromptTemplateDialog open={dialog === "prompts"} templates={session.state.templates} loaded={templatesLoaded} {...(promptImportProgress === undefined ? {} : { importProgress: promptImportProgress })} {...(templateToUse ? { templateToUse } : {})} {...(composerSelection ? { selection: composerSelection } : {})} onClose={() => { setDialog(undefined); setPromptImportProgress(undefined); setTemplateToUse(undefined); }} onSave={(template) => saveTemplate(template)} onDelete={(id) => deleteTemplate(id)} onImport={(items, overwrite) => importTemplates(items, overwrite)} onInsert={insertTemplate} />
+    {selectedPeer ? <ReminderDialog open={dialog === "reminders"} peer={selectedPeer} creator={resolvedAgentId} reminders={session.state.reminders} locks={Object.fromEntries(session.state.reminderLocks)} pendingIds={pendingReminderIds} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={lockReminder} /> : null}
+    <PromptTemplateDialog open={dialog === "prompts"} templates={session.state.templates} loaded={templatesLoaded} {...(promptImportProgress === undefined ? {} : { importProgress: promptImportProgress })} {...(reminderTemplateToUse ? { templateToUse: reminderTemplateToUse } : templateToUse ? { templateToUse } : {})} {...(reminderTemplateToUse && reminderSelection ? { selection: reminderSelection } : !reminderTemplateToUse && composerSelection ? { selection: composerSelection } : {})} onClose={closePromptTemplateDialog} onClosed={reopenDialogAfterPromptClose} onSave={(template) => saveTemplate(template)} onDelete={(id) => deleteTemplate(id)} onImport={(items, overwrite) => importTemplates(items, overwrite)} onInsert={(value, selection) => { if (reminderTemplateToUse) insertReminderTemplate(value, selection); else insertTemplate(value, selection); }} />
     <ArrivalDialog open={dialog === "arrival"} {...(arrivalForDialog ? { arrival: arrivalForDialog } : {})} uiAgentId={resolvedAgentId} onClose={() => setDialog(undefined)} onDismiss={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} />
   </>;
 }

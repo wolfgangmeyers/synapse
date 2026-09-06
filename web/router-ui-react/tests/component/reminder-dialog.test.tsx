@@ -5,6 +5,7 @@ import "@testing-library/jest-dom/vitest";
 import userEvent from "@testing-library/user-event";
 import { ReminderDialog } from "../../src/components/ReminderDialog";
 import type { Reminder } from "../../src/domain/reminders";
+import type { PromptTemplate } from "../../src/domain/prompt-templates";
 
 afterEach(cleanup);
 
@@ -17,4 +18,17 @@ describe("ReminderDialog", () => {
   it("rejects blank body and invalid delay", async () => { const user = userEvent.setup(); const onCreate = vi.fn(); render(<ReminderDialog {...base} reminders={[]} onCreate={onCreate} />); await user.click(screen.getByRole("button", { name: "Add reminder" })); await user.click(screen.getByRole("button", { name: "Create reminder" })); expect(screen.getByRole("alert")).toHaveTextContent("Enter reminder text"); await user.type(screen.getByRole("textbox", { name: "Reminder" }), "Do it"); const delay = screen.getByRole("spinbutton"); await user.clear(delay); await user.type(delay, "10081"); await user.click(screen.getByRole("button", { name: "Create reminder" })); expect(onCreate).not.toHaveBeenCalled(); expect(screen.getByRole("alert")).toHaveTextContent("1 to 10080"); });
   it("contains rejected delete requests and shows the reminder error", async () => { const user = userEvent.setup(); const onDelete = vi.fn().mockRejectedValue(new Error("Delete failed")); render(<ReminderDialog {...base} onDelete={onDelete} />); await user.click(screen.getByRole("button", { name: "Delete" })); await expect(screen.findByRole("alert")).resolves.toHaveTextContent("Delete failed"); expect(screen.getByText("Check this")).toBeInTheDocument(); });
   it("shows refresh errors while keeping the current reminder list visible", () => { render(<ReminderDialog {...base} status="Reminder deleted, but the list could not be refreshed." />); expect(screen.getByRole("status")).toHaveTextContent("list could not be refreshed"); expect(screen.getByText("Check this")).toBeInTheDocument(); });
+  it("reports the editor selection for template use without submitting", async () => {
+    const user = userEvent.setup(); const template: PromptTemplate = { id: "t1", name: "Review", body: "Review ${file}" }; const onUseTemplate = vi.fn(); const onCreate = vi.fn();
+    const state = { mode: "create" as const, subject: "", body: "Start", delay: 1, recurring: false, lockAfterCreate: false };
+    const { rerender } = render(<ReminderDialog {...base} reminders={[]} onCreate={onCreate} templates={[template]} onUseTemplate={onUseTemplate} dialogState={state} onDialogStateChange={vi.fn()} />);
+    const body = screen.getByRole("textbox", { name: "Reminder" });
+    expect(body).toBeInstanceOf(HTMLTextAreaElement);
+    if (!(body instanceof HTMLTextAreaElement)) throw new Error("Reminder input is not a textarea");
+    body.focus(); body.setSelectionRange(5, 5);
+    await user.click(screen.getByRole("button", { name: "Select prompt" })); await user.click(screen.getByRole("option", { name: "Use prompt template Review" }));
+    expect(onUseTemplate).toHaveBeenCalledWith(template, { start: 5, end: 5 });
+    rerender(<ReminderDialog {...base} reminders={[]} onCreate={onCreate} templates={[template]} onUseTemplate={onUseTemplate} dialogState={{ ...state, body: "StartReview app.ts" }} onDialogStateChange={vi.fn()} />);
+    expect(screen.getByRole("textbox", { name: "Reminder" })).toHaveValue("StartReview app.ts"); expect(onCreate).not.toHaveBeenCalled();
+  });
 });

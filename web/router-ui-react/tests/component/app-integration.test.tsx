@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App } from "../../src/App";
 import { createInitialState } from "../../src/state/app-state";
 import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, ownerScope } from "../../src/persistence/settings-repository";
@@ -248,6 +248,85 @@ describe("App integration", () => {
     await waitFor(() => expect(reminderRequests).toBe(2));
     expect(await screen.findByText("Arrived remotely")).toBeInTheDocument();
     expect(screen.getByText("Remote reminder")).toBeInTheDocument();
+  });
+
+  it("returns to the reminder editor after pasting a rendered prompt template", async () => {
+    const user = (await import("@testing-library/user-event")).default.setup();
+    const template = { id: "template-1", name: "Review", body: "Review ${file}", created_at: "2029-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z" };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [peer] });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [template] });
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory }} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Worker One (worker-one)" }));
+    const header = document.querySelector(".conversation-header");
+    if (!(header instanceof HTMLElement)) throw new Error("Conversation header is missing");
+    await user.click(within(header).getByRole("button", { name: "Add reminder" }));
+    const remindersDialog = screen.getByRole("dialog", { name: "Reminders" });
+    await user.click(within(remindersDialog).getByRole("button", { name: "Add reminder" }));
+    const reminderDialog = screen.getByRole("dialog", { name: "New reminder" });
+    await user.click(within(reminderDialog).getByRole("button", { name: "Select prompt" }));
+    await user.click(await screen.findByRole("option", { name: "Use prompt template Review" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "file" }), { target: { value: "app.ts" } });
+    expect(screen.getByText("Review app.ts")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Paste" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "New reminder" })).toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "Reminder" })).toHaveValue("Review app.ts");
+  });
+
+  it("returns to the edit reminder editor after pasting a rendered prompt template", async () => {
+    const user = (await import("@testing-library/user-event")).default.setup();
+    const template = { id: "template-1", name: "Review", body: "Review ${file}", created_at: "2029-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z" };
+    const reminder = { id: "reminder-1", target: peer.agent_id, creator: "web-ui", subject: "Existing subject", body: "Existing body", state: "scheduled", enabled: true, created_at: "2030-01-01T00:00:00.000Z", next_due_at: "2030-01-01T00:05:00.000Z", interval_ms: null, occurrence_number: 0, attempt_count: 0 };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [peer] });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [reminder] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [template] });
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: peer.agent_id, high_water_sequence: 0, messages: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" transportOptions={{ fetchImpl, webSocketFactory }} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Worker One (worker-one)" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Worker One (worker-one)" }));
+    const header = document.querySelector(".conversation-header");
+    if (!(header instanceof HTMLElement)) throw new Error("Conversation header is missing");
+    await user.click(within(header).getByRole("button", { name: "Add reminder" }));
+    const remindersDialog = screen.getByRole("dialog", { name: "Reminders" });
+    await user.click(within(remindersDialog).getByRole("button", { name: "Edit" }));
+    const body = screen.getByRole("textbox", { name: "Reminder" });
+    expect(body).toBeInstanceOf(HTMLTextAreaElement);
+    if (!(body instanceof HTMLTextAreaElement)) throw new Error("Reminder input is not a textarea");
+    body.focus();
+    body.setSelectionRange(body.value.length, body.value.length);
+    const reminderDialog = screen.getByRole("dialog", { name: "Edit reminder" });
+    await user.click(within(reminderDialog).getByRole("button", { name: "Select prompt" }));
+    await user.click(await screen.findByRole("option", { name: "Use prompt template Review" }));
+    const token = screen.getByRole("textbox", { name: "file" });
+    expect(token).toBeInstanceOf(HTMLInputElement);
+    if (!(token instanceof HTMLInputElement)) throw new Error("Prompt token input is not an input");
+    fireEvent.change(token, { target: { value: "app.ts" } });
+    expect(screen.getByText("Review app.ts")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Paste" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Edit reminder" })).toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "Reminder" })).toHaveValue("Existing bodyReview app.ts");
   });
 
   it("keeps the reminder editor open when App update fails", async () => {
