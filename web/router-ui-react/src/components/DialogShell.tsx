@@ -6,6 +6,7 @@ export interface DialogShellProps {
   description?: string;
   children: ReactNode;
   onClose: () => void;
+  onClosed?: () => void;
   onCancel?: () => void;
   className?: string;
   closeLabel?: string;
@@ -21,6 +22,7 @@ export function DialogShell({
   description,
   children,
   onClose,
+  onClosed,
   onCancel,
   className = "message-dialog",
   closeLabel = "Close dialog",
@@ -31,6 +33,7 @@ export function DialogShell({
   const headingId = titleId ?? `${title.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-title`;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const wasOpen = useRef(false);
+  const closeHandled = useRef(false);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -44,13 +47,18 @@ export function DialogShell({
         const first = dialog.querySelector<HTMLElement>("input, textarea, button, [tabindex='0']");
         first?.focus();
       });
-    } else if (!open && wasOpen.current && dialog.open) {
-      if (typeof dialog.close === "function") dialog.close();
+    } else if (!open && wasOpen.current) {
+      closeHandled.current = false;
+      if (dialog.open && typeof dialog.close === "function") dialog.close();
       else dialog.removeAttribute("open");
+      if (!closeHandled.current) {
+        closeHandled.current = true;
+        onClosed?.();
+      }
       requestAnimationFrame(() => returnFocus?.focus());
     }
     wasOpen.current = open;
-  }, [open]);
+  }, [onClosed, open, returnFocus]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -61,6 +69,10 @@ export function DialogShell({
       if (!onCancel) onClose();
     };
     const close = () => {
+      if (!closeHandled.current) {
+        closeHandled.current = true;
+        onClosed?.();
+      }
       requestAnimationFrame(() => returnFocus?.focus());
     };
     dialog.addEventListener("cancel", cancel);
@@ -69,7 +81,7 @@ export function DialogShell({
       dialog.removeEventListener("cancel", cancel);
       dialog.removeEventListener("close", close);
     };
-  }, [onCancel, onClose, open, returnFocus]);
+  }, [onCancel, onClose, onClosed, open, returnFocus]);
 
   return (
     <dialog ref={dialogRef} className={className} aria-labelledby={headingId}>
