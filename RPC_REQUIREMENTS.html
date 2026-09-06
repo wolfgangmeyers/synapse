@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Router-managed Pi RPC requirements</title>
+  <style>
+    :root {
+      --ink: #0b0d14;
+      --canvas: #0b0d10;
+      --surface: #151925;
+      --surface-raised: #202638;
+      --primary: #9da8ff;
+      --secondary: #78e0cd;
+      --text: #f2f4ff;
+      --muted: #b5bcd0;
+      --warning: #ffd166;
+      --line: rgba(181, 188, 208, 0.16);
+      --known-line: rgba(120, 224, 205, 0.42);
+      --validation-line: rgba(255, 209, 102, 0.42);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--ink);
+      color: var(--text);
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(980px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 56px 0 72px;
+    }
+
+    h1, h2, h3, p { margin: 0; }
+
+    h1 {
+      max-width: 760px;
+      font-size: clamp(2rem, 5vw, 3.4rem);
+      line-height: 1.06;
+      letter-spacing: -0.035em;
+    }
+
+    h2 {
+      font-size: 1.35rem;
+      line-height: 1.2;
+    }
+
+    p, li { color: var(--muted); }
+
+    .eyebrow, .section-number, .label {
+      color: var(--primary);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .hero {
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--surface);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 20px;
+      padding: 6px 10px;
+      border: 1px solid rgba(157, 168, 255, 0.4);
+      border-radius: 999px;
+      background: rgba(157, 168, 255, 0.12);
+      color: var(--primary);
+      font-size: 0.82rem;
+      font-weight: 750;
+    }
+
+    .status::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--primary);
+      content: "";
+    }
+
+    .summary {
+      max-width: 700px;
+      margin-top: 20px;
+      font-size: 1.08rem;
+    }
+
+    .note {
+      margin-top: 20px;
+      padding: 14px 16px;
+      border-left: 3px solid var(--primary);
+      border-radius: 0 14px 14px 0;
+      background: var(--surface-raised);
+    }
+
+    section {
+      margin-top: 44px;
+    }
+
+    .section-heading {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .section-number {
+      color: var(--secondary);
+    }
+
+    .card {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--surface);
+    }
+
+    .known {
+      border-color: var(--known-line);
+    }
+
+    .validation {
+      border-color: var(--validation-line);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .known .label { color: var(--secondary); }
+    .validation .label { color: var(--warning); }
+
+    .marker {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--secondary);
+    }
+
+    .validation .marker { background: var(--warning); }
+
+    ul {
+      display: grid;
+      gap: 12px;
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+
+    li::marker { color: var(--primary); }
+
+    .validation li::marker { color: var(--warning); }
+
+    .subtle {
+      margin-top: 14px;
+      font-size: 0.94rem;
+    }
+
+    .questions {
+      display: grid;
+      gap: 12px;
+    }
+
+    .question {
+      padding: 18px;
+      border: 1px solid var(--validation-line);
+      border-radius: 16px;
+      background: var(--surface);
+    }
+
+    .question h3 {
+      color: var(--text);
+      font-size: 1rem;
+      line-height: 1.3;
+    }
+
+    .question p {
+      margin-top: 6px;
+    }
+
+    footer {
+      margin-top: 44px;
+      padding-top: 20px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .document-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .document-links a { color: var(--secondary); }
+    .document-links a:focus-visible { outline: 3px solid var(--primary); outline-offset: 3px; }
+
+    @media (max-width: 640px) {
+      main { width: min(100% - 24px, 980px); padding: 28px 0 48px; }
+      .hero, .card { padding: 20px; }
+      .section-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+    }
+
+    @media print {
+      :root {
+        --ink: #fff;
+        --canvas: #fff;
+        --surface: #fff;
+        --surface-raised: #f4f4f4;
+        --primary: #0645ad;
+        --secondary: #075f37;
+        --text: #111;
+        --muted: #444;
+        --warning: #714600;
+        --line: #aaa;
+        --known-line: #777;
+        --validation-line: #777;
+      }
+      body { background: #fff; color: #111; font-size: 10pt; }
+      main { width: auto; max-width: none; padding: 0; }
+      .hero, .card, .question { box-shadow: none; break-inside: avoid; }
+      a { color: #111; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <div class="status">Confirmed direction</div>
+      <p class="eyebrow">Product brief</p>
+      <h1>Router-managed Pi RPC requirements</h1>
+      <p class="summary">Build an alternative way to run workers and the supervisor. In this brief, RPC means the router starts Pi directly and communicates with it without a terminal window. This is direction for investigation and product planning. It is not a validated technical design.</p>
+      <p class="note">Tmux is the supported legacy compatibility path for this delivery. Its future deprecation and removal are direction, not implementation scope here unless another confirmed requirement already requires them.</p>
+      <nav class="document-links" aria-label="Document set">
+        <a href="RPC_RESEARCH.html">Research</a>
+        <a href="RPC_SPEC.html">Specification</a>
+      </nav>
+    </header>
+
+    <section aria-labelledby="direction-heading">
+      <div class="section-heading">
+        <span class="section-number">01</span>
+        <h2 id="direction-heading">Known direction</h2>
+      </div>
+      <div class="card known">
+        <div class="card-header">
+          <span class="marker" aria-hidden="true"></span>
+          <span class="label">Settled</span>
+        </div>
+        <ul>
+          <li>The router exposes an API that launches a new agent.</li>
+          <li>The router never launches a tmux agent.</li>
+          <li>A user may still launch Pi inside tmux. Outside RPC mode, when the mecha-messaging extension is installed and active, Pi automatically connects to the router through the current protocol.</li>
+          <li>The existing tmux path stays supported and fully working as the legacy compatibility path alongside the new RPC system for this delivery.</li>
+          <li>Tmux and router-managed agents can send messages to each other through the router.</li>
+          <li>Router-managed Pi agents load a dedicated thin extension that registers their router-backed tools. Its code is fixed and generic; it does not hardcode router tool definitions. They do not use the existing <code>mecha-messaging</code> or <code>mecha-goal</code> extensions. Tmux agents keep those extensions and the current protocol.</li>
+          <li>The router owns router-managed process lifecycle, RPC supervision, histories, Web UI state and controls, message routing, and every other capability required by this brief.</li>
+          <li>Business, state, and tool behavior lives in router internal handlers. The thin extension registers tools and bridges control traffic. It does not duplicate router behavior.</li>
+          <li>The thin extension registers every router capability in the selected inventory of up to 32 tools. The exhaustive parity inventory is research evidence, not a scope limit. An omitted inventory row does not remove a required capability.</li>
+          <li>Pi independently verifies late extension-tool registration: a tool registered through an RPC-invoked extension command appears with its exact supplied schema on the next model request. This proves Pi registration only. It does not prove the complete production router executor or result path.</li>
+          <li>After a router-managed process starts and before its first model turn, the router sends one bounded, versioned, canonically hashed dynamic-tool manifest through the reserved RPC-invoked extension command. The agent is not ready until the full manifest validates and registers successfully for its current extension runtime generation.</li>
+          <li>The extension constructs and registers every manifest tool. The router owns each tool name, description, input schema, handler mapping, and handler logic. A desired manifest has 16–32 definitions: revision one starts with the 16 exact baseline tools. Adding a router tool within that selected limit does not require an extension code change.</li>
+          <li>The extension enforces byte bounds on raw untrusted manifest input before parsing. It validates the parsed manifest and every schema node before coercion or registration. It builds schemas from that validated subset and rejects coercive values, unsupported types or constructs, unsupported or type-inappropriate keywords, reversed ranges, and any unbounded accepted string, array, integer, or number.</li>
+          <li>The extension preflights the entire manifest atomically before exposing a manifest tool. It rejects malformed JSON; duplicate or conflicting manifest names; names already present in <code>pi.getAllTools()</code>, including built-ins, reserved names, and existing extensions; unsupported protocol versions; excessive bounds or nesting; hash or runtime-generation mismatches; and unsafe property names. A rejected startup manifest leaves the agent not ready. A rejected later update leaves the current tool set unchanged. Both leave no partial manifest-tool registration and record the failure in complete history.</li>
+          <li>Every installed manifest name is immutable for that extension runtime. Dynamic registration is add-only for a running process. Until a separately accepted add-only update protocol passes its acceptance checks, the extension accepts exactly one startup manifest and rejects delivery after the first non-command prompt. That protocol may add a previously unused name if supported. It cannot remove, replace, or mutate an existing tool definition in place, and it never treats active-tool deactivation as registry removal or reconciliation.</li>
+          <li>A changed schema or meaning gets a new permanently unique Pi-visible name: <code>&lt;capability_id&gt;__&lt;definition_sha256&gt;</code>, tied to its full canonical definition hash. It takes effect only by restarting the Pi process on its same Pi session and delivering the new full manifest before work resumes. A session switch, reload, resume, or fork creates a fresh extension runtime generation and also replays the full manifest before a model turn. This is not a context reset.</li>
+          <li>Each generic tool closure captures immutable trusted runtime generation, manifest hash, tool name, and allowlisted operation. It preserves the exact dynamically registered tool name and validated arguments in one dedicated router control request. It revalidates policy before every side effect and never relies on Pi coercion to distinguish primitive types. Manifest data never provides code, URLs, headers, shell commands, credentials, or executable identifiers.</li>
+          <li>Initial acceptance still requires complete parity for all 16 required tools. The dynamic manifest is the registration mechanism, not a scope reduction.</li>
+          <li>A dynamic tool returns only its bounded immediate asynchronous result. A later result or error uses the separately validated control-delivery mechanism and cannot replace the original Pi tool result. Full router end-to-end dispatch, result delivery, ordering, replay, and stale-generation handling remain acceptance work.</li>
+          <li>The router keeps state wherever possible.</li>
+          <li>Each router-managed Pi process gets a generated session ID when it starts. The ID lives for the lifetime of that agent.</li>
+          <li>Restarting an agent resumes the same Pi session.</li>
+          <li>After the router itself restarts, every agent that was running comes back automatically and resumes the same Pi session.</li>
+          <li>Reset context is a separate action. It keeps the worker name and both Web UI histories. It creates a new Pi session ID. Later restarts resume that new session.</li>
+          <li>Terminating an agent clears its router state.</li>
+          <li>The router automatically restarts a crashed agent. It stops after a bounded number of repeated crashes so it cannot restart forever.</li>
+          <li>A usable product will need substantial implementation work.</li>
+          <li>The router keeps internal source and runtime metadata for each agent. It owns the authoritative parent and subagent indicator projection for the Web UI: a snapshot for initial load and reconnect, followed by live deltas.</li>
+          <li>The existing connected-agent list API remains compatible for tmux and router-managed agents.</li>
+          <li>Existing consumers can use the router message API the same way for tmux and router-managed agents.</li>
+          <li>Router-managed Pi agents receive mailbox messages directly in the router-managed RPC path.</li>
+          <li>Every agent has a send-message tool. The router-managed tool is registered by the thin extension.</li>
+          <li>The tool feeds sends into router behavior equivalent to an API call.</li>
+          <li>The tool does not accept a <code>from</code> parameter. The router derives the sender from the agent's registered identity.</li>
+          <li>When a thin-extension tool runs, it sends a structured JSON control request to the router. The router interprets the request and calls the matching existing or new internal handler.</li>
+          <li>Control traffic is a dedicated protocol, not ordinary mailbox or conversational traffic. Its envelope has an explicit control discriminator or <code>customType</code>, a request identifier, an allowed operation, and a payload. The router validates the envelope, derives the sender from the router-managed process, and dispatches only allowed operations.</li>
+          <li>Every thin-extension tool is asynchronous or fire-and-forget. It emits its control request and returns without waiting for router handling. Fire-and-forget calls receive no later response. An asynchronous operation may later receive a correlated result or error as a new control message from the router. Dynamic registration does not change these control-request semantics or amend an already returned Pi tool result.</li>
+          <li>Research must prove the router-to-agent delivery path for later control messages and define the immediate tool return honestly. A failed operation or failed later delivery must be visible in complete history.</li>
+          <li>Fire-and-forget calls may use custom session messages with <code>customType</code> and details.</li>
+          <li>The router does not use <code>Origin</code> or host origin as authorization for the managed HTTP or WebSocket surface. Requests may come from any host or origin that can reach the router, and non-browser clients without <code>Origin</code> remain supported. This does not change bind, listen, exposure, Tailscale, or public-network configuration.</li>
+          <li>Browser-session authentication, request correlation, CSRF protection for cookie-based state-changing requests, WebSocket session authorization, and secret redaction establish authority. Origin does not. This adds no new authentication framework.</li>
+          <li>The supervisor is an ordinary worker for now. No lifecycle behavior depends on the worker name <code>supervisor</code>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section aria-labelledby="web-heading">
+      <div class="section-heading">
+        <span class="section-number">02</span>
+        <h2 id="web-heading">What must be available in the Web UI</h2>
+      </div>
+      <div class="card known">
+        <div class="card-header">
+          <span class="marker" aria-hidden="true"></span>
+          <span class="label">Settled</span>
+        </div>
+        <ul>
+          <li>The RPC path has no console or terminal view.</li>
+          <li>The Web UI must cover the visibility and controls Wolfgang needs for the RPC path.</li>
+          <li>The Web UI has launch, restart, and terminate controls. Router APIs are also available.</li>
+          <li>The launch form accepts a worker name, a path, a model, and an optional initial instruction.</li>
+          <li>The launch path is always a working directory. The picker selects folders, and the path can also be entered as plain text.</li>
+          <li>The model is selectable for each launch.</li>
+          <li>The optional initial-instruction input can insert or paste prompt templates, like the worker input in today's Web UI.</li>
+          <li>The Web UI has global router settings.</li>
+          <li>The router settings dialog lets Wolfgang select the default worker model from the models available to Pi.</li>
+          <li>If no default model is configured, the router uses GPT-5.6 Terra.</li>
+          <li>If the configured default model becomes unavailable, the router falls back to GPT-5.6 Terra.</li>
+          <li>Restarting an agent resumes the same Pi session.</li>
+          <li>The Web UI must show the actual state of each agent. A router-managed parent's active and compacting indicators come from structured Pi RPC state or events, never from terminal text or status inference.</li>
+          <li>The Web UI shows a visible source indicator for each agent: tmux or router-managed. This is the only user-visible source distinction.</li>
+          <li>The Web UI lets the user view subagents nested under or associated with their router-managed parent. Each entry shows a stable task identity, description or name, model when known, structured lifecycle state, and elapsed time while active or finished timing when terminal.</li>
+          <li>The subagent view shows <code>running</code>, <code>completed</code>, <code>failed</code>, or <code>stopped</code> only when structured evidence supports that state. It preserves a more precise structured state when available and does not infer a lifecycle state from missing events or terminal text.</li>
+          <li>The router keys a child association by parent worker identity, parent Pi session and process fencing, and subagent task ID. Terminal records also preserve their parent entry identity and timing so a resumed task ID cannot attach an old run to a new incarnation.</li>
+          <li>After a router restart or parent-session switch, the router reconstructs current active subagent state before publishing it. It does not rely only on previously observed live deltas.</li>
+          <li>Parent compaction appears as transient <code>compacting</code> activity from structured Pi compaction start, end, error, or reconciled state. The indicator clears deterministically after completion, failure, disconnect, or restart reconciliation.</li>
+          <li>Child compaction appears in the nested view when structured child telemetry supplies it. It uses structured forwarding or an authoritative snapshot, never terminal-text parsing.</li>
+          <li>At minimum, each agent has a simple state view: pretty-printed JSON in a code-viewer popup.</li>
+          <li>Errors appear in the complete history. They do not need a separate persistent acknowledged or cleared state.</li>
+          <li>The Web UI has two separate histories. Wolfgang can switch between a quiet view and a complete view.</li>
+          <li>The quiet view shows only messages an agent explicitly sends with the new send-message tool to Wolfgang's router-wide <code>canonical_quiet_recipient_id</code>. Protocol traffic stays out of this view. A tool call appears here only when its actual purpose is to send that message; the protocol traffic and resulting message remain distinct.</li>
+          <li><code>canonical_quiet_recipient_id</code> is an explicit operator setting for Wolfgang, persisted router-wide and required before managed mode starts. It uses exact validated identifier equality, never a display name, browser-local owner, or inferred history alias. It may change only through operator configuration and router restart; retained entries preserve their write-time eligibility.</li>
+          <li>The complete view shows all agent activity, including tool invocations, control requests and responses, parent and structured child compactions, reminders arriving, messages arriving from other agents, and other activity. Runtime indicators and their lifecycle changes do not enter quiet history.</li>
+          <li>The quiet history retains up to N messages. N is the current router per-conversation limit and must be found through research.</li>
+          <li>The complete history retains up to 200 activity entries total, including tool calls, compactions, reminders, errors, messages, and other activity.</li>
+          <li>The histories stay separate. Complete-history activity does not wipe out or evict messages sent directly to Wolfgang.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section aria-labelledby="provider-auth-heading">
+      <div class="section-heading">
+        <span class="section-number">03</span>
+        <h2 id="provider-auth-heading">Provider authentication</h2>
+      </div>
+      <div class="card known">
+        <div class="card-header">
+          <span class="marker" aria-hidden="true"></span>
+          <span class="label">Confirmed defaults</span>
+        </div>
+        <ul>
+          <li>Router-managed Pi agents must support provider authentication.</li>
+          <li>The minimum providers are ChatGPT, Google, and Cursor through <code>pi-cursor-sdk</code>.</li>
+          <li>The Web UI is the required provider login and logout surface. It starts and coordinates Pi's supported secure authentication interaction. No terminal is required.</li>
+          <li>The Web UI shows non-secret provider authentication status only. Credentials remain in Pi's protected authentication store. Router state never stores credential material, browser state, or raw authentication data.</li>
+          <li>One router-wide provider and account context is shared by every router-managed agent. The product has no per-agent provider-account selection or credential store.</li>
+          <li>Launch and router-directed model selection use only models available from that shared authenticated context.</li>
+          <li>A successful login or logout changes the shared context for every router-managed agent's future operations. An agent may finish its current turn. Before it receives further work, the router restarts it on the same Pi session so it loads the changed shared context.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section aria-labelledby="investigation-heading">
+      <div class="section-heading">
+        <span class="section-number">04</span>
+        <h2 id="investigation-heading">Implementation validation</h2>
+      </div>
+      <div class="card validation">
+        <div class="card-header">
+          <span class="marker" aria-hidden="true"></span>
+          <span class="label">Required validation</span>
+        </div>
+        <p class="subtle">These checks establish technical capability and evidence. They validate implementation choices. They do not leave product behavior undecided.</p>
+      </div>
+      <div class="questions" style="margin-top: 12px;">
+        <article class="question">
+          <h3>What is the router launch API?</h3>
+          <p>Verify its request and response shape, validation, the direct Pi connection it starts, and its lifecycle mechanics. Do not add request fields until the API is known.</p>
+        </article>
+        <article class="question">
+          <h3>Can RPC report structured parent state and compaction?</h3>
+          <p>Verify the JSON state and event fields for parent active and compacting indicators, including compaction start, end, error, disconnect, and reconciliation behavior.</p>
+        </article>
+        <article class="question">
+          <h3>What is N?</h3>
+          <p>Find the current router per-conversation message limit. Also verify its expiration and retention behavior.</p>
+        </article>
+        <article class="question">
+          <h3>Which crash-loop policy meets the bounded-recovery requirement?</h3>
+          <p>Validate a deterministic restart limit, window, backoff, healthy-reset rule, and manual-recovery behavior from evidence.</p>
+        </article>
+        <article class="question">
+          <h3>How does the router deliver later control messages?</h3>
+          <p>Every thin tool returns after emitting its control request. It does not wait for a router response. Custom session messages are one-way, so research must prove how the router delivers a later control message to the extension for an asynchronous result or error. Define the immediate return, failed delivery, duplicate, and correlation behavior from the experiment.</p>
+        </article>
+        <article class="question">
+          <h3>How does the router install dynamic tools?</h3>
+          <p>Independent validation proves late registration and next-turn schema exposure in Pi. It does not prove the production router executor, generic dynamic closure, same-call tool result, or router end-to-end result delivery. Validate the hashed runtime-generation manifest, raw-input/schema bounds before coercion, atomic registration, collision and immutable-name rules, first-turn gate, separately accepted add-only updates, and same-session restart for changed definitions. Do not claim safe in-place removal or replacement.</p>
+        </article>
+        <article class="question">
+          <h3>How are thin tools, messages, and helpers handled?</h3>
+          <p>Verify that the thin extension registers every required router-backed tool, that control requests cannot enter ordinary mailbox handling, and how mailbox messages reach RPC Pi agents. Verify the structured subagent lifecycle and compaction telemetry available to the router. Raw parent RPC does not itself expose child streams or child-compaction events.</p>
+        </article>
+        <article class="question">
+          <h3>How do tmux and RPC stay compatible?</h3>
+          <p>Verify the current tmux connection protocol, the paths that post messages or indicators into an agent, and what must stay unchanged for tmux support.</p>
+        </article>
+        <article class="question">
+          <h3>What state belongs in the router?</h3>
+          <p>Keep state in the router wherever possible. Validate the authoritative parent and subagent snapshot, live-delta, composite-identity, and restart/session-switch reconstruction rules, including how generated session IDs map to processes, resume, context reset, and router recovery.</p>
+        </article>
+        <article class="question">
+          <h3>How does the router obtain current active subagents?</h3>
+          <p>Current raw Pi has no direct child-list RPC. Validate the exact snapshot source for initial load, reconnect, router restart, and parent-session switch. The smallest required addition is structured child lifecycle telemetry with current compacting state in the router's authoritative snapshot. Do not substitute terminal-text parsing.</p>
+        </article>
+        <article class="question">
+          <h3>How does the router get Pi's available-model list?</h3>
+          <p>Document the current extension-backed model-list path for tmux agents and the router-managed path. Keep the tmux path unchanged.</p>
+        </article>
+        <article class="question">
+          <h3>How do the histories work underneath?</h3>
+          <p>Investigate event collection, separate storage, and retention so the quiet and complete views remain independent.</p>
+        </article>
+        <article class="question">
+          <h3>Which supported Pi interactions serve the required providers?</h3>
+          <p>Validate the ChatGPT, Google, and Cursor paths through <code>pi-cursor-sdk</code>. Additional Pi providers remain optional.</p>
+        </article>
+        <article class="question">
+          <h3>What core-RPC authentication limit must the Web UI handle?</h3>
+          <p>Validate that core RPC has no login, logout, or provider-status operation. The Web UI must coordinate a supported Pi authentication interaction without exposing credentials.</p>
+        </article>
+        <article class="question">
+          <h3>Which supported Pi integration implements Web UI authentication?</h3>
+          <p>Validate the secure interaction path and its browser or device-code handoff. Keep the thin extension's dedicated control protocol unchanged.</p>
+        </article>
+        <article class="question">
+          <h3>Does the Web UI preserve Pi's credential boundary?</h3>
+          <p>Verify that the supported Pi authentication flow keeps credentials in Pi's protected store and exposes only non-secret status to the router and Web UI.</p>
+        </article>
+        <article class="question">
+          <h3>How does the shared authenticated context affect model selection?</h3>
+          <p>Verify that router settings and launch selection use the shared context's available models, and that a completed login or logout refreshes each router-managed agent before its next turn.</p>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="defaults-heading">
+      <div class="section-heading">
+        <span class="section-number">05</span>
+        <h2 id="defaults-heading">Settled product defaults</h2>
+      </div>
+      <div class="card known">
+        <div class="card-header">
+          <span class="marker" aria-hidden="true"></span>
+          <span class="label">Confirmed</span>
+        </div>
+        <ul>
+          <li>Restart All applies only to router-managed RPC agents.</li>
+          <li>Tmux agents remain visible and can exchange messages with router-managed agents. They are excluded from Restart All because the router does not own or reliably restart their processes.</li>
+          <li>Tmux deprecation and removal are future direction. This project adds no removal date, migration feature, or tmux-removal work unless another confirmed requirement already requires it.</li>
+          <li>A router-managed restart still resumes the agent's same Pi session.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section aria-labelledby="success-heading">
+      <div class="section-heading">
+        <span class="section-number">06</span>
+        <h2 id="success-heading">Observable success criteria</h2>
+      </div>
+      <div class="card known">
+        <div class="card-header">
+          <span class="marker" aria-hidden="true"></span>
+          <span class="label">Required checks</span>
+        </div>
+        <ul>
+          <li>Every router capability or tool required by the parity inventory is registered by the thin extension. An inventory omission cannot create a parity gap.</li>
+          <li>A control request never enters ordinary mailbox or conversational handling.</li>
+          <li>A malformed envelope or unknown operation is rejected without invoking an internal handler. The rejection appears in complete history.</li>
+          <li>Valid authenticated managed HTTP requests from two unrelated HTTP(S) origins both succeed, as does a valid non-browser request without <code>Origin</code>. Missing or invalid browser session, WebSocket session ticket, or CSRF proof fails independently of Origin before an effect or upgrade.</li>
+          <li>A caller cannot spoof sender identity. The router uses the identity bound to the router-managed process.</li>
+          <li>Each accepted request invokes its matching handler once. A duplicate request does not invoke the handler again.</li>
+          <li>Every thin-extension tool returns after emitting its control request. It never waits synchronously for router execution, a result, or an error.</li>
+          <li>An asynchronous operation's later result or error is delivered as a new control message and correlates to its request identifier. Fire-and-forget operations produce no later response.</li>
+          <li>Operation failures and failed later-control delivery are visible in complete history.</li>
+          <li>Control requests, later results or errors, and tool activity appear in complete history. They do not enter quiet history.</li>
+          <li>Only a resulting message from the new send-message tool to Wolfgang's <code>canonical_quiet_recipient_id</code> enters quiet history. That message remains separate from its control traffic.</li>
+          <li>Managed mode does not start without <code>canonical_quiet_recipient_id</code>. A configuration replacement after router restart affects future messages only and does not reclassify retained rows.</li>
+          <li>A user completes login and logout for each required provider from the Web UI. Pi completes the supported secure interaction without a terminal, and the Web UI displays only non-secret status.</li>
+          <li>Credential inspection confirms that Pi's protected authentication store holds credentials and router state contains only non-secret provider/account status and selected-model metadata.</li>
+          <li>After a shared-context login or logout, an idle router-managed agent restarts on its same Pi session before its next turn. A working agent completes its current turn, then restarts before further work. The restarted agents expose only models from the changed shared context.</li>
+          <li>Restart All restarts every router-managed agent and no tmux agent. Tmux agents remain listed and message-compatible, and their processes receive no restart request.</li>
+          <li>Drive parent work and compaction start, end, and error signals. The live UI and complete history show the structured active and transient <code>compacting</code> states. They never infer either state from terminal text, and compaction clears after completion, failure, disconnect, or restart reconciliation.</li>
+          <li>Start subagents with known task identities, descriptions, models, and lifecycle outcomes. The router-managed parent shows each nested child with its supported lifecycle state and elapsed or finished timing. Exact structured states remain distinct when telemetry provides them.</li>
+          <li>Load and reconnect the Web UI while children are active, then restart the router and switch the parent session. Each view begins with an authoritative snapshot and receives live deltas afterward. Active children reconstruct without relying only on old deltas.</li>
+          <li>Deliver a stale child event after a parent process, session, or task run changes. The composite parent fencing, task identity, parent entry identity, and timing prevent it from attaching to the current child.</li>
+          <li>Trigger child compaction through structured telemetry. The nested child view and complete history show it. If current Pi does not provide that telemetry, the required structured extension event and snapshot field are added before this criterion can pass. Quiet history remains unchanged.</li>
+          <li>Start a router-managed process with the complete 16-tool manifest. The reserved command validates the canonical hash and current runtime generation, then registers every tool atomically before the first model turn. The router marks the agent ready only after the accepted manifest result. The first model request sees the exact registered schemas.</li>
+          <li>Exercise independently verified Pi scope: install one late tool through the reserved extension command and capture the next model request. It contains that exact name, description, and schema. Treat this as Pi registration evidence only, not proof of router execution or result delivery.</li>
+          <li>Deliver malformed JSON; a manifest above the raw byte bound; coercive values; <code>$ref</code>, composition, unsupported types or keywords; an array whose <code>maxItems</code> bound would fail; missing finite bounds; reversed ranges; unsafe property names; and excessive depth. Every case rejects before coercion or registration, exposes no partial tools, and records the failure in complete history.</li>
+          <li>Deliver duplicate names in one manifest, a repeated installed manifest name, a real built-in collision, an existing-extension collision, unsupported protocol, hash mismatch, stale runtime generation, and a partially invalid multi-tool manifest. Every case rejects atomically. A startup failure stays not ready; a later update preserves its current tool set.</li>
+          <li>Deliver a validated later manifest containing one previously unused tool name through the separately accepted add-only update path, with no more than 32 definitions in the target. The running process exposes that new immutable name without an extension code update. Existing manifest tools keep their original definitions and control-request behavior. A target above 32 definitions rejects without changing the installed tool set.</li>
+          <li>Deliver a changed definition for an existing tool name. The running process rejects the in-place change. Assign <code>&lt;capability_id&gt;__&lt;definition_sha256&gt;</code>, restart on the same Pi session, deliver the new full manifest before work resumes, and verify the new definition. Context reset does not occur.</li>
+          <li>Start a fake-router operation through a dynamically registered tool. A call with an unexpected property rejects before any request or side effect; a valid call makes the generic closure emit one dedicated request with the exact tool name, Pi tool-call identifier, validated arguments, manifest hash, runtime generation, and allowlisted operation. It returns its bounded asynchronous result before a delayed completion. Timeout, cancellation, error, replay, and stale-generation cases do not execute an unallowlisted operation or amend the original tool result.</li>
+          <li>Issue a session switch, reload, resume, fork, process restart, and reconnect. Each creates or reconnects a fresh extension runtime generation, replays the exact current manifest before the next model request, and fences the old generation.</li>
+          <li>Add a router tool within the selected 32-definition limit by changing only router manifest and handler data. The fixed extension code remains unchanged. The new tool registers through the validated manifest and invokes the existing asynchronous or fire-and-forget control path. Full router end-to-end dispatch and later-result delivery remain acceptance work.</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>Confirmed direction and technical research are intentionally separate.</footer>
+  </main>
+</body>
+</html>
