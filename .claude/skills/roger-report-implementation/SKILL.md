@@ -110,7 +110,7 @@ In addition to every canonical dev-loop gate, do not request git authorization u
 - search, display formatting, sorting/null behavior, and export parity are correct;
 - permission, agency isolation, stack/base/diff, indexes/migrations, and local runtime ownership are correct;
 - focused backend/frontend checks and useful coverage have passed;
-- `roger-report-review` and the canonical robot-review/pr-validate loops are clean on the current diff; and
+- `roger-report-review` is complete and the canonical Robot Review cap is followed: stop when valid feedback is addressed and the current diff is clean; if valid Blocking or Should Address findings remain after round 3, report them as unresolved instead of calling the diff clean; and
 - the synthetic browser walkthrough is meaningful and free of console/Vite overlay failures.
 
 Map every changed file to the approved spec or a validated review finding. Remove unrelated changes.

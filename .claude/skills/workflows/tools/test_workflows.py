@@ -10,6 +10,7 @@ import unittest
 
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+CANONICAL_WORKFLOWS_FILE = os.path.join(os.path.dirname(TOOLS_DIR), "workflows.json")
 
 
 class WorkflowsToolsTest(unittest.TestCase):
@@ -40,6 +41,27 @@ class WorkflowsToolsTest(unittest.TestCase):
             return []
         with open(self.workflows_file, "r", encoding="utf-8") as fh:
             return json.load(fh)
+
+    def test_checked_in_dev_loop_preserves_review_cap_and_scope(self):
+        with open(CANONICAL_WORKFLOWS_FILE, "r", encoding="utf-8") as fh:
+            workflows = json.load(fh)
+
+        dev_loop = next(workflow for workflow in workflows if workflow["name"] == "dev-loop")
+        body = dev_loop["body"]
+
+        self.assertIn("Robot Review round cap.", body)
+        self.assertIn("Run at most three total.", body)
+        self.assertIn("different persona", body)
+        self.assertIn("target or evidence changed materially", body)
+        self.assertIn("report the findings, target, and cap", body)
+        self.assertIn("Review scope.", body)
+        self.assertIn("cannot expand product scope", body)
+
+        parallel_eval = next(
+            workflow for workflow in workflows if workflow["name"] == "parallel-eval"
+        )
+        self.assertIn("retrieve `dev-loop` with `get_workflow.py dev-loop`", parallel_eval["body"])
+        self.assertNotIn("iterate until all reviewers sign off", parallel_eval["body"])
 
     def test_list_workflows_empty(self):
         result = self.run_script("list_workflows.py")

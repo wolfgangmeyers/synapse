@@ -244,9 +244,9 @@ At launch, record and send the worker a short delivery contract:
 
 **Set Greptile reminder immediately on push.** The moment a branch is pushed to a PR, set a 30-minute reminder for Greptile inline comments. Not optional.
 
-**⛔ MANDATORY GATE — Final robot-review must be clean before authorization.** Verify robot-review ran after each material target change, new material review feedback, or new material evidence on the updated head. "I fixed all findings" alone is insufficient because fixes can introduce new issues. Repeat the applicable review loop until the final pass has zero Blocking and zero Should Address. The final result must include a focus ledger: focus area -> reviewer/persona -> result/disposition, with a concrete justification for every skipped relevant area.
+**⛔ MANDATORY GATE — Final robot-review must be clean before authorization.** Across plan and implementation, run at most three Robot Review rounds. Re-review a materially changed target or material evidence only while a round remains; stop early when valid feedback is addressed and the target is clean. Retain only findings and fixes that trace to accepted requirements or correctness needed to satisfy them. Do not expand product scope, add speculative security or design requirements, or introduce adjacent improvements. If valid Blocking or Should Address feedback remains after round 3, report the unresolved findings, target, and cap. Do not claim the target is clean or ready. The cap does not prevent ordinary focused validation. A clean final result must include a focus ledger: focus area -> reviewer/persona -> result/disposition, with a concrete justification for every skipped relevant area.
 
-If unconfirmed: `"Before I authorize: run robot-review after each material target change, new material review feedback, or new material evidence until the final applicable pass has zero Blocking and zero Should Address. Report the final focus ledger with skipped-area justifications."`
+If unconfirmed: `"Before I authorize: use no more than three Robot Review rounds across plan and implementation. Re-review only a materially changed target while a round remains. If round 3 leaves valid Blocking or Should Address findings, report the unresolved findings, target, and cap; do not claim a clean pass. Report the final focus ledger with skipped-area justifications."`
 
 **⛔ MANDATORY GATE — Requirements compliance review for each applicable immutable-target readiness pass.** Applies to every task with stated requirements. The worker's review checks technical correctness; the supervisor's compliance check verifies intent was implemented. Different questions.
 
@@ -1353,7 +1353,7 @@ When Greptile comments arrive:
 
 After addressing Greptile feedback, run robot-review on the phase diff: read the robot-review `SKILL.md` and spawn its persona-reviewer subagents (one per focus area, against base branch `main`).
 
-Iterate until all reviewers sign off (no Blocking, no Should Address items remaining).
+Follow the canonical dev-loop Robot Review round cap. Stop when valid feedback is addressed and the target is clean; after round 3, report any unresolved valid Blocking or Should Address findings instead of running another round.
 
 ### Advance criteria
 

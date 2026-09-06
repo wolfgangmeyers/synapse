@@ -31,7 +31,7 @@ Use `roger-report-implementation` instead when the product contract is a dedicat
    - **independent specification/plan review:** omissions, alternatives, and requirement-to-plan coverage before implementation; and
    - **validation review:** current diff against the approved contract, focused tests, performance posture, and local browser behavior.
 4. Use OpenAI Codex GPT-5.6 Terra for repo-local architecture, lineage, permission, validation, implementation, specification, and planning subagents. Use another model only when the task explicitly requires it. Never treat external research as necessary for facts already authoritative in the repository.
-5. Before implementation, obtain the canonical dev-loop specification approval and independent plan sign-off. Before readiness, run actual focused coverage, implementation review, validation with a different reviewer persona, and a fresh follow-up review as the dev-loop requires.
+5. Before implementation, obtain the canonical dev-loop specification approval and independent plan sign-off. Before readiness, run actual focused coverage, implementation review, and validation with a different reviewer persona. Run a follow-up Robot Review only when the immutable target or evidence changed materially and the canonical maximum of three total rounds has not been reached. Stop Robot Review when valid feedback is addressed and the target is clean; continue ordinary focused validation as required.
 
 ## Reconstruct the current reporting path
 
@@ -208,6 +208,6 @@ Do not request git authorization until an independent validation pass confirms:
 - compiler, DuckDB-WASM, serve/extract, and builder behavior agree;
 - performance, partitioning, cache identity, and bounded-retention obligations are satisfied;
 - focused backend/frontend tests, meaningful coverage, and the synthetic browser walkthrough pass; and
-- canonical robot-review/pr-validate follow-up loops are clean on the current diff.
+- the canonical Robot Review cap is followed: stop when valid feedback is addressed and the current diff is clean; if valid Blocking or Should Address findings remain after round 3, report them as unresolved instead of calling the diff clean.
 
 Map every changed file to the approved specification or a validated review finding and remove unrelated changes. Commit authorization is not push authorization; do not commit, push, change PR state/base, merge, enqueue, or tear down the review environment without the corresponding explicit authorization.
