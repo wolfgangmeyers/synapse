@@ -194,6 +194,7 @@
   <div class="shell layout">
     <nav aria-label="Specification sections">
       <a href="#status">01 · Status and scope</a>
+      <a href="#phase2-rebaseline">01A · Phase 2 rebaseline</a>
       <a href="#decisions">02 · Product decisions</a>
       <a href="#architecture">03 · Architecture</a>
       <a href="#lifecycle">04 · Lifecycle</a>
@@ -241,6 +242,36 @@
               <li>No generic RPC fork, generalized event bus, durable workflow engine, sidecar daemon, or second process supervisor.</li>
               <li>No per-agent credential account, extra provider promise, tool marketplace, arbitrary manifest code, or unrelated UI redesign.</li>
             </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="phase2-rebaseline" aria-labelledby="phase2-rebaseline-title">
+        <div class="section-head"><span class="section-no">01A</span><h2 id="phase2-rebaseline-title"><a class="anchor" href="#phase2-rebaseline">Active Phase 2 simplified worker contract</a></h2></div>
+        <article class="callout warn">
+          <h3>Authority and preserved history</h3>
+          <p>This is the normative contract for the active Phase 2 worker launch work and the current restart slice. Router worker control is locally unauthenticated: any page or process that can reach the router may operate workers, with no application-layer caller identity or authorization step. It supersedes conflicting Phase 2/restart-slice browser-session, cookie, CSRF, ticket, Origin/CORS-response, fixed/pinned dependency, and fixed/pinned launcher-input statements elsewhere in this document and in <code>RPC_IMPLEMENTATION_PLAN.html</code>. Those statements remain visible as historical design evidence, not active acceptance requirements. This rebaseline does not change Phase 1’s fixed thin-extension and pi-subagents compatibility contract, current legacy tmux routes, bind/exposure rules, direct-argv/no-shell rule, containment, process/session fencing, strict request parsing, limits, retention, redaction, or other unrelated security behavior.</p>
+        </article>
+        <div class="grid">
+          <article class="card span-6">
+            <h3>Direct worker HTTP</h3>
+            <p>The active managed routes are direct worker control routes, not browser-session routes. Any page or process that can reach the router can invoke them. <code>POST /v1/managed-agents</code>, the current single-agent projection, and the future restart route accept their documented closed request bodies. Every mutation requires a canonical UUID <code>X-Request-ID</code>; responses retain the matching request and operation ID. The request ID is an idempotency/correctness key, not an authority proof. No managed route requires or issues a UI-session cookie, CSRF token, ticket, browser bootstrap, or other caller credential. <code>POST /v1/ui-session</code> is removed from active Phase 2. The existing <code>/v1/agents</code> contract remains unchanged and does not receive session-gated managed rows in this slice.</p>
+            <p>The router does not read, validate, reject, reflect, or authorize by <code>Origin</code> for an active managed route. It has no managed CORS, credential, <code>Vary: Origin</code>, or preflight response requirement. Existing router-wide generic CORS behavior may remain intact as a legacy behavior, but it is neither managed-route authority nor an acceptance target.</p>
+          </article>
+          <article class="card span-6">
+            <h3>Worker-wide idempotency without a session</h3>
+            <p>The durable key is <code>(method, X-Request-ID)</code> in one router-managed-worker scope. An exact canonical path/body replay returns the retained response; a changed path or body returns <code>409 IDEMPOTENCY_CONFLICT</code>. Terminal rows expire after 24 hours and nonterminal rows remain until terminal. There is no authorization or caller identity step before lookup. Router bind, Tailscale, and exposure configuration remain the separate reachability controls and are unchanged by this application contract.</p>
+            <p>Applied migration <code>022_managed_rpc.sql</code> is preserved. Until a deliberately separate schema cleanup, its <code>session_identity_hash</code> column is only a storage-compatibility operation-scope column. New operations write the non-secret constant <code>router-managed-worker-v1</code>; it never comes from a session, cookie, CSRF value, header, Origin, or caller. Public manager/store APIs must not expose or require that legacy column. The uncommitted <code>023_managed_restart.sql</code> remains a forward restart-transition migration and needs no session-related rewrite.</p>
+          </article>
+          <article class="card span-6">
+            <h3>Unpinned launch boundary</h3>
+            <p>Enabled worker mode requires a usable Pi executable, managed home, session root contained by that home, strict generated manifest, mecha-rpc and pi-subagents entry files, allowed working-directory roots, canonical quiet recipient, and bounded limits. The router validates resolved path type and containment, manifest shape, direct argv, sanitized environment, live process identity, and readiness. It does not require an exact Pi version, file/tree hash, lockfile/package identity, generated pin, helper, Cursor extension/package, or built UI.</p>
+            <p>Phase 2 supplies the static worker catalog <code>openai-codex/gpt-5.6-terra</code> through <code>CatalogFromModels</code>. An explicit selection still has to be in that catalog. Provider login, discovery, helper processes, and Cursor support are future work, not a Phase 2 startup dependency.</p>
+          </article>
+          <article class="card span-6">
+            <h3>Required implementation and test reconciliation</h3>
+            <p>Remove <code>ui_session.go</code>, the session registry/options, the <code>r.managedSessions == nil</code> route gate, cookie and CSRF checks, managed Origin parsing, credentialed CORS/preflight helpers, session-gated projection, and the <code>/v1/ui-session</code> dispatch. Direct managed dispatch may follow the existing generic CORS/options branch only to preserve legacy behavior; it must not create a managed preflight path. Remove <code>SessionIdentityHash</code> from launch/restart inputs and keep the compatibility scope internal to the store/manager. Remove <code>ExpectedIdentities</code>, <code>FixedInput</code>, hash/version/tree verification, Cursor/helper/UI config and flags, <code>managedExpectedFromEnvironment</code>, <code>helperCatalog</code>, and the pin-generation script; retain only the core launch paths and validation above.</p>
+            <p>Delete or rewrite session/cookie/CSRF/CORS tests. Rewrite launch, projection, restart, store, configuration, adapter, process, and native tests to use direct JSON plus <code>X-Request-ID</code>, prove an otherwise valid operation succeeds with no caller credential, test worker-wide exact replay and conflict, retain restart fences and prompt-admission proof, keep core path/containment pre-listen failures, and prove optional Cursor/helper/UI artifacts and changed valid bytes do not block startup. No Origin/CORS response case is required.</p>
           </article>
         </div>
       </section>
@@ -355,6 +386,7 @@
         <details open>
           <summary>Current Phase 2 restart-slice contract</summary>
           <div class="details-body">
+            <p><strong>Rebaseline:</strong> reservation has the direct worker idempotency scope defined in <a href="#phase2-rebaseline">Active Phase 2 simplified worker contract</a>; it does not receive, validate, or persist a UI session identity. The rest of this slice remains unchanged.</p>
             <p>This slice adds reservation and preparation only. Crash-loop execution, router-restart execution, policy projection, authoritative child snapshots, public prompt delivery, browser UI, and provider auth remain future work.</p>
             <ul>
               <li><strong>Eligibility:</strong> a restart reservation requires <code>desired_state=running</code>, <code>lifecycle_state=running</code>, <code>accepting_prompts=true</code>, <code>slot_held=true</code>, and <code>activity_state</code> of <code>active</code> or <code>idle</code>. It also requires one exact live router-owned process/RPC binding whose session ID, session epoch, process incarnation, runtime generation, PID/start marker, and process-group leadership match the durable fences. No restart transition may already exist for the agent.</li>
