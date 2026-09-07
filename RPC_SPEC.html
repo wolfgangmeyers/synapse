@@ -398,7 +398,7 @@
           </div>
         </details>
         <details open>
-          <summary>Recorded actual restart replacement entry and 16-path ledger</summary>
+          <summary>Recorded actual restart replacement entry and 17-path ledger</summary>
           <div class="details-body">
             <p>The closed 023 reservation/preparation slice remains unchanged. It ends when its owner commits <code>prepared</code>. The complete 024 five-gate readiness source is the prior dependency. This replacement ledger owns active-turn settlement as execution gate 1. There is no standalone settlement slice and no idle-only replacement path.</p>
             <p>For an active reservation, <code>ExecutePreparedRestart</code> persists <code>settling</code>, waits for the exact old binding's structured <code>agent_settled</code> event, and persists that same-binding result before it can record <code>stopping</code>. The event is a drain boundary, not proof that the old agent is idle. It does not use transcript text or an undocumented RPC state field. An idle reservation skips only the wait. A settlement failure keeps the transition at <code>settling</code>, the old group live, prompt admission closed, the slot held, desired state running, and the operation pending.</p>
@@ -423,6 +423,7 @@
                   <tr><td>Modify</td><td><code>router-proxy/internal/managed/rpc.go</code></td><td><code>RestartTurnSettler.SettlePreparedRestartTurn</code> validates the current binding's structured settlement event.</td></tr>
                   <tr><td>Modify</td><td><code>router-proxy/internal/managed/rpc_test.go</code></td><td><code>TestRestartTurnSettlerTreatsAgentSettledAsDrainBoundary</code> proves exact-binding settlement is a drain boundary even when its handler starts an old continuation; stale, malformed, duplicate, EOF, and close observations fail.</td></tr>
                   <tr><td>Add</td><td><code>router-proxy/internal/store/migrations/025_managed_restart_execution.sql</code></td><td>Forward execution stages, settled-turn state, and bounded target fence. Preserve every 023/024 row and index.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/store/store_test.go</code></td><td>Solely advance migration 025's startup-clock expected count from 20 to 21.</td></tr>
                   <tr><td>Modify</td><td><code>router-proxy/internal/store/managed.go</code></td><td>Transition-first admission and every stage/full-fence transaction.</td></tr>
                   <tr><td>Modify</td><td><code>router-proxy/internal/store/managed_test.go</code></td><td>Migration, stage, fence, replay, duplicate-observation, durable-write, and projection tests, including <code>TestMarkManagedRestartTurnSettledRequiresExactOldFence</code>.</td></tr>
                   <tr><td>Modify</td><td><code>router-proxy/internal/managed/process.go</code></td><td>Exact process identity, stdin-only graceful close, group-only signals, bounded reaping, and fixed failure classification.</td></tr>
@@ -438,7 +439,7 @@
             <p><code>rpc.go</code> owns structured settlement evidence. The store owns <code>MarkManagedRestartSettling</code>, <code>MarkManagedRestartTurnSettled</code>, <code>MarkManagedRestartStopping</code>, and the remaining stage/full-fence transactions. The supervisor owns the persistent <code>agentLane</code>, immutable <code>runtimeBinding</code>, and ordering: write <code>settling</code>, call the RPC settler, write its exact same-binding result, then stop. The durable old-fence settlement write permits that stop even if its settlement handler has begun an old continuation. Store writes are immediate transactions. A stale write is a no-op with no projection bump.</p>
             <h3>Safety acceptance</h3>
             <ol>
-              <li>The diff contains only these 16 replacement paths. Migration 025 preserves 023/024 data and indexes.</li>
+              <li>The diff contains only these 17 replacement paths. Migration 025 preserves 023/024 data and indexes. The <code>store_test.go</code> change solely advances the startup-clock expected count from 20 to 21.</li>
               <li>Direct restart has exact request-ID, replay, conflict, private-field, and <code>Cache-Control: no-store</code> behavior. It is locally unauthenticated and reads no browser credential or <code>Origin</code>.</li>
               <li>Both active and idle reservations use the closed active-or-idle reservation seam. Active work never stops before durable structured same-binding settlement. <code>agent_settled</code> is a drain boundary, not idle proof.</li>
               <li>One old group is proved absent before one target starts. The target keeps session, epoch, model, cwd, manifest, direct argv, and sanitized environment with a new process incarnation.</li>
