@@ -143,6 +143,32 @@ test("bootstrap is atomic before model tools exist and a raw coercive tool call 
   }), current.context));
 });
 
+test("raw managed arguments reject boolean coercion, unknown keys, deep values, oversized strings, and oversized arrays before control traffic", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  const invokeRejected = async (name: string, argumentsValue: RecordValue, id: string): Promise<void> => {
+    const tool = current.tools.get(name);
+    assert.ok(tool, `missing ${name}`);
+    const execute = tool.execute as (toolCallId: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>;
+    current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "toolCall", id, name, arguments: argumentsValue }] } }, current.context);
+    const result = await execute(id, argumentsValue, undefined, undefined, current.context);
+    assert.equal(result.isError, true, id);
+  };
+  const deepValue: RecordValue = { action: "set" };
+  let nested: unknown = [];
+  for (let depth = 0; depth < 10; depth++) nested = [nested];
+  deepValue.goal = nested;
+  await invokeRejected("mecha_context", { action: "set_policy", policy: { levels: [{ percent: 50, mandatory: "true" }] } }, "boolean-string");
+  await invokeRejected("goal", { action: "status", unexpected: true }, "unknown-key");
+  await invokeRejected("goal", deepValue, "deep-value");
+  await invokeRejected("goal", { action: "set", goal: "x".repeat(4_001) }, "oversized-string");
+  await invokeRejected("mecha_context", {
+    action: "set_policy",
+    policy: { levels: Array.from({ length: 65 }, () => ({ percent: 50 })) },
+  }, "oversized-array");
+  assert.equal(current.sent.filter((entry) => entry.message.customType === "mecha.control.request.v1").length, 0);
+});
+
 test("three non-manifest hidden commands reject unknown envelope fields before side effects", async () => {
   const current = fixture();
   await bootstrap(current);
