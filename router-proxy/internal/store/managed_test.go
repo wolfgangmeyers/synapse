@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testManifestHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestDefaultModelSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.db")
 	ctx := context.Background()
@@ -29,7 +31,7 @@ func TestFailedManagedRowsRemainDurableWhileTheirSlotIsReleased(t *testing.T) {
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})
 	require.NoError(t, err)
 	defer durable.Close()
-	agent := ManagedAgentRecord{AgentID: "failed-agent", Name: "reserved-name", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: "hash"}
+	agent := ManagedAgentRecord{AgentID: "failed-agent", Name: "reserved-name", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: testManifestHash}
 	op := ManagedOperation{OperationID: "failed-operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "failed-request", CanonicalBodyHash: "hash", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, durable.ReserveManagedLaunch(ctx, agent, op))
 	require.NoError(t, durable.MarkManagedFailed(ctx, agent.AgentID, "READINESS_FAILED", "failed startup"))
@@ -53,7 +55,7 @@ func TestMarkManagedStoppedClearsLiveProjectionAndSlot(t *testing.T) {
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})
 	require.NoError(t, err)
 	defer durable.Close()
-	agent := ManagedAgentRecord{AgentID: "stoppable", Name: "stoppable", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: "hash"}
+	agent := ManagedAgentRecord{AgentID: "stoppable", Name: "stoppable", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: testManifestHash}
 	op := ManagedOperation{OperationID: "stoppable-operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "stoppable-request", CanonicalBodyHash: "hash", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, durable.ReserveManagedLaunch(ctx, agent, op))
 	require.NoError(t, durable.MarkManagedReady(ctx, agent.AgentID))
@@ -72,7 +74,7 @@ func restartFixture(t *testing.T) (*Store, context.Context, ManagedAgentRecord, 
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, durable.Close()) })
-	agent := ManagedAgentRecord{AgentID: "restartable", Name: "restartable", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: "hash"}
+	agent := ManagedAgentRecord{AgentID: "restartable", Name: "restartable", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
 	launch := ManagedOperation{OperationID: "launch-operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "launch-request", CanonicalBodyHash: "launch-body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8"}, ResponseBody: []byte(`{"operation_id":"launch-operation"}`)}
 	require.NoError(t, durable.ReserveManagedLaunch(ctx, agent, launch))
 	require.NoError(t, durable.UpdateManagedAgentStarting(ctx, agent.AgentID, agent.PiSessionID, ProcessIdentityRecord{PID: 42, StartMarker: "start", Incarnation: "incarnation"}, "generation"))
@@ -85,7 +87,7 @@ func restartFixture(t *testing.T) (*Store, context.Context, ManagedAgentRecord, 
 
 func restartReservation(agent ManagedAgentRecord, current ManagedOperation) ManagedRestartReservation {
 	operation := ManagedOperation{OperationID: "restart-operation", Method: "POST", CanonicalPath: "/v1/managed-agents/restartable/restart", RequestID: "restart-operation", CanonicalBodyHash: "empty-object", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": "restart-operation"}, ResponseBody: []byte(`{"operation_id":"restart-operation","agent":{"agent_id":"restartable"}}`)}
-	return ManagedRestartReservation{Fence: ManagedRestartFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration}, CurrentOperationID: current.OperationID, Operation: operation, Transition: ManagedRestartTransition{TargetRuntimeGeneration: "replacement-generation"}}
+	return ManagedRestartReservation{Fence: ManagedRestartFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}, CurrentOperationID: current.OperationID, Operation: operation, Transition: ManagedRestartTransition{TargetRuntimeGeneration: "replacement-generation"}}
 }
 
 func TestForwardMigration022To023PreservesManagedRowsAndIndexes(t *testing.T) {
@@ -93,10 +95,10 @@ func TestForwardMigration022To023PreservesManagedRowsAndIndexes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
 	require.Greater(t, len(migrations), 22)
-	require.Equal(t, "023_managed_restart", migrations[len(migrations)-1].ID)
+	require.Equal(t, "024_managed_readiness_sources", migrations[len(migrations)-1].ID)
 	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
 	require.NoError(t, err)
-	agent := ManagedAgentRecord{AgentID: "migration-agent", Name: "migration-agent", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 2, ManifestRevision: 3, ManifestHash: "manifest", PendingInitialInstruction: "hello"}
+	agent := ManagedAgentRecord{AgentID: "migration-agent", Name: "migration-agent", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 2, ManifestRevision: 3, ManifestHash: testManifestHash, PendingInitialInstruction: "hello"}
 	op := ManagedOperation{OperationID: "migration-launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "migration-launch", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, before.ReserveManagedLaunch(ctx, agent, op))
 	require.NoError(t, before.UpdateManagedAgentStarting(ctx, agent.AgentID, agent.PiSessionID, ProcessIdentityRecord{PID: 77, StartMarker: "marker", Incarnation: "incarnation"}, "generation"))
@@ -236,7 +238,7 @@ func TestReserveManagedRestartRejectsIneligibleRowsWithoutEffects(t *testing.T) 
 			require.NoError(t, err)
 			agentAfter, err := durable.ManagedAgent(context.Background(), agent.AgentID)
 			require.NoError(t, err)
-			reservation.Fence = ManagedRestartFence{AgentID: agentAfter.AgentID, PiSessionID: agentAfter.PiSessionID, SessionEpoch: agentAfter.SessionEpoch, ProcessPID: agentAfter.ProcessPID, ProcessStartMarker: agentAfter.ProcessStartMarker, ProcessIncarnation: agentAfter.ProcessIncarnation, RuntimeGeneration: agentAfter.RuntimeGeneration}
+			reservation.Fence = ManagedRestartFence{AgentID: agentAfter.AgentID, PiSessionID: agentAfter.PiSessionID, SessionEpoch: agentAfter.SessionEpoch, ProcessPID: agentAfter.ProcessPID, ProcessStartMarker: agentAfter.ProcessStartMarker, ProcessIncarnation: agentAfter.ProcessIncarnation, RuntimeGeneration: agentAfter.RuntimeGeneration, ManifestRevision: agentAfter.ManifestRevision, ManifestHash: agentAfter.ManifestHash}
 		}},
 	}
 	for _, test := range cases {
@@ -332,7 +334,7 @@ func TestManagedLaunchReservesNameSlotAndOperationAtomically(t *testing.T) {
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})
 	require.NoError(t, err)
 	defer durable.Close()
-	agent := ManagedAgentRecord{AgentID: "alpha", Name: "alpha", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: "hash"}
+	agent := ManagedAgentRecord{AgentID: "alpha", Name: "alpha", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: testManifestHash}
 	op := ManagedOperation{OperationID: "123", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "123", CanonicalBodyHash: "hash", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, durable.ReserveManagedLaunch(ctx, agent, op))
 	var conflict *ManagedIdempotencyConflictError

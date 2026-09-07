@@ -81,6 +81,8 @@ type managedBinding struct {
 	sessionID            string
 	sessionEpoch         int64
 	runtimeGeneration    string
+	manifestRevision     int
+	manifestHash         string
 	reaped               bool
 	restartShutdownDone  bool
 	restartShutdownError error
@@ -252,7 +254,7 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "MANAGER_CLOSED", "managed manager closed")
 		return LaunchResult{}, errors.New("managed manager is closed")
 	}
-	binding := &managedBinding{agentID: agent.AgentID, operationID: request.RequestID, lifecycleAction: "launch", sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration}
+	binding := &managedBinding{agentID: agent.AgentID, operationID: request.RequestID, lifecycleAction: "launch", sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash}
 	m.bindings[agent.AgentID] = binding
 	m.operationIDs[agent.AgentID] = request.RequestID
 	m.startWG.Add(1)
@@ -328,7 +330,8 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.mu.Lock()
 	m.rpcs[agent.AgentID] = rpc
 	m.mu.Unlock()
-	if err = readinessGate(ctx, rpc, m.manifest, agent.PiSessionID, agent.SessionEpoch, agent.RuntimeGeneration); err != nil {
+	fence := bindingFence(agent.AgentID, binding)
+	if err = m.readinessGate(ctx, binding, fence); err != nil {
 		_ = rpc.Close()
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "READINESS_FAILED", sanitizeError(err))
@@ -342,7 +345,14 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	default:
 	}
 	binding.serial.Lock()
-	if err = m.store.MarkManagedReady(durableCtx, agent.AgentID); err != nil {
+	if !m.liveBindingForFence(durableCtx, binding, fence) {
+		binding.serial.Unlock()
+		_ = rpc.Close()
+		_ = process.Stop(context.Background())
+		m.fail(agent.AgentID, "READINESS_FAILED", "managed runtime binding changed before ready")
+		return
+	}
+	if err = m.store.MarkManagedReadyFromSources(durableCtx, fence); err != nil {
 		binding.serial.Unlock()
 		_ = rpc.Close()
 		_ = process.Stop(context.Background())
@@ -425,15 +435,15 @@ func (m *Manager) bindingFor(agentID string) (*managedBinding, bool) {
 	return binding, !m.closed && binding != nil
 }
 
-func bindingFence(agentID string, binding *managedBinding) store.ManagedRestartFence {
+func bindingFence(agentID string, binding *managedBinding) store.ManagedRuntimeFence {
 	if agentID == "" {
 		agentID = binding.agentID
 	}
-	return store.ManagedRestartFence{AgentID: agentID, PiSessionID: binding.sessionID, SessionEpoch: binding.sessionEpoch, ProcessPID: binding.identity.PID, ProcessStartMarker: binding.identity.StartMarker, ProcessIncarnation: binding.identity.Incarnation, RuntimeGeneration: binding.runtimeGeneration}
+	return store.ManagedRuntimeFence{AgentID: agentID, PiSessionID: binding.sessionID, SessionEpoch: binding.sessionEpoch, ProcessPID: binding.identity.PID, ProcessStartMarker: binding.identity.StartMarker, ProcessIncarnation: binding.identity.Incarnation, RuntimeGeneration: binding.runtimeGeneration, ManifestRevision: binding.manifestRevision, ManifestHash: binding.manifestHash}
 }
 
-func sameBindingFence(left, right store.ManagedRestartFence) bool {
-	return left.AgentID == right.AgentID && left.PiSessionID == right.PiSessionID && left.SessionEpoch == right.SessionEpoch && left.ProcessPID == right.ProcessPID && left.ProcessStartMarker == right.ProcessStartMarker && left.ProcessIncarnation == right.ProcessIncarnation && left.RuntimeGeneration == right.RuntimeGeneration
+func sameBindingFence(left, right store.ManagedRuntimeFence) bool {
+	return left.AgentID == right.AgentID && left.PiSessionID == right.PiSessionID && left.SessionEpoch == right.SessionEpoch && left.ProcessPID == right.ProcessPID && left.ProcessStartMarker == right.ProcessStartMarker && left.ProcessIncarnation == right.ProcessIncarnation && left.RuntimeGeneration == right.RuntimeGeneration && left.ManifestRevision == right.ManifestRevision && left.ManifestHash == right.ManifestHash
 }
 
 func (m *Manager) liveBinding(agent *store.ManagedAgentRecord, binding *managedBinding) bool {
@@ -444,7 +454,15 @@ func (m *Manager) liveBinding(agent *store.ManagedAgentRecord, binding *managedB
 		return false
 	}
 	fence := bindingFence(agent.AgentID, binding)
-	return agent.PiSessionID == fence.PiSessionID && agent.SessionEpoch == fence.SessionEpoch && agent.ProcessPID == fence.ProcessPID && agent.ProcessStartMarker == fence.ProcessStartMarker && agent.ProcessIncarnation == fence.ProcessIncarnation && agent.RuntimeGeneration == fence.RuntimeGeneration
+	return agent.PiSessionID == fence.PiSessionID && agent.SessionEpoch == fence.SessionEpoch && agent.ProcessPID == fence.ProcessPID && agent.ProcessStartMarker == fence.ProcessStartMarker && agent.ProcessIncarnation == fence.ProcessIncarnation && agent.RuntimeGeneration == fence.RuntimeGeneration && agent.ManifestRevision == fence.ManifestRevision && agent.ManifestHash == fence.ManifestHash
+}
+
+func (m *Manager) liveBindingForFence(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) bool {
+	if !sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
+		return false
+	}
+	agent, err := m.store.ManagedAgent(ctx, fence.AgentID)
+	return err == nil && m.liveBinding(agent, binding) && sameBindingFence(store.ManagedRuntimeFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}, fence)
 }
 
 func replayRestartOperation(request RestartRequest, operation *store.ManagedOperation) (RestartResult, error) {
@@ -748,6 +766,150 @@ func readinessGate(ctx context.Context, rpc RPC, manifest Manifest, sessionID st
 	}
 	return nil
 }
+
+// readinessGate owns the serialized source confirmation phase. The fixed
+// Phase 1 gates stay in the compatibility helper above; this method keeps the
+// binding lock from the first durable/live check through both source commits.
+func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) error {
+	binding.serial.Lock()
+	defer binding.serial.Unlock()
+	if !m.liveBindingForFence(ctx, binding, fence) {
+		return errors.New("managed runtime binding is not live")
+	}
+	if err := readinessGate(ctx, binding.rpc, m.manifest, fence.PiSessionID, fence.SessionEpoch, fence.RuntimeGeneration); err != nil {
+		return err
+	}
+
+	sourceRPC, ok := binding.rpc.(readinessSourceRPC)
+	if !ok {
+		return errors.New("managed RPC does not support readiness sources")
+	}
+	if !m.liveBindingForFence(ctx, binding, fence) {
+		return errors.New("managed runtime binding changed before policy")
+	}
+	desired, err := m.store.LoadManagedDesiredPolicy(ctx, fence.AgentID)
+	if err != nil {
+		return err
+	}
+	desiredValue, err := readinessPolicyValue(desired)
+	if err != nil {
+		return err
+	}
+	policyEnvelope := map[string]any{"protocol": "mecha.policy/v1", "policy": desiredValue, "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "manifest_sha256": fence.ManifestHash}
+	policyResponse, err := sourceRPC.ApplyPolicy(ctx, policyEnvelope)
+	if err != nil {
+		return err
+	}
+	// Installed Pi acknowledges prompt submission before the hidden command has
+	// a return payload. Fakes and future protocol versions can expose that
+	// payload directly; when present it must match the desired projection.
+	if !privateCommandAcknowledgement(policyResponse) {
+		responsePolicy, err := normalizePolicyResponse(policyResponse)
+		if err != nil {
+			return err
+		}
+		responseCanonical, responseHash, err := HashReadinessCanonicalJSON(responsePolicy)
+		if err != nil || string(responseCanonical) != string(desired.Canonical) || responseHash != desired.SHA256 {
+			return errors.New("policy command response does not match desired policy")
+		}
+	}
+	policyReceipt, err := sourceRPC.WaitForPolicyApplied(ctx, fence.RuntimeGeneration, fence.SessionEpoch)
+	if err != nil {
+		return err
+	}
+	receiptPolicy, err := normalizePolicyReceiptEnvelope(policyReceipt, fence)
+	if err != nil {
+		return err
+	}
+	receiptCanonical, receiptHash, err := HashReadinessCanonicalJSON(receiptPolicy)
+	if err != nil || string(receiptCanonical) != string(desired.Canonical) || receiptHash != desired.SHA256 {
+		return errors.New("policy receipt does not match desired policy")
+	}
+	if !m.liveBindingForFence(ctx, binding, fence) {
+		return errors.New("managed runtime binding changed before policy confirmation")
+	}
+	if err := m.store.ConfirmManagedPolicyApplied(context.Background(), fence, store.ManagedDesiredPolicy{Canonical: receiptCanonical, SHA256: receiptHash}); err != nil {
+		return err
+	}
+
+	if !m.liveBindingForFence(ctx, binding, fence) {
+		return errors.New("managed runtime binding changed before child snapshot")
+	}
+	snapshotEnvelope := map[string]any{"protocol": "mecha.child-snapshot/v1", "runtime_generation": fence.RuntimeGeneration, "session_epoch": fence.SessionEpoch, "manifest_sha256": fence.ManifestHash}
+	snapshotResponse, err := sourceRPC.RequestChildSnapshot(ctx, snapshotEnvelope)
+	if err != nil {
+		return err
+	}
+	var responseSnapshot map[string]any
+	var responseSnapshotCanonical []byte
+	var responseSnapshotHash string
+	if !privateCommandAcknowledgement(snapshotResponse) {
+		responseSnapshot, err = normalizeChildSnapshotReceipt(snapshotResponse)
+		if err != nil {
+			return err
+		}
+		responseSnapshotCanonical, responseSnapshotHash, err = HashReadinessCanonicalJSON(responseSnapshot)
+		if err != nil {
+			return err
+		}
+	}
+	snapshotReceipt, err := sourceRPC.WaitForChildSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	receiptSnapshot, err := normalizeChildSnapshotReceipt(snapshotReceipt)
+	if err != nil {
+		return err
+	}
+	receiptSnapshotCanonical, receiptSnapshotHash, err := HashReadinessCanonicalJSON(receiptSnapshot)
+	if err != nil {
+		return err
+	}
+	if receiptSnapshot["owner_session_id"] != fence.PiSessionID {
+		return errors.New("child snapshot owner does not match managed session")
+	}
+	if responseSnapshot != nil && (receiptSnapshot["snapshot_id"] != responseSnapshot["snapshot_id"] || string(receiptSnapshotCanonical) != string(responseSnapshotCanonical) || receiptSnapshotHash != responseSnapshotHash) {
+		return errors.New("child snapshot response and receipt do not match")
+	}
+	if !m.liveBindingForFence(ctx, binding, fence) {
+		return errors.New("managed runtime binding changed before child snapshot confirmation")
+	}
+	sequence, ok := readinessInteger(receiptSnapshot["sequence"])
+	if !ok {
+		return errors.New("child snapshot sequence is invalid")
+	}
+	if err := m.store.ConfirmManagedChildSnapshot(context.Background(), fence, store.ManagedChildSnapshot{SnapshotID: receiptSnapshot["snapshot_id"].(string), OwnerSessionID: receiptSnapshot["owner_session_id"].(string), Sequence: sequence, Canonical: receiptSnapshotCanonical, SHA256: receiptSnapshotHash}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readinessPolicyValue(policy store.ManagedDesiredPolicy) (map[string]any, error) {
+	value, err := parseReadinessJSON(policy.Canonical)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeDesiredPolicy(value)
+}
+func privateCommandAcknowledgement(value map[string]any) bool {
+	return value["success"] == true && value["command"] == "prompt" && len(value) <= 4
+}
+func normalizePolicyResponse(value map[string]any) (map[string]any, error) {
+	if _, present := value["inline_enabled"]; present {
+		return normalizeAppliedPolicyReceipt(value)
+	}
+	return normalizeAppliedPolicyReceipt(map[string]any{
+		"inline_enabled": value["inlineEnabled"], "inline_credits": value["inlineCredits"], "recall_content": value["recallContent"],
+		"settled_enabled": value["settledEnabled"], "goal_lock_enabled": value["goalLockEnabled"], "compaction_deferred": value["compactionDeferred"],
+	})
+}
+func normalizePolicyReceiptEnvelope(value map[string]any, fence store.ManagedRuntimeFence) (map[string]any, error) {
+	if value["protocol"] != "mecha.policy/v1" || value["runtime_generation"] != fence.RuntimeGeneration || !sameEpoch(value["session_epoch"], fence.SessionEpoch) {
+		return nil, errors.New("policy receipt does not match runtime")
+	}
+	return normalizeAppliedPolicyReceipt(value["applied"])
+}
+
 func stateSessionMatches(state map[string]any, want string) bool {
 	for _, key := range []string{"session_id", "sessionId", "session"} {
 		if value, ok := state[key].(string); ok {
