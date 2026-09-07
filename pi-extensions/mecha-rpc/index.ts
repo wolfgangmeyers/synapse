@@ -32,7 +32,7 @@ type PiApi = {
   getAllTools?: () => unknown[];
   getActiveTools?: () => string[];
   setActiveTools?: (toolNames: string[]) => void;
-  getAllCommands?: () => unknown[];
+  getCommands?: () => unknown[];
   registerTool(tool: object): void;
   registerCommand(name: string, command: Command): void;
   sendMessage(message: JsonRecord, options?: JsonRecord): void | Promise<void>;
@@ -105,9 +105,10 @@ function isCommandContext(value: unknown): value is CommandContext {
 
 function commandNames(value: unknown[]): Set<string> {
   const result = new Set<string>();
+  const canonicalName = (name: string): string => name.replace(/^\//, "").replace(/:\d+$/, "");
   for (const entry of value) {
-    if (typeof entry === "string") result.add(entry.replace(/^\//, ""));
-    else if (isRecord(entry) && typeof entry.name === "string") result.add(entry.name.replace(/^\//, ""));
+    if (typeof entry === "string") result.add(canonicalName(entry));
+    else if (isRecord(entry) && typeof entry.name === "string") result.add(canonicalName(entry.name));
   }
   return result;
 }
@@ -192,6 +193,15 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     },
   });
   const policyBridge = createPolicyBridge();
+  let runtimeRegistrationFailed = false;
+  const failClosedRegistration = (): void => {
+    if (runtimeRegistrationFailed) return;
+    runtimeRegistrationFailed = true;
+    // Pi has no unregister API. Any failed registry write may leave a partial
+    // command or tool set model-visible, so this process cannot safely continue.
+    const exit = setTimeout(() => process.exit(1), 0);
+    exit.unref();
+  };
   const toolRegistry = createToolRegistry(pi, {
     emitControl: (request) => emitControlRequest(pi, request),
     getRuntime: () => ({ runtimeGeneration: generation, manifestSha256: acceptedHash ?? "", sessionEpoch: epoch }),
@@ -202,12 +212,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       const sessionId = context.sessionManager.getSessionId();
       return typeof sessionId === "string" && sessionId.length > 0 ? "root" : undefined;
     },
-    onFatalRegistrationFailure: () => {
-      // Pi has no unregister API. Once a registry write fails, a partial tool set
-      // could otherwise remain model-visible, so this incarnation must not continue.
-      const exit = setTimeout(() => process.exit(1), 0);
-      exit.unref();
-    },
+    onFatalRegistrationFailure: failClosedRegistration,
     onRequestQueued: (request) => {
       const requestId = request.request_id;
       const contextRef = request.context_ref;
@@ -229,7 +234,14 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   }
 
   const commands = [...HIDDEN_COMMAND_NAMES, ...LEGACY_COMMAND_NAMES];
+  // Stock-Pi acceptance tests can deterministically exercise the no-unregister
+  // failure path without changing production registration behavior.
+  const forcedCommandRegistrationFailureAt = /^\d+$/.test(process.env.MECHA_RPC_TEST_FAIL_COMMAND_REGISTRATION_AT ?? "")
+    ? Number(process.env.MECHA_RPC_TEST_FAIL_COMMAND_REGISTRATION_AT)
+    : undefined;
+  let commandRegistrationAttempts = 0;
   let commandsRegistered = false;
+  let commandRegistrationFailed = false;
   let registeredOwnerSessionId: string | undefined;
   let disposeChildFactory: (() => void) | undefined;
   const queuedCommands: Array<{ name: string; command: Command }> = [];
@@ -238,6 +250,11 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   };
 
   /** Register exactly one fixed child factory after this parent accepts its manifest. */
+  const makeAcceptedToolsModelVisible = (desired: DesiredManifest): void => {
+    const active = pi.getActiveTools?.() ?? [];
+    pi.setActiveTools?.([...new Set([...active, ...desired.tools.map((tool) => tool.name)])]);
+  };
+
   const registerAcceptedChildFactory = (context: CommandContext): void => {
     if (initialAcceptedManifest !== undefined) return;
     const ownerSessionId = sessionIdFromContext(context);
@@ -287,6 +304,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         requireCurrentRuntime(envelope, generation, epoch);
         const desired = toolRegistry.installFull(envelope);
         acceptedHash = hashCanonicalJson(desired);
+        makeAcceptedToolsModelVisible(desired);
         registerAcceptedChildFactory(context);
         if (Array.isArray(envelope.restored_request_ids)) {
           for (const requestId of envelope.restored_request_ids) {
@@ -333,6 +351,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         requireCurrentRuntime(envelope, generation, epoch);
         const desired = toolRegistry.installSupplemental(envelope);
         acceptedHash = hashCanonicalJson(desired);
+        makeAcceptedToolsModelVisible(desired);
         registerAcceptedChildFactory(context);
         const receipt: InstallationReceipt = { fingerprint: delivery?.fingerprint ?? "", accepted: true, manifestSha256: acceptedHash };
         retainInstallationReceipt(delivery, receipt);
@@ -434,27 +453,50 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   };
   const registerCommands = (): void => {
     if (commandsRegistered) return;
-    const existingCommands = commandNames(pi.getAllCommands?.() ?? []);
-    const existingTools = toolNames(pi.getAllTools?.() ?? []);
-    for (const name of HIDDEN_COMMAND_NAMES) {
-      if (existingCommands.has(name) || existingTools.has(name)) throw new TypeError(`Managed command collision: ${name}`);
-    }
-    // A child receives the accepted managed tools during loader construction.
-    // Keep those tools callable rather than shadowing one with a legacy slash
-    // command; the parent has no such tool until after its startup bridge exists.
-    const legacyCommandsToRegister = new Set<string>();
-    for (const name of LEGACY_COMMAND_NAMES) {
-      if (existingCommands.has(name)) throw new TypeError(`Managed command collision: ${name}`);
-      if (!existingTools.has(name)) legacyCommandsToRegister.add(name);
-    }
-    registerLegacyCommandBridge();
-    if (queuedCommands.length !== commands.length) throw new TypeError("Managed command registry is incomplete");
-    for (const { name, command } of queuedCommands) {
-      if (HIDDEN_COMMAND_NAMES.some((hiddenName) => hiddenName === name) || legacyCommandsToRegister.has(name)) {
-        pi.registerCommand(name, command);
+    if (commandRegistrationFailed) throw new TypeError("Managed command registration previously failed.");
+    try {
+      const existingCommands = commandNames(pi.getCommands?.() ?? []);
+      const existingTools = toolNames(pi.getAllTools?.() ?? []);
+      for (const name of HIDDEN_COMMAND_NAMES) {
+        if (existingCommands.has(name) || existingTools.has(name)) throw new TypeError(`Managed command collision: ${name}`);
       }
+      // The child factory deliberately installs the documented goal tool before
+      // session_start. That one managed child tool remains callable; every other
+      // command or tool collision is a hard error rather than a silent omission.
+      const legacyCommandsToRegister = new Set<string>();
+      for (const name of LEGACY_COMMAND_NAMES) {
+        const isDocumentedChildGoalTool = initialAcceptedManifest !== undefined
+          && name === "goal"
+          && existingTools.has(name)
+          && toolRegistry.isManagedToolName(name);
+        if (existingCommands.has(name) || (existingTools.has(name) && !isDocumentedChildGoalTool)) {
+          throw new TypeError(`Managed command collision: ${name}`);
+        }
+        if (!isDocumentedChildGoalTool) legacyCommandsToRegister.add(name);
+      }
+      registerLegacyCommandBridge();
+      if (queuedCommands.length !== commands.length) throw new TypeError("Managed command registry is incomplete");
+      for (const { name, command } of queuedCommands) {
+        if (HIDDEN_COMMAND_NAMES.some((hiddenName) => hiddenName === name) || legacyCommandsToRegister.has(name)) {
+          commandRegistrationAttempts++;
+          if (forcedCommandRegistrationFailureAt === commandRegistrationAttempts) {
+            throw new Error(`forced managed command registration failure at ${commandRegistrationAttempts}`);
+          }
+          pi.registerCommand(name, {
+            ...command,
+            handler: async (argumentsText, context) => {
+              if (commandRegistrationFailed || runtimeRegistrationFailed) throw new TypeError("Managed command registry is unavailable.");
+              return command.handler(argumentsText, context);
+            },
+          });
+        }
+      }
+      commandsRegistered = true;
+    } catch (error) {
+      commandRegistrationFailed = true;
+      failClosedRegistration();
+      throw error;
     }
-    commandsRegistered = true;
   };
 
   // Pi only exposes registry inspection after its extension runtime starts. This
@@ -468,8 +510,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       // Child sessions begin with their agent profile's coding-tool allowlist.
       // The factory installed this manifest during loader reload, and this bind
       // callback makes its already-registered names model-visible before turn one.
-      const active = pi.getActiveTools?.() ?? [];
-      pi.setActiveTools?.([...new Set([...active, ...desired.tools.map((tool) => tool.name)])]);
+      makeAcceptedToolsModelVisible(desired);
       await sendHiddenCustomMessage(pi, "mecha.tools.accepted.v1", "Managed tool manifest accepted.", {
         protocol: "mecha.tools/v1", manifest_sha256: acceptedHash, runtime_generation: generation, session_epoch: epoch,
       }, { triggerTurn: false });

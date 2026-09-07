@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   canonicalizeJson,
   hashCanonicalJson,
+  validateArguments,
   validateDesiredManifest,
   validateParametersSchema,
 } from "../pi-extensions/mecha-rpc/manifest.ts";
@@ -396,6 +397,38 @@ test("fresh current manifests accept valid 17 through 32 tool states and changed
   assert.throws(() => validateDesiredManifest(overLimit, { requireBaselineCapabilities: true }));
 });
 
+test("TypeBox-built schemas enforce string enum length bounds at runtime", () => {
+  const withValue = (schema: RecordValue): RecordValue => ({
+    type: "object", additionalProperties: false, required: ["value"], properties: { value: schema },
+  });
+  for (const schema of [
+    { type: "string", minLength: 2, maxLength: 3, enum: ["x", "valid"] },
+    { type: "string", minLength: 0, maxLength: 3, enum: ["valid", "four"] },
+  ]) {
+    assert.throws(() => validateParametersSchema(withValue(schema)), JSON.stringify(schema));
+  }
+  const bounded = validateParametersSchema(withValue({ type: "string", minLength: 2, maxLength: 3, enum: ["ok", "yes"] }));
+  assert.equal(validateArguments({ value: "ok" }, bounded), true);
+  assert.equal(validateArguments({ value: "x" }, bounded), false);
+  assert.equal(validateArguments({ value: "long" }, bounded), false);
+  assert.equal(validateArguments({ value: "no" }, bounded), false);
+});
+
+test("canonical JSON follows RFC 8785 UTF-16 key ordering and rejects lone surrogates", () => {
+  // The U+1F600 high surrogate sorts before U+E000 by UTF-16 code units,
+  // while UTF-8 byte ordering incorrectly puts the private-use character first.
+  // Expected string and SHA-256 come from the independent RFC 8785 fixture
+  // recorded in the Phase 1 acceptance comparison, not this implementation.
+  const fixture = { "😀": 2, "\ue000": 1 };
+  assert.equal(canonicalizeJson(fixture), '{"😀":2,"\ue000":1}');
+  assert.equal(hashCanonicalJson(fixture), "28c95d1bbb2209223307e62f489020e8f9e0cfa16adf2daf6d88127a1e8dd22a");
+  assert.throws(() => canonicalizeJson("\ud800"));
+  assert.throws(() => canonicalizeJson({ "\udc00": true }));
+  assert.throws(() => validateParametersSchema({
+    type: "object", additionalProperties: false, required: [], properties: { "\ud800": { type: "boolean" } },
+  }));
+});
+
 test("manifest schemas reject every unlisted keyword and enum boundary", () => {
   const withValue = (schema: RecordValue): RecordValue => ({
     type: "object", additionalProperties: false, required: ["value"], properties: { value: schema },
@@ -405,6 +438,8 @@ test("manifest schemas reject every unlisted keyword and enum boundary", () => {
   }
   for (const schema of [
     { type: "string", maxLength: 3, enum: ["only"] },
+    { type: "string", minLength: 2, maxLength: 3, enum: ["x", "yes"] },
+    { type: "string", minLength: 0, maxLength: 3, enum: ["yes", "four"] },
     { type: "string", maxLength: 3, enum: ["x", "x"] },
     { type: "string", maxLength: 3, enum: Array.from({ length: 65 }, (_, index) => String(index)) },
     { type: "integer", minimum: 0, maximum: 2, enum: [0, 0] },

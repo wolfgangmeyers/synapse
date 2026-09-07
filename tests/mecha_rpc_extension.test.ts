@@ -17,7 +17,7 @@ function fixture(sessionId = "root-session", parentSessionId?: string) {
   const events = new Map<string, (event: RecordValue) => void>();
   const pi = {
     getAllTools: () => [...tools.values()],
-    getAllCommands: () => [...commands.keys()],
+    getCommands: () => [...commands.keys()],
     registerTool(tool: RecordValue) { tools.set(String(tool.name), tool); },
     registerCommand(name: string, command: Command) { commands.set(name, command); },
     on(name: string, handler: (event: RecordValue, context: RecordValue) => unknown) { handlers.set(name, handler); },
