@@ -51,6 +51,7 @@ print(f'export MECHA_MANAGED_PI_VERSION={subprocess.check_output([pi, "--version
 print(f'export MECHA_MANAGED_PI_SHA256={file_hash(pi)}')
 print(f'export MECHA_MANAGED_MANIFEST_SHA256={file_hash(os.path.join(root, "router/contract/managed-tools-v1.json"))}')
 print(f'export MECHA_MANAGED_MECHA_RPC_SHA256={file_hash(os.path.join(root, "pi-extensions/mecha-rpc/index.ts"))}')
+print(f'export MECHA_MANAGED_MECHA_RPC_TREE_SHA256={tree_hash(os.path.join(root, "pi-extensions/mecha-rpc"))}')
 print(f'export MECHA_MANAGED_PI_SUBAGENTS_ENTRY_SHA256={file_hash(subagents)}')
 print(f'export MECHA_MANAGED_PI_SUBAGENTS_TREE_SHA256={tree_hash(os.path.dirname(os.path.dirname(subagents)))}')
 print(f'export MECHA_MANAGED_CURSOR_EXTENSION_SHA256={file_hash(cursor)}')

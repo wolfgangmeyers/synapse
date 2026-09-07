@@ -86,6 +86,13 @@ func (h helperCatalog) Catalog(ctx context.Context) (managed.Catalog, error) {
 func managedProcessFactory() managed.ProcessFactory { return managed.DefaultProcessFactory() }
 func managedRPCFactory() managed.RPCFactory         { return managed.DefaultRPCFactory() }
 
+func validateManagedStartup(config managed.Config) error {
+	if !config.Enabled {
+		return nil
+	}
+	return managed.ValidateFixedInputs(config)
+}
+
 func parseManagedRoots(value string) []string {
 	var roots []string
 	for _, candidate := range strings.Split(value, ",") {
@@ -102,6 +109,7 @@ func managedExpectedFromEnvironment() managed.ExpectedIdentities {
 		PiSHA256:               os.Getenv("MECHA_MANAGED_PI_SHA256"),
 		ManifestSHA256:         os.Getenv("MECHA_MANAGED_MANIFEST_SHA256"),
 		MechaRPCHash:           os.Getenv("MECHA_MANAGED_MECHA_RPC_SHA256"),
+		MechaRPCTreeHash:       os.Getenv("MECHA_MANAGED_MECHA_RPC_TREE_SHA256"),
 		PiSubagentsEntryHash:   os.Getenv("MECHA_MANAGED_PI_SUBAGENTS_ENTRY_SHA256"),
 		PiSubagentsTreeHash:    os.Getenv("MECHA_MANAGED_PI_SUBAGENTS_TREE_SHA256"),
 		CursorExtensionHash:    os.Getenv("MECHA_MANAGED_CURSOR_EXTENSION_SHA256"),

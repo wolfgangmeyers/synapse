@@ -37,6 +37,7 @@ type launchRPC struct {
 	calls       []string
 	promptCount int
 	promptDone  chan struct{}
+	active      []string
 	once        sync.Once
 }
 
@@ -58,6 +59,9 @@ func (r *launchRPC) WaitForReceipt(context.Context, string, string, int, int64, 
 }
 func (r *launchRPC) GetActiveTools(context.Context) ([]string, error) {
 	r.calls = append(r.calls, "active")
+	if r.active != nil {
+		return append([]string{}, r.active...), nil
+	}
 	return append(append([]string{}, fixedSubagentsTools...), baselineManagedNames...), nil
 }
 func (r *launchRPC) Prompt(context.Context, string) error {
@@ -97,7 +101,7 @@ func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testin
 	process := &launchProcess{identity: ProcessIdentity{PID: 123, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
 	rpc := &launchRPC{promptDone: make(chan struct{})}
 	factory := &launchFactory{process: process, rpc: rpc}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true})})
 	require.NoError(t, err)
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "alpha", Cwd: root, InitialInstruction: "hello", SessionIdentityHash: "session", RequestID: "request"})
 	require.NoError(t, err)
@@ -130,7 +134,7 @@ func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testin
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
 	require.Equal(t, canonicalRoot, factory.spec.Cwd)
-	require.Equal(t, "openai-codex", factory.spec.Provider)
+	require.Equal(t, "openai", factory.spec.Provider)
 }
 
 func TestManagerMarksReapedManagedProcessFailed(t *testing.T) {
@@ -144,7 +148,7 @@ func TestManagerMarksReapedManagedProcessFailed(t *testing.T) {
 	process := &launchProcess{identity: ProcessIdentity{PID: 123, StartMarker: "start", Incarnation: "incarnation"}, waitErr: errors.New("signal: killed"), stopped: make(chan struct{})}
 	rpc := &launchRPC{}
 	factory := &launchFactory{process: process, rpc: rpc}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true})})
 	require.NoError(t, err)
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "reaped", Cwd: root, SessionIdentityHash: "session", RequestID: "request"})
 	require.NoError(t, err)

@@ -8,19 +8,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestManagedDefaultModelPersistsAcrossStoreReopen(t *testing.T) {
+func TestDefaultModelSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.db")
 	ctx := context.Background()
 	first, err := Open(ctx, path, Options{})
 	require.NoError(t, err)
-	require.NoError(t, first.SetDefaultModel(ctx, &ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}))
+	require.NoError(t, first.SetDefaultModel(ctx, &ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}))
 	require.NoError(t, first.Close())
 	second, err := Open(ctx, path, Options{})
 	require.NoError(t, err)
 	defer second.Close()
 	model, err := second.GetDefaultModel(ctx)
 	require.NoError(t, err)
-	require.Equal(t, &ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, model)
+	require.Equal(t, &ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, model)
 }
 
 func TestFailedManagedRowsRemainDurableWhileTheirSlotIsReleased(t *testing.T) {

@@ -64,7 +64,14 @@ func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process,
 	if spec.PiExecutable == "" || spec.SessionRoot == "" || spec.SessionID == "" || spec.Cwd == "" {
 		return nil, errors.New("incomplete managed process specification")
 	}
-	command := exec.CommandContext(ctx, spec.PiExecutable, spec.Args()...)
+	// The supervisor owns controlled termination. CommandContext would kill the
+	// leader as soon as the manager context is canceled, racing Stop's process
+	// group signal and leaving the durable row on the failed path. The context
+	// still gates startup; after Start, Stop is the only termination path.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	command := exec.Command(spec.PiExecutable, spec.Args()...)
 	command.Dir = spec.Cwd
 	command.Env = append([]string(nil), spec.Environment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -186,9 +193,17 @@ func signalOwnedProcessGroup(pid int, signal syscall.Signal) error {
 		return errors.New("managed process group identity is invalid")
 	}
 	// Setpgid: true makes the child the leader of its own group. A negative PID
-	// is therefore scoped to this managed child and its descendants, rather than
-	// killing only the leader and leaving a subprocess behind.
-	return syscall.Kill(-pid, signal)
+	// is therefore scoped to this managed child and its descendants. Some
+	// platforms can reject the group signal after the group has already begun
+	// exiting; the leader fallback still uses the identity check in Stop and
+	// lets the waiting goroutine reap the child.
+	if err := syscall.Kill(-pid, signal); err == nil {
+		return nil
+	} else if leaderErr := syscall.Kill(pid, signal); leaderErr == nil {
+		return nil
+	} else {
+		return err
+	}
 }
 
 func drainStderr(reader io.Reader) {

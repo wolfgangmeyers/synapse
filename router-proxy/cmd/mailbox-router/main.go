@@ -103,7 +103,7 @@ func main() {
 	}
 	ctx := context.Background()
 	options.managed.Expected = managedExpectedFromEnvironment()
-	if err := options.managed.Validate(); err != nil {
+	if err := validateManagedStartup(options.managed); err != nil {
 		log.Fatal(err)
 	}
 	var durable *store.Store
@@ -146,7 +146,7 @@ func main() {
 			_ = durable.Close()
 			log.Fatal(manifestErr)
 		}
-		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: helperCatalog{Path: options.managed.HelperPath, AuthPath: filepath.Join(options.managed.ManagedHome, ".pi", "agent", "auth.json")}})
+		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.StoreCatalogSource{Store: durable, Helper: helperCatalog{Path: options.managed.HelperPath, AuthPath: filepath.Join(options.managed.ManagedHome, ".pi", "agent", "auth.json")}}})
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()

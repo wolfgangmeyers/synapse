@@ -19,6 +19,9 @@ type Catalog struct{ Models []Model }
 type ModelSource interface {
 	Catalog(context.Context) (Catalog, error)
 }
+type ModelSelector interface {
+	Select(context.Context, *Model) (Model, error)
+}
 type ModelSourceFunc func(context.Context) (Catalog, error)
 
 func (f ModelSourceFunc) Catalog(ctx context.Context) (Catalog, error) { return f(ctx) }
@@ -67,7 +70,9 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 			return candidate, nil
 		}
 	}
-	terra := Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra"}
+	// The production helper exposes the installed Terra model through the
+	// openai provider. Keep this fallback identical to that catalog identity.
+	terra := Model{Provider: "openai", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra"}
 	if available(terra) {
 		return terra, nil
 	}
@@ -88,6 +93,27 @@ func (s StoreCatalogSource) Catalog(ctx context.Context) (Catalog, error) {
 		return Catalog{}, err
 	}
 	return catalog, nil
+}
+
+func (s StoreCatalogSource) DefaultModel(ctx context.Context) (*store.ManagedModel, error) {
+	if s.Store == nil {
+		return nil, errors.New("managed model store is unavailable")
+	}
+	return s.Store.GetDefaultModel(ctx)
+}
+
+// Select is the production boundary: one helper snapshot is combined with the
+// persisted router default before a child reservation is created.
+func (s StoreCatalogSource) Select(ctx context.Context, explicit *Model) (Model, error) {
+	catalog, err := s.Catalog(ctx)
+	if err != nil {
+		return Model{}, err
+	}
+	saved, err := s.DefaultModel(ctx)
+	if err != nil {
+		return Model{}, err
+	}
+	return SelectModel(explicit, saved, catalog)
 }
 func CatalogFromModels(models ...Model) ModelSource {
 	return ModelSourceFunc(func(context.Context) (Catalog, error) { return Catalog{Models: append([]Model(nil), models...)}, nil })
