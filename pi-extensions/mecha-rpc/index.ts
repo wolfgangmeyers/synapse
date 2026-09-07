@@ -491,6 +491,12 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
           });
         }
       }
+      // The acceptance matrix includes the commit fence after all 15 command
+      // writes. This test-only position proves a runtime cannot escape after a
+      // complete-looking but uncommitted registry update.
+      if (forcedCommandRegistrationFailureAt === commands.length + 1) {
+        throw new Error(`forced managed command registration failure at ${forcedCommandRegistrationFailureAt}`);
+      }
       commandsRegistered = true;
     } catch (error) {
       commandRegistrationFailed = true;

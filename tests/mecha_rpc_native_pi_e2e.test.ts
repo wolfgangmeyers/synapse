@@ -735,19 +735,93 @@ test("stock Pi 0.85 fails closed on every reserved command or tool collision and
     }
   }
 
-  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-command-failure-"));
+  const registrationFailures: JsonRecord[] = [];
+  for (const position of [1, 8, 16]) {
+    const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-command-failure-"));
+    const provider = await startDeterministicProvider({ firstToolCall: false });
+    const rpc = new StockPiRpc(home, provider.baseUrl, {
+      extensions: [EXTENSION, SUBAGENTS_EXTENSION],
+      testCommandFailureAt: position,
+    });
+    try {
+      void rpc.request({ type: "get_commands" }).catch(() => {});
+      const exitCode = await rpc.waitForExit();
+      assert.equal(exitCode, 1, `forced registration failure at ${position} must terminate stock Pi`);
+      assert.equal(provider.requests.length, 0, `partial registration at ${position} must not reach a model turn`);
+      const errorEvent = rpc.events.find((event) => event.type === "extension_error" && typeof event.error === "string");
+      assert.ok(errorEvent, `stock Pi did not report the forced registration failure at ${position}`);
+      assert.match(String(errorEvent.error), new RegExp(`forced managed command registration failure at ${position}`));
+      registrationFailures.push({ position, exit_code: exitCode, model_requests: provider.requests.length, partial_runtime_usable: false });
+    } finally {
+      await rpc.stop();
+      await provider.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+  writeAcceptanceArtifact("stock-pi-0.85-command-registration-failures.json", {
+    protocol: "mecha.phase1-stock-proof/v1", pi_version: "0.85.0",
+    forced_registration_failures: registrationFailures,
+  });
+});
+
+test("stock Pi 0.85 rejects an isolated supplemental collision without changing the accepted manifest", { timeout: 30_000 }, async () => {
+  const baseline = readManifest();
+  const accepted = supplementalManifest(baseline);
+  const acceptedHash = hashCanonicalJson(accepted);
+  const collisionTarget = supplementalManifest(accepted, "zz_stock_collision");
+  collisionTarget.revision = 3;
+  const collisionTool = (collisionTarget.tools as JsonRecord[]).find((tool) => tool.capability_id === "zz_stock_collision");
+  assert.ok(collisionTool);
+  const collisionName = String(collisionTool.name);
+  const acceptedManagedNames = new Set((accepted.tools as JsonRecord[]).map((tool) => String(tool.name)));
+
+  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-supplemental-collision-"));
   const provider = await startDeterministicProvider({ firstToolCall: false });
   const rpc = new StockPiRpc(home, provider.baseUrl, {
-    extensions: [EXTENSION, SUBAGENTS_EXTENSION],
-    testCommandFailureAt: 8,
+    extensions: [REGISTRATION_PROBE, EXTENSION, SUBAGENTS_EXTENSION],
+    probeMode: "tool",
+    probeName: collisionName,
   });
   try {
-    void rpc.request({ type: "get_commands" }).catch(() => {});
-    assert.equal(await rpc.waitForExit(), 1);
-    assert.equal(provider.requests.length, 0, "a partial command registration never reaches a model turn");
-    const errorEvent = rpc.events.find((event) => event.type === "extension_error" && typeof event.error === "string");
-    assert.ok(errorEvent, "stock Pi did not report the forced registration failure");
-    assert.match(String(errorEvent.error), /forced managed command registration failure at 8/);
+    await bootstrapCurrentManifest(rpc, baseline, RUNTIME_GENERATION, "123e4567-e89b-42d3-a456-426614174041");
+    const acceptedTool = (accepted.tools as JsonRecord[]).find((tool) => tool.capability_id === "zz_stock_supplemental");
+    assert.ok(acceptedTool);
+    successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174042",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: hashCanonicalJson(baseline),
+      desired_manifest: accepted, manifest_sha256: acceptedHash, added_name: acceptedTool.name,
+    })}` }));
+    await waitFor(() => customMessages(rpc.events, "mecha.tools.accepted.v1").some((event) => {
+      const details = (event.message as JsonRecord).details;
+      return details !== null && typeof details === "object" && !Array.isArray(details)
+        && (details as JsonRecord).manifest_sha256 === acceptedHash ? true : undefined;
+    }), "accepted 17-tool manifest receipt");
+
+    const requestsBeforeCollision = provider.requests.length;
+    successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174043",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: acceptedHash,
+      desired_manifest: collisionTarget, manifest_sha256: hashCanonicalJson(collisionTarget), added_name: collisionName,
+    })}` }));
+    const rejection = await waitFor(() => customMessages(rpc.events, "mecha.tools.rejected.v1").at(-1));
+    const rejectionDetails = (rejection.message as JsonRecord).details;
+    assert.ok(rejectionDetails !== null && typeof rejectionDetails === "object" && !Array.isArray(rejectionDetails));
+    assert.match(String((rejectionDetails as JsonRecord).reason), new RegExp(`Managed tool name collision: ${collisionName}`));
+    assert.equal(provider.requests.length, requestsBeforeCollision, "the rejected collision staging path must not make a model request");
+
+    successful(await rpc.request({ type: "prompt", message: "Confirm the collision left the accepted managed tools unchanged." }));
+    const unchangedRequest = await waitFor(() => provider.requests[requestsBeforeCollision], "post-collision model request");
+    const actualManagedNames = new Set([...requestToolNames(unchangedRequest)].filter((name) => acceptedManagedNames.has(name)));
+    assert.deepEqual(actualManagedNames, acceptedManagedNames);
+    assert.equal(requestToolNames(unchangedRequest).has(collisionName), true, "the isolated collision probe remains the only target with that name");
+
+    writeAcceptanceArtifact("stock-pi-0.85-supplemental-collision.json", {
+      protocol: "mecha.phase1-stock-proof/v1", pi_version: "0.85.0", collision_target_name: collisionName,
+      accepted_manifest_sha256: acceptedHash, accepted_managed_tool_count: acceptedManagedNames.size,
+      collision_rejected: true, staging_model_requests: 0,
+      post_rejection_managed_tool_count: actualManagedNames.size,
+      post_rejection_manifest_sha256: acceptedHash,
+    });
   } finally {
     await rpc.stop();
     await provider.stop();
