@@ -414,7 +414,19 @@ test("TypeBox-built schemas enforce string enum length bounds at runtime", () =>
   assert.equal(validateArguments({ value: "no" }, bounded), false);
 });
 
-test("canonical JSON follows RFC 8785 UTF-16 key ordering and rejects lone surrogates", () => {
+test("canonical JSON follows RFC 8785 readiness-source vectors", () => {
+  const vectors: Array<[RecordValue, string, string]> = [
+    [{ compaction: { deferred: false }, goal_lock: { enabled: false }, inline: { credits: {}, enabled: false }, recall: { content: "" }, settled: { enabled: false } }, '{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}', "dcb17869020df00dd27a11e14cc0facada376f729a13002185a3d4b87f3c3648"],
+    [{ "\ue000": 1, "😀": 2 }, '{"😀":2,"":1}', "28c95d1bbb2209223307e62f489020e8f9e0cfa16adf2daf6d88127a1e8dd22a"],
+    [{ z: "\u000f\n\"\\", a: "€" }, '{"a":"€","z":"\\u000f\\n\\\"\\\\"}', "98f26eda458b7d2c608d427a3cc241632efa23705871286bd5d95bde7917cca7"],
+    [{ literal: "\\uD800", paired: "😀" }, '{"literal":"\\\\uD800","paired":"😀"}', "79077a6609d12b2b3f6572139f10b86fcb6dfe86381f473c39cf7d9b512a3a65"],
+    [{ a: -0, b: 1e30, c: 2e-3, d: 333333333.33333329, e: 1e-27, f: 0.000001, g: 100000000000000000000, h: 1e21 }, '{"a":0,"b":1e+30,"c":0.002,"d":333333333.3333333,"e":1e-27,"f":0.000001,"g":100000000000000000000,"h":1e+21}', "c94f76fd49312072de4b95bcd57daa68330cb61b46cec8fb1ac5a55af5ad2855"],
+  ];
+  for (const [input, canonical, hash] of vectors) {
+    assert.equal(canonicalizeJson(input), canonical);
+    assert.equal(hashCanonicalJson(input), hash);
+  }
+
   // The U+1F600 high surrogate sorts before U+E000 by UTF-16 code units,
   // while UTF-8 byte ordering incorrectly puts the private-use character first.
   // Expected string and SHA-256 come from the independent RFC 8785 fixture

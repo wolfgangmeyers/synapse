@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
@@ -62,8 +63,20 @@ func (r managedTestRPC) WaitForReceipt(context.Context, string, string, int, int
 	return nil
 }
 func (r managedTestRPC) GetActiveTools(context.Context) ([]string, error) { return r.active, nil }
-func (r managedTestRPC) Prompt(context.Context, string) error             { return nil }
-func (r managedTestRPC) Close() error                                     { return nil }
+func (r managedTestRPC) ApplyPolicy(context.Context, map[string]any) (map[string]any, error) {
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+}
+func (r managedTestRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+}
+func (r managedTestRPC) RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error) {
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": *r.session, "sequence": int64(0), "runs": []any{}}, nil
+}
+func (r managedTestRPC) WaitForChildSnapshot(context.Context) (map[string]any, error) {
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": *r.session, "sequence": int64(0), "runs": []any{}}, nil
+}
+func (r managedTestRPC) Prompt(context.Context, string) error { return nil }
+func (r managedTestRPC) Close() error                         { return nil }
 
 type managedTestRPCFactory struct{ rpc managedTestRPC }
 
@@ -86,7 +99,7 @@ func TestManagedLaunchReplayHasOneReservationWithoutCredentials(t *testing.T) {
 	sort.Strings(names)
 	process := &managedTestProcess{identity: managed.ProcessIdentity{PID: 4321, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
 	sessionID := ""
-	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: managedTestProcessFactory{process: process, session: &sessionID}, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &sessionID, active: names}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: managedTestProcessFactory{process: process, session: &sessionID}, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &sessionID, active: names}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Managed: manager})
 	require.NoError(t, err)
@@ -118,7 +131,8 @@ func TestManagedLaunchReplayHasOneReservationWithoutCredentials(t *testing.T) {
 	conflict := send(`{"name":"alpha","cwd":"` + root + `","initial_instruction":"different"}`)
 	defer conflict.Body.Close()
 	require.Equal(t, http.StatusConflict, conflict.StatusCode)
-	agent, err := durable.ManagedAgent(ctx, "alpha")
-	require.NoError(t, err)
-	require.Equal(t, "running", agent.LifecycleState)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "alpha")
+		return readErr == nil && agent.LifecycleState == "running"
+	}, time.Second, time.Millisecond)
 }

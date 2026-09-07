@@ -42,6 +42,22 @@ func (r *readinessRPC) GetActiveTools(context.Context) ([]string, error) {
 	r.calls = append(r.calls, "get_active_tools")
 	return r.active, nil
 }
+func (r *readinessRPC) ApplyPolicy(_ context.Context, envelope map[string]any) (map[string]any, error) {
+	r.calls = append(r.calls, "policy")
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+}
+func (r *readinessRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
+	r.calls = append(r.calls, "policy_receipt")
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+}
+func (r *readinessRPC) RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error) {
+	r.calls = append(r.calls, "child_snapshot")
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": "owner", "sequence": int64(0), "runs": []any{}}, nil
+}
+func (r *readinessRPC) WaitForChildSnapshot(context.Context) (map[string]any, error) {
+	r.calls = append(r.calls, "snapshot_receipt")
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": "owner", "sequence": int64(0), "runs": []any{}}, nil
+}
 func (r *readinessRPC) Prompt(context.Context, string) error {
 	r.calls = append(r.calls, "prompt")
 	return nil
@@ -89,7 +105,7 @@ func TestManagedProcessLimitRejectsThirtyThirdConcurrentStart(t *testing.T) {
 	require.NoError(t, err)
 	active := expectedManagedActiveTools(manifest)
 	factory := &admissionFactory{started: make(chan struct{}), release: make(chan struct{}), active: active}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: admissionRPCFactory{active: active}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: admissionRPCFactory{active: active}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	for index := 0; index < 32; index++ {
 		_, err = manager.Launch(ctx, LaunchRequest{Name: fmt.Sprintf("agent-%02d", index), Cwd: root, RequestID: fmt.Sprintf("request-%02d", index)})
@@ -164,15 +180,13 @@ func TestManagedProcessLimitRejectsThirtyThirdConcurrentStart(t *testing.T) {
 	require.False(t, current.SlotHeld)
 }
 
-func TestReadinessDefersPolicyAndChildSnapshot(t *testing.T) {
+func TestPhase1ReadinessGatesRemainUnchanged(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json")
 	manifest, _, err := LoadManifest(path)
 	require.NoError(t, err)
 	rpc := &readinessRPC{active: expectedManagedActiveTools(manifest)}
 	require.NoError(t, readinessGate(context.Background(), rpc, manifest, "session", 1, "generation"))
 	require.Equal(t, []string{"get_state", "get_commands", "bootstrap", "receipt", "get_active_tools"}, rpc.calls)
-	require.NotContains(t, rpc.calls, "policy")
-	require.NotContains(t, rpc.calls, "child_snapshot")
 	require.Equal(t, "mecha.bootstrap/v1", rpc.envelope["protocol"])
 	require.Equal(t, manifest.Raw, rpc.envelope["desired_manifest"])
 	require.Equal(t, manifest.CanonicalSHA256, rpc.envelope["manifest_sha256"])
@@ -250,6 +264,18 @@ func (r *restartPreparationRPC) GetActiveTools(context.Context) ([]string, error
 	defer r.mu.Unlock()
 	r.activeCalls++
 	return append([]string{}, r.active...), nil
+}
+func (r *restartPreparationRPC) ApplyPolicy(context.Context, map[string]any) (map[string]any, error) {
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+}
+func (r *restartPreparationRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+}
+func (r *restartPreparationRPC) RequestChildSnapshot(context.Context, map[string]any) (map[string]any, error) {
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": r.session, "sequence": int64(0), "runs": []any{}}, nil
+}
+func (r *restartPreparationRPC) WaitForChildSnapshot(context.Context) (map[string]any, error) {
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": r.session, "sequence": int64(0), "runs": []any{}}, nil
 }
 func (r *restartPreparationRPC) Prompt(context.Context, string) error {
 	r.mu.Lock()

@@ -1,17 +1,21 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var managedIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var managedSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // ManagedModel is the immutable provider/model pair selected for a launch.
 type ManagedModel struct {
@@ -74,9 +78,10 @@ const managedWorkerOperationScope = "router-managed-worker-v1"
 
 const managedOperationSelect = `SELECT operation_id,session_identity_hash,method,canonical_path,request_id,canonical_body_hash,state,response_status,response_headers_json,response_body,created_at,terminal_at,expires_at FROM managed_http_operations`
 
-// ManagedRestartFence identifies the exact live process that reservation may
-// take out of prompt admission. Every restart write carries this old fence.
-type ManagedRestartFence struct {
+// ManagedRuntimeFence identifies the exact bound Pi runtime. Source writes,
+// readiness, and restart reservation use this one fence so a manifest change
+// cannot be mistaken for the same live process.
+type ManagedRuntimeFence struct {
 	AgentID            string
 	PiSessionID        string
 	SessionEpoch       int64
@@ -84,6 +89,45 @@ type ManagedRestartFence struct {
 	ProcessStartMarker string
 	ProcessIncarnation string
 	RuntimeGeneration  string
+	ManifestRevision   int
+	ManifestHash       string
+}
+
+// ManagedRestartFence remains source-compatible for the closed restart slice.
+type ManagedRestartFence = ManagedRuntimeFence
+
+type ManagedDesiredPolicy struct {
+	Canonical []byte
+	SHA256    string
+}
+
+type ManagedChildSnapshot struct {
+	SnapshotID     string
+	OwnerSessionID string
+	Sequence       int64
+	Canonical      []byte
+	SHA256         string
+}
+
+// ManagedReadinessSource is private durable state. It is deliberately absent
+// from public projections and lasts until a future terminate transaction.
+type ManagedReadinessSource struct {
+	AgentID             string
+	DesiredPolicy       ManagedDesiredPolicy
+	Fence               *ManagedRuntimeFence
+	AppliedPolicy       *ManagedDesiredPolicy
+	PolicyConfirmedAt   string
+	Snapshot            *ManagedChildSnapshot
+	SnapshotConfirmedAt string
+}
+
+const defaultManagedReadinessPolicyCanonical = `{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`
+const defaultManagedReadinessPolicySHA256 = "dcb17869020df00dd27a11e14cc0facada376f729a13002185a3d4b87f3c3648"
+
+// DefaultManagedReadinessPolicy returns a copy because callers must not mutate
+// the exact canonical bytes that identify the router's default projection.
+func DefaultManagedReadinessPolicy() ManagedDesiredPolicy {
+	return ManagedDesiredPolicy{Canonical: []byte(defaultManagedReadinessPolicyCanonical), SHA256: defaultManagedReadinessPolicySHA256}
 }
 
 // ManagedRestartTransition is the bounded durable handoff to a later
@@ -309,6 +353,16 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 			}
 			return err
 		}
+		defaultPolicy := DefaultManagedReadinessPolicy()
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_readiness_sources (
+			agent_id, desired_policy_canonical, desired_policy_sha256
+		) VALUES (?, ?, ?)`, agent.AgentID, defaultPolicy.Canonical, defaultPolicy.SHA256); err != nil {
+			// Only an explicit migration fixture opens the historical schema
+			// without 024. Production Open always applies this migration first.
+			if !strings.Contains(err.Error(), "no such table: managed_readiness_sources") {
+				return err
+			}
+		}
 		if err := insertManagedOperation(ctx, s.db, operation); err != nil {
 			return err
 		}
@@ -394,12 +448,12 @@ func (s *Store) MarkManagedOperationTerminal(ctx context.Context, operationID st
 	})
 }
 
-func restartFenceFromAgent(agent *ManagedAgentRecord) ManagedRestartFence {
-	return ManagedRestartFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration}
+func restartFenceFromAgent(agent *ManagedAgentRecord) ManagedRuntimeFence {
+	return ManagedRuntimeFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}
 }
 
-func sameManagedRestartFence(left, right ManagedRestartFence) bool {
-	return left.AgentID == right.AgentID && left.PiSessionID == right.PiSessionID && left.SessionEpoch == right.SessionEpoch && left.ProcessPID == right.ProcessPID && left.ProcessStartMarker == right.ProcessStartMarker && left.ProcessIncarnation == right.ProcessIncarnation && left.RuntimeGeneration == right.RuntimeGeneration
+func sameManagedRestartFence(left, right ManagedRuntimeFence) bool {
+	return left.AgentID == right.AgentID && left.PiSessionID == right.PiSessionID && left.SessionEpoch == right.SessionEpoch && left.ProcessPID == right.ProcessPID && left.ProcessStartMarker == right.ProcessStartMarker && left.ProcessIncarnation == right.ProcessIncarnation && left.RuntimeGeneration == right.RuntimeGeneration && left.ManifestRevision == right.ManifestRevision && left.ManifestHash == right.ManifestHash
 }
 
 func restartActionHasHigherPriority(action string) bool {
@@ -549,11 +603,21 @@ func (s *Store) ManagedRestartTransition(ctx context.Context, agentID string) (*
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	return scanManagedRestartTransition(s.db.QueryRowContext(ctx, managedRestartTransitionSelect+` WHERE agent_id = ?`, agentID))
+	return managedRestartTransitionForTx(ctx, s.db, agentID)
 }
 
 func managedRestartTransitionForTx(ctx context.Context, db *sql.DB, agentID string) (*ManagedRestartTransition, error) {
-	return scanManagedRestartTransition(db.QueryRowContext(ctx, managedRestartTransitionSelect+` WHERE agent_id = ?`, agentID))
+	transition, err := scanManagedRestartTransition(db.QueryRowContext(ctx, managedRestartTransitionSelect+` WHERE agent_id = ?`, agentID))
+	if err != nil {
+		return nil, err
+	}
+	var revision int
+	var hash string
+	if err := db.QueryRowContext(ctx, `SELECT manifest_revision, manifest_hash FROM managed_agents WHERE agent_id = ?`, agentID).Scan(&revision, &hash); err != nil {
+		return nil, err
+	}
+	transition.Fence.ManifestRevision, transition.Fence.ManifestHash = revision, hash
+	return transition, nil
 }
 
 // MarkManagedRestartPrepared advances only the private transition stage. It
@@ -672,7 +736,22 @@ func (s *Store) UpdateManagedAgentStarting(ctx context.Context, agentID string, 
 		}
 		changed, err := result.RowsAffected()
 		if err != nil || changed == 0 {
+			if err != nil {
+				return err
+			}
+			return &ManagedReadinessSourceStaleError{AgentID: agentID}
+		}
+		agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ?`, agentID), nil)
+		if err != nil {
 			return err
+		}
+		if err := s.rollManagedReadinessSourceFenceTx(ctx, restartFenceFromAgent(agent)); err != nil {
+			// Open applies 024 before a production process can start. This only
+			// permits the explicit 023-to-024 migration fixture to retain its
+			// historical process identity long enough for backfill to run.
+			if !strings.Contains(err.Error(), "no such table: managed_readiness_sources") {
+				return err
+			}
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -683,6 +762,205 @@ func (s *Store) UpdateManagedAgentStarting(ctx context.Context, agentID string, 
 type ProcessIdentityRecord struct {
 	PID                      int
 	StartMarker, Incarnation string
+}
+
+type ManagedReadinessSourceStaleError struct{ AgentID string }
+
+func (e *ManagedReadinessSourceStaleError) Error() string {
+	return "managed readiness source fence is stale"
+}
+func (e *ManagedReadinessSourceStaleError) Code() string { return "stale" }
+
+func validManagedRuntimeFence(fence ManagedRuntimeFence) bool {
+	return fence.AgentID != "" && fence.PiSessionID != "" && fence.SessionEpoch >= 1 && fence.ProcessPID > 0 && fence.ProcessStartMarker != "" && fence.ProcessIncarnation != "" && fence.RuntimeGeneration != "" && fence.ManifestRevision >= 1 && managedSHA256RE.MatchString(fence.ManifestHash)
+}
+
+func (s *Store) LoadManagedDesiredPolicy(ctx context.Context, agentID string) (ManagedDesiredPolicy, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ManagedDesiredPolicy{}, errors.New("store is closed")
+	}
+	var policy ManagedDesiredPolicy
+	if err := s.db.QueryRowContext(ctx, `SELECT desired_policy_canonical, desired_policy_sha256 FROM managed_readiness_sources WHERE agent_id = ?`, agentID).Scan(&policy.Canonical, &policy.SHA256); err != nil {
+		return ManagedDesiredPolicy{}, err
+	}
+	policy.Canonical = append([]byte(nil), policy.Canonical...)
+	return policy, nil
+}
+
+func (s *Store) ManagedReadinessSource(ctx context.Context, agentID string) (*ManagedReadinessSource, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return scanManagedReadinessSource(s.db.QueryRowContext(ctx, `SELECT agent_id, desired_policy_canonical, desired_policy_sha256,
+		pi_session_id, session_epoch, process_pid, process_start_marker, process_incarnation, runtime_generation, manifest_revision, manifest_hash,
+		applied_policy_canonical, applied_policy_sha256, policy_confirmed_at,
+		snapshot_id, snapshot_owner_session_id, snapshot_sequence, snapshot_canonical, snapshot_sha256, snapshot_confirmed_at
+		FROM managed_readiness_sources WHERE agent_id = ?`, agentID))
+}
+
+func scanManagedReadinessSource(scanner interface{ Scan(...any) error }) (*ManagedReadinessSource, error) {
+	var source ManagedReadinessSource
+	var pi, marker, incarnation, generation, manifestHash sql.NullString
+	var epoch, pid, revision sql.NullInt64
+	var appliedCanonical []byte
+	var appliedHash, policyAt sql.NullString
+	var snapshotID, snapshotOwner, snapshotCanonical, snapshotHash, snapshotAt sql.NullString
+	var snapshotSequence sql.NullInt64
+	if err := scanner.Scan(&source.AgentID, &source.DesiredPolicy.Canonical, &source.DesiredPolicy.SHA256,
+		&pi, &epoch, &pid, &marker, &incarnation, &generation, &revision, &manifestHash,
+		&appliedCanonical, &appliedHash, &policyAt,
+		&snapshotID, &snapshotOwner, &snapshotSequence, &snapshotCanonical, &snapshotHash, &snapshotAt); err != nil {
+		return nil, err
+	}
+	source.DesiredPolicy.Canonical = append([]byte(nil), source.DesiredPolicy.Canonical...)
+	if pi.Valid {
+		source.Fence = &ManagedRuntimeFence{AgentID: source.AgentID, PiSessionID: pi.String, SessionEpoch: epoch.Int64, ProcessPID: int(pid.Int64), ProcessStartMarker: marker.String, ProcessIncarnation: incarnation.String, RuntimeGeneration: generation.String, ManifestRevision: int(revision.Int64), ManifestHash: manifestHash.String}
+	}
+	if appliedHash.Valid {
+		source.AppliedPolicy = &ManagedDesiredPolicy{Canonical: append([]byte(nil), appliedCanonical...), SHA256: appliedHash.String}
+		source.PolicyConfirmedAt = policyAt.String
+	}
+	if snapshotID.Valid {
+		source.Snapshot = &ManagedChildSnapshot{SnapshotID: snapshotID.String, OwnerSessionID: snapshotOwner.String, Sequence: snapshotSequence.Int64, Canonical: []byte(snapshotCanonical.String), SHA256: snapshotHash.String}
+		source.SnapshotConfirmedAt = snapshotAt.String
+	}
+	return &source, nil
+}
+
+// RollManagedReadinessSourceFence clears confirmations for a newly installed
+// binding while retaining the router's desired policy. Replacement execution
+// will call this same helper in its later target-install transaction.
+func (s *Store) RollManagedReadinessSourceFence(ctx context.Context, fence ManagedRuntimeFence) error {
+	if !validManagedRuntimeFence(fence) {
+		return errors.New("managed readiness source fence is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		return s.rollManagedReadinessSourceFenceTx(ctx, fence)
+	})
+}
+func (s *Store) rollManagedReadinessSourceFenceTx(ctx context.Context, fence ManagedRuntimeFence) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET
+		pi_session_id = ?, session_epoch = ?, process_pid = ?, process_start_marker = ?, process_incarnation = ?, runtime_generation = ?, manifest_revision = ?, manifest_hash = ?,
+		applied_policy_canonical = NULL, applied_policy_sha256 = NULL, policy_confirmed_at = NULL,
+		snapshot_id = NULL, snapshot_owner_session_id = NULL, snapshot_sequence = NULL, snapshot_canonical = NULL, snapshot_sha256 = NULL, snapshot_confirmed_at = NULL
+		WHERE agent_id = ? AND EXISTS (SELECT 1 FROM managed_agents WHERE agent_id = ?
+			AND pi_session_id = ? AND session_epoch = ? AND process_pid = ? AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ? AND manifest_revision = ? AND manifest_hash = ?)`,
+		fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash,
+		fence.AgentID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+	}
+	return nil
+}
+
+func readinessSourceFenceWhere() string {
+	return `agent_id = ? AND pi_session_id = ? AND session_epoch = ? AND process_pid = ? AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ? AND manifest_revision = ? AND manifest_hash = ?
+		AND EXISTS (SELECT 1 FROM managed_agents WHERE agent_id = ? AND pi_session_id = ? AND session_epoch = ? AND process_pid = ? AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ? AND manifest_revision = ? AND manifest_hash = ?)`
+}
+func readinessSourceFenceArgs(fence ManagedRuntimeFence) []any {
+	return []any{fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash,
+		fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash}
+}
+
+func (s *Store) ConfirmManagedPolicyApplied(ctx context.Context, fence ManagedRuntimeFence, policy ManagedDesiredPolicy) error {
+	if !validManagedRuntimeFence(fence) || len(policy.Canonical) < 2 || len(policy.Canonical) > 32768 || !managedSHA256RE.MatchString(policy.SHA256) {
+		return errors.New("managed policy confirmation is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		args := append([]any{policy.Canonical, policy.SHA256, formatTimestamp(s.clock.Now())}, readinessSourceFenceArgs(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET applied_policy_canonical = ?, applied_policy_sha256 = ?, policy_confirmed_at = ? WHERE `+readinessSourceFenceWhere()+`
+			AND snapshot_id IS NULL AND snapshot_owner_session_id IS NULL AND snapshot_sequence IS NULL AND snapshot_canonical IS NULL AND snapshot_sha256 IS NULL AND snapshot_confirmed_at IS NULL`, args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+		}
+		return nil
+	})
+}
+
+func (s *Store) ConfirmManagedChildSnapshot(ctx context.Context, fence ManagedRuntimeFence, snapshot ManagedChildSnapshot) error {
+	if !validManagedRuntimeFence(fence) || snapshot.SnapshotID == "" || snapshot.OwnerSessionID == "" || !utf8.ValidString(snapshot.SnapshotID) || !utf8.ValidString(snapshot.OwnerSessionID) || len([]byte(snapshot.SnapshotID)) > 8192 || len([]byte(snapshot.OwnerSessionID)) > 8192 || snapshot.Sequence < 0 || len(snapshot.Canonical) < 2 || len(snapshot.Canonical) > 32768 || !managedSHA256RE.MatchString(snapshot.SHA256) {
+		return errors.New("managed child snapshot confirmation is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		args := append([]any{snapshot.SnapshotID, snapshot.OwnerSessionID, snapshot.Sequence, snapshot.Canonical, snapshot.SHA256, formatTimestamp(s.clock.Now())}, readinessSourceFenceArgs(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET snapshot_id = ?, snapshot_owner_session_id = ?, snapshot_sequence = ?, snapshot_canonical = ?, snapshot_sha256 = ?, snapshot_confirmed_at = ? WHERE `+readinessSourceFenceWhere()+`
+			AND applied_policy_canonical IS NOT NULL AND applied_policy_sha256 IS NOT NULL AND policy_confirmed_at IS NOT NULL`, args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+		}
+		return nil
+	})
+}
+
+func (s *Store) managedReadinessSourcesConfirmedForFenceTx(ctx context.Context, fence ManagedRuntimeFence) error {
+	var desired, desiredHash, applied, appliedHash []byte
+	err := s.db.QueryRowContext(ctx, `SELECT desired_policy_canonical, desired_policy_sha256, applied_policy_canonical, applied_policy_sha256 FROM managed_readiness_sources WHERE `+readinessSourceFenceWhere()+`
+		AND applied_policy_canonical IS NOT NULL AND applied_policy_sha256 IS NOT NULL AND policy_confirmed_at IS NOT NULL
+		AND snapshot_id IS NOT NULL AND snapshot_owner_session_id IS NOT NULL AND snapshot_sequence IS NOT NULL AND snapshot_canonical IS NOT NULL AND snapshot_sha256 IS NOT NULL AND snapshot_confirmed_at IS NOT NULL`, readinessSourceFenceArgs(fence)...).Scan(&desired, &desiredHash, &applied, &appliedHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+		}
+		return err
+	}
+	if !bytes.Equal(desired, applied) || string(desiredHash) != string(appliedHash) {
+		return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+	}
+	return nil
+}
+
+// MarkManagedReadyFromSources performs source confirmation and the public ready
+// transition in one transaction. Confirmations never add a projection bump;
+// this existing readiness transition remains the only one.
+func (s *Store) MarkManagedReadyFromSources(ctx context.Context, fence ManagedRuntimeFence) error {
+	if !validManagedRuntimeFence(fence) {
+		return errors.New("managed readiness source fence is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		if err := s.managedReadinessSourcesConfirmedForFenceTx(ctx, fence); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state = 'running', activity_state = 'idle', accepting_prompts = 1, started_at = COALESCE(started_at, ?), updated_at = ?
+			WHERE agent_id = ? AND lifecycle_state = 'starting' AND pi_session_id = ? AND session_epoch = ? AND process_pid = ? AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ? AND manifest_revision = ? AND manifest_hash = ?`, now, now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
 }
 
 func (s *Store) MarkManagedReady(ctx context.Context, agentID string) error {

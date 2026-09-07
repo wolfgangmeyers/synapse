@@ -41,6 +41,9 @@ type launchRPC struct {
 	promptContextCancelled chan struct{}
 	releasePrompt          chan struct{}
 	active                 []string
+	policyEnvelope         map[string]any
+	snapshotEnvelope       map[string]any
+	failAt                 string
 	once                   sync.Once
 }
 
@@ -66,6 +69,42 @@ func (r *launchRPC) GetActiveTools(context.Context) ([]string, error) {
 		return append([]string{}, r.active...), nil
 	}
 	return append(append([]string{}, fixedSubagentsTools...), baselineManagedNames...), nil
+}
+func (r *launchRPC) readinessFailure(step string) error {
+	if r.failAt == step {
+		return errors.New("scripted " + step + " failure")
+	}
+	return nil
+}
+func (r *launchRPC) ApplyPolicy(_ context.Context, envelope map[string]any) (map[string]any, error) {
+	r.calls = append(r.calls, "policy")
+	r.policyEnvelope = envelope
+	if err := r.readinessFailure("policy-command"); err != nil {
+		return nil, err
+	}
+	return map[string]any{"inlineEnabled": false, "inlineCredits": map[string]any{}, "recallContent": "", "settledEnabled": false, "goalLockEnabled": false, "compactionDeferred": false}, nil
+}
+func (r *launchRPC) WaitForPolicyApplied(_ context.Context, generation string, epoch int64) (map[string]any, error) {
+	r.calls = append(r.calls, "policy-receipt")
+	if err := r.readinessFailure("policy-receipt"); err != nil {
+		return nil, err
+	}
+	return map[string]any{"protocol": "mecha.policy/v1", "runtime_generation": generation, "session_epoch": epoch, "applied": map[string]any{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false}}, nil
+}
+func (r *launchRPC) RequestChildSnapshot(_ context.Context, envelope map[string]any) (map[string]any, error) {
+	r.calls = append(r.calls, "snapshot")
+	r.snapshotEnvelope = envelope
+	if err := r.readinessFailure("snapshot-command"); err != nil {
+		return nil, err
+	}
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": r.session, "sequence": int64(0), "runs": []any{}}, nil
+}
+func (r *launchRPC) WaitForChildSnapshot(context.Context) (map[string]any, error) {
+	r.calls = append(r.calls, "snapshot-receipt")
+	if err := r.readinessFailure("snapshot-receipt"); err != nil {
+		return nil, err
+	}
+	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": r.session, "sequence": int64(0), "runs": []any{}}, nil
 }
 func (r *launchRPC) Prompt(ctx context.Context, _ string) error {
 	r.calls = append(r.calls, "prompt")
@@ -106,7 +145,7 @@ type launchRPCFactory struct{ rpc *launchRPC }
 
 func (f launchRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
 
-func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testing.T) {
+func TestManagerMarksReadyOnlyAfterReadinessSources(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
@@ -117,7 +156,7 @@ func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testin
 	process := &launchProcess{identity: ProcessIdentity{PID: 123, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
 	rpc := &launchRPC{promptDone: make(chan struct{})}
 	factory := &launchFactory{process: process, rpc: rpc}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "alpha", Cwd: root, InitialInstruction: "hello", RequestID: "request"})
 	require.NoError(t, err)
@@ -129,7 +168,7 @@ func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testin
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("managed agent did not become ready")
+			t.Fatalf("managed agent did not become ready: %+v", agent)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -138,8 +177,17 @@ func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testin
 	case <-time.After(2 * time.Second):
 		t.Fatal("initial instruction was not sent")
 	}
-	require.Equal(t, []string{"state", "commands", "bootstrap", "receipt", "active", "prompt"}, rpc.calls)
+	require.Equal(t, []string{"state", "commands", "bootstrap", "receipt", "active", "policy", "policy-receipt", "snapshot", "snapshot-receipt", "prompt"}, rpc.calls)
 	require.Equal(t, 1, rpc.promptCount)
+	source, err := durable.ManagedReadinessSource(ctx, "alpha")
+	require.NoError(t, err)
+	require.NotNil(t, source.AppliedPolicy)
+	require.NotNil(t, source.Snapshot)
+	require.Equal(t, store.DefaultManagedReadinessPolicy(), *source.AppliedPolicy)
+	require.Equal(t, "mecha.policy/v1", rpc.policyEnvelope["protocol"])
+	require.Equal(t, "mecha.child-snapshot/v1", rpc.snapshotEnvelope["protocol"])
+	require.Equal(t, manifest.CanonicalSHA256, rpc.policyEnvelope["manifest_sha256"])
+	require.Equal(t, manifest.CanonicalSHA256, rpc.snapshotEnvelope["manifest_sha256"])
 	require.NoError(t, manager.Close(context.Background()))
 	stopped, err := durable.ManagedAgent(ctx, "alpha")
 	require.NoError(t, err)
@@ -151,6 +199,65 @@ func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testin
 	require.NoError(t, err)
 	require.Equal(t, canonicalRoot, factory.spec.Cwd)
 	require.Equal(t, "openai-codex", factory.spec.Provider)
+}
+
+func TestManagerSourceReadinessFailuresNeverAdmitTheInitialInstruction(t *testing.T) {
+	for _, test := range []struct {
+		name                     string
+		failAt                   string
+		wantPolicy, wantSnapshot bool
+	}{
+		{"policy command", "policy-command", false, false},
+		{"policy receipt", "policy-receipt", false, false},
+		{"snapshot command", "snapshot-command", true, false},
+		{"snapshot receipt", "snapshot-receipt", true, false},
+		{"final source-confirmed ready transition", "final-source-confirmation", true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, durable.Close()) })
+			manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+			require.NoError(t, err)
+			root := t.TempDir()
+			process := &launchProcess{identity: ProcessIdentity{PID: 800, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
+			rpc := &launchRPC{failAt: test.failAt}
+			factory := &launchFactory{process: process, rpc: rpc}
+			groupChecks := 0
+			manager, err := NewManager(ManagerOptions{
+				Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+				ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+				ProcessGroupLeaderVerifier: func(ProcessIdentity) bool {
+					groupChecks++
+					// The sixth check occurs after both source commits and immediately
+					// before MarkManagedReadyFromSources. It proves the final source-
+					// confirmed transition cannot release the initial instruction.
+					return test.failAt != "final-source-confirmation" || groupChecks != 6
+				},
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
+			_, err = manager.Launch(ctx, LaunchRequest{Name: "failure-agent", Cwd: root, InitialInstruction: "must not send", RequestID: "failure-request"})
+			require.NoError(t, err)
+			require.Eventually(t, func() bool {
+				agent, readErr := durable.ManagedAgent(ctx, "failure-agent")
+				return readErr == nil && agent.LifecycleState == "failed"
+			}, 2*time.Second, time.Millisecond)
+			agent, err := durable.ManagedAgent(ctx, "failure-agent")
+			require.NoError(t, err)
+			require.Equal(t, "READINESS_FAILED", agent.LastErrorCode)
+			require.False(t, agent.AcceptingPrompts)
+			require.False(t, agent.InitialInstructionSent)
+			require.Equal(t, 0, rpc.promptCount)
+			var notReady *store.ManagedAgentNotReadyError
+			require.ErrorAs(t, manager.AdmitPrompt(ctx, "failure-agent", "must not admit"), &notReady)
+			source, err := durable.ManagedReadinessSource(ctx, "failure-agent")
+			require.NoError(t, err)
+			require.Equal(t, test.wantPolicy, source.AppliedPolicy != nil)
+			require.Equal(t, test.wantSnapshot, source.Snapshot != nil)
+		})
+	}
 }
 
 func TestManagerCloseCommitsLaunchStateAfterRunContextCancelled(t *testing.T) {
@@ -167,7 +274,7 @@ func TestManagerCloseCommitsLaunchStateAfterRunContextCancelled(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(releasePrompt) }) }
 	rpc := &launchRPC{promptEntered: make(chan struct{}), promptContextCancelled: make(chan struct{}), releasePrompt: releasePrompt}
 	factory := &launchFactory{process: process, rpc: rpc}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	t.Cleanup(release)
@@ -216,7 +323,7 @@ func TestManagerMarksReapedManagedProcessFailed(t *testing.T) {
 	process := &launchProcess{identity: ProcessIdentity{PID: 123, StartMarker: "start", Incarnation: "incarnation"}, waitErr: errors.New("signal: killed"), stopped: make(chan struct{})}
 	rpc := &launchRPC{}
 	factory := &launchFactory{process: process, rpc: rpc}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "reaped", Cwd: root, RequestID: "request"})
 	require.NoError(t, err)
