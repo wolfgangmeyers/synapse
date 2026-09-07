@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -8,7 +9,7 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 
 import { hashCanonicalJson } from "../pi-extensions/mecha-rpc/manifest.ts";
-import { encodeHiddenEnvelope } from "../pi-extensions/mecha-rpc/protocol.ts";
+import { CUSTOM_MESSAGE_TYPES, encodeHiddenEnvelope } from "../pi-extensions/mecha-rpc/protocol.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const EXTENSION = join(ROOT, "pi-extensions/mecha-rpc/index.ts");
@@ -399,9 +400,71 @@ function changedDefinitionManifest(base: JsonRecord): JsonRecord {
   return desired;
 }
 
+type AcceptanceProvenance = {
+  readonly candidate: {
+    readonly mecha_developer_head: string;
+    readonly pi_subagents_head: string;
+    readonly installed_pi_version: string;
+  };
+  readonly run: { readonly run_id: string; readonly started_at: string };
+  readonly directory: string;
+};
+
+function commandOutput(command: string, arguments_: readonly string[], cwd = ROOT): string {
+  return execFileSync(command, arguments_, { cwd, encoding: "utf8" }).trim();
+}
+
+function acceptanceProvenance(): AcceptanceProvenance {
+  const actual = {
+    mecha_developer_head: commandOutput("git", ["rev-parse", "HEAD"]),
+    pi_subagents_head: commandOutput("git", ["-C", resolve(ROOT, "../pi-packages"), "rev-parse", "HEAD"]),
+    installed_pi_version: commandOutput("pi", ["--version"]),
+  };
+  const supplied = {
+    mecha_developer_head: process.env.MECHA_RPC_ACCEPTANCE_MECHA_HEAD,
+    pi_subagents_head: process.env.MECHA_RPC_ACCEPTANCE_FORK_HEAD,
+    installed_pi_version: process.env.MECHA_RPC_ACCEPTANCE_PI_VERSION,
+    run_id: process.env.MECHA_RPC_ACCEPTANCE_RUN_ID,
+    started_at: process.env.MECHA_RPC_ACCEPTANCE_STARTED_AT,
+    directory: process.env.MECHA_RPC_ACCEPTANCE_RUN_DIR,
+  };
+  const suppliedValues = Object.values(supplied);
+  if (suppliedValues.some((value) => value !== undefined) && suppliedValues.some((value) => value === undefined || value === "")) {
+    throw new Error("Phase 1 acceptance evidence requires a complete run identity");
+  }
+  if (supplied.run_id !== undefined) {
+    assert.deepEqual({
+      mecha_developer_head: supplied.mecha_developer_head,
+      pi_subagents_head: supplied.pi_subagents_head,
+      installed_pi_version: supplied.installed_pi_version,
+    }, actual, "acceptance runner identity must match the sources and Pi actually exercised");
+    return {
+      candidate: actual,
+      run: { run_id: supplied.run_id, started_at: supplied.started_at! },
+      directory: supplied.directory!,
+    };
+  }
+  const runId = randomUUID();
+  return {
+    candidate: actual,
+    run: { run_id: runId, started_at: new Date().toISOString() },
+    directory: join(ACCEPTANCE_ARTIFACT_DIR, actual.mecha_developer_head, runId),
+  };
+}
+
+const ACCEPTANCE_PROVENANCE = acceptanceProvenance();
+
 function writeAcceptanceArtifact(name: string, evidence: JsonRecord): void {
-  mkdirSync(ACCEPTANCE_ARTIFACT_DIR, { recursive: true });
-  writeFileSync(join(ACCEPTANCE_ARTIFACT_DIR, name), `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+  mkdirSync(ACCEPTANCE_PROVENANCE.directory, { recursive: true });
+  writeFileSync(join(ACCEPTANCE_PROVENANCE.directory, name), `${JSON.stringify({
+    protocol: "mecha.phase1-stock-proof/v2",
+    artifact_id: name,
+    status: "passed",
+    generated_at: new Date().toISOString(),
+    candidate: ACCEPTANCE_PROVENANCE.candidate,
+    run: ACCEPTANCE_PROVENANCE.run,
+    evidence,
+  }, null, 2)}\n`, "utf8");
 }
 
 function successful(response: JsonRecord): void {
@@ -463,7 +526,8 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
   });
   assert.match(version, /0\.85\.0/);
   const evidenceRegistry = JSON.parse(readFileSync(ACCEPTANCE_EVIDENCE, "utf8")) as JsonRecord;
-  assert.equal(evidenceRegistry.stock_pi_version, "0.85.0");
+  assert.equal(evidenceRegistry.protocol, "mecha.phase1-acceptance-contract/v1");
+  assert.equal(evidenceRegistry.required_pi_version, version);
   const requiredPrompts = evidenceRegistry.required_prompts;
   assert.ok(requiredPrompts !== null && typeof requiredPrompts === "object" && !Array.isArray(requiredPrompts));
   const hiddenPrompts = (requiredPrompts as JsonRecord).hidden;
@@ -849,6 +913,12 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
       recall_projection: { content: "" },
     });
     successful(await rpc.request({ type: "prompt", message: `/mecha-bootstrap-v1 ${bootstrap}` }));
+    successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174024",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: manifestHash,
+      desired_manifest: manifest, manifest_sha256: manifestHash, added_name: "missing-supplemental-tool",
+    })}` }));
+    await waitFor(() => customMessages(rpc.events, "mecha.tools.rejected.v1").length > 0 ? true : undefined, "rejected native supplemental evidence");
     successful(await rpc.request({ type: "prompt", message: `/mecha-child-snapshot-v1 ${encodeHiddenEnvelope({
       protocol: "mecha.child-snapshot/v1", runtime_generation: RUNTIME_GENERATION, session_epoch: 1,
       manifest_sha256: manifestHash,
@@ -913,6 +983,14 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
     await waitFor(() => provider.childRequests[1] === undefined ? undefined : true, "the child continuation held during result append");
     provider.releaseChildTurn();
     successful(await parentTurn);
+    successful(await rpc.request({ type: "prompt", message: `/mecha-mailbox-deliver-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.mailbox-deliver/v1", message_id: "stock-child-mail", content: "Stock child evidence mail.",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, manifest_sha256: manifestHash,
+    })}` }));
+    successful(await rpc.request({ type: "prompt", message: `/mecha-policy-apply-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.policy/v1", runtime_generation: RUNTIME_GENERATION, session_epoch: 1, manifest_sha256: manifestHash,
+      policy: { inline: { enabled: false, credits: {} }, recall: { content: "" } },
+    })}` }));
 
     await waitFor(() => {
       const deltas = customMessages(rpc.events, "mecha.child.delta.v1");
@@ -957,6 +1035,23 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
       protocol: "mecha.phase1-stock-proof/v1", runtime_generation: RUNTIME_GENERATION,
       parent_first_request: true, child_first_request: true, child_manifest_size: 16,
       child_context_result_append: true, stale_child_result_appended: false,
+    });
+    const sessionRecords = recordsIn(join(home, "sessions"));
+    const observedCustomMessageTypes = CUSTOM_MESSAGE_TYPES.map((customType) => {
+      const rpcEvents = customMessages(rpc.events, customType).length;
+      const persistedMessages = customRecords(sessionRecords, customType).length;
+      const observedCount = rpcEvents + persistedMessages;
+      assert.ok(observedCount > 0, `native run did not observe ${customType}`);
+      return {
+        custom_type: customType,
+        observed_count: observedCount,
+        sources: ["installed-stock-pi-rpc", "installed-stock-pi-session"],
+      };
+    });
+    writeAcceptanceArtifact("stock-pi-0.85-custom-message-types.json", {
+      protocol: "mecha.phase1-stock-proof/v1",
+      observed_custom_message_types: observedCustomMessageTypes,
+      phase2_exclusions: ["router dispatch and persistence", "managed HTTP and authentication", "mailbox recovery", "browser acceptance and release gates"],
     });
   } finally {
     await rpc.stop();

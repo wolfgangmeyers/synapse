@@ -1,7 +1,8 @@
 {
-  "protocol": "mecha.phase1-acceptance-evidence/v1",
-  "stock_pi_version": "0.85.0",
-  "artifact_directory": "/tmp/mecha-rpc-acceptance",
+  "protocol": "mecha.phase1-acceptance-contract/v1",
+  "required_fork_head": "06ed583c720ed0fe6d6cc099b26eeb384795ea39",
+  "required_pi_version": "0.85.0",
+  "artifact_directory": "/tmp/mecha-rpc-acceptance/<mecha-developer-head>/<run-id>",
   "required_prompts": {
     "hidden": [
       "mecha-bootstrap-v1",
@@ -23,16 +24,30 @@
       "mecha-reply"
     ]
   },
-  "stock_proofs": [
-    "parent-first-request",
-    "child-first-request",
-    "supplemental-replay",
-    "changed-definition-fresh-generation",
-    "stale-generation-rejection"
+  "required_custom_message_types": [
+    "mecha.tools.accepted.v1",
+    "mecha.tools.rejected.v1",
+    "mecha.control.request.v1",
+    "mecha.control.result.v1",
+    "mecha.mailbox.appended.v1",
+    "mecha.policy.applied.v1",
+    "mecha.child.snapshot.v1",
+    "mecha.child.delta.v1"
   ],
-  "fork_proofs": [
-    "test/lifecycle/child-extension-factories.test.ts",
-    "test/lifecycle/subagent-manager.test.ts",
-    "test/service/service-adapter.test.ts"
+  "required_artifacts": [
+    "stock-pi-0.85-parent-commands.json",
+    "stock-pi-0.85-command-registration-failures.json",
+    "stock-pi-0.85-supplemental-collision.json",
+    "stock-pi-0.85-real-child.json",
+    "stock-pi-0.85-custom-message-types.json",
+    "stock-pi-0.85-ac090-child-factory-lifecycle.json",
+    "stock-pi-0.85-lifecycle-generations.json",
+    "stock-pi-0.85-fresh-generation.json"
+  ],
+  "phase2_exclusions": [
+    "router dispatch and persistence",
+    "managed HTTP and authentication",
+    "mailbox recovery",
+    "browser acceptance and release gates"
   ]
 }

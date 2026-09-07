@@ -20,17 +20,14 @@ npm --prefix pi-extensions/mecha-rpc ci
 ## Required checks
 
 ```sh
-npm run check:mecha-rpc:fork
-pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run check
-pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run lint
-pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run test
-pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run build:types
-pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run verify:public-types
-npm run test:mecha-rpc:contract
-npm run test:mecha-rpc:native
-npm --prefix pi-extensions/mecha-rpc run test:coverage
-npm --prefix pi-extensions/mecha-rpc run build
+npm run validate:mecha-rpc:phase1
 ```
+
+The command requires clean mecha-developer and fork worktrees. It runs the fork checks, extension contract and installed-Pi native tests, focused coverage, and declaration build. It creates one run directory at `/tmp/mecha-rpc-acceptance/<mecha-developer-head>/<run-id>/`. Its run record includes the actual mecha-developer and fork heads, installed Pi version, UTC start and finish times, each command and exit status, and the passed native artifacts. The final line prints that record path.
+
+`tests/fixtures/mecha-rpc/acceptance-evidence-v1.json` is the Phase 1 acceptance contract. The validator rejects a run unless every artifact has the same candidate and run identity, and one native artifact records an actual observation of all eight Phase 1 custom message types.
+
+Phase 1 records only the thin extension and checked fork boundary. Router dispatch and persistence, managed HTTP and authentication, mailbox recovery, browser acceptance, and release gates remain Phase 2 or later work.
 
 `test:coverage` writes JSON coverage to `/tmp/mecha-rpc-coverage/` and instruments only `pi-extensions/mecha-rpc/**/*.ts`.
 
@@ -42,4 +39,4 @@ The focused suite covers canonical base64url and malformed envelopes, strict sch
 
 `tests/mecha_rpc_native_pi_e2e.test.ts` starts installed Pi `0.85.0` in fresh RPC processes with the checked fork entry and a local deterministic provider. It prompts all six hidden commands and all nine legacy commands, proves a real child receives its manifest before its first request, checks child result append and stale-result rejection, and starts a fresh generation that rejects an old fence and accepts a changed hash-named definition.
 
-The expected evidence matrix is `tests/fixtures/mecha-rpc/acceptance-evidence-v1.json`. Successful native tests write the matching run artifacts under `/tmp/mecha-rpc-acceptance/`. The fork suite supplies the duplicate-registration, disposer, per-spawn snapshot, and owner-release checks for the public child-factory API.
+The expected evidence contract is `tests/fixtures/mecha-rpc/acceptance-evidence-v1.json`. Successful native tests write matching artifacts only inside the validation run directory. The fork suite supplies the duplicate-registration, disposer, per-spawn snapshot, and owner-release checks for the public child-factory API.
