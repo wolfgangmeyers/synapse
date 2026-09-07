@@ -101,7 +101,7 @@ function validateBootstrapEnvelope(value: unknown, runtime: RuntimeFence): Boots
   const allowed = new Set(["protocol", "delivery_id", "runtime_generation", "session_epoch", "desired_manifest", "manifest_sha256", "restored_request_ids", "inline_policy", "recall_projection"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) throw new TypeError("Bootstrap envelope has unexpected fields");
   assertEnvelopeFence(value, "mecha.bootstrap/v1", runtime);
-  const desired = validateDesiredManifest(value.desired_manifest, { requireBaseline: true });
+  const desired = validateDesiredManifest(value.desired_manifest, { requireBaselineCapabilities: true });
   if (typeof value.manifest_sha256 !== "string" || !SHA256.test(value.manifest_sha256) || value.manifest_sha256 !== hashCanonicalJson(desired)) {
     throw new TypeError("Bootstrap manifest hash is invalid");
   }
@@ -120,7 +120,7 @@ function validateSupplementalEnvelope(value: unknown, current: DesiredManifest, 
   const allowed = new Set(["protocol", "delivery_id", "runtime_generation", "session_epoch", "base_manifest_sha256", "desired_manifest", "manifest_sha256", "added_name"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) throw new TypeError("Supplemental envelope has unexpected fields");
   assertEnvelopeFence(value, "mecha.tools-install/v1", runtime);
-  const desired = validateDesiredManifest(value.desired_manifest);
+  const desired = validateDesiredManifest(value.desired_manifest, { requireBaselineCapabilities: true });
   const currentHash = hashCanonicalJson(current);
   if (value.base_manifest_sha256 !== currentHash || typeof value.manifest_sha256 !== "string" || value.manifest_sha256 !== hashCanonicalJson(desired)) {
     throw new TypeError("Supplemental manifest identity is invalid");
@@ -128,7 +128,9 @@ function validateSupplementalEnvelope(value: unknown, current: DesiredManifest, 
   if (desired.revision !== current.revision + 1 || typeof value.added_name !== "string") throw new TypeError("Supplemental manifest revision is invalid");
   const previous = new Map(current.tools.map((tool) => [tool.name, tool]));
   const newTools = desired.tools.filter((tool) => !previous.has(tool.name));
-  if (newTools.length !== 1 || newTools[0]?.name !== value.added_name) throw new TypeError("Supplemental manifest must add exactly one name");
+  if (newTools.length !== 1 || newTools[0]?.name !== value.added_name || newTools[0]?.name !== `${newTools[0]?.capability_id}__${newTools[0]?.definition_sha256}`) {
+    throw new TypeError("Supplemental manifest must add exactly one immutable name");
+  }
   for (const tool of current.tools) {
     const target = desired.tools.find((candidate) => candidate.name === tool.name);
     if (target === undefined || hashCanonicalJson(target) !== hashCanonicalJson(tool)) throw new TypeError("Supplemental manifest mutates an installed name");
@@ -243,7 +245,7 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
    * its own duplicate proof, and Pi rejects any loader-level name collision.
    */
   const installAcceptedSnapshot = (value: DesiredManifest): DesiredManifest => {
-    const desired = validateDesiredManifest(value, { requireBaseline: true });
+    const desired = validateDesiredManifest(value, { requireBaselineCapabilities: true });
     return installValidatedFull(desired, false);
   };
 

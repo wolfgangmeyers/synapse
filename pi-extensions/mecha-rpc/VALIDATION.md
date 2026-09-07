@@ -1,29 +1,45 @@
 # Phase 1 validation
 
-This package is the fixed thin Pi extension only. It registers the generated managed-tool manifest and carries control messages. It does not open a router, Mailbox, or tmux connection and does not implement router handlers.
+This is the fixed thin Pi extension. It registers the generated managed-tool manifest and carries control messages. Router handlers, durable router ledgers, mailbox recovery, and browser acceptance are outside Phase 1.
 
-## Reproducible checks
+## Fork workspace prerequisite
+
+This package intentionally uses the Wolfgang `pi-packages` fork on `main`. It has no registry release or registry version pin. The `file:../../../pi-packages/packages/pi-subagents` dependency requires a sibling checkout at `../pi-packages` from the mecha-developer root. A clean mecha-developer clone alone cannot install this package.
+
+Before `npm ci`, clone the fork beside this repository, install its workspace dependencies, and keep the checkout clean on the current `origin/main`:
 
 ```sh
-npm run check:mecha-rpc
-npm run test:mecha-rpc
+git clone --branch main https://github.com/wolfgangmeyers/pi-packages.git ../pi-packages
+pnpm --dir ../pi-packages install --frozen-lockfile
+npm run check:mecha-rpc:fork
+npm --prefix pi-extensions/mecha-rpc ci
+```
+
+`check:mecha-rpc:fork` verifies the required source entry, clean `main`, and `HEAD == origin/main`, then prints the source commit used for the run. It is direct provenance for the local source dependency, not a claim that an isolated clone works.
+
+## Required checks
+
+```sh
+npm run check:mecha-rpc:fork
+pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run check
+pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run lint
+pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run test
+pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run build:types
+pnpm --dir ../pi-packages --filter @gotgenes/pi-subagents run verify:public-types
+npm run test:mecha-rpc:contract
 npm run test:mecha-rpc:native
 npm --prefix pi-extensions/mecha-rpc run test:coverage
 npm --prefix pi-extensions/mecha-rpc run build
 ```
 
-`test:coverage` uses the package-local `c8` development dependency and writes its JSON report to `/tmp/mecha-rpc-coverage/`. It instruments only `pi-extensions/mecha-rpc/**/*.ts`.
+`test:coverage` writes JSON coverage to `/tmp/mecha-rpc-coverage/` and instruments only `pi-extensions/mecha-rpc/**/*.ts`.
 
-## Coverage and boundary tests
+## Focused extension coverage
 
-The 21 focused tests cover the strict manifest grammar, malformed envelope inputs, exact 16 KiB control content and details boundaries, closed hidden-command envelopes, all eight custom-message detail schemas, registration failures at positions 1, 8, and 16, child bindings, stale child rejection, and child-stream append delegation.
-
-The child test uses a UUID-shaped child session ID and the fork manager's in-memory binding. It verifies that the child receives a manager-issued `ctx1_` reference, the parent extension receives the pending request, the parent routes the result through `appendControlResultV1`, and child inline calls do not consume root credits.
+The focused suite covers canonical base64url and malformed envelopes, strict schema keywords and enum bounds, manifest ordering and 16–32 limits, raw argument closure, registration collisions and fatal writes, current 17–32 manifests, changed-definition hash names, and accepted/rejected full and supplemental delivery replay. Installation receipts are bounded to 128 per extension runtime and clear at session shutdown.
 
 ## Stock Pi proof
 
-`tests/mecha_rpc_native_pi_e2e.test.ts` runs installed Pi `0.85.0` in RPC mode with this extension and the approved `pi-subagents` fork entry. It uses a local deterministic OpenAI-compatible provider and temporary configuration only.
+`tests/mecha_rpc_native_pi_e2e.test.ts` starts installed Pi `0.85.0` in fresh RPC processes with the checked fork entry and a local deterministic provider. It prompts all six hidden commands and all nine legacy commands, proves a real child receives its manifest before its first request, checks child result append and stale-result rejection, and starts a fresh generation that rejects an old fence and accepts a changed hash-named definition.
 
-The proof checks all 15 application commands, the 16 generated tools on the real child's first model request, raw model tool-call capture, and correlation from that generated control request ID to the later result. A replay of that result produces no second custom result.
-
-The companion `pi-subagents` change adds the public owner-bound inline-factory hook that installs this child extension before the child session binds. Router, durable-ledger, and browser acceptance work remain outside this Phase 1 extension package.
+The expected evidence matrix is `tests/fixtures/mecha-rpc/acceptance-evidence-v1.json`. Successful native tests write the matching run artifacts under `/tmp/mecha-rpc-acceptance/`. The fork suite supplies the duplicate-registration, disposer, per-spawn snapshot, and owner-release checks for the public child-factory API.

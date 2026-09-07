@@ -195,18 +195,16 @@ test("full installs preflight atomically and supplemental installation is one un
   const tools = target.tools as RecordValue[];
   const extra = {
     capability_id: "future_capability",
-    name: "future_capability__" + "b".repeat(64),
     label: "Future capability",
     description: "A bounded future capability.",
     parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
     operation_id: "future.operation",
     prompt_guidelines: [],
   };
-  const definition = { ...extra };
-  delete (definition as RecordValue).name;
-  const definitionHash = hashCanonicalJson(definition);
-  tools.push({ ...extra, definition_sha256: definitionHash, definition_id: `def_${definitionHash}` });
-  tools.sort((left, right) => String(left.capability_id).localeCompare(String(right.capability_id)));
+  const definitionHash = hashCanonicalJson(extra);
+  const extraName = `future_capability__${definitionHash}`;
+  tools.push({ ...extra, name: extraName, definition_sha256: definitionHash, definition_id: `def_${definitionHash}` });
+  tools.sort((left, right) => Buffer.compare(Buffer.from(String(left.capability_id), "utf8"), Buffer.from(String(right.capability_id), "utf8")));
   target.revision = 2;
   const added = registry.installSupplemental({
     protocol: "mecha.tools-install/v1",
@@ -216,7 +214,7 @@ test("full installs preflight atomically and supplemental installation is one un
     base_manifest_sha256: hashCanonicalJson(desired),
     desired_manifest: target,
     manifest_sha256: hashCanonicalJson(target),
-    added_name: extra.name,
+    added_name: extraName,
   });
   assert.equal(added.tools.length, 17);
   assert.equal(pi.tools.length, 17);
@@ -317,4 +315,134 @@ test("a collision or one malformed tool leaves no partial full installation", ()
     inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
   }));
   assert.equal(emptyPi.tools.length, 0);
+});
+
+function manifestTool(capabilityId: string, description = "A bounded future capability."): RecordValue {
+  const definition = {
+    capability_id: capabilityId,
+    label: `Label ${capabilityId}`,
+    description,
+    parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
+    operation_id: `future.${capabilityId}`,
+  };
+  const definitionSha = hashCanonicalJson(definition);
+  return {
+    ...definition,
+    name: `${capabilityId}__${definitionSha}`,
+    definition_id: `def_${definitionSha}`,
+    definition_sha256: definitionSha,
+  };
+}
+
+function sortedManifest(tools: RecordValue[], revision: number): RecordValue {
+  return {
+    protocol: "mecha.tools/v1",
+    revision,
+    tools: tools.sort((left, right) => Buffer.compare(
+      Buffer.from(String(left.capability_id), "utf8"),
+      Buffer.from(String(right.capability_id), "utf8"),
+    )),
+  };
+}
+
+test("fresh current manifests accept valid 17 through 32 tool states and changed definitions use hash names", () => {
+  const baseline = manifest();
+  const baseTools = structuredClone(baseline.tools) as RecordValue[];
+  const current17 = sortedManifest([...baseTools, manifestTool("future_capability")], 2);
+  assert.equal(validateDesiredManifest(current17, { requireBaselineCapabilities: true }).tools.length, 17);
+
+  const current32 = sortedManifest([
+    ...baseTools,
+    ...Array.from({ length: 16 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
+  ], 2);
+  assert.equal(validateDesiredManifest(current32, { requireBaselineCapabilities: true }).tools.length, 32);
+
+  const changedTools = structuredClone(baseline.tools) as RecordValue[];
+  const changed = changedTools.find((tool) => tool.capability_id === "goal")!;
+  const changedDefinition = {
+    capability_id: changed.capability_id,
+    label: changed.label,
+    description: "Changed goal definition.",
+    parameters: changed.parameters,
+    operation_id: changed.operation_id,
+    ...(changed.prompt_snippet === undefined ? {} : { prompt_snippet: changed.prompt_snippet }),
+    ...(changed.prompt_guidelines === undefined ? {} : { prompt_guidelines: changed.prompt_guidelines }),
+  };
+  const changedSha = hashCanonicalJson(changedDefinition);
+  Object.assign(changed, {
+    ...changedDefinition,
+    name: `goal__${changedSha}`,
+    definition_id: `def_${changedSha}`,
+    definition_sha256: changedSha,
+  });
+  const restarted = sortedManifest(changedTools, 2);
+  assert.doesNotThrow(() => validateDesiredManifest(restarted, { requireBaselineCapabilities: true }));
+  assert.equal((restarted.tools as RecordValue[]).find((tool) => tool.capability_id === "goal")!.name, `goal__${changedSha}`);
+
+  const incorrectlyNamedAdditional = structuredClone(current17) as RecordValue;
+  const additional = (incorrectlyNamedAdditional.tools as RecordValue[]).find((tool) => tool.capability_id === "future_capability")!;
+  additional.name = "future_capability";
+  assert.throws(() => validateDesiredManifest(incorrectlyNamedAdditional, { requireBaselineCapabilities: true }));
+
+  const incorrectlyNamedChange = structuredClone(restarted) as RecordValue;
+  const changedAgain = (incorrectlyNamedChange.tools as RecordValue[]).find((tool) => tool.capability_id === "goal")!;
+  changedAgain.name = "goal";
+  assert.throws(() => validateDesiredManifest(incorrectlyNamedChange, { requireBaselineCapabilities: true }));
+
+  const overLimit = sortedManifest([
+    ...(current32.tools as RecordValue[]),
+    manifestTool("future_16"),
+  ], 3);
+  assert.throws(() => validateDesiredManifest(overLimit, { requireBaselineCapabilities: true }));
+});
+
+test("manifest schemas reject every unlisted keyword and enum boundary", () => {
+  const withValue = (schema: RecordValue): RecordValue => ({
+    type: "object", additionalProperties: false, required: ["value"], properties: { value: schema },
+  });
+  for (const keyword of ["$ref", "$defs", "oneOf", "anyOf", "allOf", "not", "const", "format", "pattern", "if", "then", "else", "dependentRequired", "default", "examples", "title"]) {
+    assert.throws(() => validateParametersSchema(withValue({ type: "boolean", [keyword]: keyword === "$ref" ? "#/value" : true })), keyword);
+  }
+  for (const schema of [
+    { type: "string", maxLength: 3, enum: ["only"] },
+    { type: "string", maxLength: 3, enum: ["x", "x"] },
+    { type: "string", maxLength: 3, enum: Array.from({ length: 65 }, (_, index) => String(index)) },
+    { type: "integer", minimum: 0, maximum: 2, enum: [0, 0] },
+    { type: "integer", minimum: 0, maximum: 2, enum: [0, 1.5] },
+    { type: "number", minimum: 0, maximum: 2, enum: [0, 3] },
+  ]) {
+    assert.throws(() => validateParametersSchema(withValue(schema)), JSON.stringify(schema));
+  }
+});
+
+test("manifest ordering, reserved-name collisions, and supplemental capacity fail before registration", () => {
+  const base = manifest();
+  const unordered = structuredClone(base) as RecordValue;
+  (unordered.tools as RecordValue[]).reverse();
+  assert.throws(() => validateDesiredManifest(unordered, { requireBaselineCapabilities: true }));
+
+  const pi = fakePi();
+  const registry = createToolRegistry(pi, {
+    emitControl: async () => {},
+    getRuntime: () => ({ runtimeGeneration: "123e4567-e89b-42d3-a456-426614174000", manifestSha256: "a".repeat(64), sessionEpoch: 1 }),
+    getContextRef: () => "root",
+  });
+  registry.installFull({
+    protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174050",
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    desired_manifest: base, manifest_sha256: hashCanonicalJson(base), restored_request_ids: [],
+    inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
+  });
+  const full32 = sortedManifest([
+    ...(structuredClone(base.tools) as RecordValue[]),
+    ...Array.from({ length: 16 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
+  ], 2);
+  const rejectedCount = pi.tools.length;
+  assert.throws(() => registry.installSupplemental({
+    protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174051",
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    base_manifest_sha256: hashCanonicalJson(base), desired_manifest: full32,
+    manifest_sha256: hashCanonicalJson(full32), added_name: (full32.tools as RecordValue[]).at(-1)!.name,
+  }));
+  assert.equal(pi.tools.length, rejectedCount);
 });

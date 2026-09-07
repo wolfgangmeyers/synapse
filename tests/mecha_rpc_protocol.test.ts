@@ -78,6 +78,14 @@ test("raw hidden envelopes reject malformed UTF-8 and preserve valid size bounda
   assert.throws(() => decodeHiddenEnvelope(encodeRaw({ value: "x".repeat(16 * 1024 + 1) })));
 });
 
+test("hidden envelope decoding accepts only canonical unpadded base64url", () => {
+  const canonical = encodeRaw({ value: "canonical" });
+  assert.deepEqual(decodeHiddenEnvelope(canonical), { value: "canonical" });
+  assert.throws(() => decodeHiddenEnvelope(`${canonical}=`), "padding is not base64url");
+  assert.throws(() => decodeHiddenEnvelope(`+${canonical.slice(1)}`), "standard base64 alphabet is not accepted");
+  assert.throws(() => decodeHiddenEnvelope("eyJ2YWx1ZSI6ImNhbm9uaWNhbCJ9A"), "a decodable noncanonical tail is rejected");
+});
+
 test("all custom details are closed, including legacy availability and nested source rows", () => {
   const valid: Array<[string, RecordValue]> = [
     ["mecha.tools.accepted.v1", { protocol: "mecha.tools/v1", manifest_sha256: MANIFEST_SHA, runtime_generation: GENERATION, session_epoch: 1 }],

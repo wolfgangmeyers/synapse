@@ -1,0 +1,38 @@
+{
+  "protocol": "mecha.phase1-acceptance-evidence/v1",
+  "stock_pi_version": "0.85.0",
+  "artifact_directory": "/tmp/mecha-rpc-acceptance",
+  "required_prompts": {
+    "hidden": [
+      "mecha-bootstrap-v1",
+      "mecha-install-tools-v1",
+      "mecha-control-result-v1",
+      "mecha-mailbox-deliver-v1",
+      "mecha-policy-apply-v1",
+      "mecha-child-snapshot-v1"
+    ],
+    "legacy": [
+      "goal",
+      "goal-lock",
+      "goal-snooze",
+      "goal-snooze-turn-limit",
+      "goal-snooze-budget",
+      "goal-snooze-budget-refill",
+      "mecha-parent-message",
+      "inline-tools",
+      "mecha-reply"
+    ]
+  },
+  "stock_proofs": [
+    "parent-first-request",
+    "child-first-request",
+    "supplemental-replay",
+    "changed-definition-fresh-generation",
+    "stale-generation-rejection"
+  ],
+  "fork_proofs": [
+    "test/lifecycle/child-extension-factories.test.ts",
+    "test/lifecycle/subagent-manager.test.ts",
+    "test/service/service-adapter.test.ts"
+  ]
+}

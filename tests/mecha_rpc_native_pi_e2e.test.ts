@@ -14,6 +14,8 @@ const ROOT = resolve(import.meta.dirname, "..");
 const EXTENSION = join(ROOT, "pi-extensions/mecha-rpc/index.ts");
 const SUBAGENTS_EXTENSION = "/Users/wolfgang/code/pi-packages/packages/pi-subagents/src/index.ts";
 const RUNTIME_GENERATION = "123e4567-e89b-42d3-a456-426614174000";
+const ACCEPTANCE_EVIDENCE = join(ROOT, "tests/fixtures/mecha-rpc/acceptance-evidence-v1.json");
+const ACCEPTANCE_ARTIFACT_DIR = "/tmp/mecha-rpc-acceptance";
 const EXPECTED_COMMANDS = new Set([
   "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1",
   "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
@@ -29,9 +31,10 @@ class StockPiRpc {
   private readonly stderr: string[] = [];
   private readonly process;
 
-  constructor(home: string, baseUrl: string, options: { persistSession?: boolean } = {}) {
+  constructor(home: string, baseUrl: string, options: { persistSession?: boolean; runtimeGeneration?: string } = {}) {
     configureDeterministicProvider(home, baseUrl);
     const persistSession = options.persistSession === true;
+    const runtimeGeneration = options.runtimeGeneration ?? RUNTIME_GENERATION;
     const sessionArgs = persistSession ? ["--session-dir", join(home, "sessions")] : ["--no-session"];
     this.process = spawn("pi", [
       "--mode", "rpc", ...sessionArgs, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline",
@@ -44,7 +47,7 @@ class StockPiRpc {
         ...process.env,
         PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
         TMPDIR: join(home, "tmp"),
-        MECHA_RPC_RUNTIME_GENERATION: RUNTIME_GENERATION,
+        MECHA_RPC_RUNTIME_GENERATION: runtimeGeneration,
         MECHA_RPC_SESSION_EPOCH: "1",
         MECHA_TEST_BASE_URL: baseUrl,
         PI_OFFLINE: "1",
@@ -134,7 +137,7 @@ function configureDeterministicProvider(home: string, baseUrl: string): void {
   }), "utf8");
 }
 
-async function startDeterministicProvider(): Promise<{ baseUrl: string; requests: JsonRecord[]; stop: () => Promise<void> }> {
+async function startDeterministicProvider(options: { firstToolCall?: boolean } = {}): Promise<{ baseUrl: string; requests: JsonRecord[]; stop: () => Promise<void> }> {
   const requests: JsonRecord[] = [];
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -146,7 +149,7 @@ async function startDeterministicProvider(): Promise<{ baseUrl: string; requests
     const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) requests.push(parsed as JsonRecord);
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-    if (requests.length === 1) {
+    if (requests.length === 1 && options.firstToolCall !== false) {
       response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: "raw-goal-call", type: "function", function: { name: "goal", arguments: JSON.stringify({ action: "status" }) } }] }, finish_reason: null }] })}\n\n`);
       response.write(`data: ${JSON.stringify({ id: "deterministic", model: "deterministic-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
     } else {
@@ -312,6 +315,61 @@ function readManifest(): JsonRecord {
   return JSON.parse(readFileSync(join(ROOT, "router/contract/managed-tools-v1.json"), "utf8")) as JsonRecord;
 }
 
+function supplementalManifest(base: JsonRecord): JsonRecord {
+  const desired = structuredClone(base);
+  const tools = desired.tools;
+  if (!Array.isArray(tools)) throw new Error("managed manifest tools are unavailable");
+  const definition = {
+    capability_id: "zz_stock_supplemental",
+    label: "Stock supplemental tool",
+    description: "A bounded stock-Pi supplemental definition.",
+    parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
+    operation_id: "stock.supplemental",
+  };
+  const definitionSha = hashCanonicalJson(definition);
+  tools.push({
+    ...definition,
+    name: `${definition.capability_id}__${definitionSha}`,
+    definition_id: `def_${definitionSha}`,
+    definition_sha256: definitionSha,
+  });
+  desired.revision = 2;
+  return desired;
+}
+
+function changedDefinitionManifest(base: JsonRecord): JsonRecord {
+  const desired = structuredClone(base);
+  const tools = desired.tools;
+  if (!Array.isArray(tools)) throw new Error("managed manifest tools are unavailable");
+  const original = tools.find((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool)
+    && (tool as JsonRecord).capability_id === "goal");
+  if (original === undefined || original === null || typeof original !== "object" || Array.isArray(original)) throw new Error("goal definition is unavailable");
+  const tool = original as JsonRecord;
+  const definition: JsonRecord = {
+    capability_id: tool.capability_id,
+    label: tool.label,
+    description: "Changed goal definition for the fresh stock-Pi generation.",
+    parameters: tool.parameters,
+    operation_id: tool.operation_id,
+    ...(tool.prompt_snippet === undefined ? {} : { prompt_snippet: tool.prompt_snippet }),
+    ...(tool.prompt_guidelines === undefined ? {} : { prompt_guidelines: tool.prompt_guidelines }),
+  };
+  const definitionSha = hashCanonicalJson(definition);
+  Object.assign(tool, {
+    ...definition,
+    name: `goal__${definitionSha}`,
+    definition_id: `def_${definitionSha}`,
+    definition_sha256: definitionSha,
+  });
+  desired.revision = 2;
+  return desired;
+}
+
+function writeAcceptanceArtifact(name: string, evidence: JsonRecord): void {
+  mkdirSync(ACCEPTANCE_ARTIFACT_DIR, { recursive: true });
+  writeFileSync(join(ACCEPTANCE_ARTIFACT_DIR, name), `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+}
+
 function successful(response: JsonRecord): void {
   assert.equal(response.success, true, JSON.stringify(response));
 }
@@ -334,6 +392,15 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     child.once("exit", (code) => code === 0 ? resolveVersion(output.trim()) : reject(new Error(`pi --version exited with ${String(code)}`)));
   });
   assert.match(version, /0\.85\.0/);
+  const evidenceRegistry = JSON.parse(readFileSync(ACCEPTANCE_EVIDENCE, "utf8")) as JsonRecord;
+  assert.equal(evidenceRegistry.stock_pi_version, "0.85.0");
+  const requiredPrompts = evidenceRegistry.required_prompts;
+  assert.ok(requiredPrompts !== null && typeof requiredPrompts === "object" && !Array.isArray(requiredPrompts));
+  const hiddenPrompts = (requiredPrompts as JsonRecord).hidden;
+  const legacyPrompts = (requiredPrompts as JsonRecord).legacy;
+  assert.ok(Array.isArray(hiddenPrompts));
+  assert.ok(Array.isArray(legacyPrompts));
+  assert.deepEqual(new Set([...hiddenPrompts, ...legacyPrompts]), EXPECTED_COMMANDS);
 
   const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-pi-"));
   const provider = await startDeterministicProvider();
@@ -438,6 +505,54 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     successful(duplicateResponse);
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     assert.equal(customMessages(rpc.events, "mecha.control.result.v1").length, 1);
+
+    const supplemental = supplementalManifest(manifest);
+    const supplementalHash = hashCanonicalJson(supplemental);
+    const supplementalTool = (supplemental.tools as JsonRecord[]).find((tool) => tool.capability_id === "zz_stock_supplemental");
+    assert.ok(supplementalTool);
+    const supplementalEnvelope = encodeHiddenEnvelope({
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174003",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: manifestHash,
+      desired_manifest: supplemental, manifest_sha256: supplementalHash, added_name: supplementalTool.name,
+    });
+    successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${supplementalEnvelope}` }));
+    successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${supplementalEnvelope}` }));
+    assert.equal(customMessages(rpc.events, "mecha.tools.accepted.v1").length, 3, "accepted supplemental replay returns a receipt without a second registration");
+
+    successful(await rpc.request({ type: "prompt", message: `/mecha-mailbox-deliver-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.mailbox-deliver/v1", message_id: "stock-mail", content: "Stock managed mail.",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, manifest_sha256: supplementalHash,
+    })}` }));
+    successful(await rpc.request({ type: "prompt", message: `/mecha-policy-apply-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.policy/v1", runtime_generation: RUNTIME_GENERATION, session_epoch: 1, manifest_sha256: supplementalHash,
+      policy: { inline: { enabled: false, credits: {} }, recall: { content: "" } },
+    })}` }));
+    successful(await rpc.request({ type: "prompt", message: `/mecha-child-snapshot-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.child-snapshot/v1", runtime_generation: RUNTIME_GENERATION, session_epoch: 1, manifest_sha256: supplementalHash,
+    })}` }));
+    await waitFor(() => customMessages(rpc.events, "mecha.mailbox.appended.v1").length === 1
+      && customMessages(rpc.events, "mecha.policy.applied.v1").length === 1
+      && customMessages(rpc.events, "mecha.child.snapshot.v1").length === 1 ? true : undefined, "three hidden-command custom messages");
+
+    const observedLegacy = new Set<string>();
+    for (const [index, name] of (legacyPrompts as unknown[]).entries()) {
+      assert.equal(typeof name, "string");
+      const raw = `stock raw argument ${index}`;
+      successful(await rpc.request({ type: "prompt", message: `/${name} ${raw}` }));
+      await waitFor(() => customMessages(rpc.events, "mecha.control.request.v1").find((event) => {
+        const message = event.message as JsonRecord;
+        const details = message.details;
+        return details !== null && typeof details === "object" && !Array.isArray(details)
+          && (details as JsonRecord).legacy_command === name && (details as JsonRecord).raw_arguments === raw;
+      }), `legacy ${name} control frame`);
+      observedLegacy.add(name);
+    }
+    assert.deepEqual(observedLegacy, new Set(legacyPrompts as string[]));
+    writeAcceptanceArtifact("stock-pi-0.85-parent-commands.json", {
+      protocol: "mecha.phase1-stock-proof/v1", pi_version: version, runtime_generation: RUNTIME_GENERATION,
+      prompted_hidden: hiddenPrompts, prompted_legacy: legacyPrompts, accepted_manifest_sizes: [16, 17],
+      supplemental_replay: true, custom_message_types: ["mecha.mailbox.appended.v1", "mecha.policy.applied.v1", "mecha.child.snapshot.v1"],
+    });
   } finally {
     await rpc.stop();
     await provider.stop();
@@ -569,6 +684,52 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
     successful(await rpc.request({ type: "prompt", message: `/mecha-control-result-v1 ${stale}` }));
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     assert.equal(customRecords(recordsIn(join(home, "sessions")), "mecha.control.result.v1").length, 1);
+    writeAcceptanceArtifact("stock-pi-0.85-real-child.json", {
+      protocol: "mecha.phase1-stock-proof/v1", runtime_generation: RUNTIME_GENERATION,
+      parent_first_request: true, child_first_request: true, child_manifest_size: 16,
+      child_context_result_append: true, stale_child_result_appended: false,
+    });
+  } finally {
+    await rpc.stop();
+    await provider.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stock Pi 0.85 rejects an old generation and bootstraps a changed definition in a fresh process", { timeout: 30_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-restart-"));
+  const provider = await startDeterministicProvider({ firstToolCall: false });
+  const generation = "123e4567-e89b-42d3-a456-426614174099";
+  const rpc = new StockPiRpc(home, provider.baseUrl, { runtimeGeneration: generation });
+  try {
+    const changed = changedDefinitionManifest(readManifest());
+    const changedHash = hashCanonicalJson(changed);
+    const stale = encodeHiddenEnvelope({
+      protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174090",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, desired_manifest: changed, manifest_sha256: changedHash,
+      restored_request_ids: [], inline_policy: { enabled: false, credits: {} }, recall_projection: { content: "" },
+    });
+    successful(await rpc.request({ type: "prompt", message: `/mecha-bootstrap-v1 ${stale}` }));
+    await waitFor(() => customMessages(rpc.events, "mecha.tools.rejected.v1").length === 1 ? true : undefined, "stale bootstrap rejection");
+
+    const current = encodeHiddenEnvelope({
+      protocol: "mecha.bootstrap/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174091",
+      runtime_generation: generation, session_epoch: 1, desired_manifest: changed, manifest_sha256: changedHash,
+      restored_request_ids: [], inline_policy: { enabled: false, credits: {} }, recall_projection: { content: "" },
+    });
+    successful(await rpc.request({ type: "prompt", message: `/mecha-bootstrap-v1 ${current}` }));
+    successful(await rpc.request({ type: "prompt", message: "Confirm the restarted current manifest." }));
+    const firstRequest = await waitFor(() => provider.requests[0], "fresh generation model request");
+    const names = requestToolNames(firstRequest);
+    const changedGoal = (changed.tools as JsonRecord[]).find((tool) => tool.capability_id === "goal")!;
+    assert.equal(typeof changedGoal.name, "string");
+    assert.ok(names.has(changedGoal.name));
+    assert.equal(names.has("goal"), false, "a changed definition cannot reuse the old model-visible name");
+    writeAcceptanceArtifact("stock-pi-0.85-fresh-generation.json", {
+      protocol: "mecha.phase1-stock-proof/v1", runtime_generation: generation,
+      stale_generation_rejected: true, changed_definition_name: changedGoal.name,
+      fresh_manifest_size: (changed.tools as JsonRecord[]).length,
+    });
   } finally {
     await rpc.stop();
     await provider.stop();
