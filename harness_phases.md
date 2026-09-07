@@ -27,7 +27,7 @@ These constraints apply to every phase:
 - Track agent connection history. Remove all resources for identities disconnected for one hour.
 - Recurring reminders fire only while their target has a live WebSocket lease.
 - Do not add authentication, federation, Redis, NATS, Kafka, browser UI, cron expressions, or speculative abstractions.
-- Phase 3 consumes the existing router-to-Web UI and router-to-mobile-app contracts. It must not require either client to change its routes, HTTP envelopes or responses, WebSocket frames, registration behavior, CORS/origin behavior, or local unauthenticated access model.
+- Phase 3 preserves existing Web UI and mobile router contracts by default. It may add optional contract data only for the expanded worker-activity view, including narrowly necessary managed status, history, or live-update data. Existing routes, envelopes, responses, frames, registration behavior, CORS/origin behavior, and local unauthenticated access remain unchanged for legacy consumers.
 - Use deterministic clocks, IDs, and scheduler hooks in tests. Tests must not sleep for an hour.
 - Every schema change must have a migration and restart/recovery tests.
 - Every phase ends with tests, static checks, `git diff --check`, and robot review before handoff.
@@ -245,7 +245,7 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 
 **Included**:
 
-- Consume the existing v1 router routes, HTTP envelopes and responses, and `/v1/agents` WebSocket frames as defined by `router/contract/manifest.json` and `protocol/v1/schema.json`. The extension adapts to those contracts; it does not ask the Web UI or mobile app to adopt a Phase 3-specific route, field, frame, registration flow, or behavior.
+- Consume the existing v1 router routes, HTTP envelopes and responses, and `/v1/agents` WebSocket frames as defined by `router/contract/manifest.json` and `protocol/v1/schema.json`. Preserve all legacy behavior. Add only optional data needed by the expanded worker-activity view, including narrowly necessary managed status, history, or live updates. Those additions must not require a change in existing Web UI or mobile screens.
 - Resolve `agent_id` only from the current tmux pane's window name using
   `TMUX_PANE` and `tmux display-message`; reject invalid names and fail closed
   outside tmux.
@@ -273,11 +273,11 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 - Terminal-control behavior.
 - Non-Pi harness support.
 - Active-system installation.
-- Router, Web UI, or mobile-app contract changes. This includes endpoint and response changes, message-envelope changes, WebSocket frame additions or changed semantics/required fields, client registration changes, CORS/origin changes, and authentication or pairing work.
+- Broad router, Web UI, or mobile-app contract changes. Phase 3 must not change existing endpoint or response semantics, existing message-envelope or WebSocket-frame fields, registration, CORS/origin behavior, authentication, pairing, or legacy screens. The only contract exception is additive optional data required by the expanded worker-activity view, including narrowly necessary managed status, history, or live updates.
 
 **Implementation tasks**:
 
-1. Record the current router contract fixture set before extension work: `router/contract/manifest.json`, `router/contract/http-outcomes.json`, `router/contract/frame-cases.json`, and `protocol/v1/schema.json`. Phase 3 must consume this set unchanged and use the established Web UI and mobile-app client behavior as compatibility evidence.
+1. Record the current router contract fixture set before extension work: `router/contract/manifest.json`, `router/contract/http-outcomes.json`, `router/contract/frame-cases.json`, and `protocol/v1/schema.json`. Preserve existing contract behavior as compatibility evidence. Any Phase 3 addition must be optional, limited to the expanded worker-activity view, and limited to narrowly necessary managed status, history, or live-update data.
 2. Convert Phase 1's verified spike into production extension code without retaining duplicate paths.
 3. Implement strict configuration parsing and actionable missing-identity errors.
 4. Implement WebSocket connection states and bounded kickstart behavior.
@@ -307,11 +307,11 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 - Connection refusal triggers bounded kickstart without killing an already-starting router.
 - Every shutdown reason leaves no extension socket, timer, listener, or status residue.
 - A live tmux-hosted Pi acceptance suite covers idle and active cases. Tmux is only the process host.
-- The existing Web UI and mobile app continue to use their current routes, envelopes, WebSocket frames, and registration behavior without source, configuration, or contract changes. Phase 3 preserves the local unauthenticated router decision; it does not add an authentication or origin gate.
+- Existing Web UI and mobile screens continue to use their current routes, envelopes, WebSocket frames, and registration behavior without source, configuration, or behavior changes. Phase 3 may add optional data only for the expanded worker-activity view, including narrowly necessary managed status, history, or live updates. It preserves the local unauthenticated router decision and does not add an authentication or origin gate.
 
 **Worker handoff**:
 
-Provide extension installation instructions for the isolated test environment, live-test transcripts/screenshots or structured evidence, session mode requirements, race cases exercised, confirmation that the recorded router contract fixtures stayed unchanged, and any behavior that differs from `harness_spec.md`.
+Provide extension installation instructions for the isolated test environment, live-test transcripts/screenshots or structured evidence, session mode requirements, race cases exercised, confirmation that legacy router contract behavior stayed unchanged, a list of any optional expanded worker-activity additions and why each is necessary, and any behavior that differs from `harness_spec.md`.
 
 **Estimated complexity**: Complex.
 
