@@ -410,39 +410,30 @@
               <li><code>400</code>: <code>INVALID_JSON</code>, <code>UNKNOWN_FIELD</code>, <code>MISSING_REQUEST_ID</code>, or <code>INVALID_REQUEST_ID</code>. <code>401</code>: <code>UI_SESSION_REQUIRED</code> or <code>UI_SESSION_EXPIRED</code>. <code>403</code>: <code>CSRF_INVALID</code>.</li>
               <li><code>404</code>: <code>AGENT_NOT_FOUND</code>, <code>AUTH_OPERATION_NOT_FOUND</code>, or <code>PROMPT_NOT_FOUND</code>. <code>409</code>: <code>CONFLICT</code>, <code>AGENT_NOT_READY</code>, <code>NAME_IN_USE</code>, <code>AUTH_OPERATION_IN_PROGRESS</code>, or <code>IDEMPOTENCY_CONFLICT</code>.</li>
               <li><code>413</code>: <code>PAYLOAD_TOO_LARGE</code>. <code>422</code>: <code>INVALID_WORKING_DIRECTORY</code>, <code>INVALID_MODEL</code>, <code>MODEL_UNAVAILABLE</code>, or <code>VALIDATION_FAILED</code>. <code>500</code>: <code>INTERNAL</code>. <code>502</code>: <code>AUTH_HELPER_FAILED</code>. <code>503</code>: <code>MANAGED_AGENTS_DISABLED</code>.</li>
-              <li>For a mutation, the router stores key <code>(ui_session_id, method, canonical_path, X-Request-ID)</code>, SHA-256 of its canonical body, and terminal response. The router authorizes the current UI session and matching CSRF proof before this idempotency lookup. An exact replay is available only after both checks pass and returns the stored response without another effect; another body/path returns 409. Terminal keys expire after 24 hours; a nonterminal key is retained until terminal. Session expiry or router restart does not remove its idempotency rows.</li>
+              <li>For a mutation, the durable lookup key is <code>(ui_session_identity_hash, method, X-Request-ID)</code>. The row also stores canonical path, SHA-256 of its canonical body, and the terminal response. The router authorizes the current UI session and matching CSRF proof before lookup, then compares path and body hash. An exact replay returns the stored response without another effect. A changed path or body returns <code>409 IDEMPOTENCY_CONFLICT</code>. Terminal keys expire after 24 hours; a nonterminal key is retained until terminal. Session expiry or router restart does not remove its idempotency rows.</li>
               <li>AC-083 proves expiry and router-restart retention through an internal retained-operation recovery check using the stored session hash, method, canonical path, and request ID. The check is read-only and non-authorizing: it has no HTTP route, does not accept browser credentials, and cannot authorize, execute, or retry a mutation. It returns the retained response and operation ID for reconciliation proof only.</li>
             </ul>
           </div>
         </details>
         <details>
-          <summary>Normative ManagedAgent response</summary>
+          <summary>Normative current managed response</summary>
           <div class="details-body">
 <pre>{
   "agent_id": "review-worker",
   "source": "router-managed",
   "cwd": "/allowed/repository",
-  "model": {"provider":"openai-codex","id":"gpt-5.6-terra","name":"GPT-5.6 Terra"},
+  "model": {"provider":"openai-codex","id":"gpt-5.6-terra"},
   "desired_state": "running",
   "lifecycle_state": "running",
   "activity_state": "idle",
   "accepting_prompts": true,
-  "pi_session_id": "…",
-  "session_epoch": 1,
-  "process_incarnation": "…",
-  "runtime_generation": "…",
   "manifest": {"revision":1,"sha256":"…","installed_tool_count":16},
-  "auth_revision": 4,
-  "started_at": "RFC3339",
+  "created_at": "RFC3339",
+  "started_at": "RFC3339 or null",
   "updated_at": "RFC3339",
-  "last_error": null,
-  "restart": {"unexpected_exits_in_window":0,"next_restart_at":null},
-  "parent_compaction": {"state":"idle","started_at":null,"last_outcome":null},
-  "subagent_version": 18,
-  "subagent_count": 0,
-  "subagents": []
+  "last_error": null
 }</pre>
-            <p><code>process_incarnation</code>, <code>runtime_generation</code>, and <code>pi_session_id</code> are null before first binding. <code>last_error</code> is null or <code>{code,message,at}</code>. No PID, session file path, credential path, token, raw process environment, or secret appears in public JSON.</p>
+            <p><code>managed.PublicAgent</code> is the projection authority for the current managed routes and the Phase 2 restart slice. The fields shown above are its complete allowlist. <code>pi_session_id</code>, <code>session_epoch</code>, PID, process start marker, <code>process_incarnation</code>, <code>runtime_generation</code>, session file path, credential path, token, raw process environment, pending instruction, and raw process output stay durable-only. <code>last_error</code> is null or <code>{code,message,at}</code>.</p>
           </div>
         </details>
         <details>
@@ -847,7 +838,7 @@
 
       <section id="persistence" aria-labelledby="persistence-title">
         <div class="section-head"><span class="section-no">12</span><h2 id="persistence-title"><a class="anchor" href="#persistence">Persistence, reconstruction, and race precedence</a></h2></div>
-        <p class="intro">Use the router's existing SQLite store and migration runner. One additive migration after <code>021_goal_control_revision_history.sql</code> creates or extends only the records below. There is no second database or append-only infrastructure.</p>
+        <p class="intro">Use the router's existing SQLite store and migration runner. Current main has applied <code>022_managed_rpc.sql</code> after <code>021_goal_control_revision_history.sql</code>. The Phase 2 restart slice adds forward <code>023_managed_restart.sql</code>; it does not rewrite an applied migration. There is no second database or append-only infrastructure.</p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Record</th><th>Necessary durable fields</th><th>Retention/cleanup</th></tr></thead>
