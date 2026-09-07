@@ -2,7 +2,6 @@ package transport
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -10,11 +9,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
@@ -30,27 +27,17 @@ type managedHTTPError struct {
 func (e *managedHTTPError) Error() string { return e.code }
 
 func managedPath(path string) bool {
-	return path == "/v1/ui-session" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/")
+	return path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/")
 }
+
+// handleManagedHTTP exposes direct local worker controls. Reachability is the
+// authority boundary, so this path deliberately has no session, CSRF, Origin,
+// or managed CORS handling.
 func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) bool {
-	if r.managed == nil || r.managedSessions == nil || !managedPath(req.URL.Path) {
+	if r.managed == nil || !managedPath(req.URL.Path) {
 		return false
 	}
-	validOrigin, present := managedOrigin(req)
-	if present && !validOrigin {
-		r.writeManagedError(w, req, &managedHTTPError{422, "VALIDATION_FAILED", "Origin is invalid"})
-		return true
-	}
-	r.applyManagedCORS(w, req)
-	if req.Method == http.MethodOptions {
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusNoContent)
-		return true
-	}
 	switch {
-	case req.Method == http.MethodPost && req.URL.Path == "/v1/ui-session":
-		r.handleUISession(w, req)
-		return true
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents":
 		r.handleManagedLaunch(w, req)
 		return true
@@ -61,86 +48,6 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		r.writeManagedError(w, req, &managedHTTPError{404, "NOT_FOUND", "Resource was not found"})
 		return true
 	}
-}
-func managedOrigin(req *http.Request) (bool, bool) {
-	values := req.Header.Values("Origin")
-	if len(values) == 0 {
-		return true, false
-	}
-	if len(values) != 1 {
-		return false, true
-	}
-	value := values[0]
-	if value == "" || value == "null" || strings.ContainsAny(value, " \t\r\n") {
-		return false, true
-	}
-	parsed, err := urlParseOrigin(value)
-	return err == nil && parsed, true
-}
-func urlParseOrigin(value string) (bool, error) {
-	parsed, err := url.Parse(value)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return false, errors.New("origin is not an HTTP(S) origin")
-	}
-	if parsed.Hostname() == "" {
-		return false, errors.New("origin host")
-	}
-	return true, nil
-}
-func (r *Router) applyManagedCORS(w http.ResponseWriter, req *http.Request) {
-	origin := req.Header.Values("Origin")
-	if len(origin) == 1 {
-		w.Header().Set("Access-Control-Allow-Origin", origin[0])
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Vary", "Origin")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Mecha-CSRF, X-Request-ID")
-	}
-}
-
-func (r *Router) handleUISession(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
-		r.writeManagedError(w, req, &managedHTTPError{404, "NOT_FOUND", "Resource was not found"})
-		return
-	}
-	payload, _, err := decodeManagedObject(req, 4096, true)
-	if err != nil {
-		r.writeManagedError(w, req, err)
-		return
-	}
-	if len(payload) != 0 {
-		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "UI session bootstrap accepts only an empty object"})
-		return
-	}
-	old := uiSessionToken(req)
-	if old != "" {
-		r.managedSessions.Invalidate(old)
-	}
-	token, csrf, expires, err := r.managedSessions.Issue()
-	if err != nil {
-		r.writeManagedError(w, req, &managedHTTPError{409, "CONFLICT", "UI session capacity reached"})
-		return
-	}
-	setUISessionCookie(w, req, token, int(uiSessionLifetime.Seconds()))
-	r.writeManagedJSON(w, req, 201, map[string]any{"csrf_token": csrf, "expires_at": expires.UTC().Format(time.RFC3339Nano)}, nil)
-}
-
-func (r *Router) authenticateManaged(req *http.Request) (UISession, error) {
-	token := uiSessionToken(req)
-	if token == "" {
-		return UISession{}, &managedHTTPError{401, "UI_SESSION_REQUIRED", "A UI session is required"}
-	}
-	session, err := r.managedSessions.Authenticate(token)
-	if err != nil {
-		return UISession{}, &managedHTTPError{401, "UI_SESSION_EXPIRED", "The UI session has expired"}
-	}
-	return session, nil
-}
-func (r *Router) requireManagedCSRF(req *http.Request, session UISession) error {
-	if !r.managedSessions.ValidateCSRF(session, req.Header.Get("X-Mecha-CSRF")) {
-		return &managedHTTPError{403, "CSRF_INVALID", "The CSRF proof is invalid"}
-	}
-	return nil
 }
 
 func decodeManagedObject(req *http.Request, max int, requireJSON bool) (map[string]json.RawMessage, []byte, error) {
@@ -230,15 +137,6 @@ func decodeManagedValue(decoder *json.Decoder) (any, error) {
 	return token, nil
 }
 func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
-	session, err := r.authenticateManaged(req)
-	if err != nil {
-		r.writeManagedError(w, req, err)
-		return
-	}
-	if err := r.requireManagedCSRF(req, session); err != nil {
-		r.writeManagedError(w, req, err)
-		return
-	}
 	requestID := req.Header.Get("X-Request-ID")
 	if !canonicalUUID(requestID) {
 		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
@@ -294,7 +192,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		canonicalPath = r.managedPathCanonicalizer(req)
 	}
 	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
-	existing, lookupErr := r.store.FindManagedOperationByIdentity(req.Context(), session.IdentityHash, req.Method, requestID)
+	existing, lookupErr := r.store.FindManagedOperation(req.Context(), req.Method, requestID)
 	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
 		return
@@ -304,24 +202,24 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 			r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
 			return
 		}
-		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+		r.writeManagedRaw(w, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
 		return
 	}
-	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, InitialInstruction: instruction, SessionIdentityHash: session.IdentityHash, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, InitialInstruction: instruction, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
 	if launchErr != nil {
 		var idempotencyConflict *store.ManagedIdempotencyConflictError
 		if errors.As(launchErr, &idempotencyConflict) {
-			r.replayManagedOperation(w, req, session.IdentityHash, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+			r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
 			return
 		}
 		r.writeManagedError(w, req, managedLaunchError(launchErr))
 		return
 	}
 	body, _ := json.Marshal(map[string]any{"operation_id": requestID, "agent": managed.PublicAgent(result.Agent)})
-	r.writeManagedRaw(w, req, 202, map[string]string{"X-Request-ID": requestID, "Content-Type": "application/json; charset=utf-8"}, body)
+	r.writeManagedRaw(w, 202, map[string]string{"X-Request-ID": requestID, "Content-Type": "application/json; charset=utf-8"}, body)
 }
-func (r *Router) replayManagedOperation(w http.ResponseWriter, req *http.Request, sessionHash, requestID, path, bodyHash string) {
-	existing, err := r.store.FindManagedOperationByIdentity(req.Context(), sessionHash, req.Method, requestID)
+func (r *Router) replayManagedOperation(w http.ResponseWriter, req *http.Request, requestID, path, bodyHash string) {
+	existing, err := r.store.FindManagedOperation(req.Context(), req.Method, requestID)
 	if err != nil || existing == nil {
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not replay the operation"})
 		return
@@ -330,7 +228,7 @@ func (r *Router) replayManagedOperation(w http.ResponseWriter, req *http.Request
 		r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
 		return
 	}
-	r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+	r.writeManagedRaw(w, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
 }
 func canonicalManagedBody(payload map[string]json.RawMessage) []byte {
 	keys := make([]string, 0, len(payload))
@@ -404,12 +302,6 @@ func managedLaunchError(err error) error {
 	return &managedHTTPError{422, "VALIDATION_FAILED", "Launch request is invalid"}
 }
 func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request) {
-	session, err := r.authenticateManaged(req)
-	_ = session
-	if err != nil {
-		r.writeManagedError(w, req, err)
-		return
-	}
 	id := strings.TrimPrefix(req.URL.Path, "/v1/managed-agents/")
 	if id == "" || strings.Contains(id, "/") {
 		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
@@ -430,8 +322,7 @@ func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request)
 	}
 	r.writeManagedJSON(w, req, 200, managed.ProjectionEnvelope(snapshot), nil)
 }
-func (r *Router) writeManagedRaw(w http.ResponseWriter, req *http.Request, status int, headers map[string]string, body []byte) {
-	r.applyManagedCORS(w, req)
+func (r *Router) writeManagedRaw(w http.ResponseWriter, status int, headers map[string]string, body []byte) {
 	w.Header().Set("Cache-Control", "no-store")
 	for key, value := range headers {
 		w.Header().Set(key, value)
@@ -444,30 +335,18 @@ func (r *Router) writeManagedRaw(w http.ResponseWriter, req *http.Request, statu
 }
 func (r *Router) writeManagedJSON(w http.ResponseWriter, req *http.Request, status int, value any, headers map[string]string) {
 	body, _ := json.Marshal(value)
-	r.writeManagedRaw(w, req, status, headers, body)
+	r.writeManagedRaw(w, status, headers, body)
 }
 func (r *Router) writeManagedError(w http.ResponseWriter, req *http.Request, err error) {
 	candidate, ok := err.(*managedHTTPError)
 	if !ok {
 		candidate = &managedHTTPError{500, "INTERNAL", "Router could not complete the request"}
 	}
-	if candidate.code == "UI_SESSION_EXPIRED" {
-		clearUISessionCookie(w, req)
-	}
 	headers := map[string]string{}
 	if requestID := requestIDFromRequest(req); requestID != nil {
 		headers["X-Request-ID"] = requestID.(string)
 	}
-	corsRequest := req
-	if candidate.code == "VALIDATION_FAILED" {
-		valid, present := managedOrigin(req)
-		if present && !valid {
-			corsRequest = req.Clone(req.Context())
-			corsRequest.Header = req.Header.Clone()
-			corsRequest.Header.Del("Origin")
-		}
-	}
-	r.writeManagedJSON(w, corsRequest, candidate.status, map[string]any{"error": map[string]any{"code": candidate.code, "message": candidate.message, "details": map[string]any{}}, "request_id": requestIDFromRequest(req)}, headers)
+	r.writeManagedJSON(w, req, candidate.status, map[string]any{"error": map[string]any{"code": candidate.code, "message": candidate.message, "details": map[string]any{}}, "request_id": requestIDFromRequest(req)}, headers)
 }
 func requestIDFromRequest(req *http.Request) any {
 	value := req.Header.Get("X-Request-ID")
@@ -475,29 +354,4 @@ func requestIDFromRequest(req *http.Request) any {
 		return value
 	}
 	return nil
-}
-func (r *Router) connectedAgentsWithManaged(ctx context.Context, includeModels bool, req *http.Request) map[string]any {
-	base := r.connectedAgents(ctx, includeModels)
-	if r.managed == nil || r.managedSessions == nil || uiSessionToken(req) == "" {
-		return base
-	}
-	if _, err := r.managedSessions.Authenticate(uiSessionToken(req)); err != nil {
-		return base
-	}
-	agents, err := r.managed.Agents(ctx)
-	if err != nil {
-		return base
-	}
-	items, ok := base["agents"].([]map[string]any)
-	if !ok {
-		return base
-	}
-	for _, agent := range agents {
-		if agent.LifecycleState == "running" && agent.AcceptingPrompts {
-			items = append(items, map[string]any{"agent_id": agent.AgentID, "source": "router-managed", "activity_state": agent.ActivityState})
-		}
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i]["agent_id"].(string) < items[j]["agent_id"].(string) })
-	base["agents"] = items
-	return base
 }

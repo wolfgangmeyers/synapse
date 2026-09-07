@@ -26,9 +26,9 @@ func TestOwnedProcessGroupSignalReachesManagedDescendant(t *testing.T) {
 	require.Error(t, signalOwnedProcessGroup(0, syscall.SIGTERM))
 }
 
-func TestCommandSpecUsesDirectPiRPCAndFixedExtensions(t *testing.T) {
-	spec := CommandSpec{SessionRoot: "/managed/sessions", SessionID: "session", Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts", CursorExtension: "cursor.ts"}
-	require.Equal(t, []string{"--mode", "rpc", "--session-dir", "/managed/sessions", "--session-id", "session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline", "--provider", "openai-codex", "--model", "gpt-5.6-terra", "-e", "rpc.ts", "-e", "subagents.ts", "-e", "cursor.ts"}, spec.Args())
+func TestCommandSpecUsesDirectPiRPCAndRequiredExtensions(t *testing.T) {
+	spec := CommandSpec{SessionRoot: "/managed/sessions", SessionID: "session", Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts"}
+	require.Equal(t, []string{"--mode", "rpc", "--session-dir", "/managed/sessions", "--session-id", "session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline", "--provider", "openai-codex", "--model", "gpt-5.6-terra", "-e", "rpc.ts", "-e", "subagents.ts"}, spec.Args())
 	env := ChildEnvironmentFor(Config{ManagedHome: "/managed/home", SessionRoot: filepath.Join("/managed/home", "sessions")}, "123e4567-e89b-42d3-a456-426614174000", 2)
 	require.Equal(t, []string{
 		"HOME=/managed/home", "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=/managed/home/tmp", "LANG=C", "LC_ALL=C",

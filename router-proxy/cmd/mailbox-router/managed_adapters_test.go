@@ -1,33 +1,33 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/stretchr/testify/require"
 )
 
-func TestHelperCatalogUsesManagedProtectedAuthStore(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
-	require.NoError(t, err)
-	helper := filepath.Join(root, "auth-helper", "index.mjs")
-	if _, err := os.Stat(filepath.Join(root, "auth-helper", "node_modules", "@earendil-works", "pi-coding-agent")); err != nil {
-		t.Skip("managed helper dependencies are required")
+func TestManagedStartupUsesOnlyCoreLaunchInputs(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	session := filepath.Join(home, "sessions")
+	work := filepath.Join(root, "work")
+	require.NoError(t, os.MkdirAll(session, 0o700))
+	require.NoError(t, os.MkdirAll(work, 0o700))
+	write := func(name, value string, mode os.FileMode) string {
+		path := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte(value), mode))
+		return path
 	}
-	home := t.TempDir()
-	authPath := filepath.Join(home, ".pi", "agent", "auth.json")
-	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
-	require.NoError(t, os.WriteFile(authPath, []byte(`{"openai":{"type":"api_key","key":"synthetic-test-key"}}`), 0o600))
-	catalog, err := (helperCatalog{Path: helper, AuthPath: authPath}).Catalog(context.Background())
-	require.NoError(t, err)
-	found := false
-	for _, model := range catalog.Models {
-		if model.Provider == "openai" && model.ID == "gpt-5.6-terra" {
-			found = true
-		}
-		require.NotContains(t, model.Name, "synthetic-test-key")
-	}
-	require.True(t, found)
+	config := managed.Config{Enabled: true, PiExecutable: write("bin/pi", "#!/bin/sh\n", 0o700), ManagedHome: home, SessionRoot: session, ManifestPath: write("contract/managed.json", `{}`, 0o600), MechaRPCExtension: write("extensions/rpc.ts", "export {}", 0o600), PiSubagentsExtension: write("extensions/subagents.ts", "export {}", 0o600), AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}
+	require.NoError(t, validateManagedStartup(config))
+	config.PiSubagentsExtension = ""
+	require.Error(t, validateManagedStartup(config))
+}
+
+func TestParseManagedRootsDropsEmptyValues(t *testing.T) {
+	require.Equal(t, []string{"/one", "/two"}, parseManagedRoots(" /one, ,/two "))
 }

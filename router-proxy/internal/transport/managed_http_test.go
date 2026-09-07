@@ -23,8 +23,7 @@ func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
-	manifestPath := filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json")
-	manifest, _, err := managed.LoadManifest(manifestPath)
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})
 	require.NoError(t, err)
@@ -35,123 +34,12 @@ func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	return server, durable
 }
 
-func TestManagedSessionRequiresExactObjectAndReflectsCredentialedOrigin(t *testing.T) {
-	server, _ := newManagedHTTPTestServer(t)
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", strings.NewReader(`{"extra":true}`))
-	require.NoError(t, err)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	require.NoError(t, err)
-	defer response.Body.Close()
-	require.Equal(t, http.StatusBadRequest, response.StatusCode)
-
-	request, err = http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", strings.NewReader(`{}`))
-	require.NoError(t, err)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Origin", "https://one.example")
-	response, err = http.DefaultClient.Do(request)
-	require.NoError(t, err)
-	defer response.Body.Close()
-	require.Equal(t, http.StatusCreated, response.StatusCode)
-	require.Equal(t, "https://one.example", response.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "true", response.Header.Get("Access-Control-Allow-Credentials"))
-
-	request, err = http.NewRequest(http.MethodOptions, server.URL+"/v1/managed-agents", nil)
-	require.NoError(t, err)
-	request.Header.Set("Origin", "https://one.example")
-	response, err = http.DefaultClient.Do(request)
-	require.NoError(t, err)
-	defer response.Body.Close()
-	require.Equal(t, http.StatusNoContent, response.StatusCode)
-	require.Equal(t, "https://one.example", response.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "true", response.Header.Get("Access-Control-Allow-Credentials"))
-
-	request, err = http.NewRequest(http.MethodOptions, server.URL+"/v1/managed-agents", nil)
-	require.NoError(t, err)
-	request.Header.Set("Origin", "not-an-origin")
-	response, err = http.DefaultClient.Do(request)
-	require.NoError(t, err)
-	defer response.Body.Close()
-	require.Equal(t, http.StatusUnprocessableEntity, response.StatusCode)
-	require.Empty(t, response.Header.Get("Access-Control-Allow-Origin"))
+func TestCanonicalUUIDUsesTheStandardFiveGroups(t *testing.T) {
+	require.True(t, canonicalUUID("123e4567-e89b-42d3-a456-426614174081"))
+	require.False(t, canonicalUUID("123e4567-e89b-42d3-a456426614174081"))
 }
 
-func TestManagedCredentialedCORSByOrigin(t *testing.T) {
-	server, _ := newManagedHTTPTestServer(t)
-	for _, origin := range []string{"https://one.example", "https://two.example:8443"} {
-		request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", strings.NewReader(`{}`))
-		require.NoError(t, err)
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Origin", origin)
-		response, err := http.DefaultClient.Do(request)
-		require.NoError(t, err)
-		_, _ = io.Copy(io.Discard, response.Body)
-		response.Body.Close()
-		require.Equal(t, http.StatusCreated, response.StatusCode)
-		require.Equal(t, origin, response.Header.Get("Access-Control-Allow-Origin"))
-		require.Equal(t, "true", response.Header.Get("Access-Control-Allow-Credentials"))
-		require.Equal(t, "Origin", response.Header.Get("Vary"))
-
-		request, err = http.NewRequest(http.MethodOptions, server.URL+"/v1/managed-agents", nil)
-		require.NoError(t, err)
-		request.Header.Set("Origin", origin)
-		request.Header.Set("Access-Control-Request-Method", "POST")
-		request.Header.Set("Access-Control-Request-Headers", "content-type, x-mecha-csrf, x-request-id")
-		response, err = http.DefaultClient.Do(request)
-		require.NoError(t, err)
-		response.Body.Close()
-		require.Equal(t, http.StatusNoContent, response.StatusCode)
-		require.Equal(t, origin, response.Header.Get("Access-Control-Allow-Origin"))
-		require.Equal(t, "true", response.Header.Get("Access-Control-Allow-Credentials"))
-		require.Equal(t, "GET, POST, PUT, DELETE, OPTIONS", response.Header.Get("Access-Control-Allow-Methods"))
-		require.Equal(t, "Content-Type, X-Mecha-CSRF, X-Request-ID", response.Header.Get("Access-Control-Allow-Headers"))
-	}
-
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", strings.NewReader(`{}`))
-	require.NoError(t, err)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Origin", "not-an-origin")
-	response, err := http.DefaultClient.Do(request)
-	require.NoError(t, err)
-	response.Body.Close()
-	require.Equal(t, http.StatusUnprocessableEntity, response.StatusCode)
-	require.Empty(t, response.Header.Get("Access-Control-Allow-Origin"))
-
-	request, err = http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", strings.NewReader(`{}`))
-	require.NoError(t, err)
-	request.Header.Set("Content-Type", "application/json")
-	response, err = http.DefaultClient.Do(request)
-	require.NoError(t, err)
-	response.Body.Close()
-	require.Equal(t, http.StatusCreated, response.StatusCode)
-	require.Empty(t, response.Header.Get("Access-Control-Allow-Origin"))
-	require.Empty(t, response.Header.Get("Access-Control-Allow-Credentials"))
-
-	legacy, err := http.Get(server.URL + "/v1/agents")
-	require.NoError(t, err)
-	legacyBody, err := io.ReadAll(legacy.Body)
-	require.NoError(t, err)
-	legacy.Body.Close()
-	require.Equal(t, http.StatusOK, legacy.StatusCode)
-	require.Empty(t, legacy.Header.Get("Access-Control-Allow-Origin"))
-	legacyOriginRequest, err := http.NewRequest(http.MethodGet, server.URL+"/v1/agents", nil)
-	require.NoError(t, err)
-	legacyOriginRequest.Header.Set("Origin", "https://legacy.example")
-	legacyOrigin, err := http.DefaultClient.Do(legacyOriginRequest)
-	require.NoError(t, err)
-	legacyOriginBody, err := io.ReadAll(legacyOrigin.Body)
-	require.NoError(t, err)
-	legacyOrigin.Body.Close()
-	var legacyJSON, legacyOriginJSON map[string]any
-	require.NoError(t, json.Unmarshal(legacyBody, &legacyJSON))
-	require.NoError(t, json.Unmarshal(legacyOriginBody, &legacyOriginJSON))
-	delete(legacyJSON, "generated_at")
-	delete(legacyOriginJSON, "generated_at")
-	require.Equal(t, legacyJSON, legacyOriginJSON)
-	require.Equal(t, "*", legacyOrigin.Header.Get("Access-Control-Allow-Origin"))
-}
-
-func TestManagedAgentGETEnvelopeAndProjectionVersion(t *testing.T) {
+func TestManagedProjectionIsDirectAndKeepsItsVersion(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "router.db")
 	durable, err := store.Open(ctx, database, store.Options{})
@@ -163,26 +51,11 @@ func TestManagedAgentGETEnvelopeAndProjectionVersion(t *testing.T) {
 	router, err := New(Options{Store: durable, Managed: manager})
 	require.NoError(t, err)
 	server := httptest.NewServer(router)
-	bootstrap := func() (*http.Cookie, string) {
-		request, requestErr := http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", strings.NewReader(`{}`))
-		require.NoError(t, requestErr)
-		request.Header.Set("Content-Type", "application/json")
-		response, requestErr := http.DefaultClient.Do(request)
-		require.NoError(t, requestErr)
-		defer response.Body.Close()
-		var body struct {
-			CSRF string `json:"csrf_token"`
-		}
-		require.NoError(t, json.NewDecoder(response.Body).Decode(&body))
-		require.Equal(t, http.StatusCreated, response.StatusCode)
-		return response.Cookies()[0], body.CSRF
-	}
-	cookie, _ := bootstrap()
-	require.NoError(t, durable.ReserveManagedLaunch(ctx, store.ManagedAgentRecord{AgentID: "alpha", Name: "alpha", SlotHeld: true, Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", ManifestRevision: 1, ManifestHash: "manifest"}, store.ManagedOperation{OperationID: "operation", SessionIdentityHash: "session", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "operation", CanonicalBodyHash: "body", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{"operation_id":"operation"}`)}))
+
+	require.NoError(t, durable.ReserveManagedLaunch(ctx, store.ManagedAgentRecord{AgentID: "alpha", Name: "alpha", SlotHeld: true, Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", ManifestRevision: 1, ManifestHash: "manifest"}, store.ManagedOperation{OperationID: "operation", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "operation", CanonicalBodyHash: "body", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{"operation_id":"operation"}`)}))
 	get := func() (map[string]json.RawMessage, int64) {
 		request, requestErr := http.NewRequest(http.MethodGet, server.URL+"/v1/managed-agents/alpha", nil)
 		require.NoError(t, requestErr)
-		request.AddCookie(cookie)
 		response, requestErr := http.DefaultClient.Do(request)
 		require.NoError(t, requestErr)
 		defer response.Body.Close()
@@ -200,28 +73,27 @@ func TestManagedAgentGETEnvelopeAndProjectionVersion(t *testing.T) {
 	require.NoError(t, durable.MarkManagedReady(ctx, "alpha"))
 	_, thirdVersion := get()
 	require.Greater(t, thirdVersion, secondVersion)
-	finalVersion, err := durable.GetProjectionVersion(ctx)
+
+	missing, err := http.Get(server.URL + "/v1/managed-agents/missing")
 	require.NoError(t, err)
-	require.Equal(t, thirdVersion, finalVersion)
+	defer missing.Body.Close()
+	require.Equal(t, http.StatusNotFound, missing.StatusCode)
+
 	require.NoError(t, router.Close(ctx))
-	require.NoError(t, durable.Close())
 	server.Close()
+	require.NoError(t, durable.Close())
 
 	reopened, err := store.Open(ctx, database, store.Options{})
 	require.NoError(t, err)
 	defer reopened.Close()
-	reopenedVersion, err := reopened.GetProjectionVersion(ctx)
-	require.NoError(t, err)
-	require.Equal(t, thirdVersion, reopenedVersion)
 	manager, err = managed.NewManager(managed.ManagerOptions{Store: reopened, Config: managed.Config{Enabled: false}, Manifest: manifest})
 	require.NoError(t, err)
 	router, err = New(Options{Store: reopened, Managed: manager})
 	require.NoError(t, err)
 	server = httptest.NewServer(router)
 	defer func() { server.Close(); _ = router.Close(ctx) }()
-	cookie, _ = bootstrap()
-	envelope, afterReopenVersion := get()
-	require.Equal(t, thirdVersion, afterReopenVersion)
+	envelope, reopenedVersion := get()
+	require.Equal(t, thirdVersion, reopenedVersion)
 	var agent map[string]any
 	require.NoError(t, json.Unmarshal(envelope["agent"], &agent))
 	require.Equal(t, "alpha", agent["agent_id"])
@@ -302,7 +174,7 @@ func managedLegacyCommandsForTest() []string {
 	return []string{"goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"}
 }
 
-func TestLaunchReplayLifecycle(t *testing.T) {
+func TestLaunchReplayLifecycleUsesOneWorkerWideOperation(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
@@ -317,30 +189,18 @@ func TestLaunchReplayLifecycle(t *testing.T) {
 	sort.Strings(active)
 	processFactory := &replayProcessFactory{release: make(chan struct{})}
 	rpcFactory := &replayRPCFactory{active: active}
-	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: processFactory, RPCFactory: rpcFactory, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: processFactory, RPCFactory: rpcFactory, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Managed: manager})
 	require.NoError(t, err)
 	server := httptest.NewServer(router)
 	defer func() { server.Close(); _ = router.Close(ctx); _ = durable.Close() }()
-	bootstrapRequest, err := http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", strings.NewReader(`{}`))
-	require.NoError(t, err)
-	bootstrapRequest.Header.Set("Content-Type", "application/json")
-	bootstrapResponse, err := http.DefaultClient.Do(bootstrapRequest)
-	require.NoError(t, err)
-	var bootstrap struct {
-		CSRF string `json:"csrf_token"`
-	}
-	require.NoError(t, json.NewDecoder(bootstrapResponse.Body).Decode(&bootstrap))
-	bootstrapResponse.Body.Close()
-	cookie := bootstrapResponse.Cookies()[0]
+
 	request := func(id, body string) (int, []byte, http.Header) {
 		req, requestErr := http.NewRequest(http.MethodPost, server.URL+"/v1/managed-agents", strings.NewReader(body))
 		require.NoError(t, requestErr)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Mecha-CSRF", bootstrap.CSRF)
 		req.Header.Set("X-Request-ID", id)
-		req.AddCookie(cookie)
 		response, requestErr := http.DefaultClient.Do(req)
 		require.NoError(t, requestErr)
 		defer response.Body.Close()
@@ -355,6 +215,9 @@ func TestLaunchReplayLifecycle(t *testing.T) {
 	require.Equal(t, alphaStatus, pendingStatus)
 	require.Equal(t, alphaResponse, pendingResponse)
 	require.Equal(t, alphaHeaders.Get("X-Request-ID"), pendingHeaders.Get("X-Request-ID"))
+	conflictStatus, _, _ := request("123e4567-e89b-42d3-a456-426614174081", `{"name":"alpha","cwd":"`+root+`","initial_instruction":"different"}`)
+	require.Equal(t, http.StatusConflict, conflictStatus)
+
 	close(processFactory.release)
 	require.Eventually(t, func() bool {
 		agent, readErr := durable.ManagedAgent(ctx, "alpha")
@@ -364,6 +227,7 @@ func TestLaunchReplayLifecycle(t *testing.T) {
 	require.Equal(t, alphaStatus, readyStatus)
 	require.Equal(t, alphaResponse, readyResponse)
 	require.Equal(t, alphaHeaders.Get("Content-Type"), readyHeaders.Get("Content-Type"))
+
 	betaStatus, betaResponse, betaHeaders := request("123e4567-e89b-42d3-a456-426614174082", `{"name":"beta","cwd":"`+root+`"}`)
 	require.Equal(t, http.StatusAccepted, betaStatus)
 	require.Eventually(t, func() bool {
@@ -376,6 +240,14 @@ func TestLaunchReplayLifecycle(t *testing.T) {
 	require.Equal(t, betaHeaders.Get("X-Request-ID"), failedHeaders.Get("X-Request-ID"))
 }
 
+func TestUISessionRouteIsNotAnActiveManagedRoute(t *testing.T) {
+	server, _ := newManagedHTTPTestServer(t)
+	response, err := http.Post(server.URL+"/v1/ui-session", "application/json", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusNotFound, response.StatusCode)
+}
+
 func sortedJSONKeys(values map[string]json.RawMessage) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -383,57 +255,4 @@ func sortedJSONKeys(values map[string]json.RawMessage) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func TestManagedSessionAndProjectionAreAuthenticated(t *testing.T) {
-	server, _ := newManagedHTTPTestServer(t)
-	response, err := http.Post(server.URL+"/v1/ui-session", "application/json", strings.NewReader(`{}`))
-	require.NoError(t, err)
-	defer response.Body.Close()
-	require.Equal(t, http.StatusCreated, response.StatusCode)
-	require.Contains(t, response.Header.Get("Set-Cookie"), "HttpOnly")
-	require.Contains(t, response.Header.Get("Set-Cookie"), "SameSite=Strict")
-	require.Contains(t, response.Header.Get("Set-Cookie"), "Path=/v1")
-	cookie := response.Cookies()[0]
-	var bootstrap struct {
-		CSRF string `json:"csrf_token"`
-	}
-	body, err := io.ReadAll(response.Body)
-	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(body, &bootstrap))
-	require.NotEmpty(t, bootstrap.CSRF)
-
-	csrfMissing, err := http.NewRequest(http.MethodPost, server.URL+"/v1/managed-agents", strings.NewReader(`{"name":"alpha","cwd":"/tmp"}`))
-	require.NoError(t, err)
-	csrfMissing.Header.Set("Content-Type", "application/json")
-	csrfMissing.AddCookie(cookie)
-	csrfResponse, err := http.DefaultClient.Do(csrfMissing)
-	require.NoError(t, err)
-	defer csrfResponse.Body.Close()
-	require.Equal(t, http.StatusForbidden, csrfResponse.StatusCode)
-
-	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/managed-agents/missing", nil)
-	require.NoError(t, err)
-	request.AddCookie(cookie)
-	response, err = http.DefaultClient.Do(request)
-	require.NoError(t, err)
-	defer response.Body.Close()
-	require.Equal(t, http.StatusNotFound, response.StatusCode)
-
-	response, err = http.Get(server.URL + "/v1/managed-agents/missing")
-	require.NoError(t, err)
-	defer response.Body.Close()
-	require.Equal(t, http.StatusUnauthorized, response.StatusCode)
-
-	invalidRequest, err := http.NewRequest(http.MethodGet, server.URL+"/v1/managed-agents/missing", nil)
-	require.NoError(t, err)
-	invalidRequest.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: "invalid"})
-	invalidResponse, err := http.DefaultClient.Do(invalidRequest)
-	require.NoError(t, err)
-	defer invalidResponse.Body.Close()
-	require.Equal(t, http.StatusUnauthorized, invalidResponse.StatusCode)
-	cleared := invalidResponse.Cookies()[0]
-	require.Equal(t, uiSessionCookieName, cleared.Name)
-	require.Equal(t, "/v1", cleared.Path)
-	require.Equal(t, -1, cleared.MaxAge)
 }

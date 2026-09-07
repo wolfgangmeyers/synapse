@@ -16,12 +16,6 @@ ROUTER_MANAGED_SESSION_ROOT ?=
 ROUTER_MANAGED_MANIFEST ?=
 ROUTER_MANAGED_MECHA_RPC ?=
 ROUTER_MANAGED_PI_SUBAGENTS ?=
-ROUTER_MANAGED_CURSOR ?=
-ROUTER_MANAGED_CURSOR_PACKAGE ?=
-ROUTER_MANAGED_CURSOR_LOCK ?=
-ROUTER_MANAGED_HELPER ?=
-ROUTER_MANAGED_HELPER_LOCK ?=
-ROUTER_MANAGED_UI ?=
 ROUTER_MANAGED_CWD_ROOTS ?=
 ROUTER_MANAGED_QUIET_RECIPIENT ?=
 
@@ -32,7 +26,7 @@ build-router:
 	go build -o "$(ROUTER_BINARY)" ./cmd/mailbox-router
 
 run-router: build-router
-	exec "$(ROUTER_BINARY)" --database "$(ROUTER_DATABASE)" --host "$(ROUTER_HOST)" --port "$(ROUTER_PORT)" --log "$(ROUTER_LOG)" --max-batch-chars "$(ROUTER_MAX_BATCH_CHARS)" --audit-supervisor-target "$(ROUTER_AUDIT_SUPERVISOR_TARGET)" --audit-tmux-session "$(ROUTER_AUDIT_TMUX_SESSION)" --policy-timeout "$(ROUTER_POLICY_TIMEOUT)" --managed="$(ROUTER_MANAGED)" --managed-pi "$(ROUTER_MANAGED_PI)" --managed-home "$(ROUTER_MANAGED_HOME)" --managed-session-root "$(ROUTER_MANAGED_SESSION_ROOT)" --managed-manifest "$(ROUTER_MANAGED_MANIFEST)" --managed-mecha-rpc "$(ROUTER_MANAGED_MECHA_RPC)" --managed-pi-subagents "$(ROUTER_MANAGED_PI_SUBAGENTS)" --managed-cursor "$(ROUTER_MANAGED_CURSOR)" --managed-cursor-package "$(ROUTER_MANAGED_CURSOR_PACKAGE)" --managed-cursor-lock "$(ROUTER_MANAGED_CURSOR_LOCK)" --managed-helper "$(ROUTER_MANAGED_HELPER)" --managed-helper-lock "$(ROUTER_MANAGED_HELPER_LOCK)" --managed-ui "$(ROUTER_MANAGED_UI)" --managed-cwd-roots "$(ROUTER_MANAGED_CWD_ROOTS)" --managed-quiet-recipient "$(ROUTER_MANAGED_QUIET_RECIPIENT)"
+	exec "$(ROUTER_BINARY)" --database "$(ROUTER_DATABASE)" --host "$(ROUTER_HOST)" --port "$(ROUTER_PORT)" --log "$(ROUTER_LOG)" --max-batch-chars "$(ROUTER_MAX_BATCH_CHARS)" --audit-supervisor-target "$(ROUTER_AUDIT_SUPERVISOR_TARGET)" --audit-tmux-session "$(ROUTER_AUDIT_TMUX_SESSION)" --policy-timeout "$(ROUTER_POLICY_TIMEOUT)" --managed="$(ROUTER_MANAGED)" --managed-pi "$(ROUTER_MANAGED_PI)" --managed-home "$(ROUTER_MANAGED_HOME)" --managed-session-root "$(ROUTER_MANAGED_SESSION_ROOT)" --managed-manifest "$(ROUTER_MANAGED_MANIFEST)" --managed-mecha-rpc "$(ROUTER_MANAGED_MECHA_RPC)" --managed-pi-subagents "$(ROUTER_MANAGED_PI_SUBAGENTS)" --managed-cwd-roots "$(ROUTER_MANAGED_CWD_ROOTS)" --managed-quiet-recipient "$(ROUTER_MANAGED_QUIET_RECIPIENT)"
 
 test:
 	go test ./...

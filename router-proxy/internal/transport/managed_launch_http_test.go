@@ -1,9 +1,7 @@
 package transport
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -73,7 +71,7 @@ func (f managedTestRPCFactory) Open(context.Context, managed.Process) (managed.R
 	return f.rpc, nil
 }
 
-func TestManagedLaunchReplayHasOneReservation(t *testing.T) {
+func TestManagedLaunchReplayHasOneReservationWithoutCredentials(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
@@ -88,31 +86,20 @@ func TestManagedLaunchReplayHasOneReservation(t *testing.T) {
 	sort.Strings(names)
 	process := &managedTestProcess{identity: managed.ProcessIdentity{PID: 4321, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
 	sessionID := ""
-	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: managedTestProcessFactory{process: process, session: &sessionID}, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &sessionID, active: names}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: managedTestProcessFactory{process: process, session: &sessionID}, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &sessionID, active: names}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Managed: manager})
 	require.NoError(t, err)
 	server := httptest.NewServer(router)
 	defer func() { server.Close(); _ = router.Close(ctx); _ = durable.Close() }()
-	bootstrapReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/ui-session", bytes.NewBufferString(`{}`))
-	require.NoError(t, err)
-	bootstrapReq.Header.Set("Content-Type", "application/json")
-	bootstrapResp, err := http.DefaultClient.Do(bootstrapReq)
-	require.NoError(t, err)
-	defer bootstrapResp.Body.Close()
-	cookie := bootstrapResp.Cookies()[0]
-	var bootstrap struct {
-		CSRF string `json:"csrf_token"`
-	}
-	require.NoError(t, json.NewDecoder(bootstrapResp.Body).Decode(&bootstrap))
+
 	body := `{"name":"alpha","cwd":"` + root + `","initial_instruction":"hello"}`
 	requestID := "123e4567-e89b-42d3-a456-426614174081"
 	send := func(payload string) *http.Response {
-		request, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/managed-agents", strings.NewReader(payload))
+		request, requestErr := http.NewRequest(http.MethodPost, server.URL+"/v1/managed-agents", strings.NewReader(payload))
+		require.NoError(t, requestErr)
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-Request-ID", requestID)
-		request.Header.Set("X-Mecha-CSRF", bootstrap.CSRF)
-		request.AddCookie(cookie)
 		response, requestErr := http.DefaultClient.Do(request)
 		require.NoError(t, requestErr)
 		return response

@@ -50,46 +50,22 @@
       "error_code": "not_found"
     },
     {
-      "id": "managed-session-bootstrap",
-      "method": "POST",
-      "path": "/v1/ui-session",
-      "status": "verified",
-      "success_status": 201,
-      "request_body": {},
-      "response_headers": {"set-cookie": "mecha_ui_session=<opaque>; HttpOnly; SameSite=Strict; Path=/v1; Max-Age=28800", "cache-control": "no-store"}
-    },
-    {
       "id": "managed-launch",
       "method": "POST",
       "path": "/v1/managed-agents",
       "status": "verified",
       "success_status": 202,
-      "required_headers": ["Cookie", "X-Mecha-CSRF", "X-Request-ID"],
+      "required_headers": ["X-Request-ID"],
+      "request_validation": {"content_type": "application/json", "body": "closed object"},
       "response_shape": {"operation_id": "request_id", "agent": "bounded managed projection"}
     },
     {
-      "id": "managed-auth-error",
+      "id": "managed-launch-replay",
       "method": "POST",
       "path": "/v1/managed-agents",
       "status": "verified",
-      "error_status": 401,
-      "error_code": "UI_SESSION_REQUIRED"
-    },
-    {
-      "id": "managed-preflight",
-      "method": "OPTIONS",
-      "path": "/v1/managed-agents",
-      "status": "verified",
-      "success_status": 204,
-      "response_headers": {"access-control-allow-origin": "<valid Origin>", "access-control-allow-credentials": "true", "vary": "Origin", "cache-control": "no-store"}
-    },
-    {
-      "id": "managed-malformed-origin",
-      "method": "OPTIONS",
-      "path": "/v1/managed-agents",
-      "status": "verified",
-      "error_status": 422,
-      "error_code": "VALIDATION_FAILED"
+      "success_status": 202,
+      "request_validation": {"same_method_and_request_id": "exact canonical path/body replay", "changed_path_or_body": "409 IDEMPOTENCY_CONFLICT"}
     },
     {
       "id": "managed-agent-projection",

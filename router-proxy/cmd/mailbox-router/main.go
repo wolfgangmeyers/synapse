@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -46,19 +45,13 @@ func parseConfig(args []string) (config, error) {
 	flags.DurationVar(&result.policyTimeout, "policy-timeout", transport.DefaultPolicyTimeout, "maximum duration for one native policy run")
 	var managedEnabled bool
 	flags.BoolVar(&managedEnabled, "managed", false, "enable router-managed Pi launches")
-	var managedPi, managedHome, managedSession, managedManifest, managedExtension, managedSubagents, managedCursor, managedHelper, managedHelperLock, managedCursorPackage, managedCursorLock, managedUI, managedRoots, managedRecipient string
+	var managedPi, managedHome, managedSession, managedManifest, managedExtension, managedSubagents, managedRoots, managedRecipient string
 	flags.StringVar(&managedPi, "managed-pi", "", "installed Pi executable")
 	flags.StringVar(&managedHome, "managed-home", "", "managed Pi HOME root")
 	flags.StringVar(&managedSession, "managed-session-root", "", "managed Pi session root")
 	flags.StringVar(&managedManifest, "managed-manifest", "", "managed tool manifest")
 	flags.StringVar(&managedExtension, "managed-mecha-rpc", "", "fixed mecha-rpc extension")
 	flags.StringVar(&managedSubagents, "managed-pi-subagents", "", "checked pi-subagents extension")
-	flags.StringVar(&managedCursor, "managed-cursor", "", "pinned Cursor extension")
-	flags.StringVar(&managedHelper, "managed-helper", "", "one-shot model helper")
-	flags.StringVar(&managedHelperLock, "managed-helper-lock", "", "helper lockfile")
-	flags.StringVar(&managedCursorPackage, "managed-cursor-package", "", "Cursor package root")
-	flags.StringVar(&managedCursorLock, "managed-cursor-lock", "", "Cursor package lockfile")
-	flags.StringVar(&managedUI, "managed-ui", "", "built router UI distribution")
 	flags.StringVar(&managedRoots, "managed-cwd-roots", "", "comma-separated allowed working-directory roots")
 	flags.StringVar(&managedRecipient, "managed-quiet-recipient", "", "canonical quiet recipient")
 	if err := flags.Parse(args); err != nil {
@@ -88,13 +81,13 @@ func parseConfig(args []string) (config, error) {
 	if result.policyTimeout <= 0 {
 		return config{}, errors.New("--policy-timeout must be positive")
 	}
-	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursor, CursorPackage: managedCursorPackage, CursorLockfile: managedCursorLock, HelperPath: managedHelper, HelperLockfile: managedHelperLock, UIDistribution: managedUI, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
+	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--help" {
-		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--managed=false|true] [managed fixed-input flags]")
+		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--managed=false|true] [managed launch flags]")
 		return
 	}
 	options, err := parseConfig(os.Args[1:])
@@ -102,7 +95,6 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
-	options.managed.Expected = managedExpectedFromEnvironment()
 	if err := validateManagedStartup(options.managed); err != nil {
 		log.Fatal(err)
 	}
@@ -140,13 +132,13 @@ func main() {
 			_ = durable.Close()
 			log.Fatal(err)
 		}
-		manifest, _, manifestErr := managed.ValidateManifestFile(options.managed.ManifestPath, options.managed.Expected.ManifestSHA256)
+		manifest, _, manifestErr := managed.ValidateManifestFile(options.managed.ManifestPath, "")
 		if manifestErr != nil {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()
 			log.Fatal(manifestErr)
 		}
-		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.StoreCatalogSource{Store: durable, Helper: helperCatalog{Path: options.managed.HelperPath, AuthPath: filepath.Join(options.managed.ManagedHome, ".pi", "agent", "auth.json")}}})
+		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()
