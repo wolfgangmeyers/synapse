@@ -101,7 +101,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	}
 	catalog := options.CatalogSource
 	if catalog == nil {
-		catalog = CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})
+		catalog = CatalogFromModels(Model{Provider: "openai", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	return &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, runCtx: runCtx, cancel: cancel}, nil
@@ -140,15 +140,20 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 	if err != nil {
 		return LaunchResult{}, err
 	}
-	catalog, err := m.catalog.Catalog(ctx)
-	if err != nil {
-		return LaunchResult{}, err
+	var selected Model
+	if selector, ok := m.catalog.(ModelSelector); ok {
+		selected, err = selector.Select(ctx, request.Model)
+	} else {
+		var catalog Catalog
+		catalog, err = m.catalog.Catalog(ctx)
+		if err == nil {
+			var saved *store.ManagedModel
+			saved, err = m.store.GetDefaultModel(ctx)
+			if err == nil {
+				selected, err = SelectModel(request.Model, saved, catalog)
+			}
+		}
 	}
-	saved, err := m.store.GetDefaultModel(ctx)
-	if err != nil {
-		return LaunchResult{}, err
-	}
-	selected, err := SelectModel(request.Model, saved, catalog)
 	if err != nil {
 		return LaunchResult{}, err
 	}

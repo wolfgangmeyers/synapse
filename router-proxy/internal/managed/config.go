@@ -36,6 +36,7 @@ type ExpectedIdentities struct {
 	PiSHA256               string
 	ManifestSHA256         string
 	MechaRPCHash           string
+	MechaRPCTreeHash       string
 	PiSubagentsEntryHash   string
 	PiSubagentsTreeHash    string
 	CursorExtensionHash    string
@@ -115,7 +116,7 @@ func (c Config) Validate() error {
 	if !managedRecipientRE.MatchString(copy.CanonicalQuietRecipientID) {
 		return errors.New("canonical quiet recipient is invalid")
 	}
-	if copy.Expected.PiVersion != "0.85.0" || copy.Expected.PiSHA256 == "" || copy.Expected.ManifestSHA256 == "" || copy.Expected.MechaRPCHash == "" || copy.Expected.PiSubagentsEntryHash == "" || copy.Expected.PiSubagentsTreeHash == "" || copy.Expected.CursorExtensionHash == "" || copy.Expected.CursorPackageHash == "" || copy.Expected.CursorResolvedIdentity == "" || copy.Expected.CursorLockfileHash == "" || copy.Expected.CursorTreeHash == "" || copy.Expected.HelperHash == "" || copy.Expected.HelperLockfileHash == "" || copy.Expected.HelperTreeHash == "" || copy.Expected.UIDistributionTreeHash == "" {
+	if copy.Expected.PiVersion != "0.85.0" || copy.Expected.PiSHA256 == "" || copy.Expected.ManifestSHA256 == "" || copy.Expected.MechaRPCHash == "" || copy.Expected.MechaRPCTreeHash == "" || copy.Expected.PiSubagentsEntryHash == "" || copy.Expected.PiSubagentsTreeHash == "" || copy.Expected.CursorExtensionHash == "" || copy.Expected.CursorPackageHash == "" || copy.Expected.CursorResolvedIdentity == "" || copy.Expected.CursorLockfileHash == "" || copy.Expected.CursorTreeHash == "" || copy.Expected.HelperHash == "" || copy.Expected.HelperLockfileHash == "" || copy.Expected.HelperTreeHash == "" || copy.Expected.UIDistributionTreeHash == "" {
 		return errors.New("managed mode requires pinned immutable identities for every fixed runtime input")
 	}
 	if len(copy.AllowedWorkingDirectoryRoots) == 0 {
@@ -214,6 +215,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("%s: %w", item.name, err)
 			}
 		}
+	}
+	if err := verifyTreeHash(filepath.Dir(copy.MechaRPCExtension), copy.Expected.MechaRPCTreeHash); err != nil {
+		return fmt.Errorf("mecha-rpc tree: %w", err)
 	}
 	for _, item := range []struct{ name, path, hash string }{{"Cursor lockfile", copy.CursorLockfile, copy.Expected.CursorLockfileHash}, {"helper lockfile", copy.HelperLockfile, copy.Expected.HelperLockfileHash}} {
 		if item.hash != "" {

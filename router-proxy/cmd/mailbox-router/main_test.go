@@ -2,18 +2,23 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +32,176 @@ func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	require.Equal(t, "supervisor", parsed.auditSupervisorTarget)
 	require.Equal(t, "mecha", parsed.auditTmuxSession)
 	require.Equal(t, transport.DefaultPolicyTimeout, parsed.policyTimeout)
+}
+
+func hashManagedTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func hashManagedTestTree(t *testing.T, root string) string {
+	t.Helper()
+	type entry struct {
+		name string
+		data []byte
+	}
+	var entries []entry
+	require.NoError(t, filepath.WalkDir(root, func(path string, item fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if item.IsDir() {
+			if item.Name() == "node_modules" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if item.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("tree contains symlink: %s", path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		name, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, entry{filepath.ToSlash(name), data})
+		return nil
+	}))
+	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+	digest := sha256.New()
+	for _, item := range entries {
+		_, _ = digest.Write([]byte(item.name))
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write(item.data)
+		_, _ = digest.Write([]byte{0})
+	}
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string) {
+	t.Helper()
+	root := t.TempDir()
+	write := func(path, contents string, mode os.FileMode) {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte(contents), mode))
+	}
+	pi := filepath.Join(root, "bin", "pi")
+	write(pi, "#!/bin/sh\nprintf '0.85.0\\n'\n", 0o700)
+	manifest := filepath.Join(root, "manifest.json")
+	write(manifest, `{"revision":1,"tools":[]}`, 0o600)
+	mechaRoot := filepath.Join(root, "mecha-rpc")
+	mecha := filepath.Join(mechaRoot, "index.ts")
+	write(mecha, "import './protocol.js';\n", 0o600)
+	write(filepath.Join(mechaRoot, "protocol.ts"), "export const protocol = 1;\n", 0o600)
+	subagentsRoot := filepath.Join(root, "pi-subagents")
+	subagents := filepath.Join(subagentsRoot, "src", "index.ts")
+	write(subagents, "export default function extension() {}\n", 0o600)
+	write(filepath.Join(subagentsRoot, "src", "child.ts"), "export const child = true;\n", 0o600)
+	cursorRoot := filepath.Join(root, "cursor")
+	cursor := filepath.Join(cursorRoot, "dist", "index.js")
+	write(cursor, "export default function extension() {}\n", 0o600)
+	cursorPackage := filepath.Join(cursorRoot, "package.json")
+	write(cursorPackage, `{"name":"@mecha/cursor","version":"1.0.0"}`, 0o600)
+	cursorLock := filepath.Join(cursorRoot, "package-lock.json")
+	write(cursorLock, `{"lockfileVersion":3}`, 0o600)
+	helperRoot := filepath.Join(root, "helper")
+	helper := filepath.Join(helperRoot, "index.mjs")
+	write(helper, "console.log('{}');\n", 0o600)
+	write(filepath.Join(helperRoot, "providers.mjs"), "export const providers = [];\n", 0o600)
+	helperLock := filepath.Join(helperRoot, "package-lock.json")
+	write(helperLock, `{"lockfileVersion":3}`, 0o600)
+	ui := filepath.Join(root, "ui")
+	write(filepath.Join(ui, "index.html"), "<!doctype html>", 0o600)
+	write(filepath.Join(ui, "app.js"), "console.log('ui');\n", 0o600)
+	home := filepath.Join(root, "home")
+	sessionRoot := filepath.Join(home, "sessions")
+	workRoot := filepath.Join(root, "work")
+	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
+	require.NoError(t, os.MkdirAll(workRoot, 0o700))
+	config := managed.Config{
+		Enabled: true, PiExecutable: pi, ManagedHome: home, SessionRoot: sessionRoot,
+		ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents,
+		CursorExtension: cursor, CursorPackage: cursorRoot, CursorLockfile: cursorLock,
+		HelperPath: helper, HelperLockfile: helperLock, UIDistribution: ui,
+		AllowedWorkingDirectoryRoots: []string{workRoot}, CanonicalQuietRecipientID: "supervisor",
+		Expected: managed.ExpectedIdentities{
+			PiVersion: "0.85.0", PiSHA256: hashManagedTestFile(t, pi), ManifestSHA256: hashManagedTestFile(t, manifest),
+			MechaRPCHash: hashManagedTestFile(t, mecha), MechaRPCTreeHash: hashManagedTestTree(t, mechaRoot),
+			PiSubagentsEntryHash: hashManagedTestFile(t, subagents), PiSubagentsTreeHash: hashManagedTestTree(t, subagentsRoot),
+			CursorExtensionHash: hashManagedTestFile(t, cursor), CursorPackageHash: hashManagedTestFile(t, cursorPackage),
+			CursorResolvedIdentity: "@mecha/cursor@1.0.0", CursorLockfileHash: hashManagedTestFile(t, cursorLock), CursorTreeHash: hashManagedTestTree(t, cursorRoot),
+			HelperHash: hashManagedTestFile(t, helper), HelperLockfileHash: hashManagedTestFile(t, helperLock), HelperTreeHash: hashManagedTestTree(t, helperRoot),
+			UIDistributionTreeHash: hashManagedTestTree(t, ui),
+		},
+	}
+	return config, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "mecha-tree": filepath.Join(mechaRoot, "protocol.ts"), "subagents": subagents, "subagents-tree": filepath.Join(subagentsRoot, "src", "child.ts"), "cursor": cursor, "cursor-package": cursorPackage, "cursor-lock": cursorLock, "cursor-tree": filepath.Join(cursorRoot, "dist", "tampered.js"), "helper": helper, "helper-tree": filepath.Join(helperRoot, "providers.mjs"), "helper-lock": helperLock, "ui-tree": filepath.Join(ui, "tampered.js")}
+}
+
+func TestManagedStartupRejectsTamperedFixedInputsBeforeListen(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{"pi", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["pi"], []byte("#!/bin/sh\nprintf '0.85.0\\n'\nprintf tampered\n"), 0o700))
+		}},
+		{"manifest", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["manifest"], []byte(`{"revision":2}`), 0o600))
+		}},
+		{"mecha-rpc-entry", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["mecha"], []byte("tampered\n"), 0o600))
+		}},
+		{"mecha-rpc-local-module", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["mecha-tree"], []byte("tampered\n"), 0o600))
+		}},
+		{"pi-subagents-entry", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["subagents"], []byte("tampered\n"), 0o600))
+		}},
+		{"pi-subagents-local-module", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["subagents-tree"], []byte("tampered\n"), 0o600))
+		}},
+		{"cursor-entry", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["cursor"], []byte("tampered\n"), 0o600))
+		}},
+		{"cursor-package", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["cursor-package"], []byte(`{"name":"@mecha/cursor","version":"9.9.9"}`), 0o600))
+		}},
+		{"cursor-lockfile", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["cursor-lock"], []byte(`{"lockfileVersion":2}`), 0o600))
+		}},
+		{"cursor-tree", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["cursor-tree"], []byte("tampered\n"), 0o600))
+		}},
+		{"helper-source", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["helper"], []byte("tampered\n"), 0o600))
+		}},
+		{"helper-local-module", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["helper-tree"], []byte("tampered\n"), 0o600))
+		}},
+		{"helper-lockfile", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["helper-lock"], []byte(`{"lockfileVersion":2}`), 0o600))
+		}},
+		{"ui-tree", func(paths map[string]string) {
+			require.NoError(t, os.WriteFile(paths["ui-tree"], []byte("tampered\n"), 0o600))
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			config, paths := managedStartupTestFixture(t)
+			testCase.mutate(paths)
+			require.Error(t, validateManagedStartup(config))
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err, "startup validation must happen before listener creation")
+			require.NoError(t, listener.Close())
+		})
+	}
 }
 
 func TestManagedConfigurationFailureDoesNotBindListener(t *testing.T) {

@@ -88,7 +88,7 @@ func TestManagedLaunchReplayHasOneReservation(t *testing.T) {
 	sort.Strings(names)
 	process := &managedTestProcess{identity: managed.ProcessIdentity{PID: 4321, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
 	sessionID := ""
-	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: managedTestProcessFactory{process: process, session: &sessionID}, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &sessionID, active: names}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: managedTestProcessFactory{process: process, session: &sessionID}, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &sessionID, active: names}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true})})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Managed: manager})
 	require.NoError(t, err)

@@ -114,6 +114,7 @@ func TestManagedRouterWithInstalledPiReachesReadyWithoutMailbox(t *testing.T) {
 		PiSHA256:               nativeHashFile(t, pi),
 		ManifestSHA256:         nativeHashFile(t, filepath.Join(root, "router", "contract", "managed-tools-v1.json")),
 		MechaRPCHash:           nativeHashFile(t, mecha),
+		MechaRPCTreeHash:       nativeHashTree(t, filepath.Dir(mecha)),
 		PiSubagentsEntryHash:   nativeHashFile(t, subagents),
 		PiSubagentsTreeHash:    nativeHashTree(t, filepath.Dir(filepath.Dir(subagents))),
 		CursorExtensionHash:    nativeHashFile(t, cursor),
@@ -136,7 +137,7 @@ func TestManagedRouterWithInstalledPiReachesReadyWithoutMailbox(t *testing.T) {
 			UIDistribution: ui, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor", Expected: expected,
 		},
 		Manifest:      manifest,
-		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true}),
 	})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Host: "127.0.0.1", Port: 0, Managed: manager})
