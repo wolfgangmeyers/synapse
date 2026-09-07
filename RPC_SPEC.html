@@ -352,6 +352,19 @@
             </tbody>
           </table>
         </div>
+        <details open>
+          <summary>Current Phase 2 restart-slice contract</summary>
+          <div class="details-body">
+            <p>This slice adds reservation and preparation only. Crash-loop execution, router-restart execution, policy projection, authoritative child snapshots, public prompt delivery, browser UI, and provider auth remain future work.</p>
+            <ul>
+              <li><strong>Eligibility:</strong> a restart reservation requires <code>desired_state=running</code>, <code>lifecycle_state=running</code>, <code>accepting_prompts=true</code>, <code>slot_held=true</code>, and <code>activity_state</code> of <code>active</code> or <code>idle</code>. It also requires one exact live router-owned process/RPC binding whose session ID, session epoch, process incarnation, runtime generation, PID/start marker, and process-group leadership match the durable fences. No restart transition may already exist for the agent.</li>
+              <li><strong>Atomic reservation:</strong> <code>store.ReserveManagedRestart</code> uses one immediate transaction to create the single bounded restart transition and set <code>accepting_prompts=false</code>. <code>managed.Manager</code> runs that transaction through the same per-agent serializer used for admission.</li>
+              <li><strong>Preparation:</strong> after reservation, <code>get_state</code> runs under one five-second deadline before a stop signal, replacement start, or prompt delivery. A deadline expiry or any state-read error runs the rollback transaction. It deletes the transition, restores the pre-reservation desired/lifecycle/activity/prompt/slot values, and records exactly <code>{code:&quot;RESTART_PREPARATION_FAILED&quot;,message:&quot;restart preparation failed&quot;}</code> in the durable last error. The raw timeout or state-read text is not durable.</li>
+              <li><strong>Internal prompt-admission seam:</strong> <code>managed.Manager.AdmitPrompt(ctx, agentID, message)</code> is internal Go code. It holds the same per-agent serializer, reads the durable ready and accepting state plus the exact live binding, then calls that binding's <code>RPC.Prompt</code>. Any failed admission returns the typed <code>AGENT_NOT_READY</code> result without a prompt call or queue. This slice adds no HTTP route, browser state, manifest command, or P3 surface.</li>
+              <li><strong>Required tests:</strong> <code>TestReserveManagedRestartAtomicallyDisablesPromptAdmission</code> admits one fake prompt before reservation, then proves the next admission returns <code>AGENT_NOT_READY</code> and the RPC prompt count does not increase. <code>TestRestartPreparationFailurePersistsExactDurableError</code> covers a five-second <code>get_state</code> timeout and a state-read error; both assert the exact durable code and message above. <code>TestReserveManagedRestartRejectsIneligibleRowsWithoutEffects</code> covers every failed eligibility condition and asserts no operation or transition, no agent-row or projection-version mutation, no slot mutation, and zero process/RPC/async calls.</li>
+            </ul>
+          </div>
+        </details>
         <div class="schema-grid" style="margin-top:14px">
           <article class="card">
             <h3>Lifecycle and activity values</h3>
@@ -368,7 +381,7 @@
               <li><code>get_active_tools</code> contains exactly the accepted full manifest's Pi-visible names: one current definition for each of the 16 required baseline capabilities plus any accepted supplemental capabilities.</li>
               <li>Policy projection and the prescribed authoritative child snapshot operation complete.</li>
             </ol>
-            <p>No initial instruction, mailbox delivery, or other model prompt may pass before all five.</p>
+            <p>Full Phase 2 requires all five gates before any initial instruction, mailbox delivery, or other model prompt.</p><p><strong>Current restart slice:</strong> it completes gates one through four only. Policy projection and the authoritative child snapshot remain future Phase 2 work. No instruction, mailbox delivery, legacy-command prompt, or model prompt may pass before the first four gates.</p>
           </article>
         </div>
       </section>
@@ -843,7 +856,7 @@
           <table>
             <thead><tr><th>Record</th><th>Necessary durable fields</th><th>Retention/cleanup</th></tr></thead>
             <tbody>
-              <tr><td><code>managed_agents</code></td><td>Agent ID, cwd, selected model, desired/lifecycle/activity state, Pi session ID/file, session epoch, process PID/start marker/incarnation, runtime generation, accepted manifest revision/hash, auth revision, crash timestamps, pending mutation, compaction projection, timestamps, pending initial instruction until accepted.</td><td>Until successful terminate. Initial instruction clears after acceptance. PID/path never public.</td></tr>
+              <tr><td><code>managed_agents</code></td><td>Agent ID, cwd, selected model, desired/lifecycle/activity state, Pi session ID/file, session epoch, process PID/start marker/incarnation, runtime generation, accepted manifest revision/hash, auth revision, crash timestamps, pending mutation, compaction projection, timestamps, pending initial instruction until accepted.</td><td>Until successful terminate. Initial instruction clears after acceptance. PID/path never public.</td></tr><tr><td><code>managed_restart_transitions</code></td><td>Agent ID, transition ID/state, full process/session/runtime fences, and the pre-reservation prompt/lifecycle/activity/slot values needed for preparation rollback.</td><td>At most one transition per agent. Delete it on preparation rollback or terminal restart, and when its agent is terminated.</td></tr>
               <tr><td><code>managed_tool_manifest</code></td><td>One router-wide committed desired manifest, canonical bytes, revision/hash, definitions, and optional staged target/state.</td><td>Retain current plus prior committed revision for rollback; replacing prior is transactional after target acceptance. No unbounded revision history.</td></tr>
               <tr><td><code>managed_control_requests</code></td><td>Request/result IDs, agent/session/process/context/tool/definition/operation/manifest fences, canonical input hash, state, bounded result/error, handler timestamps, delivery receipt.</td><td>200 newest per agent and 30 days, but never prune nonterminal rows. Delete on terminate.</td></tr>
               <tr><td><code>managed_http_operations</code></td><td>UI session ID hash, method/path/request ID, canonical body hash, state, bounded terminal response.</td><td>Terminal rows expire after 24 hours; nonterminal rows remain until terminal. Session logout does not delete them.</td></tr>
@@ -865,7 +878,7 @@
               <li>Manual restart and auth restart coalesce into one same-session restart. Restart All does not create a second action for an already pending agent.</li>
               <li>Terminate aborts immediately. Reset/restart/auth refresh stop accepting prompts and wait for the current turn to settle. They do not infer settlement from silence.</li>
               <li>An exit with the exact current incarnation and <code>expected_exit=true</code> never increments crash count. A callback from any older incarnation is stale and has no effect.</li>
-              <li>A browser prompt arriving when <code>accepting_prompts=false</code> returns <code>409 AGENT_NOT_READY</code>; it is not queued across a lifecycle boundary.</li>
+              <li>When the future browser prompt route exists, a prompt arriving when <code>accepting_prompts=false</code> returns <code>409 AGENT_NOT_READY</code>; it is not queued across a lifecycle boundary. The current restart slice exposes no public prompt route. Its internal admission seam returns the same typed result without a prompt call.</li>
             </ul>
           </div>
         </details>
