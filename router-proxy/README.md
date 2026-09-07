@@ -22,6 +22,8 @@ The launcher uses `~/.mecha-developer/router.sqlite`, `~/.mecha-developer/router
 
 The launcher also enables the read-only tmux/router audit. It checks the existing `mecha` tmux session every 30 minutes and durably sends a summary to `supervisor` when it finds unmapped windows or live agents without a goal or recurring reminder. It never provisions tmux. Set `MECHA_ROUTER_AUDIT_SUPERVISOR_TARGET`, `MECHA_ROUTER_AUDIT_TMUX_SESSION`, or `MECHA_ROUTER_POLICY_TIMEOUT` to override the delivery target, observed session, or per-run policy timeout. Only one unsettled audit message is retained, so changed findings do not build a queue while the target is away.
 
+Managed Pi launch is opt-in and remains disabled unless `MECHA_ROUTER_MANAGED=true` is set. Before enabling it, install the pinned helper dependencies with `npm --prefix auth-helper ci --ignore-scripts`, then generate the immutable-input pins with `tools/managed-launch-identities.sh`. Export the printed `MECHA_MANAGED_*` values before starting the launcher. This preparation pins the installed Pi binary, extension sources, Cursor package and lockfile, helper, and built UI; the router verifies them at startup and never hashes mutable inputs during a launch. The helper reads only the managed Pi `auth.json` protected store and returns a bounded model catalog without credential values. The normal launcher path creates the managed home and session directories with mode `0700`; it does not create tmux windows. Run `npm --prefix auth-helper test` and `npm --prefix web/router-ui-react run build` when refreshing these artifacts.
+
 ## Build and run the proxy
 
 ```bash

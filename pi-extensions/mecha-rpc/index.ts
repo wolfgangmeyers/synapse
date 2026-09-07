@@ -49,6 +49,7 @@ export type MechaRpcOptions = {
 };
 
 const CHILD_FACTORY_NAME = "mecha-rpc-managed-child-v1";
+const FIXED_SUBAGENTS_TOOL_NAMES = ["subagent", "get_subagent_result", "steer_subagent"] as const;
 const MAX_INSTALL_DELIVERY_RECEIPTS = 128;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -57,6 +58,8 @@ type InstallationReceipt = {
   fingerprint: string;
   accepted: boolean;
   manifestSha256?: string;
+  manifestRevision?: number;
+  activeTools?: string[];
   reason?: string;
 };
 
@@ -168,6 +171,8 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       if (receipt.manifestSha256 === undefined) throw new TypeError("Accepted installation receipt is invalid.");
       await sendHiddenCustomMessage(pi, "mecha.tools.accepted.v1", "Managed tool manifest accepted.", {
         protocol: "mecha.tools/v1", manifest_sha256: receipt.manifestSha256, runtime_generation: generation, session_epoch: epoch,
+        ...(receipt.manifestRevision === undefined ? {} : { manifest_revision: receipt.manifestRevision }),
+        ...(receipt.activeTools === undefined ? {} : { active_tools: [...receipt.activeTools] }),
       }, { triggerTurn: false });
       return;
     }
@@ -251,8 +256,28 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
 
   /** Register exactly one fixed child factory after this parent accepts its manifest. */
   const makeAcceptedToolsModelVisible = (desired: DesiredManifest): void => {
+    // Keep the three fixed pi-subagents tools available to preserve the
+    // existing managed child bridge. Managed launches explicitly exclude
+    // ambient Cursor/other-extension tools; stock Pi keeps its prior tools so
+    // supplemental collision and child-bridge behavior remains compatible.
+    const installed = toolNames(pi.getAllTools?.() ?? []);
     const active = pi.getActiveTools?.() ?? [];
-    pi.setActiveTools?.([...new Set([...active, ...desired.tools.map((tool) => tool.name)])]);
+    const desiredNames = new Set(desired.tools.map((tool) => tool.name));
+    const ambient = process.env.MECHA_MANAGED_ACTIVE_ONLY === "1"
+      ? FIXED_SUBAGENTS_TOOL_NAMES.filter((name) => installed.has(name))
+      : active.filter((name) => !desiredNames.has(name));
+    pi.setActiveTools?.([
+      ...ambient,
+      ...desiredNames,
+    ]);
+  };
+  const activeToolsForReceipt = (): string[] | undefined => {
+    const active = pi.getActiveTools?.();
+    if (active === undefined) return undefined;
+    if (!Array.isArray(active) || active.some((name) => typeof name !== "string" || name.length === 0)) {
+      throw new TypeError("Pi active tool registry is invalid.");
+    }
+    return [...active];
   };
 
   const registerAcceptedChildFactory = (context: CommandContext): void => {
@@ -314,7 +339,10 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         policyBridge.apply(isRecord(envelope.inline_policy) && isRecord(envelope.recall_projection)
           ? { inline: envelope.inline_policy, recall: { content: envelope.recall_projection.content ?? "" } }
           : {});
-        const receipt: InstallationReceipt = { fingerprint: delivery?.fingerprint ?? "", accepted: true, manifestSha256: acceptedHash };
+        const receipt: InstallationReceipt = {
+          fingerprint: delivery?.fingerprint ?? "", accepted: true, manifestSha256: acceptedHash,
+          manifestRevision: desired.revision, activeTools: activeToolsForReceipt(),
+        };
         retainInstallationReceipt(delivery, receipt);
         settled = true;
         await sendInstallationReceipt(receipt);
@@ -353,7 +381,10 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         acceptedHash = hashCanonicalJson(desired);
         makeAcceptedToolsModelVisible(desired);
         registerAcceptedChildFactory(context);
-        const receipt: InstallationReceipt = { fingerprint: delivery?.fingerprint ?? "", accepted: true, manifestSha256: acceptedHash };
+        const receipt: InstallationReceipt = {
+          fingerprint: delivery?.fingerprint ?? "", accepted: true, manifestSha256: acceptedHash,
+          manifestRevision: desired.revision, activeTools: activeToolsForReceipt(),
+        };
         retainInstallationReceipt(delivery, receipt);
         settled = true;
         await sendInstallationReceipt(receipt);
@@ -517,8 +548,10 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       // The factory installed this manifest during loader reload, and this bind
       // callback makes its already-registered names model-visible before turn one.
       makeAcceptedToolsModelVisible(desired);
+      const activeTools = activeToolsForReceipt();
       await sendHiddenCustomMessage(pi, "mecha.tools.accepted.v1", "Managed tool manifest accepted.", {
         protocol: "mecha.tools/v1", manifest_sha256: acceptedHash, runtime_generation: generation, session_epoch: epoch,
+        manifest_revision: desired.revision, ...(activeTools === undefined ? {} : { active_tools: activeTools }),
       }, { triggerTurn: false });
     }
   });

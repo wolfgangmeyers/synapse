@@ -1,0 +1,14 @@
+{
+  "name": "@mecha/managed-auth-helper",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "test": "node --test auth-helper.test.mjs" },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.0",
+    "@earendil-works/pi-ai": "0.85.0",
+    "@earendil-works/pi-server": "0.85.0",
+    "pi-cursor-sdk": "0.3.6"
+  }
+}

@@ -89,6 +89,8 @@ type SweepResult struct {
 	LifecycleStates      int
 	LifecycleEvents      int
 	LifecycleProducers   int
+	ManagedOperations    int
+	ManagedAgents        int
 	LifecycleUpdates     []LifecycleUpdate
 }
 
@@ -532,6 +534,17 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 			return err
 		}
 		result.LifecycleExpired, result.LifecycleStates, result.LifecycleEvents, result.LifecycleProducers, result.LifecycleUpdates, err = s.pruneLifecycle(ctx, now, policy)
+		if err != nil {
+			return err
+		}
+		result.ManagedOperations, err = s.sweepManagedOperations(ctx, nowText)
+		if err != nil {
+			return err
+		}
+		// Failed managed rows are durable audit/name reservations. They are
+		// intentionally not part of generic retention; a later terminate or
+		// restart must not make a failed name silently reusable.
+		result.ManagedAgents = 0
 		return err
 	}); err != nil {
 		return SweepResult{}, err

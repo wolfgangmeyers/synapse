@@ -38,8 +38,17 @@
     {"methods": ["DELETE"], "path": "/v1/messages/{message_id}", "source": "handleHttpRequest"},
     {"methods": ["GET", "POST"], "path": "/v1/tmux/windows", "source": "handleTmuxRequest"},
     {"methods": ["DELETE", "PATCH"], "path": "/v1/tmux/windows/{window}", "source": "handleTmuxRequest"},
-    {"methods": ["POST"], "path": "/v1/tmux/windows/{window}/{action}", "actions": ["keys", "start", "stop", "restart", "resume", "rename"], "source": "handleTmuxRequest"}
+    {"methods": ["POST"], "path": "/v1/tmux/windows/{window}/{action}", "actions": ["keys", "start", "stop", "restart", "resume", "rename"], "source": "handleTmuxRequest"},
+    {"methods": ["POST"], "path": "/v1/ui-session", "source": "handleManagedHTTP", "managed": true, "cors": "credentialed-origin-reflection"},
+    {"methods": ["POST", "OPTIONS"], "path": "/v1/managed-agents", "source": "handleManagedHTTP", "managed": true, "cors": "credentialed-origin-reflection"},
+    {"methods": ["GET", "OPTIONS"], "path": "/v1/managed-agents/{id}", "source": "handleManagedHTTP", "managed": true, "cors": "credentialed-origin-reflection"}
   ],
+  "managed": {
+    "enabled_by_default": false,
+    "routes": ["/v1/ui-session", "/v1/managed-agents", "/v1/managed-agents/{id}"],
+    "cors": {"allow_origin": "reflected valid Origin", "allow_credentials": true, "vary": "Origin", "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type", "X-Mecha-CSRF", "X-Request-ID"]},
+    "legacy_agents_additive_when_authenticated": true
+  },
   "websocket": {
     "path": "/v1/agents",
     "client_frames": [

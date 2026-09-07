@@ -424,8 +424,10 @@ export function validateCustomMessageDetails(customType: CustomMessageType, deta
     : customType === "mecha.policy.applied.v1" ? 24_000 : MAX_JSON_STRING_BYTES;
   if (!isRecord(details) || !validateJsonValue(details, 1, { nodes: 0 }, maxStringBytes)) protocolError("custom message details are invalid");
   if (customType === "mecha.tools.accepted.v1") {
-    validateRuntimeFence(details, ["protocol", "manifest_sha256", "runtime_generation", "session_epoch"]);
+    validateRuntimeFence(details, ["protocol", "manifest_sha256", "runtime_generation", "session_epoch"], ["manifest_revision", "active_tools"]);
     if (details.protocol !== "mecha.tools/v1" || typeof details.manifest_sha256 !== "string" || !SHA256.test(details.manifest_sha256)) protocolError("tool acceptance details are invalid");
+    if (details.manifest_revision !== undefined && (typeof details.manifest_revision !== "number" || !Number.isSafeInteger(details.manifest_revision) || details.manifest_revision < 1)) protocolError("tool acceptance revision is invalid");
+    if (details.active_tools !== undefined && (!Array.isArray(details.active_tools) || details.active_tools.some((name) => typeof name !== "string" || name.length === 0))) protocolError("tool acceptance active tools are invalid");
   } else if (customType === "mecha.tools.rejected.v1") {
     validateRuntimeFence(details, ["protocol", "reason", "runtime_generation", "session_epoch"]);
     if (details.protocol !== "mecha.tools/v1") protocolError("tool rejection protocol is invalid");

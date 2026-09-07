@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
@@ -119,6 +120,8 @@ type Options struct {
 	AuditTmuxSession       string
 	PolicyTimeout          time.Duration
 	PolicySender           PolicySender
+	Managed                *managed.Manager
+	ManagedSessions        *SessionRegistry
 }
 
 type Router struct {
@@ -178,40 +181,43 @@ type Router struct {
 	ownershipGeneration uint64
 	// deliveryOfferMu protects one coalescing timer per agent. Close marks the
 	// timer set closed before waiting so no callback can be added concurrently.
-	deliveryOfferMu         sync.Mutex
-	pendingDeliveryOffers   map[string]*pendingDeliveryOffer
-	deliveryOfferWG         sync.WaitGroup
-	deliveryStoreWG         sync.WaitGroup
-	deliveryOffersClosed    bool
-	deliveryOffersCancel    context.CancelFunc
-	server                  *http.Server
-	listener                net.Listener
-	serveDone               chan struct{}
-	sweepCancel             context.CancelFunc
-	sweepDone               chan struct{}
-	closed                  bool
-	sessions                map[string]*session
-	convos                  map[string]map[string]*session
-	conversationOrder       map[string][]string
-	activities              map[string]activity
-	models                  map[string]modelProjection
-	goals                   map[string]goalState
-	inlineToolStates        map[string]inlineToolState
-	latestGoalRevision      map[string]int64
-	lastSweepRecord         time.Time
-	pendingMod              map[string]*pendingControl
-	pendingGoal             map[string]*pendingControl
-	pendingLock             map[string]*pendingControl
-	pendingInlineTool       map[string]*pendingControl
-	lifecycleState          map[string]lifecycleAgent
-	nextVersion             int64
-	rates                   map[string][]time.Time
-	selectedTmux            string
-	windowIDs               map[string]string
-	tmuxProvisionals        map[string]*tmuxProvisioning
-	tmuxSessionProvisioning *tmuxProvisioning
-	goalAvailable           bool
-	lifecycleAvailable      bool
+	deliveryOfferMu          sync.Mutex
+	pendingDeliveryOffers    map[string]*pendingDeliveryOffer
+	deliveryOfferWG          sync.WaitGroup
+	deliveryStoreWG          sync.WaitGroup
+	deliveryOffersClosed     bool
+	deliveryOffersCancel     context.CancelFunc
+	server                   *http.Server
+	listener                 net.Listener
+	serveDone                chan struct{}
+	sweepCancel              context.CancelFunc
+	sweepDone                chan struct{}
+	closed                   bool
+	sessions                 map[string]*session
+	convos                   map[string]map[string]*session
+	conversationOrder        map[string][]string
+	activities               map[string]activity
+	models                   map[string]modelProjection
+	goals                    map[string]goalState
+	inlineToolStates         map[string]inlineToolState
+	latestGoalRevision       map[string]int64
+	lastSweepRecord          time.Time
+	pendingMod               map[string]*pendingControl
+	pendingGoal              map[string]*pendingControl
+	pendingLock              map[string]*pendingControl
+	pendingInlineTool        map[string]*pendingControl
+	lifecycleState           map[string]lifecycleAgent
+	nextVersion              int64
+	rates                    map[string][]time.Time
+	selectedTmux             string
+	windowIDs                map[string]string
+	tmuxProvisionals         map[string]*tmuxProvisioning
+	tmuxSessionProvisioning  *tmuxProvisioning
+	goalAvailable            bool
+	lifecycleAvailable       bool
+	managed                  *managed.Manager
+	managedSessions          *SessionRegistry
+	managedPathCanonicalizer func(*http.Request) string
 }
 
 type session struct {
@@ -320,6 +326,9 @@ func (randomIDs) Next() (string, error) {
 func New(options Options) (*Router, error) {
 	if options.Store == nil {
 		return nil, errors.New("store is required")
+	}
+	if options.Managed != nil && options.Managed.Store() != options.Store {
+		return nil, errors.New("managed manager must use the router store")
 	}
 	host := options.Host
 	if host == "" {
@@ -442,7 +451,11 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel}
+	managedSessions := options.ManagedSessions
+	if options.Managed != nil && managedSessions == nil {
+		managedSessions = NewSessionRegistry(SessionRegistryOptions{Clock: clock})
+	}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, managedSessions: managedSessions}
 	r.goalAvailable, r.lifecycleAvailable = goal, lifecycle
 	if r.policySender == nil {
 		r.policySender = r.sendPolicyMessage
@@ -597,6 +610,11 @@ func (r *Router) Close(ctx context.Context) error {
 		r.deliveryOffersCancel()
 	}
 	var err error
+	if r.managed != nil {
+		if managedErr := r.managed.Close(ctx); managedErr != nil {
+			err = managedErr
+		}
+	}
 	if policyErr := r.stopPolicies(ctx); policyErr != nil {
 		err = policyErr
 	}
