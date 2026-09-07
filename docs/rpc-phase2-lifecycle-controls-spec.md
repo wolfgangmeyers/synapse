@@ -128,9 +128,33 @@ The maximum snapshot size is the existing managed-agent cap of 32. The parent re
 
 ## 5. Migration 027: exact durable contract
 
-Migration `027_managed_control_requests.sql` is forward-only. It does not alter migrations 022–026. It may rebuild `managed_agents` only to widen its existing `desired_state` check from `('running')` to `('running','terminated')`; it copies every 025 column and index byte-for-byte apart from that check. The physical creation order is `managed_session_artifacts`, `managed_lifecycle_actions`, `managed_lifecycle_batch_items`, then `managed_control_requests`, followed by indexes and the managed-agent rebuild.
+Migration `027_managed_control_requests.sql` is forward-only. It does not alter migrations 022–026. The new independent tables are created in this order: `managed_session_artifacts`, `managed_lifecycle_actions`, `managed_lifecycle_batch_items`, and `managed_control_requests`; their indexes follow. The managed-agent rebuild comes last.
 
-All timestamps are non-empty RFC3339 UTC text. UUID fields are canonical lower-case UUID text. SHA-256 fields are 64 lower-case hexadecimal characters. `text_1_128` below means non-empty UTF-8 text at most 128 bytes. The migration implements the listed checks directly; prose does not create an alternative state.
+### 5.0 Populated SQLite rebuild procedure
+
+`managed_agents` has populated foreign-key children after 026. They are `managed_readiness_sources` from 024, `managed_restart_transitions` from 025, and `managed_direct_delivery_attempts` plus `managed_direct_delivery_diagnostics` from 026. A normal parent `DROP TABLE` fails with foreign keys enabled. `PRAGMA defer_foreign_keys` does not fix that drop. `PRAGMA foreign_keys` cannot change inside `BEGIN IMMEDIATE`.
+
+The store has one SQLite connection (`SetMaxOpenConns(1)`) and holds its store mutex during migrations. Migration 027 gets a dedicated runner on that same connection. It is the only migration allowed to suspend foreign-key enforcement. The runner must use this sequence:
+
+1. Verify `PRAGMA foreign_keys=1` and `PRAGMA legacy_alter_table=0`. Verify that 024, 025, and 026 are recorded in `schema_migrations`, and that the four child tables above exist. Capture each child's `sqlite_master` table and index SQL, row count, and `PRAGMA foreign_key_list` result.
+2. Outside any transaction, execute `PRAGMA foreign_keys=OFF`, then read it back as `0`. Do not use a separate connection.
+3. Start `BEGIN IMMEDIATE`. Create the four new 027 tables and their indexes. Create `managed_agents_027_new` with the complete 025 `managed_agents` column list, constraints, and the sole change `desired_state IN ('running','terminated')`. Do not create, detach, copy, drop, or recreate any child table.
+4. Copy the parent with an explicit ordered 025 column list. Save a temporary full-row snapshot before the copy. The copied row count must equal the snapshot count, and two directional `EXCEPT` queries over every copied column must be empty.
+5. Drop `managed_agents`; rename `managed_agents_027_new` to `managed_agents`; recreate only `managed_agents_slot_idx` with its 025 definition. With `legacy_alter_table=OFF`, SQLite rewrites the existing child foreign-key metadata to the replacement parent name while leaving all child rows and DDL intact.
+6. Before committing, require zero rows from `PRAGMA foreign_key_check` and `PRAGMA integrity_check` equal to `ok`. Compare every captured child table/index SQL, row count, and foreign-key list with its pre-rebuild value. The child foreign key must still name `managed_agents(agent_id)`.
+7. Insert the 027 migration record, then commit. Outside the transaction, execute `PRAGMA foreign_keys=ON` and read it back as `1`. Run `PRAGMA foreign_key_check` again before returning the store.
+
+The runner must roll back the open transaction for any SQL error, parity failure, foreign-key failure, integrity failure, or migration-record failure. It must then restore and verify `PRAGMA foreign_keys=ON`. Rollback leaves the old parent, all 024/025/026 children, their rows, indexes, and migration ledger untouched, with no 027 record. If the post-commit re-enable or verification fails, the runner closes the database and returns an error; it must not return a store using a connection with foreign keys disabled.
+
+The required migration tests use a real accepted-026 fixture with populated rows in `managed_agents`, all four child tables, `managed_http_operations`, and an in-flight 025 restart transition. They prove: successful 026-to-027 upgrade; parent row equality; child row/count/DDL/index/FK-list equality; both foreign-key checks and integrity check clean; widened `desired_state` accepts `terminated` and still rejects any other value; expected 027 tables and indexes exist; and reopen leaves foreign keys enabled. Failure-injection tests fail after the parent copy, after the parent drop, and at the pre-commit foreign-key check. Each proves rollback preserves the 026 schema/data, records no 027 migration, and restores `foreign_keys=ON`. A separate test proves `PRAGMA foreign_keys=OFF` issued after `BEGIN IMMEDIATE` does not count as this procedure.
+
+### 5.0.1 Value-validation ownership
+
+The earlier statement that every timestamp and UUID check was implemented by migration 027 was too broad. Migration 027 preserves 022–026 values and does not add schema checks to their existing columns. Its SQL directly enforces only the `CHECK` constraints written in this section.
+
+`router-proxy/internal/store/managed.go` owns canonical-value validation before every lifecycle/control write. It validates canonical lower-case UUIDs for newly allocated action, artifact, request, and result IDs; non-empty UTC RFC3339 timestamps for every new `*_at` value; and the existing SHA-256 and `text_1_128` bounds before insert or update. The 027 backfill is the exception: it copies existing 025 operation IDs as action IDs, so its preflight requires each backfilled action ID to be non-empty and unique, but does not claim a new historical UUID schema constraint. Every validation failure aborts its enclosing immediate transaction. Direct SQL test fixtures may use malformed legacy values only when they are testing migration preservation; they cannot establish a valid 027 store write.
+
+SHA-256 fields are 64 lower-case hexadecimal characters. `text_1_128` below means non-empty UTF-8 text at most 128 bytes.
 
 ### 5.1 `managed_lifecycle_actions`
 
@@ -557,4 +581,4 @@ The test records only public-safe assertions. It does not print raw session cont
 
 ## 10. Definition of done
 
-The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted 026 database, preserve 022–026 rows and indexes, and pass every named constraint, race, retention, exact-entry, process, artifact, and fault test. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
+The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, pass the rebuild success and rollback tests in that section, and pass every named constraint, race, retention, exact-entry, process, artifact, and fault test. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
