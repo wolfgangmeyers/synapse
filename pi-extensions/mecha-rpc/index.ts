@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { getSubagentsService, type SubagentsService } from "@gotgenes/pi-subagents";
+
 import { createChildBridge } from "./child-bridge.js";
 import { hashCanonicalJson, type DesiredManifest, type JsonRecord } from "./manifest.js";
 import { createPolicyBridge } from "./policy-bridge.js";
@@ -31,19 +33,13 @@ type PiApi = {
   getActiveTools?: () => string[];
   setActiveTools?: (toolNames: string[]) => void;
   getAllCommands?: () => unknown[];
-  registerTool: (tool: object) => void;
-  registerCommand: (name: string, command: Command) => void;
-  sendMessage: (message: JsonRecord, options?: JsonRecord) => void | Promise<void>;
-  on: (name: string, handler: (event: JsonRecord, context: CommandContext) => unknown) => void;
+  registerTool(tool: object): void;
+  registerCommand(name: string, command: Command): void;
+  sendMessage(message: JsonRecord, options?: JsonRecord): void | Promise<void>;
+  on(name: string, handler: (event: JsonRecord, context: CommandContext) => unknown): void;
   events?: { on?: (name: string, handler: (event: JsonRecord) => void) => void };
 };
 
-type ChildExtensionFactoryService = {
-  registerChildExtensionV1: (registration: {
-    name: string;
-    factory: (pi: PiApi) => void | Promise<void>;
-  }) => () => void;
-};
 
 export type MechaRpcOptions = {
   getRuntimeGeneration?: () => string;
@@ -52,10 +48,19 @@ export type MechaRpcOptions = {
   initialAcceptedManifest?: DesiredManifest;
 };
 
-const SUBAGENTS_SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 const CHILD_FACTORY_NAME = "mecha-rpc-managed-child-v1";
+const MAX_INSTALL_DELIVERY_RECEIPTS = 128;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type InstallationReceipt = {
+  fingerprint: string;
+  accepted: boolean;
+  manifestSha256?: string;
+  reason?: string;
+};
+
+type InstallationDelivery = { deliveryId: string; fingerprint: string };
 
 function isRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -65,22 +70,31 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Read only the published public service capability; never its manager or child sessions. */
-function isChildExtensionFactoryService(value: unknown): value is ChildExtensionFactoryService {
-  return isUnknownRecord(value) && typeof value.registerChildExtensionV1 === "function";
-}
+type ChildExtensionFactoryService = Pick<SubagentsService, "registerChildExtensionV1">;
 
+/** Read the package's public owner-bound service capability, never its manager or child sessions. */
 function childExtensionFactoryService(ownerSessionId: string): ChildExtensionFactoryService | undefined {
-  const registry = Object.getOwnPropertyDescriptor(globalThis, SUBAGENTS_SERVICE_REGISTRY)?.value;
-  if (!isUnknownRecord(registry) || !(registry.services instanceof Map)) return undefined;
-  const service = registry.services.get(ownerSessionId);
-  return isChildExtensionFactoryService(service) ? service : undefined;
+  const service = getSubagentsService(ownerSessionId);
+  return service !== undefined && typeof service.registerChildExtensionV1 === "function" ? service : undefined;
+}
+function installationDelivery(value: JsonRecord, protocol: "mecha.bootstrap/v1" | "mecha.tools-install/v1"): InstallationDelivery | undefined {
+  if (value.protocol !== protocol || typeof value.delivery_id !== "string" || !UUID.test(value.delivery_id)) return undefined;
+  return { deliveryId: value.delivery_id, fingerprint: hashCanonicalJson(value) };
 }
 
 function sessionIdFromContext(context: unknown): string | undefined {
   if (!isUnknownRecord(context) || !isUnknownRecord(context.sessionManager) || typeof context.sessionManager.getSessionId !== "function") return undefined;
   const sessionId = context.sessionManager.getSessionId();
   return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
+}
+
+/** Validates Pi's public ExtensionFactory boundary before entering the narrower RPC adapter. */
+function isPiApi(value: unknown): value is PiApi {
+  return isUnknownRecord(value)
+    && typeof value.registerTool === "function"
+    && typeof value.registerCommand === "function"
+    && typeof value.sendMessage === "function"
+    && typeof value.on === "function";
 }
 
 function isCommandContext(value: unknown): value is CommandContext {
@@ -138,6 +152,28 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   if (typeof generation !== "string" || !UUID.test(generation) || typeof epoch !== "number" || !Number.isSafeInteger(epoch) || epoch < 1) throw new TypeError("Managed runtime identity is invalid");
   let acceptedHash: string | undefined;
   const rootPendingRequestIds = new Set<string>();
+  const installationReceipts = new Map<string, InstallationReceipt>();
+  const retainInstallationReceipt = (delivery: InstallationDelivery | undefined, receipt: InstallationReceipt): void => {
+    if (delivery === undefined || installationReceipts.has(delivery.deliveryId)) return;
+    while (installationReceipts.size >= MAX_INSTALL_DELIVERY_RECEIPTS) {
+      const oldest = installationReceipts.keys().next().value;
+      if (typeof oldest !== "string") break;
+      installationReceipts.delete(oldest);
+    }
+    installationReceipts.set(delivery.deliveryId, receipt);
+  };
+  const sendInstallationReceipt = async (receipt: InstallationReceipt): Promise<void> => {
+    if (receipt.accepted) {
+      if (receipt.manifestSha256 === undefined) throw new TypeError("Accepted installation receipt is invalid.");
+      await sendHiddenCustomMessage(pi, "mecha.tools.accepted.v1", "Managed tool manifest accepted.", {
+        protocol: "mecha.tools/v1", manifest_sha256: receipt.manifestSha256, runtime_generation: generation, session_epoch: epoch,
+      }, { triggerTurn: false });
+      return;
+    }
+    await sendHiddenCustomMessage(pi, "mecha.tools.rejected.v1", "Managed tool manifest rejected.", {
+      protocol: "mecha.tools/v1", reason: receipt.reason ?? "invalid installation", runtime_generation: generation, session_epoch: epoch,
+    }, { triggerTurn: false });
+  };
   const childBridge = createChildBridge({
     getOwnerSessionId: (context) => {
       if (!isUnknownRecord(context) || !isUnknownRecord(context.sessionManager) || typeof context.sessionManager.getSessionId !== "function") return undefined;
@@ -203,33 +239,51 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
 
   /** Register exactly one fixed child factory after this parent accepts its manifest. */
   const registerAcceptedChildFactory = (context: CommandContext): void => {
-    if (initialAcceptedManifest !== undefined || disposeChildFactory !== undefined) return;
+    if (initialAcceptedManifest !== undefined) return;
     const ownerSessionId = sessionIdFromContext(context);
     if (ownerSessionId === undefined) return;
     const service = childExtensionFactoryService(ownerSessionId);
     if (service === undefined) return;
     const acceptedManifest = toolRegistry.acceptedManifest();
     if (acceptedManifest === undefined) throw new TypeError("Managed child factory requires an accepted manifest.");
+    // Existing children retain their spawn snapshot. Replacing this registration
+    // only gives future children the newly accepted add-only manifest.
+    disposeChildFactory?.();
+    disposeChildFactory = undefined;
     // This closure intentionally captures only the cloned, parent-validated manifest.
     disposeChildFactory = service.registerChildExtensionV1({
       name: CHILD_FACTORY_NAME,
       factory: (childPi) => {
+        if (!isPiApi(childPi)) throw new TypeError("Pi child extension API is invalid.");
         createMechaRpcExtension(childPi, { initialAcceptedManifest: acceptedManifest });
       },
     });
   };
 
-  const rejected = async (reason: string): Promise<void> => {
-    await sendHiddenCustomMessage(pi, "mecha.tools.rejected.v1", "Managed tool manifest rejected.", {
-      protocol: "mecha.tools/v1", reason: reason.slice(0, 2_000), runtime_generation: generation, session_epoch: epoch,
-    }, { triggerTurn: false });
+  const replayInstallationReceipt = async (delivery: InstallationDelivery | undefined): Promise<InstallationReceipt | undefined> => {
+    if (delivery === undefined) return undefined;
+    const receipt = installationReceipts.get(delivery.deliveryId);
+    if (receipt === undefined) return undefined;
+    if (receipt.fingerprint !== delivery.fingerprint) throw new TypeError("Installation delivery ID was reused with a different envelope.");
+    await sendInstallationReceipt(receipt);
+    return receipt;
   };
 
   queueCommand("mecha-bootstrap-v1", {
     description: "Reserved managed bootstrap command.",
     async handler(argumentsText, context) {
+      let delivery: InstallationDelivery | undefined;
+      let replayed = false;
+      let settled = false;
       try {
         const envelope = decodeHiddenEnvelope(argumentsText);
+        delivery = installationDelivery(envelope, "mecha.bootstrap/v1");
+        const prior = await replayInstallationReceipt(delivery);
+        if (prior !== undefined) {
+          replayed = true;
+          if (!prior.accepted) throw new TypeError(prior.reason ?? "Managed tool manifest rejected.");
+          return { accepted: true, replayed: true };
+        }
         requireCurrentRuntime(envelope, generation, epoch);
         const desired = toolRegistry.installFull(envelope);
         acceptedHash = hashCanonicalJson(desired);
@@ -242,12 +296,18 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         policyBridge.apply(isRecord(envelope.inline_policy) && isRecord(envelope.recall_projection)
           ? { inline: envelope.inline_policy, recall: { content: envelope.recall_projection.content ?? "" } }
           : {});
-        await sendHiddenCustomMessage(pi, "mecha.tools.accepted.v1", "Managed tool manifest accepted.", {
-          protocol: "mecha.tools/v1", manifest_sha256: acceptedHash, runtime_generation: generation, session_epoch: epoch,
-        }, { triggerTurn: false });
+        const receipt: InstallationReceipt = { fingerprint: delivery?.fingerprint ?? "", accepted: true, manifestSha256: acceptedHash };
+        retainInstallationReceipt(delivery, receipt);
+        settled = true;
+        await sendInstallationReceipt(receipt);
         return { accepted: true };
       } catch (error) {
-        await rejected(error instanceof Error ? error.message : "invalid bootstrap");
+        if (!replayed && !settled) {
+          const reason = (error instanceof Error ? error.message : "invalid bootstrap").slice(0, 2_000);
+          const receipt: InstallationReceipt = { fingerprint: delivery?.fingerprint ?? "", accepted: false, reason };
+          retainInstallationReceipt(delivery, receipt);
+          await sendInstallationReceipt(receipt);
+        }
         throw error;
       }
     },
@@ -255,18 +315,37 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
 
   queueCommand("mecha-install-tools-v1", {
     description: "Reserved managed supplemental install command.",
-    async handler(argumentsText) {
+    async handler(argumentsText, context) {
+      let delivery: InstallationDelivery | undefined;
+      let replayed = false;
+      let settled = false;
       try {
         const envelope = decodeHiddenEnvelope(argumentsText);
-        requireCurrentRuntime(envelope, generation, epoch, acceptedHash);
+        delivery = installationDelivery(envelope, "mecha.tools-install/v1");
+        const prior = await replayInstallationReceipt(delivery);
+        if (prior !== undefined) {
+          replayed = true;
+          if (!prior.accepted) throw new TypeError(prior.reason ?? "Managed supplemental manifest rejected.");
+          return { accepted: true, replayed: true };
+        }
+        // The supplemental envelope carries the next manifest hash; the registry
+        // independently fences its base hash against the current accepted manifest.
+        requireCurrentRuntime(envelope, generation, epoch);
         const desired = toolRegistry.installSupplemental(envelope);
         acceptedHash = hashCanonicalJson(desired);
-        await sendHiddenCustomMessage(pi, "mecha.tools.accepted.v1", "Managed tool manifest accepted.", {
-          protocol: "mecha.tools/v1", manifest_sha256: acceptedHash, runtime_generation: generation, session_epoch: epoch,
-        }, { triggerTurn: false });
+        registerAcceptedChildFactory(context);
+        const receipt: InstallationReceipt = { fingerprint: delivery?.fingerprint ?? "", accepted: true, manifestSha256: acceptedHash };
+        retainInstallationReceipt(delivery, receipt);
+        settled = true;
+        await sendInstallationReceipt(receipt);
         return { accepted: true };
       } catch (error) {
-        await rejected(error instanceof Error ? error.message : "invalid supplemental manifest");
+        if (!replayed && !settled) {
+          const reason = (error instanceof Error ? error.message : "invalid supplemental manifest").slice(0, 2_000);
+          const receipt: InstallationReceipt = { fingerprint: delivery?.fingerprint ?? "", accepted: false, reason };
+          retainInstallationReceipt(delivery, receipt);
+          await sendInstallationReceipt(receipt);
+        }
         throw error;
       }
     },
@@ -401,6 +480,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     disposeChildFactory = undefined;
     childBridge.clearOwnerSession(registeredOwnerSessionId);
     rootPendingRequestIds.clear();
+    installationReceipts.clear();
     registeredOwnerSessionId = undefined;
   });
 

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { createMechaRpcExtension } from "../pi-extensions/mecha-rpc/index.ts";
+import { hashCanonicalJson, validateDesiredManifest } from "../pi-extensions/mecha-rpc/manifest.ts";
 import { decodeHiddenEnvelope, encodeHiddenEnvelope } from "../pi-extensions/mecha-rpc/protocol.ts";
 
 type RecordValue = Record<string, unknown>;
@@ -37,6 +38,31 @@ function fixture(sessionId = "root-session", parentSessionId?: string) {
 
 function manifest(): RecordValue {
   return JSON.parse(readFileSync("router/contract/managed-tools-v1.json", "utf8")) as RecordValue;
+}
+
+function manifestHash(value: RecordValue): string {
+  return hashCanonicalJson(validateDesiredManifest(value));
+}
+
+function supplementalManifest(base: RecordValue): RecordValue {
+  const desired = structuredClone(base);
+  const template = (desired.tools as RecordValue[])[0]!;
+  const definition = {
+    capability_id: "zz_supplemental",
+    label: "Supplemental tool",
+    description: "A bounded supplemental managed tool.",
+    parameters: template.parameters,
+    operation_id: "mecha.supplemental",
+  };
+  const definitionSha = hashCanonicalJson(definition);
+  (desired.tools as RecordValue[]).push({
+    ...definition,
+    name: `zz_supplemental__${definitionSha}`,
+    definition_id: `def_${definitionSha}`,
+    definition_sha256: definitionSha,
+  });
+  desired.revision = 2;
+  return desired;
 }
 
 function bootstrap(current: ReturnType<typeof fixture>) {
@@ -213,11 +239,20 @@ test("an accepted parent manifest installs one owner-bound child factory before 
   const symbol = Symbol.for("@gotgenes/pi-subagents:service-registry");
   const previous = Object.getOwnPropertyDescriptor(globalThis, symbol);
   const registrations: Array<{ name: string; factory: (pi: RecordValue) => void | Promise<void> }> = [];
-  const unregister = () => undefined;
+  const activeFactories = new Map<string, { name: string; factory: (pi: RecordValue) => void | Promise<void> }>();
+  let factoryDisposals = 0;
   const service = {
     registerChildExtensionV1(registration: { name: string; factory: (pi: RecordValue) => void | Promise<void> }) {
+      if (activeFactories.has(registration.name)) throw new Error("duplicate child factory");
       registrations.push(registration);
-      return unregister;
+      activeFactories.set(registration.name, registration);
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        factoryDisposals++;
+        if (activeFactories.get(registration.name) === registration) activeFactories.delete(registration.name);
+      };
     },
   };
   Object.defineProperty(globalThis, symbol, { configurable: true, value: { services: new Map([["root-session", service]]) } });
@@ -225,6 +260,7 @@ test("an accepted parent manifest installs one owner-bound child factory before 
     const parent = fixture();
     await bootstrap(parent);
     assert.equal(registrations.length, 1);
+    assert.equal(activeFactories.size, 1);
     assert.equal(registrations[0]!.name, "mecha-rpc-managed-child-v1");
 
     const childCommands = new Map<string, Command>();
@@ -247,7 +283,34 @@ test("an accepted parent manifest installs one owner-bound child factory before 
     assert.equal(childCommands.has("goal"), false, "the child tool must not be shadowed by a legacy command");
     assert.equal(childCommands.has("mecha-bootstrap-v1"), true);
 
+    const supplemental = supplementalManifest(manifest());
+    await parent.commands.get("mecha-install-tools-v1")!.handler(encodeHiddenEnvelope({
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174099",
+      runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+      base_manifest_sha256: String((parent.sent.at(-1)!.message.details as RecordValue).manifest_sha256),
+      desired_manifest: supplemental, manifest_sha256: manifestHash(supplemental),
+      added_name: (supplemental.tools as RecordValue[]).at(-1)!.name,
+    }), parent.context);
+    assert.equal(registrations.length, 2, "supplemental acceptance replaces only the future-child factory");
+    assert.equal(factoryDisposals, 1, "the first factory is disposed before its replacement registers");
+    assert.equal(activeFactories.size, 1);
+
+    const freshChildTools = new Map<string, RecordValue>();
+    const freshChildHandlers = new Map<string, (event: RecordValue, context: RecordValue) => unknown>();
+    await registrations[1]!.factory({
+      getAllTools: () => [...freshChildTools.values()], getAllCommands: () => [],
+      registerTool(tool: RecordValue) { freshChildTools.set(String(tool.name), tool); },
+      registerCommand() {}, on(name: string, handler: (event: RecordValue, context: RecordValue) => unknown) { freshChildHandlers.set(name, handler); },
+      sendMessage() {},
+    });
+    await freshChildHandlers.get("session_start")!({}, {
+      sessionManager: { getSessionId: () => "fresh-child-session", getHeader: () => ({ parentSession: "root-session" }) },
+    });
+    assert.equal(freshChildTools.size, 17);
+
     parent.handlers.get("session_shutdown")!({}, parent.context);
+    assert.equal(factoryDisposals, 2, "parent shutdown releases its remaining owner-bound factory");
+    assert.equal(activeFactories.size, 0);
   } finally {
     if (previous === undefined) delete (globalThis as Record<PropertyKey, unknown>)[symbol];
     else Object.defineProperty(globalThis, symbol, previous);
@@ -267,16 +330,11 @@ test("a real UUID child session gets a manager-issued context, routes its result
   const contextRef = "ctx1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const childSessionId = "0198d10a-9eed-7d1b-9876-123456789abc";
   const appended: Array<RecordValue> = [];
-  const controlContextsByRef = new Map([[contextRef, {
-    contextRef,
-    ownerSessionId: "root-session",
-    taskId: "task",
-    runId: "run",
-    parentEntryId: "entry",
-    childSession: { sessionId: childSessionId },
-  }]]);
+  let childContextIsLive = true;
   const service = {
-    manager: { controlContextsByRef },
+    getChildContextRefV1(receivedChildSessionId: string) {
+      return childContextIsLive && receivedChildSessionId === childSessionId ? contextRef : undefined;
+    },
     getLifecycleSnapshotV2(ownerSessionId: string) {
       return { protocol: "mecha.children/v1", snapshot_id: "snapshot", owner_session_id: ownerSessionId, sequence: 1, runs: [
         { ...sourceChild(), context_ref: contextRef },
@@ -317,7 +375,7 @@ test("a real UUID child session gets a manager-issued context, routes its result
     assert.equal(appended[0]!.receivedContextRef, contextRef);
     assert.equal((appended[0]!.payload as RecordValue).request_id, request.request_id);
 
-    controlContextsByRef.clear();
+    childContextIsLive = false;
     child.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "toolCall", id: "stale-child", name: "goal", arguments: { action: "status" } }] } }, childContext);
     const stale = await execute("stale-child", { action: "status" }, undefined, undefined, childContext);
     assert.equal(stale.isError, true);
@@ -335,3 +393,63 @@ function sourceChild(): RecordValue {
     compaction: { state: "idle", count: 0, started_at: null, last_outcome: null }, sequence: 1,
   };
 }
+
+function deliveryId(index: number): string {
+  return `123e4567-e89b-42d3-a456-${index.toString(16).padStart(12, "0")}`;
+}
+
+function bootstrapEnvelope(current: ReturnType<typeof fixture>, delivery = deliveryId(1), desired = manifest()): RecordValue {
+  return {
+    protocol: "mecha.bootstrap/v1", delivery_id: delivery,
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    desired_manifest: desired, manifest_sha256: manifestHash(desired), restored_request_ids: [],
+    inline_policy: { enabled: true, credits: {} }, recall_projection: { enabled: false, stores: [], content: "" },
+  };
+}
+
+test("full and supplemental installation retain bounded accepted and rejected delivery receipts", async () => {
+  const current = fixture();
+  const full = bootstrapEnvelope(current);
+  const command = current.commands.get("mecha-bootstrap-v1")!;
+  await command.handler(encodeHiddenEnvelope(full), current.context);
+  await command.handler(encodeHiddenEnvelope(full), current.context);
+  assert.equal(current.tools.size, 16, "accepted full replay must not register a second manifest");
+  assert.equal(current.sent.filter(({ message }) => message.customType === "mecha.tools.accepted.v1").length, 2);
+
+  const supplemental = supplementalManifest(manifest());
+  const supplementalEnvelope = {
+    protocol: "mecha.tools-install/v1", delivery_id: deliveryId(2),
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    base_manifest_sha256: manifestHash(manifest()), desired_manifest: supplemental,
+    manifest_sha256: manifestHash(supplemental), added_name: (supplemental.tools as RecordValue[]).at(-1)!.name,
+  };
+  const supplementalCommand = current.commands.get("mecha-install-tools-v1")!;
+  await supplementalCommand.handler(encodeHiddenEnvelope(supplementalEnvelope), current.context);
+  await supplementalCommand.handler(encodeHiddenEnvelope(supplementalEnvelope), current.context);
+  assert.equal(current.tools.size, 17, "accepted supplemental replay must not register the new name twice");
+
+  const invalidFull = { ...bootstrapEnvelope(current, deliveryId(3)), unexpected: true };
+  await assert.rejects(async () => command.handler(encodeHiddenEnvelope(invalidFull), current.context));
+  const firstRejected = current.sent.at(-1)!.message;
+  await assert.rejects(async () => command.handler(encodeHiddenEnvelope(invalidFull), current.context));
+  const secondRejected = current.sent.at(-1)!.message;
+  assert.deepEqual(secondRejected, firstRejected, "rejected full replay must return its original receipt");
+
+  const invalidSupplemental = { ...supplementalEnvelope, delivery_id: deliveryId(4), added_name: "wrong_name" };
+  await assert.rejects(async () => supplementalCommand.handler(encodeHiddenEnvelope(invalidSupplemental), current.context));
+  const rejectedSupplemental = current.sent.at(-1)!.message;
+  await assert.rejects(async () => supplementalCommand.handler(encodeHiddenEnvelope(invalidSupplemental), current.context));
+  assert.deepEqual(current.sent.at(-1)!.message, rejectedSupplemental, "rejected supplemental replay must return its original receipt");
+  assert.equal(current.tools.size, 17);
+
+  for (let index = 5; index < 133; index++) {
+    const rejected = { ...bootstrapEnvelope(current, deliveryId(index)), unexpected: true };
+    await assert.rejects(async () => command.handler(encodeHiddenEnvelope(rejected), current.context));
+  }
+  await assert.rejects(async () => command.handler(encodeHiddenEnvelope(full), current.context));
+  assert.equal(current.tools.size, 17, "receipt eviction must not change accepted runtime state");
+
+  current.handlers.get("session_shutdown")!({}, current.context);
+  await assert.rejects(async () => command.handler(encodeHiddenEnvelope(supplementalEnvelope), current.context));
+  assert.equal(current.tools.size, 17, "shutdown clears receipts but cannot revive a terminated registry");
+});

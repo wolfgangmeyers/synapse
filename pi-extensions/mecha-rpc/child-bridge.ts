@@ -1,13 +1,12 @@
+import { getSubagentsService, type ContextRefV1, type SubagentsService } from "@gotgenes/pi-subagents";
+
 import type { JsonRecord } from "./manifest.js";
 import type { ControlResultPayload } from "./protocol.js";
 
 type LifecycleRun = JsonRecord & { task_id: string; run_id: string; parent_entry_id: string; context_ref?: string | null };
 type LifecycleSnapshot = JsonRecord & { protocol: "mecha.children/v1"; owner_session_id: string; runs: LifecycleRun[] };
 type AppendOutcome = { kind: "accepted" | "already_present" | "rejected"; result_id?: string; error?: JsonRecord };
-type Service = {
-  getLifecycleSnapshotV2: (ownerSessionId: string) => LifecycleSnapshot;
-  appendControlResultV1: (contextRef: string, payload: ControlResultPayload) => Promise<AppendOutcome>;
-};
+type Service = Pick<SubagentsService, "getLifecycleSnapshotV2" | "getChildContextRefV1" | "appendControlResultV1">;
 type SessionIdentity = { sessionId: string; parentSessionId?: string };
 type PendingBinding = {
   requestId: string;
@@ -25,7 +24,6 @@ type SharedOwnerState = {
   pending: Map<string, PendingBinding>;
 };
 
-const SERVICE_REGISTRY = Symbol.for("@gotgenes/pi-subagents:service-registry");
 const CONTEXT_REF = /^ctx1_[A-Za-z0-9_-]{43}$/;
 const statesByOwnerSession = new Map<string, SharedOwnerState>();
 
@@ -37,13 +35,9 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasService(value: unknown): value is Service {
-  return isUnknownRecord(value) && typeof value.getLifecycleSnapshotV2 === "function" && typeof value.appendControlResultV1 === "function";
-}
 
-function isManagerBackedService(value: unknown): value is Service & { manager: Record<string, unknown> } {
-  return isUnknownRecord(value) && typeof value.getLifecycleSnapshotV2 === "function"
-    && typeof value.appendControlResultV1 === "function" && isUnknownRecord(value.manager);
+function isContextRef(value: unknown): value is ContextRefV1 {
+  return typeof value === "string" && CONTEXT_REF.test(value);
 }
 
 function lifecycleKey(taskId: string, runId: string, parentEntryId: string): string {
@@ -55,11 +49,9 @@ function requireString(value: unknown, label: string): string {
   return value;
 }
 
+/** The checked fork owns owner-service lookup; this extension never reads its registry. */
 function readService(ownerSessionId: string): Service | undefined {
-  const registry = Object.getOwnPropertyDescriptor(globalThis, SERVICE_REGISTRY)?.value;
-  if (!isUnknownRecord(registry) || !(registry.services instanceof Map)) return undefined;
-  const service = registry.services.get(ownerSessionId);
-  return hasService(service) ? service : undefined;
+  return getSubagentsService(ownerSessionId);
 }
 
 function stateForOwner(ownerSessionId: string): SharedOwnerState {
@@ -99,26 +91,11 @@ export function stripServiceOnlyContext(value: unknown): JsonRecord {
   return wire;
 }
 
-/**
- * The fork deliberately exposes only two service operations. Its manager keeps
- * child-session identity beside the opaque reference in memory, so this narrow
- * structural read joins that manager-issued binding to the service snapshot.
- * No context is derived from a model argument or child session ID.
- */
-function managerBindingForChildSession(service: Service, ownerSessionId: string, childSessionId: string): ManagerBinding | undefined {
-  if (!isManagerBackedService(service)) return undefined;
-  const contexts = service.manager.controlContextsByRef;
-  if (!(contexts instanceof Map)) return undefined;
-  for (const [reference, candidate] of contexts) {
-    if (typeof reference !== "string" || !CONTEXT_REF.test(reference) || !isUnknownRecord(candidate)) continue;
-    const childSession = candidate.childSession;
-    if (!isUnknownRecord(childSession) || childSession.sessionId !== childSessionId) continue;
-    const contextRef = candidate.contextRef;
-    const owner = candidate.ownerSessionId;
-    const taskId = candidate.taskId;
-    const runId = candidate.runId;
-    const parentEntryId = candidate.parentEntryId;
-    if (contextRef !== reference || owner !== ownerSessionId || typeof taskId !== "string" || typeof runId !== "string" || typeof parentEntryId !== "string") continue;
+function bindingForContextRef(ownerSessionId: string, state: SharedOwnerState, contextRef: string, childSessionId: string): ManagerBinding | undefined {
+  for (const [key, candidate] of state.contextByLifecycle) {
+    if (candidate !== contextRef) continue;
+    const [taskId, runId, parentEntryId] = key.split("\u0000");
+    if (taskId === undefined || runId === undefined || parentEntryId === undefined) continue;
     return { ownerSessionId, taskId, runId, parentEntryId, contextRef, childSessionId };
   }
   return undefined;
@@ -192,12 +169,13 @@ export function createChildBridge(options: {
       const service = readService(identity.parentSessionId);
       if (service === undefined) return undefined;
       refreshOwnerSnapshot(identity.parentSessionId, service);
-      const binding = managerBindingForChildSession(service, identity.parentSessionId, identity.sessionId);
-      if (binding === undefined) return undefined;
+      const contextRef = service.getChildContextRefV1(identity.sessionId);
+      if (typeof contextRef !== "string" || !CONTEXT_REF.test(contextRef)) return undefined;
       const state = stateForOwner(identity.parentSessionId);
-      if (state.contextByLifecycle.get(lifecycleKey(binding.taskId, binding.runId, binding.parentEntryId)) !== binding.contextRef) return undefined;
-      state.liveBindingByContextRef.set(binding.contextRef, binding);
-      return binding.contextRef;
+      const binding = bindingForContextRef(identity.parentSessionId, state, contextRef, identity.sessionId);
+      if (binding === undefined) return undefined;
+      state.liveBindingByContextRef.set(contextRef, binding);
+      return contextRef;
     },
     bindPendingRequest(value: { requestId: string; taskId: string; runId: string; parentEntryId: string }): void {
       for (const [ownerSessionId, state] of statesByOwnerSession) {
@@ -231,12 +209,10 @@ export function createChildBridge(options: {
       refreshOwnerSnapshot(ownerSessionId, service);
       const current = state.contextByLifecycle.get(lifecycleKey(binding.taskId, binding.runId, binding.parentEntryId));
       if (current !== binding.contextRef) throw new TypeError("STALE_CHILD_CONTEXT");
-      if (binding.childSessionId !== undefined) {
-        const live = managerBindingForChildSession(service, ownerSessionId, binding.childSessionId);
-        if (live === undefined || live.contextRef !== binding.contextRef || live.taskId !== binding.taskId || live.runId !== binding.runId || live.parentEntryId !== binding.parentEntryId) {
-          throw new TypeError("STALE_CHILD_CONTEXT");
-        }
+      if (binding.childSessionId !== undefined && service.getChildContextRefV1(binding.childSessionId) !== binding.contextRef) {
+        throw new TypeError("STALE_CHILD_CONTEXT");
       }
+      if (!isContextRef(binding.contextRef)) throw new TypeError("STALE_CHILD_CONTEXT");
       const outcome = await service.appendControlResultV1(binding.contextRef, payload);
       if (!isRecord(outcome) || (outcome.kind !== "accepted" && outcome.kind !== "already_present" && outcome.kind !== "rejected")) {
         throw new TypeError("Invalid child append outcome");

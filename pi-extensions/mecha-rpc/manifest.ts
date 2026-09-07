@@ -56,6 +56,26 @@ export const BASELINE_TOOL_NAMES = Object.freeze([
   "mecha_router",
 ] as const);
 
+/** The generated revision-one contract permits its original short names only for these exact bytes. */
+const BASELINE_DEFINITION_SHA256: Readonly<Record<typeof BASELINE_TOOL_NAMES[number], string>> = Object.freeze({
+  goal: "7beb0bc57b881d24f980bb721e1deb0805942e87aeb7777a458fc13811f092c6",
+  goal_snooze: "c48cde2a484a5b70736fa37e3f1c736977109453f20b84192b7fb27968bd0b27",
+  mecha_context: "a6ae2502f76c2b5c1837bddcf8c8613e1f96fade26e7e37c89068a7070b844c8",
+  mecha_git: "ea52281c3d5dcb4311c571d3ce326a719545b7ffa74acacbc54b2b1226c9a9a5",
+  mecha_mailbox_send: "4eab3aa0a26a699d314653f85e7fc5420eebcb2afa5a87bc48c5e372e9fe53b2",
+  mecha_parent_message: "2eb0922dc3c0acad276229837c72ca829bfeee04be4ae0c5522cee464cec0da0",
+  mecha_pr: "bccc303b438ef65b2d447fdb3c5d3b3efea62eaab2282c504e2880e0f7643585",
+  mecha_priority: "39c8b3b2c1471a4df437783f2766d7980a8efa95680e0f1bc7facc50bfb84e3e",
+  mecha_recall: "df134eb5b972ba943c393f0ae5807f71f66f6635fa6afbcdeddcc4b49f30a7e0",
+  mecha_reminder: "3ee0aee5630c84883e32383cf3c6789a963dad15cf5bed2ca3f98ff710bff698",
+  mecha_request_inline_tool_allowance: "98adf7b9a6f69375931b66c1649c669784bc9fd4fa65f5a93a0cbf8404237214",
+  mecha_router: "dbcb6eeafd0f177f732ceb39acd336cc60f0f2b7d3e79855b2eb3a89849df205",
+  mecha_settled_notifications: "bdcfd97bf8cec67ce70a641370fcf90affa0ab31a80c7c40ee07d123311b1f1f",
+  mecha_state: "15f43e468b451bba3b3f1fd7ed823ef4fc0a3333ec892f226c145bd8c0fe7c02",
+  mecha_verification_handoff: "8f723b1630e1d0b4a2c9c862566f640302a4cbed37794511a49469d24e43358d",
+  mecha_worker: "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
+});
+
 function isRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -255,24 +275,45 @@ function validateTool(value: unknown): ManifestTool {
   return result;
 }
 
-export function validateDesiredManifest(value: unknown, options: { requireBaseline?: boolean } = {}): DesiredManifest {
+export function validateDesiredManifest(value: unknown, options: { requireBaseline?: boolean; requireBaselineCapabilities?: boolean } = {}): DesiredManifest {
   if (!isRecord(value)) fail("desired manifest must be an object");
   exactlyKeys(value, ["protocol", "revision", "tools"], "desired manifest");
   requiredKeys(value, ["protocol", "revision", "tools"], "desired manifest");
   if (value.protocol !== "mecha.tools/v1") fail("unsupported desired manifest protocol");
   const revision = safeInteger(value.revision, "manifest revision", 1, Number.MAX_SAFE_INTEGER);
   if (!Array.isArray(value.tools) || value.tools.length < MIN_TOOLS || value.tools.length > MAX_TOOLS) fail("manifest must contain 16 through 32 tools");
-  const tools = value.tools.map(validateTool).sort((left, right) => Buffer.compare(Buffer.from(left.capability_id), Buffer.from(right.capability_id)));
+  const tools = value.tools.map(validateTool);
+  for (let index = 1; index < tools.length; index++) {
+    const previous = tools[index - 1]!;
+    const current = tools[index]!;
+    if (Buffer.compare(Buffer.from(previous.capability_id, "utf8"), Buffer.from(current.capability_id, "utf8")) >= 0) {
+      fail("tools must be ordered by capability_id");
+    }
+  }
   const names = new Set<string>();
   const capabilityIds = new Set<string>();
   const definitions = new Set<string>();
   for (const tool of tools) {
     if (names.has(tool.name) || capabilityIds.has(tool.capability_id) || definitions.has(tool.definition_sha256)) fail("manifest contains duplicate names or definitions");
+    const immutableName = `${tool.capability_id}__${tool.definition_sha256}`;
+    const baselineCapability = BASELINE_TOOL_NAMES.find((name) => name === tool.capability_id);
+    const originalBaselineName = baselineCapability !== undefined
+      && tool.name === baselineCapability
+      && tool.definition_sha256 === BASELINE_DEFINITION_SHA256[baselineCapability];
+    if (tool.name !== immutableName && !originalBaselineName) {
+      fail(`tool name does not match its immutable definition identity: ${tool.capability_id}`);
+    }
     names.add(tool.name); capabilityIds.add(tool.capability_id); definitions.add(tool.definition_sha256);
   }
-  if (options.requireBaseline === true) {
+  if (revision === 1 || options.requireBaseline === true) {
     if (revision !== 1 || tools.length !== BASELINE_TOOL_NAMES.length) fail("revision one must be the exact baseline");
-    for (const name of BASELINE_TOOL_NAMES) if (!names.has(name)) fail(`revision one is missing ${name}`);
+    for (const name of BASELINE_TOOL_NAMES) {
+      const tool = tools.find((candidate) => candidate.capability_id === name);
+      if (tool === undefined || tool.name !== name) fail(`revision one is missing ${name}`);
+    }
+  }
+  if (options.requireBaselineCapabilities === true) {
+    for (const name of BASELINE_TOOL_NAMES) if (!capabilityIds.has(name)) fail(`current manifest is missing baseline capability ${name}`);
   }
   return { protocol: "mecha.tools/v1", revision, tools };
 }
