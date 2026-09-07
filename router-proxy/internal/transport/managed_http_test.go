@@ -272,6 +272,36 @@ func TestUISessionRouteIsNotAnActiveManagedRoute(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, response.StatusCode)
 }
 
+func TestManagedRestartHTTPContract(t *testing.T) {
+	server, _ := newManagedHTTPTestServer(t)
+	request := func(id, body string) *http.Response {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/managed-agents/missing/restart", strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		if id != "" {
+			req.Header.Set("X-Request-ID", id)
+		}
+		response, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		return response
+	}
+	assertError := func(response *http.Response, status int, code string, requestID any) {
+		t.Helper()
+		defer response.Body.Close()
+		require.Equal(t, status, response.StatusCode)
+		require.Equal(t, "no-store", response.Header.Get("Cache-Control"))
+		var payload map[string]any
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&payload))
+		require.Equal(t, code, payload["error"].(map[string]any)["code"])
+		require.Equal(t, requestID, payload["request_id"])
+	}
+	assertError(request("", `{}`), http.StatusBadRequest, "MISSING_REQUEST_ID", nil)
+	assertError(request("not-a-uuid", `{}`), http.StatusBadRequest, "INVALID_REQUEST_ID", nil)
+	valid := "123e4567-e89b-42d3-a456-426614174081"
+	assertError(request(valid, `{"unexpected":true}`), http.StatusBadRequest, "UNKNOWN_FIELD", valid)
+	assertError(request(valid, `{}`), http.StatusNotFound, "AGENT_NOT_FOUND", valid)
+}
+
 func sortedJSONKeys(values map[string]json.RawMessage) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {

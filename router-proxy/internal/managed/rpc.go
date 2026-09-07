@@ -10,6 +10,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
 var ErrReadinessBacklogFull = errors.New("managed readiness receipt backlog is full")
@@ -33,6 +35,13 @@ type readinessSourceRPC interface {
 	WaitForChildSnapshot(context.Context) (map[string]any, error)
 }
 
+// RestartTurnSettler is deliberately narrower than RPC. Existing launch-only
+// callers remain source-compatible; controlled active restart requires this
+// binding-scoped stdout capability.
+type RestartTurnSettler interface {
+	SettlePreparedRestartTurn(context.Context, store.ManagedRuntimeFence) error
+}
+
 type RPCFactory interface {
 	Open(context.Context, Process) (RPC, error)
 }
@@ -45,6 +54,12 @@ func (f RPCFactoryFunc) Open(ctx context.Context, process Process) (RPC, error) 
 type receiptNotification struct {
 	sequence uint64
 	value    map[string]any
+}
+
+type restartSettlementToken struct {
+	fence     store.ManagedRuntimeFence
+	watermark uint64
+	consumed  bool
 }
 type rpcResponse struct {
 	value map[string]any
@@ -71,6 +86,7 @@ type rpcClient struct {
 	bootstrapWatermark *uint64
 	policyWatermark    *uint64
 	snapshotWatermark  *uint64
+	settlementToken    *restartSettlementToken
 
 	closeOnce sync.Once
 	closeErr  error
@@ -374,6 +390,103 @@ func (c *rpcClient) waitForReceipt(ctx context.Context, watermark uint64, want s
 		}
 	}
 }
+
+// SettlePreparedRestartTurn treats stock Pi's agent_settled frame as a drain
+// boundary. The frame has no session or process fields, so the supplied fence
+// is deliberately retained only as the caller's immutable binding proof; this
+// client proves pipe ownership by observing the frame on this stdout reader.
+func (c *rpcClient) SettlePreparedRestartTurn(ctx context.Context, fence store.ManagedRuntimeFence) error {
+	if !validRestartFence(fence) {
+		return errors.New("restart settlement fence is invalid")
+	}
+	c.mu.Lock()
+	if c.terminal != nil {
+		err := c.terminal
+		c.mu.Unlock()
+		return err
+	}
+	if c.settlementToken != nil {
+		c.mu.Unlock()
+		return errors.New("restart settlement is already armed")
+	}
+	token := &restartSettlementToken{fence: fence, watermark: c.eventSequence}
+	c.settlementToken = token
+	c.mu.Unlock()
+
+	for {
+		c.mu.Lock()
+		if c.terminal != nil {
+			err := c.terminal
+			if c.settlementToken == token {
+				c.settlementToken = nil
+			}
+			c.mu.Unlock()
+			return err
+		}
+		settled := -1
+		for index, item := range c.backlog {
+			if !agentSettledType(item.value) {
+				continue
+			}
+			if !agentSettledFrame(item.value) {
+				if c.settlementToken == token {
+					c.settlementToken = nil
+				}
+				c.mu.Unlock()
+				return errors.New("restart settlement received a malformed agent_settled event")
+			}
+			if item.sequence <= token.watermark {
+				if c.settlementToken == token {
+					c.settlementToken = nil
+				}
+				c.mu.Unlock()
+				return errors.New("restart settlement received a stale agent_settled event")
+			}
+			if settled >= 0 {
+				if c.settlementToken == token {
+					c.settlementToken = nil
+				}
+				c.mu.Unlock()
+				return errors.New("restart settlement received duplicate agent_settled events")
+			}
+			settled = index
+		}
+		if settled >= 0 {
+			c.backlog = append(c.backlog[:settled], c.backlog[settled+1:]...)
+			token.consumed = true
+			if c.settlementToken == token {
+				c.settlementToken = nil
+			}
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+		select {
+		case <-c.notified:
+		case <-ctx.Done():
+			c.mu.Lock()
+			if c.settlementToken == token {
+				c.settlementToken = nil
+			}
+			c.mu.Unlock()
+			return ctx.Err()
+		}
+	}
+}
+
+func validRestartFence(fence store.ManagedRuntimeFence) bool {
+	return fence.AgentID != "" && fence.PiSessionID != "" && fence.SessionEpoch >= 1 && fence.ProcessPID > 0 && fence.ProcessStartMarker != "" && fence.ProcessIncarnation != "" && fence.RuntimeGeneration != "" && fence.ManifestRevision >= 1 && len(fence.ManifestHash) == 64
+}
+
+func agentSettledType(value map[string]any) bool {
+	typeName, ok := value["type"].(string)
+	return ok && typeName == "agent_settled"
+}
+
+func agentSettledFrame(value map[string]any) bool {
+	return len(value) == 1 && agentSettledType(value)
+}
+
 func takeWatermark(c *rpcClient, which *uint64) (uint64, error) {
 	if which == nil {
 		return 0, errors.New("readiness receipt wait has no command watermark")

@@ -41,6 +41,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents":
 		r.handleManagedLaunch(w, req)
 		return true
+	case req.Method == http.MethodPost && managedRestartPath(req.URL.Path) != "":
+		r.handleManagedRestart(w, req, managedRestartPath(req.URL.Path))
+		return true
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/managed-agents/"):
 		r.handleManagedAgentGET(w, req)
 		return true
@@ -218,6 +221,78 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 	body, _ := json.Marshal(map[string]any{"operation_id": requestID, "agent": managed.PublicAgent(result.Agent)})
 	r.writeManagedRaw(w, 202, map[string]string{"X-Request-ID": requestID, "Content-Type": "application/json; charset=utf-8"}, body)
 }
+func managedRestartPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/restart") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/restart")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+// handleManagedRestart is a direct local control. It intentionally reads no
+// identity, cookie, Origin, or permission data: loopback reachability is the
+// boundary. Durable replay/conflict lookup happens in ReserveRestart before a
+// process binding is inspected.
+func (r *Router) handleManagedRestart(w http.ResponseWriter, req *http.Request, agentID string) {
+	requestID := req.Header.Get("X-Request-ID")
+	if requestID == "" {
+		r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_REQUEST_ID", "X-Request-ID is required"})
+		return
+	}
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 64*1024, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	if len(payload) != 0 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	canonicalPath := req.URL.Path
+	if r.managedPathCanonicalizer != nil {
+		canonicalPath = r.managedPathCanonicalizer(req)
+	}
+	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
+	result, restartErr := r.managed.ReserveRestart(req.Context(), managed.RestartRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	if restartErr != nil {
+		r.writeManagedError(w, req, managedRestartError(restartErr))
+		return
+	}
+	if result.Operation == nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the restart operation"})
+		return
+	}
+	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+}
+
+func managedRestartError(err error) error {
+	var missing *store.ManagedAgentNotFoundError
+	if errors.As(err, &missing) {
+		return &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"}
+	}
+	var conflict *store.ManagedRestartConflictError
+	if errors.As(err, &conflict) {
+		return &managedHTTPError{409, "CONFLICT", "A managed lifecycle operation is already in progress"}
+	}
+	var notReady *store.ManagedAgentNotReadyError
+	if errors.As(err, &notReady) {
+		return &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent is not ready to restart"}
+	}
+	var idempotency *store.ManagedIdempotencyConflictError
+	if errors.As(err, &idempotency) {
+		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
+	}
+	return &managedHTTPError{500, "INTERNAL", "Router could not restart the managed agent"}
+}
+
 func (r *Router) replayManagedOperation(w http.ResponseWriter, req *http.Request, requestID, path, bodyHash string) {
 	existing, err := r.store.FindManagedOperation(req.Context(), req.Method, requestID)
 	if err != nil || existing == nil {

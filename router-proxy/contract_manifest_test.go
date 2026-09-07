@@ -78,8 +78,8 @@ func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 	require.NotEmpty(t, manifest.WebSocket.ServerFrames)
 	require.Equal(t, "protocol/v1/schema.json", manifest.WebSocket.Schema)
 	require.Equal(t, map[string]string{
-		"http_outcomes":    "http-outcomes.json",
-		"frame_cases":      "frame-cases.json",
+		"http_outcomes":          "http-outcomes.json",
+		"frame_cases":            "frame-cases.json",
 		"generated_fields":       "generated-fields.json",
 		"transport_differential": "transport-differential.json",
 	}, manifest.Fixtures)
@@ -101,6 +101,25 @@ func TestContractManifestScaffoldIsSelfContained(t *testing.T) {
 	manifestServerTypes := frameTypeSet(manifest.WebSocket.ServerFrames)
 	require.Equal(t, clientTypes, manifestClientTypes, "manifest client inventory must match protocol clientFrame union")
 	require.Equal(t, serverTypes, manifestServerTypes, "manifest server inventory must match protocol serverFrame union")
+}
+
+func TestContractManifestManagedRestartRoute(t *testing.T) {
+	manifest := readManifest(t, filepath.Join("..", "router", "contract"))
+	found := false
+	for _, raw := range manifest.HTTP {
+		var route struct {
+			Methods []string `json:"methods"`
+			Path    string   `json:"path"`
+			Managed bool     `json:"managed"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &route))
+		if route.Path == "/v1/managed-agents/{agent_id}/restart" {
+			found = true
+			require.Equal(t, []string{"POST"}, route.Methods)
+			require.True(t, route.Managed)
+		}
+	}
+	require.True(t, found)
 }
 
 func TestManifestFixtureReferenceFailureIsReported(t *testing.T) {

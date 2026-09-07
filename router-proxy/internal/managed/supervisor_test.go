@@ -460,6 +460,21 @@ func TestReserveManagedRestartRejectsInvalidLiveBindingWithoutEffects(t *testing
 	}
 }
 
+func TestRestartTransitionFirstAdmissionRejectsFreshManagerWithoutBinding(t *testing.T) {
+	manager, durable, _ := readyRestartManager(t, nil)
+	defer manager.Close(context.Background())
+	manager.mu.Lock()
+	delete(manager.bindings, "restart-agent")
+	delete(manager.processes, "restart-agent")
+	delete(manager.rpcs, "restart-agent")
+	manager.mu.Unlock()
+	_, err := manager.ReserveRestart(context.Background(), restartRequest())
+	var notReady *store.ManagedAgentNotReadyError
+	require.ErrorAs(t, err, &notReady)
+	_, err = durable.ManagedRestartTransition(context.Background(), "restart-agent")
+	require.Error(t, err)
+}
+
 func TestRestartPreparationSuccessIsBoundedAndDoesNotReplace(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, nil)
 	defer manager.Close(context.Background())

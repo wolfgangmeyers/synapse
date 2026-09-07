@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -346,6 +347,55 @@ func TestRPCClientWakesWaitersOnEOFAndClose(t *testing.T) {
 	require.NoError(t, other.Close())
 	err := other.Prompt(context.Background(), "after-close")
 	require.Contains(t, err.Error(), "closed")
+}
+
+func TestRestartTurnSettlerTreatsAgentSettledAsDrainBoundary(t *testing.T) {
+	newClient := func(t *testing.T) (*rpcClient, *io.PipeWriter) {
+		t.Helper()
+		reader, writer := io.Pipe()
+		client := NewRPCClient(io.Discard, reader, func() error { return writer.Close() }).(*rpcClient)
+		t.Cleanup(func() { _ = client.Close() })
+		return client, writer
+	}
+	fence := store.ManagedRuntimeFence{AgentID: "agent", PiSessionID: "session", SessionEpoch: 1, ProcessPID: 17, ProcessStartMarker: "marker", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	t.Run("post-watermark settle accepts drain and leaves continuation alone", func(t *testing.T) {
+		client, writer := newClient(t)
+		result := make(chan error, 1)
+		go func() { result <- client.SettlePreparedRestartTurn(context.Background(), fence) }()
+		require.Eventually(t, func() bool {
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			return client.settlementToken != nil
+		}, time.Second, time.Millisecond)
+		require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled"}))
+		require.NoError(t, <-result)
+		// A settled handler may intentionally start a continuation. It is not
+		// treated as target work and is left in the old pipe's normal backlog.
+		require.NoError(t, writeRPC(writer, map[string]any{"type": "turn_started", "source": "old-continuation"}))
+		require.Eventually(t, func() bool {
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			return len(client.backlog) == 1 && client.backlog[0].value["source"] == "old-continuation"
+		}, time.Second, time.Millisecond)
+	})
+	t.Run("stale malformed and EOF fail", func(t *testing.T) {
+		client, writer := newClient(t)
+		require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled"}))
+		require.Eventually(t, func() bool { client.mu.Lock(); defer client.mu.Unlock(); return client.eventSequence == 1 }, time.Second, time.Millisecond)
+		require.Error(t, client.SettlePreparedRestartTurn(context.Background(), fence))
+		client, writer = newClient(t)
+		result := make(chan error, 1)
+		go func() { result <- client.SettlePreparedRestartTurn(context.Background(), fence) }()
+		require.Eventually(t, func() bool { client.mu.Lock(); defer client.mu.Unlock(); return client.settlementToken != nil }, time.Second, time.Millisecond)
+		require.NoError(t, writeRPC(writer, map[string]any{"type": "agent_settled", "extra": true}))
+		require.Error(t, <-result)
+		client, writer = newClient(t)
+		result = make(chan error, 1)
+		go func() { result <- client.SettlePreparedRestartTurn(context.Background(), fence) }()
+		require.Eventually(t, func() bool { client.mu.Lock(); defer client.mu.Unlock(); return client.settlementToken != nil }, time.Second, time.Millisecond)
+		require.NoError(t, writer.Close())
+		require.ErrorIs(t, <-result, io.EOF)
+	})
 }
 
 func TestRPCClientRejectsNonCanonicalManagedCommandBeforeReadiness(t *testing.T) {

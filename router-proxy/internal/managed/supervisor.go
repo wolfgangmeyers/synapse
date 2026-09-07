@@ -48,6 +48,7 @@ type ManagerOptions struct {
 	Clock                             deterministic.Clock
 	IDSource                          deterministic.IDSource
 	ProcessGroupLeaderVerifier        ProcessGroupLeaderVerifier
+	ProcessGroupOps                   ProcessGroupOps
 	RestartPreparationDeadlineFactory RestartPreparationDeadlineFactory
 	RestartPreparationHook            RestartPreparationHook
 }
@@ -69,8 +70,14 @@ type RestartResult struct {
 	Replayed  bool
 }
 
+// managedAgentLane survives a binding replacement. Restart execution, recovery,
+// close, and exit handling all acquire this one owner before they can touch the
+// durable transition or either process group.
+type managedAgentLane struct{ serial sync.Mutex }
+
 type managedBinding struct {
 	agentID              string
+	lane                 *managedAgentLane
 	serial               sync.Mutex
 	preparationWG        sync.WaitGroup
 	process              Process
@@ -84,6 +91,11 @@ type managedBinding struct {
 	manifestRevision     int
 	manifestHash         string
 	reaped               bool
+	token                string
+	waitDone             <-chan error
+	waitSignal           <-chan struct{}
+	waitErr              error
+	restartExecutionDone bool
 	restartShutdownDone  bool
 	restartShutdownError error
 }
@@ -102,7 +114,9 @@ type Manager struct {
 	rpcs                map[string]RPC
 	operationIDs        map[string]string
 	bindings            map[string]*managedBinding
+	lanes               map[string]*managedAgentLane
 	groupLeader         ProcessGroupLeaderVerifier
+	processOps          ProcessGroupOps
 	preparationDeadline RestartPreparationDeadlineFactory
 	preparationHook     RestartPreparationHook
 	runCtx              context.Context
@@ -156,12 +170,16 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	if groupLeader == nil {
 		groupLeader = defaultProcessGroupLeaderVerifier
 	}
+	processOps := options.ProcessGroupOps
+	if processOps == nil {
+		processOps = DefaultProcessGroupOps()
+	}
 	deadlineFactory := options.RestartPreparationDeadlineFactory
 	if deadlineFactory == nil {
 		deadlineFactory = context.WithTimeout
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	return &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, groupLeader: groupLeader, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, runCtx: runCtx, cancel: cancel}, nil
+	return &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, runCtx: runCtx, cancel: cancel}, nil
 }
 
 type managerClock struct{}
@@ -254,7 +272,7 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "MANAGER_CLOSED", "managed manager closed")
 		return LaunchResult{}, errors.New("managed manager is closed")
 	}
-	binding := &managedBinding{agentID: agent.AgentID, operationID: request.RequestID, lifecycleAction: "launch", sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash}
+	binding := &managedBinding{agentID: agent.AgentID, lane: m.laneLocked(agent.AgentID), operationID: request.RequestID, lifecycleAction: "launch", token: agent.RuntimeGeneration, sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash}
 	m.bindings[agent.AgentID] = binding
 	m.operationIDs[agent.AgentID] = request.RequestID
 	m.startWG.Add(1)
@@ -282,16 +300,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	// Close cancels ctx to stop process and RPC work. This goroutine owns its
 	// durable launch transitions, and Close waits for them before returning.
 	durableCtx := context.Background()
-	defer func() {
-		m.mu.Lock()
-		delete(m.processes, agent.AgentID)
-		delete(m.rpcs, agent.AgentID)
-		delete(m.operationIDs, agent.AgentID)
-		if m.bindings[agent.AgentID] == binding {
-			delete(m.bindings, agent.AgentID)
-		}
-		m.mu.Unlock()
-	}()
+	defer m.clearBinding(binding)
 	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
 	process, err := m.processFactory.Start(ctx, spec)
 	if err != nil {
@@ -312,7 +321,19 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.processes[agent.AgentID] = process
 	m.mu.Unlock()
 	waitDone := make(chan error, 1)
-	go func() { waitDone <- process.Wait() }()
+	waitSignal := make(chan struct{})
+	go func() {
+		waitErr := process.Wait()
+		binding.serial.Lock()
+		binding.waitErr = waitErr
+		close(waitSignal)
+		binding.serial.Unlock()
+		waitDone <- waitErr
+	}()
+	binding.serial.Lock()
+	binding.waitDone = waitDone
+	binding.waitSignal = waitSignal
+	binding.serial.Unlock()
 	if err = m.store.UpdateManagedAgentStarting(durableCtx, agent.AgentID, agent.PiSessionID, store.ProcessIdentityRecord{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}, agent.RuntimeGeneration); err != nil {
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(err))
@@ -338,7 +359,10 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		return
 	}
 	select {
-	case waitErr := <-waitDone:
+	case <-waitSignal:
+		binding.serial.Lock()
+		waitErr := binding.waitErr
+		binding.serial.Unlock()
 		_ = rpc.Close()
 		m.fail(agent.AgentID, "PROCESS_EXITED", sanitizeError(waitErr))
 		return
@@ -373,7 +397,10 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	binding.lifecycleAction = ""
 	binding.serial.Unlock()
 	select {
-	case waitErr := <-waitDone:
+	case <-waitSignal:
+		binding.serial.Lock()
+		waitErr := binding.waitErr
+		binding.serial.Unlock()
 		if m.recordRestartExit(binding) {
 			return
 		}
@@ -415,7 +442,11 @@ func (m *Manager) findOperationForAgent(agentID string) (*store.ManagedOperation
 }
 
 func defaultProcessGroupLeaderVerifier(identity ProcessIdentity) bool {
-	if ValidateIdentity(identity) != nil || processStartMarker(identity.PID) != identity.StartMarker {
+	if ValidateIdentity(identity) != nil {
+		return false
+	}
+	marker, err := processStartMarker(identity.PID)
+	if err != nil || marker != identity.StartMarker {
 		return false
 	}
 	groupID, err := syscall.Getpgid(identity.PID)
@@ -428,6 +459,21 @@ func (m *Manager) isClosed() bool {
 	return m.closed
 }
 
+func (m *Manager) laneLocked(agentID string) *managedAgentLane {
+	lane := m.lanes[agentID]
+	if lane == nil {
+		lane = &managedAgentLane{}
+		m.lanes[agentID] = lane
+	}
+	return lane
+}
+
+func (m *Manager) laneFor(agentID string) *managedAgentLane {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.laneLocked(agentID)
+}
+
 func (m *Manager) bindingFor(agentID string) (*managedBinding, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -435,11 +481,48 @@ func (m *Manager) bindingFor(agentID string) (*managedBinding, bool) {
 	return binding, !m.closed && binding != nil
 }
 
+// clearBinding only removes the runtime maps when this immutable binding still
+// owns them. An old exit may arrive after a target has been installed.
+func (m *Manager) clearBinding(binding *managedBinding) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.bindings[binding.agentID] != binding {
+		return
+	}
+	delete(m.processes, binding.agentID)
+	delete(m.rpcs, binding.agentID)
+	delete(m.operationIDs, binding.agentID)
+	delete(m.bindings, binding.agentID)
+}
+
+func (m *Manager) installBinding(binding *managedBinding) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
+	if binding.lane == nil {
+		binding.lane = m.laneLocked(binding.agentID)
+	}
+	m.bindings[binding.agentID] = binding
+	m.processes[binding.agentID] = binding.process
+	m.rpcs[binding.agentID] = binding.rpc
+	m.operationIDs[binding.agentID] = binding.operationID
+	return true
+}
+
 func bindingFence(agentID string, binding *managedBinding) store.ManagedRuntimeFence {
 	if agentID == "" {
 		agentID = binding.agentID
 	}
 	return store.ManagedRuntimeFence{AgentID: agentID, PiSessionID: binding.sessionID, SessionEpoch: binding.sessionEpoch, ProcessPID: binding.identity.PID, ProcessStartMarker: binding.identity.StartMarker, ProcessIncarnation: binding.identity.Incarnation, RuntimeGeneration: binding.runtimeGeneration, ManifestRevision: binding.manifestRevision, ManifestHash: binding.manifestHash}
+}
+
+func storedAgentFence(agent *store.ManagedAgentRecord) store.ManagedRuntimeFence {
+	if agent == nil {
+		return store.ManagedRuntimeFence{}
+	}
+	return store.ManagedRuntimeFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}
 }
 
 func sameBindingFence(left, right store.ManagedRuntimeFence) bool {
@@ -479,25 +562,26 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if request.AgentID == "" || request.Method == "" || request.CanonicalPath == "" || request.RequestID == "" || request.CanonicalBodyHash == "" {
 		return RestartResult{}, errors.New("managed restart request is incomplete")
 	}
-	existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID)
-	if err == nil {
-		return replayRestartOperation(request, existing)
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	admission, err := m.store.LookupManagedRestartAdmission(ctx, request.Method, request.RequestID, request.CanonicalPath, request.CanonicalBodyHash, request.AgentID)
+	if err != nil {
 		return RestartResult{}, err
+	}
+	if admission.Operation != nil {
+		return replayRestartOperation(request, admission.Operation)
 	}
 	binding, ok := m.bindingFor(request.AgentID)
 	if !ok {
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
 	binding.serial.Lock()
-	agent, err := m.store.ManagedAgent(ctx, request.AgentID)
-	if err != nil {
-		binding.serial.Unlock()
-		if errors.Is(err, sql.ErrNoRows) {
-			return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
+	agent := admission.Agent
+	if agent == nil {
+		var readErr error
+		agent, readErr = m.store.ManagedAgent(ctx, request.AgentID)
+		if readErr != nil {
+			binding.serial.Unlock()
+			return RestartResult{}, readErr
 		}
-		return RestartResult{}, err
 	}
 	if !m.liveBinding(agent, binding) {
 		binding.serial.Unlock()
@@ -625,6 +709,33 @@ func (m *Manager) prepareRestart(binding *managedBinding, fence store.ManagedRes
 	if m.preparationHook != nil {
 		_ = m.preparationHook(m.runCtx, "prepared")
 	}
+	// Older launch-only RPC doubles remain valid for the closed reservation
+	// slice. A real active replacement cannot continue without the narrow
+	// binding-scoped settlement capability.
+	_, transitionErr := m.store.ManagedRestartTransition(context.Background(), fence.AgentID)
+	if transitionErr == nil && supportsRestartSettlement(rpc) {
+		m.startRestartExecution(binding, fence, operationID)
+	}
+}
+
+func supportsRestartSettlement(rpc RPC) bool {
+	_, ok := rpc.(RestartTurnSettler)
+	return ok
+}
+
+func (m *Manager) startRestartExecution(binding *managedBinding, fence store.ManagedRestartFence, operationID string) {
+	m.mu.Lock()
+	if m.closed || binding.restartExecutionDone {
+		m.mu.Unlock()
+		return
+	}
+	binding.restartExecutionDone = true
+	m.startWG.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.startWG.Done()
+		m.ExecutePreparedRestart(binding, fence, operationID)
+	}()
 }
 
 // AdmitPrompt is intentionally internal. It shares restart's serializer so a
@@ -646,64 +757,404 @@ func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) erro
 	return nil
 }
 
-// shutdownRestartBinding is the only close path for a pending restart. It
-// waits for preparation to leave its RPC read, then retains the transition for
-// router recovery instead of routing through generic launch cleanup.
+// ExecutePreparedRestart is the single controlled replacement owner. The
+// per-agent lane survives a binding replacement, so Close, recovery, and an
+// old process exit cannot race a target install or its readiness gate.
+func (m *Manager) ExecutePreparedRestart(binding *managedBinding, oldFence store.ManagedRestartFence, operationID string) {
+	if binding.lane == nil {
+		return
+	}
+	binding.lane.serial.Lock()
+	defer binding.lane.serial.Unlock()
+	m.executePreparedRestartInLane(binding, oldFence, operationID)
+}
+
+func (m *Manager) executePreparedRestartInLane(binding *managedBinding, oldFence store.ManagedRestartFence, operationID string) {
+	transition, err := m.store.ManagedRestartTransition(context.Background(), oldFence.AgentID)
+	if err != nil || transition.OperationID != operationID || !sameBindingFence(transition.Fence, oldFence) || transition.Stage != "prepared" {
+		return
+	}
+
+	binding.serial.Lock()
+	if !m.restartBindingCurrent(binding, oldFence, operationID) {
+		binding.serial.Unlock()
+		return
+	}
+	oldRPC, oldProcess, oldWait := binding.rpc, binding.process, binding.waitDone
+	binding.serial.Unlock()
+	if oldRPC == nil || oldProcess == nil || oldWait == nil {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_IDENTITY_UNSAFE", "restart process identity could not be verified")
+		return
+	}
+
+	if transition.ReservationActivityState == "active" {
+		if err := m.store.MarkManagedRestartSettling(context.Background(), oldFence, operationID); err != nil {
+			return
+		}
+		settler, ok := oldRPC.(RestartTurnSettler)
+		if !ok {
+			_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_SETTLE_FAILED", "restart turn did not settle")
+			return
+		}
+		settleCtx, cancel := context.WithTimeout(m.runCtx, m.config.Limits.GracefulStop)
+		err = settler.SettlePreparedRestartTurn(settleCtx, oldFence)
+		cancel()
+		binding.serial.Lock()
+		current := m.restartBindingCurrent(binding, oldFence, operationID)
+		binding.serial.Unlock()
+		if err != nil || !current || m.store.MarkManagedRestartTurnSettled(context.Background(), oldFence, operationID) != nil {
+			_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_SETTLE_FAILED", "restart turn did not settle")
+			return
+		}
+	}
+
+	if err := m.store.MarkManagedRestartStopping(context.Background(), oldFence, operationID); err != nil {
+		return
+	}
+	if m.processOps.Probe(oldFenceIdentity(oldFence)).State != ProcessOwned {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_IDENTITY_UNSAFE", "restart process identity could not be verified")
+		return
+	}
+	if err := m.processOps.CloseProcessInput(oldProcess); err != nil {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_STOP_FAILED", "restart process stop did not complete")
+		return
+	}
+	if !m.reapRestartGroup(m.runCtx, oldFenceIdentity(oldFence), oldWait) {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_STOP_FAILED", "restart process stop did not complete")
+		return
+	}
+	if err := m.store.MarkManagedRestartOldStopped(context.Background(), oldFence, operationID); err != nil {
+		return
+	}
+	// The old pipe is closed only after the stopped commit. A continuation that
+	// Pi begins after agent_settled stays on this old binding and cannot reach
+	// the replacement's readiness or prompt path.
+	_ = oldRPC.Close()
+	stopped, err := m.store.ManagedRestartTransition(context.Background(), oldFence.AgentID)
+	if err == nil {
+		m.startRestartTargetInLane(stopped)
+	}
+}
+
+// startRestartTargetInLane starts exactly one replacement from the retained
+// stopped state. Both direct execution and cold recovery use this path.
+func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTransition) {
+	if transition == nil || transition.Stage != "stopped" {
+		return
+	}
+	oldFence, operationID := transition.Fence, transition.OperationID
+	current, err := m.store.ManagedRestartTransition(context.Background(), oldFence.AgentID)
+	if err != nil || current.OperationID != operationID || current.Stage != "stopped" || !sameBindingFence(current.Fence, oldFence) {
+		return
+	}
+	agent, err := m.store.ManagedAgent(context.Background(), oldFence.AgentID)
+	if err != nil || !sameBindingFence(storedAgentFence(agent), oldFence) || agent.ActivityState != "stopped" || agent.LifecycleState != "restarting" || agent.AcceptingPrompts {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_STATE_WRITE_FAILED", "restart state write failed")
+		return
+	}
+	if m.manifest.CanonicalSHA256 != oldFence.ManifestHash || manifestRevision(m.manifest) != oldFence.ManifestRevision {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
+		return
+	}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: oldFence.PiSessionID, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, Environment: ChildEnvironmentFor(m.config, current.TargetRuntimeGeneration, oldFence.SessionEpoch)}
+	targetProcess, err := m.processFactory.Start(m.runCtx, spec)
+	if err != nil {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
+		return
+	}
+	targetIdentity := targetProcess.Identity()
+	targetFence := store.ManagedRuntimeFence{AgentID: oldFence.AgentID, PiSessionID: oldFence.PiSessionID, SessionEpoch: oldFence.SessionEpoch, ProcessPID: targetIdentity.PID, ProcessStartMarker: targetIdentity.StartMarker, ProcessIncarnation: targetIdentity.Incarnation, RuntimeGeneration: current.TargetRuntimeGeneration, ManifestRevision: oldFence.ManifestRevision, ManifestHash: oldFence.ManifestHash}
+	target := &managedBinding{agentID: oldFence.AgentID, lane: m.laneFor(oldFence.AgentID), token: targetFence.RuntimeGeneration, process: targetProcess, operationID: operationID, lifecycleAction: "restart", identity: targetIdentity, sessionID: targetFence.PiSessionID, sessionEpoch: targetFence.SessionEpoch, runtimeGeneration: targetFence.RuntimeGeneration, manifestRevision: targetFence.ManifestRevision, manifestHash: targetFence.ManifestHash}
+	m.watchRestartProcess(target)
+	if ValidateIdentity(targetIdentity) != nil || targetIdentity.Incarnation == oldFence.ProcessIncarnation || m.processOps.Probe(targetIdentity).State != ProcessOwned {
+		if !m.cleanupUninstalledTarget(targetProcess, targetIdentity, target.waitDone) {
+			_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete")
+			return
+		}
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_IDENTITY_UNSAFE", "restart process identity could not be verified")
+		return
+	}
+	if err := m.store.InstallManagedRestartTarget(context.Background(), oldFence, targetFence, operationID); err != nil {
+		if !m.cleanupUninstalledTarget(targetProcess, targetIdentity, target.waitDone) {
+			_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete")
+			return
+		}
+		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
+		return
+	}
+	targetRPC, err := m.rpcFactory.Open(m.runCtx, targetProcess)
+	if err != nil {
+		m.cleanupInstalledTarget(target, targetFence, operationID)
+		return
+	}
+	target.serial.Lock()
+	target.rpc = targetRPC
+	target.serial.Unlock()
+	if !m.installBinding(target) {
+		_ = targetRPC.Close()
+		m.cleanupInstalledTarget(target, targetFence, operationID)
+		return
+	}
+	if err := m.readinessGate(m.runCtx, target, targetFence); err != nil {
+		_ = targetRPC.Close()
+		if m.cleanupInstalledTarget(target, targetFence, operationID) {
+			m.clearBinding(target)
+		}
+		return
+	}
+	select {
+	case <-target.waitSignal:
+		_ = targetRPC.Close()
+		if m.cleanupInstalledTarget(target, targetFence, operationID) {
+			m.clearBinding(target)
+		}
+		return
+	default:
+	}
+	if err := m.store.CompleteManagedRestartReady(context.Background(), targetFence, operationID); err != nil {
+		_ = targetRPC.Close()
+		if m.cleanupInstalledTarget(target, targetFence, operationID) {
+			m.clearBinding(target)
+		}
+		return
+	}
+	target.serial.Lock()
+	target.lifecycleAction = ""
+	target.serial.Unlock()
+	m.watchReadyRestartTarget(target)
+}
+
+func (m *Manager) watchRestartProcess(binding *managedBinding) {
+	waitDone := make(chan error, 1)
+	waitSignal := make(chan struct{})
+	binding.waitDone, binding.waitSignal = waitDone, waitSignal
+	go func() {
+		waitErr := binding.process.Wait()
+		binding.serial.Lock()
+		binding.waitErr = waitErr
+		close(waitSignal)
+		binding.serial.Unlock()
+		waitDone <- waitErr
+	}()
+}
+
+func (m *Manager) watchReadyRestartTarget(target *managedBinding) {
+	m.startWG.Add(1)
+	go func() {
+		defer m.startWG.Done()
+		select {
+		case <-target.waitSignal:
+			target.serial.Lock()
+			waitErr := target.waitErr
+			target.serial.Unlock()
+			if !m.isClosed() {
+				_ = m.store.MarkManagedFailed(context.Background(), target.agentID, "PROCESS_EXITED", sanitizeError(waitErr))
+			}
+			m.clearBinding(target)
+		case <-m.runCtx.Done():
+		}
+	}()
+}
+
+func oldFenceIdentity(fence store.ManagedRuntimeFence) ProcessIdentity {
+	return ProcessIdentity{PID: fence.ProcessPID, StartMarker: fence.ProcessStartMarker, Incarnation: fence.ProcessIncarnation}
+}
+
+func (m *Manager) restartBindingCurrent(binding *managedBinding, fence store.ManagedRuntimeFence, operationID string) bool {
+	if binding.reaped || binding.operationID != operationID || binding.process == nil || binding.rpc == nil || !sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
+		return false
+	}
+	m.mu.Lock()
+	current := !m.closed && m.bindings[fence.AgentID] == binding
+	m.mu.Unlock()
+	return current
+}
+
+// reapRestartGroup is the only process-group reaper used by execution,
+// shutdown, and cold recovery. A leader exit is insufficient: the entire
+// owned group must be absent before the durable stage can advance.
+func (m *Manager) reapRestartGroup(parent context.Context, identity ProcessIdentity, waitDone <-chan error) bool {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if m.processOps.Probe(identity).State == ProcessAbsent {
+		return true
+	}
+	graceful, cancel := context.WithTimeout(parent, m.config.Limits.GracefulStop)
+	probe := m.processOps.WaitForProcessGroupEmpty(graceful, identity, waitDone)
+	cancel()
+	if probe.State == ProcessAbsent {
+		return true
+	}
+	if m.processOps.Probe(identity).State != ProcessOwned || m.processOps.SignalVerifiedProcessGroup(identity, syscall.SIGTERM) != nil {
+		return false
+	}
+	term, cancel := context.WithTimeout(context.Background(), m.config.Limits.TermStop)
+	probe = m.processOps.WaitForProcessGroupEmpty(term, identity, waitDone)
+	cancel()
+	if probe.State == ProcessAbsent {
+		return true
+	}
+	if m.processOps.Probe(identity).State != ProcessOwned || m.processOps.SignalVerifiedProcessGroup(identity, syscall.SIGKILL) != nil {
+		return false
+	}
+	kill, cancel := context.WithTimeout(context.Background(), m.config.Limits.TermStop)
+	probe = m.processOps.WaitForProcessGroupEmpty(kill, identity, waitDone)
+	cancel()
+	return probe.State == ProcessAbsent
+}
+
+// cleanupUninstalledTarget does not report success until the owned group is
+// gone. There is no durable target fence before installation, so returning
+// early here would make a failed install orphan a child process.
+func (m *Manager) cleanupUninstalledTarget(process Process, identity ProcessIdentity, waitDone <-chan error) bool {
+	if process == nil {
+		return false
+	}
+	probe := m.processOps.Probe(identity)
+	if probe.State == ProcessAbsent {
+		return true
+	}
+	if probe.State != ProcessOwned {
+		return false
+	}
+	if err := m.processOps.CloseProcessInput(process); err != nil {
+		return false
+	}
+	return m.reapRestartGroup(context.Background(), identity, waitDone)
+}
+
+// cleanupInstalledTarget retains the target fence until a controlled reaper
+// proves the group absent. Only then may the store restore the old stopped
+// fence so a later recovery owner can create one replacement.
+func (m *Manager) cleanupInstalledTarget(binding *managedBinding, fence store.ManagedRuntimeFence, operationID string) bool {
+	if binding == nil || !m.cleanupUninstalledTarget(binding.process, binding.identity, binding.waitDone) {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), fence, operationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete")
+		return false
+	}
+	if err := m.store.ResetManagedRestartTargetToStopped(context.Background(), fence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready"); err != nil {
+		_ = m.store.RecordManagedRestartFailure(context.Background(), fence, operationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete")
+		return false
+	}
+	return true
+}
+
+// shutdownRestartBinding arbitrates Close with restart execution through the
+// persistent lane. It never calls Process.Stop: every owned group follows the
+// same fenced reaper as execution and recovery.
 func (m *Manager) shutdownRestartBinding(ctx context.Context, binding *managedBinding) (bool, error) {
 	binding.preparationWG.Wait()
-	binding.serial.Lock()
-	defer binding.serial.Unlock()
-	if binding.restartShutdownDone {
-		return true, binding.restartShutdownError
-	}
-	if binding.lifecycleAction != "restart" {
+	if binding.lane == nil {
 		return false, nil
 	}
-	finish := func(err error) (bool, error) {
-		binding.restartShutdownDone = true
-		binding.restartShutdownError = err
+	binding.lane.serial.Lock()
+	defer binding.lane.serial.Unlock()
+	binding.serial.Lock()
+	if binding.restartShutdownDone {
+		err := binding.restartShutdownError
+		binding.serial.Unlock()
 		return true, err
 	}
-	fence := bindingFence(binding.agentID, binding)
+	if binding.lifecycleAction != "restart" {
+		binding.serial.Unlock()
+		return false, nil
+	}
+	fence, process, rpc, waitDone := bindingFence(binding.agentID, binding), binding.process, binding.rpc, binding.waitDone
+	binding.serial.Unlock()
+	finish := func(err error) (bool, error) {
+		binding.serial.Lock()
+		binding.restartShutdownDone = true
+		binding.restartShutdownError = err
+		binding.serial.Unlock()
+		return true, err
+	}
 	transition, err := m.store.ManagedRestartTransition(context.Background(), binding.agentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
-	if err != nil {
+	if err != nil || transition.OperationID != binding.operationID {
 		return finish(err)
 	}
-	if transition.OperationID != binding.operationID || !sameBindingFence(transition.Fence, fence) || binding.process == nil || binding.process.Identity() != binding.identity || !m.groupLeader(binding.identity) {
+	if transition.TargetFence != nil && sameBindingFence(*transition.TargetFence, fence) && transition.Stage == "starting" {
+		if process == nil || process.Identity() != binding.identity || !m.reapRestartGroup(context.Background(), oldFenceIdentity(fence), waitDone) {
+			return finish(m.store.RecordManagedRestartFailure(context.Background(), fence, transition.OperationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete"))
+		}
+		if rpc != nil {
+			_ = rpc.Close()
+		}
+		binding.serial.Lock()
+		binding.reaped = true
+		binding.serial.Unlock()
+		err := m.store.ResetManagedRestartTargetToStopped(context.Background(), fence, transition.OperationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
+		if err == nil {
+			m.clearBinding(binding)
+		}
+		return finish(err)
+	}
+	if !sameBindingFence(transition.Fence, fence) {
+		// A target cleanup or replacement handoff already removed this immutable
+		// binding. It must never fall through to generic raw Process.Stop.
+		return finish(nil)
+	}
+	if process == nil || process.Identity() != binding.identity {
 		return finish(&store.ManagedRestartStaleError{AgentID: binding.agentID})
 	}
-	if err := binding.process.Stop(ctx); err != nil {
-		return finish(err)
+	if transition.Stage == "reserved" || transition.Stage == "prepared" || transition.Stage == "settling" {
+		if err := m.store.MarkManagedRestartStoppingForShutdown(context.Background(), transition.Fence, transition.OperationID); err != nil {
+			return finish(err)
+		}
+		transition.Stage = "stopping"
 	}
+	if transition.Stage == "stopping" {
+		if m.processOps.Probe(oldFenceIdentity(fence)).State == ProcessOwned {
+			if err := m.processOps.CloseProcessInput(process); err != nil {
+				return finish(m.store.RecordManagedRestartFailure(context.Background(), fence, transition.OperationID, "RESTART_STOP_FAILED", "restart process stop did not complete"))
+			}
+		}
+		if !m.reapRestartGroup(context.Background(), oldFenceIdentity(fence), waitDone) {
+			return finish(m.store.RecordManagedRestartFailure(context.Background(), fence, transition.OperationID, "RESTART_STOP_FAILED", "restart process stop did not complete"))
+		}
+		if err := m.store.MarkManagedRestartOldStopped(context.Background(), fence, transition.OperationID); err != nil {
+			return finish(err)
+		}
+	}
+	if transition.Stage != "stopped" && transition.Stage != "stopping" {
+		return finish(&store.ManagedRestartStaleError{AgentID: binding.agentID})
+	}
+	if rpc != nil {
+		_ = rpc.Close()
+	}
+	binding.serial.Lock()
 	binding.reaped = true
-	if binding.rpc != nil {
-		_ = binding.rpc.Close()
-	}
-	return finish(m.store.RecordManagedRestartShutdown(context.Background(), fence, transition.OperationID))
+	binding.serial.Unlock()
+	m.clearBinding(binding)
+	return finish(nil)
 }
 
-// recordRestartExit keeps a restart recovery record when the owned process
-// exits unexpectedly. Generic failed/stopped writes are unsafe once restart
-// owns the transition, so recovery receives the fenced stopped observation.
+// recordRestartExit leaves restart transitions to their lane owner. A leader
+// exit alone does not prove the group is empty, so this callback cannot write a
+// stopped stage or race a target install.
 func (m *Manager) recordRestartExit(binding *managedBinding) bool {
 	binding.serial.Lock()
 	defer binding.serial.Unlock()
+	m.mu.Lock()
+	current := m.bindings[binding.agentID] == binding
+	m.mu.Unlock()
+	if !current {
+		return true
+	}
 	if binding.lifecycleAction != "restart" {
 		return false
 	}
 	transition, err := m.store.ManagedRestartTransition(context.Background(), binding.agentID)
-	if err != nil {
-		return false
-	}
-	fence := bindingFence(binding.agentID, binding)
-	binding.reaped = true
-	if transition.OperationID != binding.operationID || !sameBindingFence(transition.Fence, fence) {
+	if err != nil || transition.OperationID != binding.operationID {
 		return true
 	}
-	_ = m.store.RecordManagedRestartShutdown(context.Background(), fence, transition.OperationID)
+	fence := bindingFence(binding.agentID, binding)
+	if sameBindingFence(transition.Fence, fence) || (transition.TargetFence != nil && sameBindingFence(*transition.TargetFence, fence)) {
+		binding.reaped = true
+		return true
+	}
 	return true
 }
 
@@ -985,6 +1436,92 @@ func normalizeCommandName(value string) string {
 		}
 	}
 	return value
+}
+
+// RecoverManagedRestartTransitions continues retained work through the same
+// per-agent lane as direct execution. It never attaches to a pre-restart RPC
+// pipe; live prepared turns remain retained until their original owner can
+// settle them, while absent or planned groups can continue safely.
+func (m *Manager) RecoverManagedRestartTransitions(ctx context.Context) error {
+	transitions, err := m.store.ListManagedRestartTransitions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, listed := range transitions {
+		lane := m.laneFor(listed.Fence.AgentID)
+		lane.serial.Lock()
+		m.recoverManagedRestartTransitionInLane(ctx, listed.Fence.AgentID)
+		lane.serial.Unlock()
+	}
+	return nil
+}
+
+func (m *Manager) recoverManagedRestartTransitionInLane(ctx context.Context, agentID string) {
+	transition, err := m.store.RecoverableManagedRestartTransition(ctx, agentID)
+	if err != nil {
+		return
+	}
+	switch transition.Stage {
+	case "reserved":
+		// Preparation owns reservation completion. A router that stopped before
+		// preparation leaves this bounded record for its normal retry path.
+		return
+	case "prepared", "settling":
+		probe := m.processOps.Probe(oldFenceIdentity(transition.Fence))
+		switch probe.State {
+		case ProcessAbsent:
+			if m.store.RecoverManagedRestartOldGone(context.Background(), transition.Fence, transition.OperationID) == nil {
+				stopped, readErr := m.store.ManagedRestartTransition(context.Background(), agentID)
+				if readErr == nil {
+					m.startRestartTargetInLane(stopped)
+				}
+			}
+		case ProcessOwned, ProcessPresent:
+			_ = m.store.RecordManagedRestartFailure(context.Background(), transition.Fence, transition.OperationID, "RESTART_RECOVERY_NEEDS_SETTLE", "restart requires a live turn settle")
+		case ProcessMismatch, ProcessUnknown:
+			_ = m.store.RecordManagedRestartFailure(context.Background(), transition.Fence, transition.OperationID, "RESTART_IDENTITY_UNSAFE", "restart process identity could not be verified")
+		}
+	case "stopping":
+		if m.reapRestartGroup(context.Background(), oldFenceIdentity(transition.Fence), nil) {
+			if m.store.MarkManagedRestartOldStopped(context.Background(), transition.Fence, transition.OperationID) == nil {
+				stopped, readErr := m.store.ManagedRestartTransition(context.Background(), agentID)
+				if readErr == nil {
+					m.startRestartTargetInLane(stopped)
+				}
+			}
+		} else {
+			_ = m.store.RecordManagedRestartFailure(context.Background(), transition.Fence, transition.OperationID, "RESTART_STOP_FAILED", "restart process stop did not complete")
+		}
+	case "stopped":
+		m.startRestartTargetInLane(transition)
+	case "starting":
+		if transition.TargetFence == nil {
+			return
+		}
+		probe := m.processOps.Probe(oldFenceIdentity(*transition.TargetFence))
+		switch probe.State {
+		case ProcessAbsent:
+			if m.store.ResetManagedRestartTargetToStopped(context.Background(), *transition.TargetFence, transition.OperationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready") == nil {
+				stopped, readErr := m.store.ManagedRestartTransition(context.Background(), agentID)
+				if readErr == nil {
+					m.startRestartTargetInLane(stopped)
+				}
+			}
+		case ProcessOwned:
+			if m.reapRestartGroup(context.Background(), oldFenceIdentity(*transition.TargetFence), nil) {
+				if m.store.ResetManagedRestartTargetToStopped(context.Background(), *transition.TargetFence, transition.OperationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready") == nil {
+					stopped, readErr := m.store.ManagedRestartTransition(context.Background(), agentID)
+					if readErr == nil {
+						m.startRestartTargetInLane(stopped)
+					}
+				}
+			} else {
+				_ = m.store.RecordManagedRestartFailure(context.Background(), *transition.TargetFence, transition.OperationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete")
+			}
+		case ProcessMismatch, ProcessUnknown, ProcessPresent:
+			_ = m.store.RecordManagedRestartFailure(context.Background(), *transition.TargetFence, transition.OperationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete")
+		}
+	}
 }
 
 func (m *Manager) Store() *store.Store { return m.store }

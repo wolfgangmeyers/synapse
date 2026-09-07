@@ -90,12 +90,12 @@ func restartReservation(agent ManagedAgentRecord, current ManagedOperation) Mana
 	return ManagedRestartReservation{Fence: ManagedRestartFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}, CurrentOperationID: current.OperationID, Operation: operation, Transition: ManagedRestartTransition{TargetRuntimeGeneration: "replacement-generation"}}
 }
 
-func TestForwardMigration022To023PreservesManagedRowsAndIndexes(t *testing.T) {
+func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
 	require.Greater(t, len(migrations), 22)
-	require.Equal(t, "024_managed_readiness_sources", migrations[len(migrations)-1].ID)
+	require.Equal(t, "025_managed_restart_execution", migrations[len(migrations)-1].ID)
 	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
 	require.NoError(t, err)
 	agent := ManagedAgentRecord{AgentID: "migration-agent", Name: "migration-agent", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 2, ManifestRevision: 3, ManifestHash: testManifestHash, PendingInitialInstruction: "hello"}
@@ -103,6 +103,26 @@ func TestForwardMigration022To023PreservesManagedRowsAndIndexes(t *testing.T) {
 	require.NoError(t, before.ReserveManagedLaunch(ctx, agent, op))
 	require.NoError(t, before.UpdateManagedAgentStarting(ctx, agent.AgentID, agent.PiSessionID, ProcessIdentityRecord{PID: 77, StartMarker: "marker", Incarnation: "incarnation"}, "generation"))
 	require.NoError(t, before.MarkManagedReady(ctx, agent.AgentID))
+	require.NoError(t, before.MarkManagedOperationTerminal(ctx, op.OperationID))
+	beforeRestart, err := before.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	// The pre-025 store API now writes the widened transition columns. Seed one
+	// real 023-shaped retained row directly so this migration proves its copy
+	// preserves an in-flight restart as well as ordinary managed rows.
+	restartOperation := ManagedOperation{OperationID: "migration-restart", Method: "POST", CanonicalPath: "/v1/managed-agents/migration-agent/restart", RequestID: "migration-restart", CanonicalBodyHash: "restart-body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	require.NoError(t, before.PutManagedOperation(ctx, restartOperation))
+	_, err = before.db.Exec(`INSERT INTO managed_restart_transitions (
+		agent_id,operation_id,old_pi_session_id,old_session_epoch,old_process_pid,
+		old_process_start_marker,old_process_incarnation,old_runtime_generation,target_runtime_generation,
+		old_desired_state,old_lifecycle_state,old_activity_state,old_accepting_prompts,old_slot_held,
+		reservation_activity_state,planned_stop,stage,created_at,updated_at
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		beforeRestart.AgentID, restartOperation.OperationID, beforeRestart.PiSessionID, beforeRestart.SessionEpoch, beforeRestart.ProcessPID,
+		beforeRestart.ProcessStartMarker, beforeRestart.ProcessIncarnation, beforeRestart.RuntimeGeneration, "target-generation",
+		"running", "running", beforeRestart.ActivityState, 1, 1, beforeRestart.ActivityState, 0, "reserved", beforeRestart.UpdatedAt, beforeRestart.UpdatedAt)
+	require.NoError(t, err)
+	_, err = before.db.Exec(`UPDATE managed_agents SET lifecycle_state='restarting', accepting_prompts=0 WHERE agent_id=?`, beforeRestart.AgentID)
+	require.NoError(t, err)
 	require.NoError(t, before.Close())
 
 	after, err := Open(ctx, path, Options{})
@@ -115,6 +135,13 @@ func TestForwardMigration022To023PreservesManagedRowsAndIndexes(t *testing.T) {
 	require.Equal(t, "marker", stored.ProcessStartMarker)
 	require.Equal(t, "incarnation", stored.ProcessIncarnation)
 	require.Equal(t, "generation", stored.RuntimeGeneration)
+	transition, err := after.ManagedRestartTransition(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "migration-restart", transition.OperationID)
+	require.Equal(t, "reserved", transition.Stage)
+	require.Equal(t, 3, transition.Fence.ManifestRevision)
+	require.Equal(t, testManifestHash, transition.Fence.ManifestHash)
+	require.Nil(t, transition.TargetFence)
 	var indexSQL string
 	require.NoError(t, after.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='managed_agents_slot_idx'`).Scan(&indexSQL))
 	require.Contains(t, indexSQL, "slot_held")
@@ -124,6 +151,8 @@ func TestForwardMigration022To023PreservesManagedRowsAndIndexes(t *testing.T) {
 	require.Error(t, err)
 	var applied int
 	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='023_managed_restart'`).Scan(&applied))
+	require.Equal(t, 1, applied)
+	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='025_managed_restart_execution'`).Scan(&applied))
 	require.Equal(t, 1, applied)
 	require.NoError(t, after.Close())
 	reopened, err := Open(ctx, path, Options{})
@@ -327,6 +356,92 @@ func TestRollbackManagedRestartPreparationRestoresReservationAndTerminalizesOper
 	afterStale, err := durable.GetProjectionVersion(ctx)
 	require.NoError(t, err)
 	require.Equal(t, after, afterStale)
+}
+
+func TestMarkManagedRestartTurnSettledRequiresExactOldFence(t *testing.T) {
+	durable, ctx, agent, launch := restartFixture(t)
+	reservation := restartReservation(agent, launch)
+	_, _, err := durable.ReserveManagedRestart(ctx, reservation)
+	require.NoError(t, err)
+	require.NoError(t, durable.MarkManagedRestartPrepared(ctx, reservation.Fence, reservation.Operation.OperationID))
+	activeFence := reservation.Fence
+	// The fixture starts idle. The active-only settlement writer must reject it
+	// without changing the transition or public projection.
+	before, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.ErrorAs(t, durable.MarkManagedRestartTurnSettled(ctx, activeFence, reservation.Operation.OperationID), new(*ManagedRestartStaleError))
+	after, err := durable.GetProjectionVersion(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	_ = agent
+}
+
+func TestManagedRestartExecutionTransactions(t *testing.T) {
+	durable, ctx, agent, launch := restartFixture(t)
+	_, err := durable.db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+	reservation := restartReservation(agent, launch)
+	_, _, err = durable.ReserveManagedRestart(ctx, reservation)
+	require.NoError(t, err)
+	require.NoError(t, durable.MarkManagedRestartPrepared(ctx, reservation.Fence, reservation.Operation.OperationID))
+	require.NoError(t, durable.MarkManagedRestartSettling(ctx, reservation.Fence, reservation.Operation.OperationID))
+	require.NoError(t, durable.MarkManagedRestartTurnSettled(ctx, reservation.Fence, reservation.Operation.OperationID))
+	require.NoError(t, durable.MarkManagedRestartStopping(ctx, reservation.Fence, reservation.Operation.OperationID))
+	transition, err := durable.ManagedRestartTransition(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "stopping", transition.Stage)
+	require.True(t, transition.PlannedStop)
+	require.NotEmpty(t, transition.TurnSettledAt)
+	require.NoError(t, durable.MarkManagedRestartOldStopped(ctx, reservation.Fence, reservation.Operation.OperationID))
+	target := reservation.Fence
+	target.ProcessPID = 88
+	target.ProcessStartMarker = "target-marker"
+	target.ProcessIncarnation = "target-incarnation"
+	target.RuntimeGeneration = "replacement-generation"
+	require.NoError(t, durable.InstallManagedRestartTarget(ctx, reservation.Fence, target, reservation.Operation.OperationID))
+	policy := DefaultManagedReadinessPolicy()
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, target, policy))
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, target, ManagedChildSnapshot{SnapshotID: "snapshot", OwnerSessionID: target.PiSessionID, Sequence: 0, Canonical: []byte(`{}`), SHA256: testManifestHash}))
+	require.NoError(t, durable.CompleteManagedRestartReady(ctx, target, reservation.Operation.OperationID))
+	ready, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", ready.LifecycleState)
+	require.True(t, ready.AcceptingPrompts)
+	require.Equal(t, target.RuntimeGeneration, ready.RuntimeGeneration)
+	_, err = durable.ManagedRestartTransition(ctx, agent.AgentID)
+	require.Error(t, err)
+	op, err := durable.ManagedOperation(ctx, reservation.Operation.OperationID)
+	require.NoError(t, err)
+	require.Equal(t, "terminal", op.State)
+}
+
+func TestRestartAdmissionAndFailureStayDurableAndRedacted(t *testing.T) {
+	durable, ctx, agent, launch := restartFixture(t)
+	_, err := durable.db.Exec(`UPDATE managed_agents SET activity_state='active' WHERE agent_id=?`, agent.AgentID)
+	require.NoError(t, err)
+	updated, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	agent = *updated
+	reservation := restartReservation(agent, launch)
+	admission, err := durable.LookupManagedRestartAdmission(ctx, reservation.Operation.Method, reservation.Operation.RequestID, reservation.Operation.CanonicalPath, reservation.Operation.CanonicalBodyHash, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, agent.AgentID, admission.Agent.AgentID)
+	_, _, err = durable.ReserveManagedRestart(ctx, reservation)
+	require.NoError(t, err)
+	_, err = durable.LookupManagedRestartAdmission(ctx, reservation.Operation.Method, "second", reservation.Operation.CanonicalPath, reservation.Operation.CanonicalBodyHash, agent.AgentID)
+	var conflict *ManagedRestartConflictError
+	require.ErrorAs(t, err, &conflict)
+	require.NoError(t, durable.MarkManagedRestartPrepared(ctx, reservation.Fence, reservation.Operation.OperationID))
+	require.NoError(t, durable.MarkManagedRestartSettling(ctx, reservation.Fence, reservation.Operation.OperationID))
+	require.NoError(t, durable.RecordManagedRestartFailure(ctx, reservation.Fence, reservation.Operation.OperationID, "RESTART_SETTLE_FAILED", "restart turn did not settle"))
+	stored, err := durable.ManagedAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "RESTART_SETTLE_FAILED", stored.LastErrorCode)
+	require.Equal(t, "restart turn did not settle", stored.LastErrorMessage)
+	require.Error(t, durable.RecordManagedRestartFailure(ctx, reservation.Fence, reservation.Operation.OperationID, "RESTART_SETTLE_FAILED", "raw stderr token=secret"))
+	_, err = durable.LookupManagedRestartAdmission(ctx, reservation.Operation.Method, reservation.Operation.RequestID, reservation.Operation.CanonicalPath+"/other", reservation.Operation.CanonicalBodyHash, agent.AgentID)
+	var idempotency *ManagedIdempotencyConflictError
+	require.ErrorAs(t, err, &idempotency)
 }
 
 func TestManagedLaunchReservesNameSlotAndOperationAtomically(t *testing.T) {

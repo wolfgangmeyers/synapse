@@ -1,6 +1,7 @@
 package managed
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -24,6 +25,32 @@ func TestOwnedProcessGroupSignalReachesManagedDescendant(t *testing.T) {
 		t.Fatal("owned process group did not terminate")
 	}
 	require.Error(t, signalOwnedProcessGroup(0, syscall.SIGTERM))
+}
+
+func TestProcessGroupOps(t *testing.T) {
+	command := exec.Command("/bin/sh", "-c", "sleep 30 & wait")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, command.Start())
+	defer func() { _ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL); _ = command.Wait() }()
+	marker, err := processStartMarker(command.Process.Pid)
+	require.NoError(t, err)
+	identity := ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: "test"}
+	ops := DefaultProcessGroupOps()
+	require.Equal(t, ProcessOwned, ops.Probe(identity).State)
+	require.NoError(t, syscall.Kill(command.Process.Pid, syscall.SIGTERM))
+	finished := make(chan error, 1)
+	go func() { finished <- command.Wait() }()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("leader did not exit")
+	}
+	require.Equal(t, ProcessPresent, ops.Probe(identity).State, "a reaped leader cannot prove its descendants are gone")
+	require.Error(t, ops.SignalVerifiedProcessGroup(identity, syscall.SIGTERM), "no leader fallback is allowed")
+	require.NoError(t, syscall.Kill(-identity.PID, syscall.SIGKILL))
+	deadline, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.Equal(t, ProcessAbsent, ops.WaitForProcessGroupEmpty(deadline, identity, finished).State)
 }
 
 func TestCommandSpecUsesDirectPiRPCAndRequiredExtensions(t *testing.T) {

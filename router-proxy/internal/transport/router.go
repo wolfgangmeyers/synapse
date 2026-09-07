@@ -517,6 +517,11 @@ func (r *Router) Listen(ctx context.Context) error {
 		return errors.New("router is already listening")
 	}
 	r.mu.Unlock()
+	if r.managed != nil {
+		if err := r.managed.RecoverManagedRestartTransitions(ctx); err != nil {
+			return err
+		}
+	}
 	if err := r.runSweep(ctx); err != nil {
 		return err
 	}
