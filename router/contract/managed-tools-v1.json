@@ -1,0 +1,713 @@
+{
+  "protocol": "mecha.tools/v1",
+  "revision": 1,
+  "tools": [
+    {
+      "capability_id": "goal",
+      "label": "Goal",
+      "description": "Set, inspect, or disable the active goal evaluator.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "set",
+              "status",
+              "off"
+            ]
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      },
+      "operation_id": "goal.control",
+      "prompt_snippet": "Set, inspect, or disable the active goal evaluator.",
+      "prompt_guidelines": [
+        "Use goal with action set, status, or off for standing goal evaluation.",
+        "Call pi__goal through the Cursor pi bridge."
+      ],
+      "name": "goal",
+      "definition_id": "def_7beb0bc57b881d24f980bb721e1deb0805942e87aeb7777a458fc13811f092c6",
+      "definition_sha256": "7beb0bc57b881d24f980bb721e1deb0805942e87aeb7777a458fc13811f092c6"
+    },
+    {
+      "capability_id": "goal_snooze",
+      "label": "Goal Snooze",
+      "description": "Deliberately wait before resuming an active goal when snooze is enabled.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {}
+      },
+      "operation_id": "goal.snooze",
+      "name": "goal_snooze",
+      "definition_id": "def_c48cde2a484a5b70736fa37e3f1c736977109453f20b84192b7fb27968bd0b27",
+      "definition_sha256": "c48cde2a484a5b70736fa37e3f1c736977109453f20b84192b7fb27968bd0b27"
+    },
+    {
+      "capability_id": "mecha_context",
+      "label": "Mecha Context",
+      "description": "Inspect or configure Pi context-threshold notifications, or trigger self-compaction.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "status",
+              "set_policy",
+              "compact"
+            ]
+          },
+          "policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": {
+              "levels": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "percent"
+                  ],
+                  "properties": {
+                    "percent": {
+                      "type": "number",
+                      "minimum": 1,
+                      "maximum": 99
+                    },
+                    "guidance": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "mandatory": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "maxItems": 64
+              }
+            }
+          },
+          "customInstructions": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "postCompactionNotification": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      },
+      "operation_id": "context.control",
+      "prompt_snippet": "Inspect context-threshold policy or request Pi self-compaction",
+      "prompt_guidelines": [
+        "Use mecha_context with action status, set_policy, or compact for context-threshold and compaction control.",
+        "Call pi__mecha_context through the Cursor pi bridge."
+      ],
+      "name": "mecha_context",
+      "definition_id": "def_a6ae2502f76c2b5c1837bddcf8c8613e1f96fade26e7e37c89068a7070b844c8",
+      "definition_sha256": "a6ae2502f76c2b5c1837bddcf8c8613e1f96fade26e7e37c89068a7070b844c8"
+    },
+    {
+      "capability_id": "mecha_git",
+      "label": "Mecha git",
+      "description": "Read task git status.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "task"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 6
+          },
+          "task": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        }
+      },
+      "operation_id": "ops.git_status",
+      "name": "mecha_git",
+      "definition_id": "def_ea52281c3d5dcb4311c571d3ce326a719545b7ffa74acacbc54b2b1226c9a9a5",
+      "definition_sha256": "ea52281c3d5dcb4311c571d3ce326a719545b7ffa74acacbc54b2b1226c9a9a5"
+    },
+    {
+      "capability_id": "mecha_mailbox_send",
+      "label": "Send Mailbox message",
+      "description": "Send an ordinary Mailbox V2 message to another local agent.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recipient",
+          "body"
+        ],
+        "properties": {
+          "recipient": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      },
+      "operation_id": "mail.send",
+      "prompt_snippet": "Send a durable Mailbox V2 message to another local agent",
+      "prompt_guidelines": [
+        "Use mecha_mailbox_send for supervisor, worker, and service replies with recipient, body, and optional subject.",
+        "Call pi__mecha_mailbox_send through the Cursor pi bridge."
+      ],
+      "name": "mecha_mailbox_send",
+      "definition_id": "def_4eab3aa0a26a699d314653f85e7fc5420eebcb2afa5a87bc48c5e372e9fe53b2",
+      "definition_sha256": "4eab3aa0a26a699d314653f85e7fc5420eebcb2afa5a87bc48c5e372e9fe53b2"
+    },
+    {
+      "capability_id": "mecha_parent_message",
+      "label": "Message parent",
+      "description": "Child-only: send an ordinary Mailbox message to this native subagent's target parent.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          }
+        }
+      },
+      "operation_id": "mail.parent",
+      "prompt_snippet": "Send a message from a native subagent to its parent",
+      "prompt_guidelines": [
+        "Use mecha_parent_message only in native subagent sessions to message the parent agent.",
+        "Call pi__mecha_parent_message through the Cursor pi bridge."
+      ],
+      "name": "mecha_parent_message",
+      "definition_id": "def_2eb0922dc3c0acad276229837c72ca829bfeee04be4ae0c5522cee464cec0da0",
+      "definition_sha256": "2eb0922dc3c0acad276229837c72ca829bfeee04be4ae0c5522cee464cec0da0"
+    },
+    {
+      "capability_id": "mecha_pr",
+      "label": "Mecha pull request",
+      "description": "Read pull request status.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "pullRequest"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 6
+          },
+          "pullRequest": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000000
+          }
+        }
+      },
+      "operation_id": "ops.pr_status",
+      "name": "mecha_pr",
+      "definition_id": "def_bccc303b438ef65b2d447fdb3c5d3b3efea62eaab2282c504e2880e0f7643585",
+      "definition_sha256": "bccc303b438ef65b2d447fdb3c5d3b3efea62eaab2282c504e2880e0f7643585"
+    },
+    {
+      "capability_id": "mecha_priority",
+      "label": "Supervisor priority",
+      "description": "Manage supervisor priority records.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "create",
+              "update",
+              "status"
+            ]
+          },
+          "priorityId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 16,
+            "enum": [
+              "active",
+              "blocked",
+              "completed",
+              "deferred",
+              "cancelled"
+            ]
+          },
+          "taskIds": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "maxItems": 50
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      },
+      "operation_id": "ops.priority",
+      "name": "mecha_priority",
+      "definition_id": "def_39c8b3b2c1471a4df437783f2766d7980a8efa95680e0f1bc7facc50bfb84e3e",
+      "definition_sha256": "39c8b3b2c1471a4df437783f2766d7980a8efa95680e0f1bc7facc50bfb84e3e"
+    },
+    {
+      "capability_id": "mecha_recall",
+      "label": "Mecha Recall",
+      "description": "Enable, disable, or inspect process-local Markdown recall.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "enable",
+              "disable",
+              "status"
+            ]
+          },
+          "stores": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "maxItems": 64
+          }
+        }
+      },
+      "operation_id": "recall.control",
+      "prompt_snippet": "Enable, disable, or inspect process-local Markdown recall",
+      "prompt_guidelines": [
+        "Use mecha_recall with action enable, disable, or status for recall stores.",
+        "Call pi__mecha_recall through the Cursor pi bridge."
+      ],
+      "name": "mecha_recall",
+      "definition_id": "def_df134eb5b972ba943c393f0ae5807f71f66f6635fa6afbcdeddcc4b49f30a7e0",
+      "definition_sha256": "df134eb5b972ba943c393f0ae5807f71f66f6635fa6afbcdeddcc4b49f30a7e0"
+    },
+    {
+      "capability_id": "mecha_reminder",
+      "label": "Mecha reminder",
+      "description": "Manage reminders through fixed operations.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ]
+          },
+          "reminderId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "delayMinutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10080
+          },
+          "scheduledAt": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "intervalMinutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10080
+          }
+        }
+      },
+      "operation_id": "reminder.control",
+      "name": "mecha_reminder",
+      "definition_id": "def_3ee0aee5630c84883e32383cf3c6789a963dad15cf5bed2ca3f98ff710bff698",
+      "definition_sha256": "3ee0aee5630c84883e32383cf3c6789a963dad15cf5bed2ca3f98ff710bff698"
+    },
+    {
+      "capability_id": "mecha_request_inline_tool_allowance",
+      "label": "Request inline tool allowance",
+      "description": "Request a temporary exception for genuinely necessary inline use of a named tool. This is an exception to the rule; subagents remain mandatory by default.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "toolName",
+          "usageCount"
+        ],
+        "properties": {
+          "toolName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "usageCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          }
+        }
+      },
+      "operation_id": "policy.inline_allowance",
+      "prompt_snippet": "Request a temporary exception to the inline tool guard",
+      "prompt_guidelines": [
+        "Use mecha_request_inline_tool_allowance only for genuinely necessary top-level bash/edit/write work.",
+        "Call pi__mecha_request_inline_tool_allowance through the Cursor pi bridge."
+      ],
+      "name": "mecha_request_inline_tool_allowance",
+      "definition_id": "def_98adf7b9a6f69375931b66c1649c669784bc9fd4fa65f5a93a0cbf8404237214",
+      "definition_sha256": "98adf7b9a6f69375931b66c1649c669784bc9fd4fa65f5a93a0cbf8404237214"
+    },
+    {
+      "capability_id": "mecha_router",
+      "label": "Mecha router",
+      "description": "Read or control fixed router operations.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "health",
+              "retry",
+              "dismiss"
+            ]
+          },
+          "messageId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        }
+      },
+      "operation_id": "router.control",
+      "name": "mecha_router",
+      "definition_id": "def_dbcb6eeafd0f177f732ceb39acd336cc60f0f2b7d3e79855b2eb3a89849df205",
+      "definition_sha256": "dbcb6eeafd0f177f732ceb39acd336cc60f0f2b7d3e79855b2eb3a89849df205"
+    },
+    {
+      "capability_id": "mecha_settled_notifications",
+      "label": "Mecha Settled Notifications",
+      "description": "Enable, disable, or inspect this Pi process's managed-worker settled mailbox notifications.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "enable",
+              "disable",
+              "status"
+            ]
+          }
+        }
+      },
+      "operation_id": "notifications.settled",
+      "prompt_snippet": "Enable, disable, or inspect settled mailbox notifications",
+      "prompt_guidelines": [
+        "Use mecha_settled_notifications with action enable, disable, or status for worker settled notifications.",
+        "Call pi__mecha_settled_notifications through the Cursor pi bridge."
+      ],
+      "name": "mecha_settled_notifications",
+      "definition_id": "def_bdcfd97bf8cec67ce70a641370fcf90affa0ab31a80c7c40ee07d123311b1f1f",
+      "definition_sha256": "bdcfd97bf8cec67ce70a641370fcf90affa0ab31a80c7c40ee07d123311b1f1f"
+    },
+    {
+      "capability_id": "mecha_state",
+      "label": "Supervisor state",
+      "description": "Manage supervisor task state.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "query",
+              "create",
+              "update"
+            ]
+          },
+          "task": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "state": {
+            "type": "string",
+            "maxLength": 16,
+            "enum": [
+              "active",
+              "completed",
+              "abandoned"
+            ]
+          },
+          "alias": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "project": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "window": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "pr": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "linear": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "field": {
+            "type": "string",
+            "maxLength": 32,
+            "enum": [
+              "summary",
+              "branch",
+              "window",
+              "pr",
+              "linear",
+              "dev_environment",
+              "supervisor_reminder_id",
+              "worker_self_reminder_ids"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      },
+      "operation_id": "ops.state",
+      "name": "mecha_state",
+      "definition_id": "def_15f43e468b451bba3b3f1fd7ed823ef4fc0a3333ec892f226c145bd8c0fe7c02",
+      "definition_sha256": "15f43e468b451bba3b3f1fd7ed823ef4fc0a3333ec892f226c145bd8c0fe7c02"
+    },
+    {
+      "capability_id": "mecha_verification_handoff",
+      "label": "Verification handoff",
+      "description": "Record a verification handoff.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "task",
+          "reminderId",
+          "successor"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 6
+          },
+          "task": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "reminderId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "successor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "remoteVerified": {
+            "type": "string",
+            "maxLength": 16,
+            "enum": [
+              "pending",
+              "true",
+              "false"
+            ]
+          }
+        }
+      },
+      "operation_id": "ops.verification_handoff",
+      "name": "mecha_verification_handoff",
+      "definition_id": "def_8f723b1630e1d0b4a2c9c862566f640302a4cbed37794511a49469d24e43358d",
+      "definition_sha256": "8f723b1630e1d0b4a2c9c862566f640302a4cbed37794511a49469d24e43358d"
+    },
+    {
+      "capability_id": "mecha_worker",
+      "label": "Managed worker",
+      "description": "Manage existing tmux workers through fixed operations.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 64,
+            "enum": [
+              "list",
+              "launch",
+              "cleanup",
+              "send"
+            ]
+          },
+          "alias": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "worker": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "operation_id": "ops.worker",
+      "name": "mecha_worker",
+      "definition_id": "def_95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da",
+      "definition_sha256": "95185d3de3e00e657ee57f2ebcbea7aa724e44df5679f6d04d5b44c365f6b2da"
+    }
+  ]
+}
