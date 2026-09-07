@@ -27,6 +27,7 @@ These constraints apply to every phase:
 - Track agent connection history. Remove all resources for identities disconnected for one hour.
 - Recurring reminders fire only while their target has a live WebSocket lease.
 - Do not add authentication, federation, Redis, NATS, Kafka, browser UI, cron expressions, or speculative abstractions.
+- Phase 3 consumes the existing router-to-Web UI and router-to-mobile-app contracts. It must not require either client to change its routes, HTTP envelopes or responses, WebSocket frames, registration behavior, CORS/origin behavior, or local unauthenticated access model.
 - Use deterministic clocks, IDs, and scheduler hooks in tests. Tests must not sleep for an hour.
 - Every schema change must have a migration and restart/recovery tests.
 - Every phase ends with tests, static checks, `git diff --check`, and robot review before handoff.
@@ -244,6 +245,7 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 
 **Included**:
 
+- Consume the existing v1 router routes, HTTP envelopes and responses, and `/v1/agents` WebSocket frames as defined by `router/contract/manifest.json` and `protocol/v1/schema.json`. The extension adapts to those contracts; it does not ask the Web UI or mobile app to adopt a Phase 3-specific route, field, frame, registration flow, or behavior.
 - Resolve `agent_id` only from the current tmux pane's window name using
   `TMUX_PANE` and `tmux display-message`; reject invalid names and fail closed
   outside tmux.
@@ -271,23 +273,25 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 - Terminal-control behavior.
 - Non-Pi harness support.
 - Active-system installation.
+- Router, Web UI, or mobile-app contract changes. This includes endpoint and response changes, message-envelope changes, WebSocket frame additions or changed semantics/required fields, client registration changes, CORS/origin changes, and authentication or pairing work.
 
 **Implementation tasks**:
 
-1. Convert Phase 1's verified spike into production extension code without retaining duplicate paths.
-2. Implement strict configuration parsing and actionable missing-identity errors.
-3. Implement WebSocket connection states and bounded kickstart behavior.
-4. Implement frame IDs, lease renewals, pong handling, and stale-connection closure.
-5. Implement session-history deduplication before every replay.
-6. Define the stable custom message content and renderer.
-7. Escape or normalize display-only content so terminal escapes/markup cannot execute.
-8. Keep model-visible body content intact within envelope limits.
-9. Implement display-column truncation for the status preview, including empty subject/body and Unicode-width cases.
-10. Test idle-to-busy and busy-to-idle races; correctness must not depend on an earlier `ctx.isIdle()` snapshot.
-11. Test disconnect after lease, after injection request, after Pi emission, and before ack.
-12. Test router restart while Pi remains active and Pi restart while the router retains a message.
-13. Test all shutdown reasons for leaked timers/listeners.
-14. Add an opt-in installation/configuration path scoped to the worktree test environment.
+1. Record the current router contract fixture set before extension work: `router/contract/manifest.json`, `router/contract/http-outcomes.json`, `router/contract/frame-cases.json`, and `protocol/v1/schema.json`. Phase 3 must consume this set unchanged and use the established Web UI and mobile-app client behavior as compatibility evidence.
+2. Convert Phase 1's verified spike into production extension code without retaining duplicate paths.
+3. Implement strict configuration parsing and actionable missing-identity errors.
+4. Implement WebSocket connection states and bounded kickstart behavior.
+5. Implement frame IDs, lease renewals, pong handling, and stale-connection closure.
+6. Implement session-history deduplication before every replay.
+7. Define the stable custom message content and renderer.
+8. Escape or normalize display-only content so terminal escapes/markup cannot execute.
+9. Keep model-visible body content intact within envelope limits.
+10. Implement display-column truncation for the status preview, including empty subject/body and Unicode-width cases.
+11. Test idle-to-busy and busy-to-idle races; correctness must not depend on an earlier `ctx.isIdle()` snapshot.
+12. Test disconnect after lease, after injection request, after Pi emission, and before ack.
+13. Test router restart while Pi remains active and Pi restart while the router retains a message.
+14. Test all shutdown reasons for leaked timers/listeners.
+15. Add an opt-in installation/configuration path scoped to the worktree test environment.
 
 **Acceptance criteria**:
 
@@ -303,10 +307,11 @@ Provide the schema diagram, migration IDs, endpoint/frame contract, state-transi
 - Connection refusal triggers bounded kickstart without killing an already-starting router.
 - Every shutdown reason leaves no extension socket, timer, listener, or status residue.
 - A live tmux-hosted Pi acceptance suite covers idle and active cases. Tmux is only the process host.
+- The existing Web UI and mobile app continue to use their current routes, envelopes, WebSocket frames, and registration behavior without source, configuration, or contract changes. Phase 3 preserves the local unauthenticated router decision; it does not add an authentication or origin gate.
 
 **Worker handoff**:
 
-Provide extension installation instructions for the isolated test environment, live-test transcripts/screenshots or structured evidence, session mode requirements, race cases exercised, and any behavior that differs from `harness_spec.md`.
+Provide extension installation instructions for the isolated test environment, live-test transcripts/screenshots or structured evidence, session mode requirements, race cases exercised, confirmation that the recorded router contract fixtures stayed unchanged, and any behavior that differs from `harness_spec.md`.
 
 **Estimated complexity**: Complex.
 

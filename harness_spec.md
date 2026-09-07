@@ -302,6 +302,14 @@ The router binds to its configured listen address, rejects non-JSON requests, an
 
 The separate browser UI retains its host and origin boundary. It serves requests only for loopback or its configured allowed host, accepts `/ui/events` only for the matching same-origin HTTP(S) origin, and keeps the existing REST relay behavior. Browser UI policy must not be inferred from the router API policy.
 
+### 7.4 Existing Web UI and mobile-app compatibility
+
+Phase 3 in `harness_phases.md` consumes the existing v1 router contract. The Web UI continues to use its current REST routes, envelopes, responses, and relay behavior. The mobile app continues to use its current HTTP routes and `/v1/agents` registration and frame behavior. Neither client needs a source, configuration, or behavior change for the Pi extension to ship.
+
+Phase 3 must preserve the route inventory in `router/contract/manifest.json`, the HTTP outcome fixtures in `router/contract/http-outcomes.json`, and the frame/envelope definitions in `router/contract/frame-cases.json` and `protocol/v1/schema.json`. It must not add, remove, or reinterpret an endpoint, envelope field, response field, WebSocket frame, frame field, registration requirement, CORS/origin rule, or client behavior used by either existing client.
+
+The local unauthenticated v1 decision remains in force. Phase 3 does not add browser or mobile authentication, pairing, credentials, token checks, or origin-based authorization. The Web UI keeps its separate same-origin policy. The router continues to accept the documented wildcard CORS and arbitrary-Origin WebSocket behavior for the local same-user trust boundary.
+
 The `from` field is a claimed local agent/service name or the normalized sender email address. It is diagnostic routing context, not authenticated identity.
 
 Inbound email keeps the existing allow-list behavior: accept `wolfgangmeyers@gmail.com` and sender addresses under `agents.meyers.life`; reject and log other senders before creating a mailbox message. Accepted email routes to the configured supervisor mailbox, initially `supervisor`. If that supervisor identity is unavailable, the message remains queued rather than being redirected or dropped.
