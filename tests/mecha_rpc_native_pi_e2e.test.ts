@@ -13,6 +13,9 @@ import { encodeHiddenEnvelope } from "../pi-extensions/mecha-rpc/protocol.ts";
 const ROOT = resolve(import.meta.dirname, "..");
 const EXTENSION = join(ROOT, "pi-extensions/mecha-rpc/index.ts");
 const SUBAGENTS_EXTENSION = "/Users/wolfgang/code/pi-packages/packages/pi-subagents/src/index.ts";
+const REGISTRATION_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-registration-probe.ts");
+const TRANSITION_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-transition-probe.ts");
+const AC090_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-ac090-probe.ts");
 const RUNTIME_GENERATION = "123e4567-e89b-42d3-a456-426614174000";
 const ACCEPTANCE_EVIDENCE = join(ROOT, "tests/fixtures/mecha-rpc/acceptance-evidence-v1.json");
 const ACCEPTANCE_ARTIFACT_DIR = "/tmp/mecha-rpc-acceptance";
@@ -30,17 +33,28 @@ class StockPiRpc {
   private nextId = 1;
   private readonly stderr: string[] = [];
   private readonly process;
+  private readonly exited: Promise<number | null>;
 
-  constructor(home: string, baseUrl: string, options: { persistSession?: boolean; runtimeGeneration?: string } = {}) {
+  constructor(home: string, baseUrl: string, options: {
+    persistSession?: boolean;
+    runtimeGeneration?: string;
+    sessionPath?: string;
+    extensions?: readonly string[];
+    probeMode?: string;
+    probeName?: string;
+    testCommandFailureAt?: number;
+  } = {}) {
     configureDeterministicProvider(home, baseUrl);
     const persistSession = options.persistSession === true;
     const runtimeGeneration = options.runtimeGeneration ?? RUNTIME_GENERATION;
-    const sessionArgs = persistSession ? ["--session-dir", join(home, "sessions")] : ["--no-session"];
+    const sessionArgs = options.sessionPath === undefined
+      ? persistSession ? ["--session-dir", join(home, "sessions")] : ["--no-session"]
+      : ["--session", options.sessionPath];
+    const extensions = options.extensions ?? [EXTENSION, SUBAGENTS_EXTENSION];
     this.process = spawn("pi", [
       "--mode", "rpc", ...sessionArgs, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline",
       "--provider", "mecha-router-test", "--model", "deterministic-model",
-      "-e", EXTENSION,
-      "-e", SUBAGENTS_EXTENSION,
+      ...extensions.flatMap((extension) => ["-e", extension]),
     ], {
       cwd: ROOT,
       env: {
@@ -51,13 +65,21 @@ class StockPiRpc {
         MECHA_RPC_SESSION_EPOCH: "1",
         MECHA_TEST_BASE_URL: baseUrl,
         PI_OFFLINE: "1",
+        ...(options.probeMode === undefined ? {} : { MECHA_RPC_TEST_PROBE_MODE: options.probeMode }),
+        ...(options.probeName === undefined ? {} : { MECHA_RPC_TEST_PROBE_NAME: options.probeName }),
+        ...(options.testCommandFailureAt === undefined ? {} : { MECHA_RPC_TEST_FAIL_COMMAND_REGISTRATION_AT: String(options.testCommandFailureAt) }),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
     createInterface({ input: this.process.stdout }).on("line", (line) => this.receive(line));
     createInterface({ input: this.process.stderr }).on("line", (line) => this.stderr.push(line));
     this.process.once("error", (error) => this.rejectAll(error));
-    this.process.once("exit", (code) => this.rejectAll(new Error(`stock Pi exited with ${String(code)}: ${this.stderr.join("\n")}`)));
+    this.exited = new Promise((resolveExit) => {
+      this.process.once("exit", (code) => {
+        resolveExit(code);
+        this.rejectAll(new Error(`stock Pi exited with ${String(code)}: ${this.stderr.join("\n")}`));
+      });
+    });
   }
 
   request(command: JsonRecord): Promise<JsonRecord> {
@@ -70,6 +92,13 @@ class StockPiRpc {
 
   diagnostics(): string {
     return this.stderr.join("\n");
+  }
+
+  async waitForExit(timeoutMs = 10_000): Promise<number | null> {
+    return await Promise.race([
+      this.exited,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`Timed out waiting for stock Pi exit: ${this.diagnostics()}`)), timeoutMs)),
+    ]);
   }
 
   async stop(): Promise<void> {
@@ -315,12 +344,12 @@ function readManifest(): JsonRecord {
   return JSON.parse(readFileSync(join(ROOT, "router/contract/managed-tools-v1.json"), "utf8")) as JsonRecord;
 }
 
-function supplementalManifest(base: JsonRecord): JsonRecord {
+function supplementalManifest(base: JsonRecord, capabilityId = "zz_stock_supplemental"): JsonRecord {
   const desired = structuredClone(base);
   const tools = desired.tools;
   if (!Array.isArray(tools)) throw new Error("managed manifest tools are unavailable");
   const definition = {
-    capability_id: "zz_stock_supplemental",
+    capability_id: capabilityId,
     label: "Stock supplemental tool",
     description: "A bounded stock-Pi supplemental definition.",
     parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
@@ -332,6 +361,11 @@ function supplementalManifest(base: JsonRecord): JsonRecord {
     name: `${definition.capability_id}__${definitionSha}`,
     definition_id: `def_${definitionSha}`,
     definition_sha256: definitionSha,
+  });
+  tools.sort((left, right) => {
+    const leftCapability = left !== null && typeof left === "object" && !Array.isArray(left) ? (left as JsonRecord).capability_id : "";
+    const rightCapability = right !== null && typeof right === "object" && !Array.isArray(right) ? (right as JsonRecord).capability_id : "";
+    return Buffer.compare(Buffer.from(String(leftCapability), "utf8"), Buffer.from(String(rightCapability), "utf8"));
   });
   desired.revision = 2;
   return desired;
@@ -372,6 +406,42 @@ function writeAcceptanceArtifact(name: string, evidence: JsonRecord): void {
 
 function successful(response: JsonRecord): void {
   assert.equal(response.success, true, JSON.stringify(response));
+}
+
+async function bootstrapCurrentManifest(rpc: StockPiRpc, desired: JsonRecord, generation: string, deliveryId: string): Promise<void> {
+  successful(await rpc.request({
+    type: "prompt",
+    message: `/mecha-bootstrap-v1 ${encodeHiddenEnvelope({
+      protocol: "mecha.bootstrap/v1", delivery_id: deliveryId, runtime_generation: generation, session_epoch: 1,
+      desired_manifest: desired, manifest_sha256: hashCanonicalJson(desired), restored_request_ids: [],
+      inline_policy: { enabled: false, credits: {} }, recall_projection: { content: "" },
+    })}`,
+  }));
+}
+
+function sessionFileFromState(response: JsonRecord): string {
+  const data = response.data;
+  if (data === null || typeof data !== "object" || Array.isArray(data) || typeof (data as JsonRecord).sessionFile !== "string") {
+    throw new Error(`stock Pi did not return a persistent session file: ${JSON.stringify(response)}`);
+  }
+  return (data as JsonRecord).sessionFile as string;
+}
+
+function latestUserEntryId(response: JsonRecord): string {
+  const data = response.data;
+  if (data === null || typeof data !== "object" || Array.isArray(data) || !Array.isArray((data as JsonRecord).entries)) {
+    throw new Error(`stock Pi did not return session entries: ${JSON.stringify(response)}`);
+  }
+  const entries = (data as JsonRecord).entries as unknown[];
+  for (const entry of entries.toReversed()) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const message = (entry as JsonRecord).message;
+    if (message !== null && typeof message === "object" && !Array.isArray(message)
+      && (message as JsonRecord).role === "user" && typeof (entry as JsonRecord).id === "string") {
+      return (entry as JsonRecord).id as string;
+    }
+  }
+  throw new Error("stock Pi session has no user entry suitable for a fork");
 }
 
 function customMessages(events: JsonRecord[], customType: string): JsonRecord[] {
@@ -518,6 +588,84 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${supplementalEnvelope}` }));
     successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${supplementalEnvelope}` }));
     assert.equal(customMessages(rpc.events, "mecha.tools.accepted.v1").length, 3, "accepted supplemental replay returns a receipt without a second registration");
+    const requestsBeforeSupplementalPrompt = provider.requests.length;
+    successful(await rpc.request({ type: "prompt", message: "Confirm the supplemental managed definition." }));
+    const supplementalRequest = await waitFor(() => provider.requests[requestsBeforeSupplementalPrompt], "17-tool supplemental model request");
+    const supplementalManagedNames = new Set((supplemental.tools as JsonRecord[]).map((tool) => String(tool.name)));
+    assert.equal([...requestToolNames(supplementalRequest)].filter((name) => supplementalManagedNames.has(name)).length, 17, "the provider request has all 17 managed tools");
+    assert.ok(requestToolNames(supplementalRequest).has(String(supplementalTool.name)));
+
+    const supplementalToolName = String(supplementalTool.name);
+    const invalidInstallations: Array<{ label: string; envelope: JsonRecord }> = [];
+    const malformedBase = structuredClone(supplemental);
+    invalidInstallations.push({ label: "stale base hash", envelope: {
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174031",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: "b".repeat(64),
+      desired_manifest: malformedBase, manifest_sha256: hashCanonicalJson(malformedBase), added_name: supplementalToolName,
+    } });
+    const changedExisting = changedDefinitionManifest(supplemental);
+    invalidInstallations.push({ label: "changed baseline definition", envelope: {
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174032",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: supplementalHash,
+      desired_manifest: changedExisting, manifest_sha256: hashCanonicalJson(changedExisting), added_name: supplementalToolName,
+    } });
+    const removedExisting = structuredClone(supplemental);
+    (removedExisting.tools as JsonRecord[]).splice((removedExisting.tools as JsonRecord[]).findIndex((tool) => tool.capability_id === "goal"), 1);
+    invalidInstallations.push({ label: "removed baseline definition", envelope: {
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174033",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: supplementalHash,
+      desired_manifest: removedExisting, manifest_sha256: hashCanonicalJson(removedExisting), added_name: supplementalToolName,
+    } });
+    const reordered = structuredClone(supplemental);
+    (reordered.tools as JsonRecord[]).reverse();
+    invalidInstallations.push({ label: "reordered definitions", envelope: {
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174034",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: supplementalHash,
+      desired_manifest: reordered, manifest_sha256: hashCanonicalJson(reordered), added_name: supplementalToolName,
+    } });
+    const twoAdditions = supplementalManifest(supplemental, "zz_second_supplemental");
+    twoAdditions.revision = 3;
+    invalidInstallations.push({ label: "two additions", envelope: {
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174035",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: supplementalHash,
+      desired_manifest: twoAdditions, manifest_sha256: hashCanonicalJson(twoAdditions), added_name: supplementalToolName,
+    } });
+    const overCapacity = structuredClone(supplemental);
+    const overCapacityTools = overCapacity.tools as JsonRecord[];
+    for (let index = 0; index < 16; index++) {
+      const definition = {
+        capability_id: `zz_more_${String(index).padStart(2, "0")}`,
+        label: `Extra ${index}`,
+        description: "An over-capacity supplemental test definition.",
+        parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
+        operation_id: `stock.extra.${index}`,
+      };
+      const definitionSha = hashCanonicalJson(definition);
+      overCapacityTools.push({ ...definition, name: `${definition.capability_id}__${definitionSha}`, definition_id: `def_${definitionSha}`, definition_sha256: definitionSha });
+    }
+    overCapacityTools.sort((left, right) => Buffer.compare(Buffer.from(String(left.capability_id), "utf8"), Buffer.from(String(right.capability_id), "utf8")));
+    overCapacity.revision = 3;
+    invalidInstallations.push({ label: "over capacity", envelope: {
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174036",
+      runtime_generation: RUNTIME_GENERATION, session_epoch: 1, base_manifest_sha256: supplementalHash,
+      desired_manifest: overCapacity, manifest_sha256: hashCanonicalJson(overCapacity), added_name: supplementalToolName,
+    } });
+    invalidInstallations.push({ label: "stale runtime fence", envelope: {
+      protocol: "mecha.tools-install/v1", delivery_id: "123e4567-e89b-42d3-a456-426614174037",
+      runtime_generation: "123e4567-e89b-42d3-a456-426614174099", session_epoch: 1, base_manifest_sha256: supplementalHash,
+      desired_manifest: supplemental, manifest_sha256: supplementalHash, added_name: supplementalToolName,
+    } });
+    const requestsBeforeInvalidInstalls = provider.requests.length;
+    for (const invalid of invalidInstallations) {
+      successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${encodeHiddenEnvelope(invalid.envelope)}` }));
+    }
+    await waitFor(() => customMessages(rpc.events, "mecha.tools.rejected.v1").length >= invalidInstallations.length ? true : undefined, "supplemental invalid-installation rejections");
+    assert.equal(provider.requests.length, requestsBeforeInvalidInstalls, "invalid supplemental updates never make a model request");
+    const requestsBeforeUnchangedPrompt = provider.requests.length;
+    successful(await rpc.request({ type: "prompt", message: "Confirm rejected supplemental updates left the registry unchanged." }));
+    const unchangedRequest = await waitFor(() => provider.requests[requestsBeforeUnchangedPrompt], "unchanged supplemental model request");
+    assert.equal([...requestToolNames(unchangedRequest)].filter((name) => supplementalManagedNames.has(name)).length, 17);
+    assert.ok(requestToolNames(unchangedRequest).has(supplementalToolName));
 
     successful(await rpc.request({ type: "prompt", message: `/mecha-mailbox-deliver-v1 ${encodeHiddenEnvelope({
       protocol: "mecha.mailbox-deliver/v1", message_id: "stock-mail", content: "Stock managed mail.",
@@ -553,6 +701,53 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
       prompted_hidden: hiddenPrompts, prompted_legacy: legacyPrompts, accepted_manifest_sizes: [16, 17],
       supplemental_replay: true, custom_message_types: ["mecha.mailbox.appended.v1", "mecha.policy.applied.v1", "mecha.child.snapshot.v1"],
     });
+  } finally {
+    await rpc.stop();
+    await provider.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stock Pi 0.85 fails closed on every reserved command or tool collision and on partial command registration", { timeout: 60_000 }, async () => {
+  const collisionCases = [...EXPECTED_COMMANDS].flatMap((name) => [
+    { mode: "command", name },
+    { mode: "tool", name },
+  ]);
+  for (const collision of collisionCases) {
+    const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-collision-"));
+    const provider = await startDeterministicProvider({ firstToolCall: false });
+    const rpc = new StockPiRpc(home, provider.baseUrl, {
+      extensions: [REGISTRATION_PROBE, EXTENSION, SUBAGENTS_EXTENSION],
+      probeMode: collision.mode,
+      probeName: collision.name,
+    });
+    try {
+      void rpc.request({ type: "get_commands" }).catch(() => {});
+      assert.equal(await rpc.waitForExit(), 1, `${collision.mode} collision for ${collision.name} must terminate this runtime`);
+      assert.equal(provider.requests.length, 0, `${collision.mode} collision for ${collision.name} must precede model use`);
+      const errorEvent = rpc.events.find((event) => event.type === "extension_error" && typeof event.error === "string");
+      assert.ok(errorEvent, `stock Pi did not report the ${collision.name} collision`);
+      assert.match(String(errorEvent.error), new RegExp(`Managed command collision: ${collision.name}`));
+    } finally {
+      await rpc.stop();
+      await provider.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-command-failure-"));
+  const provider = await startDeterministicProvider({ firstToolCall: false });
+  const rpc = new StockPiRpc(home, provider.baseUrl, {
+    extensions: [EXTENSION, SUBAGENTS_EXTENSION],
+    testCommandFailureAt: 8,
+  });
+  try {
+    void rpc.request({ type: "get_commands" }).catch(() => {});
+    assert.equal(await rpc.waitForExit(), 1);
+    assert.equal(provider.requests.length, 0, "a partial command registration never reaches a model turn");
+    const errorEvent = rpc.events.find((event) => event.type === "extension_error" && typeof event.error === "string");
+    assert.ok(errorEvent, "stock Pi did not report the forced registration failure");
+    assert.match(String(errorEvent.error), /forced managed command registration failure at 8/);
   } finally {
     await rpc.stop();
     await provider.stop();
@@ -688,6 +883,124 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
       protocol: "mecha.phase1-stock-proof/v1", runtime_generation: RUNTIME_GENERATION,
       parent_first_request: true, child_first_request: true, child_manifest_size: 16,
       child_context_result_append: true, stale_child_result_appended: false,
+    });
+  } finally {
+    await rpc.stop();
+    await provider.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stock Pi 0.85 proves AC-090 duplicate, disposer, and owner-release factory lifecycle against real child spawns", { timeout: 45_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-ac090-"));
+  const provider = await startDeterministicProvider({ firstToolCall: false });
+  const rpc = new StockPiRpc(home, provider.baseUrl, {
+    persistSession: true,
+    extensions: [EXTENSION, SUBAGENTS_EXTENSION, AC090_PROBE],
+  });
+  const manifest = readManifest();
+  const manifestHash = hashCanonicalJson(manifest);
+  const assertChildTools = async (requestIndex: number, markerExpected: boolean, description: string): Promise<void> => {
+    const request = await waitFor(() => provider.requests[requestIndex], description);
+    const names = requestToolNames(request);
+    const managed = new Set((manifest.tools as JsonRecord[]).map((tool) => String(tool.name)));
+    assert.equal([...names].filter((name) => managed.has(name)).length, 16, `${description} lost a Mecha child definition`);
+    assert.equal(names.has("phase1_ac090_marker"), markerExpected, description);
+  };
+  try {
+    await bootstrapCurrentManifest(rpc, manifest, RUNTIME_GENERATION, "123e4567-e89b-42d3-a456-426614174071");
+    successful(await rpc.request({ type: "prompt", message: "/phase1-ac090-duplicate-mecha" }));
+    const duplicateReport = await waitFor(() => customMessages(rpc.events, "phase1.ac090.v1").find((event) => {
+      const details = (event.message as JsonRecord).details;
+      return details !== null && typeof details === "object" && !Array.isArray(details) && (details as JsonRecord).action === "duplicate-mecha" ? event : undefined;
+    }), "AC-090 duplicate report");
+    assert.equal(((duplicateReport.message as JsonRecord).details as JsonRecord).duplicate_rejected, true);
+
+    successful(await rpc.request({ type: "prompt", message: "/phase1-ac090-spawn" }));
+    await assertChildTools(0, true, "child spawned with the initial marker factory");
+    successful(await rpc.request({ type: "prompt", message: "/phase1-ac090-dispose" }));
+    successful(await rpc.request({ type: "prompt", message: "/phase1-ac090-spawn" }));
+    await assertChildTools(1, false, "child spawned after marker factory disposal");
+    successful(await rpc.request({ type: "prompt", message: "/phase1-ac090-reregister" }));
+
+    successful(await rpc.request({ type: "new_session" }));
+    await bootstrapCurrentManifest(rpc, manifest, RUNTIME_GENERATION, "123e4567-e89b-42d3-a456-426614174072");
+    successful(await rpc.request({ type: "prompt", message: "/phase1-ac090-spawn" }));
+    await assertChildTools(2, false, "child spawned after parent owner release");
+    writeAcceptanceArtifact("stock-pi-0.85-ac090-child-factory-lifecycle.json", {
+      protocol: "mecha.phase1-stock-proof/v1", manifest_sha256: manifestHash,
+      duplicate_factory_rejected: true, disposer_removes_future_child_factory: true,
+      owner_release_removes_future_child_factory: true, real_child_spawns: 3,
+    });
+  } finally {
+    await rpc.stop();
+    await provider.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stock Pi 0.85 requires a complete current manifest after process, resume, switch, fork, and reload generations", { timeout: 60_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-lifecycle-"));
+  const provider = await startDeterministicProvider({ firstToolCall: false });
+  const changed = changedDefinitionManifest(readManifest());
+  const changedGoal = (changed.tools as JsonRecord[]).find((tool) => tool.capability_id === "goal")!;
+  const changedGoalName = String(changedGoal.name);
+  const assertCurrentTurn = async (rpc: StockPiRpc, label: string): Promise<void> => {
+    const requestsBeforePrompt = provider.requests.length;
+    successful(await rpc.request({ type: "prompt", message: `Confirm the ${label} manifest.` }));
+    const request = await waitFor(() => provider.requests[requestsBeforePrompt], `${label} current model request`);
+    assert.ok(requestToolNames(request).has(changedGoalName), `${label} did not advertise the changed current definition`);
+    assert.equal(requestToolNames(request).has("goal"), false, `${label} leaked the old definition name`);
+  };
+  let rpc = new StockPiRpc(home, provider.baseUrl, {
+    persistSession: true,
+    runtimeGeneration: "123e4567-e89b-42d3-a456-426614174081",
+    extensions: [EXTENSION, SUBAGENTS_EXTENSION, TRANSITION_PROBE],
+  });
+  try {
+    await bootstrapCurrentManifest(rpc, changed, "123e4567-e89b-42d3-a456-426614174081", "123e4567-e89b-42d3-a456-426614174081");
+    const originalSessionFile = sessionFileFromState(await rpc.request({ type: "get_state" }));
+    await assertCurrentTurn(rpc, "initial");
+
+    successful(await rpc.request({ type: "prompt", message: "/phase1-transition new 123e4567-e89b-42d3-a456-426614174082" }));
+    await bootstrapCurrentManifest(rpc, changed, "123e4567-e89b-42d3-a456-426614174082", "123e4567-e89b-42d3-a456-426614174082");
+    await assertCurrentTurn(rpc, "new-session");
+
+    successful(await rpc.request({ type: "prompt", message: `/phase1-transition switch 123e4567-e89b-42d3-a456-426614174083 ${originalSessionFile}` }));
+    await bootstrapCurrentManifest(rpc, changed, "123e4567-e89b-42d3-a456-426614174083", "123e4567-e89b-42d3-a456-426614174083");
+    await assertCurrentTurn(rpc, "session-switch");
+
+    successful(await rpc.request({ type: "prompt", message: "Create a user entry for the lifecycle fork." }));
+    const forkEntryId = latestUserEntryId(await rpc.request({ type: "get_entries" }));
+    successful(await rpc.request({ type: "prompt", message: `/phase1-transition fork 123e4567-e89b-42d3-a456-426614174084 ${forkEntryId}` }));
+    await bootstrapCurrentManifest(rpc, changed, "123e4567-e89b-42d3-a456-426614174084", "123e4567-e89b-42d3-a456-426614174084");
+    await assertCurrentTurn(rpc, "fork");
+
+    successful(await rpc.request({ type: "prompt", message: "/phase1-transition reload 123e4567-e89b-42d3-a456-426614174085" }));
+    await bootstrapCurrentManifest(rpc, changed, "123e4567-e89b-42d3-a456-426614174085", "123e4567-e89b-42d3-a456-426614174085");
+    await assertCurrentTurn(rpc, "extension-reload");
+    const resumableSessionFile = sessionFileFromState(await rpc.request({ type: "get_state" }));
+
+    await rpc.stop();
+    rpc = new StockPiRpc(home, provider.baseUrl, {
+      runtimeGeneration: "123e4567-e89b-42d3-a456-426614174086",
+      sessionPath: resumableSessionFile,
+      extensions: [EXTENSION, SUBAGENTS_EXTENSION, TRANSITION_PROBE],
+    });
+    await bootstrapCurrentManifest(rpc, changed, "123e4567-e89b-42d3-a456-426614174086", "123e4567-e89b-42d3-a456-426614174086");
+    await assertCurrentTurn(rpc, "process-resume");
+
+    await rpc.stop();
+    rpc = new StockPiRpc(home, provider.baseUrl, {
+      runtimeGeneration: "123e4567-e89b-42d3-a456-426614174087",
+      extensions: [EXTENSION, SUBAGENTS_EXTENSION, TRANSITION_PROBE],
+    });
+    await bootstrapCurrentManifest(rpc, changed, "123e4567-e89b-42d3-a456-426614174087", "123e4567-e89b-42d3-a456-426614174087");
+    await assertCurrentTurn(rpc, "process-restart");
+    writeAcceptanceArtifact("stock-pi-0.85-lifecycle-generations.json", {
+      protocol: "mecha.phase1-stock-proof/v1", changed_definition_name: changedGoalName,
+      fresh_generation_causes: ["process-restart", "resume", "session-switch", "fork", "extension-reload"],
+      complete_manifest_before_next_turn: true,
     });
   } finally {
     await rpc.stop();

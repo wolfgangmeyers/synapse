@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   hashCanonicalJson,
+  parameterSchemaJson,
   type DesiredManifest,
   type JsonRecord,
   type ManifestTool,
@@ -178,7 +179,7 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
       name: tool.name,
       label: tool.label,
       description: tool.description,
-      parameters: tool.parameters,
+      parameters: parameterSchemaJson(tool.parameters),
       ...(tool.prompt_snippet === undefined ? {} : { promptSnippet: tool.prompt_snippet }),
       ...(tool.prompt_guidelines === undefined ? {} : { promptGuidelines: tool.prompt_guidelines }),
       async execute(toolCallId, input, _signal, _onUpdate, context) {

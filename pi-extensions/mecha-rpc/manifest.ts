@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { Value } from "typebox/value";
+import { Type } from "typebox";
 import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonRecord;
 export type JsonRecord = { [key: string]: JsonValue };
+/** A JSON-schema-shaped TypeBox schema constructed from the accepted subset. */
 export type ParameterSchema = JsonRecord;
 
 export type ManifestTool = {
@@ -88,22 +90,48 @@ function fail(message: string): never {
   throw new TypeError(`Invalid managed tool manifest: ${message}`);
 }
 
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function requireIJsonString(value: string, label: string): void {
+  if (hasLoneSurrogate(value)) throw new TypeError(`${label} contains a lone surrogate`);
+}
+
 function sortedKeys(record: JsonRecord): string[] {
-  return Object.keys(record).sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
+  // RFC 8785 compares UTF-16 code units, not UTF-8 bytes or locale collation.
+  return Object.keys(record).sort((left, right) => left === right ? 0 : left < right ? -1 : 1);
 }
 
 /** RFC 8785-compatible canonicalization for the bounded JSON subset accepted here. */
 export function canonicalizeJson(value: JsonValue): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (value === null || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "string") {
+    requireIJsonString(value, "Canonical JSON string");
+    return JSON.stringify(value);
+  }
   if (typeof value === "number") {
-    if (!Number.isFinite(value) || !Number.isSafeInteger(value) && !Number.isFinite(value)) {
+    if (!Number.isFinite(value)) {
       throw new TypeError("Canonical JSON accepts finite numbers only");
     }
     return Object.is(value, -0) ? "0" : JSON.stringify(value);
   }
   if (Array.isArray(value)) return `[${value.map(canonicalizeJson).join(",")}]`;
   if (!isRecord(value)) throw new TypeError("Canonical JSON received an unsupported value");
-  return `{${sortedKeys(value).map((key) => `${JSON.stringify(key)}:${canonicalizeJson(value[key]!)}`).join(",")}}`;
+  return `{${sortedKeys(value).map((key) => {
+    requireIJsonString(key, "Canonical JSON property name");
+    return `${JSON.stringify(key)}:${canonicalizeJson(value[key]!)}`;
+  }).join(",")}}`;
 }
 
 export function hashCanonicalJson(value: JsonValue): string {
@@ -126,12 +154,12 @@ function safeInteger(value: unknown, label: string, minimum: number, maximum: nu
 }
 
 function boundedText(value: unknown, label: string, maximum = MAX_TOOL_TEXT_BYTES, allowEmpty = false): string {
-  if (typeof value !== "string" || (!allowEmpty && value.length === 0) || byteLength(value) > maximum) fail(`${label} must be bounded text`);
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0) || byteLength(value) > maximum || hasLoneSurrogate(value)) fail(`${label} must be bounded text`);
   return value;
 }
 
 function safePropertyName(value: string): void {
-  if (value === "__proto__" || value === "prototype" || value === "constructor") fail(`unsafe property name ${value}`);
+  if (value === "__proto__" || value === "prototype" || value === "constructor" || hasLoneSurrogate(value)) fail(`unsafe property name ${value}`);
 }
 
 function validateEnum(value: unknown, type: "string" | "integer" | "number", minimum: number | undefined, maximum: number | undefined): void {
@@ -139,7 +167,10 @@ function validateEnum(value: unknown, type: "string" | "integer" | "number", min
   const canonical = new Set<string>();
   for (const entry of value) {
     if (type === "string") {
-      if (typeof entry !== "string" || byteLength(entry) > MAX_STRING_BYTES) fail("string enum value is invalid");
+      if (typeof entry !== "string" || hasLoneSurrogate(entry) || byteLength(entry) > MAX_STRING_BYTES
+        || minimum === undefined || maximum === undefined || entry.length < minimum || entry.length > maximum) {
+        fail("string enum value is invalid");
+      }
     } else if (typeof entry !== "number" || !Number.isFinite(entry) || (type === "integer" && !Number.isSafeInteger(entry))
       || minimum === undefined || maximum === undefined || entry < minimum || entry > maximum) {
       fail("numeric enum value is invalid");
@@ -148,6 +179,16 @@ function validateEnum(value: unknown, type: "string" | "integer" | "number", min
     if (canonical.has(identity)) fail("enum contains duplicate values");
     canonical.add(identity);
   }
+}
+
+function schemaRecord(schema: TSchema): ParameterSchema {
+  if (!isRecord(schema)) throw new TypeError("TypeBox constructor returned a non-JSON schema");
+  return schema;
+}
+
+function schemaOptions(description: unknown): { description?: string } {
+  const text = description === undefined ? undefined : boundedText(description, "schema description", MAX_TOOL_TEXT_BYTES, true);
+  return text === undefined ? {} : { description: text };
 }
 
 function validateSchemaNode(value: unknown, depth: number, counter: { value: number }): ParameterSchema {
@@ -159,8 +200,7 @@ function validateSchemaNode(value: unknown, depth: number, counter: { value: num
   if (typeof type !== "string" || !["object", "array", "string", "integer", "number", "boolean"].includes(type)) {
     fail("schema type is unsupported");
   }
-  const description = value.description;
-  if (description !== undefined) boundedText(description, "schema description", MAX_TOOL_TEXT_BYTES, true);
+  const options = schemaOptions(value.description);
 
   if (type === "object") {
     exactlyKeys(value, ["type", "properties", "required", "additionalProperties", "description"], "object schema");
@@ -169,36 +209,45 @@ function validateSchemaNode(value: unknown, depth: number, counter: { value: num
     const properties = value.properties;
     const names = Object.keys(properties);
     if (names.length > 64) fail("object schema has too many properties");
+    const builtProperties: Record<string, TSchema> = {};
     for (const name of names) {
       safePropertyName(name);
-      validateSchemaNode(properties[name], depth + 1, counter);
+      builtProperties[name] = validateSchemaNode(properties[name], depth + 1, counter);
     }
     const required = new Set<string>();
     for (const name of value.required) {
       if (typeof name !== "string" || !Object.hasOwn(properties, name) || required.has(name)) fail("object required must be a unique property subset");
       required.add(name);
     }
-    return structuredClone(value);
+    return schemaRecord(Type.Object(builtProperties, { ...options, additionalProperties: false, required: [...required] }));
   }
 
   if (type === "array") {
     exactlyKeys(value, ["type", "items", "minItems", "maxItems", "description"], "array schema");
     requiredKeys(value, ["type", "items", "maxItems"], "array schema");
     const maxItems = safeInteger(value.maxItems, "array maxItems", 0, 256);
-    const minItems = value.minItems === undefined ? 0 : safeInteger(value.minItems, "array minItems", 0, maxItems);
-    if (minItems > maxItems) fail("array range is reversed");
-    validateSchemaNode(value.items, depth + 1, counter);
-    return structuredClone(value);
+    const minItems = value.minItems === undefined ? undefined : safeInteger(value.minItems, "array minItems", 0, maxItems);
+    if (minItems !== undefined && minItems > maxItems) fail("array range is reversed");
+    return schemaRecord(Type.Array(validateSchemaNode(value.items, depth + 1, counter), {
+      ...options,
+      maxItems,
+      ...(minItems === undefined ? {} : { minItems }),
+    }));
   }
 
   if (type === "string") {
     exactlyKeys(value, ["type", "minLength", "maxLength", "enum", "description"], "string schema");
     requiredKeys(value, ["type", "maxLength"], "string schema");
     const maximum = safeInteger(value.maxLength, "string maxLength", 0, MAX_STRING_BYTES);
-    const minimum = value.minLength === undefined ? 0 : safeInteger(value.minLength, "string minLength", 0, maximum);
-    if (minimum > maximum) fail("string range is reversed");
-    if (value.enum !== undefined) validateEnum(value.enum, "string", undefined, undefined);
-    return structuredClone(value);
+    const minimum = value.minLength === undefined ? undefined : safeInteger(value.minLength, "string minLength", 0, maximum);
+    if (minimum !== undefined && minimum > maximum) fail("string range is reversed");
+    if (value.enum !== undefined) validateEnum(value.enum, "string", minimum ?? 0, maximum);
+    return schemaRecord(Type.String({
+      ...options,
+      maxLength: maximum,
+      ...(minimum === undefined ? {} : { minLength: minimum }),
+      ...(value.enum === undefined ? {} : { enum: structuredClone(value.enum) }),
+    }));
   }
 
   if (type === "integer" || type === "number") {
@@ -211,17 +260,28 @@ function validateSchemaNode(value: unknown, depth: number, counter: { value: num
       fail("numeric range must be finite safe bounds");
     }
     if (value.enum !== undefined) validateEnum(value.enum, type, minimum, maximum);
-    return structuredClone(value);
+    const numericOptions = {
+      ...options,
+      minimum,
+      maximum,
+      ...(value.enum === undefined ? {} : { enum: structuredClone(value.enum) }),
+    };
+    return schemaRecord(type === "integer" ? Type.Integer(numericOptions) : Type.Number(numericOptions));
   }
 
   exactlyKeys(value, ["type", "description"], "boolean schema");
   requiredKeys(value, ["type"], "boolean schema");
-  return structuredClone(value);
+  return schemaRecord(Type.Boolean(options));
 }
 
 export function validateParametersSchema(value: unknown): ParameterSchema {
   const schema = validateSchemaNode(value, 1, { value: 0 });
-  if (schema.type !== "object") fail("parameters root must be an object");
+  const record = schemaRecord(schema);
+  if (record.type !== "object") fail("parameters root must be an object");
+  return schema;
+}
+
+export function parameterSchemaJson(schema: ParameterSchema): JsonRecord {
   return schema;
 }
 
@@ -230,7 +290,7 @@ function definitionInput(tool: Omit<ManifestTool, "definition_id" | "definition_
     capability_id: tool.capability_id,
     label: tool.label,
     description: tool.description,
-    parameters: tool.parameters,
+    parameters: parameterSchemaJson(tool.parameters),
     operation_id: tool.operation_id,
     ...(tool.prompt_snippet === undefined ? {} : { prompt_snippet: tool.prompt_snippet }),
     ...(tool.prompt_guidelines === undefined ? {} : { prompt_guidelines: tool.prompt_guidelines }),
@@ -319,8 +379,7 @@ export function validateDesiredManifest(value: unknown, options: { requireBaseli
 }
 
 function isValidatedTypeBoxSchema(value: ParameterSchema): value is ParameterSchema & TSchema {
-  // validateParametersSchema has already reduced this external JSON to TypeBox's
-  // supported structural subset before this narrow runtime-validation boundary.
+  // validateParametersSchema only returns schemas from TypeBox constructors.
   return typeof value.type === "string";
 }
 

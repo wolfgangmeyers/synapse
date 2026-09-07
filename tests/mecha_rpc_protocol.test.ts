@@ -78,6 +78,22 @@ test("raw hidden envelopes reject malformed UTF-8 and preserve valid size bounda
   assert.throws(() => decodeHiddenEnvelope(encodeRaw({ value: "x".repeat(16 * 1024 + 1) })));
 });
 
+test("hidden envelopes reject lone surrogates and deep nesting before parser stack exhaustion", () => {
+  const loneSurrogateValue = Buffer.from('{"value":"\\ud800"}', "utf8").toString("base64url");
+  const loneSurrogateKey = Buffer.from('{"\\udc00":true}', "utf8").toString("base64url");
+  assert.throws(() => decodeHiddenEnvelope(loneSurrogateValue), TypeError);
+  assert.throws(() => decodeHiddenEnvelope(loneSurrogateKey), TypeError);
+
+  const deeplyNested = `{"value":${"[".repeat(12_000)}0${"]".repeat(12_000)}}`;
+  const encoded = Buffer.from(deeplyNested, "utf8").toString("base64url");
+  assert.ok(Buffer.byteLength(deeplyNested, "utf8") < 131_072);
+  assert.throws(() => decodeHiddenEnvelope(encoded), (error: unknown) => {
+    assert.ok(error instanceof TypeError);
+    assert.doesNotMatch(String(error), /maximum call stack|RangeError/i);
+    return true;
+  });
+});
+
 test("hidden envelope decoding accepts only canonical unpadded base64url", () => {
   const canonical = encodeRaw({ value: "canonical" });
   assert.deepEqual(decodeHiddenEnvelope(canonical), { value: "canonical" });

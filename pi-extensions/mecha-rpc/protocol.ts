@@ -93,8 +93,22 @@ function assertExactKeys(value: JsonRecord, required: readonly string[], optiona
   for (const key of required) if (!Object.hasOwn(value, key)) protocolError(`missing field ${key}`);
 }
 
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function boundedString(value: unknown, label: string, maximum: number, allowEmpty = false): string {
-  if (typeof value !== "string" || (!allowEmpty && value.length === 0) || Buffer.byteLength(value, "utf8") > maximum) protocolError(`${label} is invalid`);
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0) || hasLoneSurrogate(value) || Buffer.byteLength(value, "utf8") > maximum) protocolError(`${label} is invalid`);
   return value;
 }
 
@@ -106,12 +120,12 @@ function safeInteger(value: unknown, label: string): number {
 function validateJsonValue(value: unknown, depth: number, state: { nodes: number }, maximumStringBytes = MAX_JSON_STRING_BYTES): value is JsonValue {
   if (depth > MAX_JSON_DEPTH || ++state.nodes > MAX_JSON_NODES) return false;
   if (value === null || typeof value === "boolean") return true;
-  if (typeof value === "string") return Buffer.byteLength(value, "utf8") <= maximumStringBytes;
+  if (typeof value === "string") return !hasLoneSurrogate(value) && Buffer.byteLength(value, "utf8") <= maximumStringBytes;
   if (typeof value === "number") return Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
   if (Array.isArray(value)) return value.length <= 256 && value.every((entry) => validateJsonValue(entry, depth + 1, state, maximumStringBytes));
   if (!isRecord(value) || Object.keys(value).length > 256) return false;
   for (const [key, entry] of Object.entries(value)) {
-    if (key === "__proto__" || key === "prototype" || key === "constructor" || Buffer.byteLength(key, "utf8") > MAX_JSON_STRING_BYTES) return false;
+    if (key === "__proto__" || key === "prototype" || key === "constructor" || hasLoneSurrogate(key) || Buffer.byteLength(key, "utf8") > MAX_JSON_STRING_BYTES) return false;
     if (!validateJsonValue(entry, depth + 1, state, maximumStringBytes)) return false;
   }
   return true;
@@ -130,7 +144,7 @@ class StrictJsonParser {
   constructor(private readonly text: string) {}
 
   parse(): JsonValue {
-    const value = this.value();
+    const value = this.value(1);
     this.whitespace();
     if (this.index !== this.text.length) protocolError("trailing JSON input");
     return value;
@@ -140,11 +154,12 @@ class StrictJsonParser {
     while (this.index < this.text.length && /[\u0020\u000a\u000d\u0009]/.test(this.text[this.index]!)) this.index++;
   }
 
-  private value(): JsonValue {
+  private value(depth: number): JsonValue {
+    if (depth > MAX_JSON_DEPTH) protocolError("JSON depth exceeds limit");
     this.whitespace();
     const current = this.text[this.index];
-    if (current === "{") return this.object();
-    if (current === "[") return this.array();
+    if (current === "{") return this.object(depth);
+    if (current === "[") return this.array(depth);
     if (current === '"') return this.string();
     if (this.text.startsWith("true", this.index)) { this.index += 4; return true; }
     if (this.text.startsWith("false", this.index)) { this.index += 5; return false; }
@@ -152,7 +167,7 @@ class StrictJsonParser {
     return this.number();
   }
 
-  private object(): JsonRecord {
+  private object(depth: number): JsonRecord {
     this.index++;
     const result: JsonRecord = {};
     const names = new Set<string>();
@@ -166,7 +181,7 @@ class StrictJsonParser {
       names.add(key);
       this.whitespace();
       if (this.text[this.index++] !== ":") protocolError("object key lacks colon");
-      const value = this.value();
+      const value = this.value(depth + 1);
       Object.defineProperty(result, key, { value, enumerable: true, configurable: false, writable: false });
       this.whitespace();
       const separator = this.text[this.index++];
@@ -175,13 +190,13 @@ class StrictJsonParser {
     }
   }
 
-  private array(): JsonValue[] {
+  private array(depth: number): JsonValue[] {
     this.index++;
     const result: JsonValue[] = [];
     this.whitespace();
     if (this.text[this.index] === "]") { this.index++; return result; }
     while (true) {
-      result.push(this.value());
+      result.push(this.value(depth + 1));
       this.whitespace();
       const separator = this.text[this.index++];
       if (separator === "]") return result;
@@ -201,7 +216,7 @@ class StrictJsonParser {
         const token = this.text.slice(start, this.index);
         try {
           const parsed: unknown = JSON.parse(token);
-          if (typeof parsed !== "string") protocolError("invalid JSON string");
+          if (typeof parsed !== "string" || hasLoneSurrogate(parsed)) protocolError("invalid JSON string");
           return parsed;
         } catch {
           protocolError("invalid JSON string");
