@@ -86,33 +86,32 @@ func commandOutput(t *testing.T, directory string, command string, args ...strin
 	return strings.TrimSpace(string(output))
 }
 
-var readinessCandidatePaths = []string{
-	"RPC_IMPLEMENTATION_PLAN.html",
-	"router-proxy/internal/managed/readiness_canonical.go",
-	"router-proxy/internal/managed/readiness_canonical_test.go",
+var replacementCandidatePaths = []string{
+	"router-proxy/contract_manifest_test.go",
+	"router-proxy/internal/managed/process.go",
+	"router-proxy/internal/managed/process_test.go",
 	"router-proxy/internal/managed/rpc.go",
 	"router-proxy/internal/managed/rpc_test.go",
 	"router-proxy/internal/managed/supervisor.go",
-	"router-proxy/internal/managed/supervisor_launch_test.go",
+	"router-proxy/internal/managed/supervisor_restart_execution_test.go",
 	"router-proxy/internal/managed/supervisor_test.go",
 	"router-proxy/internal/store/managed.go",
-	"router-proxy/internal/store/managed_readiness_sources_test.go",
 	"router-proxy/internal/store/managed_test.go",
-	"router-proxy/internal/store/migrations/024_managed_readiness_sources.sql",
+	"router-proxy/internal/store/migrations/025_managed_restart_execution.sql",
 	"router-proxy/internal/store/store_test.go",
+	"router-proxy/internal/transport/managed_http.go",
 	"router-proxy/internal/transport/managed_http_test.go",
-	"router-proxy/internal/transport/managed_launch_http_test.go",
 	"router-proxy/internal/transport/managed_native_test.go",
-	"tests/mecha_rpc_manifest.test.ts",
+	"router-proxy/internal/transport/router.go",
+	"router/contract/manifest.json",
 }
 
-// readinessCandidateContentSHA256 identifies the actual dirty candidate this
-// test compiled. Each declared readiness path contributes its exact file hash,
-// so the base commit alone cannot be mistaken for the tested worktree.
-func readinessCandidateContentSHA256(t *testing.T, root string) string {
+// replacementCandidateContentSHA256 identifies the exact 17-path dirty
+// replacement candidate that the native runtime executed.
+func replacementCandidateContentSHA256(t *testing.T, root string) string {
 	t.Helper()
 	hash := sha256.New()
-	for _, relativePath := range readinessCandidatePaths {
+	for _, relativePath := range replacementCandidatePaths {
 		content, err := os.ReadFile(filepath.Join(root, relativePath))
 		require.NoError(t, err)
 		fileHash := sha256.Sum256(content)
@@ -122,19 +121,19 @@ func readinessCandidateContentSHA256(t *testing.T, root string) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func writeNativeReadinessArtifact(t *testing.T, root, pi, mecha, subagents string, manifest managed.Manifest, snapshotID, ownerID string) {
+func writeNativeReplacementArtifact(t *testing.T, root, pi, mecha, subagents string, manifest managed.Manifest, snapshotID, ownerID string) {
 	t.Helper()
 	var random [8]byte
 	_, err := rand.Read(random[:])
 	require.NoError(t, err)
 	head := commandOutput(t, root, "git", "rev-parse", "HEAD")
 	tree := commandOutput(t, root, "git", "rev-parse", "HEAD^{tree}")
-	candidate := readinessCandidateContentSHA256(t, root)
+	candidate := replacementCandidateContentSHA256(t, root)
 	piRoot := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(subagents))))
 	artifact := map[string]any{
-		"protocol": "mecha.phase2.readiness-sources/v1", "mecha_base_head": head, "mecha_base_tree": tree,
+		"protocol": "mecha.phase2.controlled-replacement/v1", "mecha_base_head": head, "mecha_base_tree": tree,
 		"mecha_candidate_identity_algorithm": "sha256-v1:path-NUL-file-sha256-LF",
-		"mecha_candidate_content_sha256":     candidate, "mecha_candidate_paths": readinessCandidatePaths,
+		"mecha_candidate_content_sha256":     candidate, "mecha_candidate_paths": replacementCandidatePaths,
 		"manifest_revision": manifest.Revision, "manifest_sha256": manifest.CanonicalSHA256,
 		"pi_executable": pi, "pi_version": commandOutput(t, root, pi, "--version"),
 		"mecha_rpc_source": mecha, "pi_subagents_entry": subagents,
@@ -145,7 +144,7 @@ func writeNativeReadinessArtifact(t *testing.T, root, pi, mecha, subagents strin
 	}
 	encoded, err := json.MarshalIndent(artifact, "", "  ")
 	require.NoError(t, err)
-	path := filepath.Join("/tmp", "mecha-rpc-acceptance", head, "phase2-readiness-sources", candidate, hex.EncodeToString(random[:]), "readiness-sources-v1.json")
+	path := filepath.Join("/tmp", "mecha-rpc-acceptance", head, "phase2-controlled-replacement", candidate, hex.EncodeToString(random[:]), "controlled-replacement-v1.json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 	require.NoError(t, os.WriteFile(path, append(encoded, '\n'), 0o600))
 	written, err := os.ReadFile(path)
@@ -155,7 +154,22 @@ func writeNativeReadinessArtifact(t *testing.T, root, pi, mecha, subagents strin
 	require.Contains(t, string(written), candidate)
 }
 
-func TestManagedRouterWithInstalledPiCommitsReadinessSources(t *testing.T) {
+func TestListenRecoversManagedRestartTransitionsBeforeBind(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})
+	require.NoError(t, err)
+	router, err := New(Options{Store: durable, Host: "127.0.0.1", Port: 0, Managed: manager})
+	require.NoError(t, err)
+	require.NoError(t, durable.Close())
+	require.Error(t, router.Listen(ctx))
+	require.Nil(t, router.listener, "recovery failure must happen before a listener is reachable")
+}
+
+func TestManagedRouterWithInstalledPiCommitsReadinessSourcesAndReplacesRuntime(t *testing.T) {
 	pi, err := exec.LookPath("pi")
 	if err != nil {
 		t.Skip("installed Pi is required for the native managed-router harness")
@@ -254,6 +268,33 @@ func TestManagedRouterWithInstalledPiCommitsReadinessSources(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, agent.AcceptingPrompts)
 	require.False(t, agent.InitialInstructionSent, "no model turn occurs before final readiness")
+	oldGeneration := agent.RuntimeGeneration
+	restartRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, httpURL+"/v1/managed-agents/native-alpha/restart", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	restartRequest.Header.Set("Content-Type", "application/json")
+	restartRequest.Header.Set("X-Request-ID", "123e4567-e89b-42d3-a456-426614174082")
+	restartResponse, err := http.DefaultClient.Do(restartRequest)
+	require.NoError(t, err)
+	defer restartResponse.Body.Close()
+	require.Equal(t, http.StatusAccepted, restartResponse.StatusCode)
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		agent, err = durable.ManagedAgent(ctx, "native-alpha")
+		if err == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts && agent.RuntimeGeneration != oldGeneration {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("managed Pi did not complete controlled replacement: %+v", agent)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	source, err = durable.ManagedReadinessSource(ctx, "native-alpha")
+	require.NoError(t, err)
+	require.NotNil(t, source.Fence)
+	require.Equal(t, agent.RuntimeGeneration, source.Fence.RuntimeGeneration)
+	require.NotNil(t, source.AppliedPolicy)
+	require.NotNil(t, source.Snapshot)
+	require.False(t, agent.InitialInstructionSent, "restart must not replay launch-only input")
 	legacyResponse, err := http.Get(httpURL + "/v1/agents")
 	require.NoError(t, err)
 	defer legacyResponse.Body.Close()
@@ -266,5 +307,5 @@ func TestManagedRouterWithInstalledPiCommitsReadinessSources(t *testing.T) {
 	require.NoError(t, err)
 	defer removedRoute.Body.Close()
 	require.Equal(t, http.StatusNotFound, removedRoute.StatusCode)
-	writeNativeReadinessArtifact(t, root, pi, mecha, subagents, manifest, source.Snapshot.SnapshotID, source.Snapshot.OwnerSessionID)
+	writeNativeReplacementArtifact(t, root, pi, mecha, subagents, manifest, source.Snapshot.SnapshotID, source.Snapshot.OwnerSessionID)
 }

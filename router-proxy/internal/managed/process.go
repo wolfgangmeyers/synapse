@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +55,31 @@ func (f ProcessFactoryFunc) Start(ctx context.Context, spec CommandSpec) (Proces
 	return f(ctx, spec)
 }
 
+type ProcessProbeState string
+
+const (
+	ProcessOwned    ProcessProbeState = "owned"
+	ProcessAbsent   ProcessProbeState = "absent"
+	ProcessMismatch ProcessProbeState = "mismatch"
+	ProcessUnknown  ProcessProbeState = "unknown"
+	ProcessPresent  ProcessProbeState = "present"
+)
+
+type ProcessProbe struct{ State ProcessProbeState }
+
+// ProcessGroupOps is the narrow ownership boundary used by restart execution.
+// It never exposes a positive-PID signal fallback.
+type ProcessGroupOps interface {
+	Probe(ProcessIdentity) ProcessProbe
+	CloseProcessInput(Process) error
+	SignalVerifiedProcessGroup(ProcessIdentity, syscall.Signal) error
+	WaitForProcessGroupEmpty(context.Context, ProcessIdentity, <-chan error) ProcessProbe
+}
+
+type defaultProcessGroupOps struct{}
+
+func DefaultProcessGroupOps() ProcessGroupOps { return defaultProcessGroupOps{} }
+
 type execProcessFactory struct{}
 
 func DefaultProcessFactory() ProcessFactory { return execProcessFactory{} }
@@ -102,7 +126,17 @@ func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process,
 		return nil, err
 	}
 	incarnation := hex.EncodeToString(randomIncarnation[:])
-	marker := processStartMarker(command.Process.Pid)
+	marker, markerErr := processStartMarker(command.Process.Pid)
+	if markerErr != nil {
+		// A child without a real identity cannot enter managed ownership. Kill
+		// its group and wait here; failure to prove cleanup makes startup fail.
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = command.Wait()
+		if (defaultProcessGroupOps{}).Probe(ProcessIdentity{PID: command.Process.Pid, StartMarker: "unavailable", Incarnation: incarnation}).State != ProcessAbsent {
+			return nil, errors.New("managed process start marker is unavailable")
+		}
+		return nil, errors.New("managed process start marker is unavailable")
+	}
 	process := &execProcess{cmd: command, stdin: stdin, stdout: stdout, stderr: stderr, identity: ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: incarnation}, waitDone: make(chan struct{}), stopDone: make(chan struct{})}
 	go drainStderr(stderr)
 	return process, nil
@@ -149,37 +183,28 @@ func (p *execProcess) Stop(ctx context.Context) error {
 			return
 		default:
 		}
-		if processStartMarker(p.cmd.Process.Pid) != p.identity.StartMarker {
+		ops := DefaultProcessGroupOps()
+		if ops.Probe(p.identity).State != ProcessOwned {
 			result = errors.New("managed process identity no longer matches")
 			close(p.stopDone)
 			return
 		}
-		if err := signalOwnedProcessGroup(p.cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		if err := ops.SignalVerifiedProcessGroup(p.identity, syscall.SIGTERM); err != nil {
 			result = err
 			close(p.stopDone)
 			return
 		}
 		done := make(chan error, 1)
 		go func() { done <- p.Wait() }()
-		timer := time.NewTimer(5 * time.Second)
-		defer timer.Stop()
-		select {
-		case result = <-done:
-		case <-timer.C:
-			_ = signalOwnedProcessGroup(p.cmd.Process.Pid, syscall.SIGKILL)
-			result = <-done
-		case <-ctx.Done():
-			// Shutdown callers must not leave a managed child behind when their
-			// outer deadline expires; the process identity is still ours here.
-			_ = signalOwnedProcessGroup(p.cmd.Process.Pid, syscall.SIGKILL)
-			result = <-done
+		probe := ops.WaitForProcessGroupEmpty(ctx, p.identity, done)
+		if probe.State != ProcessAbsent {
+			if ops.Probe(p.identity).State == ProcessOwned {
+				_ = ops.SignalVerifiedProcessGroup(p.identity, syscall.SIGKILL)
+				probe = ops.WaitForProcessGroupEmpty(context.Background(), p.identity, done)
+			}
 		}
-		// A signal-terminated child is the expected result of a successful
-		// controlled stop. Control failures (identity, signaling, or reaping)
-		// remain errors so the manager can publish a failed projection.
-		var exitErr *exec.ExitError
-		if errors.As(result, &exitErr) {
-			result = nil
+		if probe.State != ProcessAbsent {
+			result = errors.New("managed process group did not stop")
 		}
 		close(p.stopDone)
 	})
@@ -191,17 +216,89 @@ func signalOwnedProcessGroup(pid int, signal syscall.Signal) error {
 	if pid <= 0 {
 		return errors.New("managed process group identity is invalid")
 	}
-	// Setpgid: true makes the child the leader of its own group. A negative PID
-	// is therefore scoped to this managed child and its descendants. Some
-	// platforms can reject the group signal after the group has already begun
-	// exiting; the leader fallback still uses the identity check in Stop and
-	// lets the waiting goroutine reap the child.
-	if err := syscall.Kill(-pid, signal); err == nil {
-		return nil
-	} else if leaderErr := syscall.Kill(pid, signal); leaderErr == nil {
-		return nil
-	} else {
-		return err
+	return syscall.Kill(-pid, signal)
+}
+
+func (defaultProcessGroupOps) Probe(identity ProcessIdentity) ProcessProbe {
+	if ValidateIdentity(identity) != nil {
+		return ProcessProbe{State: ProcessUnknown}
+	}
+	// A negative zero signal observes the group even after its leader has been
+	// reaped. That distinction prevents a remaining descendant from authorizing
+	// target startup.
+	if err := syscall.Kill(-identity.PID, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return ProcessProbe{State: ProcessAbsent}
+		}
+		return ProcessProbe{State: ProcessUnknown}
+	}
+	marker, err := processStartMarker(identity.PID)
+	if err != nil {
+		// ps does not preserve syscall.ESRCH on every supported platform. A
+		// direct group-id lookup distinguishes a reaped leader with descendants
+		// from an indeterminate marker probe.
+		if _, groupErr := syscall.Getpgid(identity.PID); errors.Is(groupErr, syscall.ESRCH) {
+			return ProcessProbe{State: ProcessPresent}
+		}
+		return ProcessProbe{State: ProcessUnknown}
+	}
+	if marker != identity.StartMarker {
+		return ProcessProbe{State: ProcessMismatch}
+	}
+	group, err := syscall.Getpgid(identity.PID)
+	if err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return ProcessProbe{State: ProcessPresent}
+		}
+		return ProcessProbe{State: ProcessUnknown}
+	}
+	if group != identity.PID {
+		return ProcessProbe{State: ProcessMismatch}
+	}
+	return ProcessProbe{State: ProcessOwned}
+}
+
+func (defaultProcessGroupOps) CloseProcessInput(process Process) error {
+	if process == nil || process.Stdin() == nil {
+		return errors.New("managed process input is unavailable")
+	}
+	return process.Stdin().Close()
+}
+
+func (ops defaultProcessGroupOps) SignalVerifiedProcessGroup(identity ProcessIdentity, signal syscall.Signal) error {
+	if ops.Probe(identity).State != ProcessOwned {
+		return errors.New("managed process identity is not owned")
+	}
+	return signalOwnedProcessGroup(identity.PID, signal)
+}
+
+func (ops defaultProcessGroupOps) WaitForProcessGroupEmpty(ctx context.Context, identity ProcessIdentity, leaderDone <-chan error) ProcessProbe {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	interval := time.NewTicker(10 * time.Millisecond)
+	defer interval.Stop()
+	leaderObserved := false
+	for {
+		probe := ops.Probe(identity)
+		if probe.State == ProcessAbsent {
+			return probe
+		}
+		select {
+		case <-leaderDone:
+			leaderObserved = true
+			if probe.State == ProcessPresent {
+				// The leader exited, but the group remains. Keep waiting for all
+				// descendants, never treating leader exit as a success.
+				continue
+			}
+		case <-ctx.Done():
+			if leaderObserved && probe.State == ProcessPresent {
+				return probe
+			}
+			return ProcessProbe{State: ProcessUnknown}
+		case <-interval.C:
+		}
 	}
 }
 
@@ -212,12 +309,19 @@ func drainStderr(reader io.Reader) {
 	}
 }
 
-func processStartMarker(pid int) string {
-	output, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
-	if err == nil && strings.TrimSpace(string(output)) != "" {
-		return strings.TrimSpace(string(output))
+func processStartMarker(pid int) (string, error) {
+	if pid <= 0 {
+		return "", errors.New("managed process pid is invalid")
 	}
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	output, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", err
+	}
+	marker := strings.TrimSpace(string(output))
+	if marker == "" {
+		return "", syscall.ESRCH
+	}
+	return marker, nil
 }
 
 func ValidateIdentity(identity ProcessIdentity) error {
