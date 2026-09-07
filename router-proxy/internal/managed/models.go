@@ -70,9 +70,9 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 			return candidate, nil
 		}
 	}
-	// The production helper exposes the installed Terra model through the
-	// openai provider. Keep this fallback identical to that catalog identity.
-	terra := Model{Provider: "openai", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra"}
+	// The first slice uses one static local catalog. Keep the fallback aligned
+	// with the provider/model pair that the launcher passes to Pi.
+	terra := Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra"}
 	if available(terra) {
 		return terra, nil
 	}

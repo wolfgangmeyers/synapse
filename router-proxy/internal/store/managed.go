@@ -51,22 +51,69 @@ type ManagedAgentRecord struct {
 	UpdatedAt                 string
 }
 
-// ManagedOperation is the durable replay record. ResponseHeaders excludes
-// request-scoped CORS headers; those are rebuilt for each request.
+// ManagedOperation is the durable replay record. Its storage scope is private
+// to the store so callers cannot supply caller identity as part of the key.
 type ManagedOperation struct {
-	OperationID         string
-	SessionIdentityHash string
-	Method              string
-	CanonicalPath       string
-	RequestID           string
-	CanonicalBodyHash   string
-	State               string
-	ResponseStatus      int
-	ResponseHeaders     map[string]string
-	ResponseBody        []byte
-	CreatedAt           string
-	TerminalAt          string
-	ExpiresAt           string
+	OperationID       string
+	Method            string
+	CanonicalPath     string
+	RequestID         string
+	CanonicalBodyHash string
+	State             string
+	ResponseStatus    int
+	ResponseHeaders   map[string]string
+	ResponseBody      []byte
+	CreatedAt         string
+	TerminalAt        string
+	ExpiresAt         string
+}
+
+// managedWorkerOperationScope keeps migration 022 storage-compatible while
+// making direct-worker idempotency independent of caller identity.
+const managedWorkerOperationScope = "router-managed-worker-v1"
+
+const managedOperationSelect = `SELECT operation_id,session_identity_hash,method,canonical_path,request_id,canonical_body_hash,state,response_status,response_headers_json,response_body,created_at,terminal_at,expires_at FROM managed_http_operations`
+
+// ManagedRestartFence identifies the exact live process that reservation may
+// take out of prompt admission. Every restart write carries this old fence.
+type ManagedRestartFence struct {
+	AgentID            string
+	PiSessionID        string
+	SessionEpoch       int64
+	ProcessPID         int
+	ProcessStartMarker string
+	ProcessIncarnation string
+	RuntimeGeneration  string
+}
+
+// ManagedRestartTransition is the bounded durable handoff to a later
+// replacement owner. It deliberately stores the pre-reservation projection so
+// preparation can restore the still-live process without guessing its state.
+type ManagedRestartTransition struct {
+	OperationID              string
+	Fence                    ManagedRestartFence
+	TargetRuntimeGeneration  string
+	DesiredState             string
+	LifecycleState           string
+	ActivityState            string
+	AcceptingPrompts         bool
+	SlotHeld                 bool
+	ReservationActivityState string
+	PlannedStop              bool
+	Stage                    string
+	CreatedAt                string
+	UpdatedAt                string
+}
+
+// ManagedRestartReservation is the store-only input for the atomic durable
+// reservation. The manager supplies the operation that owns its live binding
+// so the store can check the same row under the immediate transaction.
+type ManagedRestartReservation struct {
+	Fence                  ManagedRestartFence
+	CurrentOperationID     string
+	CurrentLifecycleAction string
+	Transition             ManagedRestartTransition
+	Operation              ManagedOperation
 }
 
 // ManagedAgentSnapshot is the one-read-transaction projection boundary.
@@ -92,6 +139,28 @@ func (e *ManagedIdempotencyConflictError) Error() string {
 	return "managed operation idempotency conflict"
 }
 func (e *ManagedIdempotencyConflictError) Code() string { return "idempotency_conflict" }
+
+// ManagedAgentNotReadyError reports a durable or live eligibility failure.
+type ManagedAgentNotReadyError struct{ AgentID string }
+
+func (e *ManagedAgentNotReadyError) Error() string { return "managed agent is not ready" }
+func (e *ManagedAgentNotReadyError) Code() string  { return "agent_not_ready" }
+
+// ManagedRestartConflictError identifies another lifecycle owner that must
+// finish before a new restart can reserve this agent.
+type ManagedRestartConflictError struct{ AgentID string }
+
+func (e *ManagedRestartConflictError) Error() string {
+	return "managed restart conflicts with another lifecycle operation"
+}
+func (e *ManagedRestartConflictError) Code() string { return "conflict" }
+
+// ManagedRestartStaleError is a fenced no-op. It is intentionally distinct
+// from SQLite errors so callers never retry it as a transient database fault.
+type ManagedRestartStaleError struct{ AgentID string }
+
+func (e *ManagedRestartStaleError) Error() string { return "managed restart transition is stale" }
+func (e *ManagedRestartStaleError) Code() string  { return "stale" }
 
 func (s *Store) GetDefaultModel(ctx context.Context) (*ManagedModel, error) {
 	var provider, id sql.NullString
@@ -145,6 +214,11 @@ func (s *Store) SetCanonicalQuietRecipient(ctx context.Context, recipient string
 }
 
 func (s *Store) GetProjectionVersion(ctx context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, errors.New("store is closed")
+	}
 	var version int64
 	err := s.db.QueryRowContext(ctx, `SELECT projection_version FROM managed_settings WHERE singleton_id = 1`).Scan(&version)
 	return version, err
@@ -203,7 +277,7 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 	}
 	return s.runImmediate(ctx, func() error {
 		var existingOperation string
-		err := s.db.QueryRowContext(ctx, `SELECT operation_id FROM managed_http_operations WHERE session_identity_hash = ? AND method = ? AND request_id = ?`, operation.SessionIdentityHash, operation.Method, operation.RequestID).Scan(&existingOperation)
+		err := s.db.QueryRowContext(ctx, `SELECT operation_id FROM managed_http_operations WHERE session_identity_hash = ? AND method = ? AND request_id = ?`, managedWorkerOperationScope, operation.Method, operation.RequestID).Scan(&existingOperation)
 		if err == nil {
 			return &ManagedIdempotencyConflictError{}
 		}
@@ -254,7 +328,7 @@ func insertManagedOperation(ctx context.Context, db *sql.DB, operation ManagedOp
 	_, err = db.ExecContext(ctx, `INSERT INTO managed_http_operations (
         operation_id,session_identity_hash,method,canonical_path,request_id,canonical_body_hash,state,
         response_status,response_headers_json,response_body,created_at,terminal_at,expires_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, operation.OperationID, operation.SessionIdentityHash, operation.Method,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, operation.OperationID, managedWorkerOperationScope, operation.Method,
 		operation.CanonicalPath, operation.RequestID, operation.CanonicalBodyHash, operation.State,
 		operation.ResponseStatus, string(headers), string(operation.ResponseBody), operation.CreatedAt,
 		nullIfEmpty(operation.TerminalAt), nullIfEmpty(operation.ExpiresAt))
@@ -273,9 +347,9 @@ func (s *Store) PutManagedOperation(ctx context.Context, operation ManagedOperat
 
 func scanManagedOperation(scanner interface{ Scan(...any) error }) (*ManagedOperation, error) {
 	var result ManagedOperation
-	var headers, body string
+	var scope, headers, body string
 	var terminalAt, expiresAt sql.NullString
-	if err := scanner.Scan(&result.OperationID, &result.SessionIdentityHash, &result.Method, &result.CanonicalPath, &result.RequestID,
+	if err := scanner.Scan(&result.OperationID, &scope, &result.Method, &result.CanonicalPath, &result.RequestID,
 		&result.CanonicalBodyHash, &result.State, &result.ResponseStatus, &headers, &body, &result.CreatedAt, &terminalAt, &expiresAt); err != nil {
 		return nil, err
 	}
@@ -292,18 +366,299 @@ func scanManagedOperation(scanner interface{ Scan(...any) error }) (*ManagedOper
 	return &result, nil
 }
 
-func (s *Store) FindManagedOperationByIdentity(ctx context.Context, sessionHash, method, requestID string) (*ManagedOperation, error) {
-	return scanManagedOperation(s.db.QueryRowContext(ctx, `SELECT operation_id,session_identity_hash,method,canonical_path,request_id,canonical_body_hash,state,response_status,response_headers_json,response_body,created_at,terminal_at,expires_at FROM managed_http_operations WHERE session_identity_hash = ? AND method = ? AND request_id = ?`, sessionHash, method, requestID))
+// FindManagedOperation uses the one internal worker scope. Direct callers
+// share request IDs, so an exact replay is independent of transport identity.
+func (s *Store) FindManagedOperation(ctx context.Context, method, requestID string) (*ManagedOperation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return scanManagedOperation(s.db.QueryRowContext(ctx, managedOperationSelect+` WHERE session_identity_hash = ? AND method = ? AND request_id = ?`, managedWorkerOperationScope, method, requestID))
 }
 
 func (s *Store) ManagedOperation(ctx context.Context, operationID string) (*ManagedOperation, error) {
-	return scanManagedOperation(s.db.QueryRowContext(ctx, `SELECT operation_id,session_identity_hash,method,canonical_path,request_id,canonical_body_hash,state,response_status,response_headers_json,response_body,created_at,terminal_at,expires_at FROM managed_http_operations WHERE operation_id = ?`, operationID))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return scanManagedOperation(s.db.QueryRowContext(ctx, managedOperationSelect+` WHERE operation_id = ?`, operationID))
 }
 
 func (s *Store) MarkManagedOperationTerminal(ctx context.Context, operationID string) error {
 	return s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
 		_, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state = 'terminal', terminal_at = ?, expires_at = ? WHERE operation_id = ? AND state = 'pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operationID)
+		return err
+	})
+}
+
+func restartFenceFromAgent(agent *ManagedAgentRecord) ManagedRestartFence {
+	return ManagedRestartFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration}
+}
+
+func sameManagedRestartFence(left, right ManagedRestartFence) bool {
+	return left.AgentID == right.AgentID && left.PiSessionID == right.PiSessionID && left.SessionEpoch == right.SessionEpoch && left.ProcessPID == right.ProcessPID && left.ProcessStartMarker == right.ProcessStartMarker && left.ProcessIncarnation == right.ProcessIncarnation && left.RuntimeGeneration == right.RuntimeGeneration
+}
+
+func restartActionHasHigherPriority(action string) bool {
+	switch action {
+	case "reset", "resetting", "terminate", "terminating", "stop", "stopping":
+		return true
+	default:
+		return false
+	}
+}
+
+func managedOperationForTx(ctx context.Context, db *sql.DB, operationID string) (*ManagedOperation, error) {
+	return scanManagedOperation(db.QueryRowContext(ctx, managedOperationSelect+` WHERE operation_id = ?`, operationID))
+}
+
+func managedOperationForWorkerScopeTx(ctx context.Context, db *sql.DB, method, requestID string) (*ManagedOperation, error) {
+	return scanManagedOperation(db.QueryRowContext(ctx, managedOperationSelect+` WHERE session_identity_hash = ? AND method = ? AND request_id = ?`, managedWorkerOperationScope, method, requestID))
+}
+
+// ReserveManagedRestart inserts the replay operation and one transition before
+// changing the public projection. Every eligibility and fence predicate is
+// checked while the immediate transaction holds the SQLite writer lock.
+func (s *Store) ReserveManagedRestart(ctx context.Context, reservation ManagedRestartReservation) (*ManagedOperation, bool, error) {
+	if reservation.Fence.AgentID == "" || reservation.CurrentOperationID == "" || reservation.Operation.OperationID == "" || reservation.Operation.RequestID == "" || reservation.Transition.TargetRuntimeGeneration == "" {
+		return nil, false, errors.New("managed restart reservation identity is required")
+	}
+	operation := reservation.Operation
+	if operation.State == "" {
+		operation.State = "pending"
+	}
+	if operation.CreatedAt == "" {
+		operation.CreatedAt = formatTimestamp(s.clock.Now())
+	}
+	var result *ManagedOperation
+	replayed := false
+	err := s.runImmediate(ctx, func() error {
+		existing, err := managedOperationForWorkerScopeTx(ctx, s.db, operation.Method, operation.RequestID)
+		if err == nil {
+			if existing.CanonicalPath != operation.CanonicalPath || existing.CanonicalBodyHash != operation.CanonicalBodyHash {
+				return &ManagedIdempotencyConflictError{}
+			}
+			result, replayed = existing, true
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ?`, reservation.Fence.AgentID), nil)
+		if errors.Is(err, sql.ErrNoRows) {
+			return &ManagedAgentNotReadyError{AgentID: reservation.Fence.AgentID}
+		}
+		if err != nil {
+			return err
+		}
+		if !sameManagedRestartFence(restartFenceFromAgent(agent), reservation.Fence) {
+			return &ManagedAgentNotReadyError{AgentID: reservation.Fence.AgentID}
+		}
+		var transitionAgentID string
+		err = s.db.QueryRowContext(ctx, `SELECT agent_id FROM managed_restart_transitions WHERE agent_id = ?`, reservation.Fence.AgentID).Scan(&transitionAgentID)
+		if err == nil {
+			return &ManagedRestartConflictError{AgentID: reservation.Fence.AgentID}
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || (agent.ActivityState != "active" && agent.ActivityState != "idle") {
+			return &ManagedAgentNotReadyError{AgentID: reservation.Fence.AgentID}
+		}
+		current, err := managedOperationForTx(ctx, s.db, reservation.CurrentOperationID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return &ManagedRestartConflictError{AgentID: reservation.Fence.AgentID}
+		}
+		if err != nil {
+			return err
+		}
+		if current.State != "terminal" || restartActionHasHigherPriority(reservation.CurrentLifecycleAction) {
+			return &ManagedRestartConflictError{AgentID: reservation.Fence.AgentID}
+		}
+		if err := insertManagedOperation(ctx, s.db, operation); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_restart_transitions (
+			agent_id,operation_id,old_pi_session_id,old_session_epoch,old_process_pid,
+			old_process_start_marker,old_process_incarnation,old_runtime_generation,target_runtime_generation,
+			old_desired_state,old_lifecycle_state,old_activity_state,old_accepting_prompts,old_slot_held,
+			reservation_activity_state,planned_stop,stage,created_at,updated_at
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			reservation.Fence.AgentID, operation.OperationID, reservation.Fence.PiSessionID, reservation.Fence.SessionEpoch, reservation.Fence.ProcessPID,
+			reservation.Fence.ProcessStartMarker, reservation.Fence.ProcessIncarnation, reservation.Fence.RuntimeGeneration, reservation.Transition.TargetRuntimeGeneration,
+			agent.DesiredState, agent.LifecycleState, agent.ActivityState, boolInt(agent.AcceptingPrompts), boolInt(agent.SlotHeld), agent.ActivityState, 0, "reserved", now, now); err != nil {
+			return err
+		}
+		updated, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state = 'restarting', accepting_prompts = 0, updated_at = ?
+			WHERE agent_id = ? AND desired_state = 'running' AND lifecycle_state = 'running' AND accepting_prompts = 1 AND slot_held = 1
+			AND activity_state IN ('active', 'idle') AND pi_session_id = ? AND session_epoch = ? AND process_pid = ?
+			AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ?
+			AND EXISTS (SELECT 1 FROM managed_restart_transitions WHERE agent_id = ? AND operation_id = ? AND old_process_incarnation = ? AND old_runtime_generation = ?)`,
+			now, reservation.Fence.AgentID, reservation.Fence.PiSessionID, reservation.Fence.SessionEpoch, reservation.Fence.ProcessPID,
+			reservation.Fence.ProcessStartMarker, reservation.Fence.ProcessIncarnation, reservation.Fence.RuntimeGeneration,
+			reservation.Fence.AgentID, operation.OperationID, reservation.Fence.ProcessIncarnation, reservation.Fence.RuntimeGeneration)
+		if err != nil {
+			return err
+		}
+		changed, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedAgentNotReadyError{AgentID: reservation.Fence.AgentID}
+		}
+		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+			return err
+		}
+		result = &operation
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return result, replayed, nil
+}
+
+func scanManagedRestartTransition(scanner interface{ Scan(...any) error }) (*ManagedRestartTransition, error) {
+	var transition ManagedRestartTransition
+	var accepting, slot, planned int
+	if err := scanner.Scan(&transition.OperationID, &transition.Fence.AgentID, &transition.Fence.PiSessionID, &transition.Fence.SessionEpoch, &transition.Fence.ProcessPID,
+		&transition.Fence.ProcessStartMarker, &transition.Fence.ProcessIncarnation, &transition.Fence.RuntimeGeneration, &transition.TargetRuntimeGeneration,
+		&transition.DesiredState, &transition.LifecycleState, &transition.ActivityState, &accepting, &slot, &transition.ReservationActivityState,
+		&planned, &transition.Stage, &transition.CreatedAt, &transition.UpdatedAt); err != nil {
+		return nil, err
+	}
+	transition.AcceptingPrompts = accepting != 0
+	transition.SlotHeld = slot != 0
+	transition.PlannedStop = planned != 0
+	return &transition, nil
+}
+
+const managedRestartTransitionSelect = `SELECT operation_id,agent_id,old_pi_session_id,old_session_epoch,old_process_pid,old_process_start_marker,old_process_incarnation,old_runtime_generation,target_runtime_generation,old_desired_state,old_lifecycle_state,old_activity_state,old_accepting_prompts,old_slot_held,reservation_activity_state,planned_stop,stage,created_at,updated_at FROM managed_restart_transitions`
+
+// ManagedRestartTransition reads the one bounded transition for manager and
+// store tests. It is not a public managed-agent projection.
+func (s *Store) ManagedRestartTransition(ctx context.Context, agentID string) (*ManagedRestartTransition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return scanManagedRestartTransition(s.db.QueryRowContext(ctx, managedRestartTransitionSelect+` WHERE agent_id = ?`, agentID))
+}
+
+func managedRestartTransitionForTx(ctx context.Context, db *sql.DB, agentID string) (*ManagedRestartTransition, error) {
+	return scanManagedRestartTransition(db.QueryRowContext(ctx, managedRestartTransitionSelect+` WHERE agent_id = ?`, agentID))
+}
+
+// MarkManagedRestartPrepared advances only the private transition stage. It
+// intentionally does not bump the public projection version.
+func (s *Store) MarkManagedRestartPrepared(ctx context.Context, fence ManagedRestartFence, operationID string) error {
+	return s.runImmediate(ctx, func() error {
+		updated, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET stage = 'prepared', updated_at = ?
+			WHERE agent_id = ? AND operation_id = ? AND old_process_incarnation = ? AND old_runtime_generation = ? AND stage = 'reserved'
+			AND EXISTS (SELECT 1 FROM managed_agents WHERE agent_id = ? AND process_incarnation = ? AND runtime_generation = ?)`,
+			formatTimestamp(s.clock.Now()), fence.AgentID, operationID, fence.ProcessIncarnation, fence.RuntimeGeneration,
+			fence.AgentID, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		if err != nil {
+			return err
+		}
+		changed, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		return nil
+	})
+}
+
+// RollbackManagedRestartPreparation restores the saved projection and records
+// the bounded preparation error before any stop or replacement work exists.
+func (s *Store) RollbackManagedRestartPreparation(ctx context.Context, fence ManagedRestartFence, operationID, code, message string) error {
+	return s.runImmediate(ctx, func() error {
+		transition, err := managedRestartTransitionForTx(ctx, s.db, fence.AgentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		if err != nil {
+			return err
+		}
+		if transition.OperationID != operationID || !sameManagedRestartFence(transition.Fence, fence) {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		updated, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state = ?, lifecycle_state = ?, activity_state = ?, accepting_prompts = ?, slot_held = ?, last_error_code = ?, last_error_message = ?, last_error_at = ?, updated_at = ?
+			WHERE agent_id = ? AND lifecycle_state = 'restarting' AND accepting_prompts = 0 AND pi_session_id = ? AND session_epoch = ? AND process_pid = ?
+			AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ?
+			AND EXISTS (SELECT 1 FROM managed_restart_transitions WHERE agent_id = ? AND operation_id = ? AND old_process_incarnation = ? AND old_runtime_generation = ?)`,
+			transition.DesiredState, transition.LifecycleState, transition.ActivityState, boolInt(transition.AcceptingPrompts), boolInt(transition.SlotHeld), code, message, now, now,
+			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration,
+			fence.AgentID, operationID, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		if err != nil {
+			return err
+		}
+		changed, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		deleted, err := s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id = ? AND operation_id = ? AND old_process_incarnation = ? AND old_runtime_generation = ?`, fence.AgentID, operationID, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		if err != nil {
+			return err
+		}
+		changed, err = deleted.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		terminalized, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state = 'terminal', terminal_at = ?, expires_at = ? WHERE operation_id = ? AND state = 'pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operationID)
+		if err != nil {
+			return err
+		}
+		changed, err = terminalized.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+// RecordManagedRestartShutdown preserves a nonterminal transition after the
+// manager has reaped the exact owned process group during router shutdown.
+func (s *Store) RecordManagedRestartShutdown(ctx context.Context, fence ManagedRestartFence, operationID string) error {
+	return s.runImmediate(ctx, func() error {
+		updated, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state = 'stopped', updated_at = ?
+			WHERE agent_id = ? AND desired_state = 'running' AND lifecycle_state = 'restarting' AND accepting_prompts = 0 AND slot_held = 1
+			AND process_incarnation = ? AND runtime_generation = ?
+			AND EXISTS (SELECT 1 FROM managed_restart_transitions WHERE agent_id = ? AND operation_id = ? AND old_process_incarnation = ? AND old_runtime_generation = ?)`,
+			formatTimestamp(s.clock.Now()), fence.AgentID, fence.ProcessIncarnation, fence.RuntimeGeneration,
+			fence.AgentID, operationID, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		if err != nil {
+			return err
+		}
+		changed, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
 }
@@ -419,10 +774,20 @@ func (s *Store) ReleaseManagedSlot(ctx context.Context, agentID string) error {
 }
 
 func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgentRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
 	return scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ?`, agentID), nil)
 }
 
 func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
 	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` ORDER BY name ASC`)
 	if err != nil {
 		return nil, err

@@ -10,7 +10,7 @@ import (
 )
 
 func TestSelectModelUsesExplicitSavedThenTerraAvailability(t *testing.T) {
-	catalog := CatalogFromModels(Model{Provider: "saved", ID: "model", Available: true}, Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true})
+	catalog := CatalogFromModels(Model{Provider: "saved", ID: "model", Available: true}, Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})
 	current, err := catalog.Catalog(context.Background())
 	require.NoError(t, err)
 	selected, err := SelectModel(&Model{Provider: "saved", ID: "model"}, nil, current)
@@ -32,7 +32,7 @@ func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
 	require.NoError(t, durable.SetDefaultModel(ctx, &store.ManagedModel{Provider: "saved", ID: "persisted"}))
 	source := StoreCatalogSource{Store: durable, Helper: CatalogFromModels(
 		Model{Provider: "saved", ID: "persisted", Available: true},
-		Model{Provider: "openai", ID: "gpt-5.6-terra", Available: true},
+		Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true},
 	)}
 	selected, err := source.Select(ctx, nil)
 	require.NoError(t, err)
@@ -40,7 +40,7 @@ func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
 	require.NoError(t, durable.SetDefaultModel(ctx, &store.ManagedModel{Provider: "missing", ID: "persisted"}))
 	selected, err = source.Select(ctx, nil)
 	require.NoError(t, err)
-	require.Equal(t, "openai", selected.Provider)
+	require.Equal(t, "openai-codex", selected.Provider)
 	require.Equal(t, "gpt-5.6-terra", selected.ID)
 }
 
