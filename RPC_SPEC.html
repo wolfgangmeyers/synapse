@@ -250,7 +250,7 @@
         <div class="section-head"><span class="section-no">01A</span><h2 id="phase2-rebaseline-title"><a class="anchor" href="#phase2-rebaseline">Active Phase 2 simplified worker contract</a></h2></div>
         <article class="callout warn">
           <h3>Authority and preserved history</h3>
-          <p>This is the normative contract for the active Phase 2 worker launch work and the current restart slice. Router worker control is locally unauthenticated: any page or process that can reach the router may operate workers, with no application-layer caller identity or authorization step. It supersedes conflicting Phase 2/restart-slice browser-session, cookie, CSRF, ticket, Origin/CORS-response, fixed/pinned dependency, and fixed/pinned launcher-input statements elsewhere in this document and in <code>RPC_IMPLEMENTATION_PLAN.html</code>. Those statements remain visible as historical design evidence, not active acceptance requirements. This rebaseline does not change Phase 1’s fixed thin-extension and pi-subagents compatibility contract, current legacy tmux routes, bind/exposure rules, direct-argv/no-shell rule, containment, process/session fencing, strict request parsing, limits, retention, redaction, or other unrelated security behavior.</p>
+          <p>This is the normative contract for the active Phase 2 worker launch work and the current restart slice. Router worker control is locally unauthenticated: any page or process that can reach the router may operate workers, with no application-layer caller identity or authorization step. It supersedes conflicting Phase 2/restart-slice browser-session, cookie, CSRF, ticket, Origin/CORS-response, fixed/pinned dependency, and fixed/pinned launcher-input statements elsewhere in this document and in <code>RPC_IMPLEMENTATION_PLAN.html</code>. The actual replacement ledger owns active-turn settlement as its first execution gate after the closed preparation transition; no standalone settlement slice is a prerequisite. Those statements remain visible as historical design evidence, not active acceptance requirements. This rebaseline does not change Phase 1’s fixed thin-extension and pi-subagents compatibility contract, current legacy tmux routes, bind/exposure rules, direct-argv/no-shell rule, containment, process/session fencing, strict request parsing, limits, retention, redaction, or other unrelated security behavior.</p>
         </article>
         <div class="grid">
           <article class="card span-6">
@@ -395,6 +395,50 @@
               <li><strong>Internal prompt-admission seam:</strong> <code>managed.Manager.AdmitPrompt(ctx, agentID, message)</code> is internal Go code. It holds the same per-agent serializer, reads the durable ready and accepting state plus the exact live binding, then calls that binding's <code>RPC.Prompt</code>. Any failed admission returns the typed <code>AGENT_NOT_READY</code> result without a prompt call or queue. This slice adds no HTTP route, browser state, manifest command, or P3 surface.</li>
               <li><strong>Required tests:</strong> <code>TestReserveManagedRestartAtomicallyDisablesPromptAdmission</code> admits one fake prompt before reservation, then proves the next admission returns <code>AGENT_NOT_READY</code> and the RPC prompt count does not increase. <code>TestRestartPreparationFailurePersistsExactDurableError</code> covers a five-second <code>get_state</code> timeout and a state-read error; both assert the exact durable code and message above. <code>TestReserveManagedRestartRejectsIneligibleRowsWithoutEffects</code> covers every failed eligibility condition and asserts no operation or transition, no agent-row or projection-version mutation, no slot mutation, and zero process/RPC/async calls.</li>
             </ul>
+          </div>
+        </details>
+        <details open>
+          <summary>Recorded actual restart replacement entry and 16-path ledger</summary>
+          <div class="details-body">
+            <p>The closed 023 reservation/preparation slice remains unchanged. It ends when its owner commits <code>prepared</code>. The complete 024 five-gate readiness source is the prior dependency. This replacement ledger owns active-turn settlement as execution gate 1. There is no standalone settlement slice and no idle-only replacement path.</p>
+            <p>For an active reservation, <code>ExecutePreparedRestart</code> persists <code>settling</code>, waits for the exact old binding's structured <code>agent_settled</code> event, and persists that same-binding result before it can record <code>stopping</code>. It does not use transcript text or an undocumented RPC state field. An idle reservation skips only the wait. A settlement failure keeps the transition at <code>settling</code>, the old group live, prompt admission closed, the slot held, desired state running, and the operation pending.</p>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Action</th><th>Path</th><th>Replacement ownership</th></tr></thead>
+                <tbody>
+                  <tr><td>Modify</td><td><code>router/contract/manifest.json</code></td><td>Add only <code>POST /v1/managed-agents/{agent_id}/restart</code> to the direct managed route inventory.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/contract_manifest_test.go</code></td><td><code>TestContractManifestManagedRestartRoute</code> proves the route inventory and source.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/transport/managed_http.go</code></td><td>Strict empty-body parsing, request-ID validation, replay, conflict mapping, and direct restart dispatch.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/transport/managed_http_test.go</code></td><td>Exact request, replay, conflict, privacy, no-store, and invalid-ID no-lookup coverage.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/transport/router.go</code></td><td><code>Router.Listen</code> calls narrow restart-transition recovery after composition and before sweep, bind, or handler reachability.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/transport/managed_native_test.go</code></td><td>Listener ordering and one direct installed-Pi replacement proof.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/managed/rpc.go</code></td><td><code>RestartTurnSettler.SettlePreparedRestartTurn</code> validates the current binding's structured settlement event.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/managed/rpc_test.go</code></td><td>Structured settlement accepts only the exact binding and rejects stale, malformed, duplicate, EOF, and close observations.</td></tr>
+                  <tr><td>Add</td><td><code>router-proxy/internal/store/migrations/025_managed_restart_execution.sql</code></td><td>Forward execution stages, settled-turn state, and bounded target fence. Preserve every 023/024 row and index.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/store/managed.go</code></td><td>Transition-first admission and every stage/full-fence transaction.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/store/managed_test.go</code></td><td>Migration, stage, fence, replay, duplicate-observation, durable-write, and projection tests.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/managed/process.go</code></td><td>Exact process identity, stdin-only graceful close, group-only signals, bounded reaping, and fixed failure classification.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/managed/process_test.go</code></td><td>Real group and deterministic probe, signal, reap, and deadline cases.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/managed/supervisor.go</code></td><td>Persistent lanes, immutable bindings, gate-1 orchestration, execution, callback arbitration, and narrow recovery.</td></tr>
+                  <tr><td>Modify</td><td><code>router-proxy/internal/managed/supervisor_test.go</code></td><td>Closed reservation regressions plus retained-transition admission before binding checks.</td></tr>
+                  <tr><td>Add</td><td><code>router-proxy/internal/managed/supervisor_restart_execution_test.go</code></td><td>Execution, close/exit arbitration, recovery, stale-binding cleanup, and redaction seams.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <h3>Migration 025 and ownership</h3>
+            <p>Migration 025 rebuilds only <code>managed_restart_transitions</code>. It retains the old fence and target runtime generation, adds <code>turn_settled_at</code> plus the target session, epoch, PID, start marker, incarnation, manifest revision, and manifest hash, and permits only <code>reserved</code>, <code>prepared</code>, <code>settling</code>, <code>stopping</code>, <code>stopped</code>, and <code>starting</code>. <code>settling</code> and <code>turn_settled_at</code> are active-reservation state only. Active <code>stopping</code>, <code>stopped</code>, and <code>starting</code> require <code>turn_settled_at</code>; idle transitions do not enter <code>settling</code>. The target fence is all null before <code>starting</code>, complete at <code>starting</code>, and cleared if target cleanup returns to <code>stopped</code>.</p>
+            <p><code>rpc.go</code> owns structured settlement evidence. The store owns <code>MarkManagedRestartSettling</code>, <code>MarkManagedRestartTurnSettled</code>, <code>MarkManagedRestartStopping</code>, and the remaining stage/full-fence transactions. The supervisor owns the persistent <code>agentLane</code>, immutable <code>runtimeBinding</code>, and ordering: write <code>settling</code>, call the RPC settler, write its exact same-binding result, then stop. Store writes are immediate transactions. A stale write is a no-op with no projection bump.</p>
+            <h3>Safety acceptance</h3>
+            <ol>
+              <li>The diff contains only these 16 replacement paths. Migration 025 preserves 023/024 data and indexes.</li>
+              <li>Direct restart has exact request-ID, replay, conflict, private-field, and <code>Cache-Control: no-store</code> behavior. It is locally unauthenticated and reads no browser credential or <code>Origin</code>.</li>
+              <li>Both active and idle reservations use the closed active-or-idle reservation seam. Active work never stops before durable structured same-binding settlement.</li>
+              <li>One old group is proved absent before one target starts. The target keeps session, epoch, model, cwd, manifest, direct argv, and sanitized environment with a new process incarnation.</li>
+              <li>Prompt admission remains closed in every nonterminal stage. The initial instruction is never sent again.</li>
+              <li>Failure, cleanup, close, stale callback, and recovery paths retain their safe durable state. They do not start a second target or create another projection bump.</li>
+              <li>Only the target's completed five-gate readiness transaction reopens admission. It consumes the 024 source predicate under the target fence.</li>
+              <li>No direct mail, controls, policy or child implementation, UI, browser session, reset, terminate, Restart All, crash policy, general recovery, P3, P4, or Robot Review belongs to this documentation amendment or replacement ledger.</li>
+            </ol>
           </div>
         </details>
         <div class="schema-grid" style="margin-top:14px">
@@ -883,7 +927,7 @@
 
       <section id="persistence" aria-labelledby="persistence-title">
         <div class="section-head"><span class="section-no">12</span><h2 id="persistence-title"><a class="anchor" href="#persistence">Persistence, reconstruction, and race precedence</a></h2></div>
-        <p class="intro">Use the router's existing SQLite store and migration runner. Current main has applied <code>022_managed_rpc.sql</code> after <code>021_goal_control_revision_history.sql</code>. The Phase 2 restart slice adds forward <code>023_managed_restart.sql</code>; it does not rewrite an applied migration. There is no second database or append-only infrastructure.</p>
+        <p class="intro">Use the router's existing SQLite store and migration runner. Current main has applied <code>022_managed_rpc.sql</code> after <code>021_goal_control_revision_history.sql</code>. The closed Phase 2 restart slice adds forward <code>023_managed_restart.sql</code>; it does not rewrite an applied migration. The completed readiness-source slice adds <code>024_managed_readiness_sources.sql</code>, and the recorded replacement ledger adds <code>025_managed_restart_execution.sql</code>. There is no second database or append-only infrastructure.</p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Record</th><th>Necessary durable fields</th><th>Retention/cleanup</th></tr></thead>
