@@ -33,12 +33,15 @@ func (p *launchProcess) Reap()                      { p.once.Do(func() { close(p
 func (p *launchProcess) Stop(context.Context) error { p.Reap(); return nil }
 
 type launchRPC struct {
-	session     string
-	calls       []string
-	promptCount int
-	promptDone  chan struct{}
-	active      []string
-	once        sync.Once
+	session                string
+	calls                  []string
+	promptCount            int
+	promptDone             chan struct{}
+	promptEntered          chan struct{}
+	promptContextCancelled chan struct{}
+	releasePrompt          chan struct{}
+	active                 []string
+	once                   sync.Once
 }
 
 func (r *launchRPC) GetState(context.Context) (map[string]any, error) {
@@ -64,11 +67,24 @@ func (r *launchRPC) GetActiveTools(context.Context) ([]string, error) {
 	}
 	return append(append([]string{}, fixedSubagentsTools...), baselineManagedNames...), nil
 }
-func (r *launchRPC) Prompt(context.Context, string) error {
+func (r *launchRPC) Prompt(ctx context.Context, _ string) error {
 	r.calls = append(r.calls, "prompt")
 	r.promptCount++
 	if r.promptDone != nil {
 		r.once.Do(func() { close(r.promptDone) })
+	}
+	if r.promptEntered != nil {
+		close(r.promptEntered)
+	}
+	if r.releasePrompt != nil {
+		select {
+		case <-r.releasePrompt:
+		case <-ctx.Done():
+			if r.promptContextCancelled != nil {
+				close(r.promptContextCancelled)
+			}
+			<-r.releasePrompt
+		}
 	}
 	return nil
 }
@@ -135,6 +151,58 @@ func TestManagerMarksReadyOnlyAfterRPCReadinessAndSendsInstructionOnce(t *testin
 	require.NoError(t, err)
 	require.Equal(t, canonicalRoot, factory.spec.Cwd)
 	require.Equal(t, "openai-codex", factory.spec.Provider)
+}
+
+func TestManagerCloseCommitsLaunchStateAfterRunContextCancelled(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	process := &launchProcess{identity: ProcessIdentity{PID: 456, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
+	releasePrompt := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releasePrompt) }) }
+	rpc := &launchRPC{promptEntered: make(chan struct{}), promptContextCancelled: make(chan struct{}), releasePrompt: releasePrompt}
+	factory := &launchFactory{process: process, rpc: rpc}
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: launchRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true})})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	t.Cleanup(release)
+
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "alpha", Cwd: root, InitialInstruction: "hello", RequestID: "request"})
+	require.NoError(t, err)
+	select {
+	case <-rpc.promptEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial instruction did not begin")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close(context.Background()) }()
+	select {
+	case <-rpc.promptContextCancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager did not cancel the launch runtime")
+	}
+	release()
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager did not finish shutdown")
+	}
+
+	agent, err := durable.ManagedAgent(ctx, "alpha")
+	require.NoError(t, err)
+	require.True(t, agent.InitialInstructionSent)
+	require.Empty(t, agent.PendingInitialInstruction)
+	require.Equal(t, "stopped", agent.ActivityState)
+	op, err := durable.ManagedOperation(ctx, "request")
+	require.NoError(t, err)
+	require.Equal(t, "terminal", op.State)
 }
 
 func TestManagerMarksReapedManagedProcessFailed(t *testing.T) {

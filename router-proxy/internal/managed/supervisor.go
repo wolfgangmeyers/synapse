@@ -277,6 +277,9 @@ func hashString(value string) string {
 func sha256Bytes(value []byte) [32]byte { return sha256.Sum256(value) }
 
 func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, request LaunchRequest, binding *managedBinding) {
+	// Close cancels ctx to stop process and RPC work. This goroutine owns its
+	// durable launch transitions, and Close waits for them before returning.
+	durableCtx := context.Background()
 	defer func() {
 		m.mu.Lock()
 		delete(m.processes, agent.AgentID)
@@ -308,7 +311,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.mu.Unlock()
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- process.Wait() }()
-	if err = m.store.UpdateManagedAgentStarting(ctx, agent.AgentID, agent.PiSessionID, store.ProcessIdentityRecord{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}, agent.RuntimeGeneration); err != nil {
+	if err = m.store.UpdateManagedAgentStarting(durableCtx, agent.AgentID, agent.PiSessionID, store.ProcessIdentityRecord{PID: identity.PID, StartMarker: identity.StartMarker, Incarnation: identity.Incarnation}, agent.RuntimeGeneration); err != nil {
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(err))
 		return
@@ -339,7 +342,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	default:
 	}
 	binding.serial.Lock()
-	if err = m.store.MarkManagedReady(ctx, agent.AgentID); err != nil {
+	if err = m.store.MarkManagedReady(durableCtx, agent.AgentID); err != nil {
 		binding.serial.Unlock()
 		_ = rpc.Close()
 		_ = process.Stop(context.Background())
@@ -354,9 +357,9 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 			m.fail(agent.AgentID, "INITIAL_INSTRUCTION_FAILED", sanitizeError(err))
 			return
 		}
-		_ = m.store.MarkManagedInitialInstructionSent(ctx, agent.AgentID)
+		_ = m.store.MarkManagedInitialInstructionSent(durableCtx, agent.AgentID)
 	}
-	_ = m.store.MarkManagedOperationTerminal(ctx, request.RequestID)
+	_ = m.store.MarkManagedOperationTerminal(durableCtx, request.RequestID)
 	binding.lifecycleAction = ""
 	binding.serial.Unlock()
 	select {
