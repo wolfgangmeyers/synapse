@@ -10,10 +10,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 )
@@ -27,6 +29,7 @@ type config struct {
 	auditSupervisorTarget string
 	auditTmuxSession      string
 	policyTimeout         time.Duration
+	managed               managed.Config
 }
 
 func parseConfig(args []string) (config, error) {
@@ -41,6 +44,23 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.auditSupervisorTarget, "audit-supervisor-target", "supervisor", "supervisor agent ID for tmux/router audit delivery")
 	flags.StringVar(&result.auditTmuxSession, "audit-tmux-session", "mecha", "tmux session for read-only tmux/router audit inventory")
 	flags.DurationVar(&result.policyTimeout, "policy-timeout", transport.DefaultPolicyTimeout, "maximum duration for one native policy run")
+	var managedEnabled bool
+	flags.BoolVar(&managedEnabled, "managed", false, "enable router-managed Pi launches")
+	var managedPi, managedHome, managedSession, managedManifest, managedExtension, managedSubagents, managedCursor, managedHelper, managedHelperLock, managedCursorPackage, managedCursorLock, managedUI, managedRoots, managedRecipient string
+	flags.StringVar(&managedPi, "managed-pi", "", "installed Pi executable")
+	flags.StringVar(&managedHome, "managed-home", "", "managed Pi HOME root")
+	flags.StringVar(&managedSession, "managed-session-root", "", "managed Pi session root")
+	flags.StringVar(&managedManifest, "managed-manifest", "", "managed tool manifest")
+	flags.StringVar(&managedExtension, "managed-mecha-rpc", "", "fixed mecha-rpc extension")
+	flags.StringVar(&managedSubagents, "managed-pi-subagents", "", "checked pi-subagents extension")
+	flags.StringVar(&managedCursor, "managed-cursor", "", "pinned Cursor extension")
+	flags.StringVar(&managedHelper, "managed-helper", "", "one-shot model helper")
+	flags.StringVar(&managedHelperLock, "managed-helper-lock", "", "helper lockfile")
+	flags.StringVar(&managedCursorPackage, "managed-cursor-package", "", "Cursor package root")
+	flags.StringVar(&managedCursorLock, "managed-cursor-lock", "", "Cursor package lockfile")
+	flags.StringVar(&managedUI, "managed-ui", "", "built router UI distribution")
+	flags.StringVar(&managedRoots, "managed-cwd-roots", "", "comma-separated allowed working-directory roots")
+	flags.StringVar(&managedRecipient, "managed-quiet-recipient", "", "canonical quiet recipient")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -68,12 +88,13 @@ func parseConfig(args []string) (config, error) {
 	if result.policyTimeout <= 0 {
 		return config{}, errors.New("--policy-timeout must be positive")
 	}
+	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursor, CursorPackage: managedCursorPackage, CursorLockfile: managedCursorLock, HelperPath: managedHelper, HelperLockfile: managedHelperLock, UIDistribution: managedUI, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--help" {
-		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--max-batch-chars <chars>] [--audit-supervisor-target <agent-id>] [--audit-tmux-session <session>] [--policy-timeout <duration>]")
+		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--managed=false|true] [managed fixed-input flags]")
 		return
 	}
 	options, err := parseConfig(os.Args[1:])
@@ -81,6 +102,10 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
+	options.managed.Expected = managedExpectedFromEnvironment()
+	if err := options.managed.Validate(); err != nil {
+		log.Fatal(err)
+	}
 	var durable *store.Store
 	attachmentsStore, err := attachments.New(attachments.Options{
 		Directory: options.database + ".attachments",
@@ -108,7 +133,27 @@ func main() {
 	}
 	defer logWriter.Close()
 	logger := eventLogger(logWriter, os.Stderr)
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout})
+	var managedManager *managed.Manager
+	if options.managed.Enabled {
+		if err := durable.SetCanonicalQuietRecipient(ctx, options.managed.CanonicalQuietRecipientID); err != nil {
+			_, _ = attachmentsStore.Sweep(nil)
+			_ = durable.Close()
+			log.Fatal(err)
+		}
+		manifest, _, manifestErr := managed.ValidateManifestFile(options.managed.ManifestPath, options.managed.Expected.ManifestSHA256)
+		if manifestErr != nil {
+			_, _ = attachmentsStore.Sweep(nil)
+			_ = durable.Close()
+			log.Fatal(manifestErr)
+		}
+		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: helperCatalog{Path: options.managed.HelperPath, AuthPath: filepath.Join(options.managed.ManagedHome, ".pi", "agent", "auth.json")}})
+		if err != nil {
+			_, _ = attachmentsStore.Sweep(nil)
+			_ = durable.Close()
+			log.Fatal(err)
+		}
+	}
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()

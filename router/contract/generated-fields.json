@@ -7,7 +7,7 @@
     {"path": "$.created_at", "contexts": ["server_generated_envelope"]},
     {"path": "$.updated_at", "contexts": ["server_state"]},
     {"path": "$.recorded_at", "contexts": ["conversation_record"]},
-    {"path": "$.generated_at", "contexts": ["server_frame"]},
+    {"path": "$.generated_at", "contexts": ["server_frame", "server_state"]},
     {"path": "$.expires_at", "contexts": ["server_lease", "server_control"]},
     {"path": "$.claimed_at", "contexts": ["delivery_state"]},
     {"path": "$.delivery_expires_at", "contexts": ["delivery_state", "server_frame"]},

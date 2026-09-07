@@ -29,6 +29,23 @@ func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	require.Equal(t, transport.DefaultPolicyTimeout, parsed.policyTimeout)
 }
 
+func TestManagedConfigurationFailureDoesNotBindListener(t *testing.T) {
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "mailbox-router")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
+	build.Dir = filepath.Dir(filepath.Join(".", "main.go"))
+	require.NoError(t, build.Run())
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	command := exec.Command(binary, "--database", filepath.Join(directory, "router.db"), "--host", "127.0.0.1", "--port", formatPort(port), "--managed=true", "--managed-home", filepath.Join(directory, "missing-managed-home"))
+	require.Error(t, command.Run())
+	bound, err := net.Listen("tcp", "127.0.0.1:"+formatPort(port))
+	require.NoError(t, err, "invalid managed configuration must fail before router.Listen")
+	require.NoError(t, bound.Close())
+}
+
 func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	directory := t.TempDir()
 	database := filepath.Join(directory, "go-router.db")

@@ -4,10 +4,13 @@
   "scope": "isolated Go transport smoke",
   "normalization": ["server-generated frame IDs", "lease IDs", "message incarnation IDs"],
   "steps": [
-    {"request": "GET /v1/agents", "origin": "https://diff.example", "status": 200, "access_control_allow_origin": "*"},
-    {"request": "OPTIONS /v1/agents", "origin": "https://diff.example", "status": 204, "access_control_allow_origin": "*"},
-    {"request": "OPTIONS /v1/agents", "origin": null, "status": 404, "error_code": "not_found"},
-    {"request": "WebSocket register", "status": "registered"},
+    {"request": "GET /v1/agents", "origin": "https://diff.example", "status": 200, "scope": "legacy", "access_control_allow_origin": "*"},
+    {"request": "OPTIONS /v1/agents", "origin": "https://diff.example", "status": 204, "scope": "legacy", "access_control_allow_origin": "*"},
+    {"request": "OPTIONS /v1/agents", "origin": null, "status": 404, "scope": "legacy", "error_code": "not_found"},
+    {"request": "OPTIONS /v1/managed-agents", "origin": "https://one.example", "status": 204, "scope": "managed", "access_control_allow_origin": "https://one.example", "access_control_allow_credentials": "true"},
+    {"request": "OPTIONS /v1/managed-agents", "origin": "https://two.example", "status": 204, "scope": "managed", "access_control_allow_origin": "https://two.example", "access_control_allow_credentials": "true"},
+    {"request": "OPTIONS /v1/managed-agents", "origin": "invalid-origin", "status": 422, "scope": "managed", "error_code": "VALIDATION_FAILED"},
+    {"request": "WebSocket register", "status": "registered", "scope": "legacy"},
     {"request": "POST /v1/messages then WebSocket receipt", "http_status": 201, "frames": ["registered", "message", "delivery_acknowledged"], "message_id": "diff-message", "attempt_number": 1}
   ]
 }

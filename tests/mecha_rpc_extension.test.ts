@@ -15,8 +15,11 @@ function fixture(sessionId = "root-session", parentSessionId?: string) {
   const handlers = new Map<string, (event: RecordValue, context: RecordValue) => unknown>();
   const sent: Array<{ message: RecordValue; options: RecordValue | undefined }> = [];
   const events = new Map<string, (event: RecordValue) => void>();
+  let activeTools: string[] = [];
   const pi = {
     getAllTools: () => [...tools.values()],
+    getActiveTools: () => [...activeTools],
+    setActiveTools(names: string[]) { activeTools = [...names]; },
     getCommands: () => [...commands.keys()],
     registerTool(tool: RecordValue) { tools.set(String(tool.name), tool); },
     registerCommand(name: string, command: Command) { commands.set(name, command); },
@@ -33,7 +36,7 @@ function fixture(sessionId = "root-session", parentSessionId?: string) {
   };
   const extension = createMechaRpcExtension(pi, { getRuntimeGeneration: () => "123e4567-e89b-42d3-a456-426614174000", getSessionEpoch: () => 1 });
   handlers.get("session_start")!({}, context);
-  return { commands, context, events, extension, handlers, pi, sent, tools };
+  return { activeTools, commands, context, events, extension, handlers, pi, sent, tools };
 }
 
 function manifest(): RecordValue {
@@ -103,6 +106,17 @@ test("every legacy command preserves raw input and root or child availability in
     assert.deepEqual(details.availability, { session_id: "root-session", kind: "root" });
   }
   assert.equal(current.sent.length, 9);
+});
+
+test("accepted receipt reports the runtime active tools and manifest revision", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  const receipt = current.sent.at(-1)!;
+  assert.equal(receipt.message.customType, "mecha.tools.accepted.v1");
+  const details = receipt.message.details as RecordValue;
+  assert.equal(details.manifest_revision, 1);
+  assert.deepEqual(details.active_tools, [...current.pi.getActiveTools!()].sort());
+  assert.equal((details.active_tools as unknown[]).length, 16);
 });
 
 test("bootstrap is atomic before model tools exist and a raw coercive tool call fails before control traffic", async () => {

@@ -103,6 +103,9 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	if correlation != "" {
 		w.Header().Set("X-Correlation-Id", correlation)
 	}
+	if r.handleManagedHTTP(w, req) {
+		return
+	}
 	_, originPresent := req.Header["Origin"]
 	if originPresent {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -138,7 +141,7 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 		r.handleMemory(w, req)
 		return
 	case req.Method == http.MethodGet && path == "/v1/agents":
-		r.writeJSON(w, http.StatusOK, r.connectedAgents(req.Context(), req.URL.Query().Get("models") != "omit"))
+		r.writeJSON(w, http.StatusOK, r.connectedAgentsWithManaged(req.Context(), req.URL.Query().Get("models") != "omit", req))
 		return
 	case req.Method == http.MethodGet && path == "/v1/conversations":
 		r.handleConversation(w, req)
