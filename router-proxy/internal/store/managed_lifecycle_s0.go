@@ -772,7 +772,7 @@ func (s *Store) ReserveManagedControlRequest(ctx context.Context, input ManagedC
 }
 
 func (s *Store) cancelManagedControlRequestsTx(ctx context.Context, agentID, code, now string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='cancelled',terminal_at=?,error_code=?,error_detail=NULL,retryable=0 WHERE agent_id=? AND state NOT IN ('delivered','failed','cancelled')`, now, code, agentID)
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='cancelled',terminal_at=?,error_code=?,error_detail=NULL,retryable=0,next_append_at=NULL WHERE agent_id=? AND state NOT IN ('delivered','failed','cancelled')`, now, code, agentID)
 	return err
 }
 

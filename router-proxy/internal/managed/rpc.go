@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 )
 
 var ErrReadinessBacklogFull = errors.New("managed readiness receipt backlog is full")
+var rootControlUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type RPC interface {
 	GetState(context.Context) (map[string]any, error)
@@ -48,6 +51,37 @@ type DirectMailboxRPC interface {
 	PrepareManagedMailbox(context.Context) (string, error)
 	PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error)
 	RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error)
+}
+
+// RootControlEvent is emitted only for a complete hidden root request. The
+// reader validates its closed transport envelope; manager admission performs
+// the binding, manifest tuple, and schema checks before storage.
+type RootControlEvent struct {
+	RequestID, ToolCallID, CapabilityID, ToolName, DefinitionID, DefinitionSHA256, OperationID string
+	ManifestSHA256, RuntimeGeneration                                                          string
+	SessionEpoch                                                                               int64
+	Arguments                                                                                  any
+	Watermark                                                                                  uint64
+}
+
+type RootControlResultReceipt struct {
+	Event     map[string]any
+	Watermark uint64
+}
+
+type RootControlAppendToken interface {
+	Watermark() uint64
+	Release()
+}
+
+// RootControlRPC is a private S4 capability. It deliberately exposes only
+// result append, its receipt token, and exact entry lookup; no history method
+// is part of this interface.
+type RootControlRPC interface {
+	SetRootControlEventHandler(func(RootControlEvent))
+	ArmRootControlResult(requestID, entryID string) (RootControlAppendToken, error)
+	SubmitRootControlResult(context.Context, RootControlAppendToken, map[string]any) (<-chan RootControlResultReceipt, error)
+	GetRootControlEntry(context.Context, string) (map[string]any, error)
 }
 
 type DirectMailboxReceipt struct{ EntryIdentity string }
@@ -94,6 +128,32 @@ type directMailboxResult struct {
 	diagnosticCode string
 	err            error
 }
+type rootResultToken struct {
+	client             *rpcClient
+	requestID, entryID string
+	watermark          uint64
+	result             chan RootControlResultReceipt
+	closed             bool
+}
+
+func (t *rootResultToken) Watermark() uint64 {
+	if t == nil {
+		return 0
+	}
+	return t.watermark
+}
+func (t *rootResultToken) Release() {
+	if t == nil || t.client == nil {
+		return
+	}
+	t.client.mu.Lock()
+	if t.client.rootResult == t {
+		t.client.rootResult = nil
+	}
+	t.closed = true
+	t.client.mu.Unlock()
+}
+
 type rpcResponse struct {
 	value map[string]any
 	err   error
@@ -121,6 +181,8 @@ type rpcClient struct {
 	snapshotWatermark  *uint64
 	settlementToken    *restartSettlementToken
 	directMailbox      *directMailboxToken
+	rootControlHandler func(RootControlEvent)
+	rootResult         *rootResultToken
 
 	closeOnce sync.Once
 	closeErr  error
@@ -141,8 +203,9 @@ func (c *rpcClient) readLoop() {
 			c.terminalize(errors.New("RPC line exceeds 1 MiB"))
 			return
 		}
-		var raw map[string]any
-		if json.Unmarshal(line, &raw) != nil {
+		decoded, err := strictJSON(line)
+		raw, ok := decoded.(map[string]any)
+		if err != nil || !ok {
 			c.terminalize(errors.New("Pi emitted malformed RPC JSON"))
 			return
 		}
@@ -165,10 +228,39 @@ func (c *rpcClient) readLoop() {
 				continue
 			}
 		}
+		var rootCallback func(RootControlEvent)
+		var rootEvent *RootControlEvent
 		c.mu.Lock()
 		terminal := c.terminal != nil
 		if !terminal {
 			c.eventSequence++
+			if event, candidate := classifyRootControlEvent(raw, c.eventSequence); candidate {
+				// Root requests are control-plane input, not readiness receipts. Bad
+				// candidates are dropped locally and cannot fill the receipt backlog.
+				if event != nil && c.rootControlHandler != nil {
+					rootCallback, rootEvent = c.rootControlHandler, event
+				}
+				c.mu.Unlock()
+				if rootCallback != nil {
+					go rootCallback(*rootEvent)
+				}
+				continue
+			}
+			if token := c.rootResult; token != nil && classifyRootControlResultEvent(raw, token, c.eventSequence) {
+				select {
+				case token.result <- RootControlResultReceipt{Event: raw, Watermark: c.eventSequence}:
+				default:
+				}
+				c.signalLocked()
+				c.mu.Unlock()
+				continue
+			}
+			if isRootControlResultEvent(raw) {
+				// Exact entry lookup verifies the persisted result. The entry event
+				// itself is not a general readiness receipt.
+				c.mu.Unlock()
+				continue
+			}
 			if token := c.directMailbox; token != nil {
 				if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
 					c.sendDirectMailboxResultLocked(token, result)
@@ -212,6 +304,11 @@ func (c *rpcClient) terminalizeLocked(err error) {
 	if token := c.directMailbox; token != nil {
 		c.directMailbox = nil
 		c.sendDirectMailboxResultLocked(token, directMailboxResult{err: err})
+	}
+	if token := c.rootResult; token != nil {
+		c.rootResult = nil
+		token.closed = true
+		close(token.result)
 	}
 	for id, ch := range c.pending {
 		delete(c.pending, id)
@@ -808,6 +905,182 @@ func directMailboxEntryIdentity(event map[string]any, sequence uint64) string {
 func nestedMessage(event map[string]any) map[string]any {
 	message, _ := event["message"].(map[string]any)
 	return message
+}
+
+func rootControlUUID(value any) (string, bool) {
+	text, ok := value.(string)
+	return text, ok && rootControlUUIDRE.MatchString(text)
+}
+func rootControlSHA(value any) (string, bool) {
+	text, ok := value.(string)
+	return text, ok && manifestSHA256RE.MatchString(text)
+}
+func rootControlText(value any) (string, bool) {
+	text, ok := value.(string)
+	return text, ok && validManifestText(text, 256, false)
+}
+func rootControlEpoch(value any) (int64, bool) {
+	switch item := value.(type) {
+	case json.Number:
+		parsed, err := item.Int64()
+		return parsed, err == nil && parsed >= 1
+	case int64:
+		return item, item >= 1
+	case int:
+		return int64(item), item >= 1
+	case float64:
+		return int64(item), item >= 1 && item == float64(int64(item))
+	default:
+		return 0, false
+	}
+}
+
+// classifyRootControlEvent identifies only the documented completed hidden
+// request. It deliberately ignores partial frames and malformed candidates.
+func classifyRootControlEvent(event map[string]any, watermark uint64) (*RootControlEvent, bool) {
+	if event["type"] != "message_end" {
+		return nil, false
+	}
+	message := nestedMessage(event)
+	if message == nil || message["customType"] != "mecha.control.request.v1" {
+		return nil, false
+	}
+	if message["display"] != false || message["content"] != "Router control request queued." {
+		return nil, true
+	}
+	details, ok := message["details"].(map[string]any)
+	if !ok {
+		return nil, true
+	}
+	if err := exactKeys(details, "protocol", "request_id", "tool_call_id", "capability_id", "tool_name", "definition_id", "definition_sha256", "operation_id", "manifest_sha256", "runtime_generation", "session_epoch", "context_ref", "arguments"); err != nil {
+		return nil, true
+	}
+	requestID, idOK := rootControlUUID(details["request_id"])
+	toolCallID, callOK := rootControlText(details["tool_call_id"])
+	capabilityID, capabilityOK := rootControlText(details["capability_id"])
+	toolName, nameOK := rootControlText(details["tool_name"])
+	definitionID, definitionOK := rootControlText(details["definition_id"])
+	definitionSHA, definitionSHAOK := rootControlSHA(details["definition_sha256"])
+	operationID, operationOK := rootControlText(details["operation_id"])
+	manifestSHA, manifestOK := rootControlSHA(details["manifest_sha256"])
+	generation, generationOK := rootControlUUID(details["runtime_generation"])
+	epoch, epochOK := rootControlEpoch(details["session_epoch"])
+	arguments := details["arguments"]
+	if details["protocol"] != "mecha.control/v1" || details["context_ref"] != "root" || !idOK || !callOK || !capabilityOK || !nameOK || !definitionOK || !definitionSHAOK || definitionID != "def_"+definitionSHA || !operationOK || !manifestOK || !generationOK || !epochOK || !boundedJSON(arguments, 1, &jsonBounds{}) {
+		return nil, true
+	}
+	return &RootControlEvent{RequestID: requestID, ToolCallID: toolCallID, CapabilityID: capabilityID, ToolName: toolName, DefinitionID: definitionID, DefinitionSHA256: definitionSHA, OperationID: operationID, ManifestSHA256: manifestSHA, RuntimeGeneration: generation, SessionEpoch: epoch, Arguments: cloneJSONValue(arguments), Watermark: watermark}, true
+}
+
+func isRootControlResultEvent(event map[string]any) bool {
+	message := nestedMessage(event)
+	// Pi's live stdout receipt is a message_end frame, whereas get_entry and
+	// some supported explicit-append paths expose the persisted custom entry
+	// directly. Both forms carry the same closed custom type and are verified
+	// again against the reserved ID before the ledger can settle.
+	if message == nil {
+		message = event
+	}
+	return message["customType"] == "mecha.control.result.v1"
+}
+func classifyRootControlResultEvent(event map[string]any, token *rootResultToken, watermark uint64) bool {
+	return token != nil && !token.closed && watermark > token.watermark && isRootControlResultEvent(event)
+}
+
+func (c *rpcClient) SetRootControlEventHandler(handler func(RootControlEvent)) {
+	c.mu.Lock()
+	c.rootControlHandler = handler
+	c.mu.Unlock()
+}
+
+func (c *rpcClient) ArmRootControlResult(requestID, entryID string) (RootControlAppendToken, error) {
+	if !rootControlUUIDRE.MatchString(requestID) || !strings.HasPrefix(entryID, "mcr1_") || len(entryID) != len("mcr1_")+32 {
+		return nil, errors.New("managed control result token is invalid")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminal != nil {
+		return nil, c.terminal
+	}
+	if c.rootResult != nil {
+		return nil, errors.New("managed control result matcher is already armed")
+	}
+	token := &rootResultToken{client: c, requestID: requestID, entryID: entryID, watermark: c.eventSequence, result: make(chan RootControlResultReceipt, 2)}
+	c.rootResult = token
+	return token, nil
+}
+
+func (c *rpcClient) SubmitRootControlResult(ctx context.Context, rawToken RootControlAppendToken, envelope map[string]any) (<-chan RootControlResultReceipt, error) {
+	token, ok := rawToken.(*rootResultToken)
+	if !ok || token.client != c {
+		return nil, errors.New("managed control result token is invalid")
+	}
+	encoded, err := encodeRPCEnvelope(envelope)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	if c.terminal != nil {
+		err := c.terminal
+		c.mu.Unlock()
+		return nil, err
+	}
+	if c.rootResult != token || token.closed {
+		c.mu.Unlock()
+		return nil, errors.New("managed control result token is stale")
+	}
+	c.nextID++
+	id := fmt.Sprintf("managed-%d", c.nextID)
+	payload, err := json.Marshal(map[string]any{"id": id, "type": "prompt", "message": "/mecha-control-result-v1 " + encoded})
+	if err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	response := make(chan rpcResponse, 1)
+	c.pending[id] = response
+	if _, err = fmt.Fprintf(c.stdin, "%s\n", payload); err != nil {
+		delete(c.pending, id)
+		c.terminalizeLocked(err)
+		c.mu.Unlock()
+		return nil, err
+	}
+	c.mu.Unlock()
+	select {
+	case value := <-response:
+		if value.err != nil {
+			return nil, value.err
+		}
+		return token.result, nil
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+func (c *rpcClient) GetRootControlEntry(ctx context.Context, entryID string) (map[string]any, error) {
+	if !strings.HasPrefix(entryID, "mcr1_") || len(entryID) != len("mcr1_")+32 {
+		return nil, errors.New("managed control entry ID is invalid")
+	}
+	value, err := c.call(ctx, "get_entry", map[string]any{"entryId": entryID})
+	if err != nil {
+		return nil, err
+	}
+	data := unwrap(value)
+	raw, found := data["entry"]
+	if !found || raw == nil {
+		return nil, nil
+	}
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return nil, errors.New("Pi get_entry response is invalid")
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil || len(encoded) > 64*1024 {
+		return nil, errors.New("Pi get_entry response is oversized")
+	}
+	return cloneJSONRecord(entry), nil
 }
 
 // RecoverManagedMailbox accepts a persisted append only when the recorded

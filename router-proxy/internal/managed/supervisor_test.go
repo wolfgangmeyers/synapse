@@ -461,7 +461,7 @@ func TestPhase1ReadinessGatesRemainUnchanged(t *testing.T) {
 	manifest, _, err := LoadManifest(path)
 	require.NoError(t, err)
 	rpc := &readinessRPC{active: expectedManagedActiveTools(manifest)}
-	require.NoError(t, readinessGate(context.Background(), rpc, manifest, "session", 1, "generation"))
+	require.NoError(t, readinessGate(context.Background(), rpc, manifest, "session", 1, "generation", nil))
 	require.Equal(t, []string{"get_state", "get_commands", "bootstrap", "receipt", "get_active_tools"}, rpc.calls)
 	require.Equal(t, "mecha.bootstrap/v1", rpc.envelope["protocol"])
 	require.Equal(t, manifest.Raw, rpc.envelope["desired_manifest"])
@@ -904,6 +904,6 @@ func TestReadinessGateRejectsExtraCommandOrActiveTool(t *testing.T) {
 	manifest, _, err := LoadManifest(path)
 	require.NoError(t, err)
 	rpc := &readinessRPC{active: expectedManagedActiveTools(manifest)[:18]}
-	require.Error(t, readinessGate(context.Background(), rpc, manifest, "session", 1, "generation"))
+	require.Error(t, readinessGate(context.Background(), rpc, manifest, "session", 1, "generation", nil))
 	require.NotContains(t, rpc.calls, "prompt")
 }

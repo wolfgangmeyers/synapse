@@ -30,14 +30,24 @@ type managedResetG4Lock struct {
 	Pi     struct {
 		SourceRoot   string `json:"source_root"`
 		SourceRemote string `json:"source_remote"`
-		Scoped       struct {
-			Commit            string `json:"commit"`
-			Tree              string `json:"tree"`
-			Clean             bool   `json:"clean"`
-			PackageLockSHA256 string `json:"package_lock_sha256"`
-			PackageName       string `json:"package_name"`
-			PackageVersion    string `json:"package_version"`
+		PublicBase   struct {
+			Commit string `json:"commit"`
+			Tree   string `json:"tree"`
+		} `json:"public_base"`
+		Scoped struct {
+			Commit            string   `json:"commit"`
+			Tree              string   `json:"tree"`
+			MergeBase         string   `json:"merge_base"`
+			Clean             bool     `json:"clean"`
+			ChangedPaths      []string `json:"changed_paths"`
+			PackageLockSHA256 string   `json:"package_lock_sha256"`
+			PackageName       string   `json:"package_name"`
+			PackageVersion    string   `json:"package_version"`
 		} `json:"scoped"`
+		Tarball struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		} `json:"tarball"`
 		Installed struct {
 			PackageRealPath    string `json:"package_real_path"`
 			ExecutableRealPath string `json:"executable_real_path"`
@@ -61,26 +71,52 @@ type managedResetLockedPi struct {
 
 func requireManagedResetLockedPi(t *testing.T, root string) managedResetLockedPi {
 	t.Helper()
-	contents, err := os.ReadFile(managedResetG4SourceLock)
-	require.NoError(t, err, "the accepted G4 source lock is required for native reset proof")
+	return requireManagedResetLockedPiFromLock(t, root, managedResetG4SourceLock)
+}
+
+// requireManagedResetLockedPiFromLock verifies a caller-selected G4 lock. The
+// S4 proof uses this path so its command-line lock cannot be silently ignored.
+func requireManagedResetLockedPiFromLock(t *testing.T, root, sourceLockPath string) managedResetLockedPi {
+	t.Helper()
+	contents, err := os.ReadFile(sourceLockPath)
+	require.NoError(t, err, "the accepted G4 source lock is required for native proof")
 	lockSHA := sha256.Sum256(contents)
 	var lock managedResetG4Lock
 	require.NoError(t, json.Unmarshal(contents, &lock))
 	require.Equal(t, "mecha.pi.g4-source-lock/v1", lock.Schema)
+	require.Equal(t, "107d79f11072bbc8a3a757ed7fd69596bee7d68c", lock.Pi.PublicBase.Commit)
+	require.Equal(t, "f5103239060686ea2983e18906857b3df54428f5", lock.Pi.PublicBase.Tree)
+	require.Equal(t, lock.Pi.PublicBase.Commit, lock.Pi.Scoped.MergeBase)
 	require.True(t, lock.Pi.Scoped.Clean)
 	require.NotEmpty(t, lock.Pi.SourceRoot)
 	require.NotEmpty(t, lock.Pi.Installed.PackageRealPath)
 	require.NotEmpty(t, lock.Pi.Installed.ExecutableRealPath)
 	require.NotEmpty(t, lock.Pi.Scoped.PackageLockSHA256)
+	require.NotEmpty(t, lock.Pi.Tarball.Path)
+	require.Regexp(t, `^[a-f0-9]{64}$`, lock.Pi.Tarball.SHA256)
+	require.NotEmpty(t, lock.Pi.Scoped.ChangedPaths)
+	for _, changedPath := range lock.Pi.Scoped.ChangedPaths {
+		require.False(t, filepath.IsAbs(changedPath))
+		require.False(t, strings.HasPrefix(changedPath, "../"))
+		require.True(t, strings.HasPrefix(changedPath, "packages/coding-agent/src/") || strings.HasPrefix(changedPath, "packages/coding-agent/test/"), "G4 lock path escapes the approved coding-agent scope: %s", changedPath)
+	}
 
 	sourceRoot, err := filepath.EvalSymlinks(lock.Pi.SourceRoot)
 	require.NoError(t, err)
 	require.Equal(t, lock.Pi.SourceRoot, sourceRoot)
 	require.Equal(t, lock.Pi.Scoped.Commit, commandOutput(t, root, "git", "-C", sourceRoot, "rev-parse", "HEAD"))
 	require.Equal(t, lock.Pi.Scoped.Tree, commandOutput(t, root, "git", "-C", sourceRoot, "rev-parse", "HEAD^{tree}"))
+	require.Equal(t, lock.Pi.PublicBase.Tree, commandOutput(t, root, "git", "-C", sourceRoot, "rev-parse", lock.Pi.PublicBase.Commit+"^{tree}"))
+	require.Equal(t, lock.Pi.Scoped.MergeBase, commandOutput(t, root, "git", "-C", sourceRoot, "merge-base", lock.Pi.Scoped.Commit, lock.Pi.PublicBase.Commit))
 	require.Empty(t, commandOutput(t, root, "git", "-C", sourceRoot, "status", "--porcelain"), "locked Pi source checkout must be clean")
 	require.Equal(t, lock.Pi.SourceRemote, commandOutput(t, root, "git", "-C", sourceRoot, "remote", "get-url", "origin"))
 	require.Equal(t, lock.Pi.Scoped.PackageLockSHA256, safeFileSHA256(t, filepath.Join(sourceRoot, "package-lock.json")))
+	changed := strings.Fields(commandOutput(t, root, "git", "-C", sourceRoot, "diff", "--name-only", lock.Pi.PublicBase.Commit+".."+lock.Pi.Scoped.Commit))
+	require.Equal(t, lock.Pi.Scoped.ChangedPaths, changed, "the G4 lock must name every and only approved source change")
+	tarballPath, err := filepath.EvalSymlinks(lock.Pi.Tarball.Path)
+	require.NoError(t, err)
+	require.Equal(t, lock.Pi.Tarball.Path, tarballPath)
+	require.Equal(t, lock.Pi.Tarball.SHA256, safeFileSHA256(t, tarballPath))
 
 	packageRoot, err := filepath.EvalSymlinks(lock.Pi.Installed.PackageRealPath)
 	require.NoError(t, err)

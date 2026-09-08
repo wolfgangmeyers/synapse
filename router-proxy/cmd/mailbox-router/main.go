@@ -138,7 +138,19 @@ func main() {
 			_ = durable.Close()
 			log.Fatal(manifestErr)
 		}
-		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})})
+		rootExecutor, rootErr := newMailboxRouterRootControlExecutor(options.managed.ManagedHome)
+		if rootErr != nil {
+			_, _ = attachmentsStore.Sweep(nil)
+			_ = durable.Close()
+			log.Fatal(rootErr)
+		}
+		rootHandlers, rootErr := managed.NewOperationalRootControlHandlers(manifest, rootExecutor)
+		if rootErr != nil {
+			_, _ = attachmentsStore.Sweep(nil)
+			_ = durable.Close()
+			log.Fatal(rootErr)
+		}
+		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}), RootControlHandlers: rootHandlers})
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()

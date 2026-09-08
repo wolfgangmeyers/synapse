@@ -26,13 +26,17 @@ type Limits struct {
 }
 
 type Config struct {
-	Enabled                      bool
-	PiExecutable                 string
-	ManagedHome                  string
-	SessionRoot                  string
-	ManifestPath                 string
-	MechaRPCExtension            string
-	PiSubagentsExtension         string
+	Enabled              bool
+	PiExecutable         string
+	ManagedHome          string
+	SessionRoot          string
+	ManifestPath         string
+	MechaRPCExtension    string
+	PiSubagentsExtension string
+	// TestOnlyExtensions are never populated by the production router CLI.
+	// Native proofs may add a checked test probe without widening production argv.
+	TestOnlyExtensions           []string
+	TestOnlyEnvironment          []string
 	AllowedWorkingDirectoryRoots []string
 	CanonicalQuietRecipientID    string
 	Limits                       Limits
@@ -108,6 +112,11 @@ func ValidateManagedLaunchConfig(config Config) error {
 		{"pi-subagents entry", copy.PiSubagentsExtension},
 	} {
 		if err := ValidateContainedRegularFile(input.path, "", input.name); err != nil {
+			return err
+		}
+	}
+	for _, path := range copy.TestOnlyExtensions {
+		if err := ValidateContainedRegularFile(path, "", "test-only extension"); err != nil {
 			return err
 		}
 	}
@@ -237,7 +246,7 @@ func ChildEnvironmentFor(c Config, runtimeGeneration string, sessionEpoch int64)
 	if runtimeGeneration != "" {
 		environment = append(environment, "MECHA_RPC_RUNTIME_GENERATION="+runtimeGeneration, fmt.Sprintf("MECHA_RPC_SESSION_EPOCH=%d", sessionEpoch))
 	}
-	return environment
+	return append(environment, c.TestOnlyEnvironment...)
 }
 
 var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
 
 import { getSubagentsService, type SubagentsService } from "@gotgenes/pi-subagents";
 
@@ -60,6 +61,44 @@ export type MechaRpcOptions = {
 const CHILD_FACTORY_NAME = "mecha-rpc-managed-child-v1";
 const FIXED_SUBAGENTS_TOOL_NAMES = ["subagent", "get_subagent_result", "steer_subagent"] as const;
 const MAX_INSTALL_DELIVERY_RECEIPTS = 128;
+
+// These hooks exist only while the installed-Pi S4 fixture is enabled. They
+// expose no production command or message type: the fixture uses them to drive
+// the same installed root emitter and to return public-safe test observations.
+type NativeRootControlTestHooks = {
+  emit: () => Promise<string>;
+  inspect: () => JsonRecord;
+  release: () => void;
+  duplicateAppend: () => Promise<ExplicitCustomMessageAppendOutcome>;
+  changedAppend: () => Promise<ExplicitCustomMessageAppendOutcome>;
+};
+
+const nativeRootControlTestHooks = new Map<string, NativeRootControlTestHooks>();
+export async function emitInstalledRootControlForTest(sessionId: string): Promise<string> {
+  const hooks = nativeRootControlTestHooks.get(sessionId);
+  if (hooks === undefined) throw new TypeError("S4 root control test hook is unavailable.");
+  return hooks.emit();
+}
+export function inspectInstalledRootControlForTest(sessionId: string): JsonRecord {
+  const hooks = nativeRootControlTestHooks.get(sessionId);
+  if (hooks === undefined) throw new TypeError("S4 root control test hook is unavailable.");
+  return hooks.inspect();
+}
+export function releaseInstalledRootControlForTest(sessionId: string): void {
+  const hooks = nativeRootControlTestHooks.get(sessionId);
+  if (hooks === undefined) throw new TypeError("S4 root control test hook is unavailable.");
+  hooks.release();
+}
+export async function duplicateInstalledRootControlResultForTest(sessionId: string): Promise<ExplicitCustomMessageAppendOutcome> {
+  const hooks = nativeRootControlTestHooks.get(sessionId);
+  if (hooks === undefined) throw new TypeError("S4 root control test hook is unavailable.");
+  return hooks.duplicateAppend();
+}
+export async function changedInstalledRootControlResultForTest(sessionId: string): Promise<ExplicitCustomMessageAppendOutcome> {
+  const hooks = nativeRootControlTestHooks.get(sessionId);
+  if (hooks === undefined) throw new TypeError("S4 root control test hook is unavailable.");
+  return hooks.changedAppend();
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -165,6 +204,57 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   if (typeof generation !== "string" || !UUID.test(generation) || typeof epoch !== "number" || !Number.isSafeInteger(epoch) || epoch < 1) throw new TypeError("Managed runtime identity is invalid");
   let acceptedHash: string | undefined;
   const rootPendingRequestIds = new Set<string>();
+  const nativeRootControlTestEnabled = process.env.MECHA_RPC_TEST_ROOT_CONTROL_PROBE === "1";
+  const nativeRootControlHoldFirstEmission = process.env.MECHA_RPC_TEST_ROOT_CONTROL_HOLD_FIRST_EMISSION === "1";
+  let nativeRootControlNextOrdinal = 0;
+  let nativeRootControlHoldAvailable = nativeRootControlHoldFirstEmission;
+  type NativeRootControlTestRecord = {
+    ordinal: number;
+    requestId: string;
+    pendingBeforeEmission: boolean;
+    sendStarted: boolean;
+    requestEmitted: boolean;
+    sendResolved: boolean;
+    sendRejectedBeforeEmission: boolean;
+    pendingAfterSendFailure: boolean | undefined;
+    pendingBeforeResult: boolean | undefined;
+    sendResolvedBeforeResult: boolean | undefined;
+    appendOutcome: ExplicitCustomMessageAppendOutcome["kind"] | undefined;
+    pendingAfterAppend: boolean | undefined;
+    release: (() => void) | undefined;
+    releaseCalled: boolean;
+    resultContent: string | undefined;
+    resultDetails: JsonRecord | undefined;
+    resultEntryId: string | undefined;
+    duplicateOutcome: ExplicitCustomMessageAppendOutcome["kind"] | undefined;
+    changedAppendAttempted: boolean;
+    changedAppendRejected: boolean | undefined;
+  };
+  const nativeRootControlRecords = new Map<string, NativeRootControlTestRecord>();
+  const nativeRootControlSnapshot = (): JsonRecord => ({
+    records: [...nativeRootControlRecords.values()].map((record) => ({
+      ordinal: record.ordinal,
+      pending_before_emission: record.pendingBeforeEmission,
+      send_started: record.sendStarted,
+      request_emitted: record.requestEmitted,
+      send_resolved: record.sendResolved,
+      send_rejected_before_emission: record.sendRejectedBeforeEmission,
+      ...(record.pendingAfterSendFailure === undefined ? {} : { pending_after_send_failure: record.pendingAfterSendFailure }),
+      ...(record.pendingBeforeResult === undefined ? {} : { pending_before_result: record.pendingBeforeResult }),
+      ...(record.sendResolvedBeforeResult === undefined ? {} : { send_resolved_before_result: record.sendResolvedBeforeResult }),
+      ...(record.appendOutcome === undefined ? {} : { append_outcome: record.appendOutcome }),
+      ...(record.pendingAfterAppend === undefined ? {} : { pending_after_append: record.pendingAfterAppend }),
+      release_called: record.releaseCalled,
+      ...(record.duplicateOutcome === undefined ? {} : { duplicate_outcome: record.duplicateOutcome }),
+      changed_append_attempted: record.changedAppendAttempted,
+      ...(record.changedAppendRejected === undefined ? {} : { changed_append_rejected: record.changedAppendRejected }),
+    })),
+  });
+  const nativeRootControlObservationPath = nativeRootControlTestEnabled ? process.env.MECHA_RPC_TEST_ROOT_CONTROL_OBSERVATION_PATH : undefined;
+  const publishNativeRootControlObservation = (): void => {
+    if (nativeRootControlObservationPath === undefined) return;
+    writeFileSync(nativeRootControlObservationPath, JSON.stringify(nativeRootControlSnapshot()));
+  };
   const installationReceipts = new Map<string, InstallationReceipt>();
   const retainInstallationReceipt = (delivery: InstallationDelivery | undefined, receipt: InstallationReceipt): void => {
     if (delivery === undefined || installationReceipts.has(delivery.deliveryId)) return;
@@ -216,8 +306,39 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     const exit = setTimeout(() => process.exit(1), 0);
     exit.unref();
   };
+  // The installed-Pi S4 proof can force one post-registration emission failure.
+  // This test-only seam is disabled outside its dedicated native process.
+  const forcedRootControlSendFailureAt = process.env.MECHA_RPC_TEST_ROOT_CONTROL_SEND_FAILURE_AT;
+  let rootControlEmissionCount = 0;
   const toolRegistry = createToolRegistry(pi, {
-    emitControl: (request) => emitControlRequest(pi, request),
+    emitControl: async (request) => {
+      const requestId = typeof request.request_id === "string" ? request.request_id : undefined;
+      const record = requestId === undefined ? undefined : nativeRootControlRecords.get(requestId);
+      if (record !== undefined) {
+        record.sendStarted = true;
+        publishNativeRootControlObservation();
+      }
+      if (nativeRootControlTestEnabled && forcedRootControlSendFailureAt !== undefined) {
+        rootControlEmissionCount++;
+        if (String(rootControlEmissionCount) === forcedRootControlSendFailureAt) {
+          if (record !== undefined) {
+            record.sendRejectedBeforeEmission = true;
+            publishNativeRootControlObservation();
+          }
+          throw new Error("forced S4 root-control send failure");
+        }
+      }
+      await emitControlRequest(pi, request);
+      if (record === undefined) return;
+      record.requestEmitted = true;
+      publishNativeRootControlObservation();
+      if (nativeRootControlHoldAvailable) {
+        nativeRootControlHoldAvailable = false;
+        await new Promise<void>((resolve) => { record.release = resolve; });
+      }
+      record.sendResolved = true;
+      publishNativeRootControlObservation();
+    },
     getRuntime: () => ({ runtimeGeneration: generation, manifestSha256: acceptedHash ?? "", sessionEpoch: epoch }),
     getContextRef: (context) => {
       if (!isCommandContext(context)) return undefined;
@@ -230,13 +351,33 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     onRequestQueued: (request) => {
       const requestId = request.request_id;
       const contextRef = request.context_ref;
-      if (typeof requestId !== "string" || typeof contextRef !== "string") return;
-      if (contextRef === "root") rootPendingRequestIds.add(requestId);
-      else if (!childBridge.bindPendingRequestForContext(requestId, contextRef)) throw new TypeError("STALE_CHILD_CONTEXT");
-      while (rootPendingRequestIds.size > 512) {
-        const oldest = rootPendingRequestIds.values().next().value;
-        if (typeof oldest !== "string") break;
-        rootPendingRequestIds.delete(oldest);
+      if (typeof requestId !== "string" || typeof contextRef !== "string" || contextRef === "root") return;
+      if (!childBridge.bindPendingRequestForContext(requestId, contextRef)) throw new TypeError("STALE_CHILD_CONTEXT");
+    },
+    onRootRequestPrepared: (request) => {
+      const requestId = request.request_id;
+      if (typeof requestId !== "string" || !UUID.test(requestId)) throw new TypeError("INVALID_ROOT_REQUEST");
+      if (!rootPendingRequestIds.has(requestId) && rootPendingRequestIds.size >= 512) throw new TypeError("ROOT_REQUEST_CAPACITY");
+      rootPendingRequestIds.add(requestId);
+      if (nativeRootControlTestEnabled) {
+        nativeRootControlRecords.set(requestId, {
+          ordinal: ++nativeRootControlNextOrdinal, requestId, pendingBeforeEmission: rootPendingRequestIds.has(requestId), sendStarted: false,
+          requestEmitted: false, sendResolved: false, sendRejectedBeforeEmission: false, pendingAfterSendFailure: undefined,
+          pendingBeforeResult: undefined, sendResolvedBeforeResult: undefined, appendOutcome: undefined, pendingAfterAppend: undefined,
+          release: undefined, releaseCalled: false, resultContent: undefined, resultDetails: undefined, resultEntryId: undefined,
+          duplicateOutcome: undefined, changedAppendAttempted: false, changedAppendRejected: undefined,
+        });
+        publishNativeRootControlObservation();
+      }
+    },
+    onRootRequestSendFailed: (request) => {
+      const requestId = request.request_id;
+      if (typeof requestId !== "string") return;
+      rootPendingRequestIds.delete(requestId);
+      const record = nativeRootControlRecords.get(requestId);
+      if (record !== undefined) {
+        record.pendingAfterSendFailure = rootPendingRequestIds.has(requestId);
+        publishNativeRootControlObservation();
       }
     },
   });
@@ -247,7 +388,10 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     acceptedHash = hashCanonicalJson(toolRegistry.installAcceptedSnapshot(initialAcceptedManifest));
   }
 
-  const commands = [...HIDDEN_COMMAND_NAMES, ...LEGACY_COMMAND_NAMES];
+  const rootControlTestCommand = process.env.MECHA_RPC_TEST_ROOT_CONTROL_PROBE === "1"
+    ? "mecha-s4-root-control-probe-v1"
+    : undefined;
+  const commands = [...HIDDEN_COMMAND_NAMES, ...LEGACY_COMMAND_NAMES, ...(rootControlTestCommand === undefined ? [] : [rootControlTestCommand])];
   // Stock-Pi acceptance tests can deterministically exercise the no-unregister
   // failure path without changing production registration behavior.
   const forcedCommandRegistrationFailureAt = /^\d+$/.test(process.env.MECHA_RPC_TEST_FAIL_COMMAND_REGISTRATION_AT ?? "")
@@ -341,9 +485,14 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         makeAcceptedToolsModelVisible(desired);
         registerAcceptedChildFactory(context);
         if (Array.isArray(envelope.restored_request_ids)) {
+          const restored = new Set<string>();
           for (const requestId of envelope.restored_request_ids) {
-            if (typeof requestId === "string") rootPendingRequestIds.add(requestId);
+            if (typeof requestId !== "string" || !UUID.test(requestId)) throw new TypeError("INVALID_ROOT_REQUEST");
+            restored.add(requestId);
           }
+          const newRequestCount = [...restored].filter((requestId) => !rootPendingRequestIds.has(requestId)).length;
+          if (rootPendingRequestIds.size + newRequestCount > 512) throw new TypeError("ROOT_REQUEST_CAPACITY");
+          for (const requestId of restored) rootPendingRequestIds.add(requestId);
         }
         policyBridge.apply(isRecord(envelope.inline_policy) && isRecord(envelope.recall_projection)
           ? { inline: envelope.inline_policy, recall: { content: envelope.recall_projection.content ?? "" } }
@@ -417,6 +566,12 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       requireControlResultRuntime(payload, generation, epoch, acceptedHash);
       if (childBridge.hasPendingRequest(context, payload.request_id)) return childBridge.appendControlResult(context, payload);
       if (!rootPendingRequestIds.has(payload.request_id)) throw new TypeError("STALE_CHILD_CONTEXT");
+      const nativeRecord = nativeRootControlRecords.get(payload.request_id);
+      if (nativeRecord !== undefined) {
+        nativeRecord.pendingBeforeResult = rootPendingRequestIds.has(payload.request_id);
+        nativeRecord.sendResolvedBeforeResult = nativeRecord.sendResolved;
+        publishNativeRootControlObservation();
+      }
       const details: JsonRecord = {
         protocol: payload.protocol,
         result_id: payload.result_id,
@@ -437,7 +592,17 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         entryId,
       );
       if (outcome.entryId !== entryId) throw new TypeError("Explicit control-result entry ID mismatch.");
+      if (nativeRecord !== undefined) {
+        nativeRecord.appendOutcome = outcome.kind;
+        nativeRecord.resultContent = payload.content;
+        nativeRecord.resultDetails = structuredClone(details);
+        nativeRecord.resultEntryId = entryId;
+      }
       rootPendingRequestIds.delete(payload.request_id);
+      if (nativeRecord !== undefined) {
+        nativeRecord.pendingAfterAppend = rootPendingRequestIds.has(payload.request_id);
+        publishNativeRootControlObservation();
+      }
       return { kind: outcome.kind, result_id: payload.result_id };
     },
   });
@@ -487,6 +652,33 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     },
   });
 
+  const registerRootControlTestCommand = (): void => {
+    if (rootControlTestCommand === undefined) return;
+    queueCommand(rootControlTestCommand, {
+      description: "Test-only S4 root control probe.",
+      async handler(argumentsText, context) {
+        const sessionId = sessionIdFromContext(context);
+        if (sessionId === undefined) throw new TypeError("S4 probe session is unavailable.");
+        switch (argumentsText.trim()) {
+          case "goal-status":
+            return { request_id: await emitInstalledRootControlForTest(sessionId) };
+          case "release":
+            releaseInstalledRootControlForTest(sessionId);
+            return { released: true };
+          case "observe":
+            return inspectInstalledRootControlForTest(sessionId);
+          case "duplicate-append": {
+            const outcome = await duplicateInstalledRootControlResultForTest(sessionId);
+            return { kind: outcome.kind };
+          }
+          case "changed-append":
+            return changedInstalledRootControlResultForTest(sessionId);
+          default:
+            throw new TypeError("S4 probe arguments are invalid.");
+        }
+      },
+    });
+  };
   const registerLegacyCommandBridge = (): void => {
     for (const name of LEGACY_COMMAND_NAMES) {
       const definition = legacyCommandDefinitions[name];
@@ -522,10 +714,11 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         }
         if (!isDocumentedChildGoalTool) legacyCommandsToRegister.add(name);
       }
+      registerRootControlTestCommand();
       registerLegacyCommandBridge();
       if (queuedCommands.length !== commands.length) throw new TypeError("Managed command registry is incomplete");
       for (const { name, command } of queuedCommands) {
-        if (HIDDEN_COMMAND_NAMES.some((hiddenName) => hiddenName === name) || legacyCommandsToRegister.has(name)) {
+        if (HIDDEN_COMMAND_NAMES.some((hiddenName) => hiddenName === name) || legacyCommandsToRegister.has(name) || name === rootControlTestCommand) {
           commandRegistrationAttempts++;
           if (forcedCommandRegistrationFailureAt === commandRegistrationAttempts) {
             throw new Error(`forced managed command registration failure at ${commandRegistrationAttempts}`);
@@ -558,6 +751,46 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   pi.on("session_start", async (_event, context) => {
     registeredOwnerSessionId = sessionIdFromContext(context);
     registerCommands();
+    if (nativeRootControlTestEnabled && registeredOwnerSessionId !== undefined && initialAcceptedManifest === undefined) {
+      const ownerSessionId = registeredOwnerSessionId;
+      nativeRootControlTestHooks.set(ownerSessionId, {
+        emit: () => toolRegistry.emitInstalledRootRequestForTest("goal", { action: "status" }, `s4-native-${randomUUID()}`),
+        inspect: nativeRootControlSnapshot,
+        release: () => {
+          const record = [...nativeRootControlRecords.values()].find((candidate) => candidate.release !== undefined && candidate.appendOutcome !== undefined);
+          if (record === undefined || record.release === undefined || record.releaseCalled) throw new TypeError("S4 root control send-resolution gate is unavailable.");
+          record.releaseCalled = true;
+          const release = record.release;
+          record.release = undefined;
+          publishNativeRootControlObservation();
+          release();
+        },
+        duplicateAppend: async () => {
+          const record = [...nativeRootControlRecords.values()].find((candidate) => candidate.appendOutcome === "accepted" && candidate.resultContent !== undefined && candidate.resultDetails !== undefined && candidate.resultEntryId !== undefined);
+          if (record === undefined || record.resultContent === undefined || record.resultDetails === undefined || record.resultEntryId === undefined) throw new TypeError("S4 root control result is unavailable.");
+          const outcome = await sendHiddenCustomMessageWithEntryId(pi, "mecha.control.result.v1", record.resultContent, structuredClone(record.resultDetails), record.resultEntryId);
+          record.duplicateOutcome = outcome.kind;
+          publishNativeRootControlObservation();
+          return outcome;
+        },
+        changedAppend: async () => {
+          const record = [...nativeRootControlRecords.values()].find((candidate) => candidate.appendOutcome === "accepted" && candidate.resultContent !== undefined && candidate.resultDetails !== undefined && candidate.resultEntryId !== undefined);
+          if (record === undefined || record.resultContent === undefined || record.resultDetails === undefined || record.resultEntryId === undefined) throw new TypeError("S4 root control result is unavailable.");
+          record.changedAppendAttempted = true;
+          publishNativeRootControlObservation();
+          try {
+            const outcome = await sendHiddenCustomMessageWithEntryId(pi, "mecha.control.result.v1", `${record.resultContent} changed`, structuredClone(record.resultDetails), record.resultEntryId);
+            record.changedAppendRejected = false;
+            publishNativeRootControlObservation();
+            return outcome;
+          } catch (error) {
+            record.changedAppendRejected = true;
+            publishNativeRootControlObservation();
+            throw error;
+          }
+        },
+      });
+    }
     if (initialAcceptedManifest !== undefined) {
       const desired = toolRegistry.acceptedManifest();
       if (desired === undefined || acceptedHash === undefined) throw new TypeError("Managed child manifest installation was lost before bind.");
@@ -576,6 +809,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     disposeChildFactory?.();
     disposeChildFactory = undefined;
     childBridge.clearOwnerSession(registeredOwnerSessionId);
+    if (registeredOwnerSessionId !== undefined) nativeRootControlTestHooks.delete(registeredOwnerSessionId);
     rootPendingRequestIds.clear();
     installationReceipts.clear();
     registeredOwnerSessionId = undefined;

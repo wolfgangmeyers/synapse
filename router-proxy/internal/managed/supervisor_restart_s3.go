@@ -208,7 +208,7 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 	if err := m.store.ClaimManagedLifecycleRestartTargetStart(context.Background(), actionID, attemptID, source, action.PlannedTargetRuntimeGeneration); err != nil {
 		return
 	}
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: source.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, Environment: ChildEnvironmentFor(m.config, action.PlannedTargetRuntimeGeneration, source.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: source.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, action.PlannedTargetRuntimeGeneration, source.SessionEpoch)}
 	process, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		if StartErrorProvesNoChild(err) {
@@ -295,6 +295,7 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 		m.cleanupLifecycleRestartTarget(actionID, source, target, candidate)
 		return
 	}
+	m.installRootControlReceiver(candidate)
 	candidate.serial.Lock()
 	candidate.lifecycleAction = ""
 	candidate.serial.Unlock()

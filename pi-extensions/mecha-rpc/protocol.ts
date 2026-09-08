@@ -441,13 +441,14 @@ export function validateCustomMessageDetails(customType: CustomMessageType, deta
       validateAvailability(details.availability);
       validateRuntimeFence(details, ["protocol", "request_id", "operation_id", "legacy_command", "raw_arguments", "runtime_generation", "session_epoch", "availability"]);
     } else {
-      assertExactKeys(details, ["protocol", "request_id", "tool_call_id", "capability_id", "tool_name", "definition_id", "operation_id", "manifest_sha256", "runtime_generation", "session_epoch", "context_ref", "arguments"]);
+      assertExactKeys(details, ["protocol", "request_id", "tool_call_id", "capability_id", "tool_name", "definition_id", "definition_sha256", "operation_id", "manifest_sha256", "runtime_generation", "session_epoch", "context_ref", "arguments"]);
       if (details.protocol !== "mecha.control/v1" || typeof details.request_id !== "string" || !UUID.test(details.request_id)
         || typeof details.tool_call_id !== "string" || typeof details.capability_id !== "string" || typeof details.tool_name !== "string"
-        || typeof details.definition_id !== "string" || typeof details.operation_id !== "string" || typeof details.manifest_sha256 !== "string"
+        || typeof details.definition_id !== "string" || typeof details.definition_sha256 !== "string" || !SHA256.test(details.definition_sha256)
+        || details.definition_id !== `def_${details.definition_sha256}` || typeof details.operation_id !== "string" || typeof details.manifest_sha256 !== "string"
         || !SHA256.test(details.manifest_sha256) || typeof details.context_ref !== "string"
         || (details.context_ref !== "root" && !CONTEXT_REF.test(details.context_ref))) protocolError("control request details are invalid");
-      validateRuntimeFence(details, ["protocol", "request_id", "tool_call_id", "capability_id", "tool_name", "definition_id", "operation_id", "manifest_sha256", "runtime_generation", "session_epoch", "context_ref", "arguments"]);
+      validateRuntimeFence(details, ["protocol", "request_id", "tool_call_id", "capability_id", "tool_name", "definition_id", "definition_sha256", "operation_id", "manifest_sha256", "runtime_generation", "session_epoch", "context_ref", "arguments"]);
     }
   } else if (customType === "mecha.control.result.v1") {
     assertExactKeys(details, ["protocol", "result_id", "request_id", "target_session_epoch", "runtime_generation", "manifest_sha256", "status", "details"], ["error"]);

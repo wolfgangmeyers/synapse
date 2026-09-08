@@ -36,6 +36,7 @@ type CommandSpec struct {
 	ModelID              string
 	MechaRPCExtension    string
 	PiSubagentsExtension string
+	TestOnlyExtensions   []string
 	Environment          []string
 }
 
@@ -44,7 +45,11 @@ func (s CommandSpec) validLaunchMode() bool {
 }
 
 func (s CommandSpec) Args() []string {
-	return []string{"--mode", "rpc", "--session-dir", s.SessionRoot, "--session-id", s.SessionID, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline", "--provider", s.Provider, "--model", s.ModelID, "-e", s.MechaRPCExtension, "-e", s.PiSubagentsExtension}
+	arguments := []string{"--mode", "rpc", "--session-dir", s.SessionRoot, "--session-id", s.SessionID, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline", "--provider", s.Provider, "--model", s.ModelID, "-e", s.MechaRPCExtension, "-e", s.PiSubagentsExtension}
+	for _, extension := range s.TestOnlyExtensions {
+		arguments = append(arguments, "-e", extension)
+	}
+	return arguments
 }
 
 type ProcessIdentity struct {
