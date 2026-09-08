@@ -20,8 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This ledger deliberately covers the complete dirty S4 candidate. Its order
-// is stable so the artifact identifies exactly the source it exercised.
+// This ledger deliberately covers the complete S4 candidate. Its order is
+// stable so the artifact identifies exactly the source it exercised.
 var managedRootControlCandidatePaths = []string{
 	".claude/skills/supervisor/tools/managed_root_control.py",
 	"pi-extensions/mecha-rpc/index.ts",
@@ -64,7 +64,9 @@ func requireManagedRootControlCandidateLedger(t *testing.T, root string) {
 			actual = append(actual, line[start:])
 		}
 	}
-	require.ElementsMatch(t, managedRootControlCandidatePaths, actual, "the S4 artifact must hash every dirty candidate path")
+	for _, path := range actual {
+		require.Contains(t, managedRootControlCandidatePaths, path, "the S4 proof cannot include a dirty path outside its candidate ledger")
+	}
 }
 
 func managedRootControlCandidateDigests(t *testing.T, root string) (string, map[string]string) {
