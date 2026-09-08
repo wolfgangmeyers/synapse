@@ -140,18 +140,18 @@ The store has one SQLite connection (`SetMaxOpenConns(1)`) and holds its store m
 
 1. Verify `PRAGMA foreign_keys=1` and `PRAGMA legacy_alter_table=0`. Verify that 024, 025, and 026 are recorded in `schema_migrations`, and that the four child tables above exist. Capture each child's `sqlite_master` table and index SQL, row count, and `PRAGMA foreign_key_list` result.
 2. Outside any transaction, execute `PRAGMA foreign_keys=OFF`, then read it back as `0`. Do not use a separate connection.
-3. Start `BEGIN IMMEDIATE`. Create the four new 027 tables in the stated order and every required index except `managed_lifecycle_one_active_lane`. Create `managed_agents_027_new` with the complete 025 `managed_agents` column list, constraints, and the sole change `desired_state IN ('running','terminated')`. Do not create, detach, copy, drop, or recreate any child table.
-4. Copy the parent with an explicit ordered 025 column list. Save a temporary full-row snapshot before the copy. The copied row count must equal the snapshot count, and two directional `EXCEPT` queries over every copied column must be empty.
+3. Before `BEGIN IMMEDIATE`, reject a database containing a 025 `managed_agents` row with `lifecycle_state='starting'`. It is an unmatched pre-027 launch and has no durable operation link. The migration leaves that database untouched until its existing launch owner reaches a terminal state. Start `BEGIN IMMEDIATE`. Create the four new 027 tables in the stated order and every required index except `managed_lifecycle_one_active_lane`. Add nullable private `terminal_code` and `terminal_message` columns to `managed_http_operations`; 022–026 rows retain null values. Create `managed_agents_027_new` with the complete 025 `managed_agents` column list and constraints, widen `desired_state` to `('running','terminated')`, and add only nullable `launch_operation_id TEXT REFERENCES managed_http_operations(operation_id) ON DELETE RESTRICT`. Do not create, detach, copy, drop, or recreate any child table.
+4. Copy the parent with an explicit ordered 025 column list plus null `launch_operation_id`. Save a temporary full-row snapshot before the copy. The copied row count must equal the snapshot count, two directional `EXCEPT` queries over every 025 column must be empty, and every copied launch-operation link must be null.
 5. Drop `managed_agents`; rename `managed_agents_027_new` to `managed_agents`; recreate only `managed_agents_slot_idx` with its 025 definition. With `legacy_alter_table=OFF`, SQLite rewrites the existing child foreign-key metadata to the replacement parent name while leaving all child rows and DDL intact.
-6. Backfill every nonterminal 025 restart transition into its one lifecycle `restart` action before creating `managed_lifecycle_one_active_lane`. The mapping, pending-operation preflight, full source/optional target fences, timestamps, and null `retry_of` are defined in section 5.1. Create the active-lane index only after every backfill row has been inserted.
-7. Before committing, require zero rows from `PRAGMA foreign_key_check` and `PRAGMA integrity_check` equal to `ok`. Compare every captured child table/index SQL, row count, and foreign-key list with its pre-rebuild value. The child foreign key must still name `managed_agents(agent_id)`.
+6. Backfill every nonterminal 025 restart transition into its one lifecycle `restart` action before creating `managed_lifecycle_one_active_lane`. The mapping, pending-operation preflight, full source/optional target fences, timestamps, null `retry_of`, and `execution_owner='legacy025'` are defined in section 5.1. Create the active-lane index only after every backfill row has been inserted.
+7. Before committing, require zero rows from `PRAGMA foreign_key_check` and `PRAGMA integrity_check` equal to `ok`. Verify every nonnull `launch_operation_id` names an operation. Compare every captured child table/index SQL, row count, and foreign-key list with its pre-rebuild value. The child foreign key must still name `managed_agents(agent_id)`.
 8. Insert the 027 migration record, then commit. Outside the transaction, execute `PRAGMA foreign_keys=ON` and read it back as `1`. Run `PRAGMA foreign_key_check` again before returning the store.
 
 The runner must roll back the open transaction for any SQL error, parity failure, foreign-key failure, integrity failure, or migration-record failure. It must then restore and verify `PRAGMA foreign_keys=ON`. Rollback leaves the old parent, all 024/025/026 children, their rows, indexes, and migration ledger untouched, with no 027 record. If the post-commit re-enable or verification fails, the runner closes the database and returns an error; it must not return a store using a connection with foreign keys disabled.
 
 The required migration tests use a real accepted-026 fixture with populated rows in `managed_agents`, all four child tables, `managed_http_operations`, and nonterminal 025 restart transitions covering every backfill state. They prove: successful 026-to-027 upgrade; parent row equality; child row/count/DDL/index/FK-list equality; both foreign-key checks and integrity check clean; widened `desired_state` accepts `terminated` and still rejects any other value; expected 027 tables and indexes exist; and reopen leaves foreign keys enabled. Each 025 transition must produce its one mapped `restart` action with `retry_of IS NULL` and the required operation, fence, target-plan, and timestamp values.
 
-The same successful-upgrade test inserts valid initial `reset`, `terminate`, and direct `restart` actions, plus a direct `restart_all` parent with an all-null source fence and a `restart` child with `source='restart_all_child'`, its parent action ID, a full source fence, and `retry_of IS NULL`. It also inserts valid reset and terminate retries that reference eligible predecessors. It proves the schema rejects a non-null `retry_of` for `restart`, `restart_all`, and Restart All child actions. These checks cover row-local admission shape only; store tests separately prove predecessor failure state, retryability, same kind and agent, and single-successor eligibility.
+The same successful-upgrade test inserts valid initial `reset`, `terminate`, and lifecycle-owned direct `restart` actions, plus a direct `restart_all` parent with an all-null source fence and a `restart` child with `source='restart_all_child'`, its parent action ID, a full source fence, and `retry_of IS NULL`. It also inserts valid reset and terminate retries that reference eligible predecessors. It proves the schema rejects a non-null `retry_of` for `restart`, `restart_all`, and Restart All child actions. These checks cover row-local admission shape only; store tests separately prove predecessor failure state, retryability, same kind and agent, and single-successor eligibility. A separate populated 025 fixture with `lifecycle_state='starting'` must reject before any parent/table/index/ledger mutation. The normal fixture proves every copied legacy row has a null launch link and every backfilled transition has `execution_owner='legacy025'`.
 
 Failure-injection tests fail after the parent copy, after the parent drop, and at the pre-commit foreign-key check. Each proves rollback preserves the 026 schema/data, records no 027 migration, and restores `foreign_keys=ON`. A separate test proves `PRAGMA foreign_keys=OFF` issued after `BEGIN IMMEDIATE` does not count as this procedure.
 
@@ -177,6 +177,8 @@ CREATE TABLE managed_lifecycle_actions (
     REFERENCES managed_lifecycle_actions(action_id) ON DELETE CASCADE,
   retry_of TEXT UNIQUE
     REFERENCES managed_lifecycle_actions(action_id) ON DELETE RESTRICT,
+  execution_owner TEXT NOT NULL DEFAULT 'lifecycle'
+    CHECK (execution_owner IN ('legacy025','lifecycle')),
   state TEXT NOT NULL CHECK (state IN (
     'admitted','awaiting_settle','stopping_source','starting_target',
     'awaiting_target_ready','old_artifact_cleanup','terminating','cleanup',
@@ -259,6 +261,7 @@ CREATE TABLE managed_lifecycle_actions (
   CHECK ((state IN ('succeeded','failed','cancelled','superseded')) = (retryable IS NOT NULL)),
   CHECK (retryable IS NULL OR retryable IN (0,1)),
   CHECK (retry_of IS NULL OR kind IN ('reset','terminate')),
+  CHECK ((execution_owner='legacy025') = (kind='restart' AND source='direct' AND retry_of IS NULL)),
   CHECK ((recovery_owner IS NULL) = (recovery_claimed_at IS NULL))
 );
 CREATE UNIQUE INDEX managed_lifecycle_one_active_lane
@@ -276,7 +279,9 @@ Every initial action and every 025 restart backfill has `retry_of IS NULL`. A no
 
 The store also requires a retry predecessor to be terminal `failed`, `retryable=1`, the same kind and agent, and without a prior successor. SQLite's row-local checks cannot express that predecessor lookup.
 
-027 backfills every nonterminal `managed_restart_transitions` row into one `restart` action before it creates the active-lane index. `reserved` and `prepared` map to `admitted/admission`; `settling` maps to `awaiting_settle/source_settle`; `stopping` maps to `stopping_source/source_stop`; `stopped` maps to `starting_target/target_start`; and `starting` maps to `awaiting_target_ready/target_ready`. The action uses `operation_id` as `action_id`, its transition's complete old fence, its `target_runtime_generation` as `planned_target_runtime_generation`, any complete target process fence, and the transition timestamps. The planned target generation is not a process fence; the target process/session/epoch/runtime/manifest group remains all-null until identity verification. The migration fails if its operation is not pending or this one-to-one insert cannot be made. Existing restart recovery remains its owner until a later lifecycle action supersedes it.
+027 backfills every nonterminal `managed_restart_transitions` row into one `restart` action before it creates the active-lane index. `reserved` and `prepared` map to `admitted/admission`; `settling` maps to `awaiting_settle/source_settle`; `stopping` maps to `stopping_source/source_stop`; `stopped` maps to `starting_target/target_start`; and `starting` maps to `awaiting_target_ready/target_ready`. The action uses `operation_id` as `action_id`, `execution_owner='legacy025'`, its transition's complete old fence, its `target_runtime_generation` as `planned_target_runtime_generation`, any complete target process fence, and the transition timestamps. The planned target generation is not a process fence; the target process/session/epoch/runtime/manifest group remains all-null until identity verification. The migration fails if its operation is not pending or this one-to-one insert cannot be made.
+
+The bridge is durable. Every legacy store mutation joins the transition to its action by operation/action ID, requires `execution_owner='legacy025'`, the mapped action state/stage, and the exact old or target fence. It updates the transition and action in the same immediate transaction. `RollbackManagedRestartPreparation` deletes the transition and terminalizes action and operation as failed. `CompleteManagedRestartReady` deletes the transition and terminalizes action and operation as succeeded. `RecordManagedRestartFailure`, restart shutdown, old-group recovery, target reset, and every nonterminal stage change keep the transition/action pair nonterminal, retain `execution_owner='legacy025'`, and update the action's mapped state/stage and timestamp. `RecoverManagedLifecycleControls` never claims legacy-owned rows. A higher reset or terminate atomically marks the legacy action and operation superseded before its external work; all later old-executor callbacks fail the owner/fence predicate and make no durable or process change. Direct restart admitted after 027 writes `execution_owner='lifecycle'` and creates no `managed_restart_transitions` row.
 
 The lifecycle state determines the only valid stage pairs:
 
@@ -464,22 +469,33 @@ A duplicate request ID with the same tool-call, tuple, canonical arguments hash,
 
 `result_content`, `result_details_json`, and `error_detail` pass the established secret redaction before storage. `error_detail` has no raw RPC/process text.
 
-### 5.5 Foreign-key and deletion order
+### 5.5 Foreign-key retention graph and deletion order
 
 027 starts with this post-026 ownership inventory:
 
-| Record | FK or owner after 026 | Successful termination disposition |
+| Record | FK or owner after 027 | Successful termination disposition |
 | --- | --- | --- |
-| `managed_restart_transitions` | `managed_agents` and operation | Existing restart owner resolves/deletes it before lifecycle cleanup. |
+| `managed_restart_transitions` | `managed_agents`, operation, and its legacy-owned action bridge | Terminalization deletes it before its operation. A live legacy row blocks operation expiry. |
 | `managed_readiness_sources` | `managed_agents` | Delete in termination cleanup. |
-| `managed_lifecycle_actions` | operation only; no agent FK | Retain the termination action until its operation expires. Delete prior agent actions during cleanup. |
-| `managed_lifecycle_batch_items` | parent lifecycle action | Cascade when the parent operation/action expires. |
-| `managed_session_artifacts` | lifecycle action nullable target reference; no agent FK | Unlink first, then delete the row. |
+| `managed_lifecycle_actions` | operation; parent action; retry predecessor; no agent FK | Retain terminal actions with their operations. Delete explicit retry/child descendants first. |
+| `managed_lifecycle_batch_items` | parent action plus nullable child action/operation references | Retain for a live parent. Delete explicitly before referenced child rows. |
+| `managed_session_artifacts` | nullable lifecycle action target reference; no agent FK | Unlink first, then delete the row. |
 | `managed_control_requests` | no agent FK | Cancel, then delete during successful termination cleanup. |
 | `recipient_sources`, snapshots, direct attempts, diagnostics | migration 026 direct-mail owner | The hook retires/promotes the source, makes old snapshots invalid targets without retargeting them, deletes this agent's attempts/diagnostics, and leaves ordinary message/snapshot history intact. |
-| `managed_http_operations` | external replay owner | Never cascade from `managed_agents`. Terminate's own operation stays until 24-hour expiry. |
+| `managed_http_operations` | external replay owner; `managed_agents.launch_operation_id` is `ON DELETE RESTRICT` | Never cascade from `managed_agents`. A terminal launch and termination operation both remain replayable until eligible for sweep. |
 
-Successful termination runs this ordered transaction sequence after external group work: cancel controls; retire direct mail through its hook, which settles/removes its own direct attempts and diagnostics; delete router-owned session artifacts after verified unlink; delete restart transition/readiness source/prior agent lifecycle rows/control rows, deleting retry descendants before their predecessors; delete histories and policy state through their existing owners; delete `managed_agents`; terminalize the termination operation. The final durable transaction releases the name and slot once. Any failure leaves the tombstone and name/slot held.
+`expires_at` is a 24-hour eligibility floor. It never authorizes an FK-unsafe delete. `Store.Sweep` runs `SweepManagedOperationGraph` in its existing immediate transaction:
+
+1. Select terminal operations with `expires_at <= now`, ordered by `(expires_at, operation_id)`. For each candidate, build a closure over its lifecycle action, retry successors, parent-action children, and every accepted/coalesced batch-item reference. Include the batch parent operation for every referenced item. Also inspect a same-operation 025 transition.
+2. The closure is prunable only when every included operation is terminal and expired, every included lifecycle action is terminal, and no included operation has a 025 transition. An unexpired or nonterminal retry successor, child, coalesced target, or batch parent blocks the whole closure. This preserves a batch item while its parent response still has required retained work and prevents a parent action's `ON DELETE CASCADE` from deleting a live child.
+3. A terminal operation with a linked 025 transition is an invariant error. The sweep rolls back and leaves every row unchanged. Legacy success, legacy preparation rollback, and supersession terminalization must delete the transition in their own transaction before terminalizing that operation.
+4. For a prunable closure, explicitly delete batch items first. Delete lifecycle actions in postorder: retry successors and parent-action children before their predecessor or parent. Delete their operations in the same postorder. The sweep does not rely on action/operation cascades. Artifact deletion is separate and occurs only after safe unlink and after no action references it.
+
+Tests use populated graphs. They cover an expired child held by an unexpired parent, an expired parent held by an unexpired or nonterminal child, a retry successor before its predecessor, and both accepted and coalesced batch references. They prove a full eligible closure deletes items, actions, then operations in that order. A terminal operation still linked to a 025 transition fails the sweep. Injecting failure after the first batch-item deletion proves the transaction restores every row and `foreign_key_check` remains clean.
+
+Every post-027 launch inserts its operation first and records that exact pending ID in `managed_agents.launch_operation_id` in the same immediate reservation transaction. Its callback must prove the linked operation remains pending and the agent is not a tombstone before every external start and durable write. Termination reservation atomically sets the tombstone and terminalizes this pending launch with private `terminal_code='LAUNCH_CANCELLED_BY_TERMINATE'` and `terminal_message='managed launch cancelled by termination'`. The immutable launch `202` stays unchanged and exact-replayable for at least 24 hours. Before deleting the agent, cleanup clears the launch link; the `ON DELETE RESTRICT` link prevents an accidental operation delete while the agent still exists.
+
+Successful termination runs this ordered sequence after external group work. It cancels controls and uses the direct-mail hook. After safe artifact unlink, its final immediate transaction deletes every batch item that references the terminating agent's action or operation before it deletes that child. The immutable parent response is not changed. It terminalizes/supersedes any legacy bridge and blocks later old-owner callbacks, deletes retry descendants before predecessors, then deletes the legacy transition, readiness source, prior lifecycle/control rows, histories, and policy state through their owners. It clears `launch_operation_id`, deletes `managed_agents`, and terminalizes the termination action/operation. The already terminal launch operation and terminal termination operation remain replayable until their own graph-safe sweep. The final transaction releases the name and slot once. Any failure leaves the tombstone and name/slot held.
 
 ## 6. Root-control state graph and retention
 
@@ -536,15 +552,45 @@ The paired append seam adds one validated optional `entryId` to the extension `s
 
 ## 8. Recovery ownership and exact outcomes
 
+### 8.1 Legacy 025 bridge
+
+A backfilled action with `execution_owner='legacy025'` belongs only to `RecoverManagedRestartTransitions` and the old direct-restart executor. That executor lists a transition only when its joined action is nonterminal, has that owner, the matching action/stage pair, and the same action/operation ID. It owns all six paths: `reserved` and `prepared` use `admitted/admission`; `settling` uses `awaiting_settle/source_settle`; `stopping` uses `stopping_source/source_stop`; `stopped` uses `starting_target/target_start`; and `starting` uses `awaiting_target_ready/target_ready`.
+
+Every old mutation bridges atomically. A success deletes transition, marks the action `succeeded/complete`, and terminalizes the operation. A preparation rollback deletes transition, marks the action failed at its current mapped stage, and terminalizes the operation. An old failure that retains a transition keeps the action nonterminal at the same mapped stage and owner. `RecoverManagedLifecycleControls` excludes it. A later lifecycle reset or terminate first supersedes the bridge action and terminalizes its operation in its admission transaction. The old transition can remain only as retained cleanup input for that higher action. Its executor's owner predicate is then false, so an old success, failure, or target-start callback is a no-op. New direct restarts are lifecycle-owned from reservation and never create a 025 transition.
+
+| Legacy path | Required atomic bridge update | Later owner |
+| --- | --- | --- |
+| `reserved` preparation succeeds or fails before an external stop | preserve `admitted/admission`, or on `RollbackManagedRestartPreparation` delete transition and terminalize action/operation failed | old executor while retained; none after rollback |
+| `prepared` / `settling` settle, old-group-absent, or recovery probe | keep `admitted/admission` or set `awaiting_settle/source_settle`; old-group-absent moves both to `starting_target/target_start` | old executor |
+| `stopping` exact reap | move both to `stopping_source/source_stop`, then `starting_target/target_start` only after group absence | old executor |
+| `stopped` target start/install | move both to `starting_target/target_start`; persist the same target fence in both rows before readiness | old executor |
+| `starting` target readiness, target reap, or target reset | move both to `awaiting_target_ready/target_ready`, or back to `starting_target/target_start` after verified target absence | old executor |
+| any legacy `RecordManagedRestartFailure` or shutdown record | retain transition/action, mapped stage, exact fence, and `execution_owner='legacy025'`; update action timestamp | old executor on later startup |
+| `CompleteManagedRestartReady` | delete transition and terminalize linked action/operation `succeeded/complete` | none |
+| higher reset or terminate admitted from any legacy state | terminalize old action/operation `superseded` before external work; retain/delete transition only as that higher action's safe cleanup requires | higher lifecycle action |
+
+### 8.2 Pending-launch recovery
+
+Every post-027 initial launch has the durable `managed_agents.launch_operation_id` link. `RecoverPendingManagedLaunches` selects only a row where `lifecycle_state='starting'`, that link is nonnull, and the linked operation is pending. It runs before lifecycle recovery, never starts or attaches to a process, and never scans ordinary desired-running rows. It probes only the stored durable group identity:
+
+| Probe | Durable result | Signal | Retry |
+| --- | --- | --- | --- |
+| complete stored group is absent | agent `failed`; linked operation terminal `LAUNCH_RECOVERY_CANCELLED` / `managed launch cancelled during recovery` | none | no generic relaunch |
+| complete stored group is owned | reap exact group, then the same failed agent and terminal launch outcome | exact owned group only | no generic relaunch |
+| all-null/unpersisted group, present, mismatch, or unknown | agent `failed`; linked operation terminal `LAUNCH_RECOVERY_IDENTITY_UNSAFE` / `managed launch identity could not be verified`; retain name/slot | none | no generic relaunch |
+
+A durable write failure leaves the agent and operation pending. The next startup repeats this probe. An all-null identity is never read as proof that no child started: it is an unsafe outcome that keeps the failed row held. This is a terminalization pass, not desired-state recovery. The pre-027 migration preflight rejects an unmatched `starting` row, so this path never guesses its operation.
+
 `Router.Listen` calls these stages in this order before listener bind:
 
-1. `Manager.RecoverManagedRestartTransitions(ctx)`.
-2. `Manager.RecoverManagedLifecycleControls(ctx)`.
-3. `Store.ReconcileManagedRecipientSources(ctx)`.
-4. `Store.ReconcileMessageTargets(ctx)`.
-5. The existing bounded sweep.
+1. `Manager.RecoverPendingManagedLaunches(ctx)`.
+2. `Manager.RecoverManagedRestartTransitions(ctx)`.
+3. `Manager.RecoverManagedLifecycleControls(ctx)`.
+4. `Store.ReconcileManagedRecipientSources(ctx)`.
+5. `Store.ReconcileMessageTargets(ctx)`.
+6. The existing bounded sweep.
 
-`RecoverManagedLifecycleControls` loads only nonterminal lifecycle rows. It does not scan desired-running agents and does not start generic crash recovery. At startup it clears stale recovery claims, then claims one action at a time with `ClaimManagedLifecycleRecovery(actionID, routerStartupID)`. The immediate transaction requires the same nonterminal state, action ID, and complete source or target fence recorded by the row. It writes `recovery_owner` and `recovery_claimed_at`. Every stage transition clears that claim in the same transaction. A stale callback needs the current action ID and full durable fence. It is a no-op.
+`RecoverManagedLifecycleControls` loads only nonterminal `execution_owner='lifecycle'` rows. It does not scan desired-running agents and does not start generic crash recovery. At startup it clears stale recovery claims, then claims one action at a time with `ClaimManagedLifecycleRecovery(actionID, routerStartupID)`. The immediate transaction requires the same nonterminal state, action ID, ownership value, and complete source or target fence recorded by the row. It writes `recovery_owner` and `recovery_claimed_at`. Every stage transition clears that claim in the same transaction. A stale callback needs the current action ID and full durable fence. It is a no-op.
 
 | Recovery condition | Durable result | Public projection | Retry |
 | --- | --- | --- | --- |
@@ -559,6 +605,8 @@ The paired append seam adds one validated optional `entryId` to the extension `s
 | Terminate probe is mismatch/unknown | terminal `failed`, `TERMINATION_CLEANUP_FAILED` / `managed agent termination cleanup failed`, stage `terminate_reap` | `desired=terminated`, `lifecycle=failed`, `activity=failed`, admission closed, name/slot retained | false |
 | Terminate cleanup resumes with no live group | continue retained cleanup idempotently | tombstone until final commit | depends on remaining stage |
 
+Termination and launch share the agent lane from launch reservation through every callback. If termination wins before process start, its reservation atomically tombstones the agent and terminalizes the launch. The callback sees that closed link and returns without starting a process. If launch starts first, it must durably install the exact process identity or safely reap that process before it releases the lane. Termination then acts only on the stored exact group. A callback arriving after tombstone/final deletion verifies its operation link and agent row first; it may clean up only its own verified group and cannot recreate the agent, reopen admission, change a terminal operation, or start a replacement. Both the original launch and termination operations keep their immutable `202` bodies for replay. No result path rewrites either response.
+
 The complete external-action matrix is:
 
 | Event | Action state and stage | Code/message | Public state | Operation | Retained ownership | Projection |
@@ -567,8 +615,10 @@ The complete external-action matrix is:
 | Reset target start or five-gate readiness fails after verified target cleanup | failed / `target_start` or `target_ready` | `RESET_TARGET_START_FAILED` / `reset replacement did not become ready`, true | running, failed, failed, closed | terminal, 24-hour expiry | old artifact and target artifact identity retained; name/slot held | one bump |
 | Reset target identity fails and target group is absent | failed / `target_start` | `RESET_TARGET_IDENTITY_UNSAFE` / `reset replacement identity could not be verified`, true | running, failed, failed, closed | terminal, 24-hour expiry | old artifact and target identity retained | one bump |
 | Old artifact unlink fails after target readiness | failed / `old_artifact_cleanup` | `RESET_OLD_ARTIFACT_CLEANUP_FAILED` / `reset session cleanup did not complete`, true | running, failed, idle, closed | terminal, 24-hour expiry | target fence/artifact and old artifact cleanup record retained; name/slot held | one bump |
+| Terminate before launch process start | termination reservation terminalizes launch as `LAUNCH_CANCELLED_BY_TERMINATE`; callback is stale | `managed launch cancelled by termination`, false | terminated tombstone, then row removed on success | launch and termination operations terminal, 24-hour eligibility | no process exists; both immutable replay rows retained | one termination bump |
+| Terminate after launch process installation | termination reaps only persisted exact group; launch is already terminalized | `managed launch cancelled by termination`, false | terminated tombstone, then row removed on success | launch and termination operations terminal, 24-hour eligibility | exact group until reaped; both immutable replay rows retained | one termination bump |
 | Terminate abort fails, then exact reap and cleanup succeed | succeeded / `complete` | `TERMINATED` / `managed agent terminated`, false | row removed | terminal, 24-hour expiry | abort diagnostic only; all owned records removed | one removal bump |
-| Terminate group, artifact, mail-retirement, or agent cleanup fails with a safe remaining stage | failed / failing stage | `TERMINATION_CLEANUP_FAILED` / `managed agent termination cleanup failed`, true | terminated, failed, failed, closed | terminal, 24-hour expiry | tombstone, fence/artifact/direct-mail stage and name/slot retained | one bump |
+| Terminate group, artifact, mail-retirement, or agent cleanup fails with a safe remaining stage | failed / failing stage | `TERMINATION_CLEANUP_FAILED` / `managed agent termination cleanup failed`, true | terminated, failed, failed, closed | termination operation terminal; launch already terminal | tombstone, fence/artifact/direct-mail stage and name/slot retained | one bump |
 | Direct-mail retirement fails | failed / `direct_mail_retire` | `TERMINATION_CLEANUP_FAILED` / `managed agent termination cleanup failed`, true | terminated, failed, failed, closed | terminal, 24-hour expiry | tombstone and direct-mail owner state retained | one bump |
 | Reset source/target identity is mismatch or unknown | failed / relevant stage | `RESET_PROCESS_IDENTITY_UNSAFE` or `RESET_TARGET_CLEANUP_FAILED`, false | running, failed, failed, closed | terminal, 24-hour expiry | no signal; retained fence and artifacts | one bump |
 | Terminate identity is mismatch or unknown | failed / `terminate_reap` | `TERMINATION_CLEANUP_FAILED` / `managed agent termination cleanup failed`, false | terminated, failed, failed, closed | terminal, 24-hour expiry | no signal; tombstone/name/slot/fence retained | one bump |
@@ -588,11 +638,11 @@ The durable-write fault tests inject failure after source reaping, target start,
 | `pi-extensions/mecha-rpc/rpc-client.ts`, `index.ts` | Derive and pass the reserved root result ID without changing the application vocabulary or payload shape. |
 | `router-proxy/internal/managed/process.go` | `SessionLaunchMode` create/resume preconditions and no caller session path. |
 | `router-proxy/internal/managed/session_artifacts.go` | Discovery, containment, no-symlink unlink, artifact ledger, retry, and redaction. |
-| `router-proxy/internal/managed/supervisor.go` | Per-agent precedence, reset/terminate/Restart All orchestration, lifecycle recovery, stale-callback fencing. |
+| `router-proxy/internal/managed/supervisor.go` | Per-agent precedence, launch/terminate serialization, legacy bridge execution, reset/terminate/Restart All orchestration, pending-launch and lifecycle recovery, stale-callback fencing. |
 | `router-proxy/internal/store/migrations/027_managed_control_requests.sql` | The exact schema, rebuild, checks, indexes, and 022–026 preservation above. |
-| `router-proxy/internal/store/managed.go` | Immediate lifecycle/control/batch/artifact transactions, terminalization, recovery claim, retention, and delete order. |
+| `router-proxy/internal/store/managed.go` | Immediate lifecycle/control/batch/artifact/launch transactions, legacy bridge terminalization, recovery claim, graph retention, and delete order. |
 | `router-proxy/internal/store/delivery.go` | The accepted `RetireManagedRecipientSourceForTermination` boundary. |
-| focused store/manager/RPC/process/artifact/transport tests | Every check, full-or-null group, 65th/513th control capacity, retry schedule, race, recovery, and durable-write fault. |
+| focused store/manager/RPC/process/artifact/transport tests | Every check, full-or-null group, 65th/513th control capacity, retry schedule, graph retention order/rollback, six-stage legacy bridge result, launch/terminate race, complete-owned/absent and all-null/unpersisted/present/mismatch/unknown launch recovery, and durable-write fault. |
 | `router-proxy/internal/transport/managed_native_test.go` | Installed-Pi proof. |
 
 The native test uses a configured installed Pi, the fixed managed argv/extensions, an isolated session root, and no browser, credentials, UI, or model prompt. It proves:
@@ -607,4 +657,4 @@ The test records only public-safe assertions. It does not print raw session cont
 
 ## 10. Definition of done
 
-The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, pass the rebuild success and rollback tests in that section, and pass every named constraint, race, retention, exact-entry, process, artifact, and fault test. The source-fence proof must cover the direct Restart All parent's intentional all-null fence and every Restart All child's full fence. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
+The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, reject unmatched pre-027 pending launches without mutation, pass the rebuild success and rollback tests in that section, and pass every named constraint, graph-retention, six-stage legacy-bridge, launch/terminate race, recovery, exact-entry, process, artifact, and fault test. The source-fence proof must cover the direct Restart All parent's intentional all-null fence and every Restart All child's full fence. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
