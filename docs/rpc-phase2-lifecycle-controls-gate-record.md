@@ -1,6 +1,6 @@
 # Phase 2 lifecycle-control entry-gate record
 
-**Status:** pending. This is the durable record for the gates in `rpc-phase2-lifecycle-controls-spec.md` section 2. It does not accept a gate by itself.
+**Status:** all four entry gates are accepted. This is the durable record for the gates in `rpc-phase2-lifecycle-controls-spec.md` section 2. It does not authorize later lifecycle implementation by itself.
 
 ## Record schema
 
@@ -19,10 +19,74 @@ The Pi gate also names its source repository and commit, package version, built 
 
 | Gate | Status | Current evidence | Required acceptance evidence |
 | --- | --- | --- | --- |
-| G1 same-session replacement | Pending | Baseline `5d7972fd214d27b6162e51afc15b8eaef7668b97` contains the source path. | Clean commit, focused recovery artifact, and acceptance decision. |
-| G2 five-gate readiness | Pending | Baseline contains `readinessGate`. | Clean commit, focused five-gate artifact, and acceptance decision. |
+| G1 same-session replacement | Accepted | Entry below: `649e58007cd7a2e0e199e758dc50d78ffa66e005`. | Complete. |
+| G2 five-gate readiness | Accepted | Entry below: `6aea85b7db8648b47de7f0ef9ae481399d60ee47`. | Complete. |
 | G3 direct-mail termination boundary | Accepted | Entry below: `8b3a24765dd182e75b1fec63bd17e3eaeb2553b1`. | Complete. |
 | G4 Pi exact-entry and deterministic append | Accepted | Entry below: `f3407591c3cadc23c9a6c550cfa156e80f9083ef` and the locked Pi proof. | Complete. |
+
+### G1 same-session replacement — accepted 2026-09-08
+
+- Clean replacement source commit: `649e58007cd7a2e0e199e758dc50d78ffa66e005`, tree `d72322792daa58c71473ae97927f30088d1695d9`. The prior exact-head certification records a clean target before and after validation.
+
+  | Candidate path | SHA-256 at the accepted commit |
+  | --- | --- |
+  | `router-proxy/contract_manifest_test.go` | `bcbb35e4312af2bedece778bba85dea1447b2edecf00d5643dfb43b60306ac13` |
+  | `router-proxy/internal/managed/process.go` | `89bd4e2e1e1a4c877df34f998ea63407ad84a44933b028bf928bace023af1655` |
+  | `router-proxy/internal/managed/process_test.go` | `678fa4eae90e43ed0c3f7f385d976844cda50e028a9012b7b70a575af8166b30` |
+  | `router-proxy/internal/managed/rpc.go` | `934751ca8f04ec2ee38beef1ec60ac4f197584dbc19bf5e99484183bb894ac40` |
+  | `router-proxy/internal/managed/rpc_test.go` | `c3b4ccb09c84686f28bb624e2d07b47a8541b3430b2b2955999272574421c3dd` |
+  | `router-proxy/internal/managed/supervisor.go` | `8c4ddef8fb19bdfa4e05f6f09d9825475662612f3334f74f0b41718452dd9c27` |
+  | `router-proxy/internal/managed/supervisor_restart_execution_test.go` | `93a1d57c6234eb818fe35b540dc873e47d47369adb99d51bdcc80b471a6e4581` |
+  | `router-proxy/internal/managed/supervisor_test.go` | `466605f05aee4bc24adfd942e582b221a3ef7d4cda43a658435a1befe5550f0f` |
+  | `router-proxy/internal/store/managed.go` | `db55281796961b140aca6eeb4143486834b00f895e0d3241425cc4c8242562e0` |
+  | `router-proxy/internal/store/managed_test.go` | `bf39750507a5e690406373d3d34cd4fae7608b636a6a7d862e3dbaaadb1f3f8d` |
+  | `router-proxy/internal/store/migrations/025_managed_restart_execution.sql` | `0e97956fa73b5d455bfab533bfa66ede88600efacb1e1fc5674684f94c4bda79` |
+  | `router-proxy/internal/store/store_test.go` | `945625d8214221fd4851a3ef2f8441b342b8c16fffd8ba149216dd063778ba64` |
+  | `router-proxy/internal/transport/managed_http.go` | `94c9f89060b2be1d41074f0c224bdba1b71f980ed159875d6734962a55445c61` |
+  | `router-proxy/internal/transport/managed_http_test.go` | `06888502c5a70f61bb2529aef0a82e5dc0c1fb56c1c9877ecbcb5b022a488038` |
+  | `router-proxy/internal/transport/managed_native_test.go` | `fced266118a62cc7fc9c2aa27f41552ddba4c1b8d78b73bbd9b3b376ee7f237f` |
+  | `router-proxy/internal/transport/router.go` | `ed993ae680aa8f0629b25ad005b789363389f4efad5e8dec5f10a81c845e9b66` |
+  | `router/contract/manifest.json` | `933f7744ff142169bf9573651eda575f9fddc90d1e62daf45b2d4782594e616b` |
+
+- The retained installed-Pi artifact is `/tmp/mecha-rpc-acceptance/649e58007cd7a2e0e199e758dc50d78ffa66e005/phase2-controlled-replacement/23ab4bb83bbe704e213688c30818c98cc3e37cc2e7af771493dbc534efab781e/2f0cb1e27657ec95/controlled-replacement-v1.json`, SHA-256 `cf13ca241043e61c38558015941b63f271344b3be5e70cb9a7f4e4d948330c90`. It binds the 17-path candidate hash `23ab4bb83bbe704e213688c30818c98cc3e37cc2e7af771493dbc534efab781e` to the accepted commit/tree, Pi 0.85.0, and the checked pi-subagents commit `06ed583c720ed0fe6d6cc099b26eeb384795ea39`.
+- The proof command was:
+
+  ```sh
+  cd router-proxy && go test ./internal/transport -run '^TestManagedRouterWithInstalledPiCommitsReadinessSourcesAndReplacesRuntime$' -count=1 -v
+  ```
+
+  The exact-head certification records this passing installed-Pi replacement proof and the full replacement validation.
+- Current-code regression target: `bdca6b10541d7a281de78d9dd919e4c9f5b89cb5`, tree `2429642fded16e99436b5cfae2edfd2637c67d30`. The current focused managed suite passed `TestRestartExecution`, settlement interruption, target readiness, close/exit arbitration, recovery, stale-binding cleanup, and failure redaction. Later direct-mail work changed shared files, so this fresh run verifies the current behavior; it does not relabel it as the accepted commit's byte-identical source.
+- Acceptance decision: accepted for G1 on the current direction. This accepts the controlled same-session replacement prerequisite only.
+
+### G2 five-gate readiness — accepted 2026-09-08
+
+- Clean readiness source commit: `6aea85b7db8648b47de7f0ef9ae481399d60ee47`, tree `6f99b47fdad740b769d0d98df331d33545010a5d`. The prior exact-head certification records a clean target before and after validation.
+
+  | Candidate path | SHA-256 at the accepted commit |
+  | --- | --- |
+  | `RPC_IMPLEMENTATION_PLAN.html` | `06e01cda1aa01125371ab3a9f350a9b60ca683340ae82b3ed8a7874a7a4e1bce` |
+  | `router-proxy/internal/managed/readiness_canonical.go` | `c6248c73281b9e6c1395d55fd7a6470a562733c3ece5c09686e8a58bd55b203e` |
+  | `router-proxy/internal/managed/readiness_canonical_test.go` | `05cc86f656c3f3a6e7e1560024d26246475d102a46fc789a6c746f81fe0108a3` |
+  | `router-proxy/internal/managed/rpc.go` | `6605550e77eafd27b630dafe0f65f9f439c6a5784498cc09392f56cf8bdb3a5d` |
+  | `router-proxy/internal/managed/rpc_test.go` | `3a7b07e53fd258827163c0f0c5f751b12621f2d33dcb6628590468d499df4d54` |
+  | `router-proxy/internal/managed/supervisor.go` | `fbaae0d7cc4d9806ec74b71c62ff43a8962781d68f9956332e763914915c8d5c` |
+  | `router-proxy/internal/managed/supervisor_launch_test.go` | `f14ec774e9cfa26646f64d53d90fbdf5297a8a0dbb1fe752b7525ea5126ab82d` |
+  | `router-proxy/internal/managed/supervisor_test.go` | `72ab466f650f4bdc45c25872f64ffc788d7387d8712813b500676997111ba0b0` |
+  | `router-proxy/internal/store/managed.go` | `3ad554ed38422256b33328318bbe4a17951136cac56345003935f3e76a21d2b4` |
+  | `router-proxy/internal/store/managed_readiness_sources_test.go` | `3925e245624262d202938bf00ecce87259654bcba9803a6c2d3624e79c559a3f` |
+  | `router-proxy/internal/store/managed_test.go` | `34c9304b37d1bc279fa963297acfbad4732769ad389b2acb143b4afded2ff4fd` |
+  | `router-proxy/internal/store/migrations/024_managed_readiness_sources.sql` | `dafecfad2e568f8230ea758497598da89cd97ec788dc11a21ef4fd5caf0d9c55` |
+  | `router-proxy/internal/store/store_test.go` | `f5529dcd22d7c9b941d846687133707c4c640e7d16447fc4def4fa6f609b12d6` |
+  | `router-proxy/internal/transport/managed_http_test.go` | `8113ed729940591c19d87fd026ffa03d03cd860d6f3f58dce18969c1d286e5ce` |
+  | `router-proxy/internal/transport/managed_launch_http_test.go` | `d2137d4d17e80af5c47a275b722b35314c978c13272c5db75d0c471f6ccc7577` |
+  | `router-proxy/internal/transport/managed_native_test.go` | `e95fb2fe04ac3144dbfbfca3118a9ec621a85750e58f8d13c021ba344ee19db0` |
+  | `tests/mecha_rpc_manifest.test.ts` | `a5fc48b57afd3b00e2e916e4b2b7ef2829063f4eb9765db3eb93179f73f6c549` |
+
+- The retained installed-Pi artifact is `/tmp/mecha-rpc-acceptance/629c0c66301b258ad2cb372825e47a8decaf73d7/phase2-readiness-sources/89f9b669bfb594d19eb088af23741e5aa214a39feccb951a4c1620f551222bc9/c6405c36b4cb15bc/readiness-sources-v1.json`, SHA-256 `df5dcb9aa9ca689ac2ef9f66ec27555277b5621816856723ea7ad567b2a7df28`. It binds the 17-path candidate hash `89f9b669bfb594d19eb088af23741e5aa214a39feccb951a4c1620f551222bc9` to the accepted commit/tree, Pi 0.85.0, and the checked pi-subagents commit `06ed583c720ed0fe6d6cc099b26eeb384795ea39`.
+- The exact-head native proof was `TestManagedRouterWithInstalledPiCommitsReadinessSources`. It records the five gates: matching session identity, exact command inventory, bootstrap acceptance receipt, exact active-tool set, and the policy plus authoritative child-snapshot source confirmations. The certification records its passing command as part of `go test ./... -count=1`.
+- Current-code regression target: `bdca6b10541d7a281de78d9dd919e4c9f5b89cb5`, tree `2429642fded16e99436b5cfae2edfd2637c67d30`. The current focused managed suite passed `TestManagerMarksReadyOnlyAfterReadinessSources`, all five failure boundaries in `TestManagerSourceReadinessFailuresNeverAdmitTheInitialInstruction`, `TestPhase1ReadinessGatesRemainUnchanged`, and `TestReadinessGateRejectsExtraCommandOrActiveTool`. Later replacement and direct-mail work changed shared files, so this fresh run verifies the current behavior; it does not relabel it as the accepted commit's byte-identical source.
+- Acceptance decision: accepted for G2 on the current direction. This accepts the five-gate readiness prerequisite only.
 
 ### G3 direct-mail termination boundary — accepted 2026-09-08
 
@@ -87,4 +151,4 @@ The Pi gate also names its source repository and commit, package version, built 
   Read-back records the locked source/install, `{"entry":null}` before append, then one hidden `mecha.control.result.v1` entry with deterministic ID `mcr1_123e4567e89b42d3a456426614174050`, preserved after resume. The test also proves first append acceptance, exact duplicate `already_present`, changed collision rejection, and one `message_end` for the explicit entry ID.
 - Acceptance decision: accepted for G4 on the current direction. This accepts only the private exact-entry and explicit-ID append prerequisite.
 
-G1 and G2 remain pending. No migration 027, root handler, lifecycle route, P3/P4 work, or Robot Review is accepted by this record.
+No migration 027, root handler, lifecycle route, P3/P4 work, or Robot Review is accepted by this record.
