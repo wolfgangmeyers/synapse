@@ -541,6 +541,9 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 		if err != nil {
 			return err
 		}
+		if _, err = s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_diagnostics WHERE observed_at < ?`, formatTimestamp(now.Add(-30*24*time.Hour))); err != nil {
+			return err
+		}
 		// Failed managed rows are durable audit/name reservations. They are
 		// intentionally not part of generic retention; a later terminate or
 		// restart must not make a failed name silently reusable.
@@ -594,6 +597,9 @@ func (s *Store) pruneExpiredQueuedMessages(ctx context.Context, now string) (int
 		return 0, err
 	}
 	for _, id := range ids {
+		if err := s.expireManagedDirectForMessageTx(ctx, id, now); err != nil {
+			return 0, err
+		}
 		if err := s.completeLinkedReminder(ctx, id); err != nil {
 			return 0, err
 		}

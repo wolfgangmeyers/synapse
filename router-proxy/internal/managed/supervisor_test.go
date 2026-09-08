@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -93,6 +94,112 @@ type admissionRPCFactory struct{ active []string }
 
 func (f admissionRPCFactory) Open(_ context.Context, process Process) (RPC, error) {
 	return &launchRPC{session: process.(*admissionProcess).session, active: f.active}, nil
+}
+
+type recoveryDirectRPC struct {
+	launchRPC
+	recovery      DirectMailboxRecovery
+	recoveryCalls int
+	promptCalls   int
+}
+
+func (r *recoveryDirectRPC) PrepareManagedMailbox(context.Context) (string, error) {
+	return "recovery-cursor", nil
+}
+func (r *recoveryDirectRPC) PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
+	r.promptCalls++
+	events := make(chan DirectMailboxEvent)
+	close(events)
+	return events, nil
+}
+func (r *recoveryDirectRPC) RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
+	r.recoveryCalls++
+	return r.recovery, nil
+}
+
+type recoveryDirectFactory struct {
+	process *launchProcess
+	rpc     *recoveryDirectRPC
+}
+
+func (f recoveryDirectFactory) Start(_ context.Context, spec CommandSpec) (Process, error) {
+	f.rpc.session = spec.SessionID
+	return f.process, nil
+}
+
+type recoveryDirectRPCFactory struct{ rpc *recoveryDirectRPC }
+
+func (f recoveryDirectRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
+
+func TestManagedDirectRecoveryWakeup(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	process := &launchProcess{identity: ProcessIdentity{PID: 991, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
+	rpc := &recoveryDirectRPC{recovery: DirectMailboxRecovery{Receipt: &DirectMailboxReceipt{EntryIdentity: "persisted-append"}}}
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		ProcessFactory: recoveryDirectFactory{process: process, rpc: rpc}, RPCFactory: recoveryDirectRPCFactory{rpc: rpc},
+		CatalogSource:              CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	// Launch schedules direct recovery asynchronously. Keep that lane closed
+	// until the crash-boundary attempt exists, so the normal empty-recovery
+	// dispatcher cannot claim the test row before it is marked prompted.
+	lane := manager.laneFor("recovery-agent")
+	lane.serial.Lock()
+	laneLocked := true
+	defer func() {
+		if laneLocked {
+			lane.serial.Unlock()
+		}
+	}()
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "recovery-agent", Cwd: root, RequestID: "recovery-launch"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "recovery-agent")
+		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+	agent, err := durable.ManagedAgent(ctx, "recovery-agent")
+	require.NoError(t, err)
+	fence := store.ManagedRuntimeFence{AgentID: agent.AgentID, PiSessionID: agent.PiSessionID, SessionEpoch: agent.SessionEpoch, ProcessPID: agent.ProcessPID, ProcessStartMarker: agent.ProcessStartMarker, ProcessIncarnation: agent.ProcessIncarnation, RuntimeGeneration: agent.RuntimeGeneration, ManifestRevision: agent.ManifestRevision, ManifestHash: agent.ManifestHash}
+	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "recovery-direct", From: "sender", To: agent.Name, Body: "persisted body", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(ctx, "recovery-direct")
+	require.NoError(t, err)
+	attempt, err := durable.AllocateManagedDirectAttempt(ctx, fence)
+	require.NoError(t, err)
+	require.NotNil(t, attempt)
+	require.NoError(t, durable.MarkManagedDirectPrompted(ctx, *attempt, "recovery-cursor"))
+	recoveryDone := make(chan error, 1)
+	go func() { recoveryDone <- manager.RecoverManagedDirectAttempts(ctx) }()
+	lane.serial.Unlock()
+	laneLocked = false
+	select {
+	case recoveryErr := <-recoveryDone:
+		require.NoError(t, recoveryErr)
+	case <-time.After(time.Second):
+		t.Fatal("managed direct recovery did not finish")
+	}
+	require.Eventually(t, func() bool {
+		message, readErr := durable.MessageFor(ctx, "recovery-direct")
+		return readErr == nil && message == nil
+	}, time.Second, time.Millisecond)
+	require.Equal(t, 1, rpc.recoveryCalls)
+	require.Zero(t, rpc.promptCalls, "a recovered append must not send a second command")
+	require.NoError(t, manager.Close(context.Background()))
+}
+
+func TestManagedDirectOfferUsesPrivateRPCCapability(t *testing.T) {
+	// Direct delivery is deliberately a private capability, not another method
+	// on the launch/readiness RPC interface used by existing manager fakes.
+	var direct DirectMailboxRPC = &rpcClient{}
+	require.NotNil(t, direct)
 }
 
 func TestManagedProcessLimitRejectsThirtyThirdConcurrentStart(t *testing.T) {

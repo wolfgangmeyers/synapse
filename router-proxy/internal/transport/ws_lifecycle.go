@@ -434,6 +434,8 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 }
 
 func (r *Router) sessionClosedSerialized(s *session) {
+	// The directory owns tmux source lifetime. A socket/lease replacement only
+	// changes live delivery; it must not retire s.tmuxSourceID.
 	sharedPaused := s.isPaused()
 	var promoted *session
 	r.mu.Lock()

@@ -42,6 +42,8 @@ func (r *Router) beginDeliveryOffer(ctx context.Context) (context.Context, func(
 	return offerCtx, finishStore, finishOffer, true
 }
 
+// offerAgent is the retained tmux offer path. Managed direct delivery enters
+// through Router.afterEnqueue and its manager-owned lane instead.
 func (r *Router) offerAgent(agentID string) {
 	r.ownershipMu.Lock()
 	registering := r.ownership[agentID] != nil

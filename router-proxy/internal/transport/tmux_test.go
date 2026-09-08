@@ -17,6 +17,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTmuxSourceRejectsManagedNameCollision(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	owner, err := durable.ReserveTmuxRecipientSource(context.Background(), "collision", "tmux-source-v1:collision")
+	require.NoError(t, err)
+	require.NoError(t, durable.ActivateTmuxRecipientSource(context.Background(), "collision", owner))
+	err = durable.ReserveManagedLaunch(context.Background(), store.ManagedAgentRecord{AgentID: "collision-agent", Name: "collision", SlotHeld: true, Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}, store.ManagedOperation{OperationID: "collision-op", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "collision-op", CanonicalBodyHash: "body", State: "pending", ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)})
+	var conflict *store.RecipientSourceConflictError
+	require.ErrorAs(t, err, &conflict)
+}
+
 type recordedTmux struct {
 	mu                  sync.Mutex
 	sessions            []string

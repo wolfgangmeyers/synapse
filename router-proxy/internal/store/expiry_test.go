@@ -32,6 +32,16 @@ func assertTimedOutAttempt(t *testing.T, store *Store, wantMessageState string) 
 	require.Equal(t, wantMessageState, messageState)
 }
 
+func TestManagedDirectDiagnosticRetention(t *testing.T) {
+	durable, fence := readinessSourceFixture(t)
+	for index := 0; index < 201; index++ {
+		require.NoError(t, durable.RecordManagedDirectDiagnostic(context.Background(), fence.AgentID, "", 0, "stale_receipt", ""))
+	}
+	var count int
+	require.NoError(t, durable.db.QueryRow(`SELECT COUNT(*) FROM managed_direct_delivery_diagnostics WHERE agent_id = ?`, fence.AgentID).Scan(&count))
+	require.Equal(t, 200, count)
+}
+
 func TestRecordInjectionRequestedExpiresWithTimeoutTransitionBeforeError(t *testing.T) {
 	store, clock, request := expiredReceiptFixture(t)
 	require.NoError(t, clock.Advance(2*time.Second))

@@ -42,6 +42,26 @@ type RestartTurnSettler interface {
 	SettlePreparedRestartTurn(context.Context, store.ManagedRuntimeFence) error
 }
 
+// DirectMailboxRPC is private to managed delivery. It deliberately does not
+// widen RPC, so launch and readiness callers cannot issue router mail.
+type DirectMailboxRPC interface {
+	PrepareManagedMailbox(context.Context) (string, error)
+	PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error)
+	RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error)
+}
+
+type DirectMailboxReceipt struct{ EntryIdentity string }
+
+type DirectMailboxEvent struct {
+	Receipt        *DirectMailboxReceipt
+	DiagnosticCode string
+}
+
+type DirectMailboxRecovery struct {
+	Receipt     *DirectMailboxReceipt
+	Diagnostics []string
+}
+
 type RPCFactory interface {
 	Open(context.Context, Process) (RPC, error)
 }
@@ -60,6 +80,19 @@ type restartSettlementToken struct {
 	fence     store.ManagedRuntimeFence
 	watermark uint64
 	consumed  bool
+}
+type directMailboxToken struct {
+	messageID   string
+	generation  string
+	epoch       int64
+	watermark   uint64
+	receiptSeen bool
+	result      chan directMailboxResult
+}
+type directMailboxResult struct {
+	receipt        *DirectMailboxReceipt
+	diagnosticCode string
+	err            error
 }
 type rpcResponse struct {
 	value map[string]any
@@ -87,6 +120,7 @@ type rpcClient struct {
 	policyWatermark    *uint64
 	snapshotWatermark  *uint64
 	settlementToken    *restartSettlementToken
+	directMailbox      *directMailboxToken
 
 	closeOnce sync.Once
 	closeErr  error
@@ -135,6 +169,14 @@ func (c *rpcClient) readLoop() {
 		terminal := c.terminal != nil
 		if !terminal {
 			c.eventSequence++
+			if token := c.directMailbox; token != nil {
+				if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
+					c.sendDirectMailboxResultLocked(token, result)
+					c.signalLocked()
+					c.mu.Unlock()
+					continue
+				}
+			}
 			if len(c.backlog) == 128 {
 				c.terminalizeLocked(ErrReadinessBacklogFull)
 				terminal = true
@@ -167,6 +209,10 @@ func (c *rpcClient) terminalizeLocked(err error) {
 		return
 	}
 	c.terminal = err
+	if token := c.directMailbox; token != nil {
+		c.directMailbox = nil
+		c.sendDirectMailboxResultLocked(token, directMailboxResult{err: err})
+	}
 	for id, ch := range c.pending {
 		delete(c.pending, id)
 		ch <- rpcResponse{err: err}
@@ -599,6 +645,228 @@ func (c *rpcClient) GetActiveTools(_ context.Context) ([]string, error) {
 func (c *rpcClient) Prompt(ctx context.Context, message string) error {
 	_, err := c.call(ctx, "prompt", map[string]any{"message": message})
 	return err
+}
+
+// PrepareManagedMailbox records a persisted session cursor before the fixed
+// command is written. Recovery uses that cursor with Pi's documented
+// get_entries `since` boundary and never falls back to a whole-session scan.
+func (c *rpcClient) PrepareManagedMailbox(ctx context.Context) (string, error) {
+	value, err := c.call(ctx, "get_entries", nil)
+	if err != nil {
+		return "", err
+	}
+	data := unwrap(value)
+	if _, ok := data["entries"].([]any); !ok {
+		return "", errors.New("Pi get_entries response has invalid entries")
+	}
+	cursor, ok := data["leafId"].(string)
+	if !ok || cursor == "" {
+		return "", errors.New("Pi get_entries response has no recovery cursor")
+	}
+	return cursor, nil
+}
+
+// PromptManagedMailbox installs its receipt matcher while holding the same
+// mutex that serializes the JSONL write. A prompt response is deliberately not
+// a receipt; it only reports a submission failure to the retained matcher.
+func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
+	if attempt.MessageID == "" || attempt.Message.Body == "" || attempt.Fence.ManifestHash == "" || attempt.SessionEntryWatermark == "" {
+		return nil, errors.New("managed direct attempt is incomplete")
+	}
+	envelope := map[string]any{
+		"protocol": "mecha.mailbox-deliver/v1", "message_id": attempt.MessageID,
+		"content": attempt.Message.Body, "runtime_generation": attempt.Fence.RuntimeGeneration,
+		"session_epoch": attempt.Fence.SessionEpoch, "manifest_sha256": attempt.Fence.ManifestHash,
+	}
+	encoded, err := encodeRPCEnvelope(envelope)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	if c.terminal != nil {
+		err := c.terminal
+		c.mu.Unlock()
+		return nil, err
+	}
+	if c.directMailbox != nil {
+		c.mu.Unlock()
+		return nil, errors.New("managed direct mailbox matcher is already armed")
+	}
+	c.nextID++
+	id := fmt.Sprintf("managed-%d", c.nextID)
+	payload, err := json.Marshal(map[string]any{"id": id, "type": "prompt", "message": "/mecha-mailbox-deliver-v1 " + encoded})
+	if err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	response := make(chan rpcResponse, 1)
+	c.pending[id] = response
+	token := &directMailboxToken{messageID: attempt.MessageID, generation: attempt.Fence.RuntimeGeneration, epoch: attempt.Fence.SessionEpoch, watermark: c.eventSequence, result: make(chan directMailboxResult, 128)}
+	c.directMailbox = token
+	c.noteStaleDirectMailboxEventsLocked(token)
+	if _, err = fmt.Fprintf(c.stdin, "%s\n", payload); err != nil {
+		delete(c.pending, id)
+		c.directMailbox = nil
+		c.terminalizeLocked(err)
+		c.mu.Unlock()
+		return nil, err
+	}
+	c.mu.Unlock()
+	out := make(chan DirectMailboxEvent, 128)
+	go func() {
+		defer close(out)
+		defer c.releaseDirectMailboxToken(id, token)
+		responseCh := response
+		for {
+			select {
+			case value := <-token.result:
+				if value.err != nil {
+					return
+				}
+				event := DirectMailboxEvent{Receipt: value.receipt, DiagnosticCode: value.diagnosticCode}
+				if event.Receipt != nil || event.DiagnosticCode != "" {
+					out <- event
+				}
+			case responseValue := <-responseCh:
+				if responseValue.err != nil {
+					return
+				}
+				// A successful prompt response is intentionally ignored. Wait for the
+				// persisted append marker or a terminal stream condition.
+				responseCh = nil
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (c *rpcClient) releaseDirectMailboxToken(id string, token *directMailboxToken) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.directMailbox == token {
+		c.directMailbox = nil
+	}
+	delete(c.pending, id)
+}
+
+func (c *rpcClient) sendDirectMailboxResultLocked(token *directMailboxToken, result directMailboxResult) {
+	select {
+	case token.result <- result:
+	default:
+	}
+}
+
+func (c *rpcClient) noteStaleDirectMailboxEventsLocked(token *directMailboxToken) {
+	for _, item := range c.backlog {
+		if receiptCustomType(item.value) == "mecha.mailbox.appended.v1" {
+			c.sendDirectMailboxResultLocked(token, directMailboxResult{diagnosticCode: "stale_receipt"})
+		}
+	}
+}
+
+func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *directMailboxToken) (directMailboxResult, bool) {
+	if kind, _ := event["type"].(string); kind == "message_start" {
+		return directMailboxResult{}, false
+	}
+	if kind, _ := event["type"].(string); kind != "message_end" {
+		return directMailboxResult{diagnosticCode: "unrelated_receipt"}, true
+	}
+	if receiptCustomType(event) != "mecha.mailbox.appended.v1" {
+		return directMailboxResult{diagnosticCode: "wrong_custom_type"}, true
+	}
+	details := receiptDetails(event)
+	if details == nil {
+		return directMailboxResult{diagnosticCode: "malformed_receipt"}, true
+	}
+	if details["protocol"] != "mecha.mailbox/v1" || details["message_id"] != token.messageID || details["runtime_generation"] != token.generation || !sameEpoch(details["session_epoch"], token.epoch) {
+		return directMailboxResult{diagnosticCode: "mismatched_receipt"}, true
+	}
+	if c.eventSequence <= token.watermark {
+		return directMailboxResult{diagnosticCode: "stale_receipt"}, true
+	}
+	if token.receiptSeen {
+		return directMailboxResult{diagnosticCode: "duplicate_receipt"}, true
+	}
+	token.receiptSeen = true
+	identity := directMailboxEntryIdentity(event, c.eventSequence)
+	return directMailboxResult{receipt: &DirectMailboxReceipt{EntryIdentity: identity}}, true
+}
+
+func directMailboxEntryIdentity(event map[string]any, sequence uint64) string {
+	for _, candidate := range []map[string]any{event, nestedMessage(event)} {
+		for _, key := range []string{"entry_id", "id"} {
+			if value, ok := candidate[key].(string); ok && value != "" {
+				return value
+			}
+		}
+	}
+	return fmt.Sprintf("event-%d", sequence)
+}
+
+func nestedMessage(event map[string]any) map[string]any {
+	message, _ := event["message"].(map[string]any)
+	return message
+}
+
+// RecoverManagedMailbox accepts a persisted append only when the recorded
+// get_entries cursor yields one exact hidden custom-message entry. It never
+// scans from the beginning of a session and returns metadata-only diagnostics.
+func (c *rpcClient) RecoverManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
+	if attempt.SessionEntryWatermark == "" {
+		return DirectMailboxRecovery{Diagnostics: []string{"missing_recovery_cursor"}}, nil
+	}
+	value, err := c.call(ctx, "get_entries", map[string]any{"since": attempt.SessionEntryWatermark})
+	if err != nil {
+		return DirectMailboxRecovery{}, err
+	}
+	data := unwrap(value)
+	entries, ok := data["entries"].([]any)
+	if !ok {
+		return DirectMailboxRecovery{}, errors.New("Pi get_entries response has invalid entries")
+	}
+	result := DirectMailboxRecovery{}
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		customType, _ := entry["customType"].(string)
+		if customType == "" {
+			continue
+		}
+		if customType != "mecha.mailbox.appended.v1" {
+			result.Diagnostics = append(result.Diagnostics, "wrong_custom_type")
+			continue
+		}
+		identity, diagnostic := exactPersistedMailboxReceipt(entry, attempt)
+		if diagnostic != "" {
+			result.Diagnostics = append(result.Diagnostics, diagnostic)
+			continue
+		}
+		if result.Receipt == nil {
+			result.Receipt = &DirectMailboxReceipt{EntryIdentity: identity}
+		} else {
+			result.Diagnostics = append(result.Diagnostics, "duplicate_receipt")
+		}
+	}
+	return result, nil
+}
+
+func exactPersistedMailboxReceipt(entry map[string]any, attempt store.ManagedDirectAttempt) (string, string) {
+	identity, _ := entry["id"].(string)
+	entryType, typeOK := entry["type"].(string)
+	content, contentOK := entry["content"].(string)
+	display, displayOK := entry["display"].(bool)
+	details, detailsOK := entry["details"].(map[string]any)
+	if identity == "" || !typeOK || entryType != "custom_message" || !contentOK || !displayOK || display || !detailsOK || len(details) != 4 {
+		return "", "malformed_receipt"
+	}
+	if content != attempt.Message.Body || details["protocol"] != "mecha.mailbox/v1" || details["message_id"] != attempt.MessageID || details["runtime_generation"] != attempt.Fence.RuntimeGeneration || !sameEpoch(details["session_epoch"], attempt.Fence.SessionEpoch) {
+		return "", "mismatched_receipt"
+	}
+	return identity, ""
 }
 func (c *rpcClient) Close() error {
 	c.closeOnce.Do(func() {
