@@ -3,6 +3,7 @@ package managed
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +89,37 @@ func TestManagedDirectReceiptRequiresMatchingAppendMarker(t *testing.T) {
 		require.Equal(t, "persisted-entry", event.Receipt.EntryIdentity)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for direct mailbox receipt")
+	}
+}
+
+func TestManagedDirectMailboxAllowsAnEmptyBody(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	direct := client.(DirectMailboxRPC)
+	requests := readJSONLRequests(stdinReader)
+	attempt := directMailboxAttempt("empty-message")
+	attempt.Message.Body = ""
+	events, err := direct.PromptManagedMailbox(context.Background(), attempt)
+	require.NoError(t, err)
+	request := requireRequest(t, requests)
+	command := request["message"].(string)
+	encoded := strings.TrimPrefix(command, "/mecha-mailbox-deliver-v1 ")
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	require.NoError(t, err)
+	var envelope map[string]any
+	require.NoError(t, json.Unmarshal(payload, &envelope))
+	require.Equal(t, "", envelope["content"])
+
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "empty-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "empty-message", "runtime_generation": "generation", "session_epoch": 2}}}))
+	select {
+	case event := <-events:
+		require.NotNil(t, event.Receipt)
+		require.Equal(t, "empty-entry", event.Receipt.EntryIdentity)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for empty direct mailbox receipt")
 	}
 }
 

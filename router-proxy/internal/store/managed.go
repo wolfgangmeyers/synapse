@@ -1488,6 +1488,9 @@ func (s *Store) MarkManagedReadyFromSources(ctx context.Context, fence ManagedRu
 			WHERE source_kind = 'managed' AND owner_identity = ? AND state = 'reserved'`, now, fence.AgentID); err != nil {
 			return err
 		}
+		if err := s.reconcileMessageTargetsTx(ctx); err != nil {
+			return err
+		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})

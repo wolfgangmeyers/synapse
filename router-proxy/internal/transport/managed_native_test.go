@@ -239,11 +239,19 @@ func TestListenRecoversManagedRestartTransitionsBeforeBind(t *testing.T) {
 	require.Nil(t, router.listener, "recovery failure must happen before a listener is reachable")
 }
 
-func TestManagedDirectMailboxDelivery(t *testing.T) { runManagedDirectMailboxNativeProof(t, false) }
+func TestManagedDirectMailboxDelivery(t *testing.T) {
+	runManagedDirectMailboxNativeProof(t, false, false)
+}
 
-func TestManagedDirectMailboxRecovery(t *testing.T) { runManagedDirectMailboxNativeProof(t, true) }
+func TestManagedDirectMailboxEmptyBody(t *testing.T) {
+	runManagedDirectMailboxNativeProof(t, false, true)
+}
 
-func runManagedDirectMailboxNativeProof(t *testing.T, recovery bool) {
+func TestManagedDirectMailboxRecovery(t *testing.T) {
+	runManagedDirectMailboxNativeProof(t, true, false)
+}
+
+func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) {
 	pi, err := exec.LookPath("pi")
 	if err != nil {
 		t.Skip("installed Pi is required for the native managed-router harness")
@@ -362,6 +370,9 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery bool) {
 	require.True(t, agent.AcceptingPrompts)
 	require.False(t, agent.InitialInstructionSent, "no model turn occurs before final readiness")
 	messageID, body, proof := "native-direct-message", "native direct payload", "delivery"
+	if emptyBody {
+		messageID, body, proof = "native-empty-message", "", "empty-body"
+	}
 	if recovery {
 		messageID, body, proof = "native-recovery-message", "native recovery payload", "recovery"
 	}

@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,6 +131,173 @@ func (f recoveryDirectFactory) Start(_ context.Context, spec CommandSpec) (Proce
 type recoveryDirectRPCFactory struct{ rpc *recoveryDirectRPC }
 
 func (f recoveryDirectRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
+
+type failingDirectRPC struct {
+	launchRPC
+	directMu       sync.Mutex
+	directPrompts  int
+	directPrompted chan struct{}
+	directOnce     sync.Once
+}
+
+func (r *failingDirectRPC) PrepareManagedMailbox(context.Context) (string, error) {
+	return "direct-cursor", nil
+}
+func (r *failingDirectRPC) PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
+	r.directMu.Lock()
+	r.directPrompts++
+	r.directMu.Unlock()
+	if r.directPrompted != nil {
+		r.directOnce.Do(func() { close(r.directPrompted) })
+	}
+	return nil, errors.New("scripted direct prompt failure")
+}
+func (r *failingDirectRPC) RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
+	return DirectMailboxRecovery{}, nil
+}
+func (r *failingDirectRPC) directPromptCount() int {
+	r.directMu.Lock()
+	defer r.directMu.Unlock()
+	return r.directPrompts
+}
+
+type failingDirectFactory struct {
+	process *launchProcess
+	rpc     *failingDirectRPC
+}
+
+func (f failingDirectFactory) Start(_ context.Context, spec CommandSpec) (Process, error) {
+	f.rpc.session = spec.SessionID
+	return f.process, nil
+}
+
+type failingDirectRPCFactory struct{ rpc *failingDirectRPC }
+
+func (f failingDirectRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
+
+func readyFailingDirectManager(t *testing.T) (*Manager, *store.Store, string, *failingDirectRPC) {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, path, store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	process := &launchProcess{identity: ProcessIdentity{PID: 993, StartMarker: "direct-start", Incarnation: "direct-incarnation"}, stopped: make(chan struct{})}
+	rpc := &failingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, directPrompted: make(chan struct{})}
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		ProcessFactory: failingDirectFactory{process: process, rpc: rpc}, RPCFactory: failingDirectRPCFactory{rpc: rpc},
+		CatalogSource:              CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "direct-agent", Cwd: root, RequestID: "direct-launch"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "direct-agent")
+		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+	// Launch schedules a one-time empty direct-attempt recovery after readiness.
+	// Let it release the Store writer before this fixture installs a SQLite fault
+	// trigger through the independent test connection below.
+	time.Sleep(25 * time.Millisecond)
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	return manager, durable, path, rpc
+}
+
+func TestManagedDirectPromptStatePersistenceFailureReleasesAttempt(t *testing.T) {
+	manager, durable, path, rpc := readyFailingDirectManager(t)
+	_, err := durable.Enqueue(context.Background(), protocol.Envelope{ID: "prompt-state-failure", From: "sender", To: "direct-agent", Body: "body", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(context.Background(), "prompt-state-failure")
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer db.Close()
+	require.Eventually(t, func() bool {
+		_, createErr := db.Exec(`CREATE TRIGGER reject_direct_prompt_state BEFORE UPDATE OF state ON managed_direct_delivery_attempts
+			WHEN NEW.state = 'direct_prompted' BEGIN SELECT RAISE(FAIL, 'prompt state write failed'); END`)
+		return createErr == nil
+	}, time.Second, 5*time.Millisecond)
+	manager.OfferDirect("direct-agent")
+
+	require.Eventually(t, func() bool {
+		attempt, readErr := durable.ManagedDirectAttempt(context.Background(), "prompt-state-failure", 1)
+		return readErr == nil && attempt.State == "released" && attempt.FailureCode == "prompt_state_persistence_failed"
+	}, time.Second, time.Millisecond)
+	require.Zero(t, rpc.directPromptCount(), "a failed prompted-state write must not reach Pi")
+}
+
+func TestManagedDirectReleasePersistenceFailureRetriesWithoutStranding(t *testing.T) {
+	manager, durable, path, rpc := readyFailingDirectManager(t)
+	_, err := durable.Enqueue(context.Background(), protocol.Envelope{ID: "release-persistence-failure", From: "sender", To: "direct-agent", Body: "body", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(context.Background(), "release-persistence-failure")
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer db.Close()
+	require.Eventually(t, func() bool {
+		_, createErr := db.Exec(`CREATE TRIGGER reject_direct_release BEFORE UPDATE OF state ON managed_direct_delivery_attempts
+			WHEN NEW.state = 'released' BEGIN SELECT RAISE(FAIL, 'release write failed'); END`)
+		return createErr == nil
+	}, time.Second, 5*time.Millisecond)
+	manager.OfferDirect("direct-agent")
+	select {
+	case <-rpc.directPrompted:
+	case <-time.After(time.Second):
+		t.Fatal("direct prompt did not reach its injected failure")
+	}
+	require.Eventually(t, func() bool {
+		var count int
+		err := db.QueryRow(`SELECT COUNT(*) FROM managed_direct_delivery_diagnostics WHERE code = 'release_persistence_failed'`).Scan(&count)
+		return err == nil && count > 0
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		_, dropErr := db.Exec(`DROP TRIGGER reject_direct_release`)
+		return dropErr == nil
+	}, 2*time.Second, 5*time.Millisecond, "release retries must not permanently lock persistence recovery")
+
+	require.Eventually(t, func() bool {
+		attempt, readErr := durable.ManagedDirectAttempt(context.Background(), "release-persistence-failure", 1)
+		return readErr == nil && attempt.State == "released" && attempt.FailureCode == "prompt_failed"
+	}, 2*time.Second, time.Millisecond)
+}
+
+func TestOfferDirectAndCloseShareTaskAdmission(t *testing.T) {
+	manager, _, _, _ := readyFailingDirectManager(t)
+	start := make(chan struct{})
+	var offers sync.WaitGroup
+	for index := 0; index < 64; index++ {
+		offers.Add(1)
+		go func() {
+			defer offers.Done()
+			<-start
+			for attempt := 0; attempt < 16; attempt++ {
+				manager.OfferDirect("direct-agent")
+			}
+		}()
+	}
+	closeDone := make(chan error, 1)
+	go func() {
+		<-start
+		closeDone <- manager.Close(context.Background())
+	}()
+	close(start)
+	offers.Wait()
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager close did not wait for admitted offers")
+	}
+	manager.OfferDirect("direct-agent")
+}
 
 func TestManagedDirectRecoveryWakeup(t *testing.T) {
 	ctx := context.Background()

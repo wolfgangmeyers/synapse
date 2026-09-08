@@ -670,7 +670,7 @@ func (c *rpcClient) PrepareManagedMailbox(ctx context.Context) (string, error) {
 // mutex that serializes the JSONL write. A prompt response is deliberately not
 // a receipt; it only reports a submission failure to the retained matcher.
 func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
-	if attempt.MessageID == "" || attempt.Message.Body == "" || attempt.Fence.ManifestHash == "" || attempt.SessionEntryWatermark == "" {
+	if attempt.MessageID == "" || attempt.Fence.ManifestHash == "" || attempt.SessionEntryWatermark == "" {
 		return nil, errors.New("managed direct attempt is incomplete")
 	}
 	envelope := map[string]any{
