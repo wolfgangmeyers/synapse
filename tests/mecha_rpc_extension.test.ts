@@ -187,6 +187,45 @@ test("a root result accepts an already_present explicit Pi outcome before consum
   await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context));
 });
 
+test("root registration exists before emission settles and send failure rolls it back", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  const goal = current.tools.get("goal");
+  assert.ok(goal);
+  const execute = goal.execute as (id: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>;
+  let settle: (() => void) | undefined;
+  const originalSend = current.pi.sendMessage;
+  current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
+    current.sent.push({ message, options });
+    if (message.customType === "mecha.control.request.v1") return new Promise<{ kind: "accepted"; entryId: string }>((resolve) => { settle = () => resolve({ kind: "accepted", entryId: "" }); });
+    return originalSend(message, options);
+  };
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "toolCall", id: "early-result", name: "goal", arguments: { action: "status" } }] } }, current.context);
+  const pending = execute("early-result", { action: "status" }, undefined, undefined, current.context);
+  const request = current.sent.at(-1)!.message.details as RecordValue;
+  await current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
+    protocol: "mecha.control/v1", result_id: "123e4567-e89b-42d3-a456-426614174005", request_id: request.request_id,
+    target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000", manifest_sha256: current.extension.hashManifest(manifest()), status: "ok", content: "early", details: {},
+  }), current.context);
+  assert.ok(settle);
+  settle();
+  assert.equal((await pending).isError, undefined);
+
+  current.pi.sendMessage = (message: RecordValue, options?: RecordValue) => {
+    current.sent.push({ message, options });
+    if (message.customType === "mecha.control.request.v1") return Promise.reject(new Error("send failed"));
+    return originalSend(message, options);
+  };
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "toolCall", id: "failed-send", name: "goal", arguments: { action: "status" } }] } }, current.context);
+  const failed = await execute("failed-send", { action: "status" }, undefined, undefined, current.context);
+  assert.equal(failed.isError, true);
+  const failedRequest = current.sent.at(-1)!.message.details as RecordValue;
+  await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
+    protocol: "mecha.control/v1", result_id: "123e4567-e89b-42d3-a456-426614174006", request_id: failedRequest.request_id,
+    target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000", manifest_sha256: current.extension.hashManifest(manifest()), status: "ok", content: "failed", details: {},
+  }), current.context));
+});
+
 test("raw managed arguments reject boolean coercion, unknown keys, deep values, oversized strings, and oversized arrays before control traffic", async () => {
   const current = fixture();
   await bootstrap(current);

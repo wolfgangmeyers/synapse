@@ -90,6 +90,7 @@ type SweepResult struct {
 	LifecycleEvents      int
 	LifecycleProducers   int
 	ManagedOperations    int
+	ManagedControls      int
 	ManagedAgents        int
 	LifecycleUpdates     []LifecycleUpdate
 }
@@ -967,6 +968,10 @@ func (s *Store) sweep(ctx context.Context, policy RetentionPolicy, pruneQueued b
 			return err
 		}
 		result.ManagedOperations, err = s.sweepManagedOperations(ctx, nowText)
+		if err != nil {
+			return err
+		}
+		result.ManagedControls, err = s.pruneManagedControlTerminalTx(ctx, "", now)
 		if err != nil {
 			return err
 		}

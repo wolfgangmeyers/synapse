@@ -64,6 +64,10 @@ type ManagerOptions struct {
 	// durable IDs only; production leaves it nil and uses the S3 restart bridge.
 	RestartAllDispatcher              RestartAllDispatcher
 	RestartAllDispatchFailureRecorder RestartAllDispatchFailureRecorder
+	// RootControlHandlers is the concrete owner set for the closed 16-operation
+	// registry. Nil retains safe correlated unavailable results until the host
+	// wires its real supervisor-service adapters.
+	RootControlHandlers []RootControlHandler
 }
 
 // RestartRequest already contains canonical operation metadata. A future HTTP
@@ -154,6 +158,7 @@ type Manager struct {
 	afterLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
 	restartAllDispatcher                       RestartAllDispatcher
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
+	rootControlHandlers                        *RootControlHandlerRegistry
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
 	cancel                                     context.CancelFunc
@@ -181,6 +186,10 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	}
 	if len(manifest.Tools) != 16 {
 		return nil, errors.New("managed manifest must have 16 tools")
+	}
+	rootHandlers, err := NewRootControlHandlerRegistry(manifest, options.RootControlHandlers)
+	if err != nil {
+		return nil, err
 	}
 	clock := options.Clock
 	if clock == nil {
@@ -215,7 +224,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		deadlineFactory = context.WithTimeout
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	return manager, nil
 }
@@ -339,7 +348,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	// durable launch transitions, and Close waits for them before returning.
 	durableCtx := context.Background()
 	defer m.clearBinding(binding)
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
 	process, err := m.processFactory.Start(ctx, spec)
 	if err != nil {
 		m.fail(agent.AgentID, "PROCESS_START_FAILED", sanitizeError(err))
@@ -419,6 +428,16 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		_ = rpc.Close()
 		_ = process.Stop(context.Background())
 		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(err))
+		return
+	}
+	binding.serial.Unlock()
+	m.installRootControlReceiver(binding)
+	binding.serial.Lock()
+	if !m.liveBindingForFence(durableCtx, binding, fence) {
+		binding.serial.Unlock()
+		_ = rpc.Close()
+		_ = process.Stop(context.Background())
+		m.fail(agent.AgentID, "READINESS_FAILED", "managed runtime binding changed before root control activation")
 		return
 	}
 	if request.InitialInstruction != "" {
@@ -562,8 +581,8 @@ func (m *Manager) clearBinding(binding *managedBinding) {
 
 func (m *Manager) installBinding(binding *managedBinding) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return false
 	}
 	if binding.lane == nil {
@@ -573,6 +592,7 @@ func (m *Manager) installBinding(binding *managedBinding) bool {
 	m.processes[binding.agentID] = binding.process
 	m.rpcs[binding.agentID] = binding.rpc
 	m.operationIDs[binding.agentID] = binding.operationID
+	m.mu.Unlock()
 	return true
 }
 
@@ -910,7 +930,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
 		return
 	}
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: oldFence.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, Environment: ChildEnvironmentFor(m.config, current.TargetRuntimeGeneration, oldFence.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: oldFence.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, current.TargetRuntimeGeneration, oldFence.SessionEpoch)}
 	targetProcess, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
@@ -972,6 +992,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 		}
 		return
 	}
+	m.installRootControlReceiver(target)
 	target.serial.Lock()
 	target.lifecycleAction = ""
 	target.serial.Unlock()
@@ -1249,7 +1270,7 @@ func expectedManagedActiveTools(manifest Manifest) []string {
 	return result
 }
 
-func readinessGate(ctx context.Context, rpc RPC, manifest Manifest, sessionID string, epoch int64, generation string) error {
+func readinessGate(ctx context.Context, rpc RPC, manifest Manifest, sessionID string, epoch int64, generation string, restoredRequestIDs []any) error {
 	state, err := rpc.GetState(ctx)
 	if err != nil {
 		return err
@@ -1264,7 +1285,7 @@ func readinessGate(ctx context.Context, rpc RPC, manifest Manifest, sessionID st
 	if err := requireManagedCommands(commands); err != nil {
 		return err
 	}
-	envelope := map[string]any{"protocol": "mecha.bootstrap/v1", "delivery_id": generation, "runtime_generation": generation, "session_epoch": epoch, "desired_manifest": manifest.Raw, "manifest_sha256": manifest.CanonicalSHA256, "restored_request_ids": []any{}, "inline_policy": map[string]any{"enabled": false, "credits": map[string]any{}}, "recall_projection": map[string]any{"content": ""}}
+	envelope := map[string]any{"protocol": "mecha.bootstrap/v1", "delivery_id": generation, "runtime_generation": generation, "session_epoch": epoch, "desired_manifest": manifest.Raw, "manifest_sha256": manifest.CanonicalSHA256, "restored_request_ids": restoredRequestIDs, "inline_policy": map[string]any{"enabled": false, "credits": map[string]any{}}, "recall_projection": map[string]any{"content": ""}}
 	if err := rpc.Bootstrap(ctx, envelope); err != nil {
 		return err
 	}
@@ -1297,7 +1318,15 @@ func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fe
 	if !m.liveBindingForFence(ctx, binding, fence) {
 		return errors.New("managed runtime binding is not live")
 	}
-	if err := readinessGate(ctx, binding.rpc, m.manifest, fence.PiSessionID, fence.SessionEpoch, fence.RuntimeGeneration); err != nil {
+	restorable, err := m.store.ListRestorableManagedControlRequests(ctx, fence)
+	if err != nil {
+		return err
+	}
+	restoredRequestIDs := make([]any, 0, len(restorable))
+	for _, request := range restorable {
+		restoredRequestIDs = append(restoredRequestIDs, request.RequestID)
+	}
+	if err := readinessGate(ctx, binding.rpc, m.manifest, fence.PiSessionID, fence.SessionEpoch, fence.RuntimeGeneration, restoredRequestIDs); err != nil {
 		return err
 	}
 

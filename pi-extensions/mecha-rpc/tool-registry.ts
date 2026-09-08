@@ -29,6 +29,10 @@ export type ToolRegistryOptions = {
   getRuntime: () => RuntimeFence;
   getContextRef: (context: unknown) => string | undefined;
   onRequestQueued: (request: JsonRecord) => void;
+  // Root request delivery must be registered before Pi can flush its completed
+  // event; child requests retain their existing bridge-owned post-send path.
+  onRootRequestPrepared?: (request: JsonRecord) => void;
+  onRootRequestSendFailed?: (request: JsonRecord) => void;
   onFatalRegistrationFailure?: (error: unknown) => void;
 };
 
@@ -200,6 +204,7 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
           capability_id: tool.capability_id,
           tool_name: tool.name,
           definition_id: tool.definition_id,
+          definition_sha256: tool.definition_sha256,
           operation_id: tool.operation_id,
           manifest_sha256: runtime.manifestSha256,
           runtime_generation: runtime.runtimeGeneration,
@@ -207,11 +212,17 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
           context_ref: contextRef,
           arguments: structuredClone(raw.arguments),
         };
+        let rootRegistered = false;
         try {
+          if (contextRef === "root") {
+            options.onRootRequestPrepared?.(request);
+            rootRegistered = true;
+          }
           await options.emitControl(request);
-          options.onRequestQueued(request);
+          if (contextRef !== "root") options.onRequestQueued(request);
           return toolResult(tool.name, requestId);
         } catch {
+          if (rootRegistered) options.onRootRequestSendFailed?.(request);
           return errorResult("The managed control request was not queued.");
         }
       },
@@ -292,6 +303,53 @@ export function createToolRegistry(pi: PiRuntime, options: ToolRegistryOptions) 
       const tool = accepted?.tools.find((candidate) => candidate.name === name);
       return raw !== undefined && tool !== undefined && raw.name === name
         && runtimeArgumentsBounded(raw.arguments) && validateArguments(raw.arguments, tool.parameters);
+    },
+    // Native S4 proof uses this narrow test hook to exercise the installed
+    // manifest definition without creating a provider/model turn. It shares
+    // the production envelope and root-pending ordering exactly.
+    async emitInstalledRootRequestForTest(name: string, argumentsValue: unknown, toolCallId: string): Promise<string> {
+      const tool = accepted?.tools.find((candidate) => candidate.name === name);
+      if (tool === undefined || !runtimeArgumentsBounded(argumentsValue) || !validateArguments(argumentsValue, tool.parameters)
+        || typeof toolCallId !== "string" || toolCallId.length === 0) {
+        throw new TypeError("Test root control arguments are invalid");
+      }
+      const installed = accepted;
+      const runtime = options.getRuntime();
+      if (installed === undefined || runtime.manifestSha256 !== hashCanonicalJson(installed)) throw new TypeError("The accepted managed manifest is stale.");
+      const requestId = randomUUID();
+      const request: JsonRecord = {
+        protocol: "mecha.control/v1",
+        request_id: requestId,
+        tool_call_id: toolCallId,
+        capability_id: tool.capability_id,
+        tool_name: tool.name,
+        definition_id: tool.definition_id,
+        definition_sha256: tool.definition_sha256,
+        operation_id: tool.operation_id,
+        manifest_sha256: runtime.manifestSha256,
+        runtime_generation: runtime.runtimeGeneration,
+        session_epoch: runtime.sessionEpoch,
+        context_ref: "root",
+        arguments: structuredClone(argumentsValue),
+      };
+      options.onRootRequestPrepared?.(request);
+      const emission = options.emitControl(request);
+      // The locked native proof detaches only its test probe's caller from the
+      // shared emission promise. Pi can then deliver the completed request and
+      // the router can return its result while that promise remains held. The
+      // registered request and rollback behavior are unchanged from the normal
+      // awaited production path.
+      if (process.env.MECHA_RPC_TEST_ROOT_CONTROL_DETACH_EMISSION === "1") {
+        void Promise.resolve(emission).catch(() => { options.onRootRequestSendFailed?.(request); });
+        return requestId;
+      }
+      try {
+        await emission;
+      } catch (error) {
+        options.onRootRequestSendFailed?.(request);
+        throw error;
+      }
+      return requestId;
     },
   };
 }
