@@ -33,7 +33,9 @@ func TestForwardMigration023To024BackfillsManagedReadinessSources(t *testing.T) 
 	op := ManagedOperation{OperationID: "legacy-op", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "legacy-op", CanonicalBodyHash: "body", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, before.ReserveManagedLaunch(ctx, agent, op))
 	require.NoError(t, before.Close())
-	after, err := Open(ctx, path, Options{})
+	// This historical migration proof stops before 027: its deliberately
+	// unmatched starting row is now a migration-027 rejection fixture.
+	after, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
 	require.NoError(t, err)
 	defer after.Close()
 	source, err := after.ManagedReadinessSource(ctx, agent.AgentID)

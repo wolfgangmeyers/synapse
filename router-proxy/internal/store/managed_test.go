@@ -186,8 +186,11 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
 	require.Greater(t, len(migrations), 22)
-	require.Equal(t, "026_managed_direct_delivery", migrations[len(migrations)-1].ID)
-	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-2]})
+	require.Equal(t, "027_managed_control_requests", migrations[len(migrations)-1].ID)
+	// Preserve this 023-to-025 regression as a historical slice. The full 027
+	// fixture below is covered separately and deliberately requires no starting
+	// launch row.
+	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-3]})
 	require.NoError(t, err)
 	agent := ManagedAgentRecord{AgentID: "migration-agent", Name: "migration-agent", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 2, ManifestRevision: 3, ManifestHash: testManifestHash, PendingInitialInstruction: "hello"}
 	op := ManagedOperation{OperationID: "migration-launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "migration-launch", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
@@ -216,7 +219,7 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	require.NoError(t, err)
 	require.NoError(t, before.Close())
 
-	after, err := Open(ctx, path, Options{})
+	after, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
 	require.NoError(t, err)
 	stored, err := after.ManagedAgent(ctx, agent.AgentID)
 	require.NoError(t, err)
@@ -248,7 +251,7 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='026_managed_direct_delivery'`).Scan(&applied))
 	require.Equal(t, 1, applied)
 	require.NoError(t, after.Close())
-	reopened, err := Open(ctx, path, Options{})
+	reopened, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
 	require.NoError(t, err)
 	defer reopened.Close()
 	require.NoError(t, reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='023_managed_restart'`).Scan(&applied))
