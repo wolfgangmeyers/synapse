@@ -146,7 +146,11 @@ The store has one SQLite connection (`SetMaxOpenConns(1)`) and holds its store m
 
 The runner must roll back the open transaction for any SQL error, parity failure, foreign-key failure, integrity failure, or migration-record failure. It must then restore and verify `PRAGMA foreign_keys=ON`. Rollback leaves the old parent, all 024/025/026 children, their rows, indexes, and migration ledger untouched, with no 027 record. If the post-commit re-enable or verification fails, the runner closes the database and returns an error; it must not return a store using a connection with foreign keys disabled.
 
-The required migration tests use a real accepted-026 fixture with populated rows in `managed_agents`, all four child tables, `managed_http_operations`, and an in-flight 025 restart transition. They prove: successful 026-to-027 upgrade; parent row equality; child row/count/DDL/index/FK-list equality; both foreign-key checks and integrity check clean; widened `desired_state` accepts `terminated` and still rejects any other value; expected 027 tables and indexes exist; and reopen leaves foreign keys enabled. Failure-injection tests fail after the parent copy, after the parent drop, and at the pre-commit foreign-key check. Each proves rollback preserves the 026 schema/data, records no 027 migration, and restores `foreign_keys=ON`. A separate test proves `PRAGMA foreign_keys=OFF` issued after `BEGIN IMMEDIATE` does not count as this procedure.
+The required migration tests use a real accepted-026 fixture with populated rows in `managed_agents`, all four child tables, `managed_http_operations`, and nonterminal 025 restart transitions covering every backfill state. They prove: successful 026-to-027 upgrade; parent row equality; child row/count/DDL/index/FK-list equality; both foreign-key checks and integrity check clean; widened `desired_state` accepts `terminated` and still rejects any other value; expected 027 tables and indexes exist; and reopen leaves foreign keys enabled. Each 025 transition must produce its one mapped `restart` action with `retry_of IS NULL` and the required operation, fence, target-plan, and timestamp values.
+
+The same successful-upgrade test inserts valid initial `reset`, `terminate`, and direct `restart` actions, plus a `restart` child with `source='restart_all_child'`, its Restart All parent, and `retry_of IS NULL`. It also inserts valid reset and terminate retries that reference eligible predecessors. It proves the schema rejects a non-null `retry_of` for `restart`, `restart_all`, and Restart All child actions. These checks cover row-local admission shape only; store tests separately prove predecessor failure state, retryability, same kind and agent, and single-successor eligibility.
+
+Failure-injection tests fail after the parent copy, after the parent drop, and at the pre-commit foreign-key check. Each proves rollback preserves the 026 schema/data, records no 027 migration, and restores `foreign_keys=ON`. A separate test proves `PRAGMA foreign_keys=OFF` issued after `BEGIN IMMEDIATE` does not count as this procedure.
 
 ### 5.0.1 Value-validation ownership
 
@@ -209,9 +213,9 @@ CREATE TABLE managed_lifecycle_actions (
   updated_at TEXT NOT NULL,
 
   CHECK ((kind='restart_all') = (agent_id IS NULL)),
-  CHECK ((kind='restart_all') = (retry_of IS NULL)),
   CHECK ((source='restart_all_child') = (parent_action_id IS NOT NULL)),
-  CHECK ((kind='restart_all') OR parent_action_id IS NULL),
+  CHECK (kind <> 'restart_all' OR source='direct'),
+  CHECK (source <> 'restart_all_child' OR kind='restart'),
   CHECK ((kind='restart_all') OR length(CAST(agent_id AS BLOB)) BETWEEN 1 AND 128),
   CHECK ((kind IN ('restart','reset')) = (planned_target_runtime_generation IS NOT NULL)),
   CHECK (planned_target_runtime_generation IS NULL
@@ -264,6 +268,8 @@ CREATE INDEX managed_lifecycle_recovery_idx
 CREATE INDEX managed_lifecycle_agent_terminal_idx
   ON managed_lifecycle_actions(agent_id, completed_at DESC, action_id DESC);
 ```
+
+Every initial action and every 025 restart backfill has `retry_of IS NULL`. A non-null `retry_of` is valid only for a reset or terminate retry. The `UNIQUE(retry_of)` constraint prevents a retry fork; together with `CHECK (retry_of IS NULL OR kind IN ('reset','terminate'))`, it also keeps restart, Restart All, and Restart All child actions out of retry lineage. A Restart All parent is direct. A Restart All child is a `restart` action with its parent action ID.
 
 The store also requires a retry predecessor to be terminal `failed`, `retryable=1`, the same kind and agent, and without a prior successor. SQLite's row-local checks cannot express that predecessor lookup.
 
