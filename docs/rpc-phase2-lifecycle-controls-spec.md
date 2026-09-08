@@ -261,7 +261,10 @@ CREATE TABLE managed_lifecycle_actions (
   CHECK ((state IN ('succeeded','failed','cancelled','superseded')) = (retryable IS NOT NULL)),
   CHECK (retryable IS NULL OR retryable IN (0,1)),
   CHECK (retry_of IS NULL OR kind IN ('reset','terminate')),
-  CHECK ((execution_owner='legacy025') = (kind='restart' AND source='direct' AND retry_of IS NULL)),
+  CHECK (
+    execution_owner <> 'legacy025'
+    OR (kind='restart' AND source='direct' AND retry_of IS NULL)
+  ),
   CHECK ((recovery_owner IS NULL) = (recovery_claimed_at IS NULL))
 );
 CREATE UNIQUE INDEX managed_lifecycle_one_active_lane
@@ -276,6 +279,8 @@ CREATE INDEX managed_lifecycle_agent_terminal_idx
 ```
 
 Every initial action and every 025 restart backfill has `retry_of IS NULL`. A non-null `retry_of` is valid only for a reset or terminate retry. The `UNIQUE(retry_of)` constraint prevents a retry fork; together with `CHECK (retry_of IS NULL OR kind IN ('reset','terminate'))`, it also keeps restart, Restart All, and Restart All child actions out of retry lineage. A Restart All parent is direct. A Restart All child is a `restart` action with its parent action ID.
+
+The owner check constrains only `legacy025`: it may own only a direct, non-retry restart. `lifecycle` may own a direct restart admitted after 027, including the row-local migration proof. The migration and legacy store mutations separately require an exact joined 025 transition, matching action/operation ID, mapped stage, and full fence before they write `legacy025`; the table-local check cannot prove that cross-table bridge.
 
 The store also requires a retry predecessor to be terminal `failed`, `retryable=1`, the same kind and agent, and without a prior successor. SQLite's row-local checks cannot express that predecessor lookup.
 
@@ -476,6 +481,7 @@ A duplicate request ID with the same tool-call, tuple, canonical arguments hash,
 | Record | FK or owner after 027 | Successful termination disposition |
 | --- | --- | --- |
 | `managed_restart_transitions` | `managed_agents`, operation, and its legacy-owned action bridge | Terminalization deletes it before its operation. A live legacy row blocks operation expiry. |
+| `managed_agents` | `launch_operation_id` references `managed_http_operations(operation_id)` with `ON DELETE RESTRICT` | A failed launch keeps this protection link while the failed agent, name, and slot remain. Termination cleanup clears it before deleting the agent. |
 | `managed_readiness_sources` | `managed_agents` | Delete in termination cleanup. |
 | `managed_lifecycle_actions` | operation; parent action; retry predecessor; no agent FK | Retain terminal actions with their operations. Delete explicit retry/child descendants first. |
 | `managed_lifecycle_batch_items` | parent action plus nullable child action/operation references | Retain for a live parent. Delete explicitly before referenced child rows. |
@@ -486,12 +492,12 @@ A duplicate request ID with the same tool-call, tuple, canonical arguments hash,
 
 `expires_at` is a 24-hour eligibility floor. It never authorizes an FK-unsafe delete. `Store.Sweep` runs `SweepManagedOperationGraph` in its existing immediate transaction:
 
-1. Select terminal operations with `expires_at <= now`, ordered by `(expires_at, operation_id)`. For each candidate, build a closure over its lifecycle action, retry successors, parent-action children, and every accepted/coalesced batch-item reference. Include the batch parent operation for every referenced item. Also inspect a same-operation 025 transition.
-2. The closure is prunable only when every included operation is terminal and expired, every included lifecycle action is terminal, and no included operation has a 025 transition. An unexpired or nonterminal retry successor, child, coalesced target, or batch parent blocks the whole closure. This preserves a batch item while its parent response still has required retained work and prevents a parent action's `ON DELETE CASCADE` from deleting a live child.
+1. Select terminal operations with `expires_at <= now`, ordered by `(expires_at, operation_id)`. For each candidate, build a closure over its lifecycle action, retry successors, parent-action children, and every accepted/coalesced batch-item reference. Include the batch parent operation for every referenced item. Also inspect a same-operation 025 transition. Then inspect `managed_agents` for every `launch_operation_id` that names an operation in the closure. This is a reverse protection edge, not a request to add the agent to a deletable closure.
+2. The closure is prunable only when every included operation is terminal and expired, every included lifecycle action is terminal, no included operation has a 025 transition, and no managed agent retains a matching `launch_operation_id`. An unexpired or nonterminal retry successor, child, coalesced target, or batch parent blocks the whole closure. A retained launch link blocks the whole closure. This preserves a batch item while its parent response still has required retained work and prevents a parent action's `ON DELETE CASCADE` from deleting a live child.
 3. A terminal operation with a linked 025 transition is an invariant error. The sweep rolls back and leaves every row unchanged. Legacy success, legacy preparation rollback, and supersession terminalization must delete the transition in their own transaction before terminalizing that operation.
 4. For a prunable closure, explicitly delete batch items first. Delete lifecycle actions in postorder: retry successors and parent-action children before their predecessor or parent. Delete their operations in the same postorder. The sweep does not rely on action/operation cascades. Artifact deletion is separate and occurs only after safe unlink and after no action references it.
 
-Tests use populated graphs. They cover an expired child held by an unexpired parent, an expired parent held by an unexpired or nonterminal child, a retry successor before its predecessor, and both accepted and coalesced batch references. They prove a full eligible closure deletes items, actions, then operations in that order. A terminal operation still linked to a 025 transition fails the sweep. Injecting failure after the first batch-item deletion proves the transaction restores every row and `foreign_key_check` remains clean.
+Tests use populated graphs. They cover an expired child held by an unexpired parent, an expired parent held by an unexpired or nonterminal child, a retry successor before its predecessor, and both accepted and coalesced batch references. They prove a full eligible closure deletes items, actions, then operations in that order. A terminal operation still linked to a 025 transition fails the sweep. They also terminalize an expired launch through the all-null identity-unsafe recovery path while its failed `managed_agents` row retains `launch_operation_id`. The sweep must leave the operation, agent, and link intact with `foreign_key_check` clean. A termination-cleanup fixture clears the link and deletes the agent; only then may the now-unprotected expired launch operation sweep. Injecting failure after the first batch-item deletion proves the transaction restores every row and `foreign_key_check` remains clean.
 
 Every post-027 launch inserts its operation first and records that exact pending ID in `managed_agents.launch_operation_id` in the same immediate reservation transaction. Its callback must prove the linked operation remains pending and the agent is not a tombstone before every external start and durable write. Termination reservation atomically sets the tombstone and terminalizes this pending launch with private `terminal_code='LAUNCH_CANCELLED_BY_TERMINATE'` and `terminal_message='managed launch cancelled by termination'`. The immutable launch `202` stays unchanged and exact-replayable for at least 24 hours. Before deleting the agent, cleanup clears the launch link; the `ON DELETE RESTRICT` link prevents an accidental operation delete while the agent still exists.
 
