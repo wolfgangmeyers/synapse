@@ -19,7 +19,7 @@ This slice keeps the following rules:
 - Idempotency remains worker-wide: `(method, X-Request-ID)` under migration 022's fixed internal scope `router-managed-worker-v1`. The canonical path and canonical JSON body must match. A mismatch returns `409 IDEMPOTENCY_CONFLICT`.
 - The only new direct routes are `POST /v1/managed-agents/{id}/reset`, `DELETE /v1/managed-agents/{id}`, and `POST /v1/managed-agents/restart-all`. Reset and Restart All accept exactly `{}`. Terminate accepts no body. Every result uses `Cache-Control: no-store`.
 - Restart All considers only managed rows where `desired_state='running'`. It never reads, signals, alters, or calls a tmux adapter.
-- P3/P4, browser/session authentication, provider work, UI work, generic desired-running recovery, tmux lifecycle, Phase 1 extension/API changes, and direct-mail redesign stay out of scope.
+- P3/P4, browser/session authentication, provider work, UI work, generic desired-running recovery, tmux lifecycle, Phase 1 application vocabulary/payload changes, and direct-mail redesign stay out of scope. The private P2 exact-entry and explicit-ID append seams in section 7.3 are the only extension/Pi exception.
 
 ## 2. Entry gates
 
@@ -28,7 +28,9 @@ No 027 implementation starts until all four gates are recorded on a clean commit
 1. Same-session restart replacement and its `Router.Listen` recovery are accepted.
 2. The five-gate `readinessGate(ctx, binding, fence)` is accepted.
 3. Migration 026 direct managed-mail delivery is accepted on a clean commit. The current working-tree 026 changes are not this gate.
-4. The installed Pi used by native tests has the private exact `get_entry(entry_id)` RPC described in section 8. The current installed Pi 0.85.0 has `abort`, `get_state`, and `--session-id` support. It does not have this exact-entry RPC.
+4. The installed Pi used by native tests has both private P2 seams described in section 7.3: typed exact `get_entry(entry_id)` and a validated explicit-ID hidden custom-message append. The current installed Pi 0.85.0 has `abort`, `get_state`, and `--session-id` support. It does not have either P2 seam.
+
+The durable record is `docs/rpc-phase2-lifecycle-controls-gate-record.md`. Its required fields are part of this gate: clean source/tree identities, source and evidence hashes, focused proof, acceptance decision, and for Pi the tested source commit, package version, installed executable path/hash, and exact bounded response shapes. A pending row is not acceptance.
 
 The 026 acceptance record must name the commit, migration checksum, and these stable post-026 boundaries:
 
@@ -128,7 +130,7 @@ The maximum snapshot size is the existing managed-agent cap of 32. The parent re
 
 ## 5. Migration 027: exact durable contract
 
-Migration `027_managed_control_requests.sql` is forward-only. It does not alter migrations 022–026. The new independent tables are created in this order: `managed_session_artifacts`, `managed_lifecycle_actions`, `managed_lifecycle_batch_items`, and `managed_control_requests`; their indexes follow. The managed-agent rebuild comes last.
+Migration `027_managed_control_requests.sql` is forward-only. It does not alter migrations 022–026. The lifecycle-control owner is the only owner of 027. It creates the independent tables in this order: `managed_session_artifacts`, `managed_lifecycle_actions`, `managed_lifecycle_batch_items`, and `managed_control_requests`. It creates every index except `managed_lifecycle_one_active_lane`, rebuilds the populated parent, backfills nonterminal 025 restart transitions, then creates that active-lane index. A root-only control slice consumes this combined migration; it never creates a competing root-only 027 or defers lifecycle fields to 028.
 
 ### 5.0 Populated SQLite rebuild procedure
 
@@ -138,11 +140,12 @@ The store has one SQLite connection (`SetMaxOpenConns(1)`) and holds its store m
 
 1. Verify `PRAGMA foreign_keys=1` and `PRAGMA legacy_alter_table=0`. Verify that 024, 025, and 026 are recorded in `schema_migrations`, and that the four child tables above exist. Capture each child's `sqlite_master` table and index SQL, row count, and `PRAGMA foreign_key_list` result.
 2. Outside any transaction, execute `PRAGMA foreign_keys=OFF`, then read it back as `0`. Do not use a separate connection.
-3. Start `BEGIN IMMEDIATE`. Create the four new 027 tables and their indexes. Create `managed_agents_027_new` with the complete 025 `managed_agents` column list, constraints, and the sole change `desired_state IN ('running','terminated')`. Do not create, detach, copy, drop, or recreate any child table.
+3. Start `BEGIN IMMEDIATE`. Create the four new 027 tables in the stated order and every required index except `managed_lifecycle_one_active_lane`. Create `managed_agents_027_new` with the complete 025 `managed_agents` column list, constraints, and the sole change `desired_state IN ('running','terminated')`. Do not create, detach, copy, drop, or recreate any child table.
 4. Copy the parent with an explicit ordered 025 column list. Save a temporary full-row snapshot before the copy. The copied row count must equal the snapshot count, and two directional `EXCEPT` queries over every copied column must be empty.
 5. Drop `managed_agents`; rename `managed_agents_027_new` to `managed_agents`; recreate only `managed_agents_slot_idx` with its 025 definition. With `legacy_alter_table=OFF`, SQLite rewrites the existing child foreign-key metadata to the replacement parent name while leaving all child rows and DDL intact.
-6. Before committing, require zero rows from `PRAGMA foreign_key_check` and `PRAGMA integrity_check` equal to `ok`. Compare every captured child table/index SQL, row count, and foreign-key list with its pre-rebuild value. The child foreign key must still name `managed_agents(agent_id)`.
-7. Insert the 027 migration record, then commit. Outside the transaction, execute `PRAGMA foreign_keys=ON` and read it back as `1`. Run `PRAGMA foreign_key_check` again before returning the store.
+6. Backfill every nonterminal 025 restart transition into its one lifecycle `restart` action before creating `managed_lifecycle_one_active_lane`. The mapping, pending-operation preflight, full source/optional target fences, timestamps, and null `retry_of` are defined in section 5.1. Create the active-lane index only after every backfill row has been inserted.
+7. Before committing, require zero rows from `PRAGMA foreign_key_check` and `PRAGMA integrity_check` equal to `ok`. Compare every captured child table/index SQL, row count, and foreign-key list with its pre-rebuild value. The child foreign key must still name `managed_agents(agent_id)`.
+8. Insert the 027 migration record, then commit. Outside the transaction, execute `PRAGMA foreign_keys=ON` and read it back as `1`. Run `PRAGMA foreign_key_check` again before returning the store.
 
 The runner must roll back the open transaction for any SQL error, parity failure, foreign-key failure, integrity failure, or migration-record failure. It must then restore and verify `PRAGMA foreign_keys=ON`. Rollback leaves the old parent, all 024/025/026 children, their rows, indexes, and migration ledger untouched, with no 027 record. If the post-commit re-enable or verification fails, the runner closes the database and returns an error; it must not return a store using a connection with foreign keys disabled.
 
@@ -367,12 +370,14 @@ CREATE TABLE managed_control_requests (
   request_id TEXT PRIMARY KEY,
   result_id TEXT NOT NULL UNIQUE,
   agent_id TEXT NOT NULL CHECK (length(CAST(agent_id AS BLOB)) BETWEEN 1 AND 128),
-  operation_name TEXT NOT NULL CHECK (length(CAST(operation_name AS BLOB)) BETWEEN 1 AND 128),
+  tool_call_id TEXT NOT NULL CHECK (length(CAST(tool_call_id AS BLOB)) BETWEEN 1 AND 128),
+  capability_id TEXT NOT NULL CHECK (length(CAST(capability_id AS BLOB)) BETWEEN 1 AND 128),
   tool_name TEXT NOT NULL CHECK (length(CAST(tool_name AS BLOB)) BETWEEN 1 AND 128),
-  definition_sha256 TEXT NOT NULL CHECK (length(definition_sha256)=64
-    AND definition_sha256=lower(definition_sha256) AND definition_sha256 NOT GLOB '*[^0-9a-f]*'),
-  canonical_input_sha256 TEXT NOT NULL CHECK (length(canonical_input_sha256)=64
-    AND canonical_input_sha256=lower(canonical_input_sha256) AND canonical_input_sha256 NOT GLOB '*[^0-9a-f]*'),
+  definition_id TEXT NOT NULL CHECK (length(CAST(definition_id AS BLOB)) BETWEEN 1 AND 128),
+  operation_id TEXT NOT NULL CHECK (length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 128),
+  context_kind TEXT NOT NULL CHECK (context_kind='root'),
+  canonical_arguments_sha256 TEXT NOT NULL CHECK (length(canonical_arguments_sha256)=64
+    AND canonical_arguments_sha256=lower(canonical_arguments_sha256) AND canonical_arguments_sha256 NOT GLOB '*[^0-9a-f]*'),
   request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint)=64
     AND request_fingerprint=lower(request_fingerprint) AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
   state TEXT NOT NULL CHECK (state IN (
@@ -397,11 +402,16 @@ CREATE TABLE managed_control_requests (
   append_attempt INTEGER NOT NULL DEFAULT 0 CHECK (append_attempt BETWEEN 0 AND 5),
   next_append_at TEXT,
   received_at TEXT NOT NULL,
+  handler_owner TEXT,
   handler_started_at TEXT,
+  handler_deadline_at TEXT,
   side_effect_committed_at TEXT,
   handler_completed_at TEXT,
-  append_pending_at TEXT,
+  append_owner TEXT,
+  append_started_at TEXT,
+  append_watermark TEXT,
   append_submitted_at TEXT,
+  receipt_entry_identity TEXT,
   delivered_at TEXT,
   terminal_at TEXT,
   error_code TEXT,
@@ -423,12 +433,16 @@ CREATE TABLE managed_control_requests (
   CHECK ((result_payload_sha256 IS NULL) = (decoded_payload_bytes IS NULL)),
   CHECK (error_code IS NULL OR length(CAST(error_code AS BLOB)) BETWEEN 1 AND 128),
   CHECK (error_detail IS NULL OR length(CAST(error_detail AS BLOB)) <= 16384),
-  CHECK ((state IN ('append_pending','awaiting_append','delivered')) = (result_entry_id IS NOT NULL)),
+  CHECK (state NOT IN ('completed','append_pending','awaiting_append','delivered') OR result_entry_id IS NOT NULL),
   CHECK ((result_entry_id IS NULL) OR result_entry_id = 'mcr1_' || replace(result_id,'-','')),
-  CHECK ((state='awaiting_append') = (append_submitted_at IS NOT NULL)),
-  CHECK ((state='append_pending') OR next_append_at IS NULL),
-  CHECK ((state='append_pending' AND append_attempt BETWEEN 1 AND 4)
-    OR (state<>'append_pending'))
+  CHECK (append_attempt=0 OR result_entry_id IS NOT NULL),
+  CHECK (state<>'append_pending' OR (append_attempt BETWEEN 1 AND 5
+    AND append_owner IS NOT NULL AND append_started_at IS NOT NULL AND append_watermark IS NOT NULL)),
+  CHECK (state<>'awaiting_append' OR (append_attempt BETWEEN 1 AND 5
+    AND append_owner IS NOT NULL AND append_started_at IS NOT NULL
+    AND append_watermark IS NOT NULL AND append_submitted_at IS NOT NULL)),
+  CHECK (next_append_at IS NULL OR (state='completed' AND append_attempt BETWEEN 1 AND 4)),
+  CHECK (state<>'delivered' OR (delivered_at IS NOT NULL AND receipt_entry_identity IS NOT NULL))
 );
 CREATE UNIQUE INDEX managed_control_request_dedup_idx
   ON managed_control_requests(agent_id, request_id);
@@ -440,13 +454,13 @@ CREATE INDEX managed_control_nonterminal_global_idx
   WHERE state NOT IN ('delivered','failed','cancelled');
 CREATE INDEX managed_control_append_due_idx
   ON managed_control_requests(next_append_at, request_id)
-  WHERE state='append_pending';
+  WHERE state='completed' AND next_append_at IS NOT NULL;
 CREATE INDEX managed_control_terminal_retention_idx
   ON managed_control_requests(agent_id, terminal_at DESC, request_id DESC)
   WHERE state IN ('delivered','failed','cancelled');
 ```
 
-A duplicate request ID with the same fingerprint and full fence is the existing row. A changed fingerprint or fence is `CONFLICT`. Reservation happens in one immediate transaction that checks fewer than 64 nonterminal rows for that agent and fewer than 512 router-wide. The 65th per-agent or 513th router-wide reservation fails before a handler call with the fixed bounded `CONFLICT` result.
+A duplicate request ID with the same tool-call, tuple, canonical arguments hash, context kind, fingerprint, and full fence is the existing row. A changed identity field or fence is `CONFLICT`. Reservation happens in one immediate transaction that checks fewer than 64 nonterminal rows for that agent and fewer than 512 router-wide. The 65th per-agent or 513th router-wide reservation fails before a handler call with the fixed bounded `CONFLICT` result. `completed` commits the deterministic entry ID before any append allocation. A retryable explicit append rejection returns the row to `completed` with its durable due time; only a due row may allocate attempts 2–5. `append_watermark` and `receipt_entry_identity` are bounded router-owned receipt metadata, never a history cursor.
 
 `result_content`, `result_details_json`, and `error_detail` pass the established secret redaction before storage. `error_detail` has no raw RPC/process text.
 
@@ -474,13 +488,13 @@ The root-control ledger has these only transitions:
 ```text
 received -> executing -> side_effect_committed -> completed
 completed -> append_pending -> awaiting_append -> delivered
-awaiting_append -> append_pending
+awaiting_append -> completed -> append_pending
 received|executing|side_effect_committed|completed|append_pending|awaiting_append -> failed|cancelled
 ```
 
-The handler has a 30-second deadline. Model turns and deferred compaction are not handler work. The router reserves `append_pending`, the deterministic `mcr1_<result UUID without hyphens>` entry ID, complete fence, payload hash, and `append_attempt=1` before the private append command.
+The handler has a 30-second deadline. Model turns and deferred compaction are not handler work. The router commits `completed` with the deterministic `mcr1_<result UUID without hyphens>` entry ID, then reserves `append_pending`, complete fence, payload hash, append owner, watermark, and `append_attempt=1` before the private append command. Frozen root-control cancellation codes include `CANCELLED_BY_RESET` and `CANCELLED_BY_TERMINATE`.
 
-An absent exact entry under a current matching live binding moves the request back to `append_pending` with these durable delays:
+A retryable rejection or an absent exact entry under a current matching live binding moves the request back to `completed` with one durable due time. When due, it allocates the next `append_pending` attempt:
 
 | Next attempt | Due from failed observation |
 | --- | --- |
@@ -512,9 +526,13 @@ Current Pi's `createSessionManager` in `dist/main.js` opens an exact existing `-
 
 After startup, the router reads only the private `get_state` response's `sessionId` and `sessionFile`, then calls the artifact seam. It validates the session ID, contains the reported file under the configured session root, resolves it safely, and records the root-relative identity. A missing physical target is `not_materialized`, not an inferred filename and not permission to delete anything. Current `SessionManager` can defer file persistence until it has an assistant entry. The artifact proof must cover this state.
 
-### 7.3 Exact entry lookup
+### 7.3 Exact entry lookup and deterministic append
 
-The private stock-Pi change is one typed `get_entry` RPC command. It takes an exact entry ID, calls `session.sessionManager.getEntry(entryId)`, serializes at most 64 KiB, and returns one entry or an explicit absent result. It must not call `get_entries`, `get_tree`, a suffix scan, or a history traversal. The router validates entry ID, `mecha.control.result.v1`, `display:false`, closed details, result/request IDs, payload hash, and the full session/runtime/manifest fence before marking delivery.
+The private stock-Pi prerequisite has two typed seams. `get_entry` takes one exact entry ID, calls `session.sessionManager.getEntry(entryId)`, serializes at most 64 KiB, and returns `{"entry":null}` or one entry. It must not call `get_entries`, `get_tree`, a suffix scan, or a history traversal.
+
+The paired append seam adds one validated optional `entryId` to the extension `sendMessage` path. It carries that value through `AgentSession.sendCustomMessage` to `SessionManager.appendCustomMessageEntry`. An explicit ID is accepted once. An occupied ID returns `already_present` only when the stored hidden custom entry exactly matches the requested custom type, content, display flag, and closed details. Any other occupied ID is a closed error. During a provider turn, the append outcome resolves only after the deferred entry has persisted. The resulting `message_end` exposes the persisted ID for receipt validation. The seam does not add an application command, custom type, payload field, route, model turn, P3, or P4.
+
+`mecha-control-result-v1` derives `mcr1_<result UUID without hyphens>` and passes it through this seam with `triggerTurn:false` and no `deliverAs`. The router validates the exact persisted ID, `mecha.control.result.v1`, `display:false`, closed details, result/request IDs, payload hash, and the full session/runtime/manifest fence before marking delivery.
 
 ## 8. Recovery ownership and exact outcomes
 
@@ -566,6 +584,8 @@ The durable-write fault tests inject failure after source reaping, target start,
 | `router-proxy/internal/transport/managed_http.go` | Strict parsing, worker-wide idempotency, route-specific retry selection, immutable replay. |
 | `router-proxy/internal/transport/router.go` | The exact pre-bind recovery call order. |
 | `router-proxy/internal/managed/rpc.go` | `Abort`, exact-entry client, bounded response validation. |
+| tested stock Pi `rpc-types.ts`, `rpc-mode.ts`, `session-manager.ts`, `agent-session.ts`, and `extensions/types.ts` | Typed exact lookup plus validated explicit custom-message entry ID, duplicate matching, deferred persistence, and typed append outcome. |
+| `pi-extensions/mecha-rpc/rpc-client.ts`, `index.ts` | Derive and pass the reserved root result ID without changing the application vocabulary or payload shape. |
 | `router-proxy/internal/managed/process.go` | `SessionLaunchMode` create/resume preconditions and no caller session path. |
 | `router-proxy/internal/managed/session_artifacts.go` | Discovery, containment, no-symlink unlink, artifact ledger, retry, and redaction. |
 | `router-proxy/internal/managed/supervisor.go` | Per-agent precedence, reset/terminate/Restart All orchestration, lifecycle recovery, stale-callback fencing. |
@@ -580,7 +600,7 @@ The native test uses a configured installed Pi, the fixed managed argv/extension
 1. The supported `abort` RPC returns the typed successful response under the five-second bound.
 2. A `CreateNew` reset starts a fresh session ID, reports that ID through `get_state`, and records either a safely discovered materialized artifact or the verified `not_materialized` state. It keeps an old controlled artifact through target failure. After target readiness it deletes that old artifact only after containment and ownership checks.
 3. An ambiguous, symlinked, missing-after-materialization, or root-escaping artifact fails safely and performs no unlink.
-4. The root control ledger reserves `mcr1_<UUID-without-hyphens>` before append. The private `get_entry` finds that one persisted entry after a router/process reconnection. Changed payload/details/fence values fail closed. No history or suffix query is used.
+4. The root control ledger commits `mcr1_<UUID-without-hyphens>` before append. The persisted hidden entry ID must equal that reserved row value. The private `get_entry` finds that one entry after a router/process reconnection. Changed payload/details/fence values fail closed. No history or suffix query is used.
 5. Reset cannot append an old-session control result into the new session.
 
 The test records only public-safe assertions. It does not print raw session content, artifact paths, credentials, environment values, PID data, or RPC payloads.
