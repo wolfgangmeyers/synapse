@@ -16,16 +16,31 @@ import (
 	"time"
 )
 
+// SessionLaunchMode is a router-owned proof boundary. Pi accepts the same
+// argv for an existing or new session ID, so callers must state which durable
+// precondition they satisfied before ProcessFactory may start it.
+type SessionLaunchMode string
+
+const (
+	CreateNew      SessionLaunchMode = "create_new"
+	ResumeExisting SessionLaunchMode = "resume_existing"
+)
+
 type CommandSpec struct {
 	PiExecutable         string
 	SessionRoot          string
 	SessionID            string
+	LaunchMode           SessionLaunchMode
 	Cwd                  string
 	Provider             string
 	ModelID              string
 	MechaRPCExtension    string
 	PiSubagentsExtension string
 	Environment          []string
+}
+
+func (s CommandSpec) validLaunchMode() bool {
+	return s.LaunchMode == CreateNew || s.LaunchMode == ResumeExisting
 }
 
 func (s CommandSpec) Args() []string {
@@ -84,7 +99,7 @@ type execProcessFactory struct{}
 
 func DefaultProcessFactory() ProcessFactory { return execProcessFactory{} }
 func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process, error) {
-	if spec.PiExecutable == "" || spec.SessionRoot == "" || spec.SessionID == "" || spec.Cwd == "" {
+	if spec.PiExecutable == "" || spec.SessionRoot == "" || spec.SessionID == "" || spec.Cwd == "" || !spec.validLaunchMode() {
 		return nil, errors.New("incomplete managed process specification")
 	}
 	// The supervisor owns controlled termination. CommandContext would kill the

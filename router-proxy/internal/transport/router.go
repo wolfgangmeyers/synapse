@@ -520,7 +520,13 @@ func (r *Router) Listen(ctx context.Context) error {
 	}
 	r.mu.Unlock()
 	if r.managed != nil {
+		if err := r.managed.RecoverPendingManagedLaunches(ctx); err != nil {
+			return err
+		}
 		if err := r.managed.RecoverManagedRestartTransitions(ctx); err != nil {
+			return err
+		}
+		if err := r.managed.RecoverManagedLifecycleControls(ctx); err != nil {
 			return err
 		}
 	}

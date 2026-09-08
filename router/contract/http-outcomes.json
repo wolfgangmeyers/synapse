@@ -74,6 +74,24 @@
       "status": "verified",
       "success_status": 200,
       "response_shape": {"generated_at": "RFC3339", "projection_version": "durable integer", "agent": "bounded managed projection"}
+    },
+    {
+      "id": "managed-reset",
+      "method": "POST",
+      "path": "/v1/managed-agents/{id}/reset",
+      "status": "verified",
+      "success_status": 202,
+      "required_headers": ["X-Request-ID", "Cache-Control"],
+      "request_validation": {"content_type": "application/json", "body": "exact empty object", "request_id": "canonical UUID"},
+      "response_shape": {"operation_id": "request_id", "agent": "bounded managed projection"}
+    },
+    {
+      "id": "managed-reset-replay",
+      "method": "POST",
+      "path": "/v1/managed-agents/{id}/reset",
+      "status": "verified",
+      "success_status": 202,
+      "request_validation": {"same_method_and_request_id": "exact canonical path/body replay", "changed_path_or_body": "409 IDEMPOTENCY_CONFLICT", "replay_side_effects": "none"}
     }
   ],
   "route_outcomes": [],

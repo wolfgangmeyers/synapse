@@ -496,6 +496,8 @@ func lifecycleTerminalOutcomeValid(action *ManagedLifecycleAction, terminal Mana
 		switch action.Kind {
 		case "restart":
 			return !terminal.Retryable && terminal.Code == "RESTARTED" && terminal.Message == "managed agent restarted"
+		case "reset":
+			return !terminal.Retryable && terminal.Code == "RESET" && terminal.Message == "managed agent reset"
 		case "terminate":
 			return !terminal.Retryable && terminal.Code == "TERMINATED" && terminal.Message == "managed agent terminated"
 		case "restart_all":
@@ -750,13 +752,16 @@ func (s *Store) ReserveManagedControlRequest(ctx context.Context, input ManagedC
 	return reservation, err
 }
 
+func (s *Store) cancelManagedControlRequestsTx(ctx context.Context, agentID, code, now string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='cancelled',terminal_at=?,error_code=?,error_detail=NULL,retryable=0 WHERE agent_id=? AND state NOT IN ('delivered','failed','cancelled')`, now, code, agentID)
+	return err
+}
+
 func (s *Store) CancelManagedControlRequests(ctx context.Context, agentID, code string) error {
 	if !isLifecycleText(agentID) || (code != "CANCELLED_BY_RESET" && code != "CANCELLED_BY_TERMINATE") {
 		return errors.New("managed control cancellation is invalid")
 	}
 	return s.runImmediate(ctx, func() error {
-		now := formatTimestamp(s.clock.Now())
-		_, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='cancelled',terminal_at=?,error_code=?,error_detail=NULL,retryable=0 WHERE agent_id=? AND state NOT IN ('delivered','failed','cancelled')`, now, code, agentID)
-		return err
+		return s.cancelManagedControlRequestsTx(ctx, agentID, code, formatTimestamp(s.clock.Now()))
 	})
 }
