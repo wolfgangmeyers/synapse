@@ -1900,7 +1900,18 @@ func (s *Store) reserveRecipientSourceTx(ctx context.Context, recipient, kind, o
 	if err != nil {
 		return err
 	}
-	if existing.SourceKind == kind && existing.OwnerIdentity == owner && existing.State != "retired" && existing.State != "conflicted" {
+	if existing.State == "retired" {
+		// Keep the source row stable because immutable snapshots reference it.
+		// The terminated managed owner cannot reclaim its own retired route.
+		if existing.SourceKind == "managed" && existing.OwnerIdentity == retiredManagedRecipientOwner(owner) {
+			return &RecipientSourceConflictError{Recipient: recipient}
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
+			SET source_kind=?,owner_identity=?,state='reserved',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
+			WHERE recipient_name=? AND state='retired'`, kind, owner, formatTimestamp(s.clock.Now()), recipient)
+		return err
+	}
+	if existing.SourceKind == kind && existing.OwnerIdentity == owner && existing.State != "conflicted" {
 		return nil
 	}
 	return &RecipientSourceConflictError{Recipient: recipient}
