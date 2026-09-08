@@ -111,8 +111,12 @@ type Store struct {
 	maxBatchBodyChars    int
 	reminderIncarnations map[string]string
 	migrations           []Migration
-	mu                   sync.Mutex
-	closed               bool
+	// managed027Fault and managedGraphFault are test-only failure seams. They
+	// keep rollback tests on the real single SQLite connection.
+	managed027Fault   func(string) error
+	managedGraphFault func(string) error
+	mu                sync.Mutex
+	closed            bool
 }
 
 //go:embed migrations/*.sql
@@ -345,6 +349,12 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 		if migration.ID == "" {
 			return errors.New("migration ID is required")
 		}
+		if migration.ID == "027_managed_control_requests" {
+			if err := s.applyManagedControlMigration027(ctx, migration); err != nil {
+				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
+			}
+			continue
+		}
 		if err := s.runImmediate(ctx, func() error {
 			if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 				id TEXT PRIMARY KEY,
@@ -379,6 +389,342 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 		}
 	}
 	return nil
+}
+
+// applyManagedControlMigration027 is intentionally separate from runImmediate.
+// The managed parent has four populated foreign-key children after migration
+// 026, and SQLite only permits its FK enforcement switch outside a transaction.
+// Store.Open has one connection and this mutex keeps every statement below on it.
+func (s *Store) applyManagedControlMigration027(ctx context.Context, migration Migration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		id TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	var present int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE id=?`, migration.ID).Scan(&present)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	var foreignKeys, legacyAlter int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		if err != nil {
+			return err
+		}
+		return errors.New("migration 027 requires foreign_keys=1")
+	}
+	if err := s.db.QueryRowContext(ctx, `PRAGMA legacy_alter_table`).Scan(&legacyAlter); err != nil || legacyAlter != 0 {
+		if err != nil {
+			return err
+		}
+		return errors.New("migration 027 requires legacy_alter_table=0")
+	}
+	for _, id := range []string{"024_managed_readiness_sources", "025_managed_restart_execution", "026_managed_direct_delivery"} {
+		var found int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE id=?`, id).Scan(&found); err != nil {
+			return fmt.Errorf("migration 027 prerequisite %s: %w", id, err)
+		}
+	}
+	children := []string{"managed_readiness_sources", "managed_restart_transitions", "managed_direct_delivery_attempts", "managed_direct_delivery_diagnostics"}
+	before := make(map[string]managed027ChildSnapshot, len(children))
+	for _, child := range children {
+		snapshot, err := captureManaged027Child(ctx, s.db, child)
+		if err != nil {
+			return err
+		}
+		before[child] = snapshot
+	}
+	foreignKeysDisabled := false
+	restoreForeignKeys := func() error {
+		if !foreignKeysDisabled {
+			return nil
+		}
+		if _, err := s.db.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); err != nil {
+			return err
+		}
+		var value int
+		if err := s.db.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&value); err != nil {
+			return err
+		}
+		if value != 1 {
+			return errors.New("migration 027 could not restore foreign keys")
+		}
+		foreignKeysDisabled = false
+		return nil
+	}
+	fail := func(cause error, transactionOpen bool) error {
+		if transactionOpen {
+			_, _ = s.db.ExecContext(context.Background(), `ROLLBACK`)
+		}
+		if restoreErr := restoreForeignKeys(); restoreErr != nil {
+			return fmt.Errorf("%w; restore foreign keys: %v", cause, restoreErr)
+		}
+		return cause
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	foreignKeysDisabled = true
+	if err := s.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 0 {
+		if err != nil {
+			return fail(err, false)
+		}
+		return fail(errors.New("migration 027 could not disable foreign keys"), false)
+	}
+	if err := s.injectManaged027Fault("after_foreign_keys_off"); err != nil {
+		return fail(err, false)
+	}
+	var unmatchedStarting int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE lifecycle_state='starting'`).Scan(&unmatchedStarting); err != nil {
+		return fail(err, false)
+	}
+	if unmatchedStarting != 0 {
+		return fail(errors.New("migration 027 refuses unmatched pre-027 starting launches"), false)
+	}
+	if _, err := s.db.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fail(err, false)
+	}
+	if _, err := s.db.ExecContext(ctx, migration.SQL); err != nil {
+		return fail(fmt.Errorf("apply migration DDL: %w", err), true)
+	}
+	for _, statement := range []string{
+		`ALTER TABLE managed_http_operations ADD COLUMN terminal_code TEXT`,
+		`ALTER TABLE managed_http_operations ADD COLUMN terminal_message TEXT`,
+		managedAgents027DDL,
+		`CREATE TEMP TABLE managed_agents_027_snapshot AS SELECT ` + managedAgents027Columns + ` FROM managed_agents`,
+		`INSERT INTO managed_agents_027_new (` + managedAgents027Columns + `,launch_operation_id) SELECT ` + managedAgents027Columns + `,NULL FROM managed_agents`,
+	} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fail(err, true)
+		}
+	}
+	var oldCount, newCount, leftOnly, rightOnly, nonNullLinks int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents_027_snapshot`).Scan(&oldCount); err != nil {
+		return fail(err, true)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents_027_new`).Scan(&newCount); err != nil {
+		return fail(err, true)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT `+managedAgents027Columns+` FROM managed_agents_027_snapshot EXCEPT SELECT `+managedAgents027Columns+` FROM managed_agents_027_new)`).Scan(&leftOnly); err != nil {
+		return fail(err, true)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT `+managedAgents027Columns+` FROM managed_agents_027_new EXCEPT SELECT `+managedAgents027Columns+` FROM managed_agents_027_snapshot)`).Scan(&rightOnly); err != nil {
+		return fail(err, true)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents_027_new WHERE launch_operation_id IS NOT NULL`).Scan(&nonNullLinks); err != nil {
+		return fail(err, true)
+	}
+	if oldCount != newCount || leftOnly != 0 || rightOnly != 0 || nonNullLinks != 0 {
+		return fail(errors.New("migration 027 parent copy parity failed"), true)
+	}
+	if err := s.injectManaged027Fault("after_parent_copy"); err != nil {
+		return fail(err, true)
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE managed_agents`); err != nil {
+		return fail(err, true)
+	}
+	if err := s.injectManaged027Fault("after_parent_drop"); err != nil {
+		return fail(err, true)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE managed_agents_027_new RENAME TO managed_agents`); err != nil {
+		return fail(err, true)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX managed_agents_slot_idx ON managed_agents (slot_held, lifecycle_state)`); err != nil {
+		return fail(err, true)
+	}
+	if err := backfillManaged027LegacyActions(ctx, s.db); err != nil {
+		return fail(err, true)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX managed_lifecycle_one_active_lane ON managed_lifecycle_actions(agent_id) WHERE agent_id IS NOT NULL AND state IN ('admitted','awaiting_settle','stopping_source','starting_target','awaiting_target_ready','old_artifact_cleanup','terminating','cleanup')`); err != nil {
+		return fail(err, true)
+	}
+	var foreignProblems int
+	if err := s.injectManaged027Fault("pre_commit_foreign_key_check"); err != nil {
+		return fail(err, true)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignProblems); err != nil || foreignProblems != 0 {
+		if err != nil {
+			return fail(err, true)
+		}
+		return fail(errors.New("migration 027 foreign key check failed"), true)
+	}
+	var integrity string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
+		if err != nil {
+			return fail(err, true)
+		}
+		return fail(errors.New("migration 027 integrity check failed"), true)
+	}
+	for _, child := range children {
+		after, err := captureManaged027Child(ctx, s.db, child)
+		if err != nil {
+			return fail(err, true)
+		}
+		if !before[child].same(after) {
+			return fail(fmt.Errorf("migration 027 changed child %s", child), true)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?,?)`, migration.ID, formatTimestamp(s.clock.Now())); err != nil {
+		return fail(err, true)
+	}
+	if err := s.injectManaged027Fault("after_migration_record"); err != nil {
+		return fail(err, true)
+	}
+	if _, err := s.db.ExecContext(ctx, `COMMIT`); err != nil {
+		return fail(err, true)
+	}
+	if err := restoreForeignKeys(); err != nil {
+		s.closed = true
+		_ = s.db.Close()
+		return err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignProblems); err != nil || foreignProblems != 0 {
+		s.closed = true
+		_ = s.db.Close()
+		if err != nil {
+			return err
+		}
+		return errors.New("migration 027 post-commit foreign key check failed")
+	}
+	return chmodStateFiles(s.path)
+}
+
+func (s *Store) injectManaged027Fault(stage string) error {
+	if s.managed027Fault == nil {
+		return nil
+	}
+	return s.managed027Fault(stage)
+}
+
+type managed027ChildSnapshot struct {
+	tableSQL string
+	indexes  string
+	count    int
+	foreigns string
+}
+
+func (s managed027ChildSnapshot) same(other managed027ChildSnapshot) bool {
+	return s.tableSQL == other.tableSQL && s.indexes == other.indexes && s.count == other.count && s.foreigns == other.foreigns
+}
+
+func captureManaged027Child(ctx context.Context, db *sql.DB, table string) (managed027ChildSnapshot, error) {
+	allowed := map[string]bool{"managed_readiness_sources": true, "managed_restart_transitions": true, "managed_direct_delivery_attempts": true, "managed_direct_delivery_diagnostics": true}
+	if !allowed[table] {
+		return managed027ChildSnapshot{}, errors.New("unknown migration 027 child")
+	}
+	var result managed027ChildSnapshot
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&result.tableSQL); err != nil {
+		return result, err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&result.count); err != nil {
+		return result, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT name,COALESCE(sql,'') FROM sqlite_master WHERE type='index' AND tbl_name=? ORDER BY name`, table)
+	if err != nil {
+		return result, err
+	}
+	for rows.Next() {
+		var name, sqlText string
+		if err := rows.Scan(&name, &sqlText); err != nil {
+			_ = rows.Close()
+			return result, err
+		}
+		result.indexes += name + "\x00" + sqlText + "\x00"
+	}
+	if err := rows.Close(); err != nil {
+		return result, err
+	}
+	fkRows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(`+table+`)`)
+	if err != nil {
+		return result, err
+	}
+	for fkRows.Next() {
+		var id, seq int
+		var target, from, to, update, deleteRule, match string
+		if err := fkRows.Scan(&id, &seq, &target, &from, &to, &update, &deleteRule, &match); err != nil {
+			_ = fkRows.Close()
+			return result, err
+		}
+		result.foreigns += fmt.Sprintf("%d:%d:%s:%s:%s:%s:%s:%s\x00", id, seq, target, from, to, update, deleteRule, match)
+	}
+	if err := fkRows.Close(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+const managedAgents027Columns = `agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,pending_initial_instruction,initial_instruction_sent,last_error_code,last_error_message,last_error_at,created_at,started_at,updated_at`
+
+const managedAgents027DDL = `CREATE TABLE managed_agents_027_new (
+  agent_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  slot_held INTEGER NOT NULL DEFAULT 0 CHECK (slot_held IN (0,1)),
+  cwd TEXT NOT NULL,
+  selected_model_provider TEXT NOT NULL,
+  selected_model_id TEXT NOT NULL,
+  desired_state TEXT NOT NULL CHECK (desired_state IN ('running','terminated')),
+  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('starting','running','restarting','resetting','terminating','failed')),
+  activity_state TEXT NOT NULL CHECK (activity_state IN ('starting','waiting','active','idle','compacting','stopped','failed')),
+  accepting_prompts INTEGER NOT NULL DEFAULT 0 CHECK (accepting_prompts IN (0,1)),
+  pi_session_id TEXT,
+  session_epoch INTEGER NOT NULL CHECK (session_epoch >= 1),
+  process_pid INTEGER,
+  process_start_marker TEXT,
+  process_incarnation TEXT,
+  runtime_generation TEXT,
+  manifest_revision INTEGER NOT NULL CHECK (manifest_revision >= 1),
+  manifest_hash TEXT NOT NULL,
+  pending_initial_instruction TEXT,
+  initial_instruction_sent INTEGER NOT NULL DEFAULT 0 CHECK (initial_instruction_sent IN (0,1)),
+  last_error_code TEXT,
+  last_error_message TEXT,
+  last_error_at TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  updated_at TEXT NOT NULL,
+  launch_operation_id TEXT REFERENCES managed_http_operations(operation_id) ON DELETE RESTRICT
+)`
+
+func backfillManaged027LegacyActions(ctx context.Context, db *sql.DB) error {
+	var total, pending, uniqueIDs int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_restart_transitions`).Scan(&total); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_restart_transitions t JOIN managed_http_operations o ON o.operation_id=t.operation_id WHERE o.state='pending' AND length(t.operation_id)>0`).Scan(&pending); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT operation_id) FROM managed_restart_transitions WHERE length(operation_id)>0`).Scan(&uniqueIDs); err != nil {
+		return err
+	}
+	if total != pending || total != uniqueIDs {
+		return errors.New("migration 027 legacy transition preflight failed")
+	}
+	_, err := db.ExecContext(ctx, `INSERT INTO managed_lifecycle_actions (
+		action_id,operation_id,agent_id,kind,source,parent_action_id,retry_of,execution_owner,state,stage,
+		source_pi_session_id,source_session_epoch,source_process_pid,source_process_start_marker,source_process_incarnation,source_runtime_generation,source_manifest_revision,source_manifest_hash,
+		target_pi_session_id,target_session_epoch,target_process_pid,target_process_start_marker,target_process_incarnation,target_runtime_generation,target_manifest_revision,target_manifest_hash,
+		planned_target_runtime_generation,target_artifact_id,terminal_code,terminal_message,retryable,completed_at,recovery_owner,recovery_claimed_at,created_at,updated_at
+	) SELECT
+		t.operation_id,t.operation_id,t.agent_id,'restart','direct',NULL,NULL,'legacy025',
+		CASE t.stage WHEN 'reserved' THEN 'admitted' WHEN 'prepared' THEN 'admitted' WHEN 'settling' THEN 'awaiting_settle' WHEN 'stopping' THEN 'stopping_source' WHEN 'stopped' THEN 'starting_target' WHEN 'starting' THEN 'awaiting_target_ready' END,
+		CASE t.stage WHEN 'reserved' THEN 'admission' WHEN 'prepared' THEN 'admission' WHEN 'settling' THEN 'source_settle' WHEN 'stopping' THEN 'source_stop' WHEN 'stopped' THEN 'target_start' WHEN 'starting' THEN 'target_ready' END,
+		t.old_pi_session_id,t.old_session_epoch,t.old_process_pid,t.old_process_start_marker,t.old_process_incarnation,t.old_runtime_generation,t.old_manifest_revision,t.old_manifest_hash,
+		t.target_pi_session_id,t.target_session_epoch,t.target_process_pid,t.target_process_start_marker,t.target_process_incarnation,
+		CASE WHEN t.target_pi_session_id IS NULL THEN NULL ELSE t.target_runtime_generation END,t.target_manifest_revision,t.target_manifest_hash,
+		t.target_runtime_generation,NULL,NULL,NULL,NULL,NULL,NULL,NULL,t.created_at,t.updated_at
+	FROM managed_restart_transitions t
+	JOIN managed_http_operations o ON o.operation_id=t.operation_id
+	WHERE o.state='pending'`)
+	return err
 }
 
 func (s *Store) backfillMessageIncarnations(ctx context.Context) error {

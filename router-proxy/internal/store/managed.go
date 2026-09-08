@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -16,6 +17,7 @@ import (
 var managedIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 var managedSHA256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var managedCanonicalUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // ManagedModel is the immutable provider/model pair selected for a launch.
 type ManagedModel struct {
@@ -53,6 +55,9 @@ type ManagedAgentRecord struct {
 	CreatedAt                 string
 	StartedAt                 string
 	UpdatedAt                 string
+	// LaunchOperationID is a private 027 reverse-protection link. It is never
+	// exposed by the managed HTTP projection.
+	LaunchOperationID string
 }
 
 // ManagedOperation is the durable replay record. Its storage scope is private
@@ -242,6 +247,64 @@ type ManagedRestartAdmission struct {
 	Transition *ManagedRestartTransition
 }
 
+// ManagedLifecycleAction is the private durable result of lifecycle admission.
+// The HTTP response remains the immutable managed operation.
+type ManagedLifecycleAction struct {
+	ActionID                       string
+	OperationID                    string
+	AgentID                        string
+	Kind                           string
+	Source                         string
+	ParentActionID                 string
+	RetryOf                        string
+	ExecutionOwner                 string
+	State                          string
+	Stage                          string
+	SourceFence                    *ManagedRuntimeFence
+	TargetFence                    *ManagedRuntimeFence
+	PlannedTargetRuntimeGeneration string
+	TargetArtifactID               string
+	TerminalCode                   string
+	TerminalMessage                string
+	Retryable                      bool
+	CompletedAt                    string
+	RecoveryOwner                  string
+	RecoveryClaimedAt              string
+	CreatedAt                      string
+	UpdatedAt                      string
+}
+
+type ManagedLifecycleReservation struct {
+	AgentID                        string
+	Kind                           string
+	Source                         string
+	Method                         string
+	CanonicalPath                  string
+	RequestID                      string
+	CanonicalBodyHash              string
+	Fence                          ManagedRuntimeFence
+	PlannedTargetRuntimeGeneration string
+	TargetFence                    *ManagedRuntimeFence
+	TargetArtifactID               string
+	ParentActionID                 string
+	RetryOf                        string
+	Operation                      ManagedOperation
+}
+
+type ManagedLifecycleAdmission struct {
+	Operation *ManagedOperation
+	Action    *ManagedLifecycleAction
+	Agent     *ManagedAgentRecord
+	Replayed  bool
+}
+
+type ManagedLifecycleConflictError struct{ AgentID string }
+
+func (e *ManagedLifecycleConflictError) Error() string {
+	return "managed lifecycle operation conflicts with another action"
+}
+func (e *ManagedLifecycleConflictError) Code() string { return "conflict" }
+
 func (s *Store) GetDefaultModel(ctx context.Context) (*ManagedModel, error) {
 	var provider, id sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT default_model_provider, default_model_id FROM managed_settings WHERE singleton_id = 1`).Scan(&provider, &id)
@@ -371,19 +434,13 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 		if count >= maxAgents {
 			return &ManagedSlotLimitError{}
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_agents (
-            agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,
-            desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,
-            session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,
-            manifest_revision,manifest_hash,pending_initial_instruction,initial_instruction_sent,
-            last_error_code,last_error_message,last_error_at,created_at,started_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			agent.AgentID, agent.Name, boolInt(true), agent.Cwd,
-			agent.SelectedModel.Provider, agent.SelectedModel.ID, agent.DesiredState,
-			agent.LifecycleState, agent.ActivityState, boolInt(agent.AcceptingPrompts), nullIfEmpty(agent.PiSessionID),
-			agent.SessionEpoch, nullIfZero(agent.ProcessPID), nullIfEmpty(agent.ProcessStartMarker), nullIfEmpty(agent.ProcessIncarnation), nullIfEmpty(agent.RuntimeGeneration),
-			agent.ManifestRevision, agent.ManifestHash, nullIfEmpty(agent.PendingInitialInstruction), boolInt(agent.InitialInstructionSent),
-			nullIfEmpty(agent.LastErrorCode), nullIfEmpty(agent.LastErrorMessage), nullIfEmpty(agent.LastErrorAt), agent.CreatedAt, nullIfEmpty(agent.StartedAt), agent.UpdatedAt); err != nil {
+		// Post-027 rows retain this pending operation as a reverse protection
+		// edge. Inserting it first lets the parent link be FK-valid in the same
+		// transaction; historical migration fixtures still use the old shape.
+		if err := insertManagedOperation(ctx, s.db, operation); err != nil {
+			return err
+		}
+		if err := s.insertManagedLaunchAgentTx(ctx, agent, operation.OperationID); err != nil {
 			if isConstraintError(err) {
 				return &ManagedNameConflictError{Name: agent.Name}
 			}
@@ -406,12 +463,60 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 				return err
 			}
 		}
-		if err := insertManagedOperation(ctx, s.db, operation); err != nil {
-			return err
-		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
+}
+
+// insertManagedLaunchAgentTx keeps the 027 launch link private while allowing
+// focused historical migration fixtures to open schemas that intentionally end
+// before 027.
+func (s *Store) insertManagedLaunchAgentTx(ctx context.Context, agent ManagedAgentRecord, operationID string) error {
+	columns := `agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,
+		desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,
+		session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,
+		manifest_revision,manifest_hash,pending_initial_instruction,initial_instruction_sent,
+		last_error_code,last_error_message,last_error_at,created_at,started_at,updated_at`
+	values := []any{
+		agent.AgentID, agent.Name, boolInt(true), agent.Cwd,
+		agent.SelectedModel.Provider, agent.SelectedModel.ID, agent.DesiredState,
+		agent.LifecycleState, agent.ActivityState, boolInt(agent.AcceptingPrompts), nullIfEmpty(agent.PiSessionID),
+		agent.SessionEpoch, nullIfZero(agent.ProcessPID), nullIfEmpty(agent.ProcessStartMarker), nullIfEmpty(agent.ProcessIncarnation), nullIfEmpty(agent.RuntimeGeneration),
+		agent.ManifestRevision, agent.ManifestHash, nullIfEmpty(agent.PendingInitialInstruction), boolInt(agent.InitialInstructionSent),
+		nullIfEmpty(agent.LastErrorCode), nullIfEmpty(agent.LastErrorMessage), nullIfEmpty(agent.LastErrorAt), agent.CreatedAt, nullIfEmpty(agent.StartedAt), agent.UpdatedAt,
+	}
+	hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if hasLink {
+		columns += `,launch_operation_id`
+		values = append(values, operationID)
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
+	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_agents (`+columns+`) VALUES (`+placeholders+`)`, values...)
+	return err
+}
+
+func managedLaunchOperationColumnTx(ctx context.Context, db *sql.DB) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(managed_agents)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, primary int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primary); err != nil {
+			return false, err
+		}
+		if name == "launch_operation_id" {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func insertManagedOperation(ctx context.Context, db *sql.DB, operation ManagedOperation) error {
@@ -489,6 +594,529 @@ func (s *Store) MarkManagedOperationTerminal(ctx context.Context, operationID st
 		_, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state = 'terminal', terminal_at = ?, expires_at = ? WHERE operation_id = ? AND state = 'pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operationID)
 		return err
 	})
+}
+
+const managedLifecycleActionSelect = `SELECT action_id,operation_id,agent_id,kind,source,parent_action_id,retry_of,execution_owner,state,stage,source_pi_session_id,source_session_epoch,source_process_pid,source_process_start_marker,source_process_incarnation,source_runtime_generation,source_manifest_revision,source_manifest_hash,target_pi_session_id,target_session_epoch,target_process_pid,target_process_start_marker,target_process_incarnation,target_runtime_generation,target_manifest_revision,target_manifest_hash,planned_target_runtime_generation,target_artifact_id,terminal_code,terminal_message,retryable,completed_at,recovery_owner,recovery_claimed_at,created_at,updated_at FROM managed_lifecycle_actions`
+
+func scanManagedLifecycleAction(scanner interface{ Scan(...any) error }) (*ManagedLifecycleAction, error) {
+	var action ManagedLifecycleAction
+	var agentID, parent, retry, sourceSession, sourceMarker, sourceIncarnation, sourceGeneration, sourceHash, targetSession, targetMarker, targetIncarnation, targetGeneration, targetHash, planned, artifact, code, message, completed, recoveryOwner, recoveryClaimedAt sql.NullString
+	var sourceEpoch, sourcePID, sourceRevision, targetEpoch, targetPID, targetRevision sql.NullInt64
+	var retryable sql.NullInt64
+	if err := scanner.Scan(&action.ActionID, &action.OperationID, &agentID, &action.Kind, &action.Source, &parent, &retry, &action.ExecutionOwner, &action.State, &action.Stage,
+		&sourceSession, &sourceEpoch, &sourcePID, &sourceMarker, &sourceIncarnation, &sourceGeneration, &sourceRevision, &sourceHash,
+		&targetSession, &targetEpoch, &targetPID, &targetMarker, &targetIncarnation, &targetGeneration, &targetRevision, &targetHash,
+		&planned, &artifact, &code, &message, &retryable, &completed, &recoveryOwner, &recoveryClaimedAt, &action.CreatedAt, &action.UpdatedAt); err != nil {
+		return nil, err
+	}
+	action.AgentID, action.ParentActionID, action.RetryOf = agentID.String, parent.String, retry.String
+	action.PlannedTargetRuntimeGeneration, action.TargetArtifactID, action.TerminalCode, action.TerminalMessage, action.CompletedAt, action.RecoveryOwner, action.RecoveryClaimedAt = planned.String, artifact.String, code.String, message.String, completed.String, recoveryOwner.String, recoveryClaimedAt.String
+	action.Retryable = retryable.Int64 != 0
+	if sourceSession.Valid {
+		action.SourceFence = &ManagedRuntimeFence{AgentID: action.AgentID, PiSessionID: sourceSession.String, SessionEpoch: sourceEpoch.Int64, ProcessPID: int(sourcePID.Int64), ProcessStartMarker: sourceMarker.String, ProcessIncarnation: sourceIncarnation.String, RuntimeGeneration: sourceGeneration.String, ManifestRevision: int(sourceRevision.Int64), ManifestHash: sourceHash.String}
+	}
+	if targetSession.Valid {
+		action.TargetFence = &ManagedRuntimeFence{AgentID: action.AgentID, PiSessionID: targetSession.String, SessionEpoch: targetEpoch.Int64, ProcessPID: int(targetPID.Int64), ProcessStartMarker: targetMarker.String, ProcessIncarnation: targetIncarnation.String, RuntimeGeneration: targetGeneration.String, ManifestRevision: int(targetRevision.Int64), ManifestHash: targetHash.String}
+	}
+	return &action, nil
+}
+
+func managedLifecycleActionForTx(ctx context.Context, db *sql.DB, actionID string) (*ManagedLifecycleAction, error) {
+	return scanManagedLifecycleAction(db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE action_id=?`, actionID))
+}
+
+// ReserveManagedLifecycle resolves exact replay before inspecting an agent or
+// its binding. The caller supplies a complete live fence only after that lookup.
+func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation ManagedLifecycleReservation) (ManagedLifecycleAdmission, error) {
+	if reservation.Source == "" {
+		reservation.Source = "direct"
+	}
+	if reservation.Operation.OperationID == "" {
+		reservation.Operation.OperationID = reservation.RequestID
+	}
+	if reservation.Operation.Method == "" {
+		reservation.Operation.Method = reservation.Method
+	}
+	if reservation.Operation.CanonicalPath == "" {
+		reservation.Operation.CanonicalPath = reservation.CanonicalPath
+	}
+	if reservation.Operation.RequestID == "" {
+		reservation.Operation.RequestID = reservation.RequestID
+	}
+	if reservation.Operation.CanonicalBodyHash == "" {
+		reservation.Operation.CanonicalBodyHash = reservation.CanonicalBodyHash
+	}
+	if reservation.Operation.State == "" {
+		reservation.Operation.State = "pending"
+	}
+	if reservation.Operation.CreatedAt == "" {
+		reservation.Operation.CreatedAt = formatTimestamp(s.clock.Now())
+	}
+	// Request identity is the only admission check before replay lookup. The
+	// complete lifecycle shape is validated only for a new reservation below.
+	if !managedCanonicalUUIDRE.MatchString(reservation.RequestID) || reservation.Operation.OperationID != reservation.RequestID || reservation.Method == "" || reservation.CanonicalPath == "" || !managedSHA256RE.MatchString(reservation.CanonicalBodyHash) {
+		return ManagedLifecycleAdmission{}, errors.New("managed lifecycle reservation is invalid")
+	}
+	var result ManagedLifecycleAdmission
+	err := s.runImmediate(ctx, func() error {
+		existing, err := managedOperationForWorkerScopeTx(ctx, s.db, reservation.Method, reservation.RequestID)
+		if err == nil {
+			if existing.CanonicalPath != reservation.CanonicalPath || existing.CanonicalBodyHash != reservation.CanonicalBodyHash {
+				return &ManagedIdempotencyConflictError{}
+			}
+			result.Operation, result.Replayed = existing, true
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		state, stage := "admitted", "admission"
+		if reservation.Kind == "terminate" {
+			state, stage = "terminating", "abort"
+		}
+		var sourceFence *ManagedRuntimeFence
+		if validManagedRuntimeFence(reservation.Fence) {
+			sourceFence = &reservation.Fence
+		}
+		input := ManagedLifecycleActionInput{
+			ActionID: reservation.Operation.OperationID, AgentID: reservation.AgentID,
+			Kind: reservation.Kind, Source: reservation.Source, ParentActionID: reservation.ParentActionID,
+			RetryOf: reservation.RetryOf, ExecutionOwner: "lifecycle", State: state, Stage: stage,
+			SourceFence: sourceFence, TargetFence: reservation.TargetFence, PlannedTargetRuntimeGeneration: reservation.PlannedTargetRuntimeGeneration,
+			TargetArtifactID: reservation.TargetArtifactID, CreatedAt: reservation.Operation.CreatedAt, UpdatedAt: reservation.Operation.CreatedAt, Operation: reservation.Operation,
+		}
+		if err := validateLifecycleActionInput(input); err != nil {
+			return err
+		}
+		if input.RetryOf != "" {
+			if err := validateManagedLifecycleRetryPredecessorTx(ctx, s.db, input); err != nil {
+				return err
+			}
+		}
+		agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id=?`, reservation.AgentID), nil)
+		if errors.Is(err, sql.ErrNoRows) {
+			return &ManagedAgentNotFoundError{AgentID: reservation.AgentID}
+		}
+		if err != nil {
+			return err
+		}
+		if reservation.Kind != "terminate" && !sameManagedRestartFence(restartFenceFromAgent(agent), reservation.Fence) {
+			return &ManagedAgentNotReadyError{AgentID: reservation.AgentID}
+		}
+
+		var activeID, activeKind string
+		err = s.db.QueryRowContext(ctx, `SELECT action_id,kind FROM managed_lifecycle_actions WHERE agent_id=? AND state IN ('admitted','awaiting_settle','stopping_source','starting_target','awaiting_target_ready','old_artifact_cleanup','terminating','cleanup')`, reservation.AgentID).Scan(&activeID, &activeKind)
+		if err == nil {
+			if (reservation.Kind != "reset" && reservation.Kind != "terminate") || activeKind != "restart" {
+				return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
+			}
+			active, activeErr := managedLifecycleActionForTx(ctx, s.db, activeID)
+			if activeErr != nil {
+				return activeErr
+			}
+			if err := s.terminalizeLifecycleActionTx(ctx, active, "superseded", "SUPERSEDED_BY_HIGHER_ACTION", "lifecycle action superseded by a higher priority action"); err != nil {
+				return err
+			}
+			// A legacy bridge cannot remain live after its linked operation becomes
+			// terminal; this also makes late 025 callbacks durable no-ops.
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE operation_id=?`, active.OperationID); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err := insertManagedOperation(ctx, s.db, reservation.Operation); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		args := []any{input.ActionID, input.Operation.OperationID, input.AgentID, input.Kind, input.Source, nullIfEmpty(input.ParentActionID), nullIfEmpty(input.RetryOf), input.ExecutionOwner, input.State, input.Stage}
+		args = append(args, lifecycleFenceValues(input.SourceFence)...)
+		args = append(args, lifecycleFenceValues(input.TargetFence)...)
+		args = append(args, nullIfEmpty(input.PlannedTargetRuntimeGeneration), nullIfEmpty(input.TargetArtifactID), input.CreatedAt, input.UpdatedAt)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_lifecycle_actions (
+			action_id,operation_id,agent_id,kind,source,parent_action_id,retry_of,execution_owner,state,stage,
+			source_pi_session_id,source_session_epoch,source_process_pid,source_process_start_marker,source_process_incarnation,source_runtime_generation,source_manifest_revision,source_manifest_hash,
+			target_pi_session_id,target_session_epoch,target_process_pid,target_process_start_marker,target_process_incarnation,target_runtime_generation,target_manifest_revision,target_manifest_hash,
+			planned_target_runtime_generation,target_artifact_id,created_at,updated_at
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args...)
+		if err != nil {
+			return err
+		}
+		if reservation.Kind == "terminate" {
+			_, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated',lifecycle_state='terminating',accepting_prompts=0,updated_at=? WHERE agent_id=?`, now, reservation.AgentID)
+			if err == nil {
+				hasLink, linkErr := managedLaunchOperationColumnTx(ctx, s.db)
+				if linkErr != nil {
+					return linkErr
+				}
+				if hasLink {
+					var launch sql.NullString
+					if linkErr = s.db.QueryRowContext(ctx, `SELECT launch_operation_id FROM managed_agents WHERE agent_id=?`, reservation.AgentID).Scan(&launch); linkErr != nil {
+						return linkErr
+					}
+					if launch.Valid {
+						_, linkErr = s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='LAUNCH_CANCELLED_BY_TERMINATE',terminal_message='managed launch cancelled by termination' WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), launch.String)
+						if linkErr != nil {
+							return linkErr
+						}
+					}
+				}
+			}
+		} else {
+			lifecycle := map[string]string{"restart": "restarting", "reset": "resetting"}[reservation.Kind]
+			args := []any{lifecycle, now, reservation.AgentID}
+			where := `agent_id=?`
+			if validManagedRuntimeFence(reservation.Fence) {
+				where += ` AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=?`
+				args = append(args, managedFenceValues(reservation.Fence)[1:]...)
+			}
+			resultUpdate, updateErr := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state=?,accepting_prompts=0,updated_at=? WHERE `+where, args...)
+			if updateErr != nil {
+				return updateErr
+			}
+			changed, updateErr := resultUpdate.RowsAffected()
+			if updateErr != nil {
+				return updateErr
+			}
+			if changed != 1 {
+				return &ManagedAgentNotReadyError{AgentID: reservation.AgentID}
+			}
+		}
+		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+			return err
+		}
+		action, err := managedLifecycleActionForTx(ctx, s.db, reservation.Operation.OperationID)
+		if err != nil {
+			return err
+		}
+		result.Operation, result.Action, result.Agent = &reservation.Operation, action, agent
+		return nil
+	})
+	return result, err
+}
+
+func (s *Store) ManagedLifecycleAction(ctx context.Context, actionID string) (*ManagedLifecycleAction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return managedLifecycleActionForTx(ctx, s.db, actionID)
+}
+
+// ReserveManagedRestartAll records a terminal batch-admission parent. Child
+// actions are deliberately admitted only by the manager after this transaction
+// commits, so the parent never waits for a live lane or process.
+func (s *Store) ReserveManagedRestartAll(ctx context.Context, operation ManagedOperation) (*ManagedOperation, bool, error) {
+	if !managedCanonicalUUIDRE.MatchString(operation.RequestID) || operation.OperationID != operation.RequestID || operation.Method == "" || operation.CanonicalPath == "" || !managedSHA256RE.MatchString(operation.CanonicalBodyHash) {
+		return nil, false, errors.New("managed restart-all reservation is invalid")
+	}
+	if operation.State == "" {
+		operation.State = "pending"
+	}
+	if operation.CreatedAt == "" {
+		operation.CreatedAt = formatTimestamp(s.clock.Now())
+	}
+	var result *ManagedOperation
+	replayed := false
+	err := s.runImmediate(ctx, func() error {
+		existing, err := managedOperationForWorkerScopeTx(ctx, s.db, operation.Method, operation.RequestID)
+		if err == nil {
+			if existing.CanonicalPath != operation.CanonicalPath || existing.CanonicalBodyHash != operation.CanonicalBodyHash {
+				return &ManagedIdempotencyConflictError{}
+			}
+			result, replayed = existing, true
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE desired_state='running'`).Scan(&count); err != nil {
+			return err
+		}
+		if count > 32 {
+			return errors.New("managed restart-all snapshot exceeds capacity")
+		}
+		if err := insertManagedOperation(ctx, s.db, operation); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_lifecycle_actions (action_id,operation_id,agent_id,kind,source,execution_owner,state,stage,terminal_code,terminal_message,retryable,completed_at,created_at,updated_at) VALUES (?,?,NULL,'restart_all','direct','lifecycle','succeeded','complete','BATCH_ADMITTED','managed restart batch admitted',0,?,?,?)`, operation.OperationID, operation.OperationID, now, now, now); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='BATCH_ADMITTED',terminal_message='managed restart batch admitted' WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operation.OperationID); err != nil {
+			return err
+		}
+		result = &operation
+		return nil
+	})
+	return result, replayed, err
+}
+
+// CompleteManagedTermination is the final durable cleanup transaction. The
+// direct-mail owner is invoked before this boundary; it retains ordinary mail
+// and immutable snapshots while this method removes only managed lifecycle
+// records and the managed row.
+func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string) error {
+	return s.runImmediate(ctx, func() error {
+		action, err := managedLifecycleActionForTx(ctx, s.db, actionID)
+		if err != nil {
+			return err
+		}
+		if action.Kind != "terminate" || action.AgentID == "" {
+			return &ManagedRestartStaleError{AgentID: action.AgentID}
+		}
+		var name string
+		if err := s.db.QueryRowContext(ctx, `SELECT name FROM managed_agents WHERE agent_id=? AND desired_state='terminated'`, action.AgentID).Scan(&name); err != nil {
+			return err
+		}
+		_ = name // the caller passes this name only to the direct-mail owner.
+		// A batch parent response is immutable, but its item rows cannot outlive a
+		// child being deleted. Remove those references before action/operation rows.
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_lifecycle_batch_items WHERE child_action_id IN (SELECT action_id FROM managed_lifecycle_actions WHERE agent_id=?) OR child_operation_id IN (SELECT operation_id FROM managed_lifecycle_actions WHERE agent_id=?)`, action.AgentID, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_control_requests WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_readiness_sources WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_lifecycle_actions WHERE agent_id=? AND action_id<>?`, action.AgentID, actionID); err != nil {
+			return err
+		}
+		hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		if hasLink {
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET launch_operation_id=NULL WHERE agent_id=?`, action.AgentID); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET state='succeeded',stage='complete',terminal_code='TERMINATED',terminal_message='managed agent terminated',retryable=0,completed_at=?,updated_at=?,recovery_owner=NULL,recovery_claimed_at=NULL WHERE action_id=?`, now, now, actionID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='TERMINATED',terminal_message='managed agent terminated' WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), actionID); err != nil {
+			return err
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+// PendingManagedLaunches returns only post-027 launch links. It never treats a
+// desired-running row as recovery work.
+func (s *Store) PendingManagedLaunches(ctx context.Context) ([]*ManagedAgentRecord, error) {
+	agents, err := s.ManagedAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*ManagedAgentRecord, 0, len(agents))
+	for _, agent := range agents {
+		if agent.LifecycleState != "starting" || agent.LaunchOperationID == "" {
+			continue
+		}
+		op, err := s.ManagedOperation(ctx, agent.LaunchOperationID)
+		if err == nil && op.State == "pending" {
+			result = append(result, agent)
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) TerminalizeRecoveredManagedLaunch(ctx context.Context, agentID, operationID, code, message string) error {
+	if (code != "LAUNCH_RECOVERY_CANCELLED" && code != "LAUNCH_RECOVERY_IDENTITY_UNSAFE") || message == "" {
+		return errors.New("managed launch recovery outcome is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		// The reverse launch link makes this exact ownership check durable. A
+		// stale callback cannot terminalize a replacement agent or operation.
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='failed',accepting_prompts=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE agent_id=? AND lifecycle_state='starting' AND launch_operation_id=?`, code, message, formatTimestamp(s.clock.Now()), formatTimestamp(s.clock.Now()), agentID, operationID)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: agentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code=?,terminal_message=? WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), code, message, operationID)
+		if err != nil {
+			return err
+		}
+		changed, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: agentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+func managedLifecycleActionsTableTx(ctx context.Context, db *sql.DB) (bool, error) {
+	var present int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='managed_lifecycle_actions'`).Scan(&present); err != nil {
+		return false, err
+	}
+	return present == 1, nil
+}
+
+func legacyLifecycleStateStage(transitionStage string) (string, string, bool) {
+	switch transitionStage {
+	case "reserved", "prepared":
+		return "admitted", "admission", true
+	case "settling":
+		return "awaiting_settle", "source_settle", true
+	case "stopping":
+		return "stopping_source", "source_stop", true
+	case "stopped":
+		return "starting_target", "target_start", true
+	case "starting":
+		return "awaiting_target_ready", "target_ready", true
+	default:
+		return "", "", false
+	}
+}
+
+// legacyLifecycleBridgeActionTx binds an existing 025 transition to its 027
+// backfill row. It is deliberately optional before migration 027 so historical
+// migration fixtures still exercise the original 025 schema.
+func legacyLifecycleBridgeActionTx(ctx context.Context, db *sql.DB, transition *ManagedRestartTransition, fence ManagedRuntimeFence) (*ManagedLifecycleAction, error) {
+	present, err := managedLifecycleActionsTableTx(ctx, db)
+	if err != nil || !present {
+		return nil, err
+	}
+	if transition == nil || transition.OperationID == "" {
+		return nil, &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	state, stage, ok := legacyLifecycleStateStage(transition.Stage)
+	if !ok {
+		return nil, &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	action, err := managedLifecycleActionForTx(ctx, db, transition.OperationID)
+	if err != nil {
+		return nil, &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	if action.OperationID != transition.OperationID || action.AgentID != fence.AgentID || action.ExecutionOwner != "legacy025" || action.State != state || action.Stage != stage {
+		return nil, &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	expected := transition.Fence
+	if transition.Stage == "starting" {
+		if transition.TargetFence == nil {
+			return nil, &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		expected = *transition.TargetFence
+	}
+	if !sameManagedRestartFence(expected, fence) {
+		return nil, &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	actionFence := action.SourceFence
+	if transition.Stage == "starting" {
+		actionFence = action.TargetFence
+	}
+	if !lifecycleFenceMatches(actionFence, fence) {
+		return nil, &ManagedRestartStaleError{AgentID: fence.AgentID}
+	}
+	return action, nil
+}
+
+func updateLegacyLifecycleBridgeTx(ctx context.Context, db *sql.DB, action *ManagedLifecycleAction, nextState, nextStage string, target *ManagedRuntimeFence, replaceTarget bool, updatedAt string) error {
+	if action == nil {
+		return nil
+	}
+	if !lifecycleStateStageValid(nextState, nextStage) {
+		return errors.New("managed legacy lifecycle bridge state is invalid")
+	}
+	prefix := "source_"
+	expected := action.SourceFence
+	if lifecycleTargetStage(action.Stage) && action.TargetFence != nil {
+		prefix, expected = "target_", action.TargetFence
+	}
+	if expected == nil {
+		return &ManagedRestartStaleError{AgentID: action.AgentID}
+	}
+	set := `state=?,stage=?,updated_at=?`
+	args := []any{nextState, nextStage, updatedAt}
+	if replaceTarget {
+		set += `,target_pi_session_id=?,target_session_epoch=?,target_process_pid=?,target_process_start_marker=?,target_process_incarnation=?,target_runtime_generation=?,target_manifest_revision=?,target_manifest_hash=?`
+		args = append(args, lifecycleFenceValues(target)...)
+	}
+	args = append(args, action.ActionID, action.OperationID, action.State, action.Stage)
+	args = append(args, managedFenceValues(*expected)[1:]...)
+	result, err := db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET `+set+` WHERE action_id=? AND operation_id=? AND execution_owner='legacy025' AND state=? AND stage=? AND `+managedLifecycleFenceWhere(prefix), args...)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		if err != nil {
+			return err
+		}
+		return &ManagedRestartStaleError{AgentID: action.AgentID}
+	}
+	return nil
+}
+
+func (s *Store) terminalizeLegacyLifecycleBridgeTx(ctx context.Context, db *sql.DB, action *ManagedLifecycleAction, terminalState, code, message string) error {
+	if action == nil {
+		return nil
+	}
+	if (terminalState == "succeeded" && (code != "RESTARTED" || message != "managed agent restarted")) || (terminalState == "failed" && (code != "RESTART_PREPARATION_FAILED" || message != "restart preparation failed")) || (terminalState != "succeeded" && terminalState != "failed") {
+		return errors.New("managed legacy lifecycle terminal result is invalid")
+	}
+	stage := action.Stage
+	if terminalState == "succeeded" {
+		stage = "complete"
+	}
+	prefix := "source_"
+	expected := action.SourceFence
+	if lifecycleTargetStage(action.Stage) && action.TargetFence != nil {
+		prefix, expected = "target_", action.TargetFence
+	}
+	if expected == nil {
+		return &ManagedRestartStaleError{AgentID: action.AgentID}
+	}
+	now := formatTimestamp(s.clock.Now())
+	args := []any{terminalState, stage, code, message, now, now, action.ActionID, action.OperationID, action.State, action.Stage}
+	args = append(args, managedFenceValues(*expected)[1:]...)
+	result, err := db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET state=?,stage=?,terminal_code=?,terminal_message=?,retryable=0,completed_at=?,updated_at=?,recovery_owner=NULL,recovery_claimed_at=NULL WHERE action_id=? AND operation_id=? AND execution_owner='legacy025' AND state=? AND stage=? AND `+managedLifecycleFenceWhere(prefix), args...)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		if err != nil {
+			return err
+		}
+		return &ManagedRestartStaleError{AgentID: action.AgentID}
+	}
+	result, err = db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code=?,terminal_message=? WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), code, message, action.OperationID)
+	if err != nil {
+		return err
+	}
+	changed, err = result.RowsAffected()
+	if err != nil || changed != 1 {
+		if err != nil {
+			return err
+		}
+		return &ManagedRestartStaleError{AgentID: action.AgentID}
+	}
+	return nil
 }
 
 func restartFenceFromAgent(agent *ManagedAgentRecord) ManagedRuntimeFence {
@@ -588,6 +1216,23 @@ func (s *Store) ReserveManagedRestart(ctx context.Context, reservation ManagedRe
 			return err
 		}
 		now := formatTimestamp(s.clock.Now())
+		present, err := managedLifecycleActionsTableTx(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		if present {
+			// This compatibility reservation remains the old 025 executor's lane
+			// until its manager caller moves to ReserveManagedLifecycle. The
+			// bridge is created atomically so every old callback is fenced after
+			// migration 027.
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_lifecycle_actions (
+				action_id,operation_id,agent_id,kind,source,execution_owner,state,stage,
+				source_pi_session_id,source_session_epoch,source_process_pid,source_process_start_marker,source_process_incarnation,source_runtime_generation,source_manifest_revision,source_manifest_hash,
+				planned_target_runtime_generation,created_at,updated_at
+			) VALUES (?,?,?,'restart','direct','legacy025','admitted','admission',?,?,?,?,?,?,?,?,?,?,?)`, append([]any{operation.OperationID, operation.OperationID, reservation.Fence.AgentID}, append(managedFenceValues(reservation.Fence)[1:], reservation.Transition.TargetRuntimeGeneration, now, now)...)...); err != nil {
+				return err
+			}
+		}
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_restart_transitions (
 			agent_id,operation_id,old_pi_session_id,old_session_epoch,old_process_pid,
 			old_process_start_marker,old_process_incarnation,old_runtime_generation,old_manifest_revision,old_manifest_hash,target_runtime_generation,
@@ -714,7 +1359,46 @@ func (s *Store) ListManagedRestartTransitions(ctx context.Context) ([]*ManagedRe
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, managedRestartTransitionSelect+` ORDER BY agent_id ASC`)
+	present, err := managedLifecycleActionsTableTx(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	query := managedRestartTransitionSelect + ` ORDER BY agent_id ASC`
+	if present {
+		// After 027, the old executor owns only a complete, matching legacy
+		// bridge. An orphaned 025 row is not recoverable work.
+		query = managedRestartTransitionSelect + ` WHERE EXISTS (
+			SELECT 1 FROM managed_lifecycle_actions action
+			WHERE action.action_id=managed_restart_transitions.operation_id
+				AND action.operation_id=managed_restart_transitions.operation_id
+				AND action.execution_owner='legacy025'
+				AND action.state=CASE managed_restart_transitions.stage
+					WHEN 'reserved' THEN 'admitted' WHEN 'prepared' THEN 'admitted' WHEN 'settling' THEN 'awaiting_settle'
+					WHEN 'stopping' THEN 'stopping_source' WHEN 'stopped' THEN 'starting_target' WHEN 'starting' THEN 'awaiting_target_ready' END
+				AND action.stage=CASE managed_restart_transitions.stage
+					WHEN 'reserved' THEN 'admission' WHEN 'prepared' THEN 'admission' WHEN 'settling' THEN 'source_settle'
+					WHEN 'stopping' THEN 'source_stop' WHEN 'stopped' THEN 'target_start' WHEN 'starting' THEN 'target_ready' END
+				AND action.source_pi_session_id=managed_restart_transitions.old_pi_session_id
+				AND action.source_session_epoch=managed_restart_transitions.old_session_epoch
+				AND action.source_process_pid=managed_restart_transitions.old_process_pid
+				AND action.source_process_start_marker=managed_restart_transitions.old_process_start_marker
+				AND action.source_process_incarnation=managed_restart_transitions.old_process_incarnation
+				AND action.source_runtime_generation=managed_restart_transitions.old_runtime_generation
+				AND action.source_manifest_revision=managed_restart_transitions.old_manifest_revision
+				AND action.source_manifest_hash=managed_restart_transitions.old_manifest_hash
+				AND (managed_restart_transitions.stage<>'starting' OR (
+					action.target_pi_session_id=managed_restart_transitions.target_pi_session_id
+					AND action.target_session_epoch=managed_restart_transitions.target_session_epoch
+					AND action.target_process_pid=managed_restart_transitions.target_process_pid
+					AND action.target_process_start_marker=managed_restart_transitions.target_process_start_marker
+					AND action.target_process_incarnation=managed_restart_transitions.target_process_incarnation
+					AND action.target_runtime_generation=managed_restart_transitions.target_runtime_generation
+					AND action.target_manifest_revision=managed_restart_transitions.target_manifest_revision
+					AND action.target_manifest_hash=managed_restart_transitions.target_manifest_hash
+				))
+		) ORDER BY agent_id ASC`
+	}
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -738,22 +1422,27 @@ func (s *Store) RecoverableManagedRestartTransition(ctx context.Context, agentID
 // intentionally does not bump the public projection version.
 func (s *Store) MarkManagedRestartPrepared(ctx context.Context, fence ManagedRestartFence, operationID string) error {
 	return s.runImmediate(ctx, func() error {
-		updated, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET stage = 'prepared', updated_at = ?
-			WHERE agent_id = ? AND operation_id = ? AND old_process_incarnation = ? AND old_runtime_generation = ? AND stage = 'reserved'
-			AND EXISTS (SELECT 1 FROM managed_agents WHERE agent_id = ? AND process_incarnation = ? AND runtime_generation = ?)`,
-			formatTimestamp(s.clock.Now()), fence.AgentID, operationID, fence.ProcessIncarnation, fence.RuntimeGeneration,
-			fence.AgentID, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		transition, _, err := s.restartOldOwnedTx(ctx, fence, operationID, "reserved")
+		if err != nil {
+			return err
+		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		updated, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET stage='prepared',updated_at=? WHERE agent_id=? AND operation_id=? AND stage='reserved' AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{now, fence.AgentID, operationID}, managedFenceValues(fence)[1:]...)...)
 		if err != nil {
 			return err
 		}
 		changed, err := updated.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
+		if err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		return nil
+		return updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "admitted", "admission", nil, false, now)
 	})
 }
 
@@ -768,8 +1457,12 @@ func (s *Store) RollbackManagedRestartPreparation(ctx context.Context, fence Man
 		if err != nil {
 			return err
 		}
-		if transition.OperationID != operationID || !sameManagedRestartFence(transition.Fence, fence) {
+		if transition.OperationID != operationID || !sameManagedRestartFence(transition.Fence, fence) || (transition.Stage != "reserved" && transition.Stage != "prepared") {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
 		}
 		now := formatTimestamp(s.clock.Now())
 		updated, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state = ?, lifecycle_state = ?, activity_state = ?, accepting_prompts = ?, slot_held = ?, last_error_code = ?, last_error_message = ?, last_error_at = ?, updated_at = ?
@@ -800,16 +1493,22 @@ func (s *Store) RollbackManagedRestartPreparation(ctx context.Context, fence Man
 		if changed != 1 {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		terminalized, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state = 'terminal', terminal_at = ?, expires_at = ? WHERE operation_id = ? AND state = 'pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operationID)
-		if err != nil {
-			return err
-		}
-		changed, err = terminalized.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		if bridge != nil {
+			if err := s.terminalizeLegacyLifecycleBridgeTx(ctx, s.db, bridge, "failed", code, message); err != nil {
+				return err
+			}
+		} else {
+			terminalized, terminalErr := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=? WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operationID)
+			if terminalErr != nil {
+				return terminalErr
+			}
+			changed, terminalErr = terminalized.RowsAffected()
+			if terminalErr != nil || changed != 1 {
+				if terminalErr != nil {
+					return terminalErr
+				}
+				return &ManagedRestartStaleError{AgentID: fence.AgentID}
+			}
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -820,21 +1519,29 @@ func (s *Store) RollbackManagedRestartPreparation(ctx context.Context, fence Man
 // manager has reaped the exact owned process group during router shutdown.
 func (s *Store) RecordManagedRestartShutdown(ctx context.Context, fence ManagedRestartFence, operationID string) error {
 	return s.runImmediate(ctx, func() error {
-		updated, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state = 'stopped', updated_at = ?
-			WHERE agent_id = ? AND desired_state = 'running' AND lifecycle_state = 'restarting' AND accepting_prompts = 0 AND slot_held = 1
-			AND process_incarnation = ? AND runtime_generation = ?
-			AND EXISTS (SELECT 1 FROM managed_restart_transitions WHERE agent_id = ? AND operation_id = ? AND old_process_incarnation = ? AND old_runtime_generation = ?)`,
-			formatTimestamp(s.clock.Now()), fence.AgentID, fence.ProcessIncarnation, fence.RuntimeGeneration,
-			fence.AgentID, operationID, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		transition, agent, err := s.restartOldOwnedTx(ctx, fence, operationID, "reserved", "prepared", "settling", "stopping", "stopped")
+		if err != nil {
+			return err
+		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		updated, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state='stopped',updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='restarting' AND accepting_prompts=0 AND slot_held=1`, append([]any{now}, managedFenceValues(restartFenceFromAgent(agent))...)...)
 		if err != nil {
 			return err
 		}
 		changed, err := updated.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
+		if err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		state, stage, _ := legacyLifecycleStateStage(transition.Stage)
+		if err := updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, state, stage, nil, false, now); err != nil {
+			return err
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -861,8 +1568,12 @@ func (s *Store) MarkManagedRestartTurnSettled(ctx context.Context, fence Managed
 		if transition.ReservationActivityState != "active" || transition.TurnSettledAt != "" || agent.LifecycleState != "restarting" || agent.AcceptingPrompts || !agent.SlotHeld {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET turn_settled_at = ?, updated_at = ?
-			WHERE agent_id = ? AND operation_id = ? AND stage = 'settling' AND turn_settled_at IS NULL`, formatTimestamp(s.clock.Now()), formatTimestamp(s.clock.Now()), fence.AgentID, operationID)
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET turn_settled_at=?,updated_at=? WHERE agent_id=? AND operation_id=? AND stage='settling' AND turn_settled_at IS NULL AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{now, now, fence.AgentID, operationID}, managedFenceValues(fence)[1:]...)...)
 		if err != nil {
 			return err
 		}
@@ -873,7 +1584,7 @@ func (s *Store) MarkManagedRestartTurnSettled(ctx context.Context, fence Managed
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		return nil
+		return updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "awaiting_settle", "source_settle", nil, false, now)
 	})
 }
 
@@ -890,8 +1601,12 @@ func (s *Store) MarkManagedRestartStopping(ctx context.Context, fence ManagedRes
 			(transition.ReservationActivityState == "idle" && transition.Stage != "prepared") {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET planned_stop = 1, stage = 'stopping', updated_at = ?
-			WHERE agent_id = ? AND operation_id = ? AND stage = ?`, formatTimestamp(s.clock.Now()), fence.AgentID, operationID, transition.Stage)
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET planned_stop=1,stage='stopping',updated_at=? WHERE agent_id=? AND operation_id=? AND stage=? AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{now, fence.AgentID, operationID, transition.Stage}, managedFenceValues(fence)[1:]...)...)
 		if err != nil {
 			return err
 		}
@@ -902,7 +1617,7 @@ func (s *Store) MarkManagedRestartStopping(ctx context.Context, fence ManagedRes
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		return nil
+		return updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "stopping_source", "source_stop", nil, false, now)
 	})
 }
 
@@ -911,12 +1626,16 @@ func (s *Store) MarkManagedRestartStopping(ctx context.Context, fence ManagedRes
 // admission for target creation.
 func (s *Store) MarkManagedRestartOldStopped(ctx context.Context, fence ManagedRestartFence, operationID string) error {
 	return s.runImmediate(ctx, func() error {
-		_, agent, err := s.restartOldOwnedTx(ctx, fence, operationID, "stopping")
+		transition, agent, err := s.restartOldOwnedTx(ctx, fence, operationID, "stopping")
 		if err != nil {
 			return err
 		}
 		if agent.LifecycleState != "restarting" || agent.AcceptingPrompts || !agent.SlotHeld {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
 		}
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state = 'stopped', accepting_prompts = 0, updated_at = ?
@@ -931,7 +1650,7 @@ func (s *Store) MarkManagedRestartOldStopped(ctx context.Context, fence ManagedR
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET stage = 'stopped', updated_at = ? WHERE agent_id = ? AND operation_id = ? AND stage = 'stopping' AND planned_stop = 1`, now, fence.AgentID, operationID)
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET stage='stopped',updated_at=? WHERE agent_id=? AND operation_id=? AND stage='stopping' AND planned_stop=1 AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{now, fence.AgentID, operationID}, managedFenceValues(fence)[1:]...)...)
 		if err != nil {
 			return err
 		}
@@ -941,6 +1660,9 @@ func (s *Store) MarkManagedRestartOldStopped(ctx context.Context, fence ManagedR
 				return err
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		if err := updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "starting_target", "target_start", nil, false, now); err != nil {
+			return err
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -959,9 +1681,12 @@ func (s *Store) MarkManagedRestartStoppingForShutdown(ctx context.Context, fence
 		if agent.LifecycleState != "restarting" || agent.AcceptingPrompts || !agent.SlotHeld || transition.PlannedStop {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET planned_stop = 1, turn_settled_at = CASE WHEN reservation_activity_state = 'active' THEN ? ELSE NULL END, stage = 'stopping', updated_at = ?
-			WHERE agent_id = ? AND operation_id = ? AND stage = ?`, now, now, fence.AgentID, operationID, transition.Stage)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET planned_stop=1,turn_settled_at=CASE WHEN reservation_activity_state='active' THEN ? ELSE NULL END,stage='stopping',updated_at=? WHERE agent_id=? AND operation_id=? AND stage=? AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{now, now, fence.AgentID, operationID, transition.Stage}, managedFenceValues(fence)[1:]...)...)
 		if err != nil {
 			return err
 		}
@@ -972,7 +1697,7 @@ func (s *Store) MarkManagedRestartStoppingForShutdown(ctx context.Context, fence
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		return nil
+		return updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "stopping_source", "source_stop", nil, false, now)
 	})
 }
 
@@ -989,6 +1714,10 @@ func (s *Store) RecoverManagedRestartOldGone(ctx context.Context, fence ManagedR
 		if agent.LifecycleState != "restarting" || agent.AcceptingPrompts || !agent.SlotHeld {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state = 'stopped', accepting_prompts = 0, last_error_code = 'RESTART_OLD_PROCESS_GONE', last_error_message = 'restart old process was already gone', last_error_at = ?, updated_at = ?
 			WHERE `+managedFenceWhere("")+` AND desired_state = 'running' AND lifecycle_state = 'restarting' AND accepting_prompts = 0 AND slot_held = 1`, append([]any{now, now}, managedFenceValues(fence)...)...)
@@ -1002,8 +1731,7 @@ func (s *Store) RecoverManagedRestartOldGone(ctx context.Context, fence ManagedR
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET planned_stop = 1, turn_settled_at = CASE WHEN reservation_activity_state = 'active' THEN ? ELSE turn_settled_at END, stage = 'stopped', updated_at = ?
-			WHERE agent_id = ? AND operation_id = ? AND stage = ?`, now, now, fence.AgentID, operationID, transition.Stage)
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET planned_stop=1,turn_settled_at=CASE WHEN reservation_activity_state='active' THEN ? ELSE turn_settled_at END,stage='stopped',updated_at=? WHERE agent_id=? AND operation_id=? AND stage=? AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{now, now, fence.AgentID, operationID, transition.Stage}, managedFenceValues(fence)[1:]...)...)
 		if err != nil {
 			return err
 		}
@@ -1013,6 +1741,9 @@ func (s *Store) RecoverManagedRestartOldGone(ctx context.Context, fence ManagedR
 				return err
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		if err := updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "starting_target", "target_start", nil, false, now); err != nil {
+			return err
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -1031,6 +1762,10 @@ func (s *Store) ResetManagedRestartTargetToStopped(ctx context.Context, targetFe
 		if err != nil || transition.OperationID != operationID || transition.Stage != "starting" || transition.TargetFence == nil || !sameManagedRestartFence(*transition.TargetFence, targetFence) {
 			return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
 		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, targetFence)
+		if err != nil {
+			return err
+		}
 		oldFence := transition.Fence
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id = ?, session_epoch = ?, process_pid = ?, process_start_marker = ?, process_incarnation = ?, runtime_generation = ?, manifest_revision = ?, manifest_hash = ?, lifecycle_state = 'restarting', activity_state = 'stopped', accepting_prompts = 0, last_error_code = ?, last_error_message = ?, last_error_at = ?, updated_at = ?
@@ -1045,8 +1780,7 @@ func (s *Store) ResetManagedRestartTargetToStopped(ctx context.Context, targetFe
 			}
 			return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
 		}
-		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET target_pi_session_id = NULL, target_session_epoch = NULL, target_process_pid = NULL, target_process_start_marker = NULL, target_process_incarnation = NULL, target_manifest_revision = NULL, target_manifest_hash = NULL, stage = 'stopped', updated_at = ?
-			WHERE agent_id = ? AND operation_id = ? AND stage = 'starting'`, now, targetFence.AgentID, operationID)
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET target_pi_session_id=NULL,target_session_epoch=NULL,target_process_pid=NULL,target_process_start_marker=NULL,target_process_incarnation=NULL,target_manifest_revision=NULL,target_manifest_hash=NULL,stage='stopped',updated_at=? WHERE agent_id=? AND operation_id=? AND stage='starting' AND target_pi_session_id=? AND target_session_epoch=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=? AND target_manifest_revision=? AND target_manifest_hash=?`, now, targetFence.AgentID, operationID, targetFence.PiSessionID, targetFence.SessionEpoch, targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation, targetFence.ManifestRevision, targetFence.ManifestHash)
 		if err != nil {
 			return err
 		}
@@ -1056,6 +1790,9 @@ func (s *Store) ResetManagedRestartTargetToStopped(ctx context.Context, targetFe
 				return err
 			}
 			return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
+		}
+		if err := updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "starting_target", "target_start", nil, true, now); err != nil {
+			return err
 		}
 		if err := s.rollManagedReadinessSourceFenceTx(ctx, oldFence); err != nil {
 			return err
@@ -1080,6 +1817,10 @@ func (s *Store) InstallManagedRestartTarget(ctx context.Context, oldFence Manage
 		if transition.PlannedStop != true || transition.TargetRuntimeGeneration != targetFence.RuntimeGeneration || agent.ActivityState != "stopped" || agent.AcceptingPrompts || !agent.SlotHeld {
 			return &ManagedRestartStaleError{AgentID: oldFence.AgentID}
 		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, oldFence)
+		if err != nil {
+			return err
+		}
 		now := formatTimestamp(s.clock.Now())
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id = ?, session_epoch = ?, process_pid = ?, process_start_marker = ?, process_incarnation = ?, runtime_generation = ?, manifest_revision = ?, manifest_hash = ?, lifecycle_state = 'restarting', activity_state = 'starting', accepting_prompts = 0, updated_at = ?
 			WHERE `+managedFenceWhere("")+` AND lifecycle_state = 'restarting' AND activity_state = 'stopped' AND accepting_prompts = 0 AND slot_held = 1`, append([]any{targetFence.PiSessionID, targetFence.SessionEpoch, targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation, targetFence.RuntimeGeneration, targetFence.ManifestRevision, targetFence.ManifestHash, now}, managedFenceValues(oldFence)...)...)
@@ -1093,8 +1834,7 @@ func (s *Store) InstallManagedRestartTarget(ctx context.Context, oldFence Manage
 			}
 			return &ManagedRestartStaleError{AgentID: oldFence.AgentID}
 		}
-		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET target_pi_session_id = ?, target_session_epoch = ?, target_process_pid = ?, target_process_start_marker = ?, target_process_incarnation = ?, target_manifest_revision = ?, target_manifest_hash = ?, stage = 'starting', updated_at = ?
-			WHERE agent_id = ? AND operation_id = ? AND stage = 'stopped'`, targetFence.PiSessionID, targetFence.SessionEpoch, targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation, targetFence.ManifestRevision, targetFence.ManifestHash, now, oldFence.AgentID, operationID)
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET target_pi_session_id=?,target_session_epoch=?,target_process_pid=?,target_process_start_marker=?,target_process_incarnation=?,target_manifest_revision=?,target_manifest_hash=?,stage='starting',updated_at=? WHERE agent_id=? AND operation_id=? AND stage='stopped' AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{targetFence.PiSessionID, targetFence.SessionEpoch, targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation, targetFence.ManifestRevision, targetFence.ManifestHash, now, oldFence.AgentID, operationID}, managedFenceValues(oldFence)[1:]...)...)
 		if err != nil {
 			return err
 		}
@@ -1104,6 +1844,9 @@ func (s *Store) InstallManagedRestartTarget(ctx context.Context, oldFence Manage
 				return err
 			}
 			return &ManagedRestartStaleError{AgentID: oldFence.AgentID}
+		}
+		if err := updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, "awaiting_target_ready", "target_ready", &targetFence, true, now); err != nil {
+			return err
 		}
 		if err := s.rollManagedReadinessSourceFenceTx(ctx, targetFence); err != nil {
 			return err
@@ -1124,6 +1867,10 @@ func (s *Store) CompleteManagedRestartReady(ctx context.Context, targetFence Man
 		if err != nil || transition.OperationID != operationID || transition.Stage != "starting" || transition.TargetFence == nil || !sameManagedRestartFence(*transition.TargetFence, targetFence) {
 			return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
 		}
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, targetFence)
+		if err != nil {
+			return err
+		}
 		if err := s.managedReadinessSourcesConfirmedForFenceTx(ctx, targetFence); err != nil {
 			return err
 		}
@@ -1140,7 +1887,7 @@ func (s *Store) CompleteManagedRestartReady(ctx context.Context, targetFence Man
 			}
 			return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
 		}
-		result, err = s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id = ? AND operation_id = ? AND stage = 'starting'`, targetFence.AgentID, operationID)
+		result, err = s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id=? AND operation_id=? AND stage='starting' AND target_pi_session_id=? AND target_session_epoch=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=? AND target_manifest_revision=? AND target_manifest_hash=?`, targetFence.AgentID, operationID, targetFence.PiSessionID, targetFence.SessionEpoch, targetFence.ProcessPID, targetFence.ProcessStartMarker, targetFence.ProcessIncarnation, targetFence.ManifestRevision, targetFence.ManifestHash)
 		if err != nil {
 			return err
 		}
@@ -1151,16 +1898,22 @@ func (s *Store) CompleteManagedRestartReady(ctx context.Context, targetFence Man
 			}
 			return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
 		}
-		result, err = s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state = 'terminal', terminal_at = ?, expires_at = ? WHERE operation_id = ? AND state = 'pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operationID)
-		if err != nil {
-			return err
-		}
-		changed, err = result.RowsAffected()
-		if err != nil || changed != 1 {
-			if err != nil {
+		if bridge != nil {
+			if err := s.terminalizeLegacyLifecycleBridgeTx(ctx, s.db, bridge, "succeeded", "RESTARTED", "managed agent restarted"); err != nil {
 				return err
 			}
-			return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
+		} else {
+			result, terminalErr := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=? WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operationID)
+			if terminalErr != nil {
+				return terminalErr
+			}
+			changed, terminalErr = result.RowsAffected()
+			if terminalErr != nil || changed != 1 {
+				if terminalErr != nil {
+					return terminalErr
+				}
+				return &ManagedRestartStaleError{AgentID: targetFence.AgentID}
+			}
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -1195,7 +1948,12 @@ func (s *Store) RecordManagedRestartFailure(ctx context.Context, fence ManagedRe
 		if !match {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET last_error_code = ?, last_error_message = ?, last_error_at = ?, updated_at = ? WHERE agent_id = ? AND desired_state = 'running' AND lifecycle_state = 'restarting' AND accepting_prompts = 0 AND slot_held = 1`, code, message, formatTimestamp(s.clock.Now()), formatTimestamp(s.clock.Now()), fence.AgentID)
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='restarting' AND accepting_prompts=0 AND slot_held=1`, append([]any{code, message, now, now}, managedFenceValues(fence)...)...)
 		if err != nil {
 			return err
 		}
@@ -1206,7 +1964,8 @@ func (s *Store) RecordManagedRestartFailure(ctx context.Context, fence ManagedRe
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		return nil
+		state, stage, _ := legacyLifecycleStateStage(transition.Stage)
+		return updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, state, stage, nil, false, now)
 	})
 }
 
@@ -1219,7 +1978,16 @@ func (s *Store) restartStage(ctx context.Context, fence ManagedRestartFence, ope
 		if agent.LifecycleState != "restarting" || agent.AcceptingPrompts || !agent.SlotHeld || !extra(transition) {
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET stage = ?, updated_at = ? WHERE agent_id = ? AND operation_id = ? AND stage = ?`, to, formatTimestamp(s.clock.Now()), fence.AgentID, operationID, from)
+		bridge, err := legacyLifecycleBridgeActionTx(ctx, s.db, transition, fence)
+		if err != nil {
+			return err
+		}
+		nextState, nextStage, ok := legacyLifecycleStateStage(to)
+		if !ok {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_restart_transitions SET stage=?,updated_at=? WHERE agent_id=? AND operation_id=? AND stage=? AND old_pi_session_id=? AND old_session_epoch=? AND old_process_pid=? AND old_process_start_marker=? AND old_process_incarnation=? AND old_runtime_generation=? AND old_manifest_revision=? AND old_manifest_hash=?`, append([]any{to, now, fence.AgentID, operationID, from}, managedFenceValues(fence)[1:]...)...)
 		if err != nil {
 			return err
 		}
@@ -1230,7 +1998,7 @@ func (s *Store) restartStage(ctx context.Context, fence ManagedRestartFence, ope
 			}
 			return &ManagedRestartStaleError{AgentID: fence.AgentID}
 		}
-		return nil
+		return updateLegacyLifecycleBridgeTx(ctx, s.db, bridge, nextState, nextStage, nil, false, now)
 	})
 }
 
@@ -1255,13 +2023,24 @@ func (s *Store) restartOldOwnedTx(ctx context.Context, fence ManagedRestartFence
 
 func (s *Store) UpdateManagedAgentStarting(ctx context.Context, agentID string, sessionID string, identity ProcessIdentityRecord, runtimeGeneration string) error {
 	return s.runImmediate(ctx, func() error {
+		hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		where := `agent_id=? AND lifecycle_state='starting'`
+		if hasLink {
+			// The link and pending operation are a write-side ownership fence. A
+			// terminate tombstone closes the operation, so an old callback cannot
+			// install a process identity after that reservation wins.
+			where += ` AND launch_operation_id IS NOT NULL AND EXISTS (SELECT 1 FROM managed_http_operations WHERE operation_id=managed_agents.launch_operation_id AND state='pending')`
+		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id = ?, process_pid = ?, process_start_marker = ?, process_incarnation = ?, runtime_generation = ?, updated_at = ? WHERE agent_id = ? AND lifecycle_state = 'starting'`, sessionID, nullIfZero(identity.PID), nullIfEmpty(identity.StartMarker), nullIfEmpty(identity.Incarnation), runtimeGeneration, now, agentID)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET pi_session_id=?,process_pid=?,process_start_marker=?,process_incarnation=?,runtime_generation=?,updated_at=? WHERE `+where, sessionID, nullIfZero(identity.PID), nullIfEmpty(identity.StartMarker), nullIfEmpty(identity.Incarnation), runtimeGeneration, now, agentID)
 		if err != nil {
 			return err
 		}
 		changed, err := result.RowsAffected()
-		if err != nil || changed == 0 {
+		if err != nil || changed != 1 {
 			if err != nil {
 				return err
 			}
@@ -1471,9 +2250,16 @@ func (s *Store) MarkManagedReadyFromSources(ctx context.Context, fence ManagedRu
 		if err := s.managedReadinessSourcesConfirmedForFenceTx(ctx, fence); err != nil {
 			return err
 		}
+		hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		where := `agent_id=? AND lifecycle_state='starting' AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=?`
+		if hasLink {
+			where += ` AND launch_operation_id IS NOT NULL AND EXISTS (SELECT 1 FROM managed_http_operations WHERE operation_id=managed_agents.launch_operation_id AND state='pending')`
+		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state = 'running', activity_state = 'idle', accepting_prompts = 1, started_at = COALESCE(started_at, ?), updated_at = ?
-			WHERE agent_id = ? AND lifecycle_state = 'starting' AND pi_session_id = ? AND session_epoch = ? AND process_pid = ? AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ? AND manifest_revision = ? AND manifest_hash = ?`, now, now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,started_at=COALESCE(started_at,?),updated_at=? WHERE `+where, now, now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash)
 		if err != nil {
 			return err
 		}
@@ -1498,14 +2284,25 @@ func (s *Store) MarkManagedReadyFromSources(ctx context.Context, fence ManagedRu
 
 func (s *Store) MarkManagedReady(ctx context.Context, agentID string) error {
 	return s.runImmediate(ctx, func() error {
+		hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
+		if err != nil {
+			return err
+		}
+		where := `agent_id=? AND lifecycle_state='starting'`
+		if hasLink {
+			where += ` AND launch_operation_id IS NOT NULL AND EXISTS (SELECT 1 FROM managed_http_operations WHERE operation_id=managed_agents.launch_operation_id AND state='pending')`
+		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state = 'running', activity_state = 'idle', accepting_prompts = 1, started_at = COALESCE(started_at, ?), updated_at = ? WHERE agent_id = ? AND lifecycle_state = 'starting'`, now, now, agentID)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,started_at=COALESCE(started_at,?),updated_at=? WHERE `+where, now, now, agentID)
 		if err != nil {
 			return err
 		}
 		changed, err := result.RowsAffected()
-		if err != nil || changed == 0 {
-			return err
+		if err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return &ManagedReadinessSourceStaleError{AgentID: agentID}
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
@@ -1590,7 +2387,14 @@ func (s *Store) ManagedAgent(ctx context.Context, agentID string) (*ManagedAgent
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	return scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ?`, agentID), nil)
+	agent, err := scanManagedAgent(s.db.QueryRowContext(ctx, managedAgentSelect+` WHERE agent_id = ?`, agentID), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := loadManagedLaunchOperationTx(ctx, s.db, agent); err != nil {
+		return nil, err
+	}
+	return agent, nil
 }
 
 func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error) {
@@ -1603,16 +2407,24 @@ func (s *Store) ManagedAgents(ctx context.Context) ([]*ManagedAgentRecord, error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var result []*ManagedAgentRecord
 	for rows.Next() {
 		item, scanErr := scanManagedAgent(rows, nil)
 		if scanErr != nil {
+			_ = rows.Close()
 			return nil, scanErr
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, item := range result {
+		if err := loadManagedLaunchOperationTx(ctx, s.db, item); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 const managedAgentSelect = `SELECT agent_id,name,slot_held,cwd,selected_model_provider,selected_model_id,desired_state,lifecycle_state,activity_state,accepting_prompts,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,pending_initial_instruction,initial_instruction_sent,last_error_code,last_error_message,last_error_at,created_at,started_at,updated_at FROM managed_agents`
@@ -1638,6 +2450,22 @@ func scanManagedAgent(scanner interface{ Scan(...any) error }, _ any) (*ManagedA
 	result.LastErrorAt = errorAt.String
 	result.StartedAt = started.String
 	return &result, nil
+}
+
+func loadManagedLaunchOperationTx(ctx context.Context, db *sql.DB, agent *ManagedAgentRecord) error {
+	if agent == nil {
+		return nil
+	}
+	hasLink, err := managedLaunchOperationColumnTx(ctx, db)
+	if err != nil || !hasLink {
+		return err
+	}
+	var link sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT launch_operation_id FROM managed_agents WHERE agent_id=?`, agent.AgentID).Scan(&link); err != nil {
+		return err
+	}
+	agent.LaunchOperationID = link.String
+	return nil
 }
 
 func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (ManagedAgentSnapshot, error) {
@@ -1675,13 +2503,377 @@ func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (Manag
 	return ManagedAgentSnapshot{GeneratedAt: generated, ProjectionVersion: version, Agent: agent}, nil
 }
 
+// sweepManagedOperations preserves a terminal operation graph as one unit.
+// expires_at is an eligibility floor, never permission to cascade through a
+// nonterminal child, retained batch parent, 025 bridge, or launch protection.
 func (s *Store) sweepManagedOperations(ctx context.Context, now string) (int, error) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM managed_http_operations WHERE state = 'terminal' AND expires_at IS NOT NULL AND expires_at <= ?`, now)
+	var lifecycleTable int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='managed_lifecycle_actions'`).Scan(&lifecycleTable); err != nil {
+		return 0, err
+	}
+	if lifecycleTable == 0 {
+		result, err := s.db.ExecContext(ctx, `DELETE FROM managed_http_operations WHERE state='terminal' AND expires_at IS NOT NULL AND expires_at<=?`, now)
+		if err != nil {
+			return 0, err
+		}
+		count, err := result.RowsAffected()
+		return int(count), err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT operation_id FROM managed_http_operations WHERE state='terminal' AND expires_at IS NOT NULL AND expires_at<=? ORDER BY expires_at,operation_id`, now)
 	if err != nil {
 		return 0, err
 	}
-	count, err := result.RowsAffected()
-	return int(count), err
+	var candidates []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		candidates = append(candidates, id)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, candidate := range candidates {
+		count, err := s.sweepManagedOperationClosureTx(ctx, candidate, now)
+		if err != nil {
+			return 0, err
+		}
+		deleted += count
+	}
+	return deleted, nil
+}
+
+type managedOperationGraphAction struct{ id, operationID, parent, retryOf, state string }
+
+func (s *Store) sweepManagedOperationClosureTx(ctx context.Context, candidate, now string) (int, error) {
+	// Candidates are captured before graph deletion. A prior closure can remove
+	// a later candidate, which is a completed sweep outcome, not an invariant.
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_http_operations WHERE operation_id=?`, candidate).Scan(&present); err != nil {
+		return 0, err
+	}
+	if present == 0 {
+		return 0, nil
+	}
+	actions := map[string]managedOperationGraphAction{}
+	operations := map[string]struct{}{}
+	operationQueue := []string{}
+	actionQueue := []string{}
+	addOperation := func(id string) {
+		if id != "" {
+			if _, ok := operations[id]; !ok {
+				operations[id] = struct{}{}
+				operationQueue = append(operationQueue, id)
+			}
+		}
+	}
+	addAction := func(id string) error {
+		if id == "" {
+			return nil
+		}
+		if _, ok := actions[id]; ok {
+			return nil
+		}
+		var value managedOperationGraphAction
+		var parent, retry sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT action_id,operation_id,parent_action_id,retry_of,state FROM managed_lifecycle_actions WHERE action_id=?`, id).Scan(&value.id, &value.operationID, &parent, &retry, &value.state)
+		if err != nil {
+			return err
+		}
+		value.parent, value.retryOf = parent.String, retry.String
+		actions[id] = value
+		actionQueue = append(actionQueue, id)
+		return nil
+	}
+	addOperation(candidate)
+	for operationIndex, actionIndex := 0, 0; operationIndex < len(operationQueue) || actionIndex < len(actionQueue); {
+		if operationIndex < len(operationQueue) {
+			op := operationQueue[operationIndex]
+			operationIndex++
+			var actionID string
+			err := s.db.QueryRowContext(ctx, `SELECT action_id FROM managed_lifecycle_actions WHERE operation_id=?`, op).Scan(&actionID)
+			if err == nil {
+				if err := addAction(actionID); err != nil {
+					return 0, err
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return 0, err
+			}
+			if err := s.addManagedBatchOperationReferencesTx(ctx, op, addAction, addOperation); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		action := actions[actionQueue[actionIndex]]
+		actionIndex++
+		addOperation(action.operationID)
+		if err := addAction(action.parent); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		if err := addAction(action.retryOf); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		for _, query := range []string{`SELECT action_id FROM managed_lifecycle_actions WHERE retry_of=?`, `SELECT action_id FROM managed_lifecycle_actions WHERE parent_action_id=?`} {
+			rows, err := s.db.QueryContext(ctx, query, action.id)
+			if err != nil {
+				return 0, err
+			}
+			var childIDs []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					_ = rows.Close()
+					return 0, err
+				}
+				childIDs = append(childIDs, id)
+			}
+			if err := rows.Close(); err != nil {
+				return 0, err
+			}
+			for _, id := range childIDs {
+				if err := addAction(id); err != nil {
+					return 0, err
+				}
+			}
+		}
+		if err := s.addManagedBatchActionReferencesTx(ctx, action.id, addAction, addOperation); err != nil {
+			return 0, err
+		}
+	}
+	prunable, err := s.validateManagedOperationClosureTx(ctx, operations, actions, now)
+	if err != nil {
+		return 0, err
+	}
+	if !prunable {
+		return 0, nil
+	}
+	postorder, err := s.managedActionPostorderTx(ctx, actions)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.deleteManagedBatchReferencesTx(ctx, actions, operations); err != nil {
+		return 0, err
+	}
+	if s.managedGraphFault != nil {
+		if err := s.managedGraphFault("after_first_batch_item_delete"); err != nil {
+			return 0, err
+		}
+	}
+	for _, actionID := range postorder {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_lifecycle_actions WHERE action_id=?`, actionID); err != nil {
+			return 0, err
+		}
+	}
+	for _, actionID := range postorder {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_http_operations WHERE operation_id=?`, actions[actionID].operationID); err != nil {
+			return 0, err
+		}
+		delete(operations, actions[actionID].operationID)
+	}
+	remaining := make([]string, 0, len(operations))
+	for id := range operations {
+		remaining = append(remaining, id)
+	}
+	sort.Strings(remaining)
+	for _, operationID := range remaining {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_http_operations WHERE operation_id=?`, operationID); err != nil {
+			return 0, err
+		}
+	}
+	return len(postorder) + len(remaining), nil
+}
+
+func (s *Store) addManagedBatchOperationReferencesTx(ctx context.Context, operationID string, addAction func(string) error, addOperation func(string)) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT parent_action_id,child_action_id,child_operation_id FROM managed_lifecycle_batch_items WHERE child_operation_id=?`, operationID)
+	if err != nil {
+		return err
+	}
+	type batchReference struct{ parent, childAction, childOperation string }
+	var references []batchReference
+	for rows.Next() {
+		var reference batchReference
+		var childAction, childOperation sql.NullString
+		if err := rows.Scan(&reference.parent, &childAction, &childOperation); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		reference.childAction, reference.childOperation = childAction.String, childOperation.String
+		references = append(references, reference)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, reference := range references {
+		if err := addAction(reference.parent); err != nil {
+			return err
+		}
+		if err := addAction(reference.childAction); err != nil {
+			return err
+		}
+		addOperation(reference.childOperation)
+	}
+	return nil
+}
+func (s *Store) addManagedBatchActionReferencesTx(ctx context.Context, actionID string, addAction func(string) error, addOperation func(string)) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT parent_action_id,child_action_id,child_operation_id FROM managed_lifecycle_batch_items WHERE parent_action_id=? OR child_action_id=?`, actionID, actionID)
+	if err != nil {
+		return err
+	}
+	type batchReference struct{ parent, childAction, childOperation string }
+	var references []batchReference
+	for rows.Next() {
+		var reference batchReference
+		var childAction, childOperation sql.NullString
+		if err := rows.Scan(&reference.parent, &childAction, &childOperation); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		reference.childAction, reference.childOperation = childAction.String, childOperation.String
+		references = append(references, reference)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, reference := range references {
+		if err := addAction(reference.parent); err != nil {
+			return err
+		}
+		if err := addAction(reference.childAction); err != nil {
+			return err
+		}
+		addOperation(reference.childOperation)
+	}
+	return nil
+}
+func (s *Store) validateManagedOperationClosureTx(ctx context.Context, operations map[string]struct{}, actions map[string]managedOperationGraphAction, now string) (bool, error) {
+	for operationID := range operations {
+		var state string
+		var expiry sql.NullString
+		if err := s.db.QueryRowContext(ctx, `SELECT state,expires_at FROM managed_http_operations WHERE operation_id=?`, operationID).Scan(&state, &expiry); err != nil {
+			return false, err
+		}
+		if state != "terminal" || !expiry.Valid || expiry.String > now {
+			return false, nil
+		}
+		var transitions int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_restart_transitions WHERE operation_id=?`, operationID).Scan(&transitions); err != nil {
+			return false, err
+		}
+		if transitions != 0 {
+			return false, errors.New("terminal managed operation retains a 025 transition")
+		}
+		var links int
+		hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
+		if err != nil {
+			return false, err
+		}
+		if hasLink {
+			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE launch_operation_id=?`, operationID).Scan(&links); err != nil {
+				return false, err
+			}
+			if links != 0 {
+				return false, nil
+			}
+		}
+	}
+	for _, action := range actions {
+		if action.state != "succeeded" && action.state != "failed" && action.state != "cancelled" && action.state != "superseded" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (s *Store) managedActionPostorderTx(ctx context.Context, actions map[string]managedOperationGraphAction) ([]string, error) {
+	ids := make([]string, 0, len(actions))
+	for id := range actions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	seen := map[string]bool{}
+	visiting := map[string]bool{}
+	result := []string{}
+	var visit func(string) error
+	visit = func(id string) error {
+		if seen[id] {
+			return nil
+		}
+		if visiting[id] {
+			return errors.New("managed lifecycle graph cycle")
+		}
+		visiting[id] = true
+		rows, err := s.db.QueryContext(ctx, `SELECT action_id FROM managed_lifecycle_actions WHERE retry_of=? OR parent_action_id=?`, id, id)
+		if err != nil {
+			return err
+		}
+		var children []string
+		for rows.Next() {
+			var child string
+			if err := rows.Scan(&child); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if _, ok := actions[child]; ok {
+				children = append(children, child)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		sort.Strings(children)
+		for _, child := range children {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		visiting[id] = false
+		seen[id] = true
+		result = append(result, id)
+		return nil
+	}
+	for _, id := range ids {
+		if err := visit(id); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+func (s *Store) deleteManagedBatchReferencesTx(ctx context.Context, actions map[string]managedOperationGraphAction, operations map[string]struct{}) error {
+	if len(actions) == 0 && len(operations) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(actions))
+	for id := range actions {
+		ids = append(ids, id)
+	}
+	ops := make([]string, 0, len(operations))
+	for id := range operations {
+		ops = append(ops, id)
+	}
+	clauses := []string{}
+	args := []any{}
+	if len(ids) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+		clauses = append(clauses, `parent_action_id IN (`+placeholders+`)`, `child_action_id IN (`+placeholders+`)`)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	if len(ops) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(ops)), ",")
+		clauses = append(clauses, `child_operation_id IN (`+placeholders+`)`)
+		for _, id := range ops {
+			args = append(args, id)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM managed_lifecycle_batch_items WHERE `+strings.Join(clauses, " OR "), args...)
+	return err
 }
 
 func boolInt(value bool) int {
