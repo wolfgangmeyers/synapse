@@ -11,6 +11,70 @@ import (
 
 const testManifestHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestManagedRecipientConflictResolution(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyManagedDirectFixture(t)
+	enqueue := func(id, body string) (EnqueueResult, error) {
+		envelope := testEnvelope(id, body)
+		envelope.To = fence.AgentID
+		return durable.Enqueue(ctx, envelope)
+	}
+	first, err := enqueue("conflict-first", "first")
+	require.NoError(t, err)
+	firstTarget, err := durable.ResolveMessageTarget(ctx, first.Message.ID)
+	require.NoError(t, err)
+	require.Equal(t, "managed", firstTarget.SourceKind)
+
+	// Startup reconciliation keeps both concrete contenders. No new snapshot is
+	// selected while the recipient is conflicted, so lookup order cannot fall
+	// back to tmux or managed delivery.
+	_, err = durable.db.Exec(`UPDATE recipient_sources SET state='conflicted',conflict_source_kind='tmux',conflict_owner_identity='tmux-source',updated_at=? WHERE recipient_name=?`, formatTimestamp(time.Now()), fence.AgentID)
+	require.NoError(t, err)
+	blocked, err := enqueue("conflict-blocked", "blocked")
+	require.NoError(t, err)
+	blockedTarget, err := durable.ResolveMessageTarget(ctx, blocked.Message.ID)
+	require.NoError(t, err)
+	require.Nil(t, blockedTarget)
+	attempt, err := durable.AllocateManagedDirectAttempt(ctx, fence)
+	require.NoError(t, err)
+	require.Nil(t, attempt, "a conflicted source must not fall back to managed delivery")
+
+	// Retiring the secondary resumes the primary without rewriting its snapshot.
+	require.NoError(t, durable.RetireTmuxRecipientSource(ctx, fence.AgentID, "tmux-source"))
+	source, err := durable.RecipientSource(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "managed", source.SourceKind)
+	require.Equal(t, "active", source.State)
+	blockedTarget, err = durable.ResolveMessageTarget(ctx, blocked.Message.ID)
+	require.NoError(t, err)
+	require.Equal(t, "managed", blockedTarget.SourceKind)
+
+	// A second conflict makes the managed owner the retired primary. Its old
+	// snapshots become terminal and the recorded tmux survivor is promoted.
+	_, err = durable.db.Exec(`UPDATE recipient_sources SET state='conflicted',conflict_source_kind='tmux',conflict_owner_identity='tmux-source',updated_at=? WHERE recipient_name=?`, formatTimestamp(time.Now()), fence.AgentID)
+	require.NoError(t, err)
+	survivor, err := enqueue("conflict-survivor", "survivor")
+	require.NoError(t, err)
+	require.NoError(t, durable.RetireManagedRecipientSource(ctx, fence.AgentID, fence.AgentID))
+	source, err = durable.RecipientSource(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "tmux", source.SourceKind)
+	require.Equal(t, "tmux-source", source.OwnerIdentity)
+	require.Equal(t, "active", source.State)
+	for _, id := range []string{first.Message.ID, blocked.Message.ID} {
+		message, err := durable.MessageFor(ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, "dead_letter", message.State, "retired snapshots are terminalized")
+	}
+	survivorTarget, err := durable.ResolveMessageTarget(ctx, survivor.Message.ID)
+	require.NoError(t, err)
+	require.Equal(t, "tmux", survivorTarget.SourceKind)
+	require.Equal(t, "tmux-source", survivorTarget.OwnerIdentity)
+	attempt, err = durable.AllocateManagedDirectAttempt(ctx, fence)
+	require.NoError(t, err)
+	require.Nil(t, attempt, "the promoted tmux survivor must not fall back to managed direct mail")
+}
+
 func TestDefaultModelSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.db")
 	ctx := context.Background()
@@ -95,8 +159,8 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
 	require.Greater(t, len(migrations), 22)
-	require.Equal(t, "025_managed_restart_execution", migrations[len(migrations)-1].ID)
-	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+	require.Equal(t, "026_managed_direct_delivery", migrations[len(migrations)-1].ID)
+	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-2]})
 	require.NoError(t, err)
 	agent := ManagedAgentRecord{AgentID: "migration-agent", Name: "migration-agent", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 2, ManifestRevision: 3, ManifestHash: testManifestHash, PendingInitialInstruction: "hello"}
 	op := ManagedOperation{OperationID: "migration-launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "migration-launch", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
@@ -153,6 +217,8 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='023_managed_restart'`).Scan(&applied))
 	require.Equal(t, 1, applied)
 	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='025_managed_restart_execution'`).Scan(&applied))
+	require.Equal(t, 1, applied)
+	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='026_managed_direct_delivery'`).Scan(&applied))
 	require.Equal(t, 1, applied)
 	require.NoError(t, after.Close())
 	reopened, err := Open(ctx, path, Options{})

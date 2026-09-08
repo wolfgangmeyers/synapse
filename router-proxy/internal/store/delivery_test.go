@@ -16,6 +16,105 @@ func testEnvelope(id, body string) protocol.Envelope {
 }
 func testUUID(n string) string { return fmt.Sprintf("123e4567-e89b-42d3-a456-42661417%s", n) }
 
+func readyManagedDirectFixture(t *testing.T) (*Store, ManagedRuntimeFence) {
+	t.Helper()
+	durable, fence := readinessSourceFixture(t)
+	policy := DefaultManagedReadinessPolicy()
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(context.Background(), fence, policy))
+	snapshot := ManagedChildSnapshot{SnapshotID: "direct-snapshot", OwnerSessionID: "owner", Sequence: 0, Canonical: []byte(`{"owner_session_id":"owner","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"direct-snapshot"}`), SHA256: testManifestHash}
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(context.Background(), fence, snapshot))
+	require.NoError(t, durable.MarkManagedReadyFromSources(context.Background(), fence))
+	return durable, fence
+}
+
+func allocateTestDirectAttempt(t *testing.T, durable *Store, fence ManagedRuntimeFence, id string) *ManagedDirectAttempt {
+	t.Helper()
+	_, err := durable.Enqueue(context.Background(), protocol.Envelope{ID: id, From: "sender", To: fence.AgentID, Body: "body", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(context.Background(), id)
+	require.NoError(t, err)
+	attempt, err := durable.AllocateManagedDirectAttempt(context.Background(), fence)
+	require.NoError(t, err)
+	require.NotNil(t, attempt)
+	return attempt
+}
+
+func TestManagedDirectRetryBoundaries(t *testing.T) {
+	require.Equal(t, time.Second, directRetryDelay(1))
+	require.Equal(t, 5*time.Second, directRetryDelay(2))
+	require.Equal(t, 30*time.Second, directRetryDelay(3))
+	require.Equal(t, 120*time.Second, directRetryDelay(4))
+	durable, fence := readyManagedDirectFixture(t)
+	attempt := allocateTestDirectAttempt(t, durable, fence, "direct-retry")
+	terminal, err := durable.ReleaseManagedDirect(context.Background(), *attempt, "prompt_failed", "")
+	require.NoError(t, err)
+	require.False(t, terminal)
+	stored, err := durable.ManagedDirectAttempt(context.Background(), attempt.MessageID, 1)
+	require.NoError(t, err)
+	require.Equal(t, "released", stored.State)
+	require.WithinDuration(t, time.Now().Add(time.Second), parseTimestamp(stored.NextAttemptAt), 2*time.Second)
+}
+
+func TestManagedDirectFifthAttemptTerminal(t *testing.T) {
+	durable, fence := readyManagedDirectFixture(t)
+	attempt := allocateTestDirectAttempt(t, durable, fence, "direct-fifth")
+	for number := 1; number <= 5; number++ {
+		terminal, err := durable.ReleaseManagedDirect(context.Background(), *attempt, "prompt_failed", "")
+		require.NoError(t, err)
+		require.Equal(t, number == 5, terminal)
+		if number == 5 {
+			break
+		}
+		require.NoError(t, func() error {
+			_, err := durable.db.Exec(`UPDATE managed_direct_delivery_attempts SET next_attempt_at = ? WHERE message_id = ? AND attempt_number = ?`, formatTimestamp(time.Now().Add(-time.Second)), attempt.MessageID, number)
+			return err
+		}())
+		attempt, err = durable.AllocateManagedDirectAttempt(context.Background(), fence)
+		require.NoError(t, err)
+		require.NotNil(t, attempt)
+	}
+	message, err := durable.MessageFor(context.Background(), "direct-fifth")
+	require.NoError(t, err)
+	require.Equal(t, "dead_letter", message.State)
+}
+
+func TestManagedDirectExpiryAndTmuxIsolation(t *testing.T) {
+	durable, fence := readyManagedDirectFixture(t)
+	attempt := allocateTestDirectAttempt(t, durable, fence, "direct-expiry")
+	require.NoError(t, func() error {
+		_, err := durable.db.Exec(`UPDATE messages SET expires_at = ? WHERE id = ?`, formatTimestamp(time.Now().Add(-time.Second)), attempt.MessageID)
+		return err
+	}())
+	_, err := durable.Sweep(context.Background(), DefaultRetentionPolicy)
+	require.NoError(t, err)
+	message, err := durable.MessageFor(context.Background(), attempt.MessageID)
+	require.NoError(t, err)
+	require.Nil(t, message)
+	stored, err := durable.ManagedDirectAttempt(context.Background(), attempt.MessageID, attempt.AttemptNumber)
+	require.Error(t, err)
+	require.Nil(t, stored)
+}
+
+func TestTargetSnapshotSelectsDurableTmuxOwner(t *testing.T) {
+	ctx := context.Background()
+	durable := openTestStore(t)
+	owner, err := durable.ReserveTmuxRecipientSource(ctx, "agent-a", "tmux-source-v1:agent-a")
+	require.NoError(t, err)
+	require.Equal(t, "tmux-source-v1:agent-a", owner)
+	require.NoError(t, durable.ActivateTmuxRecipientSource(ctx, "agent-a", owner))
+	result, err := durable.Enqueue(ctx, testEnvelope("snapshot-message", "body"))
+	require.NoError(t, err)
+	target, err := durable.ResolveMessageTarget(ctx, result.Message.ID)
+	require.NoError(t, err)
+	require.Equal(t, "tmux", target.SourceKind)
+	require.Equal(t, owner, target.OwnerIdentity)
+	_, err = durable.AcquireAgentLease(ctx, LeaseRequest{AgentID: "agent-a", InstanceID: "instance-a", LeaseID: "lease-a"})
+	require.NoError(t, err)
+	delivery, err := durable.ClaimNextMessage(ctx, ClaimRequest{AgentID: "agent-a", InstanceID: "instance-a", LeaseID: "lease-a", SourceOwnerID: owner})
+	require.NoError(t, err)
+	require.Equal(t, "snapshot-message", delivery.Items[0].MessageID)
+}
+
 func TestEnqueueIsIdempotentAndSuppressesUnchangedLiveDuplicates(t *testing.T) {
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
 	ids := deterministic.NewSequenceIDSource(testUUID("0001"), testUUID("0002"))

@@ -162,6 +162,22 @@ func TestHTTPOriginAndPreflightMatchCurrentNodeContract(t *testing.T) {
 	require.Contains(t, string(body), `"not_found"`)
 }
 
+func TestCommonSelectorLeavesUnownedMessagesQueued(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"id":"unowned","from":"sender","to":"no-source","body":"body","created_at":"2026-08-29T12:00:00.000Z"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusCreated, response.Code)
+	message, err := durable.MessageFor(context.Background(), "unowned")
+	require.NoError(t, err)
+	require.Equal(t, "queued", message.State)
+}
+
 func TestWebSocketRegistrationDeliveryAndAckUseStoreTransitions(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))

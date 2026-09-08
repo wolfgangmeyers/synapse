@@ -231,13 +231,15 @@ type session struct {
 	conversationSync  string
 	deliveryReceipts  string
 	inlineToolControl bool
-	paused            bool
-	lifecycleEnabled  bool
-	writeMu           sync.Mutex
-	stateMu           sync.RWMutex
-	closeOnce         sync.Once
-	sendOverride      func(map[string]any) error
-	closeOverride     func(websocket.StatusCode, string) error
+	// tmuxSourceID is durable across this socket and primary replacements.
+	tmuxSourceID     string
+	paused           bool
+	lifecycleEnabled bool
+	writeMu          sync.Mutex
+	stateMu          sync.RWMutex
+	closeOnce        sync.Once
+	sendOverride     func(map[string]any) error
+	closeOverride    func(websocket.StatusCode, string) error
 }
 
 type activity struct {
@@ -519,6 +521,17 @@ func (r *Router) Listen(ctx context.Context) error {
 	r.mu.Unlock()
 	if r.managed != nil {
 		if err := r.managed.RecoverManagedRestartTransitions(ctx); err != nil {
+			return err
+		}
+	}
+	if err := r.store.ReconcileManagedRecipientSources(ctx); err != nil {
+		return err
+	}
+	if err := r.store.ReconcileMessageTargets(ctx); err != nil {
+		return err
+	}
+	if r.managed != nil {
+		if err := r.managed.RecoverManagedDirectAttempts(ctx); err != nil {
 			return err
 		}
 	}

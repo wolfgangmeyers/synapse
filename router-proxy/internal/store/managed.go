@@ -174,6 +174,24 @@ type ManagedNameConflictError struct{ Name string }
 func (e *ManagedNameConflictError) Error() string { return "managed agent name is already reserved" }
 func (e *ManagedNameConflictError) Code() string  { return "name_in_use" }
 
+// RecipientSourceConflictError keeps a name from being selected by transport
+// lookup order when a managed process and a tmux primary claim it.
+type RecipientSourceConflictError struct{ Recipient string }
+
+func (e *RecipientSourceConflictError) Error() string { return "recipient source is already owned" }
+func (e *RecipientSourceConflictError) Code() string  { return "recipient_source_conflict" }
+
+type RecipientSource struct {
+	RecipientName string
+	SourceKind    string
+	OwnerIdentity string
+	State         string
+	ConflictKind  string
+	ConflictOwner string
+	CreatedAt     string
+	UpdatedAt     string
+}
+
 type ManagedSlotLimitError struct{}
 
 func (e *ManagedSlotLimitError) Error() string { return "managed process limit reached" }
@@ -370,6 +388,13 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 				return &ManagedNameConflictError{Name: agent.Name}
 			}
 			return err
+		}
+		if err := s.reserveRecipientSourceTx(ctx, agent.Name, "managed", agent.AgentID); err != nil {
+			// Forward-migration fixtures deliberately stop before 026. Production
+			// Open applies it before a managed launch can be reserved.
+			if !strings.Contains(err.Error(), "no such table: recipient_sources") {
+				return err
+			}
 		}
 		defaultPolicy := DefaultManagedReadinessPolicy()
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_readiness_sources (
@@ -1459,6 +1484,10 @@ func (s *Store) MarkManagedReadyFromSources(ctx context.Context, fence ManagedRu
 		if changed != 1 {
 			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
 		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state = 'active', updated_at = ?
+			WHERE source_kind = 'managed' AND owner_identity = ? AND state = 'reserved'`, now, fence.AgentID); err != nil {
+			return err
+		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
@@ -1698,6 +1727,227 @@ func equalFold(a, b string) bool {
 		}
 	}
 	return true
+}
+
+// ReserveTmuxRecipientSource returns a durable source identity. A reconnect
+// reads and keeps the existing owner instead of using its WebSocket instance.
+func (s *Store) ReserveTmuxRecipientSource(ctx context.Context, recipient, proposedOwner string) (string, error) {
+	if !managedRecipientRE.MatchString(recipient) || proposedOwner == "" {
+		return "", errors.New("recipient source identity is invalid")
+	}
+	owner := ""
+	err := s.runImmediate(ctx, func() error {
+		existing, err := recipientSourceForTx(ctx, s.db, recipient)
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := s.reserveRecipientSourceTx(ctx, recipient, "tmux", proposedOwner); err != nil {
+				return err
+			}
+			owner = proposedOwner
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if existing.SourceKind != "tmux" || existing.State == "conflicted" || existing.State == "retired" {
+			return &RecipientSourceConflictError{Recipient: recipient}
+		}
+		owner = existing.OwnerIdentity
+		return nil
+	})
+	return owner, err
+}
+
+func (s *Store) ActivateTmuxRecipientSource(ctx context.Context, recipient, owner string) error {
+	return s.runImmediate(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state = 'active', updated_at = ?
+			WHERE recipient_name = ? AND source_kind = 'tmux' AND owner_identity = ? AND state IN ('reserved','active')`, formatTimestamp(s.clock.Now()), recipient, owner)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &RecipientSourceConflictError{Recipient: recipient}
+		}
+		return nil
+	})
+}
+
+// RetireManagedRecipientSource removes a managed contender explicitly. It is
+// separate from ordinary stop/restart, which deliberately retain a managed
+// source so queued snapshots have a stable owner during recovery.
+func (s *Store) RetireManagedRecipientSource(ctx context.Context, recipient, owner string) error {
+	return s.retireRecipientSource(ctx, recipient, "managed", owner)
+}
+
+func (s *Store) RetireTmuxRecipientSource(ctx context.Context, recipient, owner string) error {
+	return s.retireRecipientSource(ctx, recipient, "tmux", owner)
+}
+
+func (s *Store) retireRecipientSource(ctx context.Context, recipient, kind, owner string) error {
+	if recipient == "" || owner == "" || (kind != "managed" && kind != "tmux") {
+		return errors.New("recipient source identity is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		source, err := recipientSourceForTx(ctx, s.db, recipient)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		if source.SourceKind == kind && source.OwnerIdentity == owner {
+			if err := s.terminalizeRetiredRecipientSnapshotsTx(ctx, source.SourceKind, source.OwnerIdentity, now); err != nil {
+				return err
+			}
+			if source.State == "conflicted" {
+				// The recorded secondary becomes the active primary. Existing
+				// snapshots keep their original owner and the retired primary's
+				// rows were terminalized above; no snapshot is retargeted.
+				_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
+					SET source_kind=?,owner_identity=?,state='active',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
+					WHERE recipient_name=?`, source.ConflictKind, source.ConflictOwner, now, recipient)
+				return err
+			}
+			_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
+				SET state='retired',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
+				WHERE recipient_name=? AND source_kind=? AND owner_identity=?`, now, recipient, kind, owner)
+			return err
+		}
+		if source.State == "conflicted" && source.ConflictKind == kind && source.ConflictOwner == owner {
+			if err := s.terminalizeRetiredRecipientSnapshotsTx(ctx, kind, owner, now); err != nil {
+				return err
+			}
+			_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
+				SET state='active',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
+				WHERE recipient_name=?`, now, recipient)
+			return err
+		}
+		return &RecipientSourceConflictError{Recipient: recipient}
+	})
+}
+
+func (s *Store) terminalizeRetiredRecipientSnapshotsTx(ctx context.Context, kind, owner, now string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id FROM messages m
+		JOIN message_target_snapshots target ON target.message_id=m.id
+		WHERE m.state='queued' AND target.source_kind=? AND target.owner_identity=?`, kind, owner)
+	if err != nil {
+		return err
+	}
+	var messageIDs []string
+	for rows.Next() {
+		var messageID string
+		if err := rows.Scan(&messageID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		messageIDs = append(messageIDs, messageID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, messageID := range messageIDs {
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts
+			SET state='failed',released_at=?,next_attempt_at=NULL,failure_code='retired_target',failure_detail=NULL
+			WHERE message_id=? AND state IN ('direct_pending','direct_prompted','released')`, now, messageID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, messageID); err != nil {
+			return err
+		}
+		if err := s.rearmFailedReminder(ctx, messageID, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) RecipientSource(ctx context.Context, recipient string) (*RecipientSource, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return recipientSourceForTx(ctx, s.db, recipient)
+}
+
+func recipientSourceForTx(ctx context.Context, db *sql.DB, recipient string) (*RecipientSource, error) {
+	result := &RecipientSource{}
+	var conflictKind, conflictOwner sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT recipient_name,source_kind,owner_identity,state,conflict_source_kind,conflict_owner_identity,created_at,updated_at
+		FROM recipient_sources WHERE recipient_name = ?`, recipient).Scan(&result.RecipientName, &result.SourceKind, &result.OwnerIdentity, &result.State, &conflictKind, &conflictOwner, &result.CreatedAt, &result.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	result.ConflictKind, result.ConflictOwner = conflictKind.String, conflictOwner.String
+	return result, nil
+}
+
+func (s *Store) reserveRecipientSourceTx(ctx context.Context, recipient, kind, owner string) error {
+	if recipient == "" || owner == "" || (kind != "managed" && kind != "tmux") {
+		return errors.New("recipient source identity is invalid")
+	}
+	existing, err := recipientSourceForTx(ctx, s.db, recipient)
+	if errors.Is(err, sql.ErrNoRows) {
+		now := formatTimestamp(s.clock.Now())
+		_, err = s.db.ExecContext(ctx, `INSERT INTO recipient_sources (recipient_name,source_kind,owner_identity,state,created_at,updated_at)
+			VALUES (?, ?, ?, 'reserved', ?, ?)`, recipient, kind, owner, now, now)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if existing.SourceKind == kind && existing.OwnerIdentity == owner && existing.State != "retired" && existing.State != "conflicted" {
+		return nil
+	}
+	return &RecipientSourceConflictError{Recipient: recipient}
+}
+
+// ReconcileManagedRecipientSources is intentionally idempotent. It hydrates
+// records left by pre-026 launches without guessing a tmux owner.
+func (s *Store) ReconcileManagedRecipientSources(ctx context.Context) error {
+	return s.runImmediate(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, `SELECT name,agent_id,lifecycle_state FROM managed_agents ORDER BY name ASC`)
+		if err != nil {
+			return err
+		}
+		type candidate struct{ name, id, lifecycle string }
+		var candidates []candidate
+		for rows.Next() {
+			var value candidate
+			if err := rows.Scan(&value.name, &value.id, &value.lifecycle); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			candidates = append(candidates, value)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, value := range candidates {
+			existing, lookupErr := recipientSourceForTx(ctx, s.db, value.name)
+			if errors.Is(lookupErr, sql.ErrNoRows) {
+				now := formatTimestamp(s.clock.Now())
+				state := "active"
+				if value.lifecycle != "running" {
+					state = "reserved"
+				}
+				if _, err := s.db.ExecContext(ctx, `INSERT INTO recipient_sources (recipient_name,source_kind,owner_identity,state,created_at,updated_at) VALUES (?,?,?,?,?,?)`, value.name, "managed", value.id, state, now, now); err != nil {
+					return err
+				}
+				continue
+			}
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if existing.SourceKind != "managed" || existing.OwnerIdentity != value.id {
+				if _, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state = 'conflicted', conflict_source_kind = ?, conflict_owner_identity = ?, updated_at = ? WHERE recipient_name = ?`, "managed", value.id, formatTimestamp(s.clock.Now()), value.name); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 var _ = fmt.Sprintf

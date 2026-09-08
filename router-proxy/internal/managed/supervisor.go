@@ -51,6 +51,9 @@ type ManagerOptions struct {
 	ProcessGroupOps                   ProcessGroupOps
 	RestartPreparationDeadlineFactory RestartPreparationDeadlineFactory
 	RestartPreparationHook            RestartPreparationHook
+	// BeforeManagedDirectAcknowledge is a test seam for the durable
+	// append-before-ack crash boundary. Production leaves it nil.
+	BeforeManagedDirectAcknowledge func(context.Context, store.ManagedDirectAttempt) error
 }
 
 // RestartRequest already contains canonical operation metadata. A future HTTP
@@ -101,29 +104,30 @@ type managedBinding struct {
 }
 
 type Manager struct {
-	store               *store.Store
-	config              Config
-	manifest            Manifest
-	processFactory      ProcessFactory
-	rpcFactory          RPCFactory
-	catalog             ModelSource
-	clock               deterministic.Clock
-	ids                 deterministic.IDSource
-	mu                  sync.Mutex
-	processes           map[string]Process
-	rpcs                map[string]RPC
-	operationIDs        map[string]string
-	bindings            map[string]*managedBinding
-	lanes               map[string]*managedAgentLane
-	groupLeader         ProcessGroupLeaderVerifier
-	processOps          ProcessGroupOps
-	preparationDeadline RestartPreparationDeadlineFactory
-	preparationHook     RestartPreparationHook
-	runCtx              context.Context
-	cancel              context.CancelFunc
-	startWG             sync.WaitGroup
-	closed              bool
-	closeErr            error
+	store                   *store.Store
+	config                  Config
+	manifest                Manifest
+	processFactory          ProcessFactory
+	rpcFactory              RPCFactory
+	catalog                 ModelSource
+	clock                   deterministic.Clock
+	ids                     deterministic.IDSource
+	mu                      sync.Mutex
+	processes               map[string]Process
+	rpcs                    map[string]RPC
+	operationIDs            map[string]string
+	bindings                map[string]*managedBinding
+	lanes                   map[string]*managedAgentLane
+	groupLeader             ProcessGroupLeaderVerifier
+	processOps              ProcessGroupOps
+	preparationDeadline     RestartPreparationDeadlineFactory
+	preparationHook         RestartPreparationHook
+	beforeDirectAcknowledge func(context.Context, store.ManagedDirectAttempt) error
+	runCtx                  context.Context
+	cancel                  context.CancelFunc
+	startWG                 sync.WaitGroup
+	closed                  bool
+	closeErr                error
 }
 
 func NewManager(options ManagerOptions) (*Manager, error) {
@@ -179,7 +183,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		deadlineFactory = context.WithTimeout
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	return &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, runCtx: runCtx, cancel: cancel}, nil
+	return &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, runCtx: runCtx, cancel: cancel}, nil
 }
 
 type managerClock struct{}
@@ -396,6 +400,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	_ = m.store.MarkManagedOperationTerminal(durableCtx, request.RequestID)
 	binding.lifecycleAction = ""
 	binding.serial.Unlock()
+	m.recoverManagedDirectAttemptsAsync(agent.AgentID)
 	select {
 	case <-waitSignal:
 		binding.serial.Lock()
@@ -921,6 +926,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	target.serial.Lock()
 	target.lifecycleAction = ""
 	target.serial.Unlock()
+	m.recoverManagedDirectAttemptsAsync(target.agentID)
 	m.watchReadyRestartTarget(target)
 }
 
@@ -1522,6 +1528,233 @@ func (m *Manager) recoverManagedRestartTransitionInLane(ctx context.Context, age
 			_ = m.store.RecordManagedRestartFailure(context.Background(), *transition.TargetFence, transition.OperationID, "RESTART_TARGET_REAP_FAILED", "replacement process cleanup did not complete")
 		}
 	}
+}
+
+// OfferDirect wakes the managed agent's existing lane. Direct mailbox delivery
+// has no WebSocket registration, lease, tmux frame, or shared batch worker.
+func (m *Manager) OfferDirect(agentID string) {
+	if agentID == "" || m.isClosed() {
+		return
+	}
+	lane := m.laneFor(agentID)
+	m.startWG.Add(1)
+	go func() {
+		defer m.startWG.Done()
+		lane.serial.Lock()
+		defer lane.serial.Unlock()
+		m.dispatchDirectInLane(agentID)
+	}()
+}
+
+func (m *Manager) dispatchDirectInLane(agentID string) {
+	for {
+		binding, ok := m.bindingFor(agentID)
+		if !ok {
+			return
+		}
+		binding.serial.Lock()
+		agent, err := m.store.ManagedAgent(context.Background(), agentID)
+		if err != nil || !m.liveBinding(agent, binding) || !agent.AcceptingPrompts {
+			binding.serial.Unlock()
+			return
+		}
+		fence := bindingFence(agentID, binding)
+		rpc, supported := binding.rpc.(DirectMailboxRPC)
+		binding.serial.Unlock()
+		if !supported {
+			return
+		}
+		attempt, err := m.store.AllocateManagedDirectAttempt(context.Background(), fence)
+		if err != nil || attempt == nil {
+			m.scheduleDirectRetry(agentID)
+			return
+		}
+		// The persisted cursor is captured before the matcher is armed and before
+		// the command is written. Recovery reads only entries after this boundary.
+		prepareCtx, prepareCancel := context.WithTimeout(m.runCtx, 10*time.Second)
+		cursor, err := rpc.PrepareManagedMailbox(prepareCtx)
+		prepareCancel()
+		if err != nil {
+			_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "prompt_prepare_failed", sanitizeError(err))
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_prepare_failed", "")
+			m.scheduleDirectRetry(agentID)
+			return
+		}
+		attempt.SessionEntryWatermark = cursor
+		if err := m.store.MarkManagedDirectPrompted(context.Background(), *attempt, cursor); err != nil {
+			return
+		}
+		// A prompt response is never an acknowledgment. The matcher stays armed
+		// for the fixed 30-second persisted append-receipt window.
+		directCtx, cancel := context.WithTimeout(m.runCtx, 30*time.Second)
+		events, err := rpc.PromptManagedMailbox(directCtx, *attempt)
+		if err != nil {
+			cancel()
+			_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "prompt_failed", sanitizeError(err))
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_failed", "")
+			m.scheduleDirectRetry(agentID)
+			return
+		}
+		var receipt *DirectMailboxReceipt
+		for receipt == nil {
+			select {
+			case event, open := <-events:
+				if !open {
+					cancel()
+					_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "receipt_stream_closed", "")
+					_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_stream_closed", "")
+					m.scheduleDirectRetry(agentID)
+					return
+				}
+				if event.DiagnosticCode != "" {
+					_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, event.DiagnosticCode, "")
+				}
+				if event.Receipt != nil {
+					receipt = event.Receipt
+				}
+			case <-directCtx.Done():
+				cancel()
+				_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "receipt_timeout", "")
+				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_timeout", "")
+				m.scheduleDirectRetry(agentID)
+				return
+			}
+		}
+		cancel()
+		binding.serial.Lock()
+		current := m.liveBindingForFence(context.Background(), binding, fence)
+		binding.serial.Unlock()
+		if !current {
+			_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "stale_fence", "")
+			m.scheduleDirectRetry(agentID)
+			return
+		}
+		if m.beforeDirectAcknowledge != nil {
+			if err := m.beforeDirectAcknowledge(context.Background(), *attempt); err != nil {
+				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "acknowledgment_interrupted", "")
+				return
+			}
+		}
+		if err := m.store.AcknowledgeManagedDirect(context.Background(), *attempt, receipt.EntryIdentity, true); err != nil {
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_settlement_failed", "")
+			return
+		}
+		// The lane is intentionally one-at-a-time. A burst gets one fixed Pi
+		// command per original ordinary row, then the next oldest row.
+	}
+}
+
+func (m *Manager) scheduleDirectRetry(agentID string) {
+	due, ok, err := m.store.NextManagedDirectRetry(context.Background(), agentID)
+	if err != nil || !ok || m.isClosed() {
+		return
+	}
+	delay := due.Sub(m.clock.Now())
+	if delay < 0 {
+		delay = 0
+	}
+	m.startWG.Add(1)
+	go func() {
+		defer m.startWG.Done()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			m.OfferDirect(agentID)
+		case <-m.runCtx.Done():
+		}
+	}()
+}
+
+// RecoverManagedDirectAttempts is called only after managed restart recovery
+// has supplied its live lane. Pending writes receive a durable retry release;
+// prompted attempts stay fenced to their original ordinary row and are never
+// moved to a tmux lease.
+func (m *Manager) RecoverManagedDirectAttempts(ctx context.Context) error {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.bindings))
+	for id := range m.bindings {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		if err := m.recoverManagedDirectAttemptsForAgent(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) recoverManagedDirectAttemptsAsync(agentID string) {
+	m.startWG.Add(1)
+	go func() {
+		defer m.startWG.Done()
+		_ = m.recoverManagedDirectAttemptsForAgent(context.Background(), agentID)
+	}()
+}
+
+// recoverManagedDirectAttemptsForAgent runs only after a live lane exists.
+// Pending rows are released without I/O. Prompted rows first reconcile their
+// recorded Pi cursor; an exact persisted marker settles the original row and
+// never emits another slash command.
+func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agentID string) error {
+	lane := m.laneFor(agentID)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+	attempts, err := m.store.ManagedActiveDirectAttempts(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	binding, live := m.bindingFor(agentID)
+	if !live {
+		return nil
+	}
+	binding.serial.Lock()
+	currentFence := bindingFence(agentID, binding)
+	rpc, supported := binding.rpc.(DirectMailboxRPC)
+	bindingLive := m.liveBindingForFence(ctx, binding, currentFence)
+	binding.serial.Unlock()
+	if !bindingLive || !supported {
+		return nil
+	}
+	for _, attempt := range attempts {
+		if attempt.State == "direct_pending" {
+			_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "stale_fence")
+			continue
+		}
+		if attempt.State != "direct_prompted" {
+			continue
+		}
+		if attempt.Fence.PiSessionID != currentFence.PiSessionID {
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "recovery_session_mismatch", "")
+			_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "recovery_session_mismatch")
+			continue
+		}
+		recovery, recoveryErr := rpc.RecoverManagedMailbox(ctx, attempt)
+		if recoveryErr != nil {
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "recovery_query_failed", "")
+			_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "recovery_query_failed")
+			continue
+		}
+		for _, code := range recovery.Diagnostics {
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, code, "")
+		}
+		if recovery.Receipt != nil {
+			if err := m.store.AcknowledgeManagedDirectRecovered(context.Background(), attempt, recovery.Receipt.EntryIdentity); err != nil {
+				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "recovery_settlement_failed", "")
+			}
+			continue
+		}
+		_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "recovery_marker_absent")
+	}
+	// Keep recovery and the next allocation under the same lane ownership. The
+	// queued call cannot overtake the persisted entry scan above.
+	m.startWG.Add(1)
+	go func() {
+		defer m.startWG.Done()
+		m.dispatchDirectInLane(agentID)
+	}()
+	return nil
 }
 
 func (m *Manager) Store() *store.Store { return m.store }

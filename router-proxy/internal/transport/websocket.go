@@ -289,6 +289,17 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		}
 	}
 
+	// A primary tmux registration claims the durable source before it can own a
+	// lease. The owner ID survives reconnects and is never a WebSocket ID.
+	// The name is already unique in the recipient directory. This durable ID
+	// is intentionally independent of the connection and router ID sequences.
+	proposedSourceID := "tmux-source-v1:" + agentID
+	tmuxSourceID, sourceErr := r.store.ReserveTmuxRecipientSource(context.Background(), agentID, proposedSourceID)
+	if sourceErr != nil {
+		_ = s.sendError("duplicate_identity", frameString(frame, "frame_id"))
+		_ = s.close(4009, "recipient source conflict")
+		return sourceErr
+	}
 	oldLease, _ := r.store.LeaseFor(context.Background(), agentID)
 	leaseID, err := r.nextID()
 	if err != nil {
@@ -341,6 +352,7 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	// the client reports that compaction is complete.
 	r.clearStaleActivityGeneration(agentID, instanceID)
 	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
+	s.tmuxSourceID = tmuxSourceID
 	s.setPaused(r.agentCompacting(agentID))
 	r.cancelPendingDeliveryOffer(agentID)
 	r.mu.Lock()
@@ -359,6 +371,16 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 		return err
 	}
 	r.replayGoalControlDesired(s)
+	if err := r.store.ActivateTmuxRecipientSource(context.Background(), agentID, tmuxSourceID); err != nil {
+		r.rollbackRegisteredLease(s, owner, subscribers, conversationOrder, oldLease, agentID)
+		_ = s.close(websocket.StatusInternalError, "recipient source activation failed")
+		return err
+	}
+	if err := r.store.ReconcileMessageTargets(context.Background()); err != nil {
+		r.rollbackRegisteredLease(s, owner, subscribers, conversationOrder, oldLease, agentID)
+		_ = s.close(websocket.StatusInternalError, "recipient target reconciliation failed")
+		return err
+	}
 	r.clearStaleGeneration(agentID, instanceID, lease.LeaseID, owner != nil && owner.instanceID != instanceID)
 	for _, replacement := range oldSessions {
 		if replacement != s {
@@ -388,6 +410,9 @@ func (r *Router) registerConversationSync(s *session, frame map[string]json.RawM
 		r.removePendingForSession(reconnecting)
 	}
 	r.configureSession(s, frame, lease.LeaseID, lease.InstanceID)
+	// Conversation-sync sockets share the primary's durable tmux source. If
+	// promoted after a primary close they may offer its immutable snapshots.
+	s.tmuxSourceID = owner.tmuxSourceID
 	s.setPaused(r.agentCompacting(agentID) || owner.isPaused())
 	if !r.ownershipCurrent(transition) {
 		return true, errors.New("registration ownership transition superseded")
@@ -1390,7 +1415,7 @@ func (r *Router) deliveryOfferFields(ctx context.Context, s *session) map[string
 	if s == nil || r.isClosed() || ctx.Err() != nil || !r.isPrimarySession(s) || !r.activeLeaseContext(ctx, s) || s.isPaused() {
 		return nil
 	}
-	delivery, err := r.store.ClaimNextMessage(ctx, store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, DeliveryLeaseDuration: r.delivery})
+	delivery, err := r.store.ClaimNextMessage(ctx, store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, SourceOwnerID: s.tmuxSourceID, DeliveryLeaseDuration: r.delivery})
 	if err != nil || delivery == nil || ctx.Err() != nil {
 		return nil
 	}

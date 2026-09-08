@@ -77,7 +77,10 @@ type LeaseRequest struct {
 }
 type ClaimRequest struct {
 	AgentID, InstanceID, LeaseID string
-	DeliveryLeaseDuration        time.Duration
+	// SourceOwnerID is the durable tmux source, never the socket instance.
+	// Empty preserves direct Store test fixtures that predate source snapshots.
+	SourceOwnerID         string
+	DeliveryLeaseDuration time.Duration
 }
 type ReceiptRequest struct {
 	AgentID, InstanceID, LeaseID, MessageID string
@@ -331,7 +334,7 @@ func (s *Store) ClaimNextMessage(ctx context.Context, request ClaimRequest) (*do
 			result = active
 			return nil
 		}
-		rows, err := s.queuedRows(ctx, request.AgentID, now)
+		rows, err := s.queuedRows(ctx, request.AgentID, request.SourceOwnerID, now)
 		if err != nil {
 			return err
 		}
@@ -606,6 +609,9 @@ func (s *Store) RecoverExpiredUnclaimedMessages(ctx context.Context) ([]string, 
 			return err
 		}
 		for _, id := range expired {
+			if err := s.expireManagedDirectForMessageTx(ctx, id, now); err != nil {
+				return err
+			}
 			if err := s.completeLinkedReminder(ctx, id); err != nil {
 				return err
 			}
@@ -637,6 +643,9 @@ func (s *Store) RetryDeadLetter(ctx context.Context, messageID string) (*domain.
 			return &QueueLimitError{Recipient: current.To}
 		}
 		if _, err := s.db.ExecContext(ctx, "DELETE FROM delivery_attempts WHERE message_id = ?", messageID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "DELETE FROM managed_direct_delivery_attempts WHERE message_id = ?", messageID); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, "UPDATE messages SET state = 'queued' WHERE id = ? AND state = 'dead_letter'", messageID); err != nil {
@@ -811,8 +820,14 @@ func (s *Store) nextAttempt(ctx context.Context, id string) (int, error) {
 	err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(attempt_number),0)+1 FROM delivery_attempts WHERE message_id = ?", id).Scan(&n)
 	return n, err
 }
-func (s *Store) queuedRows(ctx context.Context, recipient, now string) ([]storedDeliveryRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT enqueue_sequence,id,sender,recipient,subject,body,created_at,expires_at,message_incarnation_id,state,sentinel_json,source_kind,retry_batch_id FROM messages WHERE recipient = ? AND state = 'queued' AND (claimed_at IS NOT NULL OR expires_at > ?) ORDER BY enqueue_sequence ASC`, recipient, now)
+func (s *Store) queuedRows(ctx context.Context, recipient, owner, now string) ([]storedDeliveryRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT enqueue_sequence,id,sender,recipient,subject,body,created_at,expires_at,message_incarnation_id,state,sentinel_json,source_kind,retry_batch_id
+		FROM messages WHERE recipient = ? AND state = 'queued' AND (claimed_at IS NOT NULL OR expires_at > ?)
+		AND (NOT EXISTS (SELECT 1 FROM message_target_snapshots target WHERE target.message_id = messages.id)
+			OR EXISTS (SELECT 1 FROM message_target_snapshots target JOIN recipient_sources source ON source.recipient_name = target.recipient_name
+				WHERE target.message_id = messages.id AND target.source_kind = 'tmux' AND source.source_kind = 'tmux'
+				AND source.state = 'active' AND source.owner_identity = target.owner_identity AND target.owner_identity = ? AND ? <> ''))
+		ORDER BY enqueue_sequence ASC`, recipient, now, owner, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -878,6 +893,518 @@ func (s *Store) queuedRows(ctx context.Context, recipient, now string) ([]stored
 	}
 	return selected, nil
 }
+
+// MessageTargetSnapshot permanently selects one delivery transport for an
+// ordinary message.  It intentionally has no live process or socket fields.
+type MessageTargetSnapshot struct {
+	SnapshotID, MessageID, MessageIncarnationID, RecipientName, SourceKind, OwnerIdentity, CreatedAt string
+}
+
+type ManagedDirectAttempt struct {
+	MessageID, MessageIncarnationID string
+	AttemptNumber                   int
+	SnapshotID                      string
+	Fence                           ManagedRuntimeFence
+	State                           string
+	// SessionEntryWatermark is Pi's opaque get_entries `since` cursor. The
+	// historical name is retained because migration 026 owns this column.
+	SessionEntryWatermark                                                       string
+	ReceiptEntryIdentity                                                        string
+	CreatedAt, PromptedAt, AcknowledgedAt, ReleasedAt, ExpiresAt, NextAttemptAt string
+	FailureCode, FailureDetail                                                  string
+	Message                                                                     domain.Message
+}
+
+type ManagedDirectNotReadyError struct{ AgentID string }
+
+func (e *ManagedDirectNotReadyError) Error() string { return "managed direct delivery is not ready" }
+func (e *ManagedDirectNotReadyError) Code() string  { return "managed_direct_not_ready" }
+
+type ManagedDirectNotActiveError struct {
+	MessageID     string
+	AttemptNumber int
+}
+
+func (e *ManagedDirectNotActiveError) Error() string {
+	return "managed direct delivery attempt is not active"
+}
+func (e *ManagedDirectNotActiveError) Code() string { return "managed_direct_not_active" }
+
+// ResolveMessageTarget is idempotent.  It never infers tmux: absent, reserved,
+// retired, and conflicted directory rows leave the ordinary message queued.
+func (s *Store) ResolveMessageTarget(ctx context.Context, messageID string) (*MessageTargetSnapshot, error) {
+	var result *MessageTargetSnapshot
+	err := s.runImmediate(ctx, func() error {
+		var err error
+		result, err = s.resolveMessageTargetTx(ctx, messageID)
+		return err
+	})
+	return result, err
+}
+
+func (s *Store) resolveMessageTargetTx(ctx context.Context, messageID string) (*MessageTargetSnapshot, error) {
+	existing, err := snapshotForMessageTx(ctx, s.db, messageID)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	message, err := s.messageForTx(ctx, messageID)
+	if err != nil || message == nil || message.State != domain.MessageQueued {
+		return nil, err
+	}
+	source, err := recipientSourceForTx(ctx, s.db, message.To)
+	if errors.Is(err, sql.ErrNoRows) || source == nil || source.State != "active" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if message.MessageIncarnationID == "" {
+		incarnation, err := s.ids.Next()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE messages SET message_incarnation_id = ? WHERE id = ? AND message_incarnation_id IS NULL`, incarnation, messageID); err != nil {
+			return nil, err
+		}
+		message.MessageIncarnationID = incarnation
+	}
+	// The ordinary message incarnation is already router-generated and unique.
+	// Deriving the snapshot ID avoids consuming unrelated delivery IDs during
+	// idempotent reconciliation.
+	result := &MessageTargetSnapshot{SnapshotID: "target-v1:" + message.MessageIncarnationID, MessageID: message.ID, MessageIncarnationID: message.MessageIncarnationID, RecipientName: message.To, SourceKind: source.SourceKind, OwnerIdentity: source.OwnerIdentity, CreatedAt: formatTimestamp(s.clock.Now())}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO message_target_snapshots (snapshot_id,message_id,message_incarnation_id,recipient_name,source_kind,owner_identity,created_at) VALUES (?,?,?,?,?,?,?)`, result.SnapshotID, result.MessageID, result.MessageIncarnationID, result.RecipientName, result.SourceKind, result.OwnerIdentity, result.CreatedAt); err != nil {
+		if isConstraintError(err) {
+			return snapshotForMessageTx(ctx, s.db, messageID)
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+func snapshotForMessageTx(ctx context.Context, db *sql.DB, messageID string) (*MessageTargetSnapshot, error) {
+	result := &MessageTargetSnapshot{}
+	err := db.QueryRowContext(ctx, `SELECT snapshot_id,message_id,message_incarnation_id,recipient_name,source_kind,owner_identity,created_at FROM message_target_snapshots WHERE message_id = ?`, messageID).Scan(&result.SnapshotID, &result.MessageID, &result.MessageIncarnationID, &result.RecipientName, &result.SourceKind, &result.OwnerIdentity, &result.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Store) MessageTargetSnapshot(ctx context.Context, messageID string) (*MessageTargetSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return snapshotForMessageTx(ctx, s.db, messageID)
+}
+
+// ReconcileMessageTargets repairs only rows that have no snapshot. Existing
+// snapshots are immutable even if source ownership later changes.
+func (s *Store) ReconcileMessageTargets(ctx context.Context) error {
+	return s.runImmediate(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, `SELECT id FROM messages WHERE state = 'queued' AND NOT EXISTS (SELECT 1 FROM message_target_snapshots target WHERE target.message_id = messages.id) ORDER BY enqueue_sequence ASC`)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if _, err := s.resolveMessageTargetTx(ctx, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func validDirectFenceTx(ctx context.Context, db *sql.DB, fence ManagedRuntimeFence) bool {
+	if !validManagedRuntimeFence(fence) {
+		return false
+	}
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM managed_agents WHERE agent_id = ? AND desired_state = 'running' AND lifecycle_state = 'running' AND accepting_prompts = 1 AND slot_held = 1
+		AND pi_session_id = ? AND session_epoch = ? AND process_pid = ? AND process_start_marker = ? AND process_incarnation = ? AND runtime_generation = ? AND manifest_revision = ? AND manifest_hash = ?`, managedFenceValues(fence)...).Scan(&found)
+	return err == nil && managedReadinessSourcesConfirmedForFenceTxStatic(ctx, db, fence) == nil
+}
+
+func managedReadinessSourcesConfirmedForFenceTxStatic(ctx context.Context, db *sql.DB, fence ManagedRuntimeFence) error {
+	var desired, desiredHash, applied, appliedHash []byte
+	err := db.QueryRowContext(ctx, `SELECT desired_policy_canonical,desired_policy_sha256,applied_policy_canonical,applied_policy_sha256 FROM managed_readiness_sources WHERE `+readinessSourceFenceWhere()+` AND applied_policy_canonical IS NOT NULL AND applied_policy_sha256 IS NOT NULL AND policy_confirmed_at IS NOT NULL AND snapshot_id IS NOT NULL AND snapshot_owner_session_id IS NOT NULL AND snapshot_sequence IS NOT NULL AND snapshot_canonical IS NOT NULL AND snapshot_sha256 IS NOT NULL AND snapshot_confirmed_at IS NOT NULL`, readinessSourceFenceArgs(fence)...).Scan(&desired, &desiredHash, &applied, &appliedHash)
+	if err != nil || string(desired) != string(applied) || string(desiredHash) != string(appliedHash) {
+		return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+	}
+	return nil
+}
+
+// AllocateManagedDirectAttempt creates one durable pending record before any
+// RPC write. It only considers managed snapshots and never touches tmux state.
+func (s *Store) AllocateManagedDirectAttempt(ctx context.Context, fence ManagedRuntimeFence) (*ManagedDirectAttempt, error) {
+	var result *ManagedDirectAttempt
+	err := s.runImmediate(ctx, func() error {
+		if !validDirectFenceTx(ctx, s.db, fence) {
+			return &ManagedDirectNotReadyError{AgentID: fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		row := s.db.QueryRowContext(ctx, `SELECT m.id,m.message_incarnation_id,m.enqueue_sequence FROM messages m
+			JOIN message_target_snapshots target ON target.message_id = m.id
+			JOIN recipient_sources source ON source.recipient_name = target.recipient_name
+			WHERE m.state = 'queued' AND m.expires_at > ? AND target.source_kind = 'managed' AND target.owner_identity = ?
+			AND source.source_kind = 'managed' AND source.state = 'active' AND source.owner_identity = target.owner_identity
+			AND NOT EXISTS (SELECT 1 FROM managed_direct_delivery_attempts active WHERE active.message_id = m.id AND active.message_incarnation_id = m.message_incarnation_id AND active.state IN ('direct_pending','direct_prompted'))
+			AND (NOT EXISTS (SELECT 1 FROM managed_direct_delivery_attempts previous WHERE previous.message_id = m.id AND previous.message_incarnation_id = m.message_incarnation_id)
+				OR EXISTS (SELECT 1 FROM managed_direct_delivery_attempts previous WHERE previous.message_id = m.id AND previous.message_incarnation_id = m.message_incarnation_id AND previous.attempt_number = (SELECT MAX(last.attempt_number) FROM managed_direct_delivery_attempts last WHERE last.message_id = m.id AND last.message_incarnation_id = m.message_incarnation_id) AND previous.state = 'released' AND previous.next_attempt_at <= ?))
+			ORDER BY m.enqueue_sequence ASC LIMIT 1`, now, fence.AgentID, now)
+		var id, incarnation string
+		var ignored int64
+		if err := row.Scan(&id, &incarnation, &ignored); errors.Is(err, sql.ErrNoRows) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		message, err := s.messageForTx(ctx, id)
+		if err != nil || message == nil {
+			return err
+		}
+		snapshot, err := snapshotForMessageTx(ctx, s.db, id)
+		if err != nil {
+			return err
+		}
+		var attempt int
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(attempt_number),0)+1 FROM managed_direct_delivery_attempts WHERE message_id = ? AND message_incarnation_id = ?`, id, incarnation).Scan(&attempt); err != nil {
+			return err
+		}
+		if attempt > 5 {
+			return nil
+		}
+		result = &ManagedDirectAttempt{MessageID: id, MessageIncarnationID: incarnation, AttemptNumber: attempt, SnapshotID: snapshot.SnapshotID, Fence: fence, State: "direct_pending", CreatedAt: now, ExpiresAt: message.ExpiresAt, Message: *message}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_direct_delivery_attempts (message_id,message_incarnation_id,attempt_number,snapshot_id,agent_id,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,state,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, result.MessageID, result.MessageIncarnationID, result.AttemptNumber, result.SnapshotID, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash, result.State, now, result.ExpiresAt)
+		return err
+	})
+	return result, err
+}
+
+func attemptFence(attempt ManagedDirectAttempt) ManagedRuntimeFence { return attempt.Fence }
+func directAttemptMatches(result sql.Result) (bool, error) {
+	n, e := result.RowsAffected()
+	return n == 1, e
+}
+
+func (s *Store) MarkManagedDirectPrompted(ctx context.Context, attempt ManagedDirectAttempt, cursor string) error {
+	if cursor == "" {
+		return errors.New("managed direct recovery cursor is required")
+	}
+	return s.runImmediate(ctx, func() error {
+		if !validDirectFenceTx(ctx, s.db, attempt.Fence) {
+			return &ManagedDirectNotReadyError{AgentID: attempt.Fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='direct_prompted',prompted_at=?,session_entry_watermark=? WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_pending' AND snapshot_id=? AND `+managedFenceWhere(""), append([]any{now, cursor, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID}, managedFenceValues(attempt.Fence)...)...)
+		if err != nil {
+			return err
+		}
+		ok, err := directAttemptMatches(result)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
+		}
+		return nil
+	})
+}
+
+func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string, requireCurrentFence bool) error {
+	return s.runImmediate(ctx, func() error {
+		if requireCurrentFence && !validDirectFenceTx(ctx, s.db, attempt.Fence) {
+			return &ManagedDirectNotReadyError{AgentID: attempt.Fence.AgentID}
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='acknowledged',acknowledged_at=?,receipt_entry_identity=?,next_attempt_at=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_prompted' AND snapshot_id=? AND `+managedFenceWhere(""), append([]any{now, nullIfEmpty(receiptEntry), attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID}, managedFenceValues(attempt.Fence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := directAttemptMatches(result)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			// A second receipt after settlement is harmless; it cannot recreate an ordinary row.
+			var count int
+			err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, attempt.MessageID).Scan(&count)
+			if err != nil {
+				return err
+			}
+			if count == 0 {
+				return nil
+			}
+			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
+		}
+		if err := s.completeLinkedReminder(ctx, attempt.MessageID); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, attempt.MessageID)
+		return err
+	})
+}
+
+// AcknowledgeManagedDirectRecovered settles an old prompted attempt after the
+// replacement Pi reads its exact persisted append marker. The old runtime
+// fence is intentionally not compared to the replacement binding: the marker
+// itself is fenced by the recorded session, generation, epoch, and content.
+func (s *Store) AcknowledgeManagedDirectRecovered(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string) error {
+	if receiptEntry == "" {
+		return errors.New("managed direct recovered receipt identity is required")
+	}
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='acknowledged',acknowledged_at=?,receipt_entry_identity=?,next_attempt_at=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state='direct_prompted' AND snapshot_id=?`, now, receiptEntry, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID)
+		if err != nil {
+			return err
+		}
+		changed, err := directAttemptMatches(result)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			var count int
+			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, attempt.MessageID).Scan(&count); err != nil {
+				return err
+			}
+			if count == 0 {
+				return nil
+			}
+			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
+		}
+		if err := s.completeLinkedReminder(ctx, attempt.MessageID); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, attempt.MessageID)
+		return err
+	})
+}
+
+func directRetryDelay(attempt int) time.Duration {
+	switch attempt {
+	case 1:
+		return time.Second
+	case 2:
+		return 5 * time.Second
+	case 3:
+		return 30 * time.Second
+	case 4:
+		return 120 * time.Second
+	default:
+		return 0
+	}
+}
+
+func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectAttempt, code, detail string) (bool, error) {
+	terminal := false
+	err := s.runImmediate(ctx, func() error {
+		if code == "" {
+			code = "direct_failure"
+		}
+		if len(code) > 128 {
+			code = code[:128]
+		}
+		if len([]byte(detail)) > 1024 {
+			detail = string([]byte(detail)[:1024])
+		}
+		now := s.clock.Now()
+		nowText := formatTimestamp(now)
+		delay := directRetryDelay(attempt.AttemptNumber)
+		terminal = delay == 0
+		state := "released"
+		var due any
+		if terminal {
+			state = "failed"
+			due = nil
+		} else {
+			due = formatTimestamp(now.Add(delay))
+		}
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state=?,released_at=?,next_attempt_at=?,failure_code=?,failure_detail=? WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state IN ('direct_pending','direct_prompted') AND snapshot_id=? AND `+managedFenceWhere(""), append([]any{state, nowText, due, code, nullIfEmpty(detail), attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID}, managedFenceValues(attempt.Fence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := directAttemptMatches(result)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
+		}
+		if terminal {
+			if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {
+				return err
+			}
+			return s.rearmFailedReminder(ctx, attempt.MessageID, nowText)
+		}
+		return nil
+	})
+	return terminal, err
+}
+
+// ReleaseManagedDirectRecovery handles interrupted pending or prompted work.
+// It checks the immutable target directory without requiring the old process
+// fence to still be live, because controlled replacement changes that fence.
+func (s *Store) ReleaseManagedDirectRecovery(ctx context.Context, attempt ManagedDirectAttempt, code string) (bool, error) {
+	terminal := false
+	err := s.runImmediate(ctx, func() error {
+		now := s.clock.Now()
+		nowText := formatTimestamp(now)
+		validTarget, err := managedDirectTargetActiveTx(ctx, s.db, attempt, nowText)
+		if err != nil {
+			return err
+		}
+		delay := directRetryDelay(attempt.AttemptNumber)
+		terminal = !validTarget || delay == 0
+		state := "released"
+		var due any
+		if terminal {
+			state = "failed"
+			due = nil
+		} else {
+			due = formatTimestamp(now.Add(delay))
+		}
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state=?,released_at=?,next_attempt_at=?,failure_code=?,failure_detail=NULL WHERE message_id=? AND message_incarnation_id=? AND attempt_number=? AND state IN ('direct_pending','direct_prompted') AND snapshot_id=?`, state, nowText, due, code, attempt.MessageID, attempt.MessageIncarnationID, attempt.AttemptNumber, attempt.SnapshotID)
+		if err != nil {
+			return err
+		}
+		changed, err := directAttemptMatches(result)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
+		}
+		if !terminal {
+			return nil
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {
+			return err
+		}
+		return s.rearmFailedReminder(ctx, attempt.MessageID, nowText)
+	})
+	return terminal, err
+}
+
+func managedDirectTargetActiveTx(ctx context.Context, db *sql.DB, attempt ManagedDirectAttempt, now string) (bool, error) {
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM messages m
+		JOIN message_target_snapshots target ON target.message_id = m.id
+		JOIN recipient_sources source ON source.recipient_name = target.recipient_name
+		WHERE m.id=? AND m.message_incarnation_id=? AND m.state='queued' AND m.expires_at > ?
+		AND target.snapshot_id=? AND target.source_kind='managed' AND target.owner_identity=?
+		AND source.source_kind='managed' AND source.state='active' AND source.owner_identity=target.owner_identity`, attempt.MessageID, attempt.MessageIncarnationID, now, attempt.SnapshotID, attempt.Fence.AgentID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) ManagedDirectAttempt(ctx context.Context, messageID string, attemptNumber int) (*ManagedDirectAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return managedDirectAttemptForTx(ctx, s.db, messageID, attemptNumber)
+}
+func managedDirectAttemptForTx(ctx context.Context, db *sql.DB, messageID string, attemptNumber int) (*ManagedDirectAttempt, error) {
+	result := &ManagedDirectAttempt{}
+	var watermark sql.NullString
+	var prompted, acknowledged, released, next, receipt, code, detail sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT a.message_id,a.message_incarnation_id,a.attempt_number,a.snapshot_id,a.agent_id,a.pi_session_id,a.session_epoch,a.process_pid,a.process_start_marker,a.process_incarnation,a.runtime_generation,a.manifest_revision,a.manifest_hash,a.state,a.session_entry_watermark,a.receipt_entry_identity,a.created_at,a.prompted_at,a.acknowledged_at,a.released_at,a.expires_at,a.next_attempt_at,a.failure_code,a.failure_detail FROM managed_direct_delivery_attempts a WHERE a.message_id=? AND a.attempt_number=?`, messageID, attemptNumber).Scan(&result.MessageID, &result.MessageIncarnationID, &result.AttemptNumber, &result.SnapshotID, &result.Fence.AgentID, &result.Fence.PiSessionID, &result.Fence.SessionEpoch, &result.Fence.ProcessPID, &result.Fence.ProcessStartMarker, &result.Fence.ProcessIncarnation, &result.Fence.RuntimeGeneration, &result.Fence.ManifestRevision, &result.Fence.ManifestHash, &result.State, &watermark, &receipt, &result.CreatedAt, &prompted, &acknowledged, &released, &result.ExpiresAt, &next, &code, &detail)
+	if err != nil {
+		return nil, err
+	}
+	result.SessionEntryWatermark = watermark.String
+	result.ReceiptEntryIdentity = receipt.String
+	result.PromptedAt = prompted.String
+	result.AcknowledgedAt = acknowledged.String
+	result.ReleasedAt = released.String
+	result.NextAttemptAt = next.String
+	result.FailureCode = code.String
+	result.FailureDetail = detail.String
+	message, err := safelyMessageForAttempt(ctx, db, messageID)
+	if err == nil && message != nil {
+		result.Message = *message
+	}
+	return result, err
+}
+func safelyMessageForAttempt(ctx context.Context, db *sql.DB, id string) (*domain.Message, error) {
+	row := db.QueryRowContext(ctx, `SELECT enqueue_sequence,id,sender,recipient,subject,body,created_at,expires_at,message_incarnation_id,state,sentinel_json,source_kind FROM messages WHERE id=?`, id)
+	return scanMessage(row)
+}
+
+func (s *Store) RecordManagedDirectDiagnostic(ctx context.Context, agentID, messageID string, attemptNumber int, code, detail string) error {
+	return s.runImmediate(ctx, func() error {
+		if code == "" {
+			code = "direct_diagnostic"
+		}
+		if len(code) > 128 {
+			code = code[:128]
+		}
+		if len([]byte(detail)) > 1024 {
+			detail = string([]byte(detail)[:1024])
+		}
+		var incarnation, snapshot any
+		if messageID != "" {
+			var i, sp string
+			_ = s.db.QueryRowContext(ctx, `SELECT message_incarnation_id,snapshot_id FROM managed_direct_delivery_attempts WHERE message_id=? AND attempt_number=?`, messageID, attemptNumber).Scan(&i, &sp)
+			incarnation = nullIfEmpty(i)
+			snapshot = nullIfEmpty(sp)
+		}
+		now := formatTimestamp(s.clock.Now())
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_direct_delivery_diagnostics(agent_id,message_id,message_incarnation_id,attempt_number,snapshot_id,code,detail,observed_at) VALUES(?,?,?,?,?,?,?,?)`, agentID, nullIfEmpty(messageID), incarnation, attemptNumber, snapshot, code, nullIfEmpty(detail), now); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_diagnostics WHERE agent_id=? AND observed_at < ?`, agentID, formatTimestamp(s.clock.Now().Add(-30*24*time.Hour))); err != nil {
+			return err
+		}
+		_, err := s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_diagnostics WHERE agent_id=? AND diagnostic_id NOT IN (SELECT diagnostic_id FROM managed_direct_delivery_diagnostics WHERE agent_id=? ORDER BY observed_at DESC,diagnostic_id DESC LIMIT 200)`, agentID, agentID)
+		return err
+	})
+}
+
+func (s *Store) NextManagedDirectRetry(ctx context.Context, agentID string) (time.Time, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return time.Time{}, false, errors.New("store is closed")
+	}
+	var due string
+	err := s.db.QueryRowContext(ctx, `SELECT next_attempt_at FROM managed_direct_delivery_attempts WHERE agent_id=? AND state='released' AND next_attempt_at IS NOT NULL ORDER BY next_attempt_at ASC LIMIT 1`, agentID).Scan(&due)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return parseTimestamp(due), true, nil
+}
+
+// ExpireManagedDirectForMessage writes the terminal attempt state before the
+// ordinary row is deleted. The foreign key then removes volatile attempt rows.
+func (s *Store) expireManagedDirectForMessageTx(ctx context.Context, messageID, now string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_direct_delivery_attempts SET state='failed',released_at=?,next_attempt_at=NULL,failure_code='expired',failure_detail=NULL WHERE message_id=? AND state IN ('direct_pending','direct_prompted','released')`, now, messageID)
+	return err
+}
+
 func utf16Length(v string) int {
 	n := 0
 	for _, r := range v {
@@ -902,6 +1429,46 @@ func deliveryFromRows(rows []storedDeliveryRow, items []protocol.DeliveryItem, e
 		Items:             items,
 	}
 }
+
+func (s *Store) ManagedActiveDirectAttempts(ctx context.Context, agentID string) ([]ManagedDirectAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id,attempt_number FROM managed_direct_delivery_attempts WHERE agent_id = ? AND state IN ('direct_pending','direct_prompted') ORDER BY message_id,attempt_number`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []struct {
+		id string
+		n  int
+	}
+	for rows.Next() {
+		var key struct {
+			id string
+			n  int
+		}
+		if err := rows.Scan(&key.id, &key.n); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]ManagedDirectAttempt, 0, len(keys))
+	for _, key := range keys {
+		attempt, err := managedDirectAttemptForTx(ctx, s.db, key.id, key.n)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *attempt)
+	}
+	return result, nil
+}
+
 func (s *Store) activeDelivery(ctx context.Context, agent, lease string) (*domain.Delivery, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT messages.enqueue_sequence,messages.id,messages.sender,messages.recipient,messages.subject,messages.body,messages.created_at,messages.expires_at,messages.message_incarnation_id,messages.state,messages.sentinel_json,messages.source_kind,delivery_attempts.attempt_number,delivery_attempts.delivery_expires_at,delivery_attempts.delivery_batch_id,delivery_attempts.owner_lease_id FROM messages JOIN delivery_attempts ON delivery_attempts.message_id = messages.id WHERE messages.recipient = ? AND messages.state IN ('leased','injection_requested') AND delivery_attempts.state IN ('leased','injection_requested') ORDER BY messages.enqueue_sequence ASC`, agent)
 	if err != nil {

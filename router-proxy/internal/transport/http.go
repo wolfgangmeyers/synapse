@@ -603,6 +603,18 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 	if result.ConversationCreated && result.ConversationMessage != nil {
 		r.broadcastConversation(*result.ConversationMessage)
 	}
+	// Source selection belongs to the router-owned durable directory. The
+	// caller's HTTP/reminder/policy origin never chooses a transport.
+	target, err := r.store.ResolveMessageTarget(context.Background(), result.Message.ID)
+	if err != nil || target == nil {
+		return
+	}
+	if target.SourceKind == "managed" {
+		if r.managed != nil {
+			r.managed.OfferDirect(target.OwnerIdentity)
+		}
+		return
+	}
 	r.offerAgent(result.Message.To)
 }
 func (r *Router) broadcastConversation(message domain.ConversationMessage) {
@@ -1055,7 +1067,7 @@ func (r *Router) handleMessageItem(w http.ResponseWriter, req *http.Request, id,
 			r.writeError(w, &httpError{409, "dead_letter_required", 0})
 			return
 		}
-		r.offerAgent(item.To)
+		r.afterEnqueue(store.EnqueueResult{Message: *item})
 		r.writeJSON(w, 200, map[string]any{"message": item})
 	case req.Method == http.MethodDelete && action == "":
 		item, err := r.store.MessageFor(req.Context(), id)

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +61,140 @@ func policyDetails(generation string, epoch int64) map[string]any {
 
 func snapshotDetails() map[string]any {
 	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": "owner", "sequence": 0, "runs": []any{}}
+}
+
+func directMailboxAttempt(id string) store.ManagedDirectAttempt {
+	return store.ManagedDirectAttempt{MessageID: id, SessionEntryWatermark: "cursor-entry", Message: domain.Message{Body: "persisted body"}, Fence: store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}}
+}
+
+func TestManagedDirectReceiptRequiresMatchingAppendMarker(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	direct, ok := client.(DirectMailboxRPC)
+	require.True(t, ok)
+	requests := readJSONLRequests(stdinReader)
+	events, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
+	require.NoError(t, err)
+	request := requireRequest(t, requests)
+	require.Equal(t, "prompt", request["type"])
+	require.Contains(t, request["message"], "/mecha-mailbox-deliver-v1 ")
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "persisted-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	select {
+	case event := <-events:
+		require.NotNil(t, event.Receipt)
+		require.Equal(t, "persisted-entry", event.Receipt.EntryIdentity)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for direct mailbox receipt")
+	}
+}
+
+func TestManagedDirectReceiptDiagnostics(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	direct := client.(DirectMailboxRPC)
+	requests := readJSONLRequests(stdinReader)
+	// This append belongs to an older command. PromptManagedMailbox retains it
+	// as a metadata-only stale diagnostic instead of accepting it.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	require.Eventually(t, func() bool {
+		client.(*rpcClient).mu.Lock()
+		defer client.(*rpcClient).mu.Unlock()
+		return client.(*rpcClient).eventSequence == 1
+	}, time.Second, time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	events, err := direct.PromptManagedMailbox(ctx, directMailboxAttempt("message-a"))
+	require.NoError(t, err)
+	request := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "turn_started"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "other.custom.v1", "details": map[string]any{}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.mailbox.appended.v1"}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "other", "runtime_generation": "generation", "session_epoch": 2}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "entry-a", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "entry-a-duplicate", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	var codes []string
+	for index := 0; index < 7; index++ {
+		select {
+		case event := <-events:
+			if event.DiagnosticCode != "" {
+				codes = append(codes, event.DiagnosticCode)
+			}
+			if event.Receipt != nil {
+				require.Equal(t, "entry-a", event.Receipt.EntryIdentity)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for direct mailbox diagnostics")
+		}
+	}
+	cancel()
+	for range events {
+	}
+	require.ElementsMatch(t, []string{"stale_receipt", "unrelated_receipt", "wrong_custom_type", "malformed_receipt", "mismatched_receipt", "duplicate_receipt"}, codes)
+}
+
+func TestManagedDirectMatcherClearsAfterCanceledWait(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	direct := client.(DirectMailboxRPC)
+	requests := readJSONLRequests(stdinReader)
+	ctx, cancel := context.WithCancel(context.Background())
+	events, err := direct.PromptManagedMailbox(ctx, directMailboxAttempt("message-a"))
+	require.NoError(t, err)
+	_ = requireRequest(t, requests)
+	cancel()
+	for range events {
+	}
+	require.Eventually(t, func() bool {
+		client.(*rpcClient).mu.Lock()
+		defer client.(*rpcClient).mu.Unlock()
+		return client.(*rpcClient).directMailbox == nil
+	}, time.Second, time.Millisecond)
+	second, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-b"))
+	require.NoError(t, err)
+	_ = requireRequest(t, requests)
+	// The second command proves the timed-out matcher was removed. Closing the
+	// client ends its waiter without accepting any prompt response as a receipt.
+	require.NotNil(t, second)
+}
+
+func TestManagedDirectRecoveryUsesExactPersistedEntry(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	direct := client.(DirectMailboxRPC)
+	requests := readJSONLRequests(stdinReader)
+	result := make(chan struct {
+		recovery DirectMailboxRecovery
+		err      error
+	}, 1)
+	go func() {
+		recovery, err := direct.RecoverManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
+		result <- struct {
+			recovery DirectMailboxRecovery
+			err      error
+		}{recovery, err}
+	}()
+	request := requireRequest(t, requests)
+	require.Equal(t, "get_entries", request["type"])
+	require.Equal(t, "cursor-entry", request["since"])
+	entries := []any{
+		map[string]any{"id": "wrong-content", "type": "custom_message", "customType": "mecha.mailbox.appended.v1", "content": "other", "display": false, "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}},
+		map[string]any{"id": "right", "type": "custom_message", "customType": "mecha.mailbox.appended.v1", "content": "persisted body", "display": false, "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}},
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{"entries": entries, "leafId": "right"}}))
+	outcome := <-result
+	require.NoError(t, outcome.err)
+	require.NotNil(t, outcome.recovery.Receipt)
+	require.Equal(t, "right", outcome.recovery.Receipt.EntryIdentity)
+	require.Contains(t, outcome.recovery.Diagnostics, "mismatched_receipt")
 }
 
 func TestRPCClientOrdersCallsBoundsResponsesAndUsesAcceptedTools(t *testing.T) {
