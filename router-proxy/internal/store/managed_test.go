@@ -75,6 +75,33 @@ func TestManagedRecipientConflictResolution(t *testing.T) {
 	require.Nil(t, attempt, "the promoted tmux survivor must not fall back to managed direct mail")
 }
 
+func TestManagedReadyReconcilesReservedQueuedMessages(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	envelope := testEnvelope("reserved-startup", "queued before ready")
+	envelope.To = fence.AgentID
+	_, err := durable.Enqueue(ctx, envelope)
+	require.NoError(t, err)
+	target, err := durable.ResolveMessageTarget(ctx, "reserved-startup")
+	require.NoError(t, err)
+	require.Nil(t, target, "a reserved managed source must not select a transport")
+
+	policy := DefaultManagedReadinessPolicy()
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, fence, policy))
+	snapshot := ManagedChildSnapshot{SnapshotID: "snapshot", OwnerSessionID: "owner", Sequence: 0, Canonical: []byte(`{"owner_session_id":"owner","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"snapshot"}`), SHA256: testManifestHash}
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, snapshot))
+	require.NoError(t, durable.MarkManagedReadyFromSources(ctx, fence))
+
+	target, err = durable.MessageTargetSnapshot(ctx, "reserved-startup")
+	require.NoError(t, err)
+	require.Equal(t, "managed", target.SourceKind)
+	require.Equal(t, fence.AgentID, target.OwnerIdentity)
+	attempt, err := durable.AllocateManagedDirectAttempt(ctx, fence)
+	require.NoError(t, err)
+	require.NotNil(t, attempt)
+	require.Equal(t, "reserved-startup", attempt.MessageID)
+}
+
 func TestDefaultModelSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.db")
 	ctx := context.Background()

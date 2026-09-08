@@ -1005,30 +1005,36 @@ func (s *Store) MessageTargetSnapshot(ctx context.Context, messageID string) (*M
 // ReconcileMessageTargets repairs only rows that have no snapshot. Existing
 // snapshots are immutable even if source ownership later changes.
 func (s *Store) ReconcileMessageTargets(ctx context.Context) error {
-	return s.runImmediate(ctx, func() error {
-		rows, err := s.db.QueryContext(ctx, `SELECT id FROM messages WHERE state = 'queued' AND NOT EXISTS (SELECT 1 FROM message_target_snapshots target WHERE target.message_id = messages.id) ORDER BY enqueue_sequence ASC`)
-		if err != nil {
+	return s.runImmediate(ctx, func() error { return s.reconcileMessageTargetsTx(ctx) })
+}
+
+// reconcileMessageTargetsTx runs under the same immediate transaction as a
+// source activation when readiness makes a reserved managed recipient live.
+// That prevents startup-queued rows from being left without an immutable
+// transport selection after the recipient becomes ready.
+func (s *Store) reconcileMessageTargetsTx(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM messages WHERE state = 'queued' AND NOT EXISTS (SELECT 1 FROM message_target_snapshots target WHERE target.message_id = messages.id) ORDER BY enqueue_sequence ASC`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Close(); err != nil {
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.resolveMessageTargetTx(ctx, id); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			if _, err := s.resolveMessageTargetTx(ctx, id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func validDirectFenceTx(ctx context.Context, db *sql.DB, fence ManagedRuntimeFence) bool {

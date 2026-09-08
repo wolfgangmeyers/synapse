@@ -464,6 +464,24 @@ func (m *Manager) isClosed() bool {
 	return m.closed
 }
 
+// startManagedTask closes the WaitGroup admission race with Close. Every
+// background task that is not registered while Manager.mu still proves the
+// manager open must enter through this boundary.
+func (m *Manager) startManagedTask(task func()) bool {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return false
+	}
+	m.startWG.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.startWG.Done()
+		task()
+	}()
+	return true
+}
+
 func (m *Manager) laneLocked(agentID string) *managedAgentLane {
 	lane := m.lanes[agentID]
 	if lane == nil {
@@ -945,9 +963,7 @@ func (m *Manager) watchRestartProcess(binding *managedBinding) {
 }
 
 func (m *Manager) watchReadyRestartTarget(target *managedBinding) {
-	m.startWG.Add(1)
-	go func() {
-		defer m.startWG.Done()
+	m.startManagedTask(func() {
 		select {
 		case <-target.waitSignal:
 			target.serial.Lock()
@@ -959,7 +975,7 @@ func (m *Manager) watchReadyRestartTarget(target *managedBinding) {
 			m.clearBinding(target)
 		case <-m.runCtx.Done():
 		}
-	}()
+	})
 }
 
 func oldFenceIdentity(fence store.ManagedRuntimeFence) ProcessIdentity {
@@ -1530,20 +1546,194 @@ func (m *Manager) recoverManagedRestartTransitionInLane(ctx context.Context, age
 	}
 }
 
+const managedDirectPersistenceRetry = 50 * time.Millisecond
+
 // OfferDirect wakes the managed agent's existing lane. Direct mailbox delivery
 // has no WebSocket registration, lease, tmux frame, or shared batch worker.
 func (m *Manager) OfferDirect(agentID string) {
-	if agentID == "" || m.isClosed() {
+	if agentID == "" {
 		return
 	}
 	lane := m.laneFor(agentID)
-	m.startWG.Add(1)
-	go func() {
-		defer m.startWG.Done()
+	m.startManagedTask(func() {
 		lane.serial.Lock()
 		defer lane.serial.Unlock()
 		m.dispatchDirectInLane(agentID)
-	}()
+	})
+}
+
+// releaseManagedDirect records an unsuccessful pre-acknowledgment delivery.
+// A transient SQLite failure must not leave the active attempt blocking every
+// later allocation, so it is retried until it reaches released or failed.
+func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code, detail string) {
+	terminal, err := m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
+	if err == nil {
+		if !terminal {
+			m.scheduleDirectRetry(attempt.Fence.AgentID)
+		}
+		return
+	}
+	var inactive *store.ManagedDirectNotActiveError
+	if errors.As(err, &inactive) {
+		return
+	}
+	var notReady *store.ManagedDirectNotReadyError
+	if errors.As(err, &notReady) {
+		m.releaseManagedDirectRecovery(attempt, code)
+		return
+	}
+	_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "release_persistence_failed", "")
+	m.retryManagedDirectRelease(attempt, code, detail, false)
+}
+
+// releaseManagedDirectRecovery uses immutable target ownership after a
+// replacement changes the original runtime fence. It has the same retry rule
+// as the live path: a persistence error cannot retain an active attempt.
+func (m *Manager) releaseManagedDirectRecovery(attempt store.ManagedDirectAttempt, code string) {
+	terminal, err := m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, code)
+	if err == nil {
+		if !terminal {
+			m.scheduleDirectRetry(attempt.Fence.AgentID)
+		}
+		return
+	}
+	var inactive *store.ManagedDirectNotActiveError
+	if errors.As(err, &inactive) {
+		return
+	}
+	_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "release_persistence_failed", "")
+	m.retryManagedDirectRelease(attempt, code, "", true)
+}
+
+func (m *Manager) retryManagedDirectRelease(attempt store.ManagedDirectAttempt, code, detail string, recovery bool) {
+	m.startManagedTask(func() {
+		for {
+			timer := time.NewTimer(managedDirectPersistenceRetry)
+			select {
+			case <-timer.C:
+			case <-m.runCtx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+
+			var terminal bool
+			var err error
+			if recovery {
+				terminal, err = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, code)
+			} else {
+				terminal, err = m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
+			}
+			if err == nil {
+				if !terminal {
+					m.scheduleDirectRetry(attempt.Fence.AgentID)
+				}
+				return
+			}
+			var inactive *store.ManagedDirectNotActiveError
+			if errors.As(err, &inactive) {
+				return
+			}
+			var notReady *store.ManagedDirectNotReadyError
+			if !recovery && errors.As(err, &notReady) {
+				recovery = true
+				continue
+			}
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "release_persistence_failed", "")
+		}
+	})
+}
+
+// acknowledgeManagedDirect retries the durable settlement after an exact
+// append receipt. Releasing at this point would risk another write, so retries
+// preserve the receipt identity until the original ordinary row is settled.
+func (m *Manager) acknowledgeManagedDirect(attempt store.ManagedDirectAttempt, receiptEntry string) bool {
+	err := m.store.AcknowledgeManagedDirect(context.Background(), attempt, receiptEntry, true)
+	if err == nil {
+		return true
+	}
+	var inactive *store.ManagedDirectNotActiveError
+	if errors.As(err, &inactive) {
+		return false
+	}
+	var notReady *store.ManagedDirectNotReadyError
+	if errors.As(err, &notReady) {
+		m.acknowledgeManagedDirectRecovered(attempt, receiptEntry)
+		return false
+	}
+	_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "receipt_settlement_failed", "")
+	m.retryManagedDirectAcknowledgment(attempt, receiptEntry, false)
+	return false
+}
+
+func (m *Manager) acknowledgeManagedDirectRecovered(attempt store.ManagedDirectAttempt, receiptEntry string) bool {
+	err := m.store.AcknowledgeManagedDirectRecovered(context.Background(), attempt, receiptEntry)
+	if err == nil {
+		return true
+	}
+	var inactive *store.ManagedDirectNotActiveError
+	if errors.As(err, &inactive) {
+		return false
+	}
+	_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "recovery_settlement_failed", "")
+	m.retryManagedDirectAcknowledgment(attempt, receiptEntry, true)
+	return false
+}
+
+func (m *Manager) retryManagedDirectAcknowledgment(attempt store.ManagedDirectAttempt, receiptEntry string, recovered bool) {
+	m.startManagedTask(func() {
+		for {
+			timer := time.NewTimer(managedDirectPersistenceRetry)
+			select {
+			case <-timer.C:
+			case <-m.runCtx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+
+			var err error
+			if recovered {
+				err = m.store.AcknowledgeManagedDirectRecovered(context.Background(), attempt, receiptEntry)
+			} else {
+				err = m.store.AcknowledgeManagedDirect(context.Background(), attempt, receiptEntry, true)
+			}
+			if err == nil {
+				m.OfferDirect(attempt.Fence.AgentID)
+				return
+			}
+			var inactive *store.ManagedDirectNotActiveError
+			if errors.As(err, &inactive) {
+				return
+			}
+			var notReady *store.ManagedDirectNotReadyError
+			if !recovered && errors.As(err, &notReady) {
+				recovered = true
+				continue
+			}
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), attempt.Fence.AgentID, attempt.MessageID, attempt.AttemptNumber, "receipt_settlement_failed", "")
+		}
+	})
 }
 
 func (m *Manager) dispatchDirectInLane(agentID string) {
@@ -1575,13 +1765,14 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 		cursor, err := rpc.PrepareManagedMailbox(prepareCtx)
 		prepareCancel()
 		if err != nil {
-			_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "prompt_prepare_failed", sanitizeError(err))
+			m.releaseManagedDirect(*attempt, "prompt_prepare_failed", sanitizeError(err))
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_prepare_failed", "")
-			m.scheduleDirectRetry(agentID)
 			return
 		}
 		attempt.SessionEntryWatermark = cursor
 		if err := m.store.MarkManagedDirectPrompted(context.Background(), *attempt, cursor); err != nil {
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_state_persistence_failed", "")
+			m.releaseManagedDirect(*attempt, "prompt_state_persistence_failed", sanitizeError(err))
 			return
 		}
 		// A prompt response is never an acknowledgment. The matcher stays armed
@@ -1590,9 +1781,8 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 		events, err := rpc.PromptManagedMailbox(directCtx, *attempt)
 		if err != nil {
 			cancel()
-			_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "prompt_failed", sanitizeError(err))
+			m.releaseManagedDirect(*attempt, "prompt_failed", sanitizeError(err))
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_failed", "")
-			m.scheduleDirectRetry(agentID)
 			return
 		}
 		var receipt *DirectMailboxReceipt
@@ -1601,9 +1791,8 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 			case event, open := <-events:
 				if !open {
 					cancel()
-					_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "receipt_stream_closed", "")
+					m.releaseManagedDirect(*attempt, "receipt_stream_closed", "")
 					_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_stream_closed", "")
-					m.scheduleDirectRetry(agentID)
 					return
 				}
 				if event.DiagnosticCode != "" {
@@ -1614,9 +1803,8 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 				}
 			case <-directCtx.Done():
 				cancel()
-				_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "receipt_timeout", "")
+				m.releaseManagedDirect(*attempt, "receipt_timeout", "")
 				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_timeout", "")
-				m.scheduleDirectRetry(agentID)
 				return
 			}
 		}
@@ -1625,8 +1813,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 		current := m.liveBindingForFence(context.Background(), binding, fence)
 		binding.serial.Unlock()
 		if !current {
-			_, _ = m.store.ReleaseManagedDirect(context.Background(), *attempt, "stale_fence", "")
-			m.scheduleDirectRetry(agentID)
+			m.releaseManagedDirect(*attempt, "stale_fence", "")
 			return
 		}
 		if m.beforeDirectAcknowledge != nil {
@@ -1635,8 +1822,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 				return
 			}
 		}
-		if err := m.store.AcknowledgeManagedDirect(context.Background(), *attempt, receipt.EntryIdentity, true); err != nil {
-			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_settlement_failed", "")
+		if !m.acknowledgeManagedDirect(*attempt, receipt.EntryIdentity) {
 			return
 		}
 		// The lane is intentionally one-at-a-time. A burst gets one fixed Pi
@@ -1646,16 +1832,14 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 
 func (m *Manager) scheduleDirectRetry(agentID string) {
 	due, ok, err := m.store.NextManagedDirectRetry(context.Background(), agentID)
-	if err != nil || !ok || m.isClosed() {
+	if err != nil || !ok {
 		return
 	}
 	delay := due.Sub(m.clock.Now())
 	if delay < 0 {
 		delay = 0
 	}
-	m.startWG.Add(1)
-	go func() {
-		defer m.startWG.Done()
+	m.startManagedTask(func() {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
@@ -1663,7 +1847,7 @@ func (m *Manager) scheduleDirectRetry(agentID string) {
 			m.OfferDirect(agentID)
 		case <-m.runCtx.Done():
 		}
-	}()
+	})
 }
 
 // RecoverManagedDirectAttempts is called only after managed restart recovery
@@ -1686,11 +1870,7 @@ func (m *Manager) RecoverManagedDirectAttempts(ctx context.Context) error {
 }
 
 func (m *Manager) recoverManagedDirectAttemptsAsync(agentID string) {
-	m.startWG.Add(1)
-	go func() {
-		defer m.startWG.Done()
-		_ = m.recoverManagedDirectAttemptsForAgent(context.Background(), agentID)
-	}()
+	m.startManagedTask(func() { _ = m.recoverManagedDirectAttemptsForAgent(context.Background(), agentID) })
 }
 
 // recoverManagedDirectAttemptsForAgent runs only after a live lane exists.
@@ -1719,7 +1899,7 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 	}
 	for _, attempt := range attempts {
 		if attempt.State == "direct_pending" {
-			_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "stale_fence")
+			m.releaseManagedDirectRecovery(attempt, "stale_fence")
 			continue
 		}
 		if attempt.State != "direct_prompted" {
@@ -1727,33 +1907,27 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 		}
 		if attempt.Fence.PiSessionID != currentFence.PiSessionID {
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "recovery_session_mismatch", "")
-			_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "recovery_session_mismatch")
+			m.releaseManagedDirectRecovery(attempt, "recovery_session_mismatch")
 			continue
 		}
 		recovery, recoveryErr := rpc.RecoverManagedMailbox(ctx, attempt)
 		if recoveryErr != nil {
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "recovery_query_failed", "")
-			_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "recovery_query_failed")
+			m.releaseManagedDirectRecovery(attempt, "recovery_query_failed")
 			continue
 		}
 		for _, code := range recovery.Diagnostics {
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, code, "")
 		}
 		if recovery.Receipt != nil {
-			if err := m.store.AcknowledgeManagedDirectRecovered(context.Background(), attempt, recovery.Receipt.EntryIdentity); err != nil {
-				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "recovery_settlement_failed", "")
-			}
+			_ = m.acknowledgeManagedDirectRecovered(attempt, recovery.Receipt.EntryIdentity)
 			continue
 		}
-		_, _ = m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, "recovery_marker_absent")
+		m.releaseManagedDirectRecovery(attempt, "recovery_marker_absent")
 	}
-	// Keep recovery and the next allocation under the same lane ownership. The
-	// queued call cannot overtake the persisted entry scan above.
-	m.startWG.Add(1)
-	go func() {
-		defer m.startWG.Done()
-		m.dispatchDirectInLane(agentID)
-	}()
+	// The offer takes the same lane after this recovery owner releases it, so no
+	// new allocation can overtake the persisted entry scan above.
+	m.OfferDirect(agentID)
 	return nil
 }
 
