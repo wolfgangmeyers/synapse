@@ -1,7 +1,23 @@
 import { createRequestId, validateCustomMessageDetails, type CustomMessageType, type LegacyCommandDefinition } from "./protocol.js";
 import type { JsonRecord } from "./manifest.js";
 
-type PiLike = { sendMessage: (message: JsonRecord, options?: JsonRecord) => void | Promise<void> };
+export type ExplicitCustomMessageAppendOutcome =
+  | { kind: "accepted"; entryId: string }
+  | { kind: "already_present"; entryId: string };
+
+export type ExplicitHiddenMessage = {
+  customType: string;
+  content: string;
+  display: false;
+  details: JsonRecord;
+};
+
+export type ExplicitHiddenMessageOptions = { triggerTurn: false; entryId: string; deliverAs?: never };
+
+type PiLike = {
+  sendMessage(message: ExplicitHiddenMessage, options: ExplicitHiddenMessageOptions): Promise<ExplicitCustomMessageAppendOutcome>;
+  sendMessage(message: JsonRecord, options?: JsonRecord): void | Promise<void>;
+};
 type CommandContext = { sessionManager?: { getSessionId?: () => string | undefined } };
 
 export async function emitControlRequest(pi: PiLike, request: JsonRecord): Promise<void> {
@@ -55,4 +71,18 @@ export async function sendHiddenCustomMessage(
     ...(options.deliverAs === undefined ? {} : { deliverAs: options.deliverAs }),
     triggerTurn: options.triggerTurn,
   });
+}
+
+export async function sendHiddenCustomMessageWithEntryId(
+  pi: PiLike,
+  customType: CustomMessageType,
+  content: string,
+  details: JsonRecord,
+  entryId: string,
+): Promise<ExplicitCustomMessageAppendOutcome> {
+  validateCustomMessageDetails(customType, details);
+  return await pi.sendMessage(
+    { customType, content, display: false, details },
+    { triggerTurn: false, entryId },
+  );
 }
