@@ -9,7 +9,11 @@ import { decodeHiddenEnvelope, encodeHiddenEnvelope } from "../pi-extensions/mec
 type RecordValue = Record<string, unknown>;
 type Command = { handler: (argumentsText: string, context: RecordValue) => Promise<unknown> | unknown };
 
-function fixture(sessionId = "root-session", parentSessionId?: string) {
+function fixture(
+  sessionId = "root-session",
+  parentSessionId?: string,
+  explicitOutcome: "accepted" | "already_present" = "accepted",
+) {
   const commands = new Map<string, Command>();
   const tools = new Map<string, RecordValue>();
   const handlers = new Map<string, (event: RecordValue, context: RecordValue) => unknown>();
@@ -25,7 +29,11 @@ function fixture(sessionId = "root-session", parentSessionId?: string) {
     registerCommand(name: string, command: Command) { commands.set(name, command); },
     on(name: string, handler: (event: RecordValue, context: RecordValue) => unknown) { handlers.set(name, handler); },
     events: { on(name: string, listener: (event: RecordValue) => void) { events.set(name, listener); } },
-    sendMessage(message: RecordValue, options?: RecordValue) { sent.push({ message, options }); },
+    sendMessage(message: RecordValue, options?: RecordValue) {
+      sent.push({ message, options });
+      const entryId = options?.entryId;
+      return typeof entryId === "string" ? Promise.resolve({ kind: explicitOutcome, entryId }) : undefined;
+    },
   };
   const context = {
     sessionManager: {
@@ -148,13 +156,35 @@ test("bootstrap is atomic before model tools exist and a raw coercive tool call 
   const completion = current.sent.at(-1)!;
   assert.equal(completion.message.customType, "mecha.control.result.v1");
   assert.equal(completion.message.display, false);
-  assert.deepEqual(completion.options, { triggerTurn: false });
+  assert.deepEqual(completion.options, { triggerTurn: false, entryId: `mcr1_${resultId.replaceAll("-", "")}` });
   assert.deepEqual(Object.keys(completion.message.details as RecordValue).sort(), ["details", "manifest_sha256", "protocol", "request_id", "result_id", "runtime_generation", "status", "target_session_epoch"]);
+  assert.equal(JSON.stringify(completion.message).includes("mcr1_"), false);
   await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
     protocol: "mecha.control/v1", result_id: "123e4567-e89b-42d3-a456-426614174003", request_id: queuedRequest.request_id,
     target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000",
     manifest_sha256: current.extension.hashManifest(manifest()), status: "ok", content: "duplicate", details: {},
   }), current.context));
+});
+
+test("a root result accepts an already_present explicit Pi outcome before consuming its correlation", async () => {
+  const current = fixture("root-session", undefined, "already_present");
+  await bootstrap(current);
+  const goal = current.tools.get("goal");
+  assert.ok(goal);
+  const execute = goal.execute as (id: string, input: RecordValue, signal: undefined, update: undefined, context: RecordValue) => Promise<RecordValue>;
+  current.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "toolCall", id: "direct-seam", name: "goal", arguments: { action: "status" } }] } }, current.context);
+  await execute("direct-seam", { action: "status" }, undefined, undefined, current.context);
+  const request = current.sent.at(-1)!.message.details as RecordValue;
+  const payload = {
+    protocol: "mecha.control/v1", result_id: "123e4567-e89b-42d3-a456-426614174004", request_id: request.request_id,
+    target_session_epoch: 1, runtime_generation: "123e4567-e89b-42d3-a456-426614174000",
+    manifest_sha256: current.extension.hashManifest(manifest()), status: "ok", content: "Already persisted", details: {},
+  };
+  const response = await current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
+  assert.deepEqual(response, { kind: "already_present", result_id: payload.result_id });
+  const resultCall = current.sent.at(-1)!;
+  assert.deepEqual(resultCall.options, { triggerTurn: false, entryId: `mcr1_${payload.result_id.replaceAll("-", "")}` });
+  await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context));
 });
 
 test("raw managed arguments reject boolean coercion, unknown keys, deep values, oversized strings, and oversized arrays before control traffic", async () => {

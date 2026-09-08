@@ -17,7 +17,15 @@ import {
   validateMailboxDeliverEnvelope,
   validatePolicyApplyEnvelope,
 } from "./protocol.js";
-import { emitControlRequest, emitLegacyCommandControl, sendHiddenCustomMessage } from "./rpc-client.js";
+import {
+  emitControlRequest,
+  emitLegacyCommandControl,
+  type ExplicitCustomMessageAppendOutcome,
+  type ExplicitHiddenMessage,
+  type ExplicitHiddenMessageOptions,
+  sendHiddenCustomMessage,
+  sendHiddenCustomMessageWithEntryId,
+} from "./rpc-client.js";
 import { createToolRegistry } from "./tool-registry.js";
 
 type CommandContext = {
@@ -35,6 +43,7 @@ type PiApi = {
   getCommands?: () => unknown[];
   registerTool(tool: object): void;
   registerCommand(name: string, command: Command): void;
+  sendMessage(message: ExplicitHiddenMessage, options: ExplicitHiddenMessageOptions): Promise<ExplicitCustomMessageAppendOutcome>;
   sendMessage(message: JsonRecord, options?: JsonRecord): void | Promise<void>;
   on(name: string, handler: (event: JsonRecord, context: CommandContext) => unknown): void;
   events?: { on?: (name: string, handler: (event: JsonRecord) => void) => void };
@@ -419,9 +428,17 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
         details: payload.details,
         ...(payload.error === undefined ? {} : { error: payload.error }),
       };
-      await sendHiddenCustomMessage(pi, "mecha.control.result.v1", payload.content, details, { triggerTurn: false });
+      const entryId = `mcr1_${payload.result_id.replaceAll("-", "")}`;
+      const outcome = await sendHiddenCustomMessageWithEntryId(
+        pi,
+        "mecha.control.result.v1",
+        payload.content,
+        details,
+        entryId,
+      );
+      if (outcome.entryId !== entryId) throw new TypeError("Explicit control-result entry ID mismatch.");
       rootPendingRequestIds.delete(payload.request_id);
-      return { kind: "accepted", result_id: payload.result_id };
+      return { kind: outcome.kind, result_id: payload.result_id };
     },
   });
 

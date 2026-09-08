@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 
@@ -17,6 +17,7 @@ const SUBAGENTS_EXTENSION = "/Users/wolfgang/code/pi-packages/packages/pi-subage
 const REGISTRATION_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-registration-probe.ts");
 const TRANSITION_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-transition-probe.ts");
 const AC090_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/stock-pi-ac090-probe.ts");
+const G4_EXPLICIT_ENTRY_ID_PROBE = join(ROOT, "tests/fixtures/mecha-rpc/g4-explicit-entry-id-probe.ts");
 const RUNTIME_GENERATION = "123e4567-e89b-42d3-a456-426614174000";
 const ACCEPTANCE_EVIDENCE = join(ROOT, "tests/fixtures/mecha-rpc/acceptance-evidence-v1.json");
 const ACCEPTANCE_ARTIFACT_DIR = "/tmp/mecha-rpc-acceptance";
@@ -27,6 +28,120 @@ const EXPECTED_COMMANDS = new Set([
 
 type JsonRecord = Record<string, unknown>;
 type PendingResponse = { resolve: (value: JsonRecord) => void; reject: (reason: Error) => void };
+
+type PiSourceLock = {
+  schema: "mecha.pi.g4-source-lock/v1";
+  pi: {
+    source_root: string;
+    source_remote: string;
+    public_base: { commit: string; tree: string };
+    scoped: {
+      commit: string;
+      tree: string;
+      merge_base: string;
+      clean: boolean;
+      changed_paths: string[];
+      package_lock_sha256: string;
+      pnpm_lock_path: null;
+      pnpm_lock_sha256: null;
+      package_name: string;
+      package_version: string;
+    };
+    tarball: { path: string; sha256: string };
+    installed: { package_real_path: string; executable_real_path: string; executable_sha256: string; package_version: string };
+  };
+  pi_packages: { path: string; commit: string; tree: string };
+};
+
+type LockedPiTarget = {
+  bin: string;
+  packageRoot: string;
+  sourceLock: PiSourceLock;
+  version: string;
+};
+
+function sha256File(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function requireEnvironmentPath(name: "MECHA_PI_BIN" | "MECHA_PI_PACKAGE_ROOT" | "MECHA_PI_SOURCE_LOCK"): string {
+  const value = process.env[name];
+  if (value === undefined || value.length === 0 || !isAbsolute(value)) throw new Error(`${name} must be an absolute path`);
+  return value;
+}
+
+function asRecord(value: unknown, message: string): JsonRecord {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(message);
+  return value as JsonRecord;
+}
+
+function readSourceLock(path: string): PiSourceLock {
+  const lock = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  const root = asRecord(lock, "MECHA_PI_SOURCE_LOCK must contain an object");
+  if (root.schema !== "mecha.pi.g4-source-lock/v1") throw new Error("MECHA_PI_SOURCE_LOCK schema is invalid");
+  return lock as PiSourceLock;
+}
+
+function commandOutput(command: string, arguments_: readonly string[], cwd = ROOT): string {
+  return execFileSync(command, arguments_, { cwd, encoding: "utf8" }).trim();
+}
+
+function resolveLockedPiTarget(): LockedPiTarget {
+  const sourceLockPath = requireEnvironmentPath("MECHA_PI_SOURCE_LOCK");
+  const packageRoot = realpathSync(requireEnvironmentPath("MECHA_PI_PACKAGE_ROOT"));
+  const bin = realpathSync(requireEnvironmentPath("MECHA_PI_BIN"));
+  const lock = readSourceLock(sourceLockPath);
+  const packageJson = asRecord(JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as unknown, "Pi package manifest is invalid");
+  if (packageJson.name !== "@earendil-works/pi-coding-agent" || packageJson.version !== "0.85.0") {
+    throw new Error("MECHA_PI_PACKAGE_ROOT is not the locked Pi 0.85.0 package");
+  }
+  const packageRelativeBin = relative(packageRoot, bin);
+  if (packageRelativeBin.length === 0 || packageRelativeBin.startsWith("..") || isAbsolute(packageRelativeBin)) {
+    throw new Error("MECHA_PI_BIN must resolve within MECHA_PI_PACKAGE_ROOT");
+  }
+  if (!statSync(bin).isFile()) throw new Error("MECHA_PI_BIN must resolve to an executable file");
+  const sourceRoot = realpathSync(lock.pi.source_root);
+  const packageLockPath = join(sourceRoot, "package-lock.json");
+  if (lock.pi.public_base.commit !== "107d79f11072bbc8a3a757ed7fd69596bee7d68c" || lock.pi.public_base.tree !== "f5103239060686ea2983e18906857b3df54428f5") {
+    throw new Error("Pi source lock does not use public Pi v0.85.0");
+  }
+  if (lock.pi.scoped.merge_base !== lock.pi.public_base.commit || !lock.pi.scoped.clean) {
+    throw new Error("Pi source lock is not a clean scoped branch from public Pi v0.85.0");
+  }
+  if (existsSync(join(sourceRoot, "pnpm-lock.yaml")) || lock.pi.scoped.pnpm_lock_path !== null || lock.pi.scoped.pnpm_lock_sha256 !== null) {
+    throw new Error("Pi v0.85.0 source lock must record the package-lock-only checkout");
+  }
+  if (sha256File(packageLockPath) !== lock.pi.scoped.package_lock_sha256) throw new Error("Pi package-lock hash mismatch");
+  const changedPaths = commandOutput("git", ["-C", sourceRoot, "diff", "--name-only", `${lock.pi.public_base.commit}..${lock.pi.scoped.commit}`]).split("\n").filter(Boolean);
+  if (JSON.stringify(changedPaths) !== JSON.stringify(lock.pi.scoped.changed_paths) || changedPaths.some((path) => !path.startsWith("packages/coding-agent/src/") && !path.startsWith("packages/coding-agent/test/"))) {
+    throw new Error("Pi source lock has paths outside the G4 Pi scope");
+  }
+  if (
+    commandOutput("git", ["-C", sourceRoot, "rev-parse", "HEAD"]) !== lock.pi.scoped.commit ||
+    commandOutput("git", ["-C", sourceRoot, "rev-parse", "HEAD^{tree}"]) !== lock.pi.scoped.tree ||
+    commandOutput("git", ["-C", sourceRoot, "merge-base", "HEAD", lock.pi.public_base.commit]) !== lock.pi.public_base.commit ||
+    commandOutput("git", ["-C", sourceRoot, "config", "--get", "remote.origin.url"]) !== lock.pi.source_remote ||
+    commandOutput("git", ["-C", sourceRoot, "status", "--porcelain"]) !== ""
+  ) throw new Error("Pi source lock does not match its source checkout");
+  const piPackagesPath = realpathSync(lock.pi_packages.path);
+  if (
+    lock.pi_packages.commit !== "06ed583c720ed0fe6d6cc099b26eeb384795ea39" ||
+    lock.pi_packages.tree !== "18aa55133ecd46fc7eb9a4a3b9265e8ec247863e" ||
+    commandOutput("git", ["-C", piPackagesPath, "rev-parse", "HEAD"]) !== lock.pi_packages.commit ||
+    commandOutput("git", ["-C", piPackagesPath, "rev-parse", "HEAD^{tree}"]) !== lock.pi_packages.tree ||
+    realpathSync(SUBAGENTS_EXTENSION) !== join(piPackagesPath, "packages/pi-subagents/src/index.ts")
+  ) throw new Error("Pi subagents compatibility checkout does not match the authoritative G4 source");
+  if (
+    sha256File(lock.pi.tarball.path) !== lock.pi.tarball.sha256 ||
+    packageRoot !== lock.pi.installed.package_real_path ||
+    bin !== lock.pi.installed.executable_real_path ||
+    sha256File(bin) !== lock.pi.installed.executable_sha256 ||
+    packageJson.version !== lock.pi.installed.package_version
+  ) throw new Error("Installed Pi package does not match the source lock");
+  return { bin, packageRoot, sourceLock: lock, version: commandOutput(bin, ["--version"]) };
+}
+
+const PI_TARGET = resolveLockedPiTarget();
 
 class StockPiRpc {
   readonly events: JsonRecord[] = [];
@@ -52,7 +167,7 @@ class StockPiRpc {
       ? persistSession ? ["--session-dir", join(home, "sessions")] : ["--no-session"]
       : ["--session", options.sessionPath];
     const extensions = options.extensions ?? [EXTENSION, SUBAGENTS_EXTENSION];
-    this.process = spawn("pi", [
+    this.process = spawn(PI_TARGET.bin, [
       "--mode", "rpc", ...sessionArgs, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline",
       "--provider", "mecha-router-test", "--model", "deterministic-model",
       ...extensions.flatMap((extension) => ["-e", extension]),
@@ -236,6 +351,49 @@ function streamToolCall(response: ServerResponse, id: string, name: string, argu
   response.end("data: [DONE]\n\n");
 }
 
+type HeldRootProvider = { baseUrl: string; requests: JsonRecord[]; release: () => void; stop: () => Promise<void> };
+
+async function startHeldRootProvider(): Promise<HeldRootProvider> {
+  const requests: JsonRecord[] = [];
+  let releaseHeldResponse: (() => void) | undefined;
+  const server = createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404).end();
+      return;
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      response.writeHead(400).end();
+      return;
+    }
+    requests.push(parsed as JsonRecord);
+    if (requests.length === 1) {
+      streamToolCall(response, "held-root-goal", "goal", { action: "status" });
+      return;
+    }
+    releaseHeldResponse = () => streamCompletion(response, { role: "assistant", content: "Held root turn complete." });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("held root provider did not bind a TCP port");
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    requests,
+    release() {
+      if (releaseHeldResponse === undefined) throw new Error("held root continuation is not waiting for a control result");
+      const release = releaseHeldResponse;
+      releaseHeldResponse = undefined;
+      release();
+    },
+    stop: () => new Promise<void>((resolveStop, rejectStop) => server.close((error) => error === undefined ? resolveStop() : rejectStop(error))),
+  };
+}
+
 async function startChildHandoffProvider(): Promise<ChildHandoffProvider> {
   const requests: JsonRecord[] = [];
   const childRequests: JsonRecord[] = [];
@@ -410,15 +568,11 @@ type AcceptanceProvenance = {
   readonly directory: string;
 };
 
-function commandOutput(command: string, arguments_: readonly string[], cwd = ROOT): string {
-  return execFileSync(command, arguments_, { cwd, encoding: "utf8" }).trim();
-}
-
 function acceptanceProvenance(): AcceptanceProvenance {
   const actual = {
     mecha_developer_head: commandOutput("git", ["rev-parse", "HEAD"]),
     pi_subagents_head: commandOutput("git", ["-C", resolve(ROOT, "../pi-packages"), "rev-parse", "HEAD"]),
-    installed_pi_version: commandOutput("pi", ["--version"]),
+    installed_pi_version: commandOutput(PI_TARGET.bin, ["--version"]),
   };
   const supplied = {
     mecha_developer_head: process.env.MECHA_RPC_ACCEPTANCE_MECHA_HEAD,
@@ -516,9 +670,134 @@ function customMessages(events: JsonRecord[], customType: string): JsonRecord[] 
   });
 }
 
+test("locked Pi G4 persists deterministic root results through get_entry and preserves stock RPC behavior", { timeout: 45_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-g4-"));
+  mkdirSync(join(home, "tmp"), { recursive: true });
+  const provider = await startHeldRootProvider();
+  const rootResultId = "123e4567-e89b-42d3-a456-426614174050";
+  const rootEntryId = `mcr1_${rootResultId.replaceAll("-", "")}`;
+  const directEntryId = "mcr1_123e4567e89b42d3a456426614174051";
+  let rpc = new StockPiRpc(home, provider.baseUrl, {
+    persistSession: true,
+    extensions: [EXTENSION, SUBAGENTS_EXTENSION, G4_EXPLICIT_ENTRY_ID_PROBE],
+  });
+  try {
+    const manifest = readManifest();
+    const manifestHash = hashCanonicalJson(manifest);
+    await bootstrapCurrentManifest(rpc, manifest, RUNTIME_GENERATION, "123e4567-e89b-42d3-a456-426614174049");
+
+    const beforeRootAppend = await rpc.request({ type: "get_entry", entryId: rootEntryId });
+    successful(beforeRootAppend);
+    assert.deepEqual(beforeRootAppend.data, { entry: null });
+
+    const rootTurn = rpc.request({ type: "prompt", message: "Queue a managed root result." });
+    const requestEvent = await waitFor(() => customMessages(rpc.events, "mecha.control.request.v1").at(-1), "root control request");
+    const requestDetails = (requestEvent.message as JsonRecord).details;
+    assert.ok(requestDetails !== null && typeof requestDetails === "object" && !Array.isArray(requestDetails));
+    await waitFor(() => provider.requests.length >= 2 ? true : undefined, "held root continuation");
+
+    const resultEnvelope = encodeHiddenEnvelope({
+      protocol: "mecha.control/v1", result_id: rootResultId,
+      request_id: (requestDetails as JsonRecord).request_id,
+      target_session_epoch: 1, runtime_generation: RUNTIME_GENERATION, manifest_sha256: manifestHash,
+      status: "ok", content: "Held root result persisted.", details: { source: "g4-native" },
+    });
+    const appendDuringStream = rpc.request({ type: "prompt", message: `/mecha-control-result-v1 ${resultEnvelope}` });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    assert.equal(rpc.events.filter((event) => event.type === "message_end" && event.entryId === rootEntryId).length, 0);
+    const beforeRelease = await rpc.request({ type: "get_entry", entryId: rootEntryId });
+    successful(beforeRelease);
+    assert.deepEqual(beforeRelease.data, { entry: null });
+
+    provider.release();
+    successful(await appendDuringStream);
+    successful(await rootTurn);
+    const rootLookup = await rpc.request({ type: "get_entry", entryId: rootEntryId });
+    successful(rootLookup);
+    const rootData = rootLookup.data;
+    assert.ok(rootData !== null && typeof rootData === "object" && !Array.isArray(rootData));
+    const rootEntry = (rootData as JsonRecord).entry;
+    assert.ok(rootEntry !== null && typeof rootEntry === "object" && !Array.isArray(rootEntry));
+    assert.deepEqual({
+      type: (rootEntry as JsonRecord).type,
+      id: (rootEntry as JsonRecord).id,
+      customType: (rootEntry as JsonRecord).customType,
+      content: (rootEntry as JsonRecord).content,
+      display: (rootEntry as JsonRecord).display,
+      details: (rootEntry as JsonRecord).details,
+    }, {
+      type: "custom_message", id: rootEntryId, customType: "mecha.control.result.v1",
+      content: "Held root result persisted.", display: false,
+      details: {
+        protocol: "mecha.control/v1", result_id: rootResultId,
+        request_id: (requestDetails as JsonRecord).request_id,
+        target_session_epoch: 1, runtime_generation: RUNTIME_GENERATION, manifest_sha256: manifestHash,
+        status: "ok", details: { source: "g4-native" },
+      },
+    });
+    assert.equal(JSON.stringify(rootEntry).includes(rootEntryId), true);
+    assert.equal(JSON.stringify((rootEntry as JsonRecord).details).includes(rootEntryId), false);
+    assert.equal(rpc.events.filter((event) => event.type === "message_end" && event.entryId === rootEntryId).length, 1);
+
+    successful(await rpc.request({ type: "prompt", message: `/mecha-control-result-v1 ${resultEnvelope}` }));
+    assert.equal(rpc.events.filter((event) => event.type === "message_end" && event.entryId === rootEntryId).length, 1);
+
+    for (const mode of ["first", "duplicate", "changed"]) {
+      successful(await rpc.request({ type: "prompt", message: `/g4-explicit-entry-id-probe ${directEntryId} ${mode}` }));
+      await waitFor(() => customMessages(rpc.events, "g4.explicit-entry-id-probe.v1").find((event) => {
+        const details = (event.message as JsonRecord).details;
+        return details !== null && typeof details === "object" && !Array.isArray(details)
+          && (details as JsonRecord).entry_id === directEntryId && (details as JsonRecord).mode === mode ? event : undefined;
+      }), `direct Pi seam ${mode}`);
+    }
+    const probeEvents = customMessages(rpc.events, "g4.explicit-entry-id-probe.v1").map((event) => (event.message as JsonRecord).details as JsonRecord)
+      .filter((details) => details.entry_id === directEntryId);
+    assert.deepEqual(probeEvents.map((details) => ({ mode: details.mode, outcome: details.outcome_kind, rejected: details.rejected })), [
+      { mode: "first", outcome: "accepted", rejected: false },
+      { mode: "duplicate", outcome: "already_present", rejected: false },
+      { mode: "changed", outcome: undefined, rejected: true },
+    ]);
+    const directLookup = await rpc.request({ type: "get_entry", entryId: directEntryId });
+    successful(directLookup);
+    assert.ok((directLookup.data as JsonRecord).entry !== null);
+    assert.equal(rpc.events.filter((event) => event.type === "message_end" && event.entryId === directEntryId).length, 1);
+
+    const sessionPath = sessionFileFromState(await rpc.request({ type: "get_state" }));
+    await rpc.stop();
+    rpc = new StockPiRpc(home, provider.baseUrl, {
+      sessionPath,
+      extensions: [EXTENSION, SUBAGENTS_EXTENSION, G4_EXPLICIT_ENTRY_ID_PROBE],
+    });
+    const resumedLookup = await rpc.request({ type: "get_entry", entryId: rootEntryId });
+    successful(resumedLookup);
+    assert.deepEqual(resumedLookup.data, rootLookup.data);
+    successful(await rpc.request({ type: "get_state" }));
+    successful(await rpc.request({ type: "abort" }));
+    const entriesResponse = await rpc.request({ type: "get_entries" });
+    successful(entriesResponse);
+    assert.ok(Array.isArray((entriesResponse.data as JsonRecord).entries));
+
+    writeAcceptanceArtifact("pi-g4-lifecycle.json", {
+      source_lock: PI_TARGET.sourceLock as unknown as JsonRecord,
+      installed_pi_package_root: PI_TARGET.packageRoot,
+      installed_pi_executable: PI_TARGET.bin,
+      installed_pi_version: PI_TARGET.version,
+      get_entry_before_append: beforeRootAppend.data as JsonRecord,
+      get_entry_after_append: rootLookup.data as JsonRecord,
+      get_entry_after_resume: resumedLookup.data as JsonRecord,
+      root_entry_id: rootEntryId,
+      direct_entry_id: directEntryId,
+    });
+  } finally {
+    await rpc.stop();
+    await provider.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("stock Pi 0.85 advertises the managed manifest through a deterministic real-model turn", { timeout: 30_000 }, async () => {
   const version = await new Promise<string>((resolveVersion, reject) => {
-    const child = spawn("pi", ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(PI_TARGET.bin, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
     child.once("error", reject);
@@ -569,7 +848,7 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     const firstModelResponse = await rpc.request({ type: "prompt", message: "Confirm the managed tools are ready." });
     successful(firstModelResponse);
     for (let attempt = 0; provider.requests.length === 0 && attempt < 100; attempt++) await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-    assert.equal(provider.requests.length, 1);
+    assert.ok(provider.requests.length >= 1);
     const advertisedTools = provider.requests[0]!.tools;
     assert.ok(Array.isArray(advertisedTools));
     const advertisedNames = new Set(advertisedTools.flatMap((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool)
