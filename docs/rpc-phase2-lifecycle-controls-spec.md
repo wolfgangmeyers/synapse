@@ -117,20 +117,20 @@ Each terminalization uses one immediate transaction with the lane's current acti
 Restart All has one bounded parent transaction. This closes concurrent replay without storing a placeholder response. Its parent is a direct `restart_all` action and has no source agent or process, so its source fence is intentionally all-null. Each accepted child is a `restart` action with `source='restart_all_child'`, its parent action ID, and a full source fence.
 
 1. Start `BEGIN IMMEDIATE`.
-2. Resolve `(POST, X-Request-ID)` under `router-managed-worker-v1`. An exact matching row returns its immutable response. A path/body mismatch returns `IDEMPOTENCY_CONFLICT`.
+2. Resolve `(POST, X-Request-ID)` under `router-managed-worker-v1`. An exact matching row returns its immutable response. A path/body mismatch returns `IDEMPOTENCY_CONFLICT`. Replay returns before a snapshot read or child-ID allocation.
 3. Read eligible managed IDs once, ordered by `agent_id ASC`. The ordered list is the snapshot. Its zero-based list position is `snapshot_position`.
-4. Compute one item for every snapshot ID from the durable rows while the writer lock is held. No row is written yet. An item is `accepted` with a preallocated internal child UUID, `coalesced` with the existing equal-priority operation, or `rejected` with a fixed safe code and message.
-5. Insert the parent operation with its complete immutable `202` response, then its `restart_all` lifecycle action. Insert accepted child operations/actions and every batch item after the parent exists. This all stays inside the same transaction.
-6. Terminalize the parent operation and parent lifecycle action as `BATCH_ADMITTED` in that transaction. Commit.
-7. After commit, enqueue accepted child execution through each agent's existing lane. The parent transaction never waits for a lane, process, settlement, or readiness check.
+4. Compute one item for every snapshot ID from the durable rows while the writer lock is held. No row is written yet. An item is `accepted`, `coalesced` with the existing equal-priority direct operation, or `rejected` with a fixed safe code and message. For each accepted item only, the store calls the manager-provided bounded ID allocator for a canonical child action/operation/request ID and planned target generation. The allocator has no durable or process side effect.
+5. The store marshals the parent body from the classified ordered items. It inserts the complete parent operation as `pending`, then its `restart_all` action as `admitted/admission`. Each accepted child operation has `operation_id == request_id == action_id`, method `POST`, canonical body hash for `{}`, and the non-routable canonical path `/internal/managed-lifecycle/restart-all/<parent-action-id>/children/<agent-id>`. It stores a bounded canonical restarting, admission-closed projection as that child operation's private `202` response. It then inserts the matching child action and every batch item. This all stays inside the same transaction.
+6. After every accepted-agent fenced update and batch-item insert succeeds, terminalize the parent operation as `BATCH_ADMITTED` with 24-hour expiry, then terminalize the matching parent action as `succeeded/complete`. A terminal parent action is never inserted or committed with a pending operation. Commit.
+7. After commit, enqueue accepted child execution through each agent's existing lane. The parent transaction never waits for a lane, process, settlement, or readiness check. A dispatch failure is recorded internally but still returns the committed stored `202`; it never rewrites the parent response or maps the first delivery to a public error.
 
-A crash before commit leaves no parent, child operation, action, or item. A crash after commit leaves the full immutable batch and recoverable child records. A concurrent caller waits on SQLite's writer lock, then observes the immutable parent. This creates at most one child admission per `(parent_action_id, agent_id)` and one item per snapshot position.
+A crash before commit leaves no parent, child operation, action, or item. A crash after commit leaves the full immutable batch and recoverable child records. A concurrent caller waits on SQLite's writer lock, then observes the immutable parent. This creates at most one child admission per `(parent_action_id, agent_id)` and one item per snapshot position. A direct restart can be coalesced by multiple parents under the cardinality rule in section 5.2.1.
 
 The maximum snapshot size is the existing managed-agent cap of 32. The parent response describes admission only. Later child replacement success is visible through each agent projection.
 
 ## 5. Migration 027: exact durable contract
 
-Migration `027_managed_control_requests.sql` is forward-only. It does not alter migrations 022–026. The lifecycle-control owner is the only owner of 027. It creates the independent tables in this order: `managed_session_artifacts`, `managed_lifecycle_actions`, `managed_lifecycle_batch_items`, and `managed_control_requests`. It creates every index except `managed_lifecycle_one_active_lane`, rebuilds the populated parent, backfills nonterminal 025 restart transitions, then creates that active-lane index. A root-only control slice consumes this combined migration; it never creates a competing root-only 027 or defers lifecycle fields to 028.
+Migration `027_managed_control_requests.sql` is forward-only. It does not alter migrations 022–026. The lifecycle-control owner is the only owner of 027. It creates the independent tables in this order: `managed_session_artifacts`, `managed_lifecycle_actions`, `managed_lifecycle_batch_items`, and `managed_control_requests`. It creates every index except `managed_lifecycle_one_active_lane`, rebuilds the populated parent, backfills nonterminal 025 restart transitions, then creates that active-lane index. A root-only control slice consumes this combined migration; it never creates a competing root-only 027 or defers an original lifecycle/control field to one. The later narrow Restart All batch-reference correction in section 5.2.1 is a forward migration owned by the Restart All slice. It does not alter 027.
 
 ### 5.0 Populated SQLite rebuild procedure
 
@@ -332,6 +332,14 @@ CREATE INDEX managed_lifecycle_batch_parent_idx
 ```
 
 `child_action_id` and `child_operation_id` must name the same child action. The store checks this join in the same parent transaction.
+
+### 5.2.1 S2 batch-reference cardinality amendment
+
+Migration 027's two global child-reference uniqueness constraints prevent more than one Restart All parent from coalescing the same pending direct restart. S2 owns forward migration `028_managed_restart_all_batch_references.sql`. It rebuilds only `managed_lifecycle_batch_items` in one immediate transaction: create a replacement with the same columns, foreign keys, checks, and parent-scoped unique constraints, but no `UNIQUE(child_action_id)` or `UNIQUE(child_operation_id)`; copy every row with an explicit column list; replace the old table; recreate `managed_lifecycle_batch_parent_idx`; and add nonunique partial indexes on each non-null child reference.
+
+The migration verifies row count and two-directional row equality, `PRAGMA foreign_key_check`, and `PRAGMA integrity_check` before it records itself. A failure rolls back to the unchanged 027 table, indexes, rows, and migration ledger. It never changes 027 or any earlier migration.
+
+Only a pending equal-priority direct restart with a matching action/operation/fence may be shared this way. An accepted Restart All child remains owned by its one `parent_action_id`; a Restart All child, terminal restart, non-direct restart, or mismatched action/operation pair is a fixed rejected item. Retention and termination must traverse every batch item that references the shared coalesced action or operation.
 
 ### 5.3 `managed_session_artifacts`
 
@@ -645,7 +653,8 @@ The durable-write fault tests inject failure after source reaping, target start,
 | `router-proxy/internal/managed/process.go` | `SessionLaunchMode` create/resume preconditions and no caller session path. |
 | `router-proxy/internal/managed/session_artifacts.go` | Discovery, containment, no-symlink unlink, artifact ledger, retry, and redaction. |
 | `router-proxy/internal/managed/supervisor.go` | Per-agent precedence, launch/terminate serialization, legacy bridge execution, reset/terminate/Restart All orchestration, pending-launch and lifecycle recovery, stale-callback fencing. |
-| `router-proxy/internal/store/migrations/027_managed_control_requests.sql` | The exact schema, rebuild, checks, indexes, and 022–026 preservation above. |
+| `router-proxy/internal/store/migrations/027_managed_control_requests.sql` | The exact historical schema, rebuild, checks, indexes, and 022–026 preservation above. |
+| `router-proxy/internal/store/migrations/028_managed_restart_all_batch_references.sql` | The narrow forward rebuild in section 5.2.1 that permits multiple coalesced-parent references while preserving the 027 batch graph. |
 | `router-proxy/internal/store/managed.go` | Immediate lifecycle/control/batch/artifact/launch transactions, legacy bridge terminalization, recovery claim, graph retention, and delete order. |
 | `router-proxy/internal/store/delivery.go` | The accepted `RetireManagedRecipientSourceForTermination` boundary. |
 | focused store/manager/RPC/process/artifact/transport tests | Every check, full-or-null group, 65th/513th control capacity, retry schedule, graph retention order/rollback, six-stage legacy bridge result, launch/terminate race, complete-owned/absent and all-null/unpersisted/present/mismatch/unknown launch recovery, and durable-write fault. |
@@ -663,4 +672,4 @@ The test records only public-safe assertions. It does not print raw session cont
 
 ## 10. Definition of done
 
-The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, reject unmatched pre-027 pending launches without mutation, pass the rebuild success and rollback tests in that section, and pass every named constraint, graph-retention, six-stage legacy-bridge, launch/terminate race, recovery, exact-entry, process, artifact, and fault test. The source-fence proof must cover the direct Restart All parent's intentional all-null fence and every Restart All child's full fence. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
+The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, reject unmatched pre-027 pending launches without mutation, pass the rebuild success and rollback tests in that section, and pass every named constraint, graph-retention, six-stage legacy-bridge, launch/terminate race, recovery, exact-entry, process, artifact, and fault test. When S2 adds Restart All, migration 028 must also preserve populated 027 batch rows, remove only the two global child-reference uniqueness constraints, retain parent-scoped uniqueness, and pass its upgrade and rollback proof. The source-fence proof must cover the direct Restart All parent's intentional all-null fence and every Restart All child's full fence. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
