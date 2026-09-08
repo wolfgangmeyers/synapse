@@ -18,7 +18,12 @@ func TestTmuxAdapterUsesEstablishedCommands(t *testing.T) {
 		case "list-sessions":
 			return "mecha\nother", nil
 		case "list-windows":
+			if args[len(args)-1] == "#{window_index}" {
+				return "0\n1", nil
+			}
 			return "supervisor\nworker", nil
+		case "show-options":
+			return "0", nil
 		default:
 			return "", nil
 		}
@@ -46,13 +51,37 @@ func TestTmuxAdapterUsesEstablishedCommands(t *testing.T) {
 		{"list-sessions", "-F", "#{session_name}"},
 		{"list-windows", "-t", "mecha", "-F", "#{window_name}"},
 		{"new-session", "-d", "-s", "mecha", "-n", "supervisor"},
-		{"new-window", "-d", "-t", "mecha", "-n", "worker"},
+		{"show-options", "-t", "mecha", "-v", "base-index"},
+		{"list-windows", "-t", "mecha", "-F", "#{window_index}"},
+		{"new-window", "-d", "-t", "mecha:2", "-n", "worker"},
 		{"rename-window", "-t", "mecha:worker", "renamed"},
 		{"send-keys", "-t", "mecha:worker", "-l", "echo hi"},
 		{"send-keys", "-t", "mecha:worker", "C-c"},
 		{"send-keys", "-t", "mecha:worker", "start", "pi-session", "Enter"},
 		{"send-keys", "-t", "mecha:worker", "resume", "pi-session", "Enter"},
 		{"kill-window", "-t", "mecha:worker"},
+	}, calls)
+}
+
+func TestTmuxAdapterProvisionUsesFirstFreeIndexAtSessionBase(t *testing.T) {
+	var calls [][]string
+	adapter := &tmuxAdapter{run: func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case "show-options":
+			return "28", nil
+		case "list-windows":
+			return "28\n29\n31", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	require.NoError(t, adapter.Provision(context.Background(), "mecha", "worker"))
+	require.Equal(t, [][]string{
+		{"show-options", "-t", "mecha", "-v", "base-index"},
+		{"list-windows", "-t", "mecha", "-F", "#{window_index}"},
+		{"new-window", "-d", "-t", "mecha:30", "-n", "worker"},
 	}, calls)
 }
 
