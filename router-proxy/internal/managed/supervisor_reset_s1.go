@@ -108,11 +108,35 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 		}
 	} else {
 		candidate, live := m.bindingFor(request.AgentID)
-		if !live || !m.liveBinding(agent, candidate) {
-			return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
+		if live && m.liveBinding(agent, candidate) {
+			binding, source = candidate, bindingFence(request.AgentID, candidate)
+			liveFence = source
+		} else {
+			// S3 clears the source binding after source-stop and recovery starts
+			// without a binding. Reset still has to reach the store's precedence
+			// transaction for an admitted or later lifecycle restart; the durable
+			// source/target fence decides whether that handoff is safe.
+			active, activeErr := m.store.ActiveManagedLifecycleAction(ctx, request.AgentID)
+			if errors.Is(activeErr, sql.ErrNoRows) {
+				return ResetResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
+			}
+			if activeErr != nil {
+				return ResetResult{}, activeErr
+			}
+			if active.Kind != "restart" || active.SourceFence == nil {
+				return ResetResult{}, &store.ManagedResetConflictError{AgentID: request.AgentID}
+			}
+			liveFence = storedAgentFence(agent)
+			switch {
+			case active.TargetFence != nil && sameBindingFence(liveFence, *active.TargetFence):
+				source = *active.TargetFence
+			case sameBindingFence(liveFence, *active.SourceFence):
+				source = *active.SourceFence
+			default:
+				return ResetResult{}, &store.ManagedResetConflictError{AgentID: request.AgentID}
+			}
 		}
-		binding, source = candidate, bindingFence(request.AgentID, candidate)
-		liveFence, targetEpoch = source, source.SessionEpoch+1
+		targetEpoch = source.SessionEpoch + 1
 		targetSession, err = m.ids.Next()
 		if err != nil {
 			return ResetResult{}, err

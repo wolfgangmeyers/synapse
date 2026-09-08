@@ -45,7 +45,7 @@ func TestMigration027BackfillsLegacyRestartAndRetainsForeignKeys(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
-	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 	require.NoError(t, err)
 	agent := ManagedAgentRecord{AgentID: "legacy", Name: "legacy", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
 	launch := ManagedOperation{OperationID: "launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "launch", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}

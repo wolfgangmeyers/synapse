@@ -804,56 +804,6 @@ func (s *Store) ManagedLifecycleAction(ctx context.Context, actionID string) (*M
 	return managedLifecycleActionForTx(ctx, s.db, actionID)
 }
 
-// ReserveManagedRestartAll records a terminal batch-admission parent. Child
-// actions are deliberately admitted only by the manager after this transaction
-// commits, so the parent never waits for a live lane or process.
-func (s *Store) ReserveManagedRestartAll(ctx context.Context, operation ManagedOperation) (*ManagedOperation, bool, error) {
-	if !managedCanonicalUUIDRE.MatchString(operation.RequestID) || operation.OperationID != operation.RequestID || operation.Method == "" || operation.CanonicalPath == "" || !managedSHA256RE.MatchString(operation.CanonicalBodyHash) {
-		return nil, false, errors.New("managed restart-all reservation is invalid")
-	}
-	if operation.State == "" {
-		operation.State = "pending"
-	}
-	if operation.CreatedAt == "" {
-		operation.CreatedAt = formatTimestamp(s.clock.Now())
-	}
-	var result *ManagedOperation
-	replayed := false
-	err := s.runImmediate(ctx, func() error {
-		existing, err := managedOperationForWorkerScopeTx(ctx, s.db, operation.Method, operation.RequestID)
-		if err == nil {
-			if existing.CanonicalPath != operation.CanonicalPath || existing.CanonicalBodyHash != operation.CanonicalBodyHash {
-				return &ManagedIdempotencyConflictError{}
-			}
-			result, replayed = existing, true
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		var count int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents WHERE desired_state='running'`).Scan(&count); err != nil {
-			return err
-		}
-		if count > 32 {
-			return errors.New("managed restart-all snapshot exceeds capacity")
-		}
-		if err := insertManagedOperation(ctx, s.db, operation); err != nil {
-			return err
-		}
-		now := formatTimestamp(s.clock.Now())
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_lifecycle_actions (action_id,operation_id,agent_id,kind,source,execution_owner,state,stage,terminal_code,terminal_message,retryable,completed_at,created_at,updated_at) VALUES (?,?,NULL,'restart_all','direct','lifecycle','succeeded','complete','BATCH_ADMITTED','managed restart batch admitted',0,?,?,?)`, operation.OperationID, operation.OperationID, now, now, now); err != nil {
-			return err
-		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='BATCH_ADMITTED',terminal_message='managed restart batch admitted' WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), operation.OperationID); err != nil {
-			return err
-		}
-		result = &operation
-		return nil
-	})
-	return result, replayed, err
-}
-
 // CompleteManagedTermination is the final durable cleanup transaction. The
 // direct-mail owner is invoked before this boundary; it retains ordinary mail
 // and immutable snapshots while this method removes only managed lifecycle

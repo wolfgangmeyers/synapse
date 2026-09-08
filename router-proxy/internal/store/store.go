@@ -111,12 +111,14 @@ type Store struct {
 	maxBatchBodyChars    int
 	reminderIncarnations map[string]string
 	migrations           []Migration
-	// managed027Fault and managedGraphFault are test-only failure seams. They
-	// keep rollback tests on the real single SQLite connection.
-	managed027Fault   func(string) error
-	managedGraphFault func(string) error
-	mu                sync.Mutex
-	closed            bool
+	// managed027Fault, managedRestartAllFault, and managedGraphFault are
+	// test-only failure seams. They keep rollback tests on the real single
+	// SQLite connection.
+	managed027Fault        func(string) error
+	managedRestartAllFault func(string) error
+	managedGraphFault      func(string) error
+	mu                     sync.Mutex
+	closed                 bool
 }
 
 //go:embed migrations/*.sql
@@ -351,6 +353,12 @@ func (s *Store) applyMigrations(ctx context.Context, migrations []Migration) err
 		}
 		if migration.ID == "027_managed_control_requests" {
 			if err := s.applyManagedControlMigration027(ctx, migration); err != nil {
+				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
+			}
+			continue
+		}
+		if migration.ID == "028_managed_restart_all_batch_references" {
+			if err := s.applyManagedRestartAllBatchReferencesMigration028(ctx, migration); err != nil {
 				return fmt.Errorf("migration %s failed: %w", migration.ID, err)
 			}
 			continue
@@ -594,6 +602,81 @@ func (s *Store) applyManagedControlMigration027(ctx context.Context, migration M
 			return err
 		}
 		return errors.New("migration 027 post-commit foreign key check failed")
+	}
+	return chmodStateFiles(s.path)
+}
+
+// applyManagedRestartAllBatchReferencesMigration028 rebuilds only the batch
+// reference table. The transaction verifies the copied rows before recording
+// the migration, so a failed upgrade leaves the historical 027 table intact.
+func (s *Store) applyManagedRestartAllBatchReferencesMigration028(ctx context.Context, migration Migration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		id TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE id=?`, migration.ID).Scan(&present); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	// TEMP tables survive only this single SQLite connection. Clear an abandoned
+	// test fixture before creating the snapshot used for two-way parity checks.
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS temp.managed_lifecycle_batch_items_028_snapshot`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	rollback := func(cause error) error {
+		_, _ = s.db.ExecContext(context.Background(), `ROLLBACK`)
+		return cause
+	}
+	if _, err := s.db.ExecContext(ctx, migration.SQL); err != nil {
+		return rollback(err)
+	}
+	columns := `parent_action_id,snapshot_position,agent_id,status,child_action_id,child_operation_id,error_code,error_message,created_at`
+	var oldCount, newCount, leftOnly, rightOnly, foreignProblems int
+	for query, destination := range map[string]*int{
+		`SELECT COUNT(*) FROM temp.managed_lifecycle_batch_items_028_snapshot`: &oldCount,
+		`SELECT COUNT(*) FROM managed_lifecycle_batch_items`:                   &newCount,
+		`SELECT COUNT(*) FROM (SELECT ` + columns + ` FROM temp.managed_lifecycle_batch_items_028_snapshot EXCEPT SELECT ` + columns + ` FROM managed_lifecycle_batch_items)`: &leftOnly,
+		`SELECT COUNT(*) FROM (SELECT ` + columns + ` FROM managed_lifecycle_batch_items EXCEPT SELECT ` + columns + ` FROM temp.managed_lifecycle_batch_items_028_snapshot)`: &rightOnly,
+		`SELECT COUNT(*) FROM pragma_foreign_key_check`: &foreignProblems,
+	} {
+		if err := s.db.QueryRowContext(ctx, query).Scan(destination); err != nil {
+			return rollback(err)
+		}
+	}
+	if oldCount != newCount || leftOnly != 0 || rightOnly != 0 || foreignProblems != 0 {
+		return rollback(errors.New("migration 028 batch reference parity failed"))
+	}
+	var integrity string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		return rollback(err)
+	}
+	if integrity != "ok" {
+		return rollback(errors.New("migration 028 integrity check failed"))
+	}
+	if s.managedRestartAllFault != nil {
+		if err := s.managedRestartAllFault("migration_028_before_record"); err != nil {
+			return rollback(err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?,?)`, migration.ID, formatTimestamp(s.clock.Now())); err != nil {
+		return rollback(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE temp.managed_lifecycle_batch_items_028_snapshot`); err != nil {
+		return rollback(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `COMMIT`); err != nil {
+		return rollback(err)
 	}
 	return chmodStateFiles(s.path)
 }

@@ -27,7 +27,7 @@ func TestForwardMigration023To024BackfillsManagedReadinessSources(t *testing.T) 
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
-	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 	require.NoError(t, err)
 	agent := ManagedAgentRecord{AgentID: "legacy-source", Name: "legacy-source", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, ManifestRevision: 1, ManifestHash: testManifestHash}
 	op := ManagedOperation{OperationID: "legacy-op", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "legacy-op", CanonicalBodyHash: "body", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
@@ -35,7 +35,7 @@ func TestForwardMigration023To024BackfillsManagedReadinessSources(t *testing.T) 
 	require.NoError(t, before.Close())
 	// This historical migration proof stops before 027: its deliberately
 	// unmatched starting row is now a migration-027 rejection fixture.
-	after, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+	after, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 	require.NoError(t, err)
 	defer after.Close()
 	source, err := after.ManagedReadinessSource(ctx, agent.AgentID)

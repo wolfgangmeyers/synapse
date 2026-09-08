@@ -34,12 +34,22 @@ func managedPath(path string) bool {
 // authority boundary, so this path deliberately has no session, CSRF, Origin,
 // or managed CORS handling.
 func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) bool {
-	if r.managed == nil || !managedPath(req.URL.Path) {
+	if !managedPath(req.URL.Path) {
+		return false
+	}
+	if r.managed == nil {
+		if req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents/restart-all" {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not restart managed agents"})
+			return true
+		}
 		return false
 	}
 	switch {
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents":
 		r.handleManagedLaunch(w, req)
+		return true
+	case req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents/restart-all":
+		r.handleManagedRestartAll(w, req)
 		return true
 	case req.Method == http.MethodPost && managedResetPath(req.URL.Path) != "":
 		r.handleManagedReset(w, req, managedResetPath(req.URL.Path))
@@ -224,6 +234,46 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 	body, _ := json.Marshal(map[string]any{"operation_id": requestID, "agent": managed.PublicAgent(result.Agent)})
 	r.writeManagedRaw(w, 202, map[string]string{"X-Request-ID": requestID, "Content-Type": "application/json; charset=utf-8"}, body)
 }
+
+// handleManagedRestartAll keeps the same local-only, strict-empty-object
+// boundary as direct restart. Its manager call returns only the immutable
+// store-built parent operation; accepted child execution is post-commit work.
+func (r *Router) handleManagedRestartAll(w http.ResponseWriter, req *http.Request) {
+	requestID := req.Header.Get("X-Request-ID")
+	if requestID == "" {
+		r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_REQUEST_ID", "X-Request-ID is required"})
+		return
+	}
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 64*1024, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	if len(payload) != 0 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	canonicalPath := req.URL.Path
+	if r.managedPathCanonicalizer != nil {
+		canonicalPath = r.managedPathCanonicalizer(req)
+	}
+	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
+	result, restartErr := r.managed.RestartAll(req.Context(), managed.RestartAllRequest{Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	if restartErr != nil {
+		r.writeManagedError(w, req, managedRestartAllError(restartErr))
+		return
+	}
+	if result.Operation == nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the restart batch"})
+		return
+	}
+	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+}
+
 func managedResetPath(path string) string {
 	const prefix = "/v1/managed-agents/"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/reset") {
@@ -349,6 +399,14 @@ func managedResetError(err error) error {
 		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
 	}
 	return &managedHTTPError{500, "INTERNAL", "Router could not reset the managed agent"}
+}
+
+func managedRestartAllError(err error) error {
+	var idempotency *store.ManagedIdempotencyConflictError
+	if errors.As(err, &idempotency) {
+		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
+	}
+	return &managedHTTPError{500, "INTERNAL", "Router could not restart managed agents"}
 }
 
 func managedRestartError(err error) error {
