@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -10,6 +11,20 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+type noChildStartError struct{ error }
+
+func (noChildStartError) NoChildStarted() bool { return true }
+
+type uncertainStartError struct{ error }
+
+func (uncertainStartError) NoChildStarted() bool { return false }
+
+func TestStartErrorProvesNoChild(t *testing.T) {
+	require.True(t, StartErrorProvesNoChild(noChildStartError{errors.New("no child")}))
+	require.False(t, StartErrorProvesNoChild(uncertainStartError{errors.New("uncertain")}))
+	require.False(t, StartErrorProvesNoChild(errors.New("plain start error")))
+}
 
 func TestOwnedProcessGroupSignalReachesManagedDescendant(t *testing.T) {
 	command := exec.Command("/bin/sh", "-c", "sleep 30 & wait")

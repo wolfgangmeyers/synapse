@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -100,12 +101,13 @@ type restartExecutionRPC struct {
 	settleCalls   int
 	policyRelease chan struct{}
 	policyErr     error
+	sessionFile   string
 	promptCalls   int
 	prompts       []string
 }
 
 func (rpc *restartExecutionRPC) GetState(context.Context) (map[string]any, error) {
-	return map[string]any{"sessionId": rpc.session}, nil
+	return map[string]any{"sessionId": rpc.session, "sessionFile": rpc.sessionFile}, nil
 }
 func (rpc *restartExecutionRPC) GetCommands(context.Context) ([]string, error) {
 	return append(append([]string{}, hiddenCommands...), legacyCommands...), nil
@@ -232,7 +234,10 @@ func newRestartExecutionFixture(t *testing.T, gracefulStop time.Duration) *resta
 	factory := &restartExecutionFactory{processes: []*restartExecutionProcess{old, target}, rpcs: []*restartExecutionRPC{oldRPC, targetRPC}}
 	ops := &restartExecutionOps{states: map[int]ProcessProbeState{7001: ProcessOwned, 7002: ProcessOwned}, process: map[int]*restartExecutionProcess{7001: old, 7002: target}}
 	root := t.TempDir()
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: gracefulStop, TermStop: time.Millisecond}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: &restartExecutionRPCFactory{factory: factory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("session", "old-generation", "target-generation"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
+	sessionFile := filepath.Join(root, "session.json")
+	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0600))
+	oldRPC.sessionFile, targetRPC.sessionFile = sessionFile, sessionFile
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: gracefulStop, TermStop: time.Millisecond}}, Manifest: manifest, ProcessFactory: factory, RPCFactory: &restartExecutionRPCFactory{factory: factory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("session", "old-generation", "target-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "restart-agent", Cwd: root, InitialInstruction: "one-time", RequestID: "launch"})
@@ -279,7 +284,10 @@ func TestRestartExecution(t *testing.T) {
 	processFactory := &restartExecutionFactory{processes: []*restartExecutionProcess{old, target}, rpcs: []*restartExecutionRPC{oldRPC, targetRPC}}
 	ops := &restartExecutionOps{states: map[int]ProcessProbeState{7001: ProcessOwned, 7002: ProcessOwned}, process: map[int]*restartExecutionProcess{7001: old, 7002: target}}
 	root := t.TempDir()
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: time.Millisecond, TermStop: time.Millisecond}}, Manifest: manifest, ProcessFactory: processFactory, RPCFactory: &restartExecutionRPCFactory{factory: processFactory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("session", "old-generation", "target-generation"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
+	sessionFile := filepath.Join(root, "session.json")
+	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0600))
+	oldRPC.sessionFile, targetRPC.sessionFile = sessionFile, sessionFile
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}, Limits: Limits{GracefulStop: time.Millisecond, TermStop: time.Millisecond}}, Manifest: manifest, ProcessFactory: processFactory, RPCFactory: &restartExecutionRPCFactory{factory: processFactory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("session", "old-generation", "target-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
 	defer manager.Close(context.Background())
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "restart-agent", Cwd: root, InitialInstruction: "one-time", RequestID: "launch"})
@@ -321,8 +329,12 @@ func TestRestartExecution(t *testing.T) {
 	require.Zero(t, prompts, "the original initial instruction is launch-only")
 	processFactory.mu.Lock()
 	count := processFactory.count
+	targetSpec := processFactory.specs[1]
 	processFactory.mu.Unlock()
 	require.Equal(t, 2, count)
+	require.Equal(t, ResumeExisting, targetSpec.LaunchMode)
+	require.Equal(t, "session", targetSpec.SessionID)
+	require.NotEmpty(t, targetSpec.SessionRoot)
 }
 
 func TestRestartSettlementInterruptsOldContinuation(t *testing.T) {
@@ -377,10 +389,46 @@ func TestRestartCloseAndExitArbitration(t *testing.T) {
 	stopCalls := fixture.target.stopCalls
 	fixture.target.mu.Unlock()
 	require.Zero(t, stopCalls, "restart close must use the controlled group reaper")
-	transition, err := fixture.durable.ManagedRestartTransition(context.Background(), "restart-agent")
+	action, err := fixture.durable.ManagedLifecycleAction(context.Background(), "restart")
 	require.NoError(t, err)
-	require.Equal(t, "stopped", transition.Stage)
-	require.Nil(t, transition.TargetFence)
+	require.Equal(t, "starting_target", action.State)
+	require.Equal(t, "target_start", action.Stage)
+	require.Nil(t, action.TargetFence)
+}
+
+func TestRestartCloseSettlesActiveSourceWithoutGenericStop(t *testing.T) {
+	fixture := newRestartExecutionFixture(t, 100*time.Millisecond)
+	fixture.oldRPC.settleRelease = make(chan struct{})
+	fixture.reserve(t)
+	require.Eventually(t, func() bool {
+		action, err := fixture.durable.ManagedLifecycleAction(context.Background(), "restart")
+		return err == nil && action.State == "awaiting_settle" && action.Stage == "source_settle"
+	}, time.Second, time.Millisecond)
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- fixture.manager.Close(context.Background()) }()
+	require.Eventually(t, fixture.manager.isClosed, time.Second, time.Millisecond)
+	close(fixture.oldRPC.settleRelease)
+	require.NoError(t, <-closeDone)
+
+	fixture.oldRPC.mu.Lock()
+	settleCalls := fixture.oldRPC.settleCalls
+	fixture.oldRPC.mu.Unlock()
+	require.Equal(t, 1, settleCalls, "active source must settle after shutdown cancels runCtx")
+	fixture.old.mu.Lock()
+	stopCalls := fixture.old.stopCalls
+	fixture.old.mu.Unlock()
+	require.Zero(t, stopCalls, "lifecycle-owned shutdown must not fall through to Process.Stop")
+	fixture.factory.mu.Lock()
+	starts := fixture.factory.count
+	fixture.factory.mu.Unlock()
+	require.Equal(t, 1, starts, "Close leaves target_start for recovery and starts no replacement")
+	action, err := fixture.durable.ManagedLifecycleAction(context.Background(), "restart")
+	require.NoError(t, err)
+	require.Equal(t, "starting_target", action.State)
+	require.Equal(t, "target_start", action.Stage)
+	_, err = fixture.durable.ManagedRestartTransition(context.Background(), "restart-agent")
+	require.Error(t, err, "lifecycle-owned shutdown must not write 025")
 }
 
 func TestRestartRecovery(t *testing.T) {
@@ -388,18 +436,18 @@ func TestRestartRecovery(t *testing.T) {
 	fixture.oldRPC.settleRelease = make(chan struct{})
 	fixture.reserve(t)
 	require.Eventually(t, func() bool {
-		transition, err := fixture.durable.ManagedRestartTransition(context.Background(), "restart-agent")
-		return err == nil && transition.Stage == "settling"
+		action, err := fixture.durable.ManagedLifecycleAction(context.Background(), "restart")
+		return err == nil && action.State == "awaiting_settle" && action.Stage == "source_settle"
 	}, time.Second, time.Millisecond)
 	fixture.ops.mu.Lock()
 	fixture.ops.states[fixture.old.identity.PID] = ProcessAbsent
 	fixture.old.once.Do(func() { close(fixture.old.done) })
 	fixture.ops.mu.Unlock()
 
-	recovered, err := NewManager(ManagerOptions{Store: fixture.durable, Config: Config{AllowedWorkingDirectoryRoots: []string{fixture.root}, Limits: Limits{GracefulStop: time.Millisecond, TermStop: time.Millisecond}}, Manifest: fixture.manifest, ProcessFactory: fixture.factory, RPCFactory: &restartExecutionRPCFactory{factory: fixture.factory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource(), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: fixture.ops})
+	recovered, err := NewManager(ManagerOptions{Store: fixture.durable, Config: Config{SessionRoot: fixture.root, AllowedWorkingDirectoryRoots: []string{fixture.root}, Limits: Limits{GracefulStop: time.Millisecond, TermStop: time.Millisecond}}, Manifest: fixture.manifest, ProcessFactory: fixture.factory, RPCFactory: &restartExecutionRPCFactory{factory: fixture.factory}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource(), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: fixture.ops})
 	require.NoError(t, err)
 	defer recovered.Close(context.Background())
-	require.NoError(t, recovered.RecoverManagedRestartTransitions(context.Background()))
+	require.NoError(t, recovered.RecoverManagedLifecycleControls(context.Background()))
 	require.Eventually(t, func() bool {
 		agent, err := fixture.durable.ManagedAgent(context.Background(), "restart-agent")
 		return err == nil && agent.LifecycleState == "running" && agent.RuntimeGeneration == "target-generation" && agent.AcceptingPrompts

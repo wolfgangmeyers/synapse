@@ -206,6 +206,34 @@ func (o *sessionArtifactOwner) discover(ctx context.Context, agentID string, epo
 	})
 }
 
+// verifyRetainedMaterialized is the direct-restart continuation boundary. It
+// reopens the controlled root and compares the durable device/inode tuple both
+// before ResumeExisting and after the target confirms its session identity.
+func (o *sessionArtifactOwner) verifyRetainedMaterialized(ctx context.Context, artifactID, agentID, sessionID string, epoch int64) (*store.ManagedSessionArtifactRecord, error) {
+	record, err := o.store.ManagedSessionArtifact(ctx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	if record.AgentID != agentID || record.PiSessionID != sessionID || record.SessionEpoch != epoch || record.DiscoveryState != "materialized" || record.CleanupState != "retained" {
+		return nil, errors.New("managed restart continuation artifact is unsafe")
+	}
+	_, relative, _, info, absent, err := o.rootRelativeSessionPath(record.RootRelativePath)
+	if err != nil || absent || relative != record.RootRelativePath {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("managed restart continuation artifact is missing")
+	}
+	device, inode, err := deviceInode(info)
+	if err != nil || device != record.FileDevice || inode != record.FileInode {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("managed restart continuation artifact identity changed")
+	}
+	return record, nil
+}
+
 func (o *sessionArtifactOwner) safeAbsence(record *store.ManagedSessionArtifactRecord) (bool, error) {
 	if record == nil {
 		return false, errors.New("session artifact is missing")

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -479,6 +480,7 @@ type restartPreparationRPC struct {
 	prepareStarted   chan struct{}
 	releasePrepare   chan struct{}
 	preparationError error
+	sessionFile      string
 	promptCalls      int
 	closeCalls       int
 }
@@ -514,7 +516,7 @@ func (r *restartPreparationRPC) GetState(ctx context.Context) (map[string]any, e
 			return nil, err
 		}
 	}
-	return map[string]any{"sessionId": r.session}, nil
+	return map[string]any{"sessionId": r.session, "sessionFile": r.sessionFile}, nil
 }
 func (r *restartPreparationRPC) GetCommands(context.Context) ([]string, error) {
 	r.mu.Lock()
@@ -593,9 +595,11 @@ func readyRestartManager(t *testing.T, preparationError error) (*Manager, *store
 	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
 	root := t.TempDir()
+	sessionFile := filepath.Join(root, "session.json")
+	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0600))
 	process := &launchProcess{identity: ProcessIdentity{PID: 321, StartMarker: "restart-start", Incarnation: "restart-incarnation"}, stopped: make(chan struct{})}
-	rpc := &restartPreparationRPC{active: expectedManagedActiveTools(manifest), preparationError: preparationError}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: restartPreparationFactory{process: process, rpc: rpc}, RPCFactory: restartPreparationRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("restart-session", "initial-generation", "replacement-generation"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	rpc := &restartPreparationRPC{active: expectedManagedActiveTools(manifest), preparationError: preparationError, sessionFile: sessionFile}
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: restartPreparationFactory{process: process, rpc: rpc}, RPCFactory: restartPreparationRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("restart-session", "initial-generation", "replacement-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "restart-agent", Cwd: root, RequestID: "launch-operation"})
 	require.NoError(t, err)
@@ -642,15 +646,15 @@ func TestRestartPreparationFailurePersistsExactDurableError(t *testing.T) {
 	_, err := manager.ReserveRestart(context.Background(), request)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		agent, readErr := durable.ManagedAgent(context.Background(), "restart-agent")
-		return readErr == nil && agent.LastErrorCode == "RESTART_PREPARATION_FAILED"
+		action, readErr := durable.ManagedLifecycleAction(context.Background(), request.RequestID)
+		return readErr == nil && action.State == "failed" && action.TerminalCode == "RESTART_PREPARATION_FAILED"
 	}, time.Second, time.Millisecond)
 	stored, err := durable.ManagedAgent(context.Background(), "restart-agent")
 	require.NoError(t, err)
 	require.Equal(t, "running", stored.LifecycleState)
 	require.True(t, stored.AcceptingPrompts)
-	require.Equal(t, "RESTART_PREPARATION_FAILED", stored.LastErrorCode)
-	require.Equal(t, "restart preparation failed", stored.LastErrorMessage)
+	require.Empty(t, stored.LastErrorCode)
+	require.Empty(t, stored.LastErrorMessage)
 	op, err := durable.ManagedOperation(context.Background(), request.RequestID)
 	require.NoError(t, err)
 	require.Equal(t, "terminal", op.State)
@@ -686,14 +690,14 @@ func TestRestartPreparationDeadlineAndSessionMismatchPersistExactError(t *testin
 			_, err := manager.ReserveRestart(context.Background(), restartRequest())
 			require.NoError(t, err)
 			require.Eventually(t, func() bool {
-				agent, readErr := durable.ManagedAgent(context.Background(), "restart-agent")
-				return readErr == nil && agent.LastErrorCode == "RESTART_PREPARATION_FAILED"
+				action, readErr := durable.ManagedLifecycleAction(context.Background(), restartRequest().RequestID)
+				return readErr == nil && action.State == "failed" && action.TerminalCode == "RESTART_PREPARATION_FAILED"
 			}, time.Second, time.Millisecond)
 			stored, err := durable.ManagedAgent(context.Background(), "restart-agent")
 			require.NoError(t, err)
 			require.Equal(t, "running", stored.LifecycleState)
 			require.True(t, stored.AcceptingPrompts)
-			require.Equal(t, "restart preparation failed", stored.LastErrorMessage)
+			require.Empty(t, stored.LastErrorMessage)
 			_, commands, _, _, _, prompts, closes := rpc.counts()
 			require.Equal(t, 0, prompts)
 			require.Equal(t, 0, closes)
@@ -750,27 +754,26 @@ func TestRestartTransitionFirstAdmissionRejectsFreshManagerWithoutBinding(t *tes
 	require.Error(t, err)
 }
 
-func TestRestartPreparationSuccessIsBoundedAndDoesNotReplace(t *testing.T) {
+func TestRestartPreparationAttachesArtifactBeforeStoppingSource(t *testing.T) {
 	manager, durable, rpc := readyRestartManager(t, nil)
 	defer manager.Close(context.Background())
 	_, err := manager.ReserveRestart(context.Background(), restartRequest())
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		transition, readErr := durable.ManagedRestartTransition(context.Background(), "restart-agent")
-		return readErr == nil && transition.Stage == "prepared"
+		action, readErr := durable.ManagedLifecycleAction(context.Background(), restartRequest().RequestID)
+		return readErr == nil && action.State == "failed" && action.TargetArtifactID != ""
 	}, time.Second, time.Millisecond)
-	stored, err := durable.ManagedAgent(context.Background(), "restart-agent")
+	action, err := durable.ManagedLifecycleAction(context.Background(), restartRequest().RequestID)
 	require.NoError(t, err)
-	require.Equal(t, "restarting", stored.LifecycleState)
-	require.Equal(t, "restart-incarnation", stored.ProcessIncarnation)
-	states, commands, bootstrap, receipt, active, prompts, closes := rpc.counts()
-	require.Equal(t, 2, states)
+	require.Equal(t, "lifecycle", action.ExecutionOwner)
+	require.Equal(t, "RESTART_IDENTITY_UNSAFE", action.TerminalCode)
+	states, commands, bootstrap, receipt, active, prompts, _ := rpc.counts()
+	require.GreaterOrEqual(t, states, 2)
 	require.Equal(t, 1, commands)
 	require.Equal(t, 1, bootstrap)
 	require.Equal(t, 1, receipt)
 	require.Equal(t, 1, active)
-	require.Equal(t, 0, prompts)
-	require.Equal(t, 0, closes)
+	require.Zero(t, prompts)
 }
 
 func TestReserveManagedRestartReplaysExactOperationWithoutSecondPreparation(t *testing.T) {
@@ -846,7 +849,7 @@ func TestReserveManagedRestartRejectsPendingLaunchOperationWithoutEffects(t *tes
 	before, err := durable.GetProjectionVersion(context.Background())
 	require.NoError(t, err)
 	_, err = manager.ReserveRestart(context.Background(), restartRequest())
-	var conflict *store.ManagedRestartConflictError
+	var conflict *store.ManagedLifecycleConflictError
 	require.ErrorAs(t, err, &conflict)
 	after, err := durable.GetProjectionVersion(context.Background())
 	require.NoError(t, err)
@@ -859,46 +862,35 @@ func TestReserveManagedRestartRejectsPendingLaunchOperationWithoutEffects(t *tes
 	require.NoError(t, err)
 }
 
-func TestRestartShutdownPreservesTransitionAtReservedAndPrepared(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		block bool
-	}{{name: "reserved", block: true}, {name: "prepared"}} {
-		t.Run(test.name, func(t *testing.T) {
-			manager, durable, rpc := readyRestartManager(t, nil)
-			if test.block {
-				rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
-			}
-			_, err := manager.ReserveRestart(context.Background(), restartRequest())
-			require.NoError(t, err)
-			if test.block {
-				select {
-				case <-rpc.prepareStarted:
-				case <-time.After(time.Second):
-					t.Fatal("restart preparation did not start")
-				}
-			} else {
-				require.Eventually(t, func() bool {
-					transition, readErr := durable.ManagedRestartTransition(context.Background(), "restart-agent")
-					return readErr == nil && transition.Stage == "prepared"
-				}, time.Second, time.Millisecond)
-			}
-			require.NoError(t, manager.Close(context.Background()))
-			stored, err := durable.ManagedAgent(context.Background(), "restart-agent")
-			require.NoError(t, err)
-			require.Equal(t, "running", stored.DesiredState)
-			require.Equal(t, "restarting", stored.LifecycleState)
-			require.Equal(t, "stopped", stored.ActivityState)
-			require.False(t, stored.AcceptingPrompts)
-			require.True(t, stored.SlotHeld)
-			transition, err := durable.ManagedRestartTransition(context.Background(), "restart-agent")
-			require.NoError(t, err)
-			require.Equal(t, restartRequest().RequestID, transition.OperationID)
-			op, err := durable.ManagedOperation(context.Background(), restartRequest().RequestID)
-			require.NoError(t, err)
-			require.Equal(t, "pending", op.State)
-		})
+func TestRestartShutdownStopsOnlyTheLifecycleOwnedSource(t *testing.T) {
+	manager, durable, rpc := readyRestartManager(t, nil)
+	rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
+	_, err := manager.ReserveRestart(context.Background(), restartRequest())
+	require.NoError(t, err)
+	select {
+	case <-rpc.prepareStarted:
+	case <-time.After(time.Second):
+		t.Fatal("restart preparation did not start")
 	}
+	close(rpc.releasePrepare)
+	require.NoError(t, manager.Close(context.Background()))
+	stored, err := durable.ManagedAgent(context.Background(), "restart-agent")
+	require.NoError(t, err)
+	require.Equal(t, "running", stored.DesiredState)
+	require.Equal(t, "restarting", stored.LifecycleState)
+	require.Equal(t, "stopped", stored.ActivityState)
+	require.False(t, stored.AcceptingPrompts)
+	require.True(t, stored.SlotHeld)
+	action, err := durable.ManagedLifecycleAction(context.Background(), restartRequest().RequestID)
+	require.NoError(t, err)
+	require.Equal(t, "lifecycle", action.ExecutionOwner)
+	require.Equal(t, "starting_target", action.State)
+	require.Equal(t, "target_start", action.Stage)
+	_, err = durable.ManagedRestartTransition(context.Background(), "restart-agent")
+	require.Error(t, err)
+	op, err := durable.ManagedOperation(context.Background(), restartRequest().RequestID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", op.State)
 }
 
 func TestReadinessGateRejectsExtraCommandOrActiveTool(t *testing.T) {

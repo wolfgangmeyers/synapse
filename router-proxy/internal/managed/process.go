@@ -64,6 +64,21 @@ type Process interface {
 type ProcessFactory interface {
 	Start(context.Context, CommandSpec) (Process, error)
 }
+
+// StartNoChildError is the only error contract that proves Start returned
+// without creating a child. Lifecycle restart may clear its durable pre-start
+// marker only for this case; every other error is fail-closed because a target
+// could exist without a durable fence.
+type StartNoChildError interface {
+	error
+	NoChildStarted() bool
+}
+
+func StartErrorProvesNoChild(err error) bool {
+	var proof StartNoChildError
+	return errors.As(err, &proof) && proof.NoChildStarted()
+}
+
 type ProcessFactoryFunc func(context.Context, CommandSpec) (Process, error)
 
 func (f ProcessFactoryFunc) Start(ctx context.Context, spec CommandSpec) (Process, error) {
