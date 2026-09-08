@@ -360,6 +360,10 @@ func managedRestartError(err error) error {
 	if errors.As(err, &conflict) {
 		return &managedHTTPError{409, "CONFLICT", "A managed lifecycle operation is already in progress"}
 	}
+	var lifecycle *store.ManagedLifecycleConflictError
+	if errors.As(err, &lifecycle) {
+		return &managedHTTPError{409, "CONFLICT", "A managed lifecycle operation is already in progress"}
+	}
 	var notReady *store.ManagedAgentNotReadyError
 	if errors.As(err, &notReady) {
 		return &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent is not ready to restart"}

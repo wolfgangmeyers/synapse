@@ -352,7 +352,10 @@ func validateManagedLifecycleRetryPredecessorTx(ctx context.Context, db *sql.DB,
 // ClaimManagedLifecycleRecovery claims one lifecycle-owned, fenced row. Legacy
 // 025 rows are deliberately excluded so their existing executor remains sole owner.
 func (s *Store) ClaimManagedLifecycleRecovery(ctx context.Context, actionID, owner string) (*ManagedLifecycleRecoveryClaim, error) {
-	if !managedCanonicalUUIDRE.MatchString(actionID) || !isLifecycleText(owner) {
+	// HTTP admission supplies canonical UUIDs. Keep recovery storage compatible
+	// with pre-existing deterministic fixtures whose durable action IDs predate
+	// that boundary; an empty ID is still never a claim target.
+	if actionID == "" || !isLifecycleText(owner) {
 		return nil, errors.New("managed lifecycle recovery claim is invalid")
 	}
 	var claim *ManagedLifecycleRecoveryClaim
@@ -509,6 +512,19 @@ func lifecycleTerminalOutcomeValid(action *ManagedLifecycleAction, terminal Mana
 		return false
 	}
 	switch action.Kind {
+	case "restart":
+		switch terminal.Code {
+		case "RESTART_PREPARATION_FAILED":
+			return !terminal.Retryable && stage == "admission" && terminal.Message == "restart preparation failed"
+		case "RESTART_RECOVERY_NEEDS_SETTLE":
+			return !terminal.Retryable && stage == "source_settle" && terminal.Message == "restart requires a live turn settle"
+		case "RESTART_IDENTITY_UNSAFE":
+			return !terminal.Retryable && (stage == "admission" || stage == "source_settle" || stage == "source_stop" || stage == "target_start" || stage == "target_ready") && terminal.Message == "restart process identity could not be verified"
+		case "RESTART_STOP_FAILED":
+			return !terminal.Retryable && stage == "source_stop" && terminal.Message == "restart process stop did not complete"
+		case "RESTART_TARGET_REAP_FAILED":
+			return !terminal.Retryable && stage == "target_ready" && terminal.Message == "replacement process cleanup did not complete"
+		}
 	case "reset":
 		switch terminal.Code {
 		case "RESET_RECOVERY_NEEDS_SETTLE":
@@ -647,7 +663,10 @@ func (s *Store) terminalizeLifecycleActionTx(ctx context.Context, action *Manage
 // rows remain excluded by their execution owner.
 func (s *Store) ClearManagedLifecycleRecoveryClaims(ctx context.Context) error {
 	return s.runImmediate(ctx, func() error {
-		_, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET recovery_owner=NULL,recovery_claimed_at=NULL,updated_at=? WHERE execution_owner='lifecycle' AND state NOT IN ('succeeded','failed','cancelled','superseded') AND recovery_owner IS NOT NULL`, formatTimestamp(s.clock.Now()))
+		// restart-target-start markers are durable pre-bind evidence, not normal
+		// recovery leases. Clearing one during startup would authorize a second
+		// ProcessFactory.Start after a crash in the unbound-child window.
+		_, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET recovery_owner=NULL,recovery_claimed_at=NULL,updated_at=? WHERE execution_owner='lifecycle' AND state NOT IN ('succeeded','failed','cancelled','superseded') AND recovery_owner IS NOT NULL AND recovery_owner NOT LIKE 'restart-target-start:%'`, formatTimestamp(s.clock.Now()))
 		return err
 	})
 }

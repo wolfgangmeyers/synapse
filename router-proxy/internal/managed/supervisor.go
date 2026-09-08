@@ -54,11 +54,12 @@ type ManagerOptions struct {
 	// BeforeManagedDirectAcknowledge is a test seam for the durable
 	// append-before-ack crash boundary. Production leaves it nil.
 	BeforeManagedDirectAcknowledge func(context.Context, store.ManagedDirectAttempt) error
-	// BeforeManagedResetOldArtifactCleanup and AfterManagedResetTargetStartBeforeBind
-	// model the two reset crash boundaries in focused/native tests. Production
-	// leaves them nil; they do not add a runtime control surface.
-	BeforeManagedResetOldArtifactCleanup   func(context.Context, string) error
-	AfterManagedResetTargetStartBeforeBind func(context.Context, string, Process) error
+	// The target-start hooks model bounded reset/restart crash boundaries in
+	// focused/native tests. Production leaves them nil; they add no runtime
+	// control surface.
+	BeforeManagedResetOldArtifactCleanup              func(context.Context, string) error
+	AfterManagedResetTargetStartBeforeBind            func(context.Context, string, Process) error
+	AfterManagedLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
 }
 
 // RestartRequest already contains canonical operation metadata. A future HTTP
@@ -125,33 +126,34 @@ type managedBinding struct {
 }
 
 type Manager struct {
-	store                           *store.Store
-	config                          Config
-	manifest                        Manifest
-	processFactory                  ProcessFactory
-	rpcFactory                      RPCFactory
-	catalog                         ModelSource
-	clock                           deterministic.Clock
-	ids                             deterministic.IDSource
-	mu                              sync.Mutex
-	processes                       map[string]Process
-	rpcs                            map[string]RPC
-	operationIDs                    map[string]string
-	bindings                        map[string]*managedBinding
-	lanes                           map[string]*managedAgentLane
-	groupLeader                     ProcessGroupLeaderVerifier
-	processOps                      ProcessGroupOps
-	preparationDeadline             RestartPreparationDeadlineFactory
-	preparationHook                 RestartPreparationHook
-	beforeDirectAcknowledge         func(context.Context, store.ManagedDirectAttempt) error
-	beforeResetOldArtifactCleanup   func(context.Context, string) error
-	afterResetTargetStartBeforeBind func(context.Context, string, Process) error
-	artifacts                       *sessionArtifactOwner
-	runCtx                          context.Context
-	cancel                          context.CancelFunc
-	startWG                         sync.WaitGroup
-	closed                          bool
-	closeErr                        error
+	store                                      *store.Store
+	config                                     Config
+	manifest                                   Manifest
+	processFactory                             ProcessFactory
+	rpcFactory                                 RPCFactory
+	catalog                                    ModelSource
+	clock                                      deterministic.Clock
+	ids                                        deterministic.IDSource
+	mu                                         sync.Mutex
+	processes                                  map[string]Process
+	rpcs                                       map[string]RPC
+	operationIDs                               map[string]string
+	bindings                                   map[string]*managedBinding
+	lanes                                      map[string]*managedAgentLane
+	groupLeader                                ProcessGroupLeaderVerifier
+	processOps                                 ProcessGroupOps
+	preparationDeadline                        RestartPreparationDeadlineFactory
+	preparationHook                            RestartPreparationHook
+	beforeDirectAcknowledge                    func(context.Context, store.ManagedDirectAttempt) error
+	beforeResetOldArtifactCleanup              func(context.Context, string) error
+	afterResetTargetStartBeforeBind            func(context.Context, string, Process) error
+	afterLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
+	artifacts                                  *sessionArtifactOwner
+	runCtx                                     context.Context
+	cancel                                     context.CancelFunc
+	startWG                                    sync.WaitGroup
+	closed                                     bool
+	closeErr                                   error
 }
 
 func NewManager(options ManagerOptions) (*Manager, error) {
@@ -207,7 +209,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		deadlineFactory = context.WithTimeout
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	return manager, nil
 }
@@ -432,6 +434,9 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		binding.serial.Lock()
 		waitErr := binding.waitErr
 		binding.serial.Unlock()
+		if m.recordLifecycleRestartExit(binding) {
+			return
+		}
 		if m.recordRestartExit(binding) {
 			return
 		}
@@ -441,7 +446,12 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 			_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "PROCESS_EXITED", sanitizeError(waitErr))
 		}
 	case <-ctx.Done():
-		handled, shutdownErr := m.shutdownRestartBinding(context.Background(), binding)
+		handled, shutdownErr := m.shutdownLifecycleRestartBinding(context.Background(), binding)
+		if handled {
+			m.recordCloseError(shutdownErr)
+			return
+		}
+		handled, shutdownErr = m.shutdownRestartBinding(context.Background(), binding)
 		if handled {
 			m.recordCloseError(shutdownErr)
 			return
@@ -604,86 +614,75 @@ func replayRestartOperation(request RestartRequest, operation *store.ManagedOper
 	return RestartResult{Operation: operation, Replayed: true}, nil
 }
 
-// ReserveRestart is an internal-only admission boundary for a future route.
-// It resolves the worker-wide durable replay before touching the live binding,
-// then closes prompt admission atomically before its state read starts.
+// ReserveRestart admits new direct restarts into the lifecycle ledger. Legacy
+// 025 transitions remain recoverable, but this path never creates one.
 func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (RestartResult, error) {
 	if request.AgentID == "" || request.Method == "" || request.CanonicalPath == "" || request.RequestID == "" || request.CanonicalBodyHash == "" {
 		return RestartResult{}, errors.New("managed restart request is incomplete")
 	}
-	admission, err := m.store.LookupManagedRestartAdmission(ctx, request.Method, request.RequestID, request.CanonicalPath, request.CanonicalBodyHash, request.AgentID)
-	if err != nil {
+	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
+		return replayRestartOperation(request, existing)
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return RestartResult{}, err
 	}
-	if admission.Operation != nil {
-		return replayRestartOperation(request, admission.Operation)
+
+	lane := m.laneFor(request.AgentID)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
+	// Replay is checked again after waiting for the stable agent lane. This is
+	// before any binding, process, or generation read.
+	if existing, err := m.store.FindManagedOperation(ctx, request.Method, request.RequestID); err == nil {
+		return replayRestartOperation(request, existing)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return RestartResult{}, err
+	}
+	agent, err := m.store.ManagedAgent(ctx, request.AgentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RestartResult{}, &store.ManagedAgentNotFoundError{AgentID: request.AgentID}
+	}
+	if err != nil {
+		return RestartResult{}, err
 	}
 	binding, ok := m.bindingFor(request.AgentID)
 	if !ok {
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
 	binding.serial.Lock()
-	agent := admission.Agent
-	if agent == nil {
-		var readErr error
-		agent, readErr = m.store.ManagedAgent(ctx, request.AgentID)
-		if readErr != nil {
-			binding.serial.Unlock()
-			return RestartResult{}, readErr
-		}
-	}
+	defer binding.serial.Unlock()
 	if !m.liveBinding(agent, binding) {
-		binding.serial.Unlock()
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
 	current, err := m.store.ManagedOperation(ctx, binding.operationID)
 	if err != nil || current.State != "terminal" || restartActionHigherPriority(binding.lifecycleAction) {
-		binding.serial.Unlock()
-		if err != nil {
-			return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
-		}
-		return RestartResult{}, &store.ManagedRestartConflictError{AgentID: request.AgentID}
+		return RestartResult{}, &store.ManagedLifecycleConflictError{AgentID: request.AgentID}
 	}
 	targetGeneration, err := m.ids.Next()
 	if err != nil {
-		binding.serial.Unlock()
 		return RestartResult{}, err
 	}
 	responseAgent := *agent
-	responseAgent.LifecycleState = "restarting"
-	responseAgent.AcceptingPrompts = false
+	responseAgent.LifecycleState, responseAgent.AcceptingPrompts = "restarting", false
 	body, err := json.Marshal(map[string]any{"operation_id": request.RequestID, "agent": PublicAgent(&responseAgent)})
 	if err != nil {
-		binding.serial.Unlock()
 		return RestartResult{}, err
 	}
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
-	fence := bindingFence(request.AgentID, binding)
-	reserved, replayed, err := m.store.ReserveManagedRestart(ctx, store.ManagedRestartReservation{Fence: fence, CurrentOperationID: binding.operationID, CurrentLifecycleAction: binding.lifecycleAction, Transition: store.ManagedRestartTransition{TargetRuntimeGeneration: targetGeneration}, Operation: operation})
+	source := bindingFence(request.AgentID, binding)
+	admission, err := m.store.ReserveManagedLifecycleRestart(ctx, store.ManagedLifecycleRestartReservation{AgentID: request.AgentID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Source: "direct", CurrentOperationID: binding.operationID, SourceFence: source, PlannedTargetRuntimeGeneration: targetGeneration, Operation: operation})
 	if err != nil {
-		binding.serial.Unlock()
-		if _, conflict := err.(*store.ManagedIdempotencyConflictError); conflict {
-			existing, lookupErr := m.store.FindManagedOperation(ctx, request.Method, request.RequestID)
-			if lookupErr == nil {
-				return replayRestartOperation(request, existing)
-			}
-		}
 		return RestartResult{}, err
 	}
-	if replayed {
-		binding.serial.Unlock()
-		return RestartResult{Operation: reserved, Replayed: true}, nil
+	if admission.Replayed {
+		return RestartResult{Operation: admission.Operation, Replayed: true}, nil
 	}
-	binding.operationID = request.RequestID
-	binding.lifecycleAction = "restart"
-	binding.serial.Unlock()
+	binding.operationID, binding.lifecycleAction = admission.Action.ActionID, "restart"
 	m.mu.Lock()
 	if m.bindings[request.AgentID] == binding {
-		m.operationIDs[request.AgentID] = request.RequestID
+		m.operationIDs[request.AgentID] = admission.Action.ActionID
 	}
 	m.mu.Unlock()
-	m.startRestartPreparation(binding, fence, request.RequestID)
-	return RestartResult{Agent: &responseAgent, Operation: reserved}, nil
+	m.startLifecycleRestart(binding, admission.Action.ActionID, source)
+	return RestartResult{Agent: &responseAgent, Operation: admission.Operation}, nil
 }
 
 func restartActionHigherPriority(action string) bool {
@@ -1013,11 +1012,18 @@ func oldFenceIdentity(fence store.ManagedRuntimeFence) ProcessIdentity {
 }
 
 func (m *Manager) restartBindingCurrent(binding *managedBinding, fence store.ManagedRuntimeFence, operationID string) bool {
+	return m.restartBindingMatches(binding, fence, operationID, false)
+}
+
+// restartBindingMatches keeps the immutable binding/fence check during Close.
+// Shutdown cancels runCtx before it settles an active source, but that must not
+// turn its still-owned lifecycle action into a stale callback.
+func (m *Manager) restartBindingMatches(binding *managedBinding, fence store.ManagedRuntimeFence, operationID string, allowClosed bool) bool {
 	if binding.reaped || binding.operationID != operationID || binding.process == nil || binding.rpc == nil || !sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
 		return false
 	}
 	m.mu.Lock()
-	current := !m.closed && m.bindings[fence.AgentID] == binding
+	current := m.bindings[fence.AgentID] == binding && (allowClosed || !m.closed)
 	m.mu.Unlock()
 	return current
 }
@@ -2001,7 +2007,12 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Unlock()
 	genericAgentIDs := make([]string, 0, len(bindings))
 	for _, binding := range bindings {
-		handled, err := m.shutdownResetBinding(ctx, binding)
+		handled, err := m.shutdownLifecycleRestartBinding(ctx, binding)
+		if handled {
+			m.recordCloseError(err)
+			continue
+		}
+		handled, err = m.shutdownResetBinding(ctx, binding)
 		if handled {
 			m.recordCloseError(err)
 			continue

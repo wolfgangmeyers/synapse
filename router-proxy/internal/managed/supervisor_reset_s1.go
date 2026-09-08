@@ -500,9 +500,9 @@ func (m *Manager) RecoverPendingManagedLaunches(ctx context.Context) error {
 	return nil
 }
 
-// RecoverManagedLifecycleControls is reset-only in this slice. It claims only
-// lifecycle-owned reset rows after legacy restart recovery and never scans
-// desired_state for generic recovery.
+// RecoverManagedLifecycleControls runs after legacy 025 recovery. It claims
+// lifecycle-owned reset rows, then lifecycle-owned direct restarts; neither
+// recovery path scans desired_state for generic process work.
 func (m *Manager) RecoverManagedLifecycleControls(ctx context.Context) error {
 	if err := m.store.ClearManagedLifecycleRecoveryClaims(ctx); err != nil {
 		return err
@@ -527,7 +527,7 @@ func (m *Manager) RecoverManagedLifecycleControls(ctx context.Context) error {
 		m.recoverResetActionInLane(claim, action)
 		lane.serial.Unlock()
 	}
-	return nil
+	return m.RecoverManagedLifecycleRestarts(ctx)
 }
 
 func (m *Manager) recoverResetActionInLane(claim *store.ManagedLifecycleRecoveryClaim, action *store.ManagedLifecycleAction) {
