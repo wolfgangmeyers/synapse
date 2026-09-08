@@ -128,7 +128,7 @@ func TestMigration027UpgradeProvesIndexesAndRowLocalActionShapes(t *testing.T) {
 	ctx := context.Background()
 	path := t.TempDir() + "/router.db"
 	migrations := DefaultMigrations()
-	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 	require.NoError(t, err)
 	seedMigration027Accepted026Fixture(t, before)
 	require.NoError(t, before.Close())
@@ -153,7 +153,7 @@ func TestMigration027RollbackRestoresAllAccepted026RowsAndSchema(t *testing.T) {
 		t.Run(checkpoint, func(t *testing.T) {
 			path := t.TempDir() + "/router.db"
 			migrations := DefaultMigrations()
-			store, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+			store, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 			require.NoError(t, err)
 			seedMigration027Accepted026Fixture(t, store)
 			before := captureMigration027RollbackState(t, store.db)
@@ -163,7 +163,7 @@ func TestMigration027RollbackRestoresAllAccepted026RowsAndSchema(t *testing.T) {
 				}
 				return nil
 			}
-			err = store.applyManagedControlMigration027(ctx, migrations[len(migrations)-1])
+			err = store.applyManagedControlMigration027(ctx, migrationByID(t, migrations, "027_managed_control_requests"))
 			require.ErrorContains(t, err, checkpoint)
 			require.Equal(t, before, captureMigration027RollbackState(t, store.db))
 			var foreignKeys, migrationRows int

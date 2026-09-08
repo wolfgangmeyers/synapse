@@ -658,6 +658,38 @@ func (m *Manager) recoverLifecycleRestartActionInLane(action *store.ManagedLifec
 	_ = claim // claim is cleared by every fenced state write above.
 }
 
+// adoptLifecycleRestartBindingInLane transfers a live idle/launch binding to
+// a committed lifecycle restart. Restart All persists admission before its
+// post-commit handoff, so the durable action is the authority for this narrow
+// binding update. The existing binding must still match the child's full
+// source fence and own a terminal predecessor; reset and other active work
+// never get overwritten by a late dispatcher task.
+func (m *Manager) adoptLifecycleRestartBindingInLane(ctx context.Context, action *store.ManagedLifecycleAction) (*managedBinding, bool) {
+	if action == nil || action.ActionID != action.OperationID || action.Kind != "restart" || action.ExecutionOwner != "lifecycle" || action.State != "admitted" || action.Stage != "admission" || action.SourceFence == nil {
+		return nil, false
+	}
+	binding, found := m.bindingFor(action.AgentID)
+	if !found {
+		return nil, false
+	}
+	binding.serial.Lock()
+	defer binding.serial.Unlock()
+	if !m.liveBindingForFence(ctx, binding, *action.SourceFence) {
+		return nil, false
+	}
+	predecessor, err := m.store.ManagedOperation(ctx, binding.operationID)
+	if err != nil || predecessor.State != "terminal" || restartActionHigherPriority(binding.lifecycleAction) {
+		return nil, false
+	}
+	binding.operationID, binding.lifecycleAction = action.ActionID, "restart"
+	m.mu.Lock()
+	if m.bindings[action.AgentID] == binding {
+		m.operationIDs[action.AgentID] = action.ActionID
+	}
+	m.mu.Unlock()
+	return binding, true
+}
+
 // ExecuteLifecycleRestartAction is the narrow future-child seam. S2 does not
 // create a parent, batch item, or child; a later owner can pass an already
 // admitted, fully fenced restart action into this common executor.
@@ -669,8 +701,7 @@ func (m *Manager) ExecuteLifecycleRestartAction(actionID string) {
 	lane := m.laneFor(action.AgentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
-	binding, _ := m.bindingFor(action.AgentID)
-	if binding != nil && action.State == "admitted" {
+	if binding, adopted := m.adoptLifecycleRestartBindingInLane(context.Background(), action); adopted {
 		m.executeLifecycleRestartInLane(binding, actionID, *action.SourceFence)
 		return
 	}

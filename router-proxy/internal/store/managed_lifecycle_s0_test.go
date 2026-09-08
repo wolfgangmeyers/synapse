@@ -29,7 +29,7 @@ func TestMigration027Accepted026FixturePreservesChildrenAndBackfillsEveryStage(t
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
-	before, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 	require.NoError(t, err)
 	seedMigration027Accepted026Fixture(t, before)
 	children := []string{"managed_readiness_sources", "managed_restart_transitions", "managed_direct_delivery_attempts", "managed_direct_delivery_diagnostics"}
@@ -90,7 +90,7 @@ func TestMigration027FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
 			ctx := context.Background()
 			path := filepath.Join(t.TempDir(), "router.db")
 			migrations := DefaultMigrations()
-			store, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+			store, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 			require.NoError(t, err)
 			seedMigration027Accepted026Fixture(t, store)
 			store.managed027Fault = func(stage string) error {
@@ -99,7 +99,7 @@ func TestMigration027FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
 				}
 				return nil
 			}
-			err = store.applyManagedControlMigration027(ctx, migrations[len(migrations)-1])
+			err = store.applyManagedControlMigration027(ctx, migrationByID(t, migrations, "027_managed_control_requests"))
 			require.ErrorContains(t, err, "injected "+checkpoint)
 			var foreignKeys, migrationRows, launchColumn int
 			require.NoError(t, store.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys))
@@ -117,12 +117,12 @@ func TestMigration027RejectsUnmatchedStartingWithoutMutation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
-	store, err := Open(ctx, path, Options{Migrations: migrations[:len(migrations)-1]})
+	store, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "027_managed_control_requests")]})
 	require.NoError(t, err)
 	agent := ManagedAgentRecord{AgentID: "unmatched", Name: "unmatched", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
 	op := ManagedOperation{OperationID: "unmatched-launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "unmatched-request", CanonicalBodyHash: "body", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, store.ReserveManagedLaunch(ctx, agent, op))
-	err = store.applyManagedControlMigration027(ctx, migrations[len(migrations)-1])
+	err = store.applyManagedControlMigration027(ctx, migrationByID(t, migrations, "027_managed_control_requests"))
 	require.ErrorContains(t, err, "unmatched pre-027 starting")
 	var migrationRows, launchColumn, foreignKeys int
 	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='027_managed_control_requests'`).Scan(&migrationRows))

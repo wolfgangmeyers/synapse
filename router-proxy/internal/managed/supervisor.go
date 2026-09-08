@@ -60,6 +60,10 @@ type ManagerOptions struct {
 	BeforeManagedResetOldArtifactCleanup              func(context.Context, string) error
 	AfterManagedResetTargetStartBeforeBind            func(context.Context, string, Process) error
 	AfterManagedLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
+	// RestartAllDispatcher is a post-commit handoff seam. Test doubles record
+	// durable IDs only; production leaves it nil and uses the S3 restart bridge.
+	RestartAllDispatcher              RestartAllDispatcher
+	RestartAllDispatchFailureRecorder RestartAllDispatchFailureRecorder
 }
 
 // RestartRequest already contains canonical operation metadata. A future HTTP
@@ -148,6 +152,8 @@ type Manager struct {
 	beforeResetOldArtifactCleanup              func(context.Context, string) error
 	afterResetTargetStartBeforeBind            func(context.Context, string, Process) error
 	afterLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
+	restartAllDispatcher                       RestartAllDispatcher
+	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
 	cancel                                     context.CancelFunc
@@ -209,7 +215,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		deadlineFactory = context.WithTimeout
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	return manager, nil
 }

@@ -168,6 +168,18 @@ func resetActiveLifecycleActionTx(ctx context.Context, db *sql.DB, agentID strin
 	return scanManagedLifecycleAction(db.QueryRowContext(ctx, managedLifecycleActionSelect+` WHERE agent_id=? AND state IN ('admitted','awaiting_settle','stopping_source','starting_target','awaiting_target_ready','old_artifact_cleanup','terminating','cleanup')`, agentID))
 }
 
+// ActiveManagedLifecycleAction exposes the one durable active-lane row for a
+// manager that has no live binding. Callers still pass their selected fence to
+// the reservation, which repeats precedence under its immediate transaction.
+func (s *Store) ActiveManagedLifecycleAction(ctx context.Context, agentID string) (*ManagedLifecycleAction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	return resetActiveLifecycleActionTx(ctx, s.db, agentID)
+}
+
 // ReserveManagedReset is intentionally separate from ReserveManagedLifecycle.
 // Its source and live fences make stage-owned reset retries representable
 // without weakening the normal one-fence lifecycle reservation seam.
