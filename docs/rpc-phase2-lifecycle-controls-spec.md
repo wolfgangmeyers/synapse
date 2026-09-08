@@ -30,7 +30,7 @@ No 027 implementation starts until all four gates are recorded on a clean commit
 3. Migration 026 direct managed-mail delivery is accepted on a clean commit. The current working-tree 026 changes are not this gate.
 4. The installed Pi used by native tests has both private P2 seams described in section 7.3: typed exact `get_entry(entry_id)` and a validated explicit-ID hidden custom-message append. The current installed Pi 0.85.0 has `abort`, `get_state`, and `--session-id` support. It does not have either P2 seam.
 
-The durable record is `docs/rpc-phase2-lifecycle-controls-gate-record.md`. Its required fields are part of this gate: clean source/tree identities, source and evidence hashes, focused proof, acceptance decision, and for Pi the tested source commit, package version, installed executable path/hash, and exact bounded response shapes. A pending row is not acceptance.
+The durable record is `docs/rpc-phase2-lifecycle-controls-gate-record.md`. Its required fields are part of this gate: clean source/tree identities, source and evidence hashes, focused proof, acceptance decision, and for Pi the tested source commit, package version, installed executable path/hash, and exact bounded response shapes. The S4 native proof independently validates the accepted G4 source lock and installed executable before starting Pi. An artifact that only cites G4 is not runtime proof. A pending row is not acceptance.
 
 The 026 acceptance record must name the commit, migration checksum, and these stable post-026 boundaries:
 
@@ -658,18 +658,101 @@ The durable-write fault tests inject failure after source reaping, target start,
 | `router-proxy/internal/store/managed.go` | Immediate lifecycle/control/batch/artifact/launch transactions, legacy bridge terminalization, recovery claim, graph retention, and delete order. |
 | `router-proxy/internal/store/delivery.go` | The accepted `RetireManagedRecipientSourceForTermination` boundary. |
 | focused store/manager/RPC/process/artifact/transport tests | Every check, full-or-null group, 65th/513th control capacity, retry schedule, graph retention order/rollback, six-stage legacy bridge result, launch/terminate race, complete-owned/absent and all-null/unpersisted/present/mismatch/unknown launch recovery, and durable-write fault. |
-| `router-proxy/internal/transport/managed_native_test.go` | Installed-Pi proof. |
+| `router-proxy/internal/transport/managed_root_control_native_test.go` | Installed-Pi S4 root-control proof. |
 
-The native test uses a configured installed Pi, the fixed managed argv/extensions, an isolated session root, and no browser, credentials, UI, or model prompt. It proves:
+### 9.1 S4 root-control ownership amendment
+
+S4 owns the root-control handler registry. It is not a later P2 prerequisite and cannot be represented by a placeholder, a default handler, or an unowned operation name. `ManifestTool` carries `capability_id`, `name`, `operation_id`, `definition_id`, and `definition_sha256` from the closed manifest. Manager construction validates that every installed manifest tool resolves to one registry entry with the same complete identity. Missing, duplicate, surplus, or mismatched entries fail construction before a request is admitted.
+
+| Path | S4 change and owner |
+| --- | --- |
+| `router-proxy/internal/managed/manifest.go` | Preserve and validate the complete manifest identity used by root admission. |
+| `router-proxy/internal/managed/root_control.go` | Root-only admission, reservation, full-fence execution/recovery ownership, and result-ledger transitions. It accepts only completed `mecha.control.request.v1` events with `context_ref:"root"`. |
+| `router-proxy/internal/managed/root_control_handlers.go` | `RootControlHandler`, `RootControlHandlerRegistry`, all 16 explicit entries, root/child availability checks, and correlation-aware execution adapters. Each adapter receives the immutable request ID, result ID, tool-call ID, complete fence, and canonical arguments. |
+| `router-proxy/internal/managed/root_control_handlers_test.go` | Exact 16-entry registry, complete-identity, duplicate/missing/surplus rejection, every handler's single owner, and root rejection of the child-only operation. |
+| `router-proxy/internal/managed/root_control_test.go` | Reservation, handler claim/completion, duplicate/recovery, cancellation, full-fence stale rejection, and result append/reconciliation. |
+| `router-proxy/internal/managed/rpc.go`, `router-proxy/internal/managed/rpc_test.go` | Private deterministic control-result append, typed exact `get_entry`, and receipt validation. No history query is added. |
+| `router-proxy/internal/managed/supervisor.go`, `router-proxy/internal/managed/supervisor_root_control_test.go` | Start/recovery sequencing and reset-fence cancellation before any stale append. |
+| `pi-extensions/mecha-rpc/rpc-client.ts`, `pi-extensions/mecha-rpc/tool-registry.ts`, `pi-extensions/mecha-rpc/index.ts`, `tests/mecha_rpc_extension.test.ts` | The manifest-backed generated-tool root emitter remains the path under test. After it builds and validates the full envelope, it synchronously registers the root pending ID before `emitControlRequest`; send failure rolls back that same registration, while success retains it through an accepted or `already_present` result append. Capacity rejects a new registration before emission and never evicts a live ID. The test-only probe uses the same registered full-envelope seam. No new production command, tool, custom type, route, provider, or model behavior is added. |
+| `tests/fixtures/mecha-rpc/s4-native-root-control-probe.ts` | Test-only extension. Its private slash command uses a narrow test-only full-envelope hook that drives the installed `goal` generated-tool path. It never imports or calls `emitLegacyCommandControl`. After the full manifest is installed, the hook reads that installed definition and builds only `mecha.control.request.v1` details with `protocol`, a fresh `request_id` and `tool_call_id`, `capability_id:"goal"`, `tool_name:"goal"`, the installed `definition_id`, `operation_id:"goal.control"`, the current `manifest_sha256`, `runtime_generation`, and `session_epoch`, `context_ref:"root"`, and closed arguments `{"action":"status"}`. It calls the shared registered full-envelope seam, which places the request ID in `rootPendingRequestIds` before it calls `emitControlRequest`; a send failure removes that ID. It is loaded only by the native test, absent from the production managed argv, and never starts a model turn. |
+| `router-proxy/internal/transport/managed_root_control_native_test.go` | Actual-router/installed-Pi S4 proof and the only writer of the S4 evidence artifact. |
+
+The registry has these exact entries. `mecha_parent_message` still has one handler so the 16-entry closure is complete, but that handler returns the fixed closed `CHILD_ONLY_OPERATION` result for a root request before any business action or append reservation. The other 15 entries are root-available. A handler can use its existing manager/store adapter, but no adapter may claim a request outside its listed operation or finalize a result without the request ID and complete fence.
+
+| Operation ID | Tool name | Root availability |
+| --- | --- | --- |
+| `goal.control` | `goal` | available |
+| `goal.snooze` | `goal_snooze` | available |
+| `context.control` | `mecha_context` | available |
+| `ops.git_status` | `mecha_git` | available |
+| `mail.send` | `mecha_mailbox_send` | available |
+| `mail.parent` | `mecha_parent_message` | child-only; fixed root rejection |
+| `ops.pr_status` | `mecha_pr` | available |
+| `ops.priority` | `mecha_priority` | available |
+| `recall.control` | `mecha_recall` | available |
+| `reminder.control` | `mecha_reminder` | available |
+| `policy.inline_allowance` | `mecha_request_inline_tool_allowance` | available |
+| `router.control` | `mecha_router` | available |
+| `notifications.settled` | `mecha_settled_notifications` | available |
+| `ops.state` | `mecha_state` | available |
+| `ops.verification_handoff` | `mecha_verification_handoff` | available |
+| `ops.worker` | `mecha_worker` | available |
+
+The native test uses the accepted G4 installed Pi, fixed managed argv plus the test-only probe, an isolated session root, and no browser, credentials, UI, model turn, or provider work. Before it starts the router or Pi, it requires `MECHA_PI_BIN`, `MECHA_PI_PACKAGE_ROOT`, and `MECHA_PI_SOURCE_LOCK`. It parses the G4 lock and verifies its schema; the public base and scoped Pi commit/tree/merge-base/remote/clean state and changed-path allowlist; package-lock, tarball, installed-package, and executable hashes; package name/version; and the locked `pi-packages` commit/tree. `MECHA_PI_BIN` must be an absolute executable whose real path exactly matches the lock's installed executable and is inside the locked package root. `MECHA_PI_PACKAGE_ROOT` must resolve to the lock's installed package root. Every spawn and version/provenance call uses that resolved executable. An unset, non-absolute, non-contained, mismatched, global, or `PATH` fallback fails before Pi starts.
+
+The test may send Pi a `prompt` RPC frame only to invoke the probe's private slash command. That is command dispatch, not a model prompt. A provider-call interceptor starts before Pi and must report exactly zero calls after the proof. The test proves:
 
 1. The supported `abort` RPC returns the typed successful response under the five-second bound.
 2. A `CreateNew` reset starts a fresh session ID, reports that ID through `get_state`, and records either a safely discovered materialized artifact or the verified `not_materialized` state. It keeps an old controlled artifact through target failure. After target readiness it deletes that old artifact only after containment and ownership checks.
 3. An ambiguous, symlinked, missing-after-materialization, or root-escaping artifact fails safely and performs no unlink.
-4. The root control ledger commits `mcr1_<UUID-without-hyphens>` before append. The persisted hidden entry ID must equal that reserved row value. The private `get_entry` finds that one entry after a router/process reconnection. Changed payload/details/fence values fail closed. No history or suffix query is used.
-5. Reset cannot append an old-session control result into the new session.
+4. The probe emits one complete manifest-backed root request after five-gate readiness. Its strict details shape has every S4 root-envelope field, the installed `goal` tuple, current runtime/manifest fence, `context_ref:"root"`, and valid closed `{"action":"status"}` arguments. It contains none of `legacy_command`, `raw_arguments`, or `availability`. The router resolves the installed complete identity, including its definition hash, to one `goal.control` registry handler. The test forces Pi to publish the completed request event and the router to invoke `/mecha-control-result-v1` before `emitControlRequest` resolves. The request ID is already in `rootPendingRequestIds`, so that early result succeeds. A controlled send failure emits no request event and rolls back only its pre-emission pending ID.
+5. The root control ledger commits `mcr1_<UUID-without-hyphens>` before append. The persisted hidden entry ID equals that reserved value. The test interrupts after the hidden entry persists but before durable receipt settlement, reconstructs the router/RPC recovery path against the same controlled session, and uses private `get_entry(result_entry_id)` to reconcile the one entry. It proves first append, exact duplicate/already-present acceptance, and rejection of changed payload, details, or fence values. It records the RPC method trace and rejects any `get_entries`, `get_tree`, history, or suffix request. The root pending ID is consumed only after `accepted` or `already_present`.
+6. Reset cancels the old full fence with `CANCELLED_BY_RESET` and cannot append its old-session result into the new session.
 
-The test records only public-safe assertions. It does not print raw session content, artifact paths, credentials, environment values, PID data, or RPC payloads.
+Run the proof exactly as follows after the four section-2 gates are accepted:
+
+```sh
+cd /Users/wolfgang/code/mecha-developer/router-proxy
+MECHA_PI_BIN=/private/tmp/pi-g4-install/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js \
+MECHA_PI_PACKAGE_ROOT=/private/tmp/pi-g4-install/node_modules/@earendil-works/pi-coding-agent \
+MECHA_PI_SOURCE_LOCK=/tmp/rpc-phase2-pi-g4-source-lock.json \
+go test ./internal/transport -run '^TestManagedRootControlInstalledPi$' -count=1 -v
+```
+
+The test emits one `MECHA_ROOT_CONTROL_S4_ARTIFACT=<path>` line. The path is deterministic from the tested tree and S4 candidate hash:
+
+```text
+/tmp/mecha-rpc-acceptance/<mecha-head>/phase2-root-control-s4/<candidate-content-sha256>/root-control-s4-v1.json
+```
+
+Run this read-back separately, with the exact path printed by the completed test:
+
+```sh
+artifact='<path printed by TestManagedRootControlInstalledPi>'
+test -r "$artifact"
+shasum -a 256 "$artifact"
+jq -e '.protocol == "mecha.phase2.root-control-s4/v1"
+  and .result == "pass"
+  and .assertions.g4_lock_verified
+  and .assertions.locked_executable
+  and .assertions.no_path_fallback
+  and .assertions.no_model_turn
+  and .assertions.zero_provider_calls
+  and .assertions.full_manifest_root_envelope
+  and .assertions.no_legacy_emission
+  and .assertions.root_pending_before_emission
+  and .assertions.forced_result_before_send_resolution
+  and .assertions.root_pending_before_result
+  and .assertions.send_failure_rolls_back_pending
+  and .assertions.exact_get_entry_recovery
+  and .assertions.duplicate_already_present
+  and .assertions.changed_receipt_rejected
+  and .assertions.reset_fence_cancelled
+  and .assertions.handler_registry_complete' "$artifact"
+```
+
+The artifact contains only the tested repository head/tree, candidate-path hashes, accepted G1–G4 evidence hashes, the G4 lock digest and public-safe source/package/executable identity, the 16-operation registry hash, a bounded RPC-method trace, and boolean assertions. It contains no raw session content, artifact paths, credentials, environment values, PID data, request payloads, or result payloads.
 
 ## 10. Definition of done
 
-The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, reject unmatched pre-027 pending launches without mutation, pass the rebuild success and rollback tests in that section, and pass every named constraint, graph-retention, six-stage legacy-bridge, launch/terminate race, recovery, exact-entry, process, artifact, and fault test. When S2 adds Restart All, migration 028 must also preserve populated 027 batch rows, remove only the two global child-reference uniqueness constraints, retain parent-scoped uniqueness, and pass its upgrade and rollback proof. The source-fence proof must cover the direct Restart All parent's intentional all-null fence and every Restart All child's full fence. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
+The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, reject unmatched pre-027 pending launches without mutation, pass the rebuild success and rollback tests in that section, and pass every named constraint, graph-retention, six-stage legacy-bridge, launch/terminate race, recovery, exact-entry, process, artifact, handler-registry, and fault test. The S4 native proof must run on the independently verified G4 executable, emit only the complete manifest-backed root envelope through the installed registry, and prove root-pending registration before emission under the forced result-before-send-resolution schedule. When S2 adds Restart All, migration 028 must also preserve populated 027 batch rows, remove only the two global child-reference uniqueness constraints, retain parent-scoped uniqueness, and pass its upgrade and rollback proof. The source-fence proof must cover the direct Restart All parent's intentional all-null fence and every Restart All child's full fence. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
