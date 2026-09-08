@@ -112,7 +112,7 @@ Each terminalization uses one immediate transaction with the lane's current acti
 
 ## 4. Restart All reservation and fan-out
 
-Restart All has one bounded parent transaction. This closes concurrent replay without storing a placeholder response.
+Restart All has one bounded parent transaction. This closes concurrent replay without storing a placeholder response. Its parent is a direct `restart_all` action and has no source agent or process, so its source fence is intentionally all-null. Each accepted child is a `restart` action with `source='restart_all_child'`, its parent action ID, and a full source fence.
 
 1. Start `BEGIN IMMEDIATE`.
 2. Resolve `(POST, X-Request-ID)` under `router-managed-worker-v1`. An exact matching row returns its immutable response. A path/body mismatch returns `IDEMPOTENCY_CONFLICT`.
@@ -148,7 +148,7 @@ The runner must roll back the open transaction for any SQL error, parity failure
 
 The required migration tests use a real accepted-026 fixture with populated rows in `managed_agents`, all four child tables, `managed_http_operations`, and nonterminal 025 restart transitions covering every backfill state. They prove: successful 026-to-027 upgrade; parent row equality; child row/count/DDL/index/FK-list equality; both foreign-key checks and integrity check clean; widened `desired_state` accepts `terminated` and still rejects any other value; expected 027 tables and indexes exist; and reopen leaves foreign keys enabled. Each 025 transition must produce its one mapped `restart` action with `retry_of IS NULL` and the required operation, fence, target-plan, and timestamp values.
 
-The same successful-upgrade test inserts valid initial `reset`, `terminate`, and direct `restart` actions, plus a `restart` child with `source='restart_all_child'`, its Restart All parent, and `retry_of IS NULL`. It also inserts valid reset and terminate retries that reference eligible predecessors. It proves the schema rejects a non-null `retry_of` for `restart`, `restart_all`, and Restart All child actions. These checks cover row-local admission shape only; store tests separately prove predecessor failure state, retryability, same kind and agent, and single-successor eligibility.
+The same successful-upgrade test inserts valid initial `reset`, `terminate`, and direct `restart` actions, plus a direct `restart_all` parent with an all-null source fence and a `restart` child with `source='restart_all_child'`, its parent action ID, a full source fence, and `retry_of IS NULL`. It also inserts valid reset and terminate retries that reference eligible predecessors. It proves the schema rejects a non-null `retry_of` for `restart`, `restart_all`, and Restart All child actions. These checks cover row-local admission shape only; store tests separately prove predecessor failure state, retryability, same kind and agent, and single-successor eligibility.
 
 Failure-injection tests fail after the parent copy, after the parent drop, and at the pre-commit foreign-key check. Each proves rollback preserves the 026 schema/data, records no 027 migration, and restores `foreign_keys=ON`. A separate test proves `PRAGMA foreign_keys=OFF` issued after `BEGIN IMMEDIATE` does not count as this procedure.
 
@@ -289,7 +289,7 @@ The lifecycle state determines the only valid stage pairs:
 | `cleanup` | `direct_mail_retire`, `agent_cleanup`, or `durable_write` |
 | terminal states | the stage that failed or `complete` |
 
-The store validates this pair before every insert or update. A direct action requires a full source fence except a terminate action that was admitted with no binding. That no-binding terminate keeps the source fence all-null. A reset requires a full source fence and its own `planned_target_runtime_generation`. A restart/reset target fence is full only after target process identity is verified; its runtime generation must equal the earlier plan.
+The store validates this pair before every insert or update. A direct action requires a full source fence except a terminate action admitted with no binding and a Restart All parent. Both exceptions keep the source fence all-null: the terminate has no binding, and the direct Restart All parent has no source agent or process. Every Restart All child requires a full source fence. A reset requires a full source fence and its own `planned_target_runtime_generation`. A restart/reset target fence is full only after target process identity is verified; its runtime generation must equal the earlier plan.
 
 ### 5.2 `managed_lifecycle_batch_items`
 
@@ -587,4 +587,4 @@ The test records only public-safe assertions. It does not print raw session cont
 
 ## 10. Definition of done
 
-The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, pass the rebuild success and rollback tests in that section, and pass every named constraint, race, retention, exact-entry, process, artifact, and fault test. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
+The slice is ready for implementation only after the gates in section 2 are accepted. The 027 migration must apply from an accepted populated 026 database through the foreign-key-safe sequence in section 5.0. It must preserve 022–026 rows and indexes, pass the rebuild success and rollback tests in that section, and pass every named constraint, race, retention, exact-entry, process, artifact, and fault test. The source-fence proof must cover the direct Restart All parent's intentional all-null fence and every Restart All child's full fence. The final diff must remain inside this lifecycle/control footprint and keep the local unauthenticated boundary, migration order, active managed-mail scope, and P3/P4 exclusions intact.
