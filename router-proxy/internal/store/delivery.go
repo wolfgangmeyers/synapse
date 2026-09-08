@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
@@ -930,6 +932,121 @@ func (e *ManagedDirectNotActiveError) Error() string {
 }
 func (e *ManagedDirectNotActiveError) Code() string { return "managed_direct_not_active" }
 
+// DirectMailSourceMismatchError is deliberately data-free: callers can retry a
+// termination cleanup without learning the source row that rejected it.
+type DirectMailSourceMismatchError struct{}
+
+func (e *DirectMailSourceMismatchError) Error() string {
+	return "managed direct recipient source mismatch"
+}
+func (e *DirectMailSourceMismatchError) Code() string { return "DIRECT_MAIL_SOURCE_MISMATCH" }
+
+type managedDirectRouteStatus uint8
+
+const (
+	managedDirectRouteActive managedDirectRouteStatus = iota
+	managedDirectRouteUnavailable
+	managedDirectRouteInvalidTarget
+)
+
+// managedDirectTerminationTestHook stays private to the direct-mail store. The
+// registry is keyed by one Store so concurrent test stores cannot share a hook.
+type managedDirectTerminationTestHook struct {
+	afterSourceDisposition  func() error
+	afterAttemptsDeleted    func() error
+	afterDiagnosticsDeleted func() error
+}
+
+var managedDirectTerminationTestHooks sync.Map // map[*Store]*managedDirectTerminationTestHook
+
+func (s *Store) setManagedDirectTerminationTestHook(hook *managedDirectTerminationTestHook) func() {
+	previous, found := managedDirectTerminationTestHooks.Load(s)
+	if hook == nil {
+		managedDirectTerminationTestHooks.Delete(s)
+	} else {
+		managedDirectTerminationTestHooks.Store(s, hook)
+	}
+	return func() {
+		if found {
+			managedDirectTerminationTestHooks.Store(s, previous)
+			return
+		}
+		managedDirectTerminationTestHooks.Delete(s)
+	}
+}
+
+func (s *Store) runManagedDirectTerminationTestHook(point func(*managedDirectTerminationTestHook) func() error) error {
+	value, found := managedDirectTerminationTestHooks.Load(s)
+	if !found {
+		return nil
+	}
+	if callback := point(value.(*managedDirectTerminationTestHook)); callback != nil {
+		return callback()
+	}
+	return nil
+}
+
+func retiredManagedRecipientOwner(agentID string) string {
+	digest := sha256.Sum256([]byte(agentID))
+	return fmt.Sprintf("retired:%x", digest)
+}
+
+// RetireManagedRecipientSourceForTermination is the direct-mail cleanup
+// boundary for a later lifecycle owner. It never changes ordinary mail or
+// immutable target snapshots.
+func (s *Store) RetireManagedRecipientSourceForTermination(ctx context.Context, agentID, recipientName string) error {
+	if !managedIdentifierRE.MatchString(agentID) || !managedRecipientRE.MatchString(recipientName) {
+		return errors.New("recipient source identity is invalid")
+	}
+	sentinel := retiredManagedRecipientOwner(agentID)
+	return s.runImmediate(ctx, func() error {
+		source, err := recipientSourceForTx(ctx, s.db, recipientName)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			now := formatTimestamp(s.clock.Now())
+			switch {
+			case source.SourceKind == "managed" && source.OwnerIdentity == agentID && (source.State == "active" || source.State == "reserved"):
+				_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
+					SET owner_identity=?,state='retired',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
+					WHERE recipient_name=?`, sentinel, now, recipientName)
+			case source.SourceKind == "managed" && source.OwnerIdentity == agentID && source.State == "conflicted" && source.ConflictKind == "tmux":
+				_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
+					SET source_kind=?,owner_identity=?,state='active',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
+					WHERE recipient_name=?`, source.ConflictKind, source.ConflictOwner, now, recipientName)
+			case source.SourceKind == "tmux" && source.State == "conflicted" && source.ConflictKind == "managed" && source.ConflictOwner == agentID:
+				_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
+					SET state='active',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
+					WHERE recipient_name=?`, now, recipientName)
+			case source.SourceKind == "managed" && source.OwnerIdentity == sentinel && source.State == "retired":
+				// Exact retirement identity is the only repeatable retired state.
+			default:
+				return &DirectMailSourceMismatchError{}
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if err := s.runManagedDirectTerminationTestHook(func(hook *managedDirectTerminationTestHook) func() error { return hook.afterSourceDisposition }); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_attempts WHERE agent_id=?`, agentID); err != nil {
+			return err
+		}
+		if err := s.runManagedDirectTerminationTestHook(func(hook *managedDirectTerminationTestHook) func() error { return hook.afterAttemptsDeleted }); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_direct_delivery_diagnostics WHERE agent_id=?`, agentID); err != nil {
+			return err
+		}
+		if err := s.runManagedDirectTerminationTestHook(func(hook *managedDirectTerminationTestHook) func() error { return hook.afterDiagnosticsDeleted }); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // ResolveMessageTarget is idempotent.  It never infers tmux: absent, reserved,
 // retired, and conflicted directory rows leave the ordinary message queued.
 func (s *Store) ResolveMessageTarget(ctx context.Context, messageID string) (*MessageTargetSnapshot, error) {
@@ -1135,6 +1252,13 @@ func (s *Store) MarkManagedDirectPrompted(ctx context.Context, attempt ManagedDi
 
 func (s *Store) AcknowledgeManagedDirect(ctx context.Context, attempt ManagedDirectAttempt, receiptEntry string, requireCurrentFence bool) error {
 	return s.runImmediate(ctx, func() error {
+		status, err := managedDirectRouteStatusTx(ctx, s.db, attempt.SnapshotID, attempt.Fence.AgentID)
+		if err != nil {
+			return err
+		}
+		if status == managedDirectRouteInvalidTarget {
+			return nil
+		}
 		if requireCurrentFence && !validDirectFenceTx(ctx, s.db, attempt.Fence) {
 			return &ManagedDirectNotReadyError{AgentID: attempt.Fence.AgentID}
 		}
@@ -1186,6 +1310,13 @@ func (s *Store) AcknowledgeManagedDirectRecovered(ctx context.Context, attempt M
 			return err
 		}
 		if !changed {
+			status, err := managedDirectRouteStatusTx(ctx, s.db, attempt.SnapshotID, attempt.Fence.AgentID)
+			if err != nil {
+				return err
+			}
+			if status == managedDirectRouteInvalidTarget {
+				return nil
+			}
 			var count int
 			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id=?`, attempt.MessageID).Scan(&count); err != nil {
 				return err
@@ -1322,6 +1453,43 @@ func managedDirectTargetActiveTx(ctx context.Context, db *sql.DB, attempt Manage
 	return err == nil, err
 }
 
+// managedDirectRouteStatusTx has only the three meaningful outcomes for an
+// immutable managed route. A missing snapshot or source cannot be a valid
+// route and is safely fenced as invalid_target.
+func managedDirectRouteStatusTx(ctx context.Context, db *sql.DB, snapshotID, expectedAgentID string) (managedDirectRouteStatus, error) {
+	var targetKind, targetOwner, sourceKind, sourceOwner, sourceState string
+	err := db.QueryRowContext(ctx, `SELECT target.source_kind,target.owner_identity,source.source_kind,source.owner_identity,source.state
+		FROM message_target_snapshots target
+		JOIN recipient_sources source ON source.recipient_name=target.recipient_name
+		WHERE target.snapshot_id=?`, snapshotID).Scan(&targetKind, &targetOwner, &sourceKind, &sourceOwner, &sourceState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return managedDirectRouteInvalidTarget, nil
+	}
+	if err != nil {
+		return managedDirectRouteInvalidTarget, err
+	}
+	if targetKind != "managed" || targetOwner != expectedAgentID || sourceKind != "managed" || sourceOwner != expectedAgentID {
+		return managedDirectRouteInvalidTarget, nil
+	}
+	if sourceState == "active" {
+		return managedDirectRouteActive, nil
+	}
+	return managedDirectRouteUnavailable, nil
+}
+
+// managedDirectSourceOwnsDiagnosticsTx preserves pre-ready diagnostics for an
+// owned reservation, but blocks late producers once termination retires,
+// promotes, or reuses the recipient source.
+func managedDirectSourceOwnsDiagnosticsTx(ctx context.Context, db *sql.DB, agentID string) (bool, error) {
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM recipient_sources
+		WHERE source_kind='managed' AND owner_identity=? AND state IN ('reserved','active') LIMIT 1`, agentID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *Store) ManagedDirectAttempt(ctx context.Context, messageID string, attemptNumber int) (*ManagedDirectAttempt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1359,6 +1527,41 @@ func safelyMessageForAttempt(ctx context.Context, db *sql.DB, id string) (*domai
 
 func (s *Store) RecordManagedDirectDiagnostic(ctx context.Context, agentID, messageID string, attemptNumber int, code, detail string) error {
 	return s.runImmediate(ctx, func() error {
+		var incarnation, snapshot any
+		if messageID != "" {
+			currentSnapshot, err := snapshotForMessageTx(ctx, s.db, messageID)
+			if err == nil {
+				status, err := managedDirectRouteStatusTx(ctx, s.db, currentSnapshot.SnapshotID, agentID)
+				if err != nil {
+					return err
+				}
+				if status == managedDirectRouteInvalidTarget {
+					return nil
+				}
+			} else if errors.Is(err, sql.ErrNoRows) {
+				active, err := managedDirectSourceOwnsDiagnosticsTx(ctx, s.db, agentID)
+				if err != nil {
+					return err
+				}
+				if !active {
+					return nil
+				}
+			} else {
+				return err
+			}
+			var i, sp string
+			_ = s.db.QueryRowContext(ctx, `SELECT message_incarnation_id,snapshot_id FROM managed_direct_delivery_attempts WHERE message_id=? AND attempt_number=?`, messageID, attemptNumber).Scan(&i, &sp)
+			incarnation = nullIfEmpty(i)
+			snapshot = nullIfEmpty(sp)
+		} else {
+			active, err := managedDirectSourceOwnsDiagnosticsTx(ctx, s.db, agentID)
+			if err != nil {
+				return err
+			}
+			if !active {
+				return nil
+			}
+		}
 		if code == "" {
 			code = "direct_diagnostic"
 		}
@@ -1367,13 +1570,6 @@ func (s *Store) RecordManagedDirectDiagnostic(ctx context.Context, agentID, mess
 		}
 		if len([]byte(detail)) > 1024 {
 			detail = string([]byte(detail)[:1024])
-		}
-		var incarnation, snapshot any
-		if messageID != "" {
-			var i, sp string
-			_ = s.db.QueryRowContext(ctx, `SELECT message_incarnation_id,snapshot_id FROM managed_direct_delivery_attempts WHERE message_id=? AND attempt_number=?`, messageID, attemptNumber).Scan(&i, &sp)
-			incarnation = nullIfEmpty(i)
-			snapshot = nullIfEmpty(sp)
 		}
 		now := formatTimestamp(s.clock.Now())
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_direct_delivery_diagnostics(agent_id,message_id,message_incarnation_id,attempt_number,snapshot_id,code,detail,observed_at) VALUES(?,?,?,?,?,?,?,?)`, agentID, nullIfEmpty(messageID), incarnation, attemptNumber, snapshot, code, nullIfEmpty(detail), now); err != nil {
