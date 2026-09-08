@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 )
@@ -13,7 +15,8 @@ import (
 type tmuxCommandRunner func(context.Context, ...string) (string, error)
 
 type tmuxAdapter struct {
-	run tmuxCommandRunner
+	run         tmuxCommandRunner
+	provisionMu sync.Mutex
 }
 
 func newTmuxAdapter(binary string) *tmuxAdapter {
@@ -61,8 +64,59 @@ func (adapter *tmuxAdapter) Windows(ctx context.Context, session string) ([]tran
 }
 
 func (adapter *tmuxAdapter) Provision(ctx context.Context, session, name string) error {
-	_, err := adapter.run(ctx, "new-window", "-d", "-t", session, "-n", name)
+	// A session-only target resolves to its active window. Choose an unused index
+	// explicitly so provisioning never collides with that unrelated window.
+	adapter.provisionMu.Lock()
+	defer adapter.provisionMu.Unlock()
+
+	target, err := adapter.nextFreeWindowTarget(ctx, session)
+	if err != nil {
+		return err
+	}
+	_, err = adapter.run(ctx, "new-window", "-d", "-t", target, "-n", name)
 	return err
+}
+
+func (adapter *tmuxAdapter) nextFreeWindowTarget(ctx context.Context, session string) (string, error) {
+	base, err := adapter.windowBaseIndex(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	output, err := adapter.run(ctx, "list-windows", "-t", session, "-F", "#{window_index}")
+	if err != nil {
+		return "", err
+	}
+	occupied := make(map[int]struct{})
+	for _, rawIndex := range splitTmuxLines(output) {
+		index, parseErr := strconv.Atoi(rawIndex)
+		if parseErr != nil || index < 0 {
+			return "", fmt.Errorf("invalid tmux window index %q", rawIndex)
+		}
+		occupied[index] = struct{}{}
+	}
+	for index := base; ; index++ {
+		if _, exists := occupied[index]; !exists {
+			return fmt.Sprintf("%s:%d", session, index), nil
+		}
+	}
+}
+
+func (adapter *tmuxAdapter) windowBaseIndex(ctx context.Context, session string) (int, error) {
+	output, err := adapter.run(ctx, "show-options", "-t", session, "-v", "base-index")
+	if err != nil {
+		return 0, err
+	}
+	if output == "" {
+		output, err = adapter.run(ctx, "show-options", "-g", "-v", "base-index")
+		if err != nil {
+			return 0, err
+		}
+	}
+	index, err := strconv.Atoi(output)
+	if err != nil || index < 0 {
+		return 0, fmt.Errorf("invalid tmux base index %q", output)
+	}
+	return index, nil
 }
 
 func (adapter *tmuxAdapter) Remove(ctx context.Context, session, name string) error {
