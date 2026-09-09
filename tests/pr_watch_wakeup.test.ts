@@ -74,6 +74,8 @@ test("client delivery does not acknowledge merely because injection was requeste
     agentId: "pr-watch",
     onEnvelope: (message) => injected.push(message),
     webSocketFactory: () => socket,
+    inlineToolControl: false,
+    fetchImpl: async () => ({ ok: false, status: 404 }),
     generateId: (() => { let number = 0; return () => `id-${++number}`; })(),
   });
 

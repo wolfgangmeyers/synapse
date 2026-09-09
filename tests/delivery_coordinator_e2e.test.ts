@@ -179,7 +179,8 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
         frames.push({ direction: "client", raw, frame: parsed });
         const messageId = messageIdFromFrame(parsed);
         if (parsed.type === "register") {
-          // Exercise the correlated delivery contract so every required frame field is present.
+          // This test-only adapter exercises the separately negotiated contract;
+          // the canonical tmux frame remains frozen at its legacy shape.
           originalSend(JSON.stringify({ ...parsed, ack_confirmation: "correlated_v1" }));
           return;
         }
@@ -268,6 +269,10 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
   await postMessage(router.httpUrl, ordinary);
   await postMessage(router.httpUrl, ordinaryFollowup);
   await client.connect();
+  const registration = frames.find(({ direction, frame }) => direction === "client" && frame.type === "register");
+  assert.equal(Object.hasOwn(registration?.frame ?? {}, "ack_confirmation"), false, "the canonical tmux registration remains legacy");
+  const registered = frames.find(({ direction, frame }) => direction === "router" && frame.type === "registered");
+  assert.equal(registered?.frame.ack_confirmation, "correlated_v1", "the test-only compatible registration may negotiate correlated acknowledgements");
   await waitFor(() => injections.length === 1, "Pi should accept the ordinary batch");
   await waitFor(() => frames.some(({ direction, frame }) => direction === "client" && frame.type === "injection_requested" && messageIdFromFrame(frame) === ordinary.id), "injection receipt should be sent");
 
@@ -331,6 +336,10 @@ test("isolated router proves durable coordinator delivery, replay, Sentinel reda
   await waitFor(() => frames.some(({ direction, frame }) => direction === "client" && frame.type === "ack" && messageIdFromFrame(frame) === ordinary.id), "durability should release the final ACK");
   const ordinaryAck = frames.find(({ direction, frame }) => direction === "client" && frame.type === "ack" && messageIdFromFrame(frame) === ordinary.id);
   assert.equal(ordinaryAck?.frame.attempt_number, 1);
+  await waitFor(() => frames.some(({ direction, frame }) => direction === "router" && frame.type === "delivery_acknowledged" && messageIdFromFrame(frame) === ordinary.id), "router should confirm the correlated ACK");
+  const ordinaryAcknowledgement = frames.find(({ direction, frame }) => direction === "router" && frame.type === "delivery_acknowledged" && messageIdFromFrame(frame) === ordinary.id);
+  assert.equal(ordinaryAcknowledgement?.frame.attempt_number, 1);
+  assert.equal(ordinaryAcknowledgement?.frame.message_incarnation_id, firstBatchFrame.frame.message_incarnation_id);
   assert.equal((await messageRecord(router.httpUrl, ordinary.id)), undefined);
   assert.equal((await messageRecord(router.httpUrl, ordinaryFollowup.id)), undefined);
 
