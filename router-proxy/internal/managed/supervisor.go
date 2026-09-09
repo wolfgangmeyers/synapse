@@ -133,6 +133,7 @@ type managedBinding struct {
 	runtimeGeneration    string
 	manifestRevision     int
 	manifestHash         string
+	parentCompacting     *bool
 	reaped               bool
 	token                string
 	waitDone             <-chan error
@@ -172,6 +173,7 @@ type Manager struct {
 	restartAllDispatcher                       RestartAllDispatcher
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
 	rootControlHandlers                        *RootControlHandlerRegistry
+	projectionPublisher                        func()
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
 	cancel                                     context.CancelFunc
@@ -482,8 +484,22 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(err))
 		return
 	}
+	// The readiness get_state response is Pi's only authoritative reconnect
+	// repair for a parent compaction that began before this router observed its
+	// native event. It was captured inside the same serialized readiness gate.
+	if binding.parentCompacting != nil {
+		if _, reconcileErr := m.store.ReconcileManagedParentCompaction(durableCtx, fence, *binding.parentCompacting); reconcileErr != nil {
+			binding.serial.Unlock()
+			_ = rpc.Close()
+			_ = process.Stop(context.Background())
+			m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(reconcileErr))
+			return
+		}
+	}
 	binding.serial.Unlock()
 	m.installRootControlReceiver(binding)
+	m.installChildDeltaReceiver(binding)
+	m.installParentCompactionReceiver(binding)
 	binding.serial.Lock()
 	if !m.liveBindingForFence(durableCtx, binding, fence) {
 		binding.serial.Unlock()
@@ -535,6 +551,12 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		if m.isClosed() {
 			_ = m.store.MarkManagedStopped(context.Background(), agent.AgentID)
 		} else {
+			// A hard parent exit cannot carry a trustworthy child terminal event.
+			// Reconcile an in-flight native parent compaction before the public
+			// failure transition, then archive every live child under this exact
+			// fence so the replacement snapshot has an honest recovery boundary.
+			_, _ = m.store.ReconcileManagedParentCompaction(context.Background(), fence, false)
+			_, _ = m.store.RecordManagedParentProcessLost(context.Background(), fence)
 			_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "PROCESS_EXITED", sanitizeError(waitErr))
 		}
 	case <-ctx.Done():
@@ -1069,6 +1091,8 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 		return
 	}
 	m.installRootControlReceiver(target)
+	m.installChildDeltaReceiver(target)
+	m.installParentCompactionReceiver(target)
 	target.serial.Lock()
 	target.lifecycleAction = ""
 	target.serial.Unlock()
@@ -1347,42 +1371,50 @@ func expectedManagedActiveTools(manifest Manifest) []string {
 }
 
 func readinessGate(ctx context.Context, rpc RPC, manifest Manifest, sessionID string, epoch int64, generation string, restoredRequestIDs []any) error {
+	_, err := readinessGateState(ctx, rpc, manifest, sessionID, epoch, generation, restoredRequestIDs)
+	return err
+}
+
+// readinessGateState keeps the initial authoritative get_state response for
+// the immediate post-ready parent-compaction reconciliation. The compatibility
+// wrapper above preserves the existing Phase 1 readiness contract.
+func readinessGateState(ctx context.Context, rpc RPC, manifest Manifest, sessionID string, epoch int64, generation string, restoredRequestIDs []any) (map[string]any, error) {
 	state, err := rpc.GetState(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !stateSessionMatches(state, sessionID) {
-		return errors.New("Pi session identity does not match managed record")
+		return nil, errors.New("Pi session identity does not match managed record")
 	}
 	commands, err := rpc.GetCommands(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := requireManagedCommands(commands); err != nil {
-		return err
+		return nil, err
 	}
 	envelope := map[string]any{"protocol": "mecha.bootstrap/v1", "delivery_id": generation, "runtime_generation": generation, "session_epoch": epoch, "desired_manifest": manifest.Raw, "manifest_sha256": manifest.CanonicalSHA256, "restored_request_ids": restoredRequestIDs, "inline_policy": map[string]any{"enabled": false, "credits": map[string]any{}}, "recall_projection": map[string]any{"content": ""}}
 	if err := rpc.Bootstrap(ctx, envelope); err != nil {
-		return err
+		return nil, err
 	}
 	if err := rpc.WaitForReceipt(ctx, generation, manifest.CanonicalSHA256, manifest.Revision, epoch, "mecha.tools.accepted.v1"); err != nil {
-		return err
+		return nil, err
 	}
 	active, err := rpc.GetActiveTools(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	want := expectedManagedActiveTools(manifest)
 	sort.Strings(active)
 	if len(active) != len(want) {
-		return errors.New("Pi active tool set does not match manifest")
+		return nil, errors.New("Pi active tool set does not match manifest")
 	}
 	for i := range want {
 		if active[i] != want[i] {
-			return errors.New("Pi active tool set does not match manifest")
+			return nil, errors.New("Pi active tool set does not match manifest")
 		}
 	}
-	return nil
+	return state, nil
 }
 
 // readinessGate owns the serialized source confirmation phase. The fixed
@@ -1402,8 +1434,14 @@ func (m *Manager) readinessGate(ctx context.Context, binding *managedBinding, fe
 	for _, request := range restorable {
 		restoredRequestIDs = append(restoredRequestIDs, request.RequestID)
 	}
-	if err := readinessGate(ctx, binding.rpc, m.manifest, fence.PiSessionID, fence.SessionEpoch, fence.RuntimeGeneration, restoredRequestIDs); err != nil {
+	state, err := readinessGateState(ctx, binding.rpc, m.manifest, fence.PiSessionID, fence.SessionEpoch, fence.RuntimeGeneration, restoredRequestIDs)
+	if err != nil {
 		return err
+	}
+	if compacting, present := state["isCompacting"].(bool); present {
+		binding.parentCompacting = &compacting
+	} else {
+		binding.parentCompacting = nil
 	}
 
 	sourceRPC, ok := binding.rpc.(readinessSourceRPC)

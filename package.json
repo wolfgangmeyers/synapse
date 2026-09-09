@@ -11,6 +11,7 @@
     "test:mecha-rpc": "npm --prefix pi-extensions/mecha-rpc run test",
     "test:mecha-rpc:contract": "npm run check:mecha-rpc && npm run test:mecha-rpc",
     "test:mecha-rpc:native": "npm --prefix pi-extensions/mecha-rpc run test:native",
+    "test:mecha-rpc:acceptance-matrix": "npm --prefix web/router-ui-react run test:acceptance:bcb -- --managed-rpc --release",
     "check:mecha-rpc:fork": "test -f ../pi-packages/packages/pi-subagents/src/index.ts && test \"$(git -C ../pi-packages branch --show-current)\" = main && test -z \"$(git -C ../pi-packages status --porcelain)\" && test \"$(git -C ../pi-packages rev-parse HEAD)\" = \"$(git -C ../pi-packages rev-parse origin/main)\" && printf 'MECHA_RPC_FORK_HEAD=%s\\n' \"$(git -C ../pi-packages rev-parse HEAD)\"",
     "validate:mecha-rpc:phase1": "node tools/validate_mecha_rpc_phase1.mjs",
     "check:mecha-rpc": "npm run check:mecha-rpc:fork && node tools/generate_managed_tools.mjs --check && npm --prefix pi-extensions/mecha-rpc run typecheck && npm --prefix pi-extensions/mecha-rpc run lint",

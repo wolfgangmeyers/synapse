@@ -229,6 +229,59 @@ func TestNormalizeChildSnapshotReceiptEnforcesTheClosedExtensionShape(t *testing
 	}
 }
 
+func TestNormalizeChildDeltaReceiptEnforcesTheClosedEventShape(t *testing.T) {
+	validDelta := func() map[string]any {
+		return map[string]any{"protocol": "mecha.children/v1", "owner_session_id": "owner", "sequence": 1, "task_id": "task", "run_id": "run", "parent_entry_id": "entry", "changes": map[string]any{"lifecycle_state": "running"}}
+	}
+	valid, err := normalizeChildDeltaReceipt(validDelta())
+	require.NoError(t, err)
+	require.EqualValues(t, 1, valid["sequence"])
+	for _, test := range []struct {
+		name  string
+		value func() any
+	}{
+		{"service-only context reference", func() any { value := validDelta(); value["context_ref"] = "ctx1_secret"; return value }},
+		{"unknown change", func() any {
+			value := validDelta()
+			value["changes"].(map[string]any)["context_ref"] = "ctx1_secret"
+			return value
+		}},
+		{"malformed compaction", func() any {
+			value := validDelta()
+			value["changes"] = map[string]any{"compaction": map[string]any{"state": "wrong"}}
+			return value
+		}},
+		{"invalid source identity", func() any { value := validDelta(); value["task_id"] = ""; return value }},
+		{"unsafe sequence", func() any {
+			value := validDelta()
+			value["sequence"] = float64(readinessMaxSafeInteger + 1)
+			return value
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := normalizeChildDeltaReceipt(test.value())
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestNormalizeParentCompactionEventPreservesNativeOutcomes(t *testing.T) {
+	start, err := normalizeParentCompactionEvent(map[string]any{"type": "compaction_start"}, 1)
+	require.NoError(t, err)
+	require.Equal(t, "compacting", start["state"])
+	end, err := normalizeParentCompactionEvent(map[string]any{"type": "compaction_end", "result": map[string]any{}}, 2)
+	require.NoError(t, err)
+	require.Equal(t, "completed", end["outcome"])
+	end, err = normalizeParentCompactionEvent(map[string]any{"type": "compaction_end", "aborted": true}, 3)
+	require.NoError(t, err)
+	require.Equal(t, "aborted", end["outcome"])
+	end, err = normalizeParentCompactionEvent(map[string]any{"type": "compaction_end", "aborted": false}, 4)
+	require.NoError(t, err)
+	require.Equal(t, "failed", end["outcome"])
+	_, err = normalizeParentCompactionEvent(map[string]any{"type": "message_end"}, 5)
+	require.Error(t, err)
+}
+
 func TestReadinessIntegerAcceptsWireNumberFormsAndRejectsUnsafeNumbers(t *testing.T) {
 	for _, value := range []any{int(1), int8(1), int16(1), int32(1), int64(1), uint(1), uint8(1), uint16(1), uint32(1), uint64(1), float32(1), float64(1)} {
 		actual, ok := readinessInteger(value)

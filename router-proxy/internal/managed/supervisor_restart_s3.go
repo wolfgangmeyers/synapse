@@ -296,6 +296,8 @@ func (m *Manager) startLifecycleRestartTargetInLane(actionID string, source stor
 		return
 	}
 	m.installRootControlReceiver(candidate)
+	m.installChildDeltaReceiver(candidate)
+	m.installParentCompactionReceiver(candidate)
 	candidate.serial.Lock()
 	candidate.lifecycleAction = ""
 	candidate.serial.Unlock()

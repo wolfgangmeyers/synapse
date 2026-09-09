@@ -3,7 +3,9 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,6 +116,29 @@ type ManagedChildSnapshot struct {
 	SHA256         string
 }
 
+// ManagedChildDelta is the prescribed post-readiness mutation contract. The
+// store merges its safe, normalized fields into the current ready snapshot in
+// the same transaction that advances the committed projection version.
+type ManagedChildDelta struct {
+	OwnerSessionID, TaskID, RunID, ParentEntryID string
+	Sequence                                     int64
+	Changes                                      map[string]any
+}
+
+// ManagedChildRecovery preserves a last known active source row when a parent
+// runtime is replaced before that row can be confirmed. The full runtime fence
+// stays private; the transport hashes it before rendering the bounded recovery
+// object to the browser.
+type ManagedChildRecovery struct {
+	PriorSessionID, PriorProcessIncarnation, PriorRuntimeGeneration string
+	PriorSessionEpoch                                               int64
+	ParentEntryID, TaskID, RunID                                    string
+	Sequence                                                        int64
+	RunCanonical                                                    []byte
+	Cause                                                           string
+	ObservedAt                                                      string
+}
+
 // ManagedReadinessSource is private durable state. It is deliberately absent
 // from public projections and lasts until a future terminate transaction.
 type ManagedReadinessSource struct {
@@ -124,6 +149,7 @@ type ManagedReadinessSource struct {
 	PolicyConfirmedAt   string
 	Snapshot            *ManagedChildSnapshot
 	SnapshotConfirmedAt string
+	Recoveries          []ManagedChildRecovery
 }
 
 const defaultManagedReadinessPolicyCanonical = `{"compaction":{"deferred":false},"goal_lock":{"enabled":false},"inline":{"credits":{},"enabled":false},"recall":{"content":""},"settled":{"enabled":false}}`
@@ -2173,11 +2199,20 @@ func (s *Store) ManagedReadinessSource(ctx context.Context, agentID string) (*Ma
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	return scanManagedReadinessSource(s.db.QueryRowContext(ctx, `SELECT agent_id, desired_policy_canonical, desired_policy_sha256,
+	source, err := scanManagedReadinessSource(s.db.QueryRowContext(ctx, `SELECT agent_id, desired_policy_canonical, desired_policy_sha256,
 		pi_session_id, session_epoch, process_pid, process_start_marker, process_incarnation, runtime_generation, manifest_revision, manifest_hash,
 		applied_policy_canonical, applied_policy_sha256, policy_confirmed_at,
 		snapshot_id, snapshot_owner_session_id, snapshot_sequence, snapshot_canonical, snapshot_sha256, snapshot_confirmed_at
 		FROM managed_readiness_sources WHERE agent_id = ?`, agentID))
+	if err != nil {
+		return nil, err
+	}
+	recoveries, err := managedChildRecoveriesForTx(ctx, s.db, agentID)
+	if err != nil {
+		return nil, err
+	}
+	source.Recoveries = recoveries
+	return source, nil
 }
 
 func scanManagedReadinessSource(scanner interface{ Scan(...any) error }) (*ManagedReadinessSource, error) {
@@ -2209,6 +2244,30 @@ func scanManagedReadinessSource(scanner interface{ Scan(...any) error }) (*Manag
 	return &source, nil
 }
 
+func managedChildRecoveriesForTx(ctx context.Context, db *sql.DB, agentID string) ([]ManagedChildRecovery, error) {
+	rows, err := db.QueryContext(ctx, `SELECT prior_pi_session_id, prior_session_epoch, prior_process_incarnation, prior_runtime_generation,
+		parent_entry_id, task_id, run_id, source_sequence, run_json, recovery_cause, updated_at
+		FROM managed_child_recoveries WHERE agent_id = ? ORDER BY updated_at ASC, rowid ASC`, agentID)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table: managed_child_recoveries") {
+			return []ManagedChildRecovery{}, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	recoveries := []ManagedChildRecovery{}
+	for rows.Next() {
+		var recovery ManagedChildRecovery
+		if err := rows.Scan(&recovery.PriorSessionID, &recovery.PriorSessionEpoch, &recovery.PriorProcessIncarnation, &recovery.PriorRuntimeGeneration,
+			&recovery.ParentEntryID, &recovery.TaskID, &recovery.RunID, &recovery.Sequence, &recovery.RunCanonical, &recovery.Cause, &recovery.ObservedAt); err != nil {
+			return nil, err
+		}
+		recovery.RunCanonical = append([]byte(nil), recovery.RunCanonical...)
+		recoveries = append(recoveries, recovery)
+	}
+	return recoveries, rows.Err()
+}
+
 // RollManagedReadinessSourceFence clears confirmations for a newly installed
 // binding while retaining the router's desired policy. Replacement execution
 // will call this same helper in its later target-install transaction.
@@ -2221,6 +2280,12 @@ func (s *Store) RollManagedReadinessSourceFence(ctx context.Context, fence Manag
 	})
 }
 func (s *Store) rollManagedReadinessSourceFenceTx(ctx context.Context, fence ManagedRuntimeFence) error {
+	// The new parent fence is already durable when this runs. Preserve every
+	// old active child before replacing its source row so a crash or an omitted
+	// replacement snapshot cannot turn absence into a terminal lifecycle state.
+	if err := s.archiveActiveManagedChildrenForFenceTx(ctx, fence); err != nil {
+		return err
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET
 		pi_session_id = ?, session_epoch = ?, process_pid = ?, process_start_marker = ?, process_incarnation = ?, runtime_generation = ?, manifest_revision = ?, manifest_hash = ?,
 		applied_policy_canonical = NULL, applied_policy_sha256 = NULL, policy_confirmed_at = NULL,
@@ -2240,6 +2305,265 @@ func (s *Store) rollManagedReadinessSourceFenceTx(ctx context.Context, fence Man
 		return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
 	}
 	return nil
+}
+
+type managedChildArchiveSnapshot struct {
+	Runs []map[string]any `json:"runs"`
+}
+
+func activeManagedChildRuns(canonical []byte) ([]map[string]any, error) {
+	var snapshot managedChildArchiveSnapshot
+	if err := json.Unmarshal(canonical, &snapshot); err != nil {
+		return nil, errors.New("stored managed child snapshot is unreadable")
+	}
+	active := make([]map[string]any, 0, len(snapshot.Runs))
+	for _, run := range snapshot.Runs {
+		state, _ := run["lifecycle_state"].(string)
+		if state != "queued" && state != "running" {
+			continue
+		}
+		if !managedChildRunIdentityValid(run) {
+			return nil, errors.New("stored managed child snapshot has invalid active run")
+		}
+		active = append(active, run)
+	}
+	return active, nil
+}
+
+func managedChildRunIdentityValid(run map[string]any) bool {
+	for _, key := range []string{"parent_entry_id", "task_id", "run_id"} {
+		value, ok := run[key].(string)
+		if !ok || value == "" || !utf8.ValidString(value) || len([]byte(value)) > 8192 {
+			return false
+		}
+	}
+	return true
+}
+
+func managedChildRunSequence(run map[string]any) (int64, bool) {
+	value, ok := run["sequence"]
+	if !ok {
+		return 0, false
+	}
+	switch sequence := value.(type) {
+	case float64:
+		if sequence != float64(int64(sequence)) || sequence < 0 {
+			return 0, false
+		}
+		return int64(sequence), true
+	case int64:
+		return sequence, sequence >= 0
+	case int:
+		return int64(sequence), sequence >= 0
+	default:
+		return 0, false
+	}
+}
+
+// archiveActiveManagedChildrenForFenceTx creates an interrupted_unknown row
+// before discarding the old readiness snapshot. A session epoch is a hard
+// boundary; a same-session process replacement starts as parent_process_lost
+// until the new snapshot can confirm or omit each old active run.
+func (s *Store) archiveActiveManagedChildrenForFenceTx(ctx context.Context, next ManagedRuntimeFence) error {
+	var prior ManagedRuntimeFence
+	var canonical []byte
+	err := s.db.QueryRowContext(ctx, `SELECT pi_session_id, session_epoch, process_pid, process_start_marker, process_incarnation, runtime_generation, manifest_revision, manifest_hash, snapshot_canonical
+		FROM managed_readiness_sources WHERE agent_id = ? AND snapshot_canonical IS NOT NULL`, next.AgentID).Scan(
+		&prior.PiSessionID, &prior.SessionEpoch, &prior.ProcessPID, &prior.ProcessStartMarker, &prior.ProcessIncarnation, &prior.RuntimeGeneration, &prior.ManifestRevision, &prior.ManifestHash, &canonical)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		// Historical migration fixtures intentionally stop before this Phase 3
+		// table. They have no runtime recovery contract to preserve.
+		if strings.Contains(err.Error(), "no such table") {
+			return nil
+		}
+		return err
+	}
+	prior.AgentID = next.AgentID
+	if !validManagedRuntimeFence(prior) || sameManagedRestartFence(prior, next) {
+		return nil
+	}
+	runs, err := activeManagedChildRuns(canonical)
+	if err != nil {
+		return err
+	}
+	cause := "parent_process_lost"
+	if prior.PiSessionID != next.PiSessionID || prior.SessionEpoch != next.SessionEpoch {
+		cause = "session_changed"
+	}
+	now := formatTimestamp(s.clock.Now())
+	for _, run := range runs {
+		sequence, valid := managedChildRunSequence(run)
+		if !valid {
+			return errors.New("stored managed child snapshot has invalid active sequence")
+		}
+		runCanonical, err := json.Marshal(run)
+		if err != nil || len(runCanonical) < 2 || len(runCanonical) > 8192 {
+			return errors.New("stored managed child run cannot be archived")
+		}
+		parentEntryID, taskID, runID := run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_recoveries(
+			agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?, 'interrupted_unknown',?,?,?)
+			ON CONFLICT(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,parent_entry_id,task_id,run_id)
+			DO UPDATE SET recovery_cause=excluded.recovery_cause, run_json=excluded.run_json, source_sequence=excluded.source_sequence, updated_at=excluded.updated_at`,
+			next.AgentID, prior.PiSessionID, prior.SessionEpoch, prior.ProcessIncarnation, prior.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, cause, now, now)
+		if err != nil {
+			return err
+		}
+		if _, err := s.recordManagedChildHistoryTx(ctx, prior, parentEntryID, taskID, runID, sequence, "recovery", run["lifecycle_state"].(string), "interrupted_unknown", cause, []string{"recovery"}); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE rowid NOT IN (SELECT rowid FROM managed_child_recoveries ORDER BY updated_at DESC, rowid DESC LIMIT ?)`, maxManagedHistoryEntries)
+	return err
+}
+
+// RecordManagedParentProcessLost fences the one failure boundary that cannot
+// wait for a replacement runtime. Once the owned parent has exited, each live
+// child is retained as interrupted_unknown and the old source snapshot is
+// cleared so the browser cannot keep presenting it as current. A later
+// same-session snapshot may confirm or omit these rows; a new session cannot.
+func (s *Store) RecordManagedParentProcessLost(ctx context.Context, fence ManagedRuntimeFence) (bool, error) {
+	if !validManagedRuntimeFence(fence) {
+		return false, errors.New("managed parent-process-loss fence is invalid")
+	}
+	updated := false
+	err := s.runImmediate(ctx, func() error {
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running'`, managedFenceValues(fence)...).Scan(&present); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		var canonical []byte
+		err := s.db.QueryRowContext(ctx, `SELECT snapshot_canonical FROM managed_readiness_sources WHERE `+readinessSourceFenceWhere()+` AND snapshot_canonical IS NOT NULL`, readinessSourceFenceArgs(fence)...).Scan(&canonical)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		runs, err := activeManagedChildRuns(canonical)
+		if err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		for _, run := range runs {
+			sequence, valid := managedChildRunSequence(run)
+			if !valid {
+				return errors.New("stored managed child snapshot has invalid active sequence")
+			}
+			runCanonical, marshalErr := json.Marshal(run)
+			if marshalErr != nil || len(runCanonical) < 2 || len(runCanonical) > 8192 {
+				return errors.New("stored managed child run cannot be archived")
+			}
+			parentEntryID, taskID, runID := run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string)
+			_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_recoveries(
+				agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,prior_runtime_generation,parent_entry_id,task_id,run_id,source_sequence,run_json,recovery_state,recovery_cause,created_at,updated_at)
+				VALUES (?,?,?,?,?,?,?,?,?,?, 'interrupted_unknown','parent_process_lost',?,?)
+				ON CONFLICT(agent_id,prior_pi_session_id,prior_session_epoch,prior_process_incarnation,parent_entry_id,task_id,run_id)
+				DO UPDATE SET recovery_cause=excluded.recovery_cause,run_json=excluded.run_json,source_sequence=excluded.source_sequence,updated_at=excluded.updated_at`,
+				fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, runCanonical, now, now)
+			if err != nil {
+				return err
+			}
+			if _, err := s.recordManagedChildHistoryTx(ctx, fence, parentEntryID, taskID, runID, sequence, "recovery", run["lifecycle_state"].(string), "interrupted_unknown", "parent_process_lost", []string{"recovery"}); err != nil {
+				return err
+			}
+		}
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET snapshot_id=NULL,snapshot_owner_session_id=NULL,snapshot_sequence=NULL,snapshot_canonical=NULL,snapshot_sha256=NULL,snapshot_confirmed_at=NULL WHERE `+readinessSourceFenceWhere()+` AND snapshot_canonical IS NOT NULL`, readinessSourceFenceArgs(fence)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return nil
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE rowid NOT IN (SELECT rowid FROM managed_child_recoveries ORDER BY updated_at DESC, rowid DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+			return err
+		}
+		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+			return err
+		}
+		updated = true
+		return nil
+	})
+	return updated, err
+}
+
+func managedChildHistoryKey(fence ManagedRuntimeFence, parentEntryID, taskID, runID string, sequence int64, kind, recoveryState, recoveryCause string, changedFields []string) string {
+	identity := strings.Join([]string{fence.AgentID, fence.PiSessionID, fmt.Sprint(fence.SessionEpoch), fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, fmt.Sprint(sequence), kind, recoveryState, recoveryCause, strings.Join(changedFields, ",")}, "\x00")
+	sum := sha256.Sum256([]byte(identity))
+	return "child:" + hex.EncodeToString(sum[:])
+}
+
+// recordManagedChildHistoryTx is the authoritative complete-history writer for
+// child transitions. It commits the visible row and its fenced, bounded audit
+// record in the same transaction as the source projection, so retries and UI
+// projection publication cannot create a second lifecycle entry.
+func (s *Store) recordManagedChildHistoryTx(ctx context.Context, fence ManagedRuntimeFence, parentEntryID, taskID, runID string, sequence int64, kind, lifecycleState, recoveryState, recoveryCause string, changedFields []string) (ManagedHistoryEntry, error) {
+	if !validManagedRuntimeFence(fence) || parentEntryID == "" || taskID == "" || runID == "" || sequence < 0 || (kind != "transition" && kind != "recovery") || (recoveryState != "confirmed" && recoveryState != "interrupted_unknown") || (recoveryState == "confirmed" && recoveryCause != "") || (recoveryState == "interrupted_unknown" && recoveryCause != "snapshot_omitted" && recoveryCause != "parent_process_lost" && recoveryCause != "session_changed") {
+		return ManagedHistoryEntry{}, errors.New("managed child history is invalid")
+	}
+	key := managedChildHistoryKey(fence, parentEntryID, taskID, runID, sequence, kind, recoveryState, recoveryCause, changedFields)
+	var existingSequence int64
+	var existingAt, existingLevel, existingMessage string
+	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message FROM managed_child_transitions t JOIN managed_complete_history h ON h.sequence=t.complete_sequence WHERE t.event_key=?`, key).Scan(&existingSequence, &existingAt, &existingLevel, &existingMessage)
+	if err == nil {
+		return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", existingSequence), At: existingAt, Level: existingLevel, Message: existingMessage}, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return ManagedHistoryEntry{}, err
+	}
+	details := map[string]any{
+		"session_epoch":       fence.SessionEpoch,
+		"process_incarnation": fence.ProcessIncarnation,
+		"runtime_generation":  fence.RuntimeGeneration,
+		"parent_entry_id":     parentEntryID,
+		"task_id":             taskID,
+		"run_id":              runID,
+		"source_sequence":     sequence,
+		"kind":                kind,
+		"lifecycle_state":     lifecycleState,
+		"recovery":            map[string]any{"state": recoveryState},
+		"changed_fields":      append([]string(nil), changedFields...),
+	}
+	if recoveryCause != "" {
+		details["recovery"] = map[string]any{"state": recoveryState, "cause": recoveryCause}
+	}
+	detailsJSON, err := json.Marshal(details)
+	if err != nil || len(detailsJSON) < 2 || len(detailsJSON) > 8192 {
+		return ManagedHistoryEntry{}, errors.New("managed child history details are invalid")
+	}
+	message := "Managed child transition recorded"
+	if kind == "recovery" && recoveryState == "interrupted_unknown" {
+		message = "Managed child recovery is interrupted and unknown"
+	}
+	occurredAt := formatTimestamp(s.clock.Now())
+	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key) VALUES (?,?,?,?,?,?)`, fence.AgentID, "managed_child", "info", message, occurredAt, key)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	completeSequence, err := result.LastInsertId()
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_transitions(event_key,complete_sequence,agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation,parent_entry_id,task_id,run_id,source_sequence,kind,lifecycle_state,recovery_state,recovery_cause,details_json,occurred_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, key, completeSequence, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, kind, lifecycleState, recoveryState, nullableString(recoveryCause), string(detailsJSON), occurredAt)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", completeSequence), At: occurredAt, Level: "info", Message: message}, nil
 }
 
 func readinessSourceFenceWhere() string {
@@ -2273,11 +2597,153 @@ func (s *Store) ConfirmManagedPolicyApplied(ctx context.Context, fence ManagedRu
 	})
 }
 
+// reconcileManagedChildRecoveriesForSnapshotTx resolves only prior runs from
+// the same parent session. A new session is a hard fence: identical-looking
+// old IDs remain interrupted_unknown and can never attach to its new epoch.
+func (s *Store) reconcileManagedChildRecoveriesForSnapshotTx(ctx context.Context, fence ManagedRuntimeFence, snapshot ManagedChildSnapshot) error {
+	var source managedChildArchiveSnapshot
+	if err := json.Unmarshal(snapshot.Canonical, &source); err != nil {
+		return errors.New("managed child recovery snapshot is unreadable")
+	}
+	current := make(map[string]map[string]any, len(source.Runs))
+	for _, run := range source.Runs {
+		if !managedChildRunIdentityValid(run) {
+			return errors.New("managed child recovery snapshot has invalid run")
+		}
+		current[managedChildRecoveryIdentity(run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string))] = run
+	}
+	recoveries, err := managedChildRecoveriesForTx(ctx, s.db, fence.AgentID)
+	if err != nil {
+		return err
+	}
+	for _, recovery := range recoveries {
+		if recovery.PriorSessionID != fence.PiSessionID || recovery.PriorSessionEpoch != fence.SessionEpoch {
+			continue
+		}
+		identity := managedChildRecoveryIdentity(recovery.ParentEntryID, recovery.TaskID, recovery.RunID)
+		if run := current[identity]; run != nil {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE agent_id=? AND prior_pi_session_id=? AND prior_session_epoch=? AND prior_process_incarnation=? AND parent_entry_id=? AND task_id=? AND run_id=?`,
+				fence.AgentID, recovery.PriorSessionID, recovery.PriorSessionEpoch, recovery.PriorProcessIncarnation, recovery.ParentEntryID, recovery.TaskID, recovery.RunID); err != nil {
+				return err
+			}
+			sequence, valid := managedChildRunSequence(run)
+			if !valid {
+				return errors.New("managed child recovery confirmation has invalid sequence")
+			}
+			if _, err := s.recordManagedChildHistoryTx(ctx, fence, recovery.ParentEntryID, recovery.TaskID, recovery.RunID, sequence, "recovery", run["lifecycle_state"].(string), "confirmed", "", []string{"snapshot"}); err != nil {
+				return err
+			}
+			continue
+		}
+		if recovery.Cause == "snapshot_omitted" {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_child_recoveries SET recovery_cause='snapshot_omitted',updated_at=? WHERE agent_id=? AND prior_pi_session_id=? AND prior_session_epoch=? AND prior_process_incarnation=? AND parent_entry_id=? AND task_id=? AND run_id=?`,
+			formatTimestamp(s.clock.Now()), fence.AgentID, recovery.PriorSessionID, recovery.PriorSessionEpoch, recovery.PriorProcessIncarnation, recovery.ParentEntryID, recovery.TaskID, recovery.RunID); err != nil {
+			return err
+		}
+		var run map[string]any
+		if err := json.Unmarshal(recovery.RunCanonical, &run); err != nil {
+			return errors.New("managed child recovery row is unreadable")
+		}
+		state, _ := run["lifecycle_state"].(string)
+		if _, err := s.recordManagedChildHistoryTx(ctx, fence, recovery.ParentEntryID, recovery.TaskID, recovery.RunID, recovery.Sequence, "recovery", state, "interrupted_unknown", "snapshot_omitted", []string{"snapshot"}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func managedChildRecoveryIdentity(parentEntryID, taskID, runID string) string {
+	return parentEntryID + "\x00" + taskID + "\x00" + runID
+}
+
+type managedChildCompactionReconciliation struct {
+	ParentEntryID, TaskID, RunID, LifecycleState string
+	Sequence                                     int64
+}
+
+// reconcileManagedChildCompactionSnapshot applies the one honest repair that
+// a new authoritative snapshot can establish: a formerly compacting child is
+// now idle but supplies no explicit ending outcome. It cannot call that
+// success, failure, or a terminal lifecycle result.
+func reconcileManagedChildCompactionSnapshot(previousCanonical, incomingCanonical []byte) ([]byte, []managedChildCompactionReconciliation, error) {
+	var previous, incoming map[string]any
+	if err := json.Unmarshal(previousCanonical, &previous); err != nil {
+		return nil, nil, errors.New("stored managed child snapshot is unreadable")
+	}
+	if err := json.Unmarshal(incomingCanonical, &incoming); err != nil {
+		return nil, nil, errors.New("managed child snapshot confirmation is unreadable")
+	}
+	previousRuns, previousValid := previous["runs"].([]any)
+	incomingRuns, incomingValid := incoming["runs"].([]any)
+	if !previousValid || !incomingValid {
+		// Historical readiness fixtures predate the child payload contract. They
+		// contain no source run that can be reconciled.
+		return incomingCanonical, []managedChildCompactionReconciliation{}, nil
+	}
+	previousByIdentity := make(map[string]map[string]any, len(previousRuns))
+	for _, value := range previousRuns {
+		run, valid := value.(map[string]any)
+		if valid && managedChildRunIdentityValid(run) {
+			previousByIdentity[managedChildRecoveryIdentity(run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string))] = run
+		}
+	}
+	reconciliations := []managedChildCompactionReconciliation{}
+	for _, value := range incomingRuns {
+		run, valid := value.(map[string]any)
+		if !valid || !managedChildRunIdentityValid(run) {
+			continue
+		}
+		prior := previousByIdentity[managedChildRecoveryIdentity(run["parent_entry_id"].(string), run["task_id"].(string), run["run_id"].(string))]
+		if prior == nil {
+			continue
+		}
+		priorCompaction, _ := prior["compaction"].(map[string]any)
+		compaction, _ := run["compaction"].(map[string]any)
+		if priorCompaction == nil || compaction == nil || priorCompaction["state"] != "compacting" || compaction["state"] == "compacting" || compaction["last_outcome"] != nil {
+			continue
+		}
+		sequence, valid := managedChildRunSequence(run)
+		state, stateValid := run["lifecycle_state"].(string)
+		if !valid || !stateValid {
+			return nil, nil, errors.New("managed child compaction reconciliation is invalid")
+		}
+		compaction["last_outcome"] = "reconciled_unknown"
+		reconciliations = append(reconciliations, managedChildCompactionReconciliation{ParentEntryID: run["parent_entry_id"].(string), TaskID: run["task_id"].(string), RunID: run["run_id"].(string), LifecycleState: state, Sequence: sequence})
+	}
+	if len(reconciliations) == 0 {
+		return incomingCanonical, reconciliations, nil
+	}
+	reconciled, err := json.Marshal(incoming)
+	if err != nil || len(reconciled) < 2 || len(reconciled) > 32768 {
+		return nil, nil, errors.New("managed child compaction reconciliation is invalid")
+	}
+	return reconciled, reconciliations, nil
+}
+
 func (s *Store) ConfirmManagedChildSnapshot(ctx context.Context, fence ManagedRuntimeFence, snapshot ManagedChildSnapshot) error {
 	if !validManagedRuntimeFence(fence) || snapshot.SnapshotID == "" || snapshot.OwnerSessionID == "" || !utf8.ValidString(snapshot.SnapshotID) || !utf8.ValidString(snapshot.OwnerSessionID) || len([]byte(snapshot.SnapshotID)) > 8192 || len([]byte(snapshot.OwnerSessionID)) > 8192 || snapshot.Sequence < 0 || len(snapshot.Canonical) < 2 || len(snapshot.Canonical) > 32768 || !managedSHA256RE.MatchString(snapshot.SHA256) {
 		return errors.New("managed child snapshot confirmation is invalid")
 	}
 	return s.runImmediate(ctx, func() error {
+		var previousCanonical []byte
+		previousErr := s.db.QueryRowContext(ctx, `SELECT snapshot_canonical FROM managed_readiness_sources WHERE `+readinessSourceFenceWhere()+` AND snapshot_canonical IS NOT NULL`, readinessSourceFenceArgs(fence)...).Scan(&previousCanonical)
+		if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
+			return previousErr
+		}
+		reconciliations := []managedChildCompactionReconciliation{}
+		if previousErr == nil {
+			var err error
+			snapshot.Canonical, reconciliations, err = reconcileManagedChildCompactionSnapshot(previousCanonical, snapshot.Canonical)
+			if err != nil {
+				return err
+			}
+			if len(reconciliations) > 0 {
+				sum := sha256.Sum256(snapshot.Canonical)
+				snapshot.SHA256 = hex.EncodeToString(sum[:])
+			}
+		}
 		args := append([]any{snapshot.SnapshotID, snapshot.OwnerSessionID, snapshot.Sequence, snapshot.Canonical, snapshot.SHA256, formatTimestamp(s.clock.Now())}, readinessSourceFenceArgs(fence)...)
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET snapshot_id = ?, snapshot_owner_session_id = ?, snapshot_sequence = ?, snapshot_canonical = ?, snapshot_sha256 = ?, snapshot_confirmed_at = ? WHERE `+readinessSourceFenceWhere()+`
 			AND applied_policy_canonical IS NOT NULL AND applied_policy_sha256 IS NOT NULL AND policy_confirmed_at IS NOT NULL`, args...)
@@ -2291,8 +2757,213 @@ func (s *Store) ConfirmManagedChildSnapshot(ctx context.Context, fence ManagedRu
 		if changed != 1 {
 			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
 		}
-		return nil
+		for _, reconciliation := range reconciliations {
+			if _, err := s.recordManagedChildHistoryTx(ctx, fence, reconciliation.ParentEntryID, reconciliation.TaskID, reconciliation.RunID, reconciliation.Sequence, "transition", reconciliation.LifecycleState, "confirmed", "", []string{"compaction", "reconciled_unknown"}); err != nil {
+				return err
+			}
+		}
+		return s.reconcileManagedChildRecoveriesForSnapshotTx(ctx, fence, snapshot)
 	})
+}
+
+// ApplyManagedChildDelta merges the existing child-delta protocol into the
+// ready snapshot. The initial readiness snapshot remains a separate gate: an
+// event is accepted only for its current fence, owning session, and a strictly
+// newer source sequence, so an old process cannot fabricate child state.
+// RecordStaleManagedChildDelta preserves a fenced audit fact without changing
+// the current projection. It is intentionally a no-op after termination,
+// because terminate removes that agent's complete history as one transaction.
+func (s *Store) RecordStaleManagedChildDelta(ctx context.Context, fence ManagedRuntimeFence, delta ManagedChildDelta, reason string) error {
+	if !validManagedRuntimeFence(fence) || !validManagedChildDelta(delta) || reason == "" || !utf8.ValidString(reason) || len(reason) > 128 {
+		return errors.New("stale managed child delta is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_agents WHERE agent_id=?`, fence.AgentID).Scan(&present); errors.Is(err, sql.ErrNoRows) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		state, _ := delta.Changes["lifecycle_state"].(string)
+		if state == "" {
+			state = "unknown"
+		}
+		_, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", []string{"stale", reason})
+		return err
+	})
+}
+
+func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntimeFence, delta ManagedChildDelta) (bool, error) {
+	if !validManagedRuntimeFence(fence) || !validManagedChildDelta(delta) {
+		return false, errors.New("managed child delta is invalid")
+	}
+	updated := false
+	err := s.runImmediate(ctx, func() error {
+		var snapshotID, owner string
+		var sequence int64
+		var canonical []byte
+		err := s.db.QueryRowContext(ctx, `SELECT snapshot_id, snapshot_owner_session_id, snapshot_sequence, snapshot_canonical FROM managed_readiness_sources WHERE `+readinessSourceFenceWhere()+`
+			AND snapshot_id IS NOT NULL AND snapshot_owner_session_id = ?`, append(readinessSourceFenceArgs(fence), fence.PiSessionID)...).Scan(&snapshotID, &owner, &sequence, &canonical)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if owner != delta.OwnerSessionID {
+			_, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", "unknown", "confirmed", "", []string{"stale", "owner_session_mismatch"})
+			return err
+		}
+		if delta.Sequence <= sequence {
+			state, _ := delta.Changes["lifecycle_state"].(string)
+			if state == "" {
+				state = "unknown"
+			}
+			_, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", []string{"stale", "sequence_regression"})
+			return err
+		}
+		next, err := mergeManagedChildDelta(canonical, delta)
+		if err != nil {
+			return err
+		}
+		nextCanonical, err := json.Marshal(next)
+		if err != nil || len(nextCanonical) < 2 || len(nextCanonical) > 32768 {
+			return errors.New("merged managed child snapshot is invalid")
+		}
+		sum := sha256.Sum256(nextCanonical)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET snapshot_sequence = ?, snapshot_canonical = ?, snapshot_sha256 = ?, snapshot_confirmed_at = ? WHERE `+readinessSourceFenceWhere()+`
+			AND snapshot_id = ? AND snapshot_owner_session_id = ? AND snapshot_sequence < ?`, append([]any{delta.Sequence, nextCanonical, hex.EncodeToString(sum[:]), formatTimestamp(s.clock.Now())}, append(readinessSourceFenceArgs(fence), snapshotID, fence.PiSessionID, delta.Sequence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return nil
+		}
+		state, err := managedChildLifecycleState(next, delta)
+		if err != nil {
+			return err
+		}
+		if _, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", managedChildChangedFields(delta.Changes)); err != nil {
+			return err
+		}
+		if err := s.confirmManagedChildRecoveryForDeltaTx(ctx, fence, delta, state); err != nil {
+			return err
+		}
+		updated = true
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+	return updated, err
+}
+
+func managedChildChangedFields(changes map[string]any) []string {
+	fields := make([]string, 0, len(changes))
+	for field := range changes {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+func managedChildLifecycleState(snapshot map[string]any, delta ManagedChildDelta) (string, error) {
+	runs, ok := snapshot["runs"].([]any)
+	if !ok {
+		return "", errors.New("merged managed child snapshot has invalid runs")
+	}
+	for _, value := range runs {
+		run, ok := value.(map[string]any)
+		if !ok || run["parent_entry_id"] != delta.ParentEntryID || run["task_id"] != delta.TaskID || run["run_id"] != delta.RunID {
+			continue
+		}
+		state, ok := run["lifecycle_state"].(string)
+		if !ok {
+			return "", errors.New("merged managed child snapshot has invalid state")
+		}
+		return state, nil
+	}
+	return "", errors.New("merged managed child snapshot is missing its delta run")
+}
+
+// A matching current-session delta is the only live event that may clear a
+// same-session uncertainty. Session-changed rows stay visible: their old event
+// cannot attach to the new epoch even when task/run text happens to match.
+func (s *Store) confirmManagedChildRecoveryForDeltaTx(ctx context.Context, fence ManagedRuntimeFence, delta ManagedChildDelta, lifecycleState string) error {
+	recoveries, err := managedChildRecoveriesForTx(ctx, s.db, fence.AgentID)
+	if err != nil {
+		return err
+	}
+	for _, recovery := range recoveries {
+		if recovery.PriorSessionID != fence.PiSessionID || recovery.PriorSessionEpoch != fence.SessionEpoch || recovery.ParentEntryID != delta.ParentEntryID || recovery.TaskID != delta.TaskID || recovery.RunID != delta.RunID {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE agent_id=? AND prior_pi_session_id=? AND prior_session_epoch=? AND prior_process_incarnation=? AND parent_entry_id=? AND task_id=? AND run_id=?`,
+			fence.AgentID, recovery.PriorSessionID, recovery.PriorSessionEpoch, recovery.PriorProcessIncarnation, recovery.ParentEntryID, recovery.TaskID, recovery.RunID); err != nil {
+			return err
+		}
+		if _, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "recovery", lifecycleState, "confirmed", "", []string{"delta"}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validManagedChildDelta(delta ManagedChildDelta) bool {
+	if delta.OwnerSessionID == "" || delta.TaskID == "" || delta.RunID == "" || delta.ParentEntryID == "" || delta.Sequence < 0 || len(delta.Changes) == 0 || len(delta.Changes) > 7 {
+		return false
+	}
+	for _, value := range []string{delta.OwnerSessionID, delta.TaskID, delta.RunID, delta.ParentEntryID} {
+		if !utf8.ValidString(value) || len([]byte(value)) > 8192 {
+			return false
+		}
+	}
+	for key := range delta.Changes {
+		switch key {
+		case "description", "model", "lifecycle_state", "started_at", "finished_at", "duration_ms", "compaction":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func mergeManagedChildDelta(canonical []byte, delta ManagedChildDelta) (map[string]any, error) {
+	var snapshot map[string]any
+	if err := json.Unmarshal(canonical, &snapshot); err != nil {
+		return nil, errors.New("stored managed child snapshot is unreadable")
+	}
+	runs, ok := snapshot["runs"].([]any)
+	if !ok {
+		return nil, errors.New("stored managed child snapshot has invalid runs")
+	}
+	var target map[string]any
+	for _, value := range runs {
+		run, valid := value.(map[string]any)
+		if !valid {
+			return nil, errors.New("stored managed child snapshot has invalid run")
+		}
+		if run["task_id"] == delta.TaskID && run["run_id"] == delta.RunID && run["parent_entry_id"] == delta.ParentEntryID {
+			target = run
+			break
+		}
+	}
+	if target == nil {
+		if len(delta.Changes) != 7 {
+			return nil, errors.New("first managed child delta must provide a complete run")
+		}
+		target = map[string]any{"task_id": delta.TaskID, "run_id": delta.RunID, "parent_entry_id": delta.ParentEntryID}
+		runs = append(runs, target)
+		snapshot["runs"] = runs
+	}
+	for key, value := range delta.Changes {
+		target[key] = value
+	}
+	target["sequence"] = delta.Sequence
+	snapshot["sequence"] = delta.Sequence
+	return snapshot, nil
 }
 
 func (s *Store) managedReadinessSourcesConfirmedForFenceTx(ctx context.Context, fence ManagedRuntimeFence) error {
@@ -2598,6 +3269,34 @@ func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAge
 		sources[source.AgentID] = source
 	}
 	if err := sourceRows.Close(); err != nil {
+		return rollback(err)
+	}
+	recoveryRows, err := s.db.QueryContext(ctx, `SELECT agent_id, prior_pi_session_id, prior_session_epoch, prior_process_incarnation, prior_runtime_generation,
+		parent_entry_id, task_id, run_id, source_sequence, run_json, recovery_cause, updated_at
+		FROM managed_child_recoveries ORDER BY updated_at ASC, rowid ASC`)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table: managed_child_recoveries") {
+			if _, commitErr := s.db.ExecContext(ctx, "COMMIT"); commitErr != nil {
+				return ManagedAgentsSnapshot{}, commitErr
+			}
+			return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, ReadinessSources: sources}, nil
+		}
+		return rollback(err)
+	}
+	for recoveryRows.Next() {
+		var agentID string
+		var recovery ManagedChildRecovery
+		if err := recoveryRows.Scan(&agentID, &recovery.PriorSessionID, &recovery.PriorSessionEpoch, &recovery.PriorProcessIncarnation, &recovery.PriorRuntimeGeneration,
+			&recovery.ParentEntryID, &recovery.TaskID, &recovery.RunID, &recovery.Sequence, &recovery.RunCanonical, &recovery.Cause, &recovery.ObservedAt); err != nil {
+			_ = recoveryRows.Close()
+			return rollback(err)
+		}
+		if source := sources[agentID]; source != nil {
+			recovery.RunCanonical = append([]byte(nil), recovery.RunCanonical...)
+			source.Recoveries = append(source.Recoveries, recovery)
+		}
+	}
+	if err := recoveryRows.Close(); err != nil {
 		return rollback(err)
 	}
 	if _, err := s.db.ExecContext(ctx, "COMMIT"); err != nil {

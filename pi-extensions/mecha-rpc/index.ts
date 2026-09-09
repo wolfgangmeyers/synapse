@@ -402,6 +402,23 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   let commandRegistrationFailed = false;
   let registeredOwnerSessionId: string | undefined;
   let disposeChildFactory: (() => void) | undefined;
+  let childDeltaDelivery: Promise<void> = Promise.resolve();
+  // The source increments lifecycle sequence before its asynchronous custom
+  // message append settles. Serialize delivery so the router never receives a
+  // terminal-only delta ahead of the preceding compaction transition.
+  const enqueueChildDelta = (wire: JsonRecord): void => {
+    const ownerSessionId = wire.owner_session_id;
+    if (typeof ownerSessionId !== "string") return;
+    childDeltaDelivery = childDeltaDelivery
+      .catch(() => undefined)
+      .then(async () => {
+        // A queued receipt from a closed session must not append into its
+        // replacement session after the router has changed the owner fence.
+        if (registeredOwnerSessionId !== ownerSessionId) return;
+        await sendHiddenCustomMessage(pi, "mecha.child.delta.v1", "Managed child lifecycle updated.", wire, { triggerTurn: false });
+      })
+      .catch(() => undefined);
+  };
   const queuedCommands: Array<{ name: string; command: Command }> = [];
   const queueCommand = (name: string, command: Command): void => {
     queuedCommands.push({ name, command });
@@ -840,8 +857,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
 
   pi.events?.on?.("subagents:lifecycle-v2", (event) => {
     try {
-      const wire = childBridge.applyLifecycleDelta(event);
-      void sendHiddenCustomMessage(pi, "mecha.child.delta.v1", "Managed child lifecycle updated.", wire, { triggerTurn: false });
+      enqueueChildDelta(childBridge.applyLifecycleDelta(event));
     } catch {
       // Source events are optional. Invalid service-only data cannot enter router wire frames.
     }

@@ -8,14 +8,29 @@ function childTiming(child: ManagedChild): string | undefined {
   return undefined;
 }
 
+function childRecovery(child: ManagedChild): string | undefined {
+  if (child.recovery.state === "confirmed") return undefined;
+  switch (child.recovery.cause) {
+    case "snapshot_omitted": return "Status interrupted: the replacement snapshot did not include this child.";
+    case "parent_process_lost": return "Status interrupted: the parent process ended before this child was confirmed.";
+    case "session_changed": return "Status interrupted: the parent started a new session.";
+  }
+}
+
+function displayedChildStatus(child: ManagedChild): string {
+  return child.recovery.state === "interrupted_unknown" ? "Interrupted · outcome unknown" : child.status;
+}
+
 export function ManagedChildList({ agentId, children }: { agentId: string; children: ManagedChild[] }): ReactElement | null {
   if (children.length === 0) return null;
   return <ul className="managed-child-list" aria-label={`Children for ${agentId}`}>{children.map((child) => {
     const timing = childTiming(child);
     const model = child.model === undefined ? undefined : child.model.name || `${child.model.provider}/${child.model.id}`;
-    return <li key={child.id}>
+    const recovery = childRecovery(child);
+    return <li key={child.id} aria-label={recovery === undefined ? undefined : `${child.description ?? child.task_id}. ${recovery}`}>
       <strong>{child.description ?? child.task_id}</strong>
-      <span>{child.status}</span>
+      <span>{displayedChildStatus(child)}</span>
+      {recovery === undefined ? null : <span className="managed-child-recovery">{recovery} Last reported state: {child.status}.</span>}
       {model === undefined ? null : <span>{model}</span>}
       {child.compaction_state === "none" || child.compaction_state === "unknown" ? null : <span>{child.compaction_state}</span>}
       {timing === undefined ? null : <span>{timing}</span>}

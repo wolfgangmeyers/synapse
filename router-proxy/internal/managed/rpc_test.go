@@ -591,3 +591,70 @@ func TestRPCClientRejectsOversizedLine(t *testing.T) {
 	_, err := client.GetState(ctx)
 	require.Error(t, err)
 }
+
+func TestRPCClientDeliversOnlyValidParentCompactionEventsOutsideReadinessBacklog(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	var live ParentCompactionRPC = client
+	received := make(chan map[string]any, 1)
+	live.SetParentCompactionEventHandler(func(event map[string]any) { received <- event })
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_start"}))
+	select {
+	case event := <-received:
+		require.Equal(t, "compacting", event["state"])
+		require.EqualValues(t, 1, event["sequence"])
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for parent compaction")
+	}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "compaction_end", "aborted": true}))
+	select {
+	case event := <-received:
+		require.Equal(t, "idle", event["state"])
+		require.Equal(t, "aborted", event["outcome"])
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for parent compaction terminal")
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 2 && len(client.backlog) == 0
+	}, time.Second, time.Millisecond)
+}
+
+func TestRPCClientDeliversOnlyValidChildDeltasOutsideReadinessBacklog(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	var live ChildDeltaRPC = client
+	received := make(chan map[string]any, 1)
+	live.SetChildDeltaEventHandler(func(delta map[string]any) { received <- delta })
+
+	valid := map[string]any{"protocol": "mecha.children/v1", "owner_session_id": "owner", "sequence": 1, "task_id": "task", "run_id": "run", "parent_entry_id": "entry", "changes": map[string]any{"lifecycle_state": "running"}}
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{
+		"customType": "mecha.child.delta.v1", "content": "Managed child lifecycle updated.", "display": false, "details": valid,
+	}}))
+	select {
+	case delta := <-received:
+		require.Equal(t, "owner", delta["owner_session_id"])
+		require.EqualValues(t, 1, delta["sequence"])
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for child delta")
+	}
+
+	// A malformed delta is consumed as its own event class and cannot poison a
+	// readiness receipt wait or fill the bounded readiness backlog.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{
+		"customType": "mecha.child.delta.v1", "content": "Managed child lifecycle updated.", "display": false, "details": map[string]any{"protocol": "mecha.children/v1"},
+	}}))
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 2 && len(client.backlog) == 0
+	}, time.Second, time.Millisecond)
+	select {
+	case delta := <-received:
+		t.Fatalf("malformed child delta reached callback: %#v", delta)
+	default:
+	}
+}

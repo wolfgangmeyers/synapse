@@ -89,6 +89,20 @@ type RootControlRPC interface {
 	GetRootControlEntry(context.Context, string) (map[string]any, error)
 }
 
+// ChildDeltaRPC receives post-readiness child lifecycle deltas. Keeping the
+// callback separate from readiness receipts means delayed lifecycle events
+// cannot satisfy or poison the launch gate.
+type ChildDeltaRPC interface {
+	SetChildDeltaEventHandler(func(map[string]any))
+}
+
+// ParentCompactionRPC receives the installed Pi's structured compaction
+// lifecycle. It is separate from child state so parent failures cannot be
+// mistaken for a nested child transition.
+type ParentCompactionRPC interface {
+	SetParentCompactionEventHandler(func(map[string]any))
+}
+
 type DirectMailboxReceipt struct{ EntryIdentity string }
 
 type DirectMailboxEvent struct {
@@ -177,17 +191,19 @@ type rpcClient struct {
 	// The matcher is owned under mu. Responses never occupy this bounded FIFO.
 	// A terminal error lives separately so a retained notification can never
 	// satisfy a readiness wait after EOF, close, or process failure.
-	eventSequence      uint64
-	backlog            []receiptNotification
-	terminal           error
-	notified           chan struct{}
-	bootstrapWatermark *uint64
-	policyWatermark    *uint64
-	snapshotWatermark  *uint64
-	settlementToken    *restartSettlementToken
-	directMailbox      *directMailboxToken
-	rootControlHandler func(RootControlEvent)
-	rootResult         *rootResultToken
+	eventSequence           uint64
+	backlog                 []receiptNotification
+	terminal                error
+	notified                chan struct{}
+	bootstrapWatermark      *uint64
+	policyWatermark         *uint64
+	snapshotWatermark       *uint64
+	settlementToken         *restartSettlementToken
+	directMailbox           *directMailboxToken
+	rootControlHandler      func(RootControlEvent)
+	childDeltaHandler       func(map[string]any)
+	parentCompactionHandler func(map[string]any)
+	rootResult              *rootResultToken
 
 	closeOnce sync.Once
 	closeErr  error
@@ -235,6 +251,10 @@ func (c *rpcClient) readLoop() {
 		}
 		var rootCallback func(RootControlEvent)
 		var rootEvent *RootControlEvent
+		var childDeltaCallback func(map[string]any)
+		var childDelta map[string]any
+		var parentCompactionCallback func(map[string]any)
+		var parentCompaction map[string]any
 		c.mu.Lock()
 		terminal := c.terminal != nil
 		if !terminal {
@@ -248,6 +268,28 @@ func (c *rpcClient) readLoop() {
 				c.mu.Unlock()
 				if rootCallback != nil {
 					go rootCallback(*rootEvent)
+				}
+				continue
+			}
+			if delta, candidate := classifyChildDeltaEvent(raw); candidate {
+				// Lifecycle deltas stay outside the readiness FIFO. Their consumer
+				// merges only a current, monotonically newer durable projection.
+				if delta != nil && c.childDeltaHandler != nil {
+					childDeltaCallback, childDelta = c.childDeltaHandler, delta
+				}
+				c.mu.Unlock()
+				if childDeltaCallback != nil {
+					go childDeltaCallback(childDelta)
+				}
+				continue
+			}
+			if event, candidate := classifyParentCompactionEvent(raw, c.eventSequence); candidate {
+				if event != nil && c.parentCompactionHandler != nil {
+					parentCompactionCallback, parentCompaction = c.parentCompactionHandler, event
+				}
+				c.mu.Unlock()
+				if parentCompactionCallback != nil {
+					go parentCompactionCallback(parentCompaction)
 				}
 				continue
 			}
@@ -1007,6 +1049,44 @@ func classifyRootControlEvent(event map[string]any, watermark uint64) (*RootCont
 	return &RootControlEvent{RequestID: requestID, ToolCallID: toolCallID, CapabilityID: capabilityID, ToolName: toolName, DefinitionID: definitionID, DefinitionSHA256: definitionSHA, OperationID: operationID, ManifestSHA256: manifestSHA, RuntimeGeneration: generation, SessionEpoch: epoch, Arguments: cloneJSONValue(arguments), Watermark: watermark}, true
 }
 
+// classifyChildDeltaEvent admits only the prescribed lifecycle delta. It is
+// deliberately distinct from the readiness snapshot, whose watermark rules are
+// stricter and whose receipt is consumed synchronously by launch.
+func classifyChildDeltaEvent(event map[string]any) (map[string]any, bool) {
+	if event["type"] != "message_end" {
+		return nil, false
+	}
+	message := nestedMessage(event)
+	if message == nil || message["customType"] != "mecha.child.delta.v1" {
+		return nil, false
+	}
+	if message["display"] != false || message["content"] != "Managed child lifecycle updated." {
+		return nil, true
+	}
+	details := receiptDetails(message)
+	if details == nil {
+		return nil, true
+	}
+	delta, err := normalizeChildDeltaReceipt(details)
+	if err != nil {
+		return nil, true
+	}
+	return delta, true
+}
+
+// classifyParentCompactionEvent admits only native Pi RPC lifecycle events.
+// It never infers an outcome from transcript text, a disconnect, or absence.
+func classifyParentCompactionEvent(event map[string]any, sequence uint64) (map[string]any, bool) {
+	if event["type"] != "compaction_start" && event["type"] != "compaction_end" {
+		return nil, false
+	}
+	normalized, err := normalizeParentCompactionEvent(event, sequence)
+	if err != nil {
+		return nil, true
+	}
+	return normalized, true
+}
+
 func isRootControlResultEvent(event map[string]any) bool {
 	message := nestedMessage(event)
 	// Pi's live stdout receipt is a message_end frame, whereas get_entry and
@@ -1025,6 +1105,18 @@ func classifyRootControlResultEvent(event map[string]any, token *rootResultToken
 func (c *rpcClient) SetRootControlEventHandler(handler func(RootControlEvent)) {
 	c.mu.Lock()
 	c.rootControlHandler = handler
+	c.mu.Unlock()
+}
+
+func (c *rpcClient) SetChildDeltaEventHandler(handler func(map[string]any)) {
+	c.mu.Lock()
+	c.childDeltaHandler = handler
+	c.mu.Unlock()
+}
+
+func (c *rpcClient) SetParentCompactionEventHandler(handler func(map[string]any)) {
+	c.mu.Lock()
+	c.parentCompactionHandler = handler
 	c.mu.Unlock()
 }
 

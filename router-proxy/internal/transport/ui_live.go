@@ -199,7 +199,11 @@ func (h *uiLiveHub) publish(ctx context.Context) {
 	if childrenChanged {
 		frames = append(frames, snapshot.childrenFrame())
 	}
-	historyFacts := append(managedLifecycleHistoryFacts(prior, snapshot), managedChildHistoryFacts(prior, snapshot)...)
+	// Child transitions already enter complete history inside the fenced store
+	// transaction that accepts their source snapshot or delta. Publishing them
+	// again from this lossy browser projection would create a second history row
+	// for one accepted transition.
+	historyFacts := managedLifecycleHistoryFacts(prior, snapshot)
 	h.current = snapshot
 	peers := make([]*uiLiveClient, 0, len(h.peers))
 	for peer := range h.peers {
@@ -286,68 +290,6 @@ func managedLifecycleHistoryFacts(prior, current *uiLiveProjection) []managedLif
 	}
 	sort.Slice(facts, func(left, right int) bool { return facts[left].agentID < facts[right].agentID })
 	return facts
-}
-
-// managedChildHistoryFacts derives bounded history only from the already
-// redacted child projection. Recovery states remove stale children rather than
-// inventing an end time or terminal state.
-func managedChildHistoryFacts(prior, current *uiLiveProjection) []managedLifecycleHistoryFact {
-	if prior == nil {
-		return nil
-	}
-	facts := make([]managedLifecycleHistoryFact, 0)
-	for _, nextProjection := range current.children {
-		agentID, _ := nextProjection["agent_id"].(string)
-		if agentID == "" {
-			continue
-		}
-		previousProjection := managedChildProjectionForAgent(prior.children, agentID)
-		if nextProjection["recovery_state"] == "reconstructing" && previousProjection != nil && previousProjection["recovery_state"] != "reconstructing" {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: agentID, message: "Managed child state is reconstructing"})
-			continue
-		}
-		previousChildren := managedChildRows(previousProjection)
-		for _, child := range managedChildRows(nextProjection) {
-			id, _ := child["id"].(string)
-			nextStatus, _ := child["status"].(string)
-			if id == "" || nextStatus == "" {
-				continue
-			}
-			before, existed := previousChildren[id]
-			if !existed {
-				facts = append(facts, managedLifecycleHistoryFact{agentID: agentID, message: "Managed child entered " + nextStatus})
-				continue
-			}
-			if previousStatus, _ := before["status"].(string); previousStatus != "" && previousStatus != nextStatus {
-				facts = append(facts, managedLifecycleHistoryFact{agentID: agentID, message: "Managed child changed from " + previousStatus + " to " + nextStatus})
-			}
-			if previousCompaction, _ := before["compaction_state"].(string); previousCompaction != "" && previousCompaction != child["compaction_state"] {
-				facts = append(facts, managedLifecycleHistoryFact{agentID: agentID, message: "Managed child compaction changed"})
-			}
-		}
-	}
-	return facts
-}
-func managedChildProjectionForAgent(projections []map[string]any, agentID string) map[string]any {
-	for _, projection := range projections {
-		if projection["agent_id"] == agentID {
-			return projection
-		}
-	}
-	return nil
-}
-func managedChildRows(projection map[string]any) map[string]map[string]any {
-	rows := map[string]map[string]any{}
-	if projection == nil {
-		return rows
-	}
-	children, _ := projection["children"].([]map[string]any)
-	for _, child := range children {
-		if id, _ := child["id"].(string); id != "" {
-			rows[id] = child
-		}
-	}
-	return rows
 }
 
 func uiLiveTransition(prior, current *uiLiveProjection) map[string]any {

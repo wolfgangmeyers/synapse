@@ -6,6 +6,7 @@ import {
   isInlineToolControlResultFrame,
   isInlineToolStateFrame,
   isManagedAgent,
+  isUILiveFrame,
   isRouterUtcTimestamp,
   isModelControlResultFrame,
   isServerFrame,
@@ -88,6 +89,18 @@ describe("protocol guards", () => {
     expect(isRouterUtcTimestamp("2026-09-09T09:48:28.4142040030Z")).toBe(false);
     expect(isManagedAgent(managedAgent)).toBe(true);
     expect(isManagedAgent({ ...managedAgent, updated_at: "2026-09-09T09:48:28.4142040030Z" })).toBe(false);
+  });
+
+  it("requires a closed per-child recovery object", () => {
+    const child = {
+      id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1,
+      recovery: { state: "interrupted_unknown", cause: "snapshot_omitted", observed_at: "2026-09-09T09:48:28Z" }, status: "running",
+      compaction_state: "unknown", compaction: { state: "idle", count: 0, last_outcome: "reconciled_unknown" },
+    };
+    const frame = { type: "managed_children_snapshot", protocol: "mecha.web/v1", lifecycle_version: 1, generated_at: "2026-09-09T09:48:28Z", children: [{ agent_id: "managed-alpha", source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [child] }] };
+    expect(isUILiveFrame(frame)).toBe(true);
+    expect(isUILiveFrame({ ...frame, children: [{ ...frame.children[0], children: [{ ...child, recovery: { state: "confirmed", cause: "session_changed", observed_at: "2026-09-09T09:48:28Z" } }] }] })).toBe(false);
+    expect(isUILiveFrame({ ...frame, children: [{ ...frame.children[0], children: [{ ...child, recovery: { state: "interrupted_unknown", cause: "old_session", observed_at: "2026-09-09T09:48:28Z" } }] }] })).toBe(false);
   });
 
   it("validates goal conditional fields and settings bounds", () => {
