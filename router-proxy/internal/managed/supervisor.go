@@ -392,7 +392,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		m.clearBinding(binding)
 		lane.serial.Unlock()
 	}()
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
 	pending, pendingErr := m.store.ManagedLaunchStillPending(durableCtx, agent.AgentID, request.RequestID)
 	if pendingErr != nil {
 		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(pendingErr))
@@ -912,6 +912,44 @@ func (m *Manager) startRestartExecution(binding *managedBinding, fence store.Man
 
 // AdmitPrompt is intentionally internal. It shares restart's serializer so a
 // message cannot cross the durable acceptance change into the old Pi process.
+// RestartAfterAuthChange reuses the existing per-agent lifecycle owner. It
+// never touches tmux state. A pending manual restart already owns the same
+// lane and is allowed to finish; it therefore coalesces the auth refresh.
+func (m *Manager) RestartAfterAuthChange(ctx context.Context, operationID string) {
+	catalog, catalogErr := m.catalog.Catalog(ctx)
+	if catalogErr != nil {
+		return
+	}
+	available := func(model store.ManagedModel) bool {
+		for _, candidate := range catalog.Models {
+			if candidate.Provider == model.Provider && candidate.ID == model.ID && candidate.Available {
+				return true
+			}
+		}
+		return false
+	}
+	agents, err := m.store.ManagedAgents(ctx)
+	if err != nil {
+		return
+	}
+	for _, agent := range agents {
+		if agent.DesiredState != "running" {
+			continue
+		}
+		if !available(agent.SelectedModel) {
+			// An auth refresh must never silently choose a replacement model for an
+			// existing session. The durable failure also closes prompt admission.
+			_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "MODEL_UNAVAILABLE", "selected model is unavailable after provider refresh")
+			continue
+		}
+		requestID, idErr := m.ids.Next()
+		if idErr != nil {
+			continue
+		}
+		_, _ = m.ReserveRestart(ctx, RestartRequest{AgentID: agent.AgentID, Method: "POST", CanonicalPath: "/v1/provider-auth/restart/" + operationID, RequestID: requestID, CanonicalBodyHash: hashString("provider-auth:" + operationID)})
+	}
+}
+
 func (m *Manager) AdmitPrompt(ctx context.Context, agentID, message string) error {
 	binding, ok := m.bindingFor(agentID)
 	if !ok {
@@ -1028,7 +1066,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
 		return
 	}
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: oldFence.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, current.TargetRuntimeGeneration, oldFence.SessionEpoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: oldFence.PiSessionID, LaunchMode: ResumeExisting, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, current.TargetRuntimeGeneration, oldFence.SessionEpoch)}
 	targetProcess, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_REPLACEMENT_FAILED", "replacement process did not become ready")
@@ -2133,6 +2171,13 @@ func (m *Manager) Store() *store.Store { return m.store }
 func (m *Manager) Agent(ctx context.Context, id string) (*store.ManagedAgentRecord, error) {
 	return m.store.ManagedAgent(ctx, id)
 }
+
+// Models returns the current launch catalog and provider-auth revision without
+// exposing helper internals or credentials.
+func (m *Manager) Models(ctx context.Context) (Catalog, error) {
+	return m.catalog.Catalog(ctx)
+}
+
 func (m *Manager) Agents(ctx context.Context) ([]*store.ManagedAgentRecord, error) {
 	return m.store.ManagedAgents(ctx)
 }

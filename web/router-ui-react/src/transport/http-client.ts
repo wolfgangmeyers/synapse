@@ -22,6 +22,11 @@ export interface ManagedOperationResponse { operation_id: string; agent?: Manage
 export interface ManagedDirectoriesResponse { path: string; parent: string; directories: Array<{ name: string; path: string }> }
 export interface ManagedChildrenResponse extends ManagedChildrenProjection {}
 export interface ManagedHistoryResponse { view: "quiet" | "complete"; entries: ManagedHistoryEntry[]; next_before: number | null }
+export interface ProviderModel { provider: "openai-codex" | "google" | "cursor"; id: string; name: string; available: boolean }
+export interface ProviderStatus { provider: "openai-codex" | "google" | "cursor"; label: "ChatGPT" | "Google" | "Cursor"; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
+export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
+export interface ModelsResponse { auth_revision: number; models: ProviderModel[]; default_model: { provider: string; id: string; name?: string } | null }
+export interface DefaultModelResponse { operation_id: string; default_model: { provider: string; id: string; name?: string } | null; effective_fallback: ProviderModel }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export class HttpRequestError extends Error {
@@ -178,6 +183,38 @@ function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
   return { path: root.path, parent: root.parent, directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
 }
+function providerName(value: unknown): value is ProviderModel["provider"] { return value === "openai-codex" || value === "google" || value === "cursor"; }
+function providerModel(value: unknown): value is ProviderModel {
+  const item = recordValue(value);
+  return !!item && providerName(item.provider) && nonEmptyString(item.id) && nonEmptyString(item.name) && typeof item.available === "boolean";
+}
+function providerStatus(value: unknown): value is ProviderStatus {
+  const item = recordValue(value);
+  if (!item || !providerName(item.provider) || typeof item.authenticated !== "boolean" || (item.status !== "authenticated" && item.status !== "signed_out") || item.authenticated !== (item.status === "authenticated") || !isRouterUtcTimestamp(item.updated_at) || (Object.hasOwn(item, "account_label") && !nonEmptyString(item.account_label)) || (Object.hasOwn(item, "error") && !nonEmptyString(item.error))) return false;
+  const labels = { "openai-codex": "ChatGPT", google: "Google", cursor: "Cursor" } as const;
+  return item.label === labels[item.provider];
+}
+function providerAuth(value: unknown): ProviderAuthResponse {
+  const root = recordValue(value);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.providers) || root.providers.length !== 3 || !root.providers.every(providerStatus) || new Set(root.providers.map((provider) => provider.provider)).size !== 3) throw invalidResponse("Router returned invalid provider state", value);
+  return { auth_revision: root.auth_revision, providers: root.providers };
+}
+function savedModel(value: unknown): { provider: string; id: string; name?: string } | null | undefined {
+  if (value === null) return null;
+  const item = recordValue(value);
+  if (!item || !nonEmptyString(item.provider) || !nonEmptyString(item.id)) return undefined;
+  return { provider: item.provider, id: item.id, ...(typeof item.name === "string" ? { name: item.name } : {}) };
+}
+function models(value: unknown): ModelsResponse {
+  const root = recordValue(value); const defaultModel = savedModel(root?.default_model);
+  if (!root || !safeInteger(root.auth_revision) || !Array.isArray(root.models) || root.models.length > 256 || !root.models.every(providerModel) || defaultModel === undefined) throw invalidResponse("Router returned invalid model catalog", value);
+  return { auth_revision: root.auth_revision, models: root.models, default_model: defaultModel };
+}
+function defaultModel(value: unknown): DefaultModelResponse {
+  const root = recordValue(value); const saved = savedModel(root?.default_model);
+  if (!root || !nonEmptyString(root.operation_id) || saved === undefined || !providerModel(root.effective_fallback)) throw invalidResponse("Router returned invalid default model", value);
+  return { operation_id: root.operation_id, default_model: saved, effective_fallback: root.effective_fallback };
+}
 function managedOperation(value: unknown): ManagedOperationResponse {
   const root = recordValue(value);
   if (!root || !nonEmptyString(root.operation_id)) throw invalidResponse("Router returned an invalid managed operation", value);
@@ -222,6 +259,11 @@ export interface RouterHttpClient {
   resetManaged(id: string): Promise<ManagedOperationResponse>;
   terminateManaged(id: string): Promise<ManagedOperationResponse>;
   restartAllManaged(): Promise<ManagedOperationResponse>;
+  models(): Promise<ModelsResponse>;
+  providerAuth(): Promise<ProviderAuthResponse>;
+  startProviderAuth(provider: ProviderModel["provider"], action: "login" | "logout"): Promise<ManagedOperationResponse>;
+  respondProviderAuth(operationId: string, promptId: string, value: string): Promise<ManagedOperationResponse>;
+  setDefaultModel(model: { provider: string; id: string } | null): Promise<DefaultModelResponse>;
 }
 
 export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): RouterHttpClient {
@@ -236,7 +278,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
   // Managed P3 calls have no browser authority material. The request ID is a
   // worker-wide idempotency key, and fetch is explicitly forbidden to attach
   // cookies should a browser happen to hold any for this origin.
-  const managedRequest = async (path: string, method: "GET" | "POST" | "DELETE", payload?: unknown): Promise<unknown> => {
+  const managedRequest = async (path: string, method: "GET" | "POST" | "PUT" | "DELETE", payload?: unknown): Promise<unknown> => {
     const headers: Record<string, string> = {};
     if (payload !== undefined) headers["content-type"] = "application/json";
     if (method !== "GET") headers["x-request-id"] = crypto.randomUUID();
@@ -288,6 +330,13 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     resetManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/reset`, "POST", {})),
     terminateManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "DELETE")),
     restartAllManaged: async () => managedOperation(await managedRequest("/v1/managed-agents/restart-all", "POST", {})),
+    models: async () => models(await managedRequest("/v1/models", "GET")),
+    providerAuth: async () => providerAuth(await managedRequest("/v1/provider-auth", "GET")),
+    startProviderAuth: async (provider, action) => managedOperation(await managedRequest(`/v1/provider-auth/${provider}/${action}`, "POST", {})),
+    // The value is intentionally accepted only as a call argument. This client
+    // does not cache, log, return, or add it to a URL.
+    respondProviderAuth: async (operationId, promptId, value) => managedOperation(await managedRequest(`/v1/provider-auth/operations/${encodeURIComponent(operationId)}/response`, "POST", { prompt_id: promptId, value })),
+    setDefaultModel: async (model) => defaultModel(await managedRequest("/v1/settings/default-model", "PUT", { model })),
   };
 }
 

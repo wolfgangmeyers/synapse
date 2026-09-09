@@ -1,4 +1,4 @@
-export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE" | "OPTIONS";
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
 
 export interface HttpRoute {
   methods: readonly HttpMethod[];
@@ -66,6 +66,12 @@ export const httpRoutes = [
   { methods: ["GET"], path: "/v1/managed-agents/{id}/children" },
   { methods: ["POST"], path: "/v1/managed-agents/{agent_id}/restart" },
   { methods: ["POST"], path: "/v1/managed-agents/{id}/reset" },
+  { methods: ["GET"], path: "/v1/models" },
+  { methods: ["PUT"], path: "/v1/settings/default-model" },
+  { methods: ["GET"], path: "/v1/provider-auth" },
+  { methods: ["POST"], path: "/v1/provider-auth/{provider}/login" },
+  { methods: ["POST"], path: "/v1/provider-auth/{provider}/logout" },
+  { methods: ["POST"], path: "/v1/provider-auth/operations/{id}/response" },
 ] as const satisfies readonly HttpRoute[];
 
 export const uiLiveFrameNames = ["managed_agents_snapshot", "managed_agent_delta", "managed_agent_removed", "managed_children_snapshot", "history_entry", "provider_auth_prompt", "provider_auth_state"] as const satisfies readonly string[];

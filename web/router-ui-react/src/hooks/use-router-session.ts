@@ -10,8 +10,9 @@ import type { Agent } from "../state/agent-projection";
 import { createRouterTransport, type RouterTransport, type RouterTransportOptions, type TransportEvent } from "../transport/router-transport";
 import { createUILiveClient, type UILiveClient } from "../transport/ui-live-client";
 import type { WebSocketFactory } from "../transport/websocket-client";
+import type { ProviderAuthPromptFrame, ProviderAuthStateFrame } from "../protocol/types";
 
-export interface RouterSessionOptions extends Omit<RouterTransportOptions, "routerUrl"> { routerUrl: string; initialState?: AppState; connect?: boolean; uiLiveWebSocketFactory?: WebSocketFactory }
+export interface RouterSessionOptions extends Omit<RouterTransportOptions, "routerUrl"> { routerUrl: string; initialState?: AppState; connect?: boolean; uiLiveWebSocketFactory?: WebSocketFactory; onProviderAuthFrame?: (frame: ProviderAuthPromptFrame | ProviderAuthStateFrame) => void }
 
 function canConnectUILive(options: RouterSessionOptions): boolean {
   return options.uiLiveWebSocketFactory !== undefined || typeof WebSocket !== "undefined";
@@ -60,6 +61,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
   const transport = useMemo(() => createRouterTransport({ ...options, routerUrl: scope.routerUrl, agentId: scope.agentId, defaultAgentId: scope.agentId }), [scope.routerUrl, scope.agentId, options.storage, options.fetchImpl, options.webSocketFactory, options.autoReconnect, options.persistDelivery]);
   const [state, dispatch] = useReducer(reducer, options.initialState ?? createInitialState(scope));
   const scopeRef = useRef(scope); scopeRef.current = scope;
+  const providerAuthFrameRef = useRef(options.onProviderAuthFrame); providerAuthFrameRef.current = options.onProviderAuthFrame;
   const uiLive = useMemo(() => createUILiveClient({
     routerUrl: scope.routerUrl,
     ...(options.uiLiveWebSocketFactory === undefined ? {} : { webSocketFactory: options.uiLiveWebSocketFactory }),
@@ -70,6 +72,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
       else if (frame.type === "managed_agent_removed") dispatch({ type: "managed/removed", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agentId: frame.agent_id });
       else if (frame.type === "managed_children_snapshot") dispatch({ type: "managed/children", scope: currentScope, version: frame.lifecycle_version, children: frame.children });
       else if (frame.type === "history_entry") dispatch({ type: "managed/history", scope: currentScope, view: frame.view, entry: frame.entry });
+      else if (frame.type === "provider_auth_prompt" || frame.type === "provider_auth_state") providerAuthFrameRef.current?.(frame);
     },
     onRecovery: () => dispatch({ type: "managed/recover", scope: scopeRef.current }),
   }), [scope.routerUrl, options.uiLiveWebSocketFactory]);

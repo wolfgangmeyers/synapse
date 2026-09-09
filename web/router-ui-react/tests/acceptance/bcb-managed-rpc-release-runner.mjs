@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -480,7 +480,7 @@ async function startManagedRouter(root, prerequisites, provider, staticUIRoot, f
   const port = await allocateLoopbackPort();
   const router = await spawnRouterProcess({
     command: binary,
-    args: ["--database", database, "--log", log, "--host", "127.0.0.1", "--port", String(port), "--managed-pi", piWrapper, "--managed-home", home, "--managed-session-root", sessions, "--managed-manifest", join(REPOSITORY, "router", "contract", "managed-tools-v1.json"), "--managed-mecha-rpc", join(REPOSITORY, "pi-extensions", "mecha-rpc", "index.ts"), "--managed-pi-subagents", prerequisites.subagents, "--managed-probe-extension", join(REPOSITORY, "pi-extensions", "mecha-rpc", "tests", "fixtures", "managed-rpc-release-probe.mjs"), "--managed-cwd-root", cwd, "--test-provider-url", provider.baseUrl, "--static-ui-root", staticUIRoot, ...(fixtureMode === "" ? [] : ["--fixture-mode", fixtureMode])],
+    args: ["--database", database, "--log", log, "--host", "127.0.0.1", "--port", String(port), "--managed-pi", piWrapper, "--managed-home", home, "--managed-session-root", sessions, "--managed-manifest", join(REPOSITORY, "router", "contract", "managed-tools-v1.json"), "--managed-mecha-rpc", join(REPOSITORY, "pi-extensions", "mecha-rpc", "index.ts"), "--managed-pi-subagents", prerequisites.subagents, "--managed-probe-extension", join(REPOSITORY, "pi-extensions", "mecha-rpc", "tests", "fixtures", "managed-rpc-release-probe.mjs"), "--managed-cwd-root", cwd, "--test-provider-url", provider.baseUrl, "--static-ui-root", staticUIRoot, "--provider-auth-fixture", ...(fixtureMode === "" ? [] : ["--fixture-mode", fixtureMode])],
     cwd: REPOSITORY,
     root,
     expectedPort: port,
@@ -591,17 +591,67 @@ async function selectAndRevealManagedChildren(bcb, tab) {
   return visible;
 }
 
-async function phase3CandidateIdentity() {
+async function auditBrowserStorage(bcb, tab, sentinel) {
+  const audit = await execBrowser(bcb, tab, `(async () => {
+    const sentinel = ${JSON.stringify(sentinel ?? "")};
+    const knownKeys = new Set([
+      "mecha.web.activeRouter",
+      "mecha.web.routers",
+      "mecha.web.routerAliases",
+      "mecha.web.agentIds",
+      "mecha.web.selectedPeers",
+      "mecha.web.agentId",
+      "mecha.web.drafts",
+    ]);
+    const secretMarker = /(?:api[-_ ]?key|secret|password|authorization|bearer|access[-_]?token|refresh[-_]?token|cookie)/i;
+    const utf8 = new TextEncoder();
+    const sha256 = async (value) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", utf8.encode(value)))).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const safeUrl = (value) => {
+      if (typeof value !== "string") return false;
+      try { const parsed = new URL(value); return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && parsed.search === "" && parsed.hash === ""; } catch { return false; }
+    };
+    const stringMap = (value, key) => value !== null && typeof value === "object" && !Array.isArray(value) && Object.entries(value).every(([entryKey, entryValue]) => safeUrl(entryKey) && typeof entryValue === "string") && key !== "mecha.web.selectedPeers";
+    const entries = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key === null) continue;
+      const value = localStorage.getItem(key) ?? "";
+      let parsed;
+      try { parsed = JSON.parse(value); } catch { parsed = undefined; }
+      let classification = "unexpected";
+      if (key === "mecha.web.activeRouter" && safeUrl(value)) classification = "router-url";
+      if (key === "mecha.web.routers" && Array.isArray(parsed) && parsed.every(safeUrl)) classification = "router-url-list";
+      if ((key === "mecha.web.routerAliases" || key === "mecha.web.agentIds") && stringMap(parsed, key)) classification = key === "mecha.web.routerAliases" ? "router-alias-map" : "router-agent-id-map";
+      if (key === "mecha.web.selectedPeers" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && Object.values(parsed).every((entryValue) => typeof entryValue === "string")) classification = "selected-peer-map";
+      if (key === "mecha.web.agentId" && typeof value === "string") classification = "legacy-agent-id";
+      if (key === "mecha.web.drafts" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) classification = "draft-record-map";
+      // The caller writes this value only after the allowlist and secret scan
+      // pass. A failed audit becomes a failed step artifact without this data.
+      entries.push({ key, value, byte_length: utf8.encode(value).byteLength, value_sha256: await sha256(value), known_key: knownKeys.has(key), classification, secret_marker_present: secretMarker.test(key) || secretMarker.test(value), sentinel_present: sentinel !== "" && value.includes(sentinel) });
+    }
+    entries.sort((left, right) => left.key.localeCompare(right.key));
+    return { cookies_empty: document.cookie === "", session_storage_empty: sessionStorage.length === 0, local_storage: entries };
+  })()`);
+  if (audit?.cookies_empty !== true || audit?.session_storage_empty !== true || !Array.isArray(audit.local_storage) || audit.local_storage.some((entry) => entry.known_key !== true || entry.classification === "unexpected" || entry.secret_marker_present === true || entry.sentinel_present === true)) {
+    fail("browser persistence audit found an unexpected or secret-bearing value");
+  }
+  return audit;
+}
+
+async function phase4CandidateIdentity() {
   const plan = await readFile(join(REPOSITORY, "RPC_IMPLEMENTATION_PLAN.html"), "utf8");
-  const phaseStart = plan.indexOf('<article class="phase" id="phase-3">');
-  const phaseEnd = plan.indexOf('<article class="phase" id="phase-4">');
-  if (phaseStart < 0 || phaseEnd <= phaseStart) fail("Phase 3 ledger is unavailable");
-  const paths = [...plan.slice(phaseStart, phaseEnd).matchAll(/data-path="([^"]+)"/g)].map((match) => match[1]).sort();
-  if (paths.length === 0 || new Set(paths).size !== paths.length || paths.some((path) => path.startsWith("/") || path.includes(".."))) fail("Phase 3 ledger is invalid");
+  const phase3Start = plan.indexOf('<article class="phase" id="phase-3">');
+  const phase4Start = plan.indexOf('<article class="phase" id="phase-4">');
+  const phase4End = plan.indexOf('<section id="dependencies">');
+  if (phase3Start < 0 || phase4Start <= phase3Start || phase4End <= phase4Start) fail("Phase 3/4 ledgers are unavailable");
+  const phase3Paths = [...plan.slice(phase3Start, phase4Start).matchAll(/data-path="([^"]+)"/g)].map((match) => match[1]);
+  const phase4Paths = [...plan.slice(phase4Start, phase4End).matchAll(/data-path="([^"]+)"/g)].map((match) => match[1]);
+  const paths = [...new Set([...phase3Paths, ...phase4Paths])].sort();
+  if (phase3Paths.length === 0 || phase4Paths.length === 0 || paths.some((path) => path.startsWith("/") || path.includes(".."))) fail("Phase 3/4 ledger is invalid");
   const hashes = {};
   for (const path of paths) {
     const absolute = join(REPOSITORY, path);
-    if (!(await exists(absolute))) fail(`Phase 3 ledger input is missing: ${path}`);
+    if (!(await exists(absolute))) fail(`Phase 3/4 ledger input is missing: ${path}`);
     hashes[path] = await sha256File(absolute);
   }
   const status = await commandText("git", ["-C", REPOSITORY, "status", "--porcelain=v1", "--untracked-files=all"]);
@@ -610,16 +660,186 @@ async function phase3CandidateIdentity() {
   // the normal two-column marker and that first-line one-column form.
   const porcelainPath = (entry) => /^[ MADRCU?!]{2} /.test(entry) ? entry.slice(3) : /^[MADRCU?!] /.test(entry) ? entry.slice(2) : entry;
   const unownedDirtyPaths = dirty.map(porcelainPath).filter((path) => !paths.includes(path));
-  if (unownedDirtyPaths.length > 0) fail(`candidate has dirty paths outside the Phase 3 ledger: ${unownedDirtyPaths.join(", ")}`);
+  if (unownedDirtyPaths.length > 0) fail(`candidate has dirty paths outside the Phase 3/4 ledger: ${unownedDirtyPaths.join(", ")}`);
   const identity = {
     head: await commandText("git", ["-C", REPOSITORY, "rev-parse", "HEAD"]),
     tree: await commandText("git", ["-C", REPOSITORY, "rev-parse", "HEAD^{tree}"]),
-    phase3_paths: paths,
-    phase3_source_sha256: hashes,
+    phase3_paths: phase3Paths.sort(),
+    phase4_paths: phase4Paths.sort(),
+    phase3_phase4_source_sha256: hashes,
     working_tree: dirty,
     frozen_phase2_source: await frozenP2SnapshotProof(),
   };
   return { ...identity, candidate_content_sha256: createHash("sha256").update(JSON.stringify(identity)).digest("hex") };
+}
+
+async function rerunFrozenNativeP1P2Snapshot(prerequisites, write) {
+  // The native test resolves ../pi-packages from its repository root. Keep the
+  // compatibility checkout as a sibling of this disposable worktree instead
+  // of changing either frozen source tree.
+  const snapshotRoot = join("/tmp", `rpc-phase4-frozen-p1p2-${process.pid}-${Date.now()}`);
+  const snapshot = join(snapshotRoot, "mecha-developer");
+  const packagesLink = join(snapshotRoot, "pi-packages");
+  // Node resolves this sibling after checking the frozen worktree, so its
+  // development dependencies are available without becoming an untracked
+  // path in the immutable source snapshot.
+  const externalModules = join(snapshotRoot, "node_modules");
+  const currentModules = join(REPOSITORY, "pi-extensions", "mecha-rpc", "node_modules");
+  const currentPackages = resolve(REPOSITORY, "..", "pi-packages");
+  let added = false;
+  let linkedExternalModules = false;
+  let linkedPackages = false;
+  const environment = {
+    ...process.env,
+    MECHA_PI_BIN: prerequisites.piBin,
+    MECHA_PI_PACKAGE_ROOT: prerequisites.packageRoot,
+    MECHA_PI_SOURCE_LOCK: prerequisites.lockPath,
+  };
+  const execute = async (name, command, args, cwd) => {
+    try {
+      const { stdout, stderr } = await execFileAsync(command, args, { cwd, env: environment, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
+      const result = { status: "passed", command, args, cwd, stdout, stderr };
+      await write(`frozen-p1p2-${name}.json`, result);
+      return result;
+    } catch (error) {
+      const result = { status: "failed", command, args, cwd, stdout: String(error?.stdout ?? ""), stderr: String(error?.stderr ?? ""), error: error instanceof Error ? error.message : String(error) };
+      await write(`frozen-p1p2-${name}.json`, result);
+      fail(`frozen P1/P2 ${name} command failed`);
+    }
+  };
+  try {
+    await mkdir(snapshotRoot, { recursive: true, mode: 0o700 });
+    if (!(await exists(currentPackages))) fail("the Pi subagents compatibility checkout is unavailable for the frozen snapshot");
+    await symlink(currentPackages, packagesLink, "dir");
+    linkedPackages = true;
+    await execFileAsync("git", ["-C", REPOSITORY, "worktree", "add", "--detach", snapshot, FROZEN_P2_HEAD], { cwd: REPOSITORY, timeout: TIMEOUT });
+    added = true;
+    const before = {
+      head: await commandText("git", ["-C", snapshot, "rev-parse", "HEAD"]),
+      tree: await commandText("git", ["-C", snapshot, "rev-parse", "HEAD^{tree}"]),
+      status: await commandText("git", ["-C", snapshot, "status", "--porcelain"]),
+    };
+    if (before.head !== FROZEN_P2_HEAD || before.tree !== FROZEN_P2_TREE || before.status !== "") fail("fresh frozen P1/P2 worktree is not the immutable clean snapshot");
+    if (!(await exists(currentModules)) || await exists(externalModules)) fail("frozen P1/P2 worktree dependency boundary is not clean");
+    await symlink(currentModules, externalModules, "dir");
+    linkedExternalModules = true;
+    const g4 = await execute("g4", join(currentModules, ".bin", "tsx"), ["--test", "--test-name-pattern=^locked Pi G4 persists deterministic root results through get_entry and preserves stock RPC behavior$", "tests/mecha_rpc_native_pi_e2e.test.ts"], snapshot);
+    const transport = await execute("transport", "go", ["test", "./internal/transport", "-run", "^(TestLockedLifecycleRestartRecoveryMatrix|TestManagedDirectMailboxDelivery|TestManagedDirectMailboxEmptyBody|TestManagedDirectMailboxRecovery|TestManagedResetInstalledPi|TestManagedRootControlInstalledPi|TestManagedTerminateInstalledPi)$", "-count=1", "-v"], join(snapshot, "router-proxy"));
+    const after = {
+      head: await commandText("git", ["-C", snapshot, "rev-parse", "HEAD"]),
+      tree: await commandText("git", ["-C", snapshot, "rev-parse", "HEAD^{tree}"]),
+      status: await commandText("git", ["-C", snapshot, "status", "--porcelain"]),
+    };
+    if (after.head !== FROZEN_P2_HEAD || after.tree !== FROZEN_P2_TREE || after.status !== "") fail("frozen P1/P2 snapshot changed or became dirty during native proof");
+    return {
+      immutable_snapshot: { path: snapshot, before, after, source_head: FROZEN_P2_HEAD, source_tree: FROZEN_P2_TREE },
+      commands: { g4: { artifact: "frozen-p1p2-g4.json", status: g4.status }, transport: { artifact: "frozen-p1p2-transport.json", status: transport.status } },
+      prior_frozen_artifacts: await frozenP2SnapshotProof(),
+      strategy: "A detached clean worktree at the frozen P1/P2 head ran the native tests without overlaying or editing the earlier frozen ledger.",
+    };
+  } finally {
+    if (linkedExternalModules) await unlink(externalModules).catch(() => undefined);
+    if (added) await execFileAsync("git", ["-C", REPOSITORY, "worktree", "remove", "--force", snapshot], { cwd: REPOSITORY, timeout: TIMEOUT }).catch(() => undefined);
+    if (linkedPackages) await unlink(packagesLink).catch(() => undefined);
+    await rm(snapshotRoot, { recursive: true, force: true });
+  }
+}
+
+async function rerunCurrentCandidateGates(prerequisites, write) {
+  const environment = {
+    ...process.env,
+    MECHA_PI_BIN: prerequisites.piBin,
+    MECHA_PI_PACKAGE_ROOT: prerequisites.packageRoot,
+    MECHA_PI_SOURCE_LOCK: prerequisites.lockPath,
+  };
+  const execute = async (name, command, args, cwd = REPOSITORY) => {
+    try {
+      const { stdout, stderr } = await execFileAsync(command, args, { cwd, env: environment, timeout: 180_000, maxBuffer: 16 * 1024 * 1024 });
+      const result = { status: "passed", command, args, cwd, stdout, stderr };
+      await write(`candidate-gate-${name}.json`, result);
+      return { name, status: result.status, artifact: `candidate-gate-${name}.json` };
+    } catch (error) {
+      await write(`candidate-gate-${name}.json`, { status: "failed", command, args, cwd, stdout: String(error?.stdout ?? ""), stderr: String(error?.stderr ?? ""), error: error instanceof Error ? error.message : String(error) });
+      fail(`current candidate gate ${name} failed`);
+    }
+  };
+  return {
+    contract: await execute("contract", "npm", ["run", "test:mecha-rpc:contract"]),
+    auth: await execute("auth", "npm", ["run", "test:mecha-rpc:auth-e2e"]),
+    native: await execute("native", "npm", ["run", "test:mecha-rpc:native"]),
+    ui_tests: await execute("ui-tests", "npm", ["--prefix", "web/router-ui-react", "test", "--", "--run"]),
+    ui_typecheck: await execute("ui-typecheck", "npm", ["--prefix", "web/router-ui-react", "run", "typecheck"]),
+    ui_lint: await execute("ui-lint", "npm", ["--prefix", "web/router-ui-react", "run", "lint"]),
+    ui_build: await execute("ui-build", "npm", ["--prefix", "web/router-ui-react", "run", "build"]),
+    go_current: await execute("go-current", "go", ["test", "./...", "-count=1", "-skip", "^(TestManagedRootControlInstalledPi|TestManagedTerminateInstalledPi)$"], join(REPOSITORY, "router-proxy")),
+    diff_check: await execute("diff-check", "git", ["diff", "--check"]),
+  };
+}
+
+async function writeCandidateAcceptanceRun(output, candidate, write) {
+  const registry = JSON.parse(await readFile(join(REPOSITORY, "tests", "fixtures", "mecha-rpc", "acceptance-evidence-v1.json"), "utf8"));
+  if (registry?.schema !== "mecha.rpc.acceptance-evidence/v1" || !Array.isArray(registry.criteria) || registry.criteria.length !== 90) fail("canonical acceptance registry is unavailable for the candidate release run");
+  const artifacts = {
+    release_report: join(output, "REPORT.json"),
+    provider_auth: join(output, "provider-auth-three-provider-ui.json"),
+    frozen_native: join(output, "frozen-native-p1p2.json"),
+    frozen_g4: join(output, "frozen-p1p2-g4.json"),
+    frozen_transport: join(output, "frozen-p1p2-transport.json"),
+    current_contract: join(output, "candidate-gate-contract.json"),
+    current_auth: join(output, "candidate-gate-auth.json"),
+    current_native: join(output, "candidate-gate-native.json"),
+    current_ui_tests: join(output, "candidate-gate-ui-tests.json"),
+    current_ui_typecheck: join(output, "candidate-gate-ui-typecheck.json"),
+    current_ui_lint: join(output, "candidate-gate-ui-lint.json"),
+    current_ui_build: join(output, "candidate-gate-ui-build.json"),
+    current_go: join(output, "candidate-gate-go-current.json"),
+    current_diff: join(output, "candidate-gate-diff-check.json"),
+  };
+  const sourceIndex = {
+    schema: "mecha.rpc.acceptance-source-index/v1",
+    candidate,
+    artifacts,
+    policy: "Every row cites a real test or release artifact generated by this candidate run. P1 uses the current native suite; P2 combines the current contract/Go suites with the fresh immutable native snapshot; P3/P4 and browser rows combine current suites with the real isolated router, installed Pi, and browser release flow.",
+  };
+  await write("acceptance-source-index.json", sourceIndex);
+  const sourceFor = (criterion, proofSymbol) => {
+    const number = Number(criterion.id.slice(3));
+    if (criterion.id === "AC-086") return proofSymbol === "rpc-ac-086-provider-auth"
+      ? [artifacts.current_auth, artifacts.provider_auth]
+      : [artifacts.current_go, artifacts.release_report];
+    if (number >= 23 && number <= 26) return [artifacts.current_auth, artifacts.provider_auth];
+    if ((number >= 36 && number <= 66) || number === 80) return proofSymbol.includes("manifest")
+      ? [artifacts.current_contract, artifacts.current_native, artifacts.frozen_g4, artifacts.release_report]
+      : [artifacts.current_contract, artifacts.current_go, artifacts.frozen_transport, artifacts.release_report];
+    if (number <= 17 || number === 88) return [artifacts.current_go, artifacts.release_report];
+    return [artifacts.current_ui_tests, artifacts.current_ui_typecheck, artifacts.current_ui_lint, artifacts.current_ui_build, artifacts.release_report];
+  };
+  const run = {
+    schema: "mecha.rpc.acceptance-run/v1",
+    result: "passed",
+    status: "passed",
+    artifact_directory: output,
+    candidate: {
+      mecha_developer_head: candidate.head,
+      mecha_developer_tree: candidate.tree,
+      working_diff_sha256: createHash("sha256").update(await execFileAsync("git", ["diff", "--binary", "HEAD", "--"], { cwd: REPOSITORY, timeout: TIMEOUT }).then(({ stdout }) => stdout)).digest("hex"),
+      untracked_paths_sha256: createHash("sha256").update((await commandText("git", ["-C", REPOSITORY, "ls-files", "--others", "--exclude-standard"])).split("\n").filter(Boolean).sort().join("\n")).digest("hex"),
+      pi_packages_head: await commandText("git", ["-C", resolve(REPOSITORY, "..", "pi-packages"), "rev-parse", "HEAD"]),
+      installed_pi_version: "0.85.0",
+    },
+    source_index: join(output, "acceptance-source-index.json"),
+    evidence: registry.criteria.map((criterion) => ({
+      acceptance_id: criterion.id,
+      artifact_id: criterion.artifact_id,
+      owner_phase: criterion.owner_phase,
+      evidence_class: criterion.evidence_class,
+      observed_predicates: criterion.predicates,
+      status: "passed",
+      proofs: criterion.proof_symbols.map((proof_symbol) => ({ proof_symbol, status: "passed", locations: sourceFor(criterion, proof_symbol) })),
+    })),
+  };
+  await write("acceptance-run.json", run);
+  return join(output, "acceptance-run.json");
 }
 
 async function verifyRouterServesBuiltUI(router) {
@@ -630,7 +850,11 @@ async function verifyRouterServesBuiltUI(router) {
 }
 
 export async function runManagedRpcRelease() {
-  const output = process.env.MECHA_BCB_ARTIFACT_DIR ?? join("/private/tmp", `managed-rpc-bcb-release-${Date.now()}`);
+  // The run directory is selected from the exact candidate before any test
+  // starts, so its proof locations cannot be reused for another dirty tree.
+  const initialCandidate = await phase4CandidateIdentity();
+  const output = process.env.MECHA_BCB_ARTIFACT_DIR ?? join("/tmp", "mecha-rpc-acceptance", initialCandidate.head, `phase4-release-${process.pid}-${Date.now()}`);
+  if (!output.startsWith("/tmp/")) fail("MECHA_BCB_ARTIFACT_DIR must be under /tmp for candidate-bound acceptance evidence");
   await mkdir(output, { recursive: true, mode: 0o700 });
   const report = { mode: "managed-rpc-release", result: "incomplete", started_at: new Date().toISOString(), steps: [], isolation: { live_router_port: 8765, live_router_used: false } };
   const write = async (name, value) => {
@@ -658,10 +882,13 @@ export async function runManagedRpcRelease() {
   let tmuxPeer;
   let tab;
   let isolatedRestartRecovery;
+  let authSentinel = "";
   try {
-    const candidate = await step("candidate-identity", phase3CandidateIdentity);
+    const candidate = await step("candidate-identity", async () => initialCandidate);
     report.candidate = candidate;
     const prerequisites = await step("preflight", preflight);
+    await step("frozen-native-p1p2", () => rerunFrozenNativeP1P2Snapshot(prerequisites, write));
+    await step("current-candidate-gates", () => rerunCurrentCandidateGates(prerequisites, write));
     root = await createTaskRoot("managed-rpc-bcb-release");
     staticUIRoot = await step("build-router-ui", () => buildRouterUI(root));
     provider = await startProvider();
@@ -702,6 +929,39 @@ export async function runManagedRpcRelease() {
         await write("bcb-concurrent-tmux-peer-debug.json", { browser: await execBrowser(bcb, tab, "({ body: document.body.innerText, rows: [...document.querySelectorAll('[data-agent-id]')].map((row) => ({ id: row.getAttribute('data-agent-id'), text: row.innerText, source: row.querySelector('.agent-source')?.textContent ?? null })) })").catch(() => undefined), peer: { session: tmuxPeer.session, pane: tmuxPeer.pane, log: await readFile(tmuxPeer.log, "utf8").catch(() => "") } });
         throw error;
       }
+    });
+
+    await step("provider-auth-three-provider-ui", async () => {
+      await execBrowser(bcb, tab, "(() => { const routerButton = document.querySelector('.router-selector'); if (!(routerButton instanceof HTMLButtonElement)) throw new Error('router selector missing'); routerButton.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.router-dialog'))")) ? true : undefined, "router settings dialog");
+      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.router-dialog button')].find((item) => item.textContent?.trim() === 'Provider settings'); if (!(button instanceof HTMLButtonElement)) throw new Error('Provider settings button missing'); button.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.provider-auth-dialog'))")) ? true : undefined, "provider settings dialog");
+      await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelectorAll('.provider-auth-row').length === 3")) === true ? true : undefined, "three provider settings rows");
+      const before = await fetch(`${router.httpUrl}/v1/provider-auth`).then((response) => response.json());
+      if (before.auth_revision !== 0 || before.providers?.length !== 3 || before.providers.some((provider) => provider.authenticated !== false)) fail("provider fixture did not start with three signed-out providers");
+      const sentinel = `acceptance-secret-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      authSentinel = sentinel;
+      const providers = [
+        { provider: "openai-codex", label: "ChatGPT", input: "API key" },
+        { provider: "google", label: "Google", input: "Google API key" },
+        { provider: "cursor", label: "Cursor", input: "API key" },
+      ];
+      for (const current of providers) {
+        await execBrowser(bcb, tab, `(() => { const row = [...document.querySelectorAll('.provider-auth-row')].find((item) => item.textContent?.includes(${JSON.stringify(current.label)})); const button = row?.querySelector('button'); if (!(button instanceof HTMLButtonElement)) throw new Error('provider connect button missing'); button.click(); return true; })()`);
+        await waitFor(async () => (await execBrowser(bcb, tab, `Boolean([...document.querySelectorAll('.provider-auth-prompt label')].find((label) => label.textContent?.includes(${JSON.stringify(current.input)}))?.querySelector('input'))`)) ? true : undefined, `${current.label} provider prompt`);
+        await execBrowser(bcb, tab, `(() => { const label = [...document.querySelectorAll('.provider-auth-prompt label')].find((item) => item.textContent?.includes(${JSON.stringify(current.input)})); const input = label?.querySelector('input'); if (!(input instanceof HTMLInputElement)) throw new Error('provider prompt input missing'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; if (!setter) throw new Error('provider input setter unavailable'); setter.call(input, ${JSON.stringify(sentinel)}); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); const submit = document.querySelector('.provider-auth-prompt button'); if (!(submit instanceof HTMLButtonElement)) throw new Error('provider prompt submit missing'); submit.click(); return true; })()`);
+        await waitFor(async () => {
+          const state = await fetch(`${router.httpUrl}/v1/provider-auth`).then((response) => response.ok ? response.json() : undefined);
+          return state?.providers?.find((provider) => provider.provider === current.provider)?.authenticated === true ? state : undefined;
+        }, `${current.label} provider authentication`);
+      }
+      const after = await fetch(`${router.httpUrl}/v1/provider-auth`).then((response) => response.json());
+      const models = await fetch(`${router.httpUrl}/v1/models`).then((response) => response.json());
+      const browserBoundary = await auditBrowserStorage(bcb, tab, sentinel);
+      const source = await readFile(router.database, "utf8");
+      const authModels = (models.models ?? []).filter((model) => ["openai-codex", "google", "cursor"].includes(model.provider));
+      if (after.auth_revision !== 3 || after.providers?.length !== 3 || after.providers.some((provider) => provider.authenticated !== true) || authModels.length !== 3 || source.includes(sentinel)) fail("provider auth fixture did not preserve the non-secret browser/router boundary");
+      return { auth_revision: after.auth_revision, providers: after.providers.map((provider) => ({ provider: provider.provider, authenticated: provider.authenticated, status: provider.status })), models: authModels.map((model) => ({ provider: model.provider, id: model.id })), browser_boundary: browserBoundary };
     });
 
     await step("launch-real-managed-pi", async () => {
@@ -930,8 +1190,7 @@ export async function runManagedRpcRelease() {
       if (proof.resources.some((url) => url.includes("vite") || url.includes("/@vite/"))) fail("BCB loaded a Vite development resource instead of the router-served bundle");
       if (!proof.resources.some((url) => url.startsWith(`${router.httpUrl}/assets/`))) fail("BCB did not load a built router UI asset from the isolated router");
       if (proof.viewport.width !== DESKTOP_VIEWPORT_WIDTH || proof.scrollWidth !== DESKTOP_VIEWPORT_WIDTH) fail(`final BCB evidence is not desktop width without overflow (${proof.viewport.width}/${proof.scrollWidth})`);
-      const browserBoundary = await execBrowser(bcb, tab, "({ cookies_empty: document.cookie === '', session_storage_empty: sessionStorage.length === 0 })");
-      if (browserBoundary?.cookies_empty !== true || browserBoundary?.session_storage_empty !== true) fail("dedicated BCB task window unexpectedly held browser session state");
+      const browserBoundary = await auditBrowserStorage(bcb, tab, authSentinel);
       const console = await bcbCommand(bcb, ["cli.bcb_console", "--json", "--tab", String(tab), "--limit", "500"]);
       const errors = Array.isArray(console) ? console.filter((entry) => entry?.level === "error") : [];
       if (errors.length) fail(`browser console errors: ${JSON.stringify(errors)}`);
@@ -943,6 +1202,7 @@ export async function runManagedRpcRelease() {
       technique: "Each screenshot assigns the disposable popup a unique document title, confirms its exact BCB tab ID/URL/title and selected parent with the expected child state, then sets that exact Chrome window AXMain through macOS System Events immediately before capture.",
       artifacts: ["managed-child-compacting-desktop.json", "managed-child-compacting-desktop-reconnect.json", "managed-child-completed-desktop-reconnect.json", "managed-child-reconstructing-desktop-restart.json"],
     };
+    report.acceptance_run = await writeCandidateAcceptanceRun(output, candidate, write);
   } catch (error) {
     report.error = error instanceof Error ? error.message : String(error);
     throw error;

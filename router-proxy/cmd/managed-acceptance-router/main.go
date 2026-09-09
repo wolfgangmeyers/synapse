@@ -34,6 +34,7 @@ type acceptanceConfig struct {
 	staticUIRoot            string
 	provider, model         string
 	fixtureMode             string
+	providerAuthFixture     bool
 }
 
 func parseConfig(args []string) (acceptanceConfig, error) {
@@ -57,6 +58,7 @@ func parseConfig(args []string) (acceptanceConfig, error) {
 	flags.StringVar(&result.provider, "test-provider", "mecha-router-test", "provider configured only in the isolated HOME")
 	flags.StringVar(&result.model, "test-model", "managed-rpc-release", "model configured only in the isolated HOME")
 	flags.StringVar(&result.fixtureMode, "fixture-mode", "", "optional acceptance-only installed-Pi fixture mode")
+	flags.BoolVar(&result.providerAuthFixture, "provider-auth-fixture", false, "enable the isolated non-secret provider-auth helper fixture")
 	if err := flags.Parse(args); err != nil {
 		return acceptanceConfig{}, err
 	}
@@ -116,6 +118,132 @@ func acceptanceLogger(path string) (func(string, map[string]any), func() error, 
 	return write, file.Close, nil
 }
 
+// acceptanceProviderAuthHelper is deliberately available only in this
+// separate release harness command. It exercises the real router/coordinator/UI
+// routes while holding a submitted value only long enough to model the private
+// helper boundary. It does not touch a credential store or production helper.
+type acceptanceProviderAuthHelper struct {
+	mu            sync.Mutex
+	authenticated map[string]bool
+}
+
+func newAcceptanceProviderAuthHelper() *acceptanceProviderAuthHelper {
+	return &acceptanceProviderAuthHelper{authenticated: make(map[string]bool)}
+}
+
+func (h *acceptanceProviderAuthHelper) Start(ctx context.Context, operationID, provider, action string) (managed.ProviderAuthRun, error) {
+	if operationID == "" || (action != "login" && action != "logout") {
+		return nil, errors.New("acceptance provider operation is invalid")
+	}
+	run := &acceptanceProviderAuthRun{events: make(chan managed.ProviderAuthEvent, 2), responses: make(chan string, 1), done: make(chan struct{})}
+	go func() {
+		defer close(run.events)
+		defer run.finish()
+		if action == "login" {
+			prompt := managed.ProviderAuthEvent{Kind: "prompt", OperationID: operationID, Provider: provider, Prompt: &managed.ProviderAuthPrompt{ID: "acceptance-secret", Kind: "secret", Message: "Enter the requested sign-in value."}}
+			select {
+			case run.events <- prompt:
+			case <-ctx.Done():
+				return
+			case <-run.done:
+				return
+			}
+			select {
+			case <-run.responses:
+				h.mu.Lock()
+				h.authenticated[provider] = true
+				h.mu.Unlock()
+			case <-ctx.Done():
+				return
+			case <-run.done:
+				return
+			}
+		} else {
+			h.mu.Lock()
+			h.authenticated[provider] = false
+			h.mu.Unlock()
+		}
+		providers, models := h.snapshot()
+		terminal := managed.ProviderAuthEvent{Kind: "terminal", OperationID: operationID, Provider: provider, Status: "succeeded", Providers: providers, Models: models}
+		select {
+		case run.events <- terminal:
+		case <-ctx.Done():
+		case <-run.done:
+		}
+	}()
+	return run, nil
+}
+
+func (h *acceptanceProviderAuthHelper) snapshot() ([]store.ManagedProviderStatus, []store.ManagedProviderModel) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	providers := make([]store.ManagedProviderStatus, 0, 3)
+	models := make([]store.ManagedProviderModel, 0, 3)
+	for _, value := range []struct{ provider, label, model string }{
+		{provider: "openai-codex", label: "ChatGPT", model: "gpt-5.6-terra"},
+		{provider: "google", label: "Google", model: "gemini-2.5-pro"},
+		{provider: "cursor", label: "Cursor", model: "cursor-fast"},
+	} {
+		connected := h.authenticated[value.provider]
+		status := "signed_out"
+		if connected {
+			status = "authenticated"
+			models = append(models, store.ManagedProviderModel{Provider: value.provider, ID: value.model, Name: value.model, Available: true})
+		}
+		providers = append(providers, store.ManagedProviderStatus{Provider: value.provider, Label: value.label, Authenticated: connected, Status: status})
+	}
+	return providers, models
+}
+
+type acceptanceProviderAuthRun struct {
+	events    chan managed.ProviderAuthEvent
+	responses chan string
+	done      chan struct{}
+	once      sync.Once
+}
+
+func (r *acceptanceProviderAuthRun) Events() <-chan managed.ProviderAuthEvent { return r.events }
+func (r *acceptanceProviderAuthRun) Respond(ctx context.Context, promptID, value string) error {
+	if promptID != "acceptance-secret" || value == "" {
+		return errors.New("acceptance provider response is invalid")
+	}
+	select {
+	case r.responses <- value:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.done:
+		return errors.New("acceptance provider run is closed")
+	}
+}
+func (r *acceptanceProviderAuthRun) Cancel() { r.finish() }
+func (r *acceptanceProviderAuthRun) Wait() error {
+	<-r.done
+	return nil
+}
+func (r *acceptanceProviderAuthRun) finish() { r.once.Do(func() { close(r.done) }) }
+
+// acceptanceCatalogSource keeps the deterministic installed-Pi model available
+// for the existing release journey while adding the router's real non-secret
+// auth catalog. Production uses StoreCatalogSource directly; this merge exists
+// only because the harness's local model is not a user-selectable provider.
+type acceptanceCatalogSource struct {
+	store    *store.Store
+	fallback managed.Model
+}
+
+func (s acceptanceCatalogSource) Catalog(ctx context.Context) (managed.Catalog, error) {
+	snapshot, err := s.store.ManagedProviderSnapshot(ctx)
+	if err != nil {
+		return managed.Catalog{}, err
+	}
+	models := []managed.Model{s.fallback}
+	for _, value := range snapshot.Models {
+		models = append(models, managed.Model{Provider: value.Provider, ID: value.ID, Name: value.Name, Available: value.Available})
+	}
+	return managed.Catalog{AuthRevision: snapshot.AuthRevision, Models: models}, nil
+}
+
 func main() {
 	options, err := parseConfig(os.Args[1:])
 	if err != nil {
@@ -172,13 +300,22 @@ func main() {
 	}
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store: durable, Config: config, Manifest: manifest,
-		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: options.provider, ID: options.model, Name: "Managed RPC release fixture", Available: true}),
+		CatalogSource: acceptanceCatalogSource{store: durable, fallback: managed.Model{Provider: options.provider, ID: options.model, Name: "Managed RPC release fixture", Available: true}},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentStore, EventLogger: logger, Managed: manager, StaticUIRoot: options.staticUIRoot})
+	var providerAuth *managed.ProviderAuthCoordinator
+	if options.providerAuthFixture {
+		providerAuth, err = managed.NewProviderAuthCoordinator(durable, manager, newAcceptanceProviderAuthHelper())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		defer providerAuth.Close()
+	}
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentStore, EventLogger: logger, Managed: manager, ProviderAuth: providerAuth, StaticUIRoot: options.staticUIRoot})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)

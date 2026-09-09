@@ -28,6 +28,41 @@ type ManagedModel struct {
 	Name     string `json:"name,omitempty"`
 }
 
+// ManagedProviderStatus is the non-secret state rendered by the shared
+// settings surface. Credentials remain in Pi's protected auth store.
+type ManagedProviderStatus struct {
+	Provider      string `json:"provider"`
+	Label         string `json:"label"`
+	Authenticated bool   `json:"authenticated"`
+	Status        string `json:"status"`
+	AccountLabel  string `json:"account_label,omitempty"`
+	UpdatedAt     string `json:"updated_at"`
+	Error         string `json:"error,omitempty"`
+}
+
+// ManagedProviderModel is the current router-owned discovery snapshot. Rows
+// are replaced per provider after a successful helper operation, never
+// appended as an auth history.
+type ManagedProviderModel struct {
+	Provider  string `json:"provider"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+}
+
+type ManagedProviderSnapshot struct {
+	AuthRevision int64                   `json:"auth_revision"`
+	Providers    []ManagedProviderStatus `json:"providers"`
+	Models       []ManagedProviderModel  `json:"models"`
+}
+
+const maxManagedProviderModels = 256
+
+var managedProviderNames = map[string]bool{"openai-codex": true, "google": true, "cursor": true}
+var managedProviderLabels = map[string]string{"openai-codex": "ChatGPT", "google": "Google", "cursor": "Cursor"}
+
+func validManagedProvider(value string) bool { return managedProviderNames[value] }
+
 // ManagedAgentRecord is the internal durable managed-agent row. Private
 // process details are deliberately kept in this type and omitted by the
 // transport projection.
@@ -358,19 +393,166 @@ func (s *Store) GetDefaultModel(ctx context.Context) (*ManagedModel, error) {
 	return &ManagedModel{Provider: provider.String, ID: id.String}, nil
 }
 
-func (s *Store) SetDefaultModel(ctx context.Context, model *ManagedModel) error {
+func validDefaultModel(model *ManagedModel) error {
 	if model != nil && (!managedIdentifierRE.MatchString(model.Provider) || !managedIdentifierRE.MatchString(model.ID)) {
 		return errors.New("invalid default model")
 	}
+	return nil
+}
+
+func setDefaultModelTx(ctx context.Context, db *sql.DB, model *ManagedModel, now string) error {
+	if model == nil {
+		_, err := db.ExecContext(ctx, `UPDATE managed_settings SET default_model_provider = NULL, default_model_id = NULL, updated_at = ? WHERE singleton_id = 1`, now)
+		return err
+	}
+	_, err := db.ExecContext(ctx, `UPDATE managed_settings SET default_model_provider = ?, default_model_id = ?, updated_at = ? WHERE singleton_id = 1`, model.Provider, model.ID, now)
+	return err
+}
+
+func (s *Store) SetDefaultModel(ctx context.Context, model *ManagedModel) error {
+	if err := validDefaultModel(model); err != nil {
+		return err
+	}
+	return s.runImmediate(ctx, func() error { return setDefaultModelTx(ctx, s.db, model, formatTimestamp(s.clock.Now())) })
+}
+
+// SetDefaultModelAndPutManagedOperation commits the user-visible default and
+// its retained idempotency response together. A replay can therefore never
+// report a model setting that failed to reach managed_settings.
+func (s *Store) SetDefaultModelAndPutManagedOperation(ctx context.Context, model *ManagedModel, operation ManagedOperation) error {
+	if err := validDefaultModel(model); err != nil {
+		return err
+	}
 	return s.runImmediate(ctx, func() error {
-		now := formatTimestamp(s.clock.Now())
-		if model == nil {
-			_, err := s.db.ExecContext(ctx, `UPDATE managed_settings SET default_model_provider = NULL, default_model_id = NULL, updated_at = ? WHERE singleton_id = 1`, now)
+		now := s.clock.Now()
+		if err := setDefaultModelTx(ctx, s.db, model, formatTimestamp(now)); err != nil {
 			return err
 		}
-		_, err := s.db.ExecContext(ctx, `UPDATE managed_settings SET default_model_provider = ?, default_model_id = ?, updated_at = ? WHERE singleton_id = 1`, model.Provider, model.ID, now)
-		return err
+		operation.State = "terminal"
+		operation.CreatedAt = formatTimestamp(now)
+		operation.TerminalAt = formatTimestamp(now)
+		operation.ExpiresAt = formatTimestamp(now.Add(24 * time.Hour))
+		return insertManagedOperation(ctx, s.db, operation)
 	})
+}
+
+// ManagedProviderSnapshot returns only the bounded provider state that can be
+// safely rendered or used for model selection. It never reads Pi credentials.
+func (s *Store) ManagedProviderSnapshot(ctx context.Context) (ManagedProviderSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ManagedProviderSnapshot{}, errors.New("store is closed")
+	}
+	var snapshot ManagedProviderSnapshot
+	if err := s.db.QueryRowContext(ctx, `SELECT auth_revision FROM managed_settings WHERE singleton_id=1`).Scan(&snapshot.AuthRevision); err != nil {
+		return snapshot, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT provider,label,authenticated,status,account_label,updated_at,error FROM managed_provider_status ORDER BY provider`)
+	if err != nil {
+		return snapshot, err
+	}
+	for rows.Next() {
+		var value ManagedProviderStatus
+		var account, failure sql.NullString
+		var authenticated int
+		if err := rows.Scan(&value.Provider, &value.Label, &authenticated, &value.Status, &account, &value.UpdatedAt, &failure); err != nil {
+			_ = rows.Close()
+			return snapshot, err
+		}
+		value.Authenticated = authenticated == 1
+		value.AccountLabel, value.Error = account.String, failure.String
+		snapshot.Providers = append(snapshot.Providers, value)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return snapshot, err
+	}
+	if err := rows.Close(); err != nil {
+		return snapshot, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT provider,model_id,name,available FROM managed_provider_models ORDER BY provider,model_id`)
+	if err != nil {
+		return snapshot, err
+	}
+	for rows.Next() {
+		var value ManagedProviderModel
+		var available int
+		if err := rows.Scan(&value.Provider, &value.ID, &value.Name, &available); err != nil {
+			_ = rows.Close()
+			return snapshot, err
+		}
+		value.Available = available == 1
+		snapshot.Models = append(snapshot.Models, value)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return snapshot, err
+	}
+	if err := rows.Close(); err != nil {
+		return snapshot, err
+	}
+	return snapshot, nil
+}
+
+// CommitManagedProviderSnapshot is the only provider-state write. The helper
+// has already completed live resolution before this transaction. A failed or
+// canceled helper never calls this method, so the revision and catalog stay
+// unchanged together.
+func (s *Store) CommitManagedProviderSnapshot(ctx context.Context, providers []ManagedProviderStatus, models []ManagedProviderModel) (int64, error) {
+	if len(providers) != 3 {
+		return 0, errors.New("provider snapshot must contain exactly three providers")
+	}
+	seen := make(map[string]bool, len(providers))
+	authenticated := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		if !validManagedProvider(provider.Provider) || seen[provider.Provider] || provider.Label != managedProviderLabels[provider.Provider] || (provider.Status != "authenticated" && provider.Status != "signed_out") || provider.Authenticated != (provider.Status == "authenticated") || len(provider.AccountLabel) > 256 || len(provider.Error) > 512 {
+			return 0, errors.New("provider status is invalid")
+		}
+		seen[provider.Provider] = true
+		authenticated[provider.Provider] = provider.Authenticated
+	}
+	for _, provider := range []string{"openai-codex", "google", "cursor"} {
+		if !seen[provider] {
+			return 0, errors.New("provider snapshot is incomplete")
+		}
+	}
+	if len(models) > maxManagedProviderModels {
+		return 0, errors.New("provider model snapshot is too large")
+	}
+	modelKeys := make(map[string]bool, len(models))
+	for _, model := range models {
+		key := model.Provider + "\x00" + model.ID
+		if !validManagedProvider(model.Provider) || !seen[model.Provider] || !authenticated[model.Provider] || !managedIdentifierRE.MatchString(model.ID) || model.Name == "" || len(model.Name) > 512 || modelKeys[key] {
+			return 0, errors.New("provider model is invalid")
+		}
+		modelKeys[key] = true
+	}
+	var revision int64
+	err := s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		for _, provider := range providers {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_provider_status (provider,label,authenticated,status,account_label,updated_at,error)
+				VALUES (?,?,?,?,?,?,?)
+				ON CONFLICT(provider) DO UPDATE SET label=excluded.label,authenticated=excluded.authenticated,status=excluded.status,account_label=excluded.account_label,updated_at=excluded.updated_at,error=excluded.error`,
+				provider.Provider, provider.Label, boolInt(provider.Authenticated), provider.Status, nullIfEmpty(provider.AccountLabel), now, nullIfEmpty(provider.Error)); err != nil {
+				return err
+			}
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_provider_models WHERE provider=?`, provider.Provider); err != nil {
+				return err
+			}
+		}
+		for _, model := range models {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_provider_models (provider,model_id,name,available,updated_at) VALUES (?,?,?,?,?)`, model.Provider, model.ID, model.Name, boolInt(model.Available), now); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_settings SET auth_revision=auth_revision+1,updated_at=? WHERE singleton_id=1`, now); err != nil {
+			return err
+		}
+		return s.db.QueryRowContext(ctx, `SELECT auth_revision FROM managed_settings WHERE singleton_id=1`).Scan(&revision)
+	})
+	return revision, err
 }
 
 func (s *Store) GetCanonicalQuietRecipient(ctx context.Context) (string, error) {
@@ -624,6 +806,30 @@ func (s *Store) ManagedOperation(ctx context.Context, operationID string) (*Mana
 		return nil, errors.New("store is closed")
 	}
 	return scanManagedOperation(s.db.QueryRowContext(ctx, managedOperationSelect+` WHERE operation_id = ?`, operationID))
+}
+
+// ReplaceManagedOperationResponse terminalizes a previously reserved response
+// without retaining an unfinished operation after its local admission fails.
+func (s *Store) ReplaceManagedOperationResponse(ctx context.Context, operationID string, status int, headers map[string]string, body []byte) error {
+	if len(body) > 64*1024 {
+		return errors.New("managed replay response is too large")
+	}
+	encodedHeaders, err := json.Marshal(headers)
+	if err != nil {
+		return err
+	}
+	return s.runImmediate(ctx, func() error {
+		now := s.clock.Now()
+		result, execErr := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',response_status=?,response_headers_json=?,response_body=?,terminal_at=?,expires_at=? WHERE operation_id=? AND state='pending'`, status, string(encodedHeaders), string(body), formatTimestamp(now), formatTimestamp(now.Add(24*time.Hour)), operationID)
+		if execErr != nil {
+			return execErr
+		}
+		changed, execErr := result.RowsAffected()
+		if execErr != nil || changed != 1 {
+			return errors.New("managed operation is not pending")
+		}
+		return nil
+	})
 }
 
 func (s *Store) MarkManagedOperationTerminal(ctx context.Context, operationID string) error {

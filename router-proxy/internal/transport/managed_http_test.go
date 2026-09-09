@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -33,6 +34,180 @@ func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	server := httptest.NewServer(router)
 	t.Cleanup(func() { server.Close(); _ = router.Close(context.Background()); _ = durable.Close() })
 	return server, durable
+}
+
+type providerAuthHTTPRun struct {
+	events          chan managed.ProviderAuthEvent
+	responseStarted chan struct{}
+	release         chan struct{}
+	done            chan struct{}
+	mu              sync.Mutex
+	respondCount    int
+	finishOnce      sync.Once
+}
+
+func newProviderAuthHTTPRun() *providerAuthHTTPRun {
+	return &providerAuthHTTPRun{events: make(chan managed.ProviderAuthEvent, 4), responseStarted: make(chan struct{}, 1), release: make(chan struct{}), done: make(chan struct{})}
+}
+func (r *providerAuthHTTPRun) Events() <-chan managed.ProviderAuthEvent { return r.events }
+func (r *providerAuthHTTPRun) Respond(ctx context.Context, promptID, value string) error {
+	if promptID != "prompt-1" || value == "" {
+		return errors.New("invalid provider test response")
+	}
+	r.mu.Lock()
+	r.respondCount++
+	r.mu.Unlock()
+	select {
+	case r.responseStarted <- struct{}{}:
+	default:
+	}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.done:
+		return errors.New("provider test run closed")
+	}
+	r.events <- managed.ProviderAuthEvent{Kind: "terminal", OperationID: "123e4567-e89b-42d3-a456-426614174001", Provider: "openai-codex", Status: "succeeded", Providers: []store.ManagedProviderStatus{
+		{Provider: "openai-codex", Label: "ChatGPT", Authenticated: true, Status: "authenticated"},
+		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
+		{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
+	}, Models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}}}
+	close(r.events)
+	r.finish()
+	return nil
+}
+func (r *providerAuthHTTPRun) Cancel()     { r.finish() }
+func (r *providerAuthHTTPRun) Wait() error { <-r.done; return nil }
+func (r *providerAuthHTTPRun) finish()     { r.finishOnce.Do(func() { close(r.done) }) }
+
+type providerAuthHTTPHelper struct{ run *providerAuthHTTPRun }
+
+func (h providerAuthHTTPHelper) Start(_ context.Context, operationID, provider, action string) (managed.ProviderAuthRun, error) {
+	if operationID != "123e4567-e89b-42d3-a456-426614174001" || provider != "openai-codex" || action != "login" {
+		return nil, errors.New("unexpected provider test operation")
+	}
+	h.run.events <- managed.ProviderAuthEvent{Kind: "prompt", OperationID: operationID, Provider: provider, Prompt: &managed.ProviderAuthPrompt{ID: "prompt-1", Kind: "secret", Message: "Enter the requested sign-in value."}}
+	return h.run, nil
+}
+
+func TestProviderPromptResponseReservesWorkerWideReplayBeforeForwardingValue(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(ctx, database, store.Options{})
+	require.NoError(t, err)
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})
+	require.NoError(t, err)
+	run := newProviderAuthHTTPRun()
+	coordinator, err := managed.NewProviderAuthCoordinator(durable, manager, providerAuthHTTPHelper{run: run})
+	require.NoError(t, err)
+	router, err := New(Options{Store: durable, Managed: manager, ProviderAuth: coordinator})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	t.Cleanup(func() { server.Close(); coordinator.Close(); _ = router.Close(ctx); _ = durable.Close() })
+
+	login, err := http.NewRequest(http.MethodPost, server.URL+"/v1/provider-auth/openai-codex/login", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("X-Request-ID", "123e4567-e89b-42d3-a456-426614174001")
+	response, err := http.DefaultClient.Do(login)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, response.StatusCode)
+	_ = response.Body.Close()
+
+	request := func() *http.Request {
+		value, requestErr := http.NewRequest(http.MethodPost, server.URL+"/v1/provider-auth/operations/123e4567-e89b-42d3-a456-426614174001/response", strings.NewReader(`{"prompt_id":"prompt-1","value":"sentinel-never-persisted"}`))
+		require.NoError(t, requestErr)
+		value.Header.Set("Content-Type", "application/json")
+		value.Header.Set("X-Request-ID", "123e4567-e89b-42d3-a456-426614174002")
+		return value
+	}
+	first := make(chan *http.Response, 1)
+	go func() {
+		result, requestErr := http.DefaultClient.Do(request())
+		require.NoError(t, requestErr)
+		first <- result
+	}()
+	require.Eventually(t, func() bool {
+		select {
+		case <-run.responseStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	// The first request is still blocked in the helper. A duplicate must replay
+	// its accepted admission rather than forwarding a second secret value.
+	second, err := http.DefaultClient.Do(request())
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, second.StatusCode)
+	_ = second.Body.Close()
+	run.mu.Lock()
+	require.Equal(t, 1, run.respondCount)
+	run.mu.Unlock()
+	close(run.release)
+	completed := <-first
+	require.Equal(t, http.StatusAccepted, completed.StatusCode)
+	_ = completed.Body.Close()
+	require.Eventually(t, func() bool {
+		snapshot, snapshotErr := durable.ManagedProviderSnapshot(ctx)
+		return snapshotErr == nil && snapshot.AuthRevision == 1
+	}, time.Second, 10*time.Millisecond)
+	// The response value is never part of the durable operation body. Check the
+	// actual SQLite file rather than merely the public response projection.
+	rawDatabase, err := os.ReadFile(database)
+	require.NoError(t, err)
+	require.NotContains(t, string(rawDatabase), "sentinel-never-persisted")
+}
+
+func TestCompleteRouteMatrix(t *testing.T) {
+	type routeDeclaration struct {
+		Methods []string `json:"methods"`
+		Path    string   `json:"path"`
+		Managed bool     `json:"managed"`
+	}
+	type manifestDocument struct {
+		HTTP []routeDeclaration `json:"http"`
+	}
+	type routeMatrix struct {
+		Schema string `json:"schema"`
+		Routes []struct {
+			Method string `json:"method"`
+			Path   string `json:"path"`
+		} `json:"routes"`
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "router", "contract", "manifest.json"))
+	require.NoError(t, err)
+	matrixBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "mecha-rpc", "route-matrix.json"))
+	require.NoError(t, err)
+	var manifest manifestDocument
+	var matrix routeMatrix
+	require.NoError(t, json.Unmarshal(manifestBytes, &manifest))
+	require.NoError(t, json.Unmarshal(matrixBytes, &matrix))
+	require.Equal(t, "mecha.rpc.managed-route-matrix/v1", matrix.Schema)
+	declared := make(map[string]struct{})
+	for _, route := range manifest.HTTP {
+		if !route.Managed {
+			continue
+		}
+		for _, method := range route.Methods {
+			declared[method+" "+route.Path] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{})
+	for _, route := range matrix.Routes {
+		key := route.Method + " " + route.Path
+		t.Run(key, func(t *testing.T) {
+			_, present := declared[key]
+			require.True(t, present, "fixture route is absent from the managed manifest")
+			_, duplicate := seen[key]
+			require.False(t, duplicate, "fixture has a duplicate managed route")
+			seen[key] = struct{}{}
+		})
+	}
+	require.Equal(t, declared, seen, "every managed manifest method/route must appear exactly once in the fixture")
 }
 
 func TestCanonicalUUIDUsesTheStandardFiveGroups(t *testing.T) {
@@ -512,6 +687,49 @@ func TestManagedRestartAllErrorStaysWithinTheSafeRouteContract(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, candidate.status)
 	require.Equal(t, "INTERNAL", candidate.code)
 	require.NotContains(t, candidate.message, "dispatch")
+}
+
+func TestModelsAndDefaultModelUseTheDirectManagedEnvelope(t *testing.T) {
+	server, _ := newManagedHTTPTestServer(t)
+	modelsResponse, err := http.Get(server.URL + "/v1/models")
+	require.NoError(t, err)
+	defer modelsResponse.Body.Close()
+	require.Equal(t, http.StatusOK, modelsResponse.StatusCode)
+	var catalog struct {
+		AuthRevision int64               `json:"auth_revision"`
+		Models       []managed.Model     `json:"models"`
+		DefaultModel *store.ManagedModel `json:"default_model"`
+	}
+	require.NoError(t, json.NewDecoder(modelsResponse.Body).Decode(&catalog))
+	require.Zero(t, catalog.AuthRevision)
+	require.Nil(t, catalog.DefaultModel)
+	require.Contains(t, catalog.Models, managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true})
+
+	requestID := "123e4567-e89b-42d3-a456-426614174081"
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/settings/default-model", strings.NewReader(`{"model":{"provider":"openai-codex","id":"gpt-5.6-terra"}}`))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Request-ID", requestID)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), `"operation_id":"`+requestID+`"`)
+	require.NotContains(t, string(body), "credential")
+
+	// Exact request-ID replay does not need a second mutation and carries the
+	// original non-secret response.
+	replay, err := http.NewRequest(http.MethodPut, server.URL+"/v1/settings/default-model", strings.NewReader(`{"model":{"provider":"openai-codex","id":"gpt-5.6-terra"}}`))
+	require.NoError(t, err)
+	replay.Header = request.Header.Clone()
+	replayResponse, err := http.DefaultClient.Do(replay)
+	require.NoError(t, err)
+	defer replayResponse.Body.Close()
+	replayBody, err := io.ReadAll(replayResponse.Body)
+	require.NoError(t, err)
+	require.Equal(t, string(body), string(replayBody))
 }
 
 func sortedJSONKeys(values map[string]json.RawMessage) []string {

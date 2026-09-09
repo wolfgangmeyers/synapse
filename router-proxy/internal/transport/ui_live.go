@@ -68,6 +68,13 @@ func (r *Router) serveUILive(w http.ResponseWriter, req *http.Request) {
 		_ = conn.Close(websocket.StatusTryAgainLater, "UI-live connection limit reached")
 		return
 	}
+	if r.providerAuth != nil {
+		if prompt := r.providerAuth.CurrentPrompt(); prompt != nil {
+			// A reconnect receives its own current prompt. Do not rebroadcast it
+			// to existing UIs, which could make another browser resubmit a value.
+			r.uiLive.sendProvider(client, r.providerAuthFrame(*prompt))
+		}
+	}
 	defer func() {
 		r.uiLive.unsubscribe(client)
 		_ = conn.Close(websocket.StatusNormalClosure, "UI-live closed")
@@ -344,6 +351,70 @@ func (r *Router) recordCompleteHistory(ctx context.Context, agentID, category, l
 	entry, err := r.store.RecordManagedCompleteHistory(ctx, agentID, category, level, message, eventKey)
 	if err == nil && r.uiLive != nil {
 		r.uiLive.publishHistory("complete", map[string]any{"id": entry.ID, "at": entry.At, "level": entry.Level, "message": entry.Message})
+	}
+}
+
+// publishProviderAuth is the sole provider-live bridge. It projects only the
+// helper's bounded prompt metadata and terminal state; submitted values never
+// enter this function or any replay frame.
+func (r *Router) providerAuthFrame(event managed.ProviderAuthEvent) map[string]any {
+	frame := map[string]any{"type": "provider_auth_state", "protocol": uiLiveProtocol, "operation_id": event.OperationID, "provider": event.Provider, "status": event.Status}
+	if event.Error != "" {
+		frame["error"] = event.Error
+	}
+	if event.Kind == "prompt" && event.Prompt != nil {
+		prompt := map[string]any{"id": event.Prompt.ID, "kind": event.Prompt.Kind, "message": event.Prompt.Message}
+		if event.Prompt.Placeholder != "" {
+			prompt["placeholder"] = event.Prompt.Placeholder
+		}
+		if event.Prompt.URL != "" {
+			prompt["url"] = event.Prompt.URL
+		}
+		return map[string]any{"type": "provider_auth_prompt", "protocol": uiLiveProtocol, "operation_id": event.OperationID, "provider": event.Provider, "prompt": prompt}
+	}
+	return frame
+}
+
+func (r *Router) publishProviderAuth(event managed.ProviderAuthEvent) {
+	if r.uiLive == nil || event.OperationID == "" || event.Provider == "" {
+		return
+	}
+	r.uiLive.publishProvider(r.providerAuthFrame(event))
+}
+
+func (h *uiLiveHub) sendProvider(client *uiLiveClient, frame map[string]any) {
+	h.mu.Lock()
+	if h.closed || h.current == nil {
+		h.mu.Unlock()
+		return
+	}
+	if _, connected := h.peers[client]; !connected {
+		h.mu.Unlock()
+		return
+	}
+	frame["projection_version"] = h.current.version
+	h.mu.Unlock()
+	if !client.send(frame) {
+		h.unsubscribe(client)
+	}
+}
+
+func (h *uiLiveHub) publishProvider(frame map[string]any) {
+	h.mu.Lock()
+	if h.closed || h.current == nil {
+		h.mu.Unlock()
+		return
+	}
+	frame["projection_version"] = h.current.version
+	peers := make([]*uiLiveClient, 0, len(h.peers))
+	for peer := range h.peers {
+		peers = append(peers, peer)
+	}
+	h.mu.Unlock()
+	for _, peer := range peers {
+		if !peer.send(frame) {
+			h.unsubscribe(peer)
+		}
 	}
 }
 

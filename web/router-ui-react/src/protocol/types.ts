@@ -913,18 +913,28 @@ export interface HistoryEntryFrame {
   view: "quiet" | "complete";
   entry: ManagedHistoryEntry;
 }
+export interface ProviderAuthPrompt {
+  id: string;
+  kind: "text" | "secret" | "select" | "manual_code";
+  message: string;
+  placeholder?: string;
+  url?: string;
+}
 export interface ProviderAuthPromptFrame {
   type: "provider_auth_prompt";
   protocol: "mecha.web/v1";
   projection_version: number;
   operation_id: string;
-  prompt_id: string;
+  provider: "openai-codex" | "google" | "cursor";
+  prompt: ProviderAuthPrompt;
 }
 export interface ProviderAuthStateFrame {
   type: "provider_auth_state";
   protocol: "mecha.web/v1";
   projection_version: number;
   operation_id: string;
-  status: string;
+  provider: "openai-codex" | "google" | "cursor";
+  status: "pending" | "succeeded" | "failed" | "expired" | "cancelled";
+  error?: string;
 }
 export type UILiveFrame = ManagedAgentsSnapshotFrame | ManagedAgentDeltaFrame | ManagedAgentRemovedFrame | ManagedChildrenSnapshotFrame | HistoryEntryFrame | ProviderAuthPromptFrame | ProviderAuthStateFrame;

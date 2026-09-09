@@ -31,7 +31,7 @@ type managedHTTPError struct {
 func (e *managedHTTPError) Error() string { return e.code }
 
 func managedPath(path string) bool {
-	return path == "/v1/history" || path == "/v1/managed-directories" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/")
+	return path == "/v1/history" || path == "/v1/managed-directories" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/") || path == "/v1/models" || path == "/v1/settings/default-model" || path == "/v1/provider-auth" || strings.HasPrefix(path, "/v1/provider-auth/")
 }
 
 // handleManagedHTTP exposes direct local worker controls. Reachability is the
@@ -56,6 +56,21 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		return true
 	}
 	switch {
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/models":
+		r.handleModelsGET(w, req)
+		return true
+	case req.Method == http.MethodPut && req.URL.Path == "/v1/settings/default-model":
+		r.handleDefaultModelPUT(w, req)
+		return true
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/provider-auth":
+		r.handleProviderAuthGET(w, req)
+		return true
+	case req.Method == http.MethodPost && providerAuthActionPath(req.URL.Path) != "":
+		r.handleProviderAuthAction(w, req, providerAuthActionPath(req.URL.Path))
+		return true
+	case req.Method == http.MethodPost && providerAuthResponseID(req.URL.Path) != "":
+		r.handleProviderAuthPromptResponse(w, req, providerAuthResponseID(req.URL.Path))
+		return true
 	case req.Method == http.MethodGet && req.URL.Path == "/v1/history":
 		r.handleManagedHistoryGET(w, req)
 		return true
@@ -90,6 +105,283 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		r.writeManagedError(w, req, &managedHTTPError{404, "NOT_FOUND", "Resource was not found"})
 		return true
 	}
+}
+
+func (r *Router) handleModelsGET(w http.ResponseWriter, req *http.Request) {
+	catalog, err := r.managed.Models(req.Context())
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{503, "MODEL_CATALOG_UNAVAILABLE", "Models are not available"})
+		return
+	}
+	defaultModel, defaultErr := r.store.GetDefaultModel(req.Context())
+	if defaultErr != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Default model could not be read"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"auth_revision": catalog.AuthRevision, "models": catalog.Models, "default_model": defaultModel}, nil)
+}
+
+func (r *Router) handleDefaultModelPUT(w http.ResponseWriter, req *http.Request) {
+	requestID := req.Header.Get("X-Request-ID")
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 4096, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	canonicalPath := req.URL.Path
+	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
+	if existing, lookupErr := r.store.FindManagedOperation(req.Context(), req.Method, requestID); lookupErr == nil {
+		if existing.CanonicalPath != canonicalPath || existing.CanonicalBodyHash != hex.EncodeToString(bodyHash[:]) {
+			r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
+			return
+		}
+		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+		return
+	} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
+		return
+	}
+	if len(payload) != 1 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	raw, ok := payload["model"]
+	if !ok {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+		return
+	}
+	var provider, id string
+	clearing := string(raw) == "null"
+	if !clearing {
+		var input map[string]json.RawMessage
+		if json.Unmarshal(raw, &input) != nil || len(input) != 2 {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+			return
+		}
+		var providerErr, idErr error
+		provider, providerErr = managedString(input, "provider", true)
+		id, idErr = managedString(input, "id", true)
+		if providerErr != nil || idErr != nil {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+			return
+		}
+	}
+	catalog, catalogErr := r.managed.Models(req.Context())
+	if catalogErr != nil {
+		r.writeManagedError(w, req, &managedHTTPError{503, "MODEL_CATALOG_UNAVAILABLE", "Models are not available"})
+		return
+	}
+	var selected *managed.Model
+	if !clearing {
+		for _, candidate := range catalog.Models {
+			if candidate.Provider == provider && candidate.ID == id && candidate.Available {
+				candidateCopy := candidate
+				selected = &candidateCopy
+				break
+			}
+		}
+		if selected == nil {
+			r.writeManagedError(w, req, &managedHTTPError{422, "MODEL_UNAVAILABLE", "Model is not available"})
+			return
+		}
+	}
+	var stored *store.ManagedModel
+	if selected != nil {
+		stored = &store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}
+	}
+	effective, effectiveErr := managed.SelectModel(nil, stored, catalog)
+	if effectiveErr != nil {
+		r.writeManagedError(w, req, &managedHTTPError{422, "MODEL_UNAVAILABLE", "No default fallback is available"})
+		return
+	}
+	response, _ := json.Marshal(map[string]any{"operation_id": requestID, "default_model": stored, "effective_fallback": effective})
+	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8"}, ResponseBody: response}
+	if err := r.store.SetDefaultModelAndPutManagedOperation(req.Context(), stored, operation); err != nil {
+		var conflict *store.ManagedIdempotencyConflictError
+		if errors.As(err, &conflict) {
+			r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+			return
+		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Default model could not be saved"})
+		return
+	}
+	r.writeManagedRaw(w, req, http.StatusOK, operation.ResponseHeaders, response)
+}
+
+func (r *Router) handleProviderAuthGET(w http.ResponseWriter, req *http.Request) {
+	if r.providerAuth == nil {
+		r.writeManagedError(w, req, &managedHTTPError{503, "PROVIDER_AUTH_DISABLED", "Provider sign-in is not available"})
+		return
+	}
+	snapshot, err := r.providerAuth.Snapshot(req.Context())
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Provider state could not be read"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"auth_revision": snapshot.AuthRevision, "providers": snapshot.Providers}, nil)
+}
+
+func (r *Router) handleProviderAuthAction(w http.ResponseWriter, req *http.Request, actionPath string) {
+	if r.providerAuth == nil {
+		r.writeManagedError(w, req, &managedHTTPError{503, "PROVIDER_AUTH_DISABLED", "Provider sign-in is not available"})
+		return
+	}
+	requestID := req.Header.Get("X-Request-ID")
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 4096, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	canonicalPath := req.URL.Path
+	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
+	existing, lookupErr := r.store.FindManagedOperation(req.Context(), req.Method, requestID)
+	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
+		return
+	}
+	if existing != nil {
+		if existing.CanonicalPath != canonicalPath || existing.CanonicalBodyHash != hex.EncodeToString(bodyHash[:]) {
+			r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
+			return
+		}
+		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+		return
+	}
+	if len(payload) != 0 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	parts := strings.Split(actionPath, "/")
+	provider, action := parts[0], parts[1]
+	response, _ := json.Marshal(map[string]any{"operation_id": requestID, "provider": provider, "status": "pending"})
+	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "pending", ResponseStatus: http.StatusAccepted, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8"}, ResponseBody: response}
+	if err := r.store.PutManagedOperation(req.Context(), operation); err != nil {
+		var conflict *store.ManagedIdempotencyConflictError
+		if errors.As(err, &conflict) {
+			r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+			return
+		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not begin the operation"})
+		return
+	}
+	if err := r.providerAuth.Begin(req.Context(), requestID, provider, action); err != nil {
+		failure := &managedHTTPError{502, "PROVIDER_AUTH_UNAVAILABLE", "Provider sign-in could not be started"}
+		if errors.Is(err, managed.ErrProviderAuthBusy) {
+			failure = &managedHTTPError{409, "PROVIDER_AUTH_BUSY", "Another provider sign-in is already in progress"}
+		}
+		failureBody, _ := json.Marshal(map[string]any{"error": map[string]any{"code": failure.code, "message": failure.message, "details": map[string]any{}}, "request_id": requestID})
+		_ = r.store.ReplaceManagedOperationResponse(req.Context(), requestID, failure.status, map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, failureBody)
+		r.writeManagedError(w, req, failure)
+		return
+	}
+	// The coordinator terminalizes this durable operation after the helper has
+	// actually settled. Until then exact retries replay this accepted response
+	// and cannot launch another provider interaction.
+	r.writeManagedRaw(w, req, http.StatusAccepted, operation.ResponseHeaders, response)
+}
+
+func (r *Router) handleProviderAuthPromptResponse(w http.ResponseWriter, req *http.Request, operationID string) {
+	if r.providerAuth == nil {
+		r.writeManagedError(w, req, &managedHTTPError{503, "PROVIDER_AUTH_DISABLED", "Provider sign-in is not available"})
+		return
+	}
+	requestID := req.Header.Get("X-Request-ID")
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 8*1024, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	if len(payload) != 2 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	promptID, e2 := managedString(payload, "prompt_id", true)
+	value, e3 := managedString(payload, "value", true)
+	if e2 != nil || e3 != nil || len([]byte(value)) > 8*1024 {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_PROMPT_RESPONSE", "Provider sign-in response is invalid"})
+		return
+	}
+	canonicalPath := req.URL.Path
+	// The idempotency fingerprint intentionally excludes value. Values can be
+	// provider secrets, so neither raw bytes nor a secret-derived digest belongs
+	// in SQLite. Prompt consumption itself still makes an alternate value fail.
+	promptHash := sha256.Sum256([]byte("provider-prompt:" + operationID + ":" + promptID))
+	bodyHash := hex.EncodeToString(promptHash[:])
+	if existing, lookupErr := r.store.FindManagedOperation(req.Context(), req.Method, requestID); lookupErr == nil {
+		if existing.CanonicalPath != canonicalPath || existing.CanonicalBodyHash != bodyHash {
+			r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
+			return
+		}
+		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+		return
+	} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
+		return
+	}
+	response, _ := json.Marshal(map[string]any{"operation_id": operationID, "status": "accepted"})
+	// Reserve the secret-free replay record before forwarding the value. A retry
+	// that races the helper therefore returns the same accepted result and can
+	// never submit the prompt value a second time. The durable fingerprint omits
+	// the sensitive value by contract, while prompt consumption rejects a new
+	// request ID after the one permitted response.
+	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: bodyHash, State: "pending", ResponseStatus: http.StatusAccepted, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8"}, ResponseBody: response}
+	if err := r.store.PutManagedOperation(req.Context(), operation); err != nil {
+		var conflict *store.ManagedIdempotencyConflictError
+		if errors.As(err, &conflict) {
+			r.replayManagedOperation(w, req, requestID, canonicalPath, bodyHash)
+			return
+		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Provider sign-in response could not be recorded"})
+		return
+	}
+	if err := r.providerAuth.Respond(req.Context(), operationID, promptID, value); err != nil {
+		failure := &managedHTTPError{409, "PROMPT_UNAVAILABLE", "Provider sign-in prompt is no longer available"}
+		failureBody, _ := json.Marshal(map[string]any{"error": map[string]any{"code": failure.code, "message": failure.message, "details": map[string]any{}}, "request_id": requestID})
+		_ = r.store.ReplaceManagedOperationResponse(req.Context(), requestID, failure.status, map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, failureBody)
+		r.writeManagedError(w, req, failure)
+		return
+	}
+	r.writeManagedRaw(w, req, http.StatusAccepted, operation.ResponseHeaders, response)
+}
+
+func providerAuthResponseID(path string) string {
+	const prefix = "/v1/provider-auth/operations/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	if len(parts) != 2 || parts[1] != "response" || !canonicalUUID(parts[0]) {
+		return ""
+	}
+	return parts[0]
+}
+
+func providerAuthActionPath(path string) string {
+	const prefix = "/v1/provider-auth/"
+	if !strings.HasPrefix(path, prefix) || providerAuthResponseID(path) != "" {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	if len(parts) != 2 || (parts[1] != "login" && parts[1] != "logout") || !managedProvider(parts[0]) {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
+}
+
+func managedProvider(value string) bool {
+	return value == "openai-codex" || value == "google" || value == "cursor"
 }
 
 func decodeManagedObject(req *http.Request, max int, requireJSON bool) (map[string]json.RawMessage, []byte, error) {

@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -47,13 +49,16 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.managedUIDist, "managed-ui-dist", "", "built React UI directory served by the router")
 	var managedEnabled bool
 	flags.BoolVar(&managedEnabled, "managed", false, "enable router-managed Pi launches")
-	var managedPi, managedHome, managedSession, managedManifest, managedExtension, managedSubagents, managedRoots, managedRecipient string
+	var managedPi, managedHome, managedSession, managedManifest, managedExtension, managedSubagents, managedCursorExtension, managedAuthHelper, managedRuntimeRoot, managedRoots, managedRecipient string
 	flags.StringVar(&managedPi, "managed-pi", "", "installed Pi executable")
 	flags.StringVar(&managedHome, "managed-home", "", "managed Pi HOME root")
 	flags.StringVar(&managedSession, "managed-session-root", "", "managed Pi session root")
 	flags.StringVar(&managedManifest, "managed-manifest", "", "managed tool manifest")
 	flags.StringVar(&managedExtension, "managed-mecha-rpc", "", "fixed mecha-rpc extension")
 	flags.StringVar(&managedSubagents, "managed-pi-subagents", "", "checked pi-subagents extension")
+	flags.StringVar(&managedCursorExtension, "managed-cursor-extension", "", "fixed pi-cursor-sdk extension")
+	flags.StringVar(&managedAuthHelper, "managed-auth-helper", "", "fixed provider auth helper entry")
+	flags.StringVar(&managedRuntimeRoot, "managed-runtime-root", "", "checked project runtime root")
 	flags.StringVar(&managedRoots, "managed-cwd-roots", "", "comma-separated allowed working-directory roots")
 	flags.StringVar(&managedRecipient, "managed-quiet-recipient", "", "canonical quiet recipient")
 	if err := flags.Parse(args); err != nil {
@@ -83,7 +88,7 @@ func parseConfig(args []string) (config, error) {
 	if result.policyTimeout <= 0 {
 		return config{}, errors.New("--policy-timeout must be positive")
 	}
-	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
+	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 
@@ -128,6 +133,7 @@ func main() {
 	defer logWriter.Close()
 	logger := eventLogger(logWriter, os.Stderr)
 	var managedManager *managed.Manager
+	var providerAuth *managed.ProviderAuthCoordinator
 	if options.managed.Enabled {
 		if err := durable.SetCanonicalQuietRecipient(ctx, options.managed.CanonicalQuietRecipientID); err != nil {
 			_, _ = attachmentsStore.Sweep(nil)
@@ -152,14 +158,26 @@ func main() {
 			_ = durable.Close()
 			log.Fatal(rootErr)
 		}
-		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}), RootControlHandlers: rootHandlers})
+		managedManager, err = managed.NewManager(managed.ManagerOptions{Store: durable, Config: options.managed, Manifest: manifest, ProcessFactory: managedProcessFactory(), RPCFactory: managedRPCFactory(), CatalogSource: managed.StoreCatalogSource{Store: durable}, RootControlHandlers: rootHandlers})
+		if err != nil {
+			_, _ = attachmentsStore.Sweep(nil)
+			_ = durable.Close()
+			log.Fatal(err)
+		}
+		nodeExecutable, nodeErr := exec.LookPath("node")
+		if nodeErr != nil || !filepath.IsAbs(nodeExecutable) {
+			_, _ = attachmentsStore.Sweep(nil)
+			_ = durable.Close()
+			log.Fatal("managed provider helper requires an absolute Node executable")
+		}
+		providerAuth, err = managed.NewProviderAuthCoordinator(durable, managedManager, fixedAuthHelper{config: options.managed, nodeExecutable: nodeExecutable})
 		if err != nil {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()
 			log.Fatal(err)
 		}
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, StaticUIRoot: options.managedUIDist})
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()

@@ -1,0 +1,21 @@
+{
+  "schema": "mecha.rpc.managed-route-matrix/v1",
+  "routes": [
+    {"method":"GET","path":"/v1/managed-agents"},
+    {"method":"POST","path":"/v1/managed-agents"},
+    {"method":"GET","path":"/v1/managed-directories"},
+    {"method":"GET","path":"/v1/history"},
+    {"method":"POST","path":"/v1/managed-agents/restart-all"},
+    {"method":"GET","path":"/v1/managed-agents/{id}"},
+    {"method":"GET","path":"/v1/managed-agents/{id}/children"},
+    {"method":"DELETE","path":"/v1/managed-agents/{id}"},
+    {"method":"POST","path":"/v1/managed-agents/{agent_id}/restart"},
+    {"method":"POST","path":"/v1/managed-agents/{id}/reset"},
+    {"method":"GET","path":"/v1/models"},
+    {"method":"PUT","path":"/v1/settings/default-model"},
+    {"method":"GET","path":"/v1/provider-auth"},
+    {"method":"POST","path":"/v1/provider-auth/{provider}/login"},
+    {"method":"POST","path":"/v1/provider-auth/{provider}/logout"},
+    {"method":"POST","path":"/v1/provider-auth/operations/{id}/response"}
+  ]
+}

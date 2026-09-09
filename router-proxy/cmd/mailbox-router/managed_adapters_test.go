@@ -28,6 +28,19 @@ func TestManagedStartupUsesOnlyCoreLaunchInputs(t *testing.T) {
 	require.Error(t, validateManagedStartup(config))
 }
 
+func TestHelperEventDecoderNeverRelaysChildOwnedStrings(t *testing.T) {
+	event, ok := decodeHelperEvent([]byte(`{"type":"prompt","operation_id":"operation-1","provider":"google","prompt":{"id":"prompt-1","kind":"secret","message":"sentinel-secret","placeholder":"sentinel-secret"}}`))
+	require.True(t, ok)
+	require.NotNil(t, event.Prompt)
+	require.NotContains(t, event.Prompt.Message, "sentinel-secret")
+	require.Empty(t, event.Prompt.Placeholder)
+	failed, ok := decodeHelperEvent([]byte(`{"type":"terminal","operation_id":"operation-1","provider":"google","status":"failed","error":"sentinel-secret"}`))
+	require.True(t, ok)
+	require.Equal(t, "Provider sign-in did not complete", failed.Error)
+	_, ok = decodeHelperEvent([]byte(`{"type":"state","operation_id":"operation-1","provider":"google","status":"sentinel-secret"}`))
+	require.False(t, ok)
+}
+
 func TestParseManagedRootsDropsEmptyValues(t *testing.T) {
 	require.Equal(t, []string{"/one", "/two"}, parseManagedRoots(" /one, ,/two "))
 }

@@ -185,6 +185,24 @@ export function isManagedChildrenProjection(value: unknown): value is ManagedChi
   return isExactRecord(value, ["agent_id", "source", "lifecycle_version", "recovery_state", "children"]) && isAgentId(value.agent_id) && value.source === "router-managed" && isSafeInteger(value.lifecycle_version, 0) && (value.recovery_state === "current" || value.recovery_state === "reconstructing") && Array.isArray(value.children) && value.children.length <= 999 && value.children.every(isManagedChild);
 }
 
+function isProviderName(value: unknown): value is "openai-codex" | "google" | "cursor" { return value === "openai-codex" || value === "google" || value === "cursor"; }
+function isSafeProviderURL(value: unknown): boolean {
+  if (!isSafeString(value, 1, 2048)) return false;
+  try {
+    const url = new URL(value);
+    // Provider links are informational only, but keeping the boundary strict
+    // prevents a live frame from turning the router UI into a credential link.
+    return url.protocol === "https:" && url.hostname !== "" && url.username === "" && url.password === "" && url.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function isProviderPrompt(value: unknown): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "kind", "message", "placeholder", "url"]) || !isSafeString(value.id, 1, 128) || typeof value.kind !== "string" || !["text", "secret", "select", "manual_code"].includes(value.kind) || !isSafeString(value.message, 1, 512)) return false;
+  return (value.placeholder === undefined || isSafeString(value.placeholder, 0, 256)) && (value.url === undefined || isSafeProviderURL(value.url));
+}
+
 function isHistoryEntry(value: unknown): boolean {
   return isRecord(value) && hasOnlyKeys(value, ["id", "at", "level", "message"])
     && isSafeString(value.id, 1, 128)
@@ -201,10 +219,9 @@ export function isUILiveFrame(value: unknown): value is UILiveFrame {
   if (value.type === "managed_agent_delta") return isExactRecord(value, ["type", "protocol", "projection_version", "base_version", "agent_id", "changes"]) && isSafeInteger(value.base_version, 0) && isAgentId(value.agent_id) && isManagedAgent(value.changes) && value.changes.agent_id === value.agent_id;
   if (value.type === "managed_agent_removed") return isExactRecord(value, ["type", "protocol", "projection_version", "base_version", "agent_id"]) && isSafeInteger(value.base_version, 0) && isAgentId(value.agent_id);
   if (value.type === "history_entry") return isExactRecord(value, ["type", "protocol", "projection_version", "view", "entry"]) && (value.view === "quiet" || value.view === "complete") && isHistoryEntry(value.entry);
-  // Provider frame names are reserved for P4. Their strict parsing keeps P3
-  // forward-compatible without adding provider enrollment or route authority.
-  if (value.type === "provider_auth_prompt") return isExactRecord(value, ["type", "protocol", "projection_version", "operation_id", "prompt_id"]) && isSafeString(value.operation_id, 1, 128) && isSafeString(value.prompt_id, 1, 128);
-  return value.type === "provider_auth_state" && isExactRecord(value, ["type", "protocol", "projection_version", "operation_id", "status"]) && isSafeString(value.operation_id, 1, 128) && isSafeString(value.status, 1, 64);
+  if (value.type === "provider_auth_prompt") return isExactRecord(value, ["type", "protocol", "projection_version", "operation_id", "provider", "prompt"]) && isSafeString(value.operation_id, 1, 128) && isProviderName(value.provider) && isProviderPrompt(value.prompt);
+  if (value.type === "provider_auth_state") return isRecord(value) && hasOnlyKeys(value, ["type", "protocol", "projection_version", "operation_id", "provider", "status", "error"]) && isSafeString(value.operation_id, 1, 128) && isProviderName(value.provider) && typeof value.status === "string" && ["pending", "succeeded", "failed", "expired", "cancelled"].includes(value.status) && (value.error === undefined || isSafeString(value.error, 1, 512));
+  return false;
 }
 
 function isAgentRole(value: unknown): value is "agent" | "user_interaction" { return value === "agent" || value === "user_interaction"; }
