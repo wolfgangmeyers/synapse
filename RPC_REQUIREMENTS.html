@@ -244,6 +244,7 @@
       <h1>Router-managed Pi RPC requirements</h1>
       <p class="summary">Build an alternative way to run workers and the supervisor. In this brief, RPC means the router starts Pi directly and communicates with it without a terminal window. This is direction for investigation and product planning. It is not a validated technical design.</p>
       <p class="note">Tmux is the supported legacy compatibility path for this delivery. Its future deprecation and removal are direction, not implementation scope here unless another confirmed requirement already requires them.</p>
+      <p class="note">Authority hierarchy: requirements &gt; specification &gt; implementation plan.</p>
       <nav class="document-links" aria-label="Document set">
         <a href="RPC_RESEARCH.html">Research</a>
         <a href="RPC_SPEC.html">Specification</a>
@@ -303,7 +304,7 @@
           <li>Research must prove the router-to-agent delivery path for later control messages and define the immediate tool return honestly. A failed operation or failed later delivery must be visible in complete history.</li>
           <li>Fire-and-forget calls may use custom session messages with <code>customType</code> and details.</li>
           <li>The router does not use <code>Origin</code> or host origin as authorization for the managed HTTP or WebSocket surface. Requests may come from any host or origin that can reach the router, and non-browser clients without <code>Origin</code> remain supported. This does not change bind, listen, exposure, Tailscale, or public-network configuration.</li>
-          <li>Browser-session authentication, request correlation, CSRF protection for cookie-based state-changing requests, WebSocket session authorization, and secret redaction establish authority. Origin does not. This adds no new authentication framework.</li>
+          <li><strong>Binding Phase 3 and Phase 4 requirement:</strong> add no sessions, cookies, CSRF, CORS/Origin authorization, or browser credentials. Local unauthenticated reachability remains the authority boundary.</li>
           <li>The supervisor is an ordinary worker for now. No lifecycle behavior depends on the worker name <code>supervisor</code>.</li>
         </ul>
       </div>
@@ -492,7 +493,7 @@
           <li>Every router capability or tool required by the parity inventory is registered by the thin extension. An inventory omission cannot create a parity gap.</li>
           <li>A control request never enters ordinary mailbox or conversational handling.</li>
           <li>A malformed envelope or unknown operation is rejected without invoking an internal handler. The rejection appears in complete history.</li>
-          <li>Valid authenticated managed HTTP requests from two unrelated HTTP(S) origins both succeed, as does a valid non-browser request without <code>Origin</code>. Missing or invalid browser session, WebSocket session ticket, or CSRF proof fails independently of Origin before an effect or upgrade.</li>
+          <li>Valid unauthenticated managed HTTP requests from two unrelated HTTP(S) origins both succeed, as does a valid non-browser request without <code>Origin</code>. Phase 3 and Phase 4 add no session, cookie, CSRF, CORS/Origin authorization, or browser-credential gate.</li>
           <li>A caller cannot spoof sender identity. The router uses the identity bound to the router-managed process.</li>
           <li>Each accepted request invokes its matching handler once. A duplicate request does not invoke the handler again.</li>
           <li>Every thin-extension tool returns after emitting its control request. It never waits synchronously for router execution, a result, or an error.</li>
