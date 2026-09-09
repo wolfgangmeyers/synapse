@@ -42,6 +42,10 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not restart managed agents"})
 			return true
 		}
+		if req.Method == http.MethodDelete && managedTerminatePath(req.URL.Path) != "" {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not terminate the managed agent"})
+			return true
+		}
 		return false
 	}
 	switch {
@@ -56,6 +60,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		return true
 	case req.Method == http.MethodPost && managedRestartPath(req.URL.Path) != "":
 		r.handleManagedRestart(w, req, managedRestartPath(req.URL.Path))
+		return true
+	case req.Method == http.MethodDelete && managedTerminatePath(req.URL.Path) != "":
+		r.handleManagedTerminate(w, req, managedTerminatePath(req.URL.Path))
 		return true
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/managed-agents/"):
 		r.handleManagedAgentGET(w, req)
@@ -286,6 +293,18 @@ func managedResetPath(path string) string {
 	return id
 }
 
+func managedTerminatePath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	id := strings.TrimPrefix(path, prefix)
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
 func managedRestartPath(path string) string {
 	const prefix = "/v1/managed-agents/"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/restart") {
@@ -375,6 +394,63 @@ func (r *Router) handleManagedReset(w http.ResponseWriter, req *http.Request, ag
 		return
 	}
 	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+}
+
+// handleManagedTerminate is intentionally a no-body DELETE. It has the same
+// local-only boundary and stored-operation replay rules as reset/restart, but
+// it never permits JSON, CORS preflight, or a caller-supplied cleanup shape.
+func (r *Router) handleManagedTerminate(w http.ResponseWriter, req *http.Request, agentID string) {
+	requestID := req.Header.Get("X-Request-ID")
+	if requestID == "" {
+		r.writeManagedError(w, req, &managedHTTPError{400, "MISSING_REQUEST_ID", "X-Request-ID is required"})
+		return
+	}
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(req.Body, 2))
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_JSON", "Request body is invalid"})
+		return
+	}
+	if len(body) != 0 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_JSON", "Request body must be empty"})
+		return
+	}
+	canonicalPath := req.URL.Path
+	if r.managedPathCanonicalizer != nil {
+		canonicalPath = r.managedPathCanonicalizer(req)
+	}
+	// The empty physical body has one canonical semantic representation for
+	// replay comparison. It is not an accepted JSON request body.
+	bodyHash := sha256.Sum256(canonicalManagedBody(map[string]json.RawMessage{}))
+	result, terminateErr := r.managed.Terminate(req.Context(), managed.TerminateRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	if terminateErr != nil {
+		r.writeManagedError(w, req, managedTerminationError(terminateErr))
+		return
+	}
+	if result.Operation == nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the termination operation"})
+		return
+	}
+	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+}
+
+func managedTerminationError(err error) error {
+	var missing *store.ManagedAgentNotFoundError
+	if errors.As(err, &missing) {
+		return &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"}
+	}
+	var conflict *store.ManagedLifecycleConflictError
+	if errors.As(err, &conflict) {
+		return &managedHTTPError{409, "CONFLICT", "A managed lifecycle operation is already in progress"}
+	}
+	var idempotency *store.ManagedIdempotencyConflictError
+	if errors.As(err, &idempotency) {
+		return &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"}
+	}
+	return &managedHTTPError{500, "INTERNAL", "Router could not terminate the managed agent"}
 }
 
 func managedResetError(err error) error {

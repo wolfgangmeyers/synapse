@@ -328,7 +328,14 @@ func validateManagedLifecycleRetryPredecessorTx(ctx context.Context, db *sql.DB,
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_lifecycle_actions WHERE retry_of=?`, input.RetryOf).Scan(&successor); err != nil {
 		return err
 	}
-	if successor != 0 || predecessor.SourceFence == nil || input.SourceFence == nil || !sameManagedRestartFence(*predecessor.SourceFence, *input.SourceFence) {
+	if successor != 0 {
+		return &ManagedLifecycleConflictError{AgentID: input.AgentID}
+	}
+	// A terminate admitted before launch binds has no source fence. Its retry
+	// is still safe because no process group can be inferred or signalled.
+	if input.Kind == "terminate" && predecessor.SourceFence == nil && input.SourceFence == nil {
+		// continue with the newest-predecessor and stage checks below
+	} else if predecessor.SourceFence == nil || input.SourceFence == nil || !sameManagedRestartFence(*predecessor.SourceFence, *input.SourceFence) {
 		return &ManagedLifecycleConflictError{AgentID: input.AgentID}
 	}
 	var newest string
@@ -371,7 +378,7 @@ func (s *Store) ClaimManagedLifecycleRecovery(ctx context.Context, actionID, own
 		if lifecycleTargetStage(action.Stage) && action.TargetFence != nil {
 			fence = action.TargetFence
 		}
-		if fence == nil || !validManagedRuntimeFence(*fence) {
+		if (fence == nil || !validManagedRuntimeFence(*fence)) && action.Kind != "terminate" {
 			return &ManagedRestartStaleError{AgentID: action.AgentID}
 		}
 		now := formatTimestamp(s.clock.Now())
@@ -380,8 +387,14 @@ func (s *Store) ClaimManagedLifecycleRecovery(ctx context.Context, actionID, own
 			prefix = "target_"
 		}
 		args := []any{owner, now, now, actionID, action.State, action.Stage}
-		args = append(args, managedFenceValues(*fence)[1:]...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET recovery_owner=?,recovery_claimed_at=?,updated_at=? WHERE action_id=? AND execution_owner='lifecycle' AND state=? AND stage=? AND recovery_owner IS NULL AND recovery_claimed_at IS NULL AND `+managedLifecycleFenceWhere(prefix), args...)
+		where := `action_id=? AND execution_owner='lifecycle' AND state=? AND stage=? AND recovery_owner IS NULL AND recovery_claimed_at IS NULL AND `
+		if fence == nil {
+			where += `source_pi_session_id IS NULL AND source_session_epoch IS NULL AND source_process_pid IS NULL AND source_process_start_marker IS NULL AND source_process_incarnation IS NULL AND source_runtime_generation IS NULL AND source_manifest_revision IS NULL AND source_manifest_hash IS NULL`
+		} else {
+			where += managedLifecycleFenceWhere(prefix)
+			args = append(args, managedFenceValues(*fence)[1:]...)
+		}
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET recovery_owner=?,recovery_claimed_at=?,updated_at=? WHERE `+where, args...)
 		if err != nil {
 			return err
 		}
@@ -392,7 +405,10 @@ func (s *Store) ClaimManagedLifecycleRecovery(ctx context.Context, actionID, own
 			}
 			return &ManagedRestartStaleError{AgentID: action.AgentID}
 		}
-		claim = &ManagedLifecycleRecoveryClaim{ActionID: actionID, Owner: owner, State: action.State, Stage: action.Stage, ClaimedAt: now, Fence: *fence}
+		claim = &ManagedLifecycleRecoveryClaim{ActionID: actionID, Owner: owner, State: action.State, Stage: action.Stage, ClaimedAt: now}
+		if fence != nil {
+			claim.Fence = *fence
+		}
 		return nil
 	})
 	return claim, err

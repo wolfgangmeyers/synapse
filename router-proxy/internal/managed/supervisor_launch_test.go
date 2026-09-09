@@ -15,22 +15,35 @@ import (
 )
 
 type launchProcess struct {
-	identity ProcessIdentity
-	stopped  chan struct{}
-	waitErr  error
-	once     sync.Once
+	identity  ProcessIdentity
+	stopped   chan struct{}
+	waitErr   error
+	once      sync.Once
+	stopMu    sync.Mutex
+	stopCalls int
 }
 
 type nopWriteCloser struct{ io.Writer }
 
 func (nopWriteCloser) Close() error { return nil }
 
-func (p *launchProcess) Identity() ProcessIdentity  { return p.identity }
-func (p *launchProcess) Stdin() io.WriteCloser      { return nopWriteCloser{io.Discard} }
-func (p *launchProcess) Stdout() io.ReadCloser      { return io.NopCloser(strings.NewReader("")) }
-func (p *launchProcess) Wait() error                { <-p.stopped; return p.waitErr }
-func (p *launchProcess) Reap()                      { p.once.Do(func() { close(p.stopped) }) }
-func (p *launchProcess) Stop(context.Context) error { p.Reap(); return nil }
+func (p *launchProcess) Identity() ProcessIdentity { return p.identity }
+func (p *launchProcess) Stdin() io.WriteCloser     { return nopWriteCloser{io.Discard} }
+func (p *launchProcess) Stdout() io.ReadCloser     { return io.NopCloser(strings.NewReader("")) }
+func (p *launchProcess) Wait() error               { <-p.stopped; return p.waitErr }
+func (p *launchProcess) Reap()                     { p.once.Do(func() { close(p.stopped) }) }
+func (p *launchProcess) Stop(context.Context) error {
+	p.stopMu.Lock()
+	p.stopCalls++
+	p.stopMu.Unlock()
+	p.Reap()
+	return nil
+}
+func (p *launchProcess) Stops() int {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+	return p.stopCalls
+}
 
 type launchRPC struct {
 	session                string
@@ -44,6 +57,8 @@ type launchRPC struct {
 	policyEnvelope         map[string]any
 	snapshotEnvelope       map[string]any
 	failAt                 string
+	abortCalls             int
+	abortErr               error
 	once                   sync.Once
 }
 
@@ -126,6 +141,10 @@ func (r *launchRPC) Prompt(ctx context.Context, _ string) error {
 		}
 	}
 	return nil
+}
+func (r *launchRPC) Abort(context.Context) error {
+	r.abortCalls++
+	return r.abortErr
 }
 func (r *launchRPC) Close() error { return nil }
 

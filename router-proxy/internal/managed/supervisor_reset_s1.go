@@ -525,12 +525,29 @@ func (m *Manager) RecoverPendingManagedLaunches(ctx context.Context) error {
 	return nil
 }
 
-// RecoverManagedLifecycleControls runs after legacy 025 recovery. It claims
-// lifecycle-owned reset rows, then lifecycle-owned direct restarts; neither
-// recovery path scans desired_state for generic process work.
+// RecoverManagedLifecycleControls resumes termination first: a durable
+// terminate tombstone has already cancelled root controls and must outrank any
+// reset or restart recovery that could otherwise revive its process.
 func (m *Manager) RecoverManagedLifecycleControls(ctx context.Context) error {
 	if err := m.store.ClearManagedLifecycleRecoveryClaims(ctx); err != nil {
 		return err
+	}
+	terminations, err := m.store.ManagedTerminationActions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, action := range terminations {
+		lane := m.laneFor(action.AgentID)
+		lane.serial.Lock()
+		owner, idErr := m.ids.Next()
+		if idErr != nil {
+			lane.serial.Unlock()
+			return idErr
+		}
+		if _, claimErr := m.store.ClaimManagedLifecycleRecovery(ctx, action.ActionID, owner); claimErr == nil {
+			m.recoverManagedTerminationActionInLane(action)
+		}
+		lane.serial.Unlock()
 	}
 	actions, err := m.store.ManagedResetActions(ctx)
 	if err != nil {

@@ -17,6 +17,8 @@ import (
 )
 
 var ErrReadinessBacklogFull = errors.New("managed readiness receipt backlog is full")
+var ErrAbortResponseMalformed = errors.New("Pi Abort response is malformed")
+var ErrAbortResponseRejected = errors.New("Pi Abort response was not successful")
 var rootControlUUIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type RPC interface {
@@ -26,6 +28,9 @@ type RPC interface {
 	WaitForReceipt(context.Context, string, string, int, int64, string) error
 	GetActiveTools(context.Context) ([]string, error)
 	Prompt(context.Context, string) error
+	// Abort asks Pi to stop the current turn. Callers must still reap the
+	// exact owned process group when this RPC times out or fails.
+	Abort(context.Context) error
 	Close() error
 }
 
@@ -377,6 +382,36 @@ func unwrap(value map[string]any) map[string]any {
 func (c *rpcClient) GetState(ctx context.Context) (map[string]any, error) {
 	value, err := c.call(ctx, "get_state", nil)
 	return unwrap(value), err
+}
+
+// Abort intentionally uses the public wire command rather than a prompt
+// wrapper. The response is part of the ownership proof: only Pi's typed,
+// successful Abort acknowledgement counts before the caller reaps its group.
+func (c *rpcClient) Abort(ctx context.Context) error {
+	value, err := c.call(ctx, "abort", nil)
+	if err != nil {
+		return err
+	}
+	return validateAbortResponse(value)
+}
+
+func validateAbortResponse(value map[string]any) error {
+	if value == nil {
+		return ErrAbortResponseMalformed
+	}
+	typ, typeOK := value["type"].(string)
+	command, commandOK := value["command"].(string)
+	success, successOK := value["success"].(bool)
+	if !typeOK || typ != "response" || !commandOK || command != "abort" || !successOK {
+		return ErrAbortResponseMalformed
+	}
+	if !success {
+		return ErrAbortResponseRejected
+	}
+	if responseError, present := value["error"]; present && responseError != nil {
+		return ErrAbortResponseRejected
+	}
+	return nil
 }
 func (c *rpcClient) GetCommands(ctx context.Context) ([]string, error) {
 	value, err := c.call(ctx, "get_commands", nil)

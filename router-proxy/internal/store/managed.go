@@ -673,6 +673,24 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 		state, stage := "admitted", "admission"
 		if reservation.Kind == "terminate" {
 			state, stage = "terminating", "abort"
+			if reservation.RetryOf != "" {
+				predecessor, predecessorErr := managedLifecycleActionForTx(ctx, s.db, reservation.RetryOf)
+				if predecessorErr != nil {
+					return predecessorErr
+				}
+				// A retry resumes the exact safe cleanup boundary. It must not send a
+				// second Abort after a file/direct-mail/durable-write failure.
+				switch predecessor.Stage {
+				case "abort", "terminate_reap":
+					state = "terminating"
+					stage = predecessor.Stage
+				case "direct_mail_retire", "agent_cleanup", "durable_write":
+					state = "cleanup"
+					stage = predecessor.Stage
+				default:
+					return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
+				}
+			}
 		}
 		var sourceFence *ManagedRuntimeFence
 		if validManagedRuntimeFence(reservation.Fence) {
@@ -703,24 +721,43 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 		if reservation.Kind != "terminate" && !sameManagedRestartFence(restartFenceFromAgent(agent), reservation.Fence) {
 			return &ManagedAgentNotReadyError{AgentID: reservation.AgentID}
 		}
+		// A completed termination removes the agent row. A retained failed
+		// tombstone may only be resumed through its recorded retry lineage.
+		if reservation.Kind == "terminate" && agent.DesiredState == "terminated" && reservation.RetryOf == "" {
+			return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
+		}
 
 		var activeID, activeKind string
 		err = s.db.QueryRowContext(ctx, `SELECT action_id,kind FROM managed_lifecycle_actions WHERE agent_id=? AND state IN ('admitted','awaiting_settle','stopping_source','starting_target','awaiting_target_ready','old_artifact_cleanup','terminating','cleanup')`, reservation.AgentID).Scan(&activeID, &activeKind)
 		if err == nil {
-			if (reservation.Kind != "reset" && reservation.Kind != "terminate") || activeKind != "restart" {
-				return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
-			}
 			active, activeErr := managedLifecycleActionForTx(ctx, s.db, activeID)
 			if activeErr != nil {
 				return activeErr
 			}
-			if err := s.terminalizeLifecycleActionTx(ctx, active, "superseded", "SUPERSEDED_BY_HIGHER_ACTION", "lifecycle action superseded by a higher priority action"); err != nil {
-				return err
-			}
-			// A legacy bridge cannot remain live after its linked operation becomes
-			// terminal; this also makes late 025 callbacks durable no-ops.
-			if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE operation_id=?`, active.OperationID); err != nil {
-				return err
+			if reservation.Kind == "terminate" && (activeKind == "restart" || activeKind == "reset") {
+				terminalState, code, message := "superseded", "SUPERSEDED_BY_HIGHER_ACTION", "lifecycle action superseded by a higher priority action"
+				if activeKind == "reset" && active.State == "admitted" && active.Stage == "admission" {
+					terminalState, code, message = "cancelled", "CANCELLED_BY_HIGHER_ACTION", "lifecycle action cancelled before external work"
+				}
+				if err := s.terminalizeLifecycleActionTx(ctx, active, terminalState, code, message); err != nil {
+					return err
+				}
+				// A legacy bridge cannot remain live after its linked operation becomes
+				// terminal; this also makes late 025 callbacks durable no-ops.
+				if activeKind == "restart" {
+					if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE operation_id=?`, active.OperationID); err != nil {
+						return err
+					}
+				}
+			} else if reservation.Kind == "reset" && activeKind == "restart" {
+				if err := s.terminalizeLifecycleActionTx(ctx, active, "superseded", "SUPERSEDED_BY_HIGHER_ACTION", "lifecycle action superseded by a higher priority action"); err != nil {
+					return err
+				}
+				if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE operation_id=?`, active.OperationID); err != nil {
+					return err
+				}
+			} else {
+				return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -743,6 +780,12 @@ func (s *Store) ReserveManagedLifecycle(ctx context.Context, reservation Managed
 			return err
 		}
 		if reservation.Kind == "terminate" {
+			// This transaction is the cancellation fence. Root-control workers
+			// inspect their durable rows before doing any external append, so they
+			// cannot publish a result after termination has been admitted.
+			if err = s.cancelManagedControlRequestsTx(ctx, reservation.AgentID, "CANCELLED_BY_TERMINATE", now); err != nil {
+				return err
+			}
 			_, err = s.db.ExecContext(ctx, `UPDATE managed_agents SET desired_state='terminated',lifecycle_state='terminating',accepting_prompts=0,updated_at=? WHERE agent_id=?`, now, reservation.AgentID)
 			if err == nil {
 				hasLink, linkErr := managedLaunchOperationColumnTx(ctx, s.db)
@@ -804,30 +847,35 @@ func (s *Store) ManagedLifecycleAction(ctx context.Context, actionID string) (*M
 	return managedLifecycleActionForTx(ctx, s.db, actionID)
 }
 
-// CompleteManagedTermination is the final durable cleanup transaction. The
-// direct-mail owner is invoked before this boundary; it retains ordinary mail
-// and immutable snapshots while this method removes only managed lifecycle
-// records and the managed row.
+// CompleteManagedTermination is the final all-or-nothing cleanup transaction.
+// The executor reaches it only after it has retired direct-mail attempts and
+// unlinked every owned session artifact; ordinary mailbox history is purposely
+// not touched by this managed-runtime cleanup.
 func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string) error {
 	return s.runImmediate(ctx, func() error {
 		action, err := managedLifecycleActionForTx(ctx, s.db, actionID)
 		if err != nil {
 			return err
 		}
-		if action.Kind != "terminate" || action.AgentID == "" {
+		if action.Kind != "terminate" || action.State != "cleanup" || action.Stage != "durable_write" || action.AgentID == "" {
 			return &ManagedRestartStaleError{AgentID: action.AgentID}
 		}
-		var name string
-		if err := s.db.QueryRowContext(ctx, `SELECT name FROM managed_agents WHERE agent_id=? AND desired_state='terminated'`, action.AgentID).Scan(&name); err != nil {
+		if err := s.completeManagedTerminationFault("before_artifact_check"); err != nil {
 			return err
 		}
-		_ = name // the caller passes this name only to the direct-mail owner.
-		// A batch parent response is immutable, but its item rows cannot outlive a
-		// child being deleted. Remove those references before action/operation rows.
+		var pending int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_session_artifacts WHERE agent_id=? AND cleanup_state<>'unlinked'`, action.AgentID).Scan(&pending); err != nil {
+			return err
+		}
+		if pending != 0 {
+			return errors.New("managed termination has session artifacts that were not safely unlinked")
+		}
+		if err := s.completeManagedTerminationFault("before_lifecycle_cleanup"); err != nil {
+			return err
+		}
+		// Batch references point across agent actions, so clear them before
+		// deleting their child operations. The batch parent response survives.
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_lifecycle_batch_items WHERE child_action_id IN (SELECT action_id FROM managed_lifecycle_actions WHERE agent_id=?) OR child_operation_id IN (SELECT operation_id FROM managed_lifecycle_actions WHERE agent_id=?)`, action.AgentID, action.AgentID); err != nil {
-			return err
-		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_control_requests WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_restart_transitions WHERE agent_id=?`, action.AgentID); err != nil {
@@ -836,7 +884,42 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_readiness_sources WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_lifecycle_actions WHERE agent_id=? AND action_id<>?`, action.AgentID, actionID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_control_requests WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM goal_control_revision_history WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM goal_control_desired_state WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_events WHERE parent_agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_diagnostics WHERE parent_agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_state WHERE parent_agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM subagent_lifecycle_producers WHERE parent_agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if err := s.completeManagedTerminationFault("before_operation_cleanup"); err != nil {
+			return err
+		}
+		// Break retry links first: they use RESTRICT so a failed predecessor can
+		// never leave the final cleanup half-applied.
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET retry_of=NULL WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_http_operations WHERE operation_id IN (SELECT operation_id FROM managed_lifecycle_actions WHERE agent_id=? AND action_id<>?)`, action.AgentID, actionID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_session_artifacts WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if err := s.completeManagedTerminationFault("before_agent_delete"); err != nil {
 			return err
 		}
 		hasLink, err := managedLaunchOperationColumnTx(ctx, s.db)
@@ -848,11 +931,14 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 				return err
 			}
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id=?`, action.AgentID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_agents WHERE agent_id=? AND desired_state='terminated'`, action.AgentID); err != nil {
+			return err
+		}
+		if err := s.completeManagedTerminationFault("before_terminalize"); err != nil {
 			return err
 		}
 		now := formatTimestamp(s.clock.Now())
-		if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET state='succeeded',stage='complete',terminal_code='TERMINATED',terminal_message='managed agent terminated',retryable=0,completed_at=?,updated_at=?,recovery_owner=NULL,recovery_claimed_at=NULL WHERE action_id=?`, now, now, actionID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET state='succeeded',stage='complete',terminal_code='TERMINATED',terminal_message='managed agent terminated',retryable=0,completed_at=?,updated_at=?,recovery_owner=NULL,recovery_claimed_at=NULL WHERE action_id=? AND state='cleanup' AND stage='durable_write'`, now, now, actionID); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='TERMINATED',terminal_message='managed agent terminated' WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), actionID); err != nil {
@@ -861,6 +947,31 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
+}
+
+func (s *Store) completeManagedTerminationFault(stage string) error {
+	if s.managedTerminationFault == nil {
+		return nil
+	}
+	return s.managedTerminationFault(stage)
+}
+
+// ManagedLaunchStillPending is the pre-start fence for an asynchronous launch
+// callback. A terminate reservation closes the linked operation in the same
+// transaction as its tombstone, so this check prevents a callback that lost
+// that race from starting a new external process.
+func (s *Store) ManagedLaunchStillPending(ctx context.Context, agentID, operationID string) (bool, error) {
+	if !isLifecycleText(agentID) || operationID == "" {
+		return false, errors.New("managed launch pending check is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, errors.New("store is closed")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_agents a JOIN managed_http_operations o ON o.operation_id=a.launch_operation_id WHERE a.agent_id=? AND a.desired_state='running' AND a.lifecycle_state='starting' AND a.launch_operation_id=? AND o.state='pending'`, agentID, operationID).Scan(&count)
+	return count == 1, err
 }
 
 // PendingManagedLaunches returns only post-027 launch links. It never treats a

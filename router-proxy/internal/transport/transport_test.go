@@ -838,7 +838,10 @@ func TestExpiredActivityIdleFrameRetainsGoalAndCurrentModel(t *testing.T) {
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{Clock: clock})
 	require.NoError(t, err)
 	defer durable.Close()
-	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock, ActivityTTL: time.Second, SweepInterval: time.Millisecond})
+	// Keep the periodic sweep realistic under race instrumentation. A single
+	// deadline-bound read below waits for the idle frame without cancelling the
+	// WebSocket reader between polls.
+	router, err := transport.New(transport.Options{Store: durable, Port: 0, Clock: clock, ActivityTTL: time.Second, SweepInterval: 50 * time.Millisecond})
 	require.NoError(t, err)
 	require.NoError(t, router.Listen(context.Background()))
 	defer router.Close(context.Background())
@@ -859,15 +862,9 @@ func TestExpiredActivityIdleFrameRetainsGoalAndCurrentModel(t *testing.T) {
 	require.Equal(t, "agent_activity", readJSON(t, worker)["type"])
 	require.NoError(t, clock.Advance(2*time.Second))
 
-	var idle map[string]any
-	require.Eventually(t, func() bool {
-		candidate, ok := tryReadJSON(observer, 10*time.Millisecond)
-		if !ok || candidate["type"] != "agent_activity" || candidate["activity_state"] != "idle" {
-			return false
-		}
-		idle = candidate
-		return true
-	}, time.Second, time.Millisecond)
+	idle := readJSONWithTimeout(t, observer, 3*time.Second)
+	require.Equal(t, "agent_activity", idle["type"])
+	require.Equal(t, "idle", idle["activity_state"])
 	require.Equal(t, goal, idle["goal"])
 	require.Equal(t, model, idle["current_model"])
 }

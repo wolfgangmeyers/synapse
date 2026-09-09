@@ -22,33 +22,7 @@ import (
 
 // This ledger deliberately covers the complete S4 candidate. Its order is
 // stable so the artifact identifies exactly the source it exercised.
-var managedRootControlCandidatePaths = []string{
-	".claude/skills/supervisor/tools/managed_root_control.py",
-	"pi-extensions/mecha-rpc/index.ts",
-	"pi-extensions/mecha-rpc/protocol.ts",
-	"pi-extensions/mecha-rpc/tool-registry.ts",
-	"router-proxy/cmd/mailbox-router/main.go",
-	"router-proxy/cmd/mailbox-router/managed_root_control.go",
-	"router-proxy/internal/managed/config.go",
-	"router-proxy/internal/managed/manifest.go",
-	"router-proxy/internal/managed/process.go",
-	"router-proxy/internal/managed/root_control_handlers.go",
-	"router-proxy/internal/managed/root_control_manager.go",
-	"router-proxy/internal/managed/root_control_rpc_test.go",
-	"router-proxy/internal/managed/rpc.go",
-	"router-proxy/internal/managed/supervisor.go",
-	"router-proxy/internal/managed/supervisor_reset_s1.go",
-	"router-proxy/internal/managed/supervisor_restart_s3.go",
-	"router-proxy/internal/managed/supervisor_test.go",
-	"router-proxy/internal/store/managed_lifecycle_s0.go",
-	"router-proxy/internal/store/managed_root_control_s4.go",
-	"router-proxy/internal/store/managed_root_control_s4_test.go",
-	"router-proxy/internal/store/store.go",
-	"router-proxy/internal/transport/managed_reset_native_test.go",
-	"router-proxy/internal/transport/managed_root_control_native_test.go",
-	"tests/fixtures/mecha-rpc/s4-native-root-control-probe.ts",
-	"tests/mecha_rpc_extension.test.ts",
-}
+var managedRootControlCandidatePaths = managedPhase2CandidatePaths
 
 func requireManagedRootControlCandidateLedger(t *testing.T, root string) {
 	t.Helper()
