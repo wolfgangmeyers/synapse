@@ -598,8 +598,17 @@ async function run() {
   return report;
 }
 
+export async function runRequested(arguments_ = process.argv.slice(2)) {
+  if (arguments_.length === 0) return run();
+  if (arguments_.length === 2 && arguments_.includes("--managed-rpc") && arguments_.includes("--release")) {
+    const { runManagedRpcRelease } = await import("./bcb-managed-rpc-release-runner.mjs");
+    return runManagedRpcRelease();
+  }
+  throw new Error("Usage: test:acceptance:bcb [--managed-rpc --release]");
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  run().then((report) => { console.log(JSON.stringify(report, null, 2)); }).catch((error) => { console.error(error instanceof Error ? error.stack : error); process.exitCode = 1; });
+  runRequested().then((report) => { console.log(JSON.stringify(report, null, 2)); }).catch((error) => { console.error(error instanceof Error ? error.stack : error); process.exitCode = 1; });
 }
 
 export { run, browserSnapshot, browserHelpers, receiptFramesForDelivery, waitForFixtureReceipts };

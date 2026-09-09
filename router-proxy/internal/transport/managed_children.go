@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
@@ -31,28 +32,30 @@ func (r *Router) managedChildrenProjection(ctx context.Context, agentID string) 
 }
 
 type managedChildSourceSnapshot struct {
-	Runs []struct {
-		TaskID        string `json:"task_id"`
-		RunID         string `json:"run_id"`
-		ParentEntryID string `json:"parent_entry_id"`
-		Description   string `json:"description"`
-		Model         *struct {
-			Provider string `json:"provider"`
-			ID       string `json:"id"`
-			Name     string `json:"name"`
-		} `json:"model"`
-		LifecycleState string  `json:"lifecycle_state"`
-		StartedAt      *string `json:"started_at"`
-		FinishedAt     *string `json:"finished_at"`
-		DurationMS     *int64  `json:"duration_ms"`
-		Compaction     struct {
-			State       string  `json:"state"`
-			Count       int64   `json:"count"`
-			StartedAt   *string `json:"started_at"`
-			LastOutcome *string `json:"last_outcome"`
-		} `json:"compaction"`
-		Sequence int64 `json:"sequence"`
-	} `json:"runs"`
+	Runs []managedChildSourceRun `json:"runs"`
+}
+
+type managedChildSourceRun struct {
+	TaskID        string `json:"task_id"`
+	RunID         string `json:"run_id"`
+	ParentEntryID string `json:"parent_entry_id"`
+	Description   string `json:"description"`
+	Model         *struct {
+		Provider string `json:"provider"`
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+	} `json:"model"`
+	LifecycleState string  `json:"lifecycle_state"`
+	StartedAt      *string `json:"started_at"`
+	FinishedAt     *string `json:"finished_at"`
+	DurationMS     *int64  `json:"duration_ms"`
+	Compaction     struct {
+		State       string  `json:"state"`
+		Count       int64   `json:"count"`
+		StartedAt   *string `json:"started_at"`
+		LastOutcome *string `json:"last_outcome"`
+	} `json:"compaction"`
+	Sequence int64 `json:"sequence"`
 }
 
 func managedChildrenProjectionForAgent(agent *store.ManagedAgentRecord, source *store.ManagedReadinessSource) map[string]any {
@@ -61,57 +64,96 @@ func managedChildrenProjectionForAgent(agent *store.ManagedAgentRecord, source *
 		agentID = agent.AgentID
 	}
 	result := map[string]any{"agent_id": agentID, "source": "router-managed", "lifecycle_version": int64(0), "recovery_state": "reconstructing", "children": []map[string]any{}}
+	recovered := managedRecoveredChildren(agent, source)
 	if !managedChildSourceCurrent(agent, source) {
+		result["children"] = recovered
 		return result
 	}
 	result["lifecycle_version"] = source.Snapshot.Sequence
 	var snapshot managedChildSourceSnapshot
 	if err := json.Unmarshal(source.Snapshot.Canonical, &snapshot); err != nil {
+		result["children"] = recovered
 		return result
 	}
-	children := make([]map[string]any, 0, len(snapshot.Runs))
+	children := make([]map[string]any, 0, len(snapshot.Runs)+len(recovered))
 	for _, run := range snapshot.Runs {
 		if !managedChildIdentityFits(run.ParentEntryID, run.TaskID, run.RunID) {
 			continue
 		}
-		// The snapshot was strictly normalized before storage. This second
-		// allowlist is still necessary: it is the sole browser projection and
-		// deliberately does not expose a Pi session, process identity, fence, or
-		// unbounded source value.
-		child := map[string]any{
-			"id":               managedChildID(agent, run.ParentEntryID, run.TaskID, run.RunID),
-			"parent_entry_id":  managedChildDisplayID(run.ParentEntryID),
-			"task_id":          managedChildDisplayID(run.TaskID),
-			"run_id":           managedChildDisplayID(run.RunID),
-			"status":           managedChildStatus(run.LifecycleState),
-			"sequence":         run.Sequence,
-			"recovery_state":   "current",
-			"compaction_state": managedChildCompaction(run.Compaction.State, run.Compaction.LastOutcome),
-			"compaction":       managedChildCompactionProjection(run.Compaction.State, run.Compaction.Count, run.Compaction.StartedAt, run.Compaction.LastOutcome),
-		}
-		if run.Description != "" {
-			child["description"] = boundedManagedDisplay(managed.RedactedStderr(run.Description), 512)
-		}
-		if model := managedChildModel(run.Model); model != nil {
-			child["model"] = model
-		}
-		if at, ok := managedChildTimestamp(run.StartedAt); ok {
-			child["started_at"] = at
-		}
-		if at, ok := managedChildTimestamp(run.FinishedAt); ok {
-			child["ended_at"] = at
-		}
-		// Never run a browser-side elapsed clock. The runtime's explicit duration
-		// or terminal timestamp is the only timing value that survives recovery.
-		if run.DurationMS != nil {
-			child["duration_ms"] = *run.DurationMS
-		}
-		children = append(children, child)
+		children = append(children, managedChildProjectionForRun(managedChildID(agent, run.ParentEntryID, run.TaskID, run.RunID), run, map[string]any{"state": "confirmed", "cause": nil, "observed_at": source.SnapshotConfirmedAt}, false))
 	}
+	children = append(children, recovered...)
 	sort.Slice(children, func(left, right int) bool { return children[left]["id"].(string) < children[right]["id"].(string) })
 	result["recovery_state"] = "current"
 	result["children"] = children
 	return result
+}
+
+func managedChildProjectionForRun(id string, run managedChildSourceRun, recovery map[string]any, reconcileCompaction bool) map[string]any {
+	compaction := managedChildCompactionProjection(run.Compaction.State, run.Compaction.Count, run.Compaction.StartedAt, run.Compaction.LastOutcome)
+	if reconcileCompaction && run.Compaction.State == "compacting" {
+		compaction = map[string]any{"state": "idle", "count": run.Compaction.Count, "last_outcome": "reconciled_unknown"}
+	}
+	child := map[string]any{
+		"id":               id,
+		"parent_entry_id":  managedChildDisplayID(run.ParentEntryID),
+		"task_id":          managedChildDisplayID(run.TaskID),
+		"run_id":           managedChildDisplayID(run.RunID),
+		"status":           managedChildStatus(run.LifecycleState),
+		"sequence":         run.Sequence,
+		"recovery":         recovery,
+		"compaction_state": managedChildCompaction(compaction["state"].(string), managedChildOutcome(compaction)),
+		"compaction":       compaction,
+	}
+	if run.Description != "" {
+		child["description"] = boundedManagedDisplay(managed.RedactedStderr(run.Description), 512)
+	}
+	if model := managedChildModel(run.Model); model != nil {
+		child["model"] = model
+	}
+	if at, ok := managedChildTimestamp(run.StartedAt); ok {
+		child["started_at"] = at
+	}
+	if at, ok := managedChildTimestamp(run.FinishedAt); ok {
+		child["ended_at"] = at
+	}
+	// Never run a browser-side elapsed clock. The runtime's explicit duration
+	// or terminal timestamp is the only timing value that survives recovery.
+	if run.DurationMS != nil {
+		child["duration_ms"] = *run.DurationMS
+	}
+	return child
+}
+
+func managedChildOutcome(compaction map[string]any) *string {
+	outcome, _ := compaction["last_outcome"].(string)
+	if outcome == "" {
+		return nil
+	}
+	return &outcome
+}
+
+func managedRecoveredChildren(agent *store.ManagedAgentRecord, source *store.ManagedReadinessSource) []map[string]any {
+	if agent == nil || source == nil || len(source.Recoveries) == 0 {
+		return []map[string]any{}
+	}
+	children := make([]map[string]any, 0, len(source.Recoveries))
+	for _, recovery := range source.Recoveries {
+		var run managedChildSourceRun
+		if json.Unmarshal(recovery.RunCanonical, &run) != nil || !managedChildIdentityFits(run.ParentEntryID, run.TaskID, run.RunID) {
+			continue
+		}
+		id := managedRecoveredChildID(agent.AgentID, recovery, run.ParentEntryID, run.TaskID, run.RunID)
+		children = append(children, managedChildProjectionForRun(id, run, map[string]any{"state": "interrupted_unknown", "cause": recovery.Cause, "observed_at": recovery.ObservedAt}, true))
+	}
+	sort.Slice(children, func(left, right int) bool { return children[left]["id"].(string) < children[right]["id"].(string) })
+	return children
+}
+
+func managedRecoveredChildID(agentID string, recovery store.ManagedChildRecovery, parentEntryID, taskID, runID string) string {
+	joined := agentID + "\x00" + recovery.PriorSessionID + "\x00" + fmt.Sprint(recovery.PriorSessionEpoch) + "\x00" + recovery.PriorProcessIncarnation + "\x00" + recovery.PriorRuntimeGeneration + "\x00" + parentEntryID + "\x00" + taskID + "\x00" + runID
+	sum := sha256.Sum256([]byte(joined))
+	return "child-" + hex.EncodeToString(sum[:16])
 }
 
 func managedChildSourceCurrent(agent *store.ManagedAgentRecord, source *store.ManagedReadinessSource) bool {

@@ -26,8 +26,12 @@ function initial(id: string): string { return id.trim().charAt(0).toUpperCase() 
 export function AgentRow({ agent, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival, onManageManaged, onManagedState }: AgentRowProps): ReactElement {
   const working = agent.activity_state === "active";
   const compacting = agent.activity_state === "compacting";
-  const hasSubagents = (agent.subagent_count ?? agent.subagents?.length ?? 0) > 0;
-  const hasSignals = (hasSubagents && !compacting) || arrival !== undefined;
+  const hasSubagents = agent.source === "router-managed" ? (agent.managed_children?.length ?? 0) > 0 : (agent.subagent_count ?? agent.subagents?.length ?? 0) > 0;
+  // The managed child list remains independently useful while its parent
+  // compacts: it can show a child still working or compacting. Legacy agent
+  // cards retain their compacting-only presentation.
+  const showSubagentBadge = hasSubagents && (!compacting || agent.source === "router-managed");
+  const hasSignals = showSubagentBadge || arrival !== undefined;
   const hasGoal = agent.goal_state?.enabled || agent.goal?.enabled;
   const hasReminders = reminderCount > 0;
   const className = ["agent-row", selected ? "active" : "", working ? "working" : "", compacting ? "compacting" : "", expanded ? "expanded" : "", hasSubagents ? "has-subagents" : ""].filter(Boolean).join(" ");
@@ -43,7 +47,7 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
           <strong>{humanName(agent.agent_id)}</strong><small className="agent-source">{agent.source === "router-managed" ? "router-managed" : "tmux"}</small>
         </span>
         {hasSignals ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
-          {!compacting ? <SubagentBadge count={agent.subagent_count} subagents={agent.subagents} expanded={expanded} listId={`agent-row-subagents-${agent.agent_id}`} onToggle={() => onToggleSubagents?.(agent.agent_id)} /> : null}
+          {showSubagentBadge ? <SubagentBadge count={agent.subagent_count} subagents={agent.subagents} expanded={expanded} listId={`agent-row-subagents-${agent.agent_id}`} onToggle={() => onToggleSubagents?.(agent.agent_id)} /> : null}
           {arrival ? <ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /> : null}
         </span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}

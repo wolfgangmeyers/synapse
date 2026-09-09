@@ -452,6 +452,8 @@ func (m *Manager) startResetTargetInLane(actionID string, source store.ManagedRu
 		return
 	}
 	m.installRootControlReceiver(candidate)
+	m.installChildDeltaReceiver(candidate)
+	m.installParentCompactionReceiver(candidate)
 	candidate.serial.Lock()
 	candidate.lifecycleAction = "reset"
 	candidate.serial.Unlock()

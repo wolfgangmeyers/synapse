@@ -828,6 +828,45 @@ func validateChildCompaction(value any) error {
 	return nil
 }
 
+func validateChildSourceChange(name string, value any) error {
+	switch name {
+	case "description":
+		if _, ok := readinessBoundedString(value, readinessMaxJSONStringBytes, true); !ok {
+			return errors.New("child description is invalid")
+		}
+	case "model":
+		if err := validateChildModel(value); err != nil {
+			return err
+		}
+	case "lifecycle_state":
+		if state, ok := value.(string); !ok || (state != "queued" && state != "running" && state != "completed" && state != "steered" && state != "aborted" && state != "stopped" && state != "error") {
+			return errors.New("child lifecycle state is invalid")
+		}
+	case "started_at":
+		if err := validateReadinessTimestamp(value, false); err != nil {
+			return err
+		}
+	case "finished_at":
+		if err := validateReadinessTimestamp(value, true); err != nil {
+			return err
+		}
+	case "duration_ms":
+		if value != nil {
+			parsed, ok := readinessInteger(value)
+			if !ok || parsed < 0 {
+				return errors.New("child duration is invalid")
+			}
+		}
+	case "compaction":
+		if err := validateChildCompaction(value); err != nil {
+			return err
+		}
+	default:
+		return errors.New("child change name is invalid")
+	}
+	return nil
+}
+
 func validateChildSourceRun(value any) error {
 	run, err := readinessObject(value)
 	if err != nil {
@@ -841,35 +880,83 @@ func validateChildSourceRun(value any) error {
 			return errors.New("child source identity is invalid")
 		}
 	}
-	if _, ok := readinessBoundedString(run["description"], readinessMaxJSONStringBytes, true); !ok {
-		return errors.New("child description is invalid")
-	}
-	if err := validateChildModel(run["model"]); err != nil {
-		return err
-	}
-	if state, ok := run["lifecycle_state"].(string); !ok || (state != "queued" && state != "running" && state != "completed" && state != "steered" && state != "aborted" && state != "stopped" && state != "error") {
-		return errors.New("child lifecycle state is invalid")
-	}
-	if err := validateReadinessTimestamp(run["started_at"], false); err != nil {
-		return err
-	}
-	if err := validateReadinessTimestamp(run["finished_at"], true); err != nil {
-		return err
-	}
-	if duration := run["duration_ms"]; duration != nil {
-		parsed, ok := readinessInteger(duration)
-		if !ok || parsed < 0 {
-			return errors.New("child duration is invalid")
+	for _, key := range []string{"description", "model", "lifecycle_state", "started_at", "finished_at", "duration_ms", "compaction"} {
+		if err := validateChildSourceChange(key, run[key]); err != nil {
+			return err
 		}
-	}
-	if err := validateChildCompaction(run["compaction"]); err != nil {
-		return err
 	}
 	sequence, ok := readinessInteger(run["sequence"])
 	if !ok || sequence < 0 {
 		return errors.New("child source sequence is invalid")
 	}
 	return nil
+}
+
+func normalizeChildDeltaReceipt(value any) (map[string]any, error) {
+	nodes := 0
+	if err := validateReadinessJSONBounds(value, 1, &nodes, readinessMaxJSONStringBytes); err != nil {
+		return nil, err
+	}
+	delta, err := readinessObject(value)
+	if err != nil {
+		return nil, err
+	}
+	if err := exactReadinessKeys(delta, "protocol", "owner_session_id", "sequence", "task_id", "run_id", "parent_entry_id", "changes"); err != nil {
+		return nil, err
+	}
+	if delta["protocol"] != "mecha.children/v1" {
+		return nil, errors.New("child delta protocol is invalid")
+	}
+	owner, ok := readinessBoundedString(delta["owner_session_id"], readinessMaxJSONStringBytes, false)
+	if !ok {
+		return nil, errors.New("child delta owner is invalid")
+	}
+	sequence, ok := readinessInteger(delta["sequence"])
+	if !ok || sequence < 0 {
+		return nil, errors.New("child delta sequence is invalid")
+	}
+	result := map[string]any{"protocol": "mecha.children/v1", "owner_session_id": owner, "sequence": sequence}
+	for _, key := range []string{"task_id", "run_id", "parent_entry_id"} {
+		text, valid := readinessBoundedString(delta[key], readinessMaxJSONStringBytes, false)
+		if !valid {
+			return nil, errors.New("child delta identity is invalid")
+		}
+		result[key] = text
+	}
+	changes, err := readinessObject(delta["changes"])
+	if err != nil || len(changes) > 7 {
+		return nil, errors.New("child delta changes are invalid")
+	}
+	for name, change := range changes {
+		if err := validateChildSourceChange(name, change); err != nil {
+			return nil, err
+		}
+	}
+	result["changes"] = changes
+	return result, nil
+}
+
+// normalizeParentCompactionEvent closes Pi's native RPC lifecycle event. The
+// per-stdout sequence is assigned by rpcClient after decoding, so a delayed
+// event cannot outrank a later event from the same Pi stream.
+func normalizeParentCompactionEvent(event map[string]any, sequence uint64) (map[string]any, error) {
+	if sequence > uint64(readinessMaxSafeInteger) {
+		return nil, errors.New("parent compaction sequence is invalid")
+	}
+	switch event["type"] {
+	case "compaction_start":
+		return map[string]any{"sequence": int64(sequence), "state": "compacting", "outcome": ""}, nil
+	case "compaction_end":
+		outcome := "failed"
+		if aborted, ok := event["aborted"].(bool); ok && aborted {
+			outcome = "aborted"
+		} else if result, present := event["result"]; present && result != nil {
+			outcome = "completed"
+		}
+		return map[string]any{"sequence": int64(sequence), "state": "idle", "outcome": outcome}, nil
+	default:
+		return nil, errors.New("parent compaction event is invalid")
+	}
 }
 
 func normalizeChildSnapshotReceipt(value any) (map[string]any, error) {

@@ -1,0 +1,961 @@
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { spawn } from "node:child_process";
+import {
+  allocateLoopbackPort,
+  createTaskRoot,
+  spawnRouterProcess,
+  stopRouterProcess,
+} from "../support/isolated-go-router.mjs";
+
+const execFileAsync = promisify(execFile);
+const HERE = dirname(fileURLToPath(import.meta.url));
+const PROJECT = resolve(HERE, "../..");
+const REPOSITORY = resolve(PROJECT, "../..");
+const BCB_SOURCE = process.env.MECHA_BCB_ROOT ?? "/Users/wolfgang/code/browser-console-bridge";
+const TIMEOUT = 45_000;
+const CHILD_AGENT = "managed-rpc-release";
+const DESKTOP_VIEWPORT_WIDTH = 1480;
+
+function delay(ms) { return new Promise((resolveDelay) => setTimeout(resolveDelay, ms)); }
+function fail(message) { throw new Error(`Managed RPC release runner: ${message}`); }
+function exists(path) { return stat(path).then(() => true).catch(() => false); }
+
+async function requireFile(path, label, executable = false) {
+  if (typeof path !== "string" || !path.startsWith("/")) fail(`${label} must be an absolute path`);
+  let info;
+  try { info = await stat(path); } catch { fail(`${label} is unavailable: ${path}`); }
+  if (!info.isFile()) fail(`${label} is not a file: ${path}`);
+  if (executable && (info.mode & 0o111) === 0) fail(`${label} is not executable: ${path}`);
+  return resolve(path);
+}
+
+const PI_LOCK_SCHEMA = "mecha.pi.g4-source-lock/v1";
+const PI_PUBLIC_COMMIT = "107d79f11072bbc8a3a757ed7fd69596bee7d68c";
+const PI_PUBLIC_TREE = "f5103239060686ea2983e18906857b3df54428f5";
+const PI_PACKAGES_COMMIT = "06ed583c720ed0fe6d6cc099b26eeb384795ea39";
+const PI_PACKAGES_TREE = "18aa55133ecd46fc7eb9a4a3b9265e8ec247863e";
+
+// Phase 2 was certified from this immutable committed source tree. Phase 3
+// deliberately re-owns some of its paths, so the current dirty tree cannot be
+// substituted for that proof or rejected merely for touching them.
+const FROZEN_P2_HEAD = "7e72e4274513c54e29def0f17648f57022f63f6b";
+const FROZEN_P2_TREE = "9c05a3f32ab486319222a28bcaceca3019c247cd";
+const FROZEN_P2_REPORT = "/tmp/rpc-phase3-trackb-native-p1p2-proof.md";
+const FROZEN_P2_ARTIFACTS = [
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/b0fab6e7-aa0f-417e-be2f-9319a1f99823/pi-g4-lifecycle.json", "aaa5f2cb1ebd73e8f74767b3d16ef7d4aa0fe5e52a7ab427fc06d37afbe99b6f"],
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/phase2-reset-s1/1580f8149525cba987a16cfefe9fa876654901b92e7ae2c195727bb5318d6e0c/217a3aced20d4ada/reset-s1-v1.json", "e3eb450cb4127e5593addedc96fb401b4e3a74ec0e085f13d33fc8826609f2fb"],
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/phase2-lifecycle-restart-s3/179acd038bdb3d98082c2e4f6fcf5566e0926c1807883583e494308618897c7b/3a6f31ea1ab8c120/lifecycle-restart-s3-v1.json", "7009cb2ebf6ab95915983416f01245c121fb1908d117ca50297420cfa2bcae01"],
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/phase2-managed-direct-mail/5b9c65b762f5765234f81d2c63baa6bc9366956025afd4a57b5176f5f2b5d85b/952c1a244c6c1462/managed-direct-mail-v1.json", "2719955666ec506674281693e3d3db523859d9c1e08dcc3a756d278f6e0270be"],
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/phase2-managed-direct-mail/5b9c65b762f5765234f81d2c63baa6bc9366956025afd4a57b5176f5f2b5d85b/3928c979351843f4/managed-direct-mail-v1.json", "aa72a7a233c63affe9fdd8091068060af79c0e3635fc72246b965fb32fcf96e8"],
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/phase2-managed-direct-mail/5b9c65b762f5765234f81d2c63baa6bc9366956025afd4a57b5176f5f2b5d85b/2dc32289df367795/managed-direct-mail-v1.json", "35aa74d0644232f6b2bfb7ca2fab2adcf1de8ced0e9e2d07878d0c26c8030718"],
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/phase2-root-control-s4/6041f852e6a0af36b5cc6ee1137765d49f7d2f18323173fea11a59909d1e8777/root-control-s4-v1.json", "a6e6b518196804c0f9b13e6d005cff3683cbbfde289d2b11aae659e11831e539"],
+  ["/tmp/mecha-rpc-acceptance/7e72e4274513c54e29def0f17648f57022f63f6b/phase2-termination-s5/6041f852e6a0af36b5cc6ee1137765d49f7d2f18323173fea11a59909d1e8777/termination-s5-v1.json", "77a0e53426b4a2ae32b50271f1c3b5ba80bacc4eab8f7bc0614c01d3d642906c"],
+];
+
+function record(value) { return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined; }
+function lockString(value) { return typeof value === "string" && value.length > 0 ? value : undefined; }
+async function sha256File(path) { return createHash("sha256").update(await readFile(path)).digest("hex"); }
+async function commandText(command, args, cwd) {
+  const { stdout } = await execFileAsync(command, args, { cwd, timeout: TIMEOUT });
+  return stdout.trim();
+}
+
+async function frozenP2SnapshotProof() {
+  if (await commandText("git", ["-C", REPOSITORY, "rev-parse", `${FROZEN_P2_HEAD}^{tree}`]) !== FROZEN_P2_TREE) {
+    fail("the frozen Phase 2 source tree is unavailable or does not match its recorded identity");
+  }
+  const report = await readFile(FROZEN_P2_REPORT, "utf8").catch(() => fail("the frozen Phase 2 proof report is unavailable"));
+  if (!report.includes(FROZEN_P2_HEAD) || !report.includes(FROZEN_P2_TREE) || !report.includes("PASS for the clean committed P1/P2 head")) {
+    fail("the frozen Phase 2 proof report is not bound to its immutable source snapshot");
+  }
+  const artifacts = [];
+  for (const [path, expectedHash] of FROZEN_P2_ARTIFACTS) {
+    if (await sha256File(path).catch(() => "") !== expectedHash) fail(`the frozen Phase 2 proof artifact is missing or changed: ${path}`);
+    artifacts.push({ path, sha256: expectedHash });
+  }
+  return {
+    source_head: FROZEN_P2_HEAD,
+    source_tree: FROZEN_P2_TREE,
+    report: FROZEN_P2_REPORT,
+    artifacts,
+    strategy: "P2 evidence is verified against its committed source tree and immutable artifacts; overlapping P3 working files are never treated as P2 inputs.",
+  };
+}
+
+async function lockedPiPrerequisites() {
+  const lockPath = await requireFile(process.env.MECHA_PI_SOURCE_LOCK ?? "", "MECHA_PI_SOURCE_LOCK");
+  const configuredBin = await requireFile(process.env.MECHA_PI_BIN ?? "", "MECHA_PI_BIN", true);
+  const configuredRoot = process.env.MECHA_PI_PACKAGE_ROOT;
+  if (typeof configuredRoot !== "string" || !isAbsolute(configuredRoot)) fail("MECHA_PI_PACKAGE_ROOT must be an absolute path");
+  const packageRoot = await realpath(configuredRoot).catch(() => fail("MECHA_PI_PACKAGE_ROOT is unavailable"));
+  const piBin = await realpath(configuredBin).catch(() => fail("MECHA_PI_BIN is unavailable"));
+  await requireFile(join(packageRoot, "package.json"), "MECHA_PI_PACKAGE_ROOT package.json");
+  let lock;
+  try { lock = JSON.parse(await readFile(lockPath, "utf8")); } catch { fail("MECHA_PI_SOURCE_LOCK is not valid JSON"); }
+  const root = record(lock);
+  const pi = record(root?.pi);
+  const installed = record(pi?.installed);
+  const scoped = record(pi?.scoped);
+  const publicBase = record(pi?.public_base);
+  const tarball = record(pi?.tarball);
+  const piPackages = record(root?.pi_packages);
+  if (root?.schema !== PI_LOCK_SCHEMA || pi === undefined || installed === undefined || scoped === undefined || publicBase === undefined || tarball === undefined || piPackages === undefined) fail("MECHA_PI_SOURCE_LOCK does not describe the required locked Pi target");
+  const sourceRootPath = lockString(pi.source_root);
+  const sourceRemote = lockString(pi.source_remote);
+  const installedBin = lockString(installed.executable_real_path);
+  const installedRoot = lockString(installed.package_real_path);
+  const installedHash = lockString(installed.executable_sha256);
+  const installedVersion = lockString(installed.package_version);
+  const packageLockHash = lockString(scoped.package_lock_sha256);
+  const sourceCommit = lockString(scoped.commit);
+  const sourceTree = lockString(scoped.tree);
+  const mergeBase = lockString(scoped.merge_base);
+  const tarballPath = lockString(tarball.path);
+  const tarballHash = lockString(tarball.sha256);
+  const piPackagesPath = lockString(piPackages.path);
+  if ([sourceRootPath, sourceRemote, installedBin, installedRoot, installedHash, installedVersion, packageLockHash, sourceCommit, sourceTree, mergeBase, tarballPath, tarballHash, piPackagesPath].some((value) => value === undefined)) fail("MECHA_PI_SOURCE_LOCK is missing required immutable Pi fields");
+  const sourceRoot = await realpath(sourceRootPath).catch(() => fail("MECHA_PI_SOURCE_LOCK source checkout is unavailable"));
+  const authoritativePackages = await realpath(piPackagesPath).catch(() => fail("MECHA_PI_SOURCE_LOCK pi-packages checkout is unavailable"));
+  if (piBin !== await realpath(installedBin).catch(() => fail("locked Pi executable is unavailable")) || packageRoot !== await realpath(installedRoot).catch(() => fail("locked Pi package is unavailable"))) fail("MECHA_PI_BIN and MECHA_PI_PACKAGE_ROOT must match MECHA_PI_SOURCE_LOCK");
+  const packageRelativeBin = relative(packageRoot, piBin);
+  if (packageRelativeBin === "" || packageRelativeBin.startsWith("..") || isAbsolute(packageRelativeBin)) fail("MECHA_PI_BIN must resolve within MECHA_PI_PACKAGE_ROOT");
+  const manifest = record(JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")));
+  if (manifest?.name !== "@earendil-works/pi-coding-agent" || manifest.version !== installedVersion) fail("MECHA_PI_PACKAGE_ROOT is not the locked Pi package");
+  if (publicBase.commit !== PI_PUBLIC_COMMIT || publicBase.tree !== PI_PUBLIC_TREE || mergeBase !== PI_PUBLIC_COMMIT || scoped.clean !== true) fail("Pi source lock is not the required clean Pi 0.85.0 scope");
+  if (scoped.pnpm_lock_path !== null || scoped.pnpm_lock_sha256 !== null || await exists(join(sourceRoot, "pnpm-lock.yaml"))) fail("Pi source lock must use the package-lock-only checkout");
+  if (await sha256File(join(sourceRoot, "package-lock.json")) !== packageLockHash) fail("Pi package-lock hash mismatch");
+  const changed = (await commandText("git", ["-C", sourceRoot, "diff", "--name-only", `${PI_PUBLIC_COMMIT}..${sourceCommit}`])).split("\n").filter(Boolean);
+  if (JSON.stringify(changed) !== JSON.stringify(scoped.changed_paths) || changed.some((path) => !path.startsWith("packages/coding-agent/src/") && !path.startsWith("packages/coding-agent/test/"))) fail("Pi source lock has paths outside the approved scope");
+  if (await commandText("git", ["-C", sourceRoot, "rev-parse", "HEAD"]) !== sourceCommit || await commandText("git", ["-C", sourceRoot, "rev-parse", "HEAD^{tree}"]) !== sourceTree || await commandText("git", ["-C", sourceRoot, "merge-base", "HEAD", PI_PUBLIC_COMMIT]) !== PI_PUBLIC_COMMIT || await commandText("git", ["-C", sourceRoot, "config", "--get", "remote.origin.url"]) !== sourceRemote || await commandText("git", ["-C", sourceRoot, "status", "--porcelain"]) !== "") fail("Pi source lock does not match its source checkout");
+  if (piPackages.commit !== PI_PACKAGES_COMMIT || piPackages.tree !== PI_PACKAGES_TREE || await commandText("git", ["-C", authoritativePackages, "rev-parse", "HEAD"]) !== PI_PACKAGES_COMMIT || await commandText("git", ["-C", authoritativePackages, "rev-parse", "HEAD^{tree}"]) !== PI_PACKAGES_TREE || await commandText("git", ["-C", authoritativePackages, "status", "--porcelain"]) !== "") fail("Pi subagents compatibility checkout does not match the source lock");
+  const subagents = join(authoritativePackages, "packages", "pi-subagents", "src", "index.ts");
+  if (await realpath(subagents).catch(() => "") !== subagents) fail("locked pi-subagents extension is unavailable");
+  if (await sha256File(tarballPath) !== tarballHash || await sha256File(piBin) !== installedHash || await commandText(piBin, ["--version"]) === "") fail("installed Pi package does not match the source lock");
+  return { lockPath, piBin, packageRoot, subagents };
+}
+
+async function preflight() {
+  const pi = await lockedPiPrerequisites();
+  const python = process.env.MECHA_BCB_PYTHON ?? join(BCB_SOURCE, ".venv", "bin", "python3");
+  await requireFile(python, "BCB Python", true);
+  if (!(await exists(join(BCB_SOURCE, "server", "bridge_server.py"))) || !(await exists(join(BCB_SOURCE, "extension", "background.js")))) {
+    fail(`Browser Console Bridge source is unavailable at ${BCB_SOURCE}`);
+  }
+  await requireFile(join(REPOSITORY, "pi-extensions", "mecha-rpc", "index.ts"), "mecha-rpc extension");
+  await requireFile(join(REPOSITORY, "pi-extensions", "mecha-rpc", "tests", "fixtures", "managed-rpc-release-probe.mjs"), "managed-RPC acceptance probe");
+  return { ...pi, python };
+}
+
+async function waitFor(probe, label, timeout = TIMEOUT) {
+  const deadline = Date.now() + timeout;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const value = await probe();
+      if (value !== undefined && value !== false) return value;
+    } catch (error) { lastError = error; }
+    await delay(100);
+  }
+  fail(`${label} timed out${lastError instanceof Error ? `: ${lastError.message}` : ""}`);
+}
+
+function bcbSettings(python) {
+  const host = process.env.MECHA_BCB_HOST ?? process.env.BCB_HOST ?? "127.0.0.1";
+  if (!["127.0.0.1", "localhost", "::1"].includes(host)) fail("BCB host must be loopback");
+  const httpPort = Number(process.env.MECHA_BCB_HTTP_PORT ?? process.env.BCB_HTTP_PORT ?? "18080");
+  const wsPort = Number(process.env.MECHA_BCB_WS_PORT ?? process.env.BCB_WS_PORT ?? "18081");
+  if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535 || !Number.isInteger(wsPort) || wsPort < 1 || wsPort > 65535) fail("BCB ports must be valid TCP ports");
+  const printableHost = host.includes(":") ? `[${host}]` : host;
+  return { python, host, httpPort, wsPort, baseUrl: `http://${printableHost}:${httpPort}` };
+}
+
+async function connectedBcb(python) {
+  const bcb = bcbSettings(python);
+  let health;
+  try { health = await (await fetch(`${bcb.baseUrl}/health`)).json(); } catch { fail(`BCB health endpoint is unavailable at ${bcb.baseUrl}`); }
+  if (health?.extension_connected !== true) {
+    fail("BCB extension is not connected. Start the bridge, then reload its Chrome extension as documented by Browser Console Bridge setup.");
+  }
+  return { ...bcb, health };
+}
+
+async function buildRouterUI(root) {
+  const staticUIRoot = join(root, "router-ui");
+  await execFileAsync("npm", ["run", "build", "--", "--outDir", staticUIRoot], { cwd: PROJECT, timeout: 120_000 });
+  const index = await readFile(join(staticUIRoot, "index.html"), "utf8");
+  if (index.includes("/@vite/client") || !index.includes("<script")) fail("router UI build did not produce a production static bundle");
+  return staticUIRoot;
+}
+
+const BCB_TAB_EDIT_RETRIES = 12;
+const BCB_TAB_EDIT_RETRY_DELAY_MS = 250;
+
+function isTransientBcbTabEditError(error) {
+  // BCB can briefly reject a command while Chrome is navigating a controlled
+  // popup or while the extension finishes a prior command. Retry only these
+  // documented transport conditions, never a browser JavaScript assertion.
+  return error instanceof Error && /tabs cannot be edited right now|extension did not respond within/i.test(error.message);
+}
+
+async function bcbCommandOnce(bcb, args) {
+  const child = spawn(bcb.python, ["-m", ...args], { cwd: BCB_SOURCE, env: { ...process.env, BCB_HOST: bcb.host, BCB_HTTP_PORT: String(bcb.httpPort), BCB_WS_PORT: String(bcb.wsPort) }, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+  child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  await Promise.race([
+    new Promise((resolveResult, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => code === 0 ? resolveResult() : reject(new Error(stderr || stdout || `BCB command exited ${code}`)));
+    }),
+    delay(TIMEOUT).then(() => { child.kill("SIGKILL"); throw new Error("BCB command timed out"); }),
+  ]);
+  if (!stdout.trim()) return undefined;
+  try { return JSON.parse(stdout); } catch { return stdout.trim(); }
+}
+
+async function bcbCommand(bcb, args) {
+  let lastError;
+  for (let attempt = 0; attempt < BCB_TAB_EDIT_RETRIES; attempt++) {
+    try {
+      return await bcbCommandOnce(bcb, args);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientBcbTabEditError(error) || attempt === BCB_TAB_EDIT_RETRIES - 1) throw error;
+      await delay(BCB_TAB_EDIT_RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+async function tabs(bcb) { return bcbCommand(bcb, ["cli.bcb_tabs", "--json"]); }
+async function execBrowser(bcb, tab, code) {
+  const args = ["cli.bcb_exec", "--json", "--world", "auto", "--timeout", "40"];
+  if (tab !== undefined) args.push("--tab", String(tab));
+  args.push(code);
+  const result = await bcbCommand(bcb, args);
+  if (!result?.success) fail(`BCB browser JavaScript failed: ${result?.error ?? "unknown error"}`);
+  return result.result;
+}
+
+async function openControlledBcbWindow(bcb, url, name) {
+  const before = await tabs(bcb);
+  if (!Array.isArray(before)) fail("BCB did not return its tab list");
+  const known = new Set(before.map((tab) => String(tab?.id)));
+  // This is the only command sent without a tab target. It opens an isolated
+  // local popup and reads no document, storage, cookie, or session data from
+  // the existing active Chrome tab.
+  // Do not request noopener: Chrome permits resizeTo only for a script-opened popup
+  // that retains its opener. The task URL is a separate loopback origin and never
+  // reads or writes the opener.
+  await execBrowser(bcb, undefined, `window.open(${JSON.stringify(url)}, ${JSON.stringify(name)}, "popup=yes,width=1560,height=980"); true`);
+  const tab = await waitFor(async () => {
+    const current = await tabs(bcb);
+    if (!Array.isArray(current)) return undefined;
+    return current.find((candidate) => candidate?.url === url && !known.has(String(candidate.id)));
+  }, "dedicated BCB release window");
+  await execBrowser(bcb, tab.id, "window.focus(); true");
+  await waitFor(async () => {
+    const current = await tabs(bcb);
+    return Array.isArray(current) && current.some((candidate) => String(candidate?.id) === String(tab.id) && candidate.active === true) ? true : undefined;
+  }, "dedicated BCB release window focus");
+  return { tab: tab.id, existing_tab_count: before.length };
+}
+
+// The release tab is a script-opened popup, so browser policy permits a real
+// window resize. This is not device emulation and does not resize any existing
+// user tab or window.
+async function resetControlledBcbWindowZoom(bcb, tab) {
+  if (process.platform !== "darwin") return { reset: "not-applicable" };
+  await execBrowser(bcb, tab, "window.focus(); true");
+  // Chrome keeps zoom per origin. Reset only the disposable loopback task tab:
+  // a non-default scale changes its CSS minimum window width and would make a
+  // physical popup resize falsely look like device emulation.
+  const script = `tell application "System Events"
+  tell process "Google Chrome"
+    set frontmost to true
+    keystroke "0" using command down
+    delay 0.2
+  end tell
+end tell`;
+  await execFileAsync("osascript", ["-e", script], { timeout: TIMEOUT });
+  return waitFor(async () => {
+    const scale = await execBrowser(bcb, tab, "visualViewport?.scale ?? 1");
+    return scale === 1 ? { reset: "Command-0 on dedicated BCB task popup", visual_viewport_scale: scale } : undefined;
+  }, "dedicated BCB popup zoom reset");
+}
+
+async function setControlledBcbWindowInnerWidth(bcb, tab, wantedWidth) {
+  let observed;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const current = await execBrowser(bcb, tab, "({ width: innerWidth, height: innerHeight, outerWidth, outerHeight, scrollWidth: document.documentElement.scrollWidth })");
+    observed = current;
+    if (current?.width === wantedWidth) return current;
+    const innerWidth = Number(current?.width);
+    const outerWidth = Number(current?.outerWidth);
+    const innerHeight = Number(current?.height);
+    const outerHeight = Number(current?.outerHeight);
+    if (![innerWidth, outerWidth, innerHeight, outerHeight].every(Number.isFinite)) fail("BCB task popup did not report window dimensions");
+    const nextWidth = Math.max(200, Math.round(outerWidth + wantedWidth - innerWidth));
+    const nextHeight = Math.max(300, Math.round(outerHeight + 900 - innerHeight));
+    // Chrome's macOS frame insets can change after a resize. Recalculate from
+    // every settled geometry instead of retrying one stale outer-width estimate.
+    for (const adjustment of [0, -1, 1]) {
+      await execBrowser(bcb, tab, `window.resizeTo(${nextWidth + adjustment}, ${nextHeight}); window.focus(); true`);
+      await delay(150);
+      const settled = await execBrowser(bcb, tab, "({ width: innerWidth, height: innerHeight, outerWidth, outerHeight, scrollWidth: document.documentElement.scrollWidth })");
+      observed = settled;
+      if (settled?.width === wantedWidth) return settled;
+    }
+  }
+  fail(`dedicated BCB popup resize did not reach ${wantedWidth}px (last ${JSON.stringify(observed)})`);
+}
+
+function appleScriptString(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function focusTaskPopupForScreenshot(bcb, tab, task) {
+  if (process.platform !== "darwin") fail("BCB screenshot proof requires macOS window focus verification");
+  const identity = await execBrowser(bcb, tab, `document.title = ${JSON.stringify(task.document_title)}; ({ url: location.href, title: document.title })`);
+  if (identity?.url !== task.url || identity?.title !== task.document_title) fail("dedicated BCB release popup did not retain its expected URL and title");
+  const selected = await waitFor(async () => {
+    const current = await tabs(bcb);
+    if (!Array.isArray(current)) return undefined;
+    return current.find((candidate) => String(candidate?.id) === String(tab) && candidate.url === task.url && candidate.title === task.document_title && candidate.active === true);
+  }, "dedicated BCB release popup selection");
+  const nativeWindowTitle = `${task.document_title} - Google Chrome`;
+  const script = `tell application "System Events"
+  tell process "Google Chrome"
+    set frontmost to true
+    set matches to every window whose name contains "${appleScriptString(task.document_title)}"
+    if (count of matches) = 0 then return "missing"
+    set targetWindow to item 1 of matches
+    try
+      perform action "AXRaise" of targetWindow
+    end try
+    set value of attribute "AXMain" of targetWindow to true
+    delay 0.2
+    return (value of attribute "AXMain" of targetWindow) as text
+  end tell
+end tell`;
+  let focusError;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const { stdout: focusResult } = await execFileAsync("osascript", ["-e", script], { timeout: TIMEOUT });
+      if (focusResult.trim() === "true") return { tab_id: tab, url: task.url, document_title: task.document_title, native_window_title: nativeWindowTitle, bcb_tab_selected: selected.active === true, macos_ax_main: true, focus_attempts: attempt + 1 };
+    } catch (error) {
+      focusError = error;
+    }
+    await execBrowser(bcb, tab, "window.focus(); true");
+    await delay(200);
+  }
+  fail(focusError instanceof Error ? `could not focus the dedicated BCB release popup: ${focusError.message}` : "macOS did not mark the dedicated BCB release popup as the main Chrome window");
+}
+
+async function screenshotManagedChildren(bcb, tab, path, task, agentID, expectedChildState) {
+  const target = await focusTaskPopupForScreenshot(bcb, tab, task);
+  const rendered = await execBrowser(bcb, tab, `(() => { const row = document.querySelector('[data-agent-id=${agentID}]'); const children = [...(row?.querySelectorAll('.managed-child-list li') ?? [])].map((child) => child.innerText); return { url: location.href, title: document.title, parent_selected: row?.getAttribute('aria-selected') === 'true', parent_text: row?.innerText ?? '', child_text: children.join('\\n'), child_count: children.length }; })()`);
+  if (rendered?.url !== task.url || rendered?.title !== task.document_title || rendered?.parent_selected !== true || rendered.child_count < 1 || !rendered.child_text.includes(expectedChildState)) {
+    fail(`BCB screenshot target did not render the selected managed ${expectedChildState} child`);
+  }
+  const result = await bcbCommand(bcb, ["cli.bcb_screenshot", "--tab", String(tab), "--output", path]);
+  if (result !== path) fail("BCB screenshot CLI did not write the requested proof artifact");
+  return { path, sha256: await sha256File(path), target: { ...target, rendered } };
+}
+
+async function screenshot(bcb, tab, path, task, expectedChildState) {
+  return screenshotManagedChildren(bcb, tab, path, task, CHILD_AGENT, expectedChildState);
+}
+
+async function screenshotReconstructing(bcb, tab, path, task) {
+  const target = await focusTaskPopupForScreenshot(bcb, tab, task);
+  const rendered = await execBrowser(bcb, tab, `(() => { const row = document.querySelector('[data-agent-id=${CHILD_AGENT}]'); return { url: location.href, title: document.title, parent_selected: row?.getAttribute('aria-selected') === 'true', parent_text: row?.innerText ?? '', child_count: row?.querySelectorAll('.managed-child-list li').length ?? -1 }; })()`);
+  if (rendered?.url !== task.url || rendered?.title !== task.document_title || rendered?.parent_selected !== true || !rendered.parent_text.includes("Reconstructing child state") || !rendered.parent_text.includes("Interrupted · outcome unknown") || rendered.child_count < 1) {
+    fail("BCB screenshot target did not render the selected reconstructing managed restart state");
+  }
+  const result = await bcbCommand(bcb, ["cli.bcb_screenshot", "--tab", String(tab), "--output", path]);
+  if (result !== path) fail("BCB screenshot CLI did not write the requested proof artifact");
+  return { path, sha256: await sha256File(path), target: { ...target, rendered } };
+}
+
+async function clearAndCloseControlledBcbWindow(bcb, tab) {
+  if (tab === undefined) return false;
+  try { await execBrowser(bcb, tab, "localStorage.clear(); sessionStorage.clear(); true"); } catch { /* close still limits cleanup to the known task tab */ }
+  await bcbCommand(bcb, ["cli.bcb_close_tabs", String(tab)]);
+  await waitFor(async () => {
+    const current = await tabs(bcb);
+    return Array.isArray(current) && !current.some((candidate) => String(candidate?.id) === String(tab)) ? true : undefined;
+  }, "dedicated BCB release window close");
+  return true;
+}
+
+function providerCompletion(response, delta, finishReason = "stop") {
+  response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  response.write(`data: ${JSON.stringify({ id: "managed-rpc-release", model: "managed-rpc-release", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+  response.write(`data: ${JSON.stringify({ id: "managed-rpc-release", model: "managed-rpc-release", choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })}\n\n`);
+  response.end("data: [DONE]\n\n");
+}
+function providerToolCalls(response, calls) {
+  providerCompletion(response, {
+    role: "assistant",
+    tool_calls: calls.map((call, index) => ({ index, id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) } })),
+  }, "tool_calls");
+}
+function toolNames(request) {
+  return new Set(Array.isArray(request?.tools) ? request.tools.flatMap((tool) => typeof tool?.function?.name === "string" ? [tool.function.name] : []) : []);
+}
+function requestAlreadyHasSubagentCall(payload) {
+  return Array.isArray(payload?.messages) && payload.messages.some((message) => Array.isArray(message?.tool_calls) && message.tool_calls.some((call) => call?.function?.name === "subagent"));
+}
+
+async function startProvider() {
+  const requests = [];
+  let parentSpawns = 0;
+  let childFixtureSeen = false;
+  const server = createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") { response.writeHead(404).end(); return; }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    let payload;
+    try { payload = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { response.writeHead(400).end(); return; }
+    requests.push(payload);
+    const tools = toolNames(payload);
+    if (!tools.has("subagent") && parentSpawns > 0) childFixtureSeen = true;
+    // A reset creates a fresh parent session. Its first model request has no
+    // prior subagent tool call, whereas the original parent follow-up carries
+    // that call in its restored history. This keeps the fixture real across a
+    // parent-session switch without allowing a child to recursively spawn.
+    if (tools.has("subagent") && !requestAlreadyHasSubagentCall(payload)) {
+      parentSpawns++;
+      providerToolCalls(response, [
+        { id: `managed-rpc-parent-spawn-${parentSpawns}-a`, name: "subagent", args: { prompt: "/phase3-child compact", description: "Managed release child A", subagent_type: "general-purpose" } },
+        { id: `managed-rpc-parent-spawn-${parentSpawns}-b`, name: "subagent", args: { prompt: "/phase3-child compact", description: "Managed release child B", subagent_type: "general-purpose" } },
+      ]);
+      return;
+    }
+    providerCompletion(response, { role: "assistant", content: "Managed release fixture completed." });
+  });
+  await new Promise((resolveListen, rejectListen) => { server.once("error", rejectListen); server.listen(0, "127.0.0.1", resolveListen); });
+  const address = server.address();
+  if (!address || typeof address === "string") fail("deterministic provider did not bind a local port");
+  const summary = () => ({
+    parent_spawned: parentSpawns > 0,
+    parent_spawn_count: parentSpawns,
+    child_fixture_seen: childFixtureSeen,
+    request_count: requests.length,
+    requests: requests.map((payload) => ({
+      model: payload?.model,
+      tools: [...toolNames(payload)],
+      messages: Array.isArray(payload?.messages) ? payload.messages.map((message) => ({ role: message?.role, content_bytes: typeof message?.content === "string" ? Buffer.byteLength(message.content) : 0, tool_call_names: Array.isArray(message?.tool_calls) ? message.tool_calls.map((call) => call?.function?.name).filter((name) => typeof name === "string") : [] })) : [],
+    })),
+  });
+  return { baseUrl: `http://127.0.0.1:${address.port}/v1`, summary, close: () => new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose())) };
+}
+
+async function startManagedRouter(root, prerequisites, provider, staticUIRoot, fixtureMode = "parent-matrix") {
+  const database = join(root, "managed-router.db");
+  const log = join(root, "managed-router.jsonl");
+  const binary = join(root, "managed-acceptance-router");
+  const piWrapper = join(root, "managed-pi-with-stderr.sh");
+  const piStderr = join(root, "managed-pi.stderr");
+  const home = join(root, "managed-home");
+  const sessions = join(home, "sessions");
+  const cwd = join(root, "work");
+  await mkdir(join(home, ".pi", "agent"), { recursive: true, mode: 0o700 });
+  await mkdir(sessions, { recursive: true, mode: 0o700 });
+  await mkdir(cwd, { recursive: true, mode: 0o700 });
+  await writeFile(join(home, ".pi", "agent", "models.json"), JSON.stringify({ providers: { "mecha-router-test": { baseUrl: provider.baseUrl, api: "openai-completions", apiKey: "managed-rpc-release", models: [{ id: "managed-rpc-release", name: "Managed RPC release fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_768, maxTokens: 1_024 }] } } }), { mode: 0o600 });
+  // The wrapper preserves the exact locked Pi argv while retaining stderr in
+  // the disposable task root if the installed runtime exits before evidence.
+  await writeFile(piWrapper, `#!/bin/sh\nexec ${JSON.stringify(prerequisites.piBin)} "$@" 2>${JSON.stringify(piStderr)}\n`, { mode: 0o700 });
+  await execFileAsync("go", ["build", "-o", binary, "./cmd/managed-acceptance-router"], { cwd: join(REPOSITORY, "router-proxy"), timeout: TIMEOUT });
+  const port = await allocateLoopbackPort();
+  const router = await spawnRouterProcess({
+    command: binary,
+    args: ["--database", database, "--log", log, "--host", "127.0.0.1", "--port", String(port), "--managed-pi", piWrapper, "--managed-home", home, "--managed-session-root", sessions, "--managed-manifest", join(REPOSITORY, "router", "contract", "managed-tools-v1.json"), "--managed-mecha-rpc", join(REPOSITORY, "pi-extensions", "mecha-rpc", "index.ts"), "--managed-pi-subagents", prerequisites.subagents, "--managed-probe-extension", join(REPOSITORY, "pi-extensions", "mecha-rpc", "tests", "fixtures", "managed-rpc-release-probe.mjs"), "--managed-cwd-root", cwd, "--test-provider-url", provider.baseUrl, "--static-ui-root", staticUIRoot, ...(fixtureMode === "" ? [] : ["--fixture-mode", fixtureMode])],
+    cwd: REPOSITORY,
+    root,
+    expectedPort: port,
+  });
+  return { ...router, database, log, home, sessions, cwd, piStderr, staticUIRoot };
+}
+
+async function restartManagedRouter(router, root, { makeChildFenceUncertain = false } = {}) {
+  const stopped = await stopRouterProcess(router);
+  if (makeChildFenceUncertain) await makePersistedChildFenceUncertain(router.database);
+  const replacement = await spawnRouterProcess({ command: router.command, args: router.args, cwd: router.cwd, root, expectedPort: router.port });
+  return { router: { ...replacement, database: router.database, log: router.log, home: router.home, sessions: router.sessions, cwd: router.cwd, piStderr: router.piStderr, staticUIRoot: router.staticUIRoot }, stopped };
+}
+
+/** Test-only crash boundary: an unmatched persisted source fence must render as uncertain after restart. */
+async function makePersistedChildFenceUncertain(database) {
+  const source = "import sqlite3, sys\ndatabase, agent = sys.argv[1:]\nconnection = sqlite3.connect(database)\ncursor = connection.execute(\"UPDATE managed_readiness_sources SET process_incarnation='phase3-unverified-after-router-restart' WHERE agent_id=?\", (agent,))\nconnection.commit()\nconnection.close()\nif cursor.rowcount != 1: raise RuntimeError('expected one managed child source')";
+  await execFileAsync("python3", ["-c", source, database, CHILD_AGENT], { cwd: REPOSITORY, timeout: TIMEOUT });
+}
+
+async function sqliteRows(database, query, parameters = []) {
+  const source = "import json, sqlite3, sys\ndatabase, query, parameters = sys.argv[1:]\nconnection = sqlite3.connect(database)\nconnection.row_factory = sqlite3.Row\nrows = [dict(row) for row in connection.execute(query, json.loads(parameters)).fetchall()]\nconnection.close()\nprint(json.dumps(rows, sort_keys=True))";
+  const { stdout } = await execFileAsync("python3", ["-c", source, database, query, JSON.stringify(parameters)], { cwd: REPOSITORY, timeout: TIMEOUT });
+  return JSON.parse(stdout);
+}
+
+async function startCanonicalTmuxPeer(root, router) {
+  const session = `rpc-phase3-peer-${process.pid}-${Date.now()}`;
+  const script = join(root, "canonical-tmux-peer.mjs");
+  const log = join(root, "canonical-tmux-peer.jsonl");
+  const webSocket = join(REPOSITORY, "node_modules", "ws", "index.js");
+  await requireFile(webSocket, "canonical tmux peer WebSocket client");
+  const source = `import { appendFileSync } from "node:fs";
+import WebSocket from ${JSON.stringify(webSocket)};
+const log = ${JSON.stringify(log)};
+const socket = new WebSocket(${JSON.stringify(router.websocketUrl)});
+let lease;
+let frame = 0;
+const write = (value) => { const line = JSON.stringify(value) + "\\n"; process.stdout.write(line); appendFileSync(log, line, { mode: 0o600 }); };
+const send = (body) => socket.send(JSON.stringify({ version: "v1", frame_id: "phase3-tmux-peer-" + (++frame), agent_id: "phase3-tmux-peer", instance_id: "phase3-tmux-peer-instance", lease_id: lease, ...body }));
+socket.on("open", () => socket.send(JSON.stringify({ version: "v1", frame_id: "phase3-tmux-peer-register", type: "register", agent_id: "phase3-tmux-peer", instance_id: "phase3-tmux-peer-instance", agent_role: "user_interaction", client_type: "phase3-acceptance", ack_confirmation: "correlated_v1", conversation_sync: "v1", delivery_receipts: "delivery_items_v1" })));
+socket.on("message", (raw) => { const frameValue = JSON.parse(String(raw)); if (frameValue.type === "registered") { lease = frameValue.lease_id; write({ event: "registered", lease }); } });
+socket.on("error", (error) => write({ event: "error", message: String(error) }));
+const renewal = setInterval(() => { if (lease) send({ type: "lease_renew" }); }, 5_000);
+process.on("SIGTERM", () => { clearInterval(renewal); socket.close(1000, "phase3 acceptance done"); });
+`;
+  await writeFile(script, source, { mode: 0o600 });
+  await execFileAsync("tmux", ["new-session", "-d", "-s", session, "node", script], { cwd: REPOSITORY, timeout: TIMEOUT });
+  const abort = async (error) => {
+    await execFileAsync("tmux", ["kill-session", "-t", session], { cwd: REPOSITORY, timeout: TIMEOUT }).catch(() => undefined);
+    throw error;
+  };
+  const pane = await waitFor(async () => {
+    const { stdout } = await execFileAsync("tmux", ["list-panes", "-t", session, "-F", "#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}"], { cwd: REPOSITORY, timeout: TIMEOUT });
+    const [paneID, pid, command, cwd] = stdout.trim().split("|");
+    if (!paneID || !/^[1-9][0-9]*$/.test(pid ?? "") || command !== "node" || cwd !== REPOSITORY) return undefined;
+    return { pane_id: paneID, pid: Number(pid), command, cwd };
+  }, "canonical tmux peer pane").catch(abort);
+  const registered = await waitFor(async () => {
+    const lines = (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean);
+    const row = lines.map((line) => { try { return JSON.parse(line); } catch { return undefined; } }).find((value) => value?.event === "registered" && typeof value.lease === "string");
+    return row === undefined ? undefined : { ...row, lines };
+  }, "canonical tmux peer registration").catch(abort);
+  return {
+    session,
+    script,
+    log,
+    pane,
+    registered,
+    stop: async () => {
+      await execFileAsync("tmux", ["kill-session", "-t", session], { cwd: REPOSITORY, timeout: TIMEOUT }).catch(() => undefined);
+      return { session, stopped: true };
+    },
+  };
+}
+
+async function launchManagedFromDedicatedBcbTab(bcb, tab, router, name, instruction) {
+  const payload = { name, cwd: router.cwd, model: { provider: "mecha-router-test", id: "managed-rpc-release" }, initial_instruction: instruction };
+  const response = await execBrowser(bcb, tab, `(async () => { const response = await fetch('/v1/managed-agents', { method: 'POST', headers: { 'content-type': 'application/json', 'X-Request-ID': crypto.randomUUID() }, body: ${JSON.stringify(JSON.stringify(payload))} }); const body = await response.json().catch(() => ({})); return { status: response.status, body }; })()`);
+  if (response?.status !== 202) fail(`BCB launch of ${name} failed: ${JSON.stringify(response)}`);
+  return response.body;
+}
+
+async function hardKillManagedPi(database, agentID) {
+  const rows = await sqliteRows(database, "SELECT process_pid,process_start_marker,process_incarnation,runtime_generation,pi_session_id,session_epoch FROM managed_agents WHERE agent_id=?", [agentID]);
+  if (rows.length !== 1 || !Number.isInteger(rows[0].process_pid) || rows[0].process_pid < 2) fail(`managed Pi process identity is unavailable for ${agentID}`);
+  process.kill(rows[0].process_pid, "SIGKILL");
+  return rows[0];
+}
+
+function reactInputScript(selector, value) {
+  return `(() => { const field = document.querySelector(${JSON.stringify(selector)}); if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) throw new Error('missing input ' + ${JSON.stringify(selector)}); const prototype = field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set; if (!setter) throw new Error('input setter unavailable'); setter.call(field, ${JSON.stringify(value)}); field.dispatchEvent(new Event('input', { bubbles: true })); field.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`;
+}
+
+async function snapshot(bcb, tab) {
+  return execBrowser(bcb, tab, "({ viewport: { width: innerWidth, height: innerHeight }, scrollWidth: document.documentElement.scrollWidth, scrollHeight: document.documentElement.scrollHeight, bodyText: document.body.innerText, html: document.documentElement.outerHTML, resources: performance.getEntriesByType('resource').map((entry) => entry.name) })");
+}
+
+async function selectAndRevealManagedChildren(bcb, tab) {
+  const selector = `[data-agent-id=${JSON.stringify(CHILD_AGENT)}]`;
+  await waitFor(async () => (await execBrowser(bcb, tab, `(() => { const row = document.querySelector(${JSON.stringify(selector)}); return row instanceof HTMLElement && row.querySelector('.agent-row-select') instanceof HTMLElement; })()`)) === true ? true : undefined, "managed parent row");
+  await execBrowser(bcb, tab, `(async () => { const row = document.querySelector(${JSON.stringify(selector)}); const select = row?.querySelector('.agent-row-select'); if (!(row instanceof HTMLElement) || !(select instanceof HTMLElement)) throw new Error('managed parent row is unavailable'); row.scrollIntoView({ block: 'center', inline: 'nearest' }); select.click(); await new Promise((resolve) => setTimeout(resolve, 25)); if (!row.querySelector('.managed-child-list li')) { const button = row.querySelector('button[aria-label*=subagent]'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed child expander missing'); button.click(); await new Promise((resolve) => setTimeout(resolve, 25)); } const child = row.querySelector('.managed-child-list li'); if (!(child instanceof HTMLElement)) throw new Error('managed child row is unavailable'); child.scrollIntoView({ block: 'center', inline: 'nearest' }); return true; })()`);
+  const visible = await waitFor(async () => {
+    const result = await execBrowser(bcb, tab, `(() => { const row = document.querySelector(${JSON.stringify(selector)}); const parent = row?.querySelector('.agent-row-select'); const child = row?.querySelector('.managed-child-list li'); if (!(row instanceof HTMLElement) || !(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return undefined; const isFullyVisible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return style.visibility !== 'hidden' && style.display !== 'none' && rect.top >= 0 && rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight; }; return { parent_selected: row.getAttribute('aria-selected') === 'true', parent_visible: isFullyVisible(parent), child_visible: isFullyVisible(child), parent_text: row.innerText, child_text: child.innerText, parent_rect: parent.getBoundingClientRect().toJSON(), child_rect: child.getBoundingClientRect().toJSON() }; })()`);
+    return result?.parent_selected === true && result?.parent_visible === true && result?.child_visible === true ? result : undefined;
+  }, "visible managed parent and child");
+  if (visible?.parent_selected !== true || visible?.parent_visible !== true || visible?.child_visible !== true) fail(`managed child is not visibly selected at desktop width: ${JSON.stringify(visible)}`);
+  return visible;
+}
+
+async function phase3CandidateIdentity() {
+  const plan = await readFile(join(REPOSITORY, "RPC_IMPLEMENTATION_PLAN.html"), "utf8");
+  const phaseStart = plan.indexOf('<article class="phase" id="phase-3">');
+  const phaseEnd = plan.indexOf('<article class="phase" id="phase-4">');
+  if (phaseStart < 0 || phaseEnd <= phaseStart) fail("Phase 3 ledger is unavailable");
+  const paths = [...plan.slice(phaseStart, phaseEnd).matchAll(/data-path="([^"]+)"/g)].map((match) => match[1]).sort();
+  if (paths.length === 0 || new Set(paths).size !== paths.length || paths.some((path) => path.startsWith("/") || path.includes(".."))) fail("Phase 3 ledger is invalid");
+  const hashes = {};
+  for (const path of paths) {
+    const absolute = join(REPOSITORY, path);
+    if (!(await exists(absolute))) fail(`Phase 3 ledger input is missing: ${path}`);
+    hashes[path] = await sha256File(absolute);
+  }
+  const status = await commandText("git", ["-C", REPOSITORY, "status", "--porcelain=v1", "--untracked-files=all"]);
+  const dirty = status === "" ? [] : status.split("\n");
+  // commandText trims the first porcelain line's leading space, so accept both
+  // the normal two-column marker and that first-line one-column form.
+  const porcelainPath = (entry) => /^[ MADRCU?!]{2} /.test(entry) ? entry.slice(3) : /^[MADRCU?!] /.test(entry) ? entry.slice(2) : entry;
+  const unownedDirtyPaths = dirty.map(porcelainPath).filter((path) => !paths.includes(path));
+  if (unownedDirtyPaths.length > 0) fail(`candidate has dirty paths outside the Phase 3 ledger: ${unownedDirtyPaths.join(", ")}`);
+  const identity = {
+    head: await commandText("git", ["-C", REPOSITORY, "rev-parse", "HEAD"]),
+    tree: await commandText("git", ["-C", REPOSITORY, "rev-parse", "HEAD^{tree}"]),
+    phase3_paths: paths,
+    phase3_source_sha256: hashes,
+    working_tree: dirty,
+    frozen_phase2_source: await frozenP2SnapshotProof(),
+  };
+  return { ...identity, candidate_content_sha256: createHash("sha256").update(JSON.stringify(identity)).digest("hex") };
+}
+
+async function verifyRouterServesBuiltUI(router) {
+  const response = await fetch(`${router.httpUrl}/`);
+  const body = await response.text();
+  if (!response.ok || body.includes("/@vite/client") || !body.includes("<script")) fail("isolated router did not serve the built router UI");
+  return { status: response.status, static_ui_root: router.staticUIRoot };
+}
+
+export async function runManagedRpcRelease() {
+  const output = process.env.MECHA_BCB_ARTIFACT_DIR ?? join("/private/tmp", `managed-rpc-bcb-release-${Date.now()}`);
+  await mkdir(output, { recursive: true, mode: 0o700 });
+  const report = { mode: "managed-rpc-release", result: "incomplete", started_at: new Date().toISOString(), steps: [], isolation: { live_router_port: 8765, live_router_used: false } };
+  const write = async (name, value) => {
+    const path = join(output, name);
+    await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+    return path;
+  };
+  const step = async (name, action) => {
+    try {
+      const value = await action();
+      const artifact = await write(`${name}.json`, { status: "passed", value });
+      report.steps.push({ name, status: "passed", artifact });
+      return value;
+    } catch (error) {
+      const artifact = await write(`${name}.json`, { status: "failed", error: error instanceof Error ? error.message : String(error) });
+      report.steps.push({ name, status: "failed", artifact });
+      throw error;
+    }
+  };
+  let root;
+  let provider;
+  let router;
+  let bcb;
+  let staticUIRoot;
+  let tmuxPeer;
+  let tab;
+  let isolatedRestartRecovery;
+  try {
+    const candidate = await step("candidate-identity", phase3CandidateIdentity);
+    report.candidate = candidate;
+    const prerequisites = await step("preflight", preflight);
+    root = await createTaskRoot("managed-rpc-bcb-release");
+    staticUIRoot = await step("build-router-ui", () => buildRouterUI(root));
+    provider = await startProvider();
+    router = await step("managed-router", () => startManagedRouter(root, prerequisites, provider, staticUIRoot));
+    await step("router-serves-built-ui", () => verifyRouterServesBuiltUI(router));
+    tmuxPeer = await step("canonical-tmux-peer", () => startCanonicalTmuxPeer(root, router));
+    bcb = await step("bcb", () => connectedBcb(prerequisites.python));
+    const taskUrl = `${router.httpUrl}/?managed-rpc-release=${encodeURIComponent(`run-${Date.now()}-${Math.random().toString(16).slice(2)}`)}`;
+    const visualTask = { url: taskUrl, document_title: `BCB Managed RPC Release ${Date.now()}-${Math.random().toString(16).slice(2)}` };
+    const taskWindow = await step("bcb-task-window", async () => {
+      const opened = await openControlledBcbWindow(bcb, taskUrl, `managed-rpc-release-${Date.now()}`);
+      tab = opened.tab;
+      const zoom = await resetControlledBcbWindowZoom(bcb, tab);
+      const viewport = await setControlledBcbWindowInnerWidth(bcb, tab, DESKTOP_VIEWPORT_WIDTH);
+      if (viewport.width !== DESKTOP_VIEWPORT_WIDTH) fail(`BCB task popup reported ${viewport.width ?? "unknown"}px instead of ${DESKTOP_VIEWPORT_WIDTH}px`);
+      return { ...opened, zoom, viewport: { width: viewport.width, height: viewport.height }, resize: "script-opened BCB popup window.resizeTo" };
+    });
+    await write("environment.json", { candidate: report.candidate, health: bcb.health, router: { http: router.httpUrl, ws: router.websocketUrl, database: router.database, log: router.log, managed_home: router.home, session_root: router.sessions, cwd: router.cwd, static_ui_root: staticUIRoot }, tmux_peer: { session: tmuxPeer.session, pane: tmuxPeer.pane, log: tmuxPeer.log, registered: tmuxPeer.registered }, bcb: { host: bcb.host, http: bcb.httpPort, existing_extension_connection: true, task_tab: tab, preexisting_tab_count: taskWindow.existing_tab_count }, browser: { task_url: taskUrl, document_title: visualTask.document_title, dedicated_window: true, device_emulation: false, ui_origin: router.httpUrl }, live_router_used: false });
+
+    await step("connect-ui", async () => {
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('input[placeholder=\"http://127.0.0.1:4000\"]'))")) ? true : undefined, "BCB configuration screen");
+      await execBrowser(bcb, tab, reactInputScript("input[placeholder='http://127.0.0.1:4000']", router.httpUrl));
+      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Connect'); if (!(button instanceof HTMLButtonElement)) throw new Error('Connect button missing'); button.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelector('[aria-label=\"Connection status\"]')?.textContent?.includes('Connected')")) ? true : undefined, "managed router connection");
+      return { router: router.httpUrl, browser_ui_origin: router.httpUrl };
+    });
+
+    await step("bcb-concurrent-tmux-peer", async () => {
+      try {
+        await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('[data-agent-id=phase3-tmux-peer] .agent-source'))")) === true ? true : undefined, "BCB canonical tmux peer row");
+        const rendered = await execBrowser(bcb, tab, "(() => { const row = document.querySelector('[data-agent-id=phase3-tmux-peer]'); return { text: row?.innerText ?? '', source: row?.querySelector('.agent-source')?.textContent ?? '' }; })()");
+        if (rendered?.source !== "tmux") fail("BCB canonical tmux row lost its tmux source label");
+        const { stdout } = await execFileAsync("tmux", ["list-panes", "-t", tmuxPeer.session, "-F", "#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}"], { cwd: REPOSITORY, timeout: TIMEOUT });
+        const [paneID, pid, command, cwd] = stdout.trim().split("|");
+        if (paneID !== tmuxPeer.pane.pane_id || Number(pid) !== tmuxPeer.pane.pid || command !== "node" || cwd !== REPOSITORY) fail("canonical tmux peer ownership changed during BCB proof");
+        return { session: tmuxPeer.session, pane: tmuxPeer.pane, rendered };
+      } catch (error) {
+        await write("bcb-concurrent-tmux-peer-debug.json", { browser: await execBrowser(bcb, tab, "({ body: document.body.innerText, rows: [...document.querySelectorAll('[data-agent-id]')].map((row) => ({ id: row.getAttribute('data-agent-id'), text: row.innerText, source: row.querySelector('.agent-source')?.textContent ?? null })) })").catch(() => undefined), peer: { session: tmuxPeer.session, pane: tmuxPeer.pane, log: await readFile(tmuxPeer.log, "utf8").catch(() => "") } });
+        throw error;
+      }
+    });
+
+    await step("launch-real-managed-pi", async () => {
+      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent button missing'); button.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-agent-dialog form'))")) ? true : undefined, "managed launch dialog");
+      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog input:nth-of-type(1)", CHILD_AGENT));
+      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog input[placeholder='/Users/me/project']", router.cwd));
+      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog fieldset label:nth-of-type(1) input", "mecha-router-test"));
+      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog fieldset label:nth-of-type(2) input", "managed-rpc-release"));
+      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog textarea", "Spawn the acceptance child compaction fixture."));
+      await execBrowser(bcb, tab, "(() => { const button = document.querySelector('.managed-agent-dialog form button[type=submit]'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed launch submit missing'); button.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}]')?.textContent?.includes('router-managed')`)) ? true : undefined, "managed Pi row");
+      return { agent_id: CHILD_AGENT };
+    });
+
+    const compacting = await step("real-child-compaction", async () => {
+      let lastPayload;
+      try {
+        const result = await waitFor(async () => {
+          const response = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`);
+          if (!response.ok) return undefined;
+          const payload = await response.json();
+          lastPayload = payload;
+          const child = payload.children?.find((candidate) => candidate.compaction_state === "compacting" && typeof candidate.started_at === "string");
+          return child ? payload : undefined;
+        }, "real managed child compacting snapshot");
+        return { endpoint: result };
+      } catch (error) {
+        const agent = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => ({ unavailable: true }));
+        const stderr = await readFile(router.piStderr, "utf8").catch(() => "");
+        await write("real-child-compaction-debug.json", { endpoint: lastPayload, managed_agent: agent, provider: provider.summary(), pi_stderr_head: stderr.slice(0, 2_000), pi_stderr_tail: stderr.slice(-2_000), browser: await execBrowser(bcb, tab, "document.body.innerText").catch(() => "unavailable") });
+        throw error;
+      }
+    });
+    await write("managed-child-compacting-endpoint.json", compacting.endpoint);
+
+    await step("native-parent-compaction-matrix", async () => {
+      try {
+        const transitions = await waitFor(async () => {
+          const rows = await sqliteRows(router.database, "SELECT source_sequence,state,outcome,pi_session_id,session_epoch,process_incarnation,runtime_generation FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [CHILD_AGENT]);
+          const outcomes = new Set(rows.map((row) => row.outcome).filter((outcome) => typeof outcome === "string"));
+          const agent = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then((response) => response.json());
+          return outcomes.has("completed") && outcomes.has("aborted") && outcomes.has("failed") && agent.agent?.activity_state === "compacting" ? { rows, agent } : undefined;
+        }, "native installed-Pi parent compaction outcome matrix");
+        const history = await fetch(`${router.httpUrl}/v1/history?view=complete&limit=100`).then((response) => response.json());
+        // The browser history contract deliberately exposes only redacted
+        // operational facts, not agent IDs or producer categories. This
+        // isolated router has one managed parent; the transition rows above
+        // bind these expected messages to its installed-Pi event stream.
+        const parentHistory = history.entries ?? [];
+        const messages = parentHistory.map((entry) => entry.message);
+        for (const expected of ["Managed parent compaction completed", "Managed parent compaction aborted", "Managed parent compaction failed"]) {
+          if (!messages.includes(expected)) fail(`parent compaction complete history omitted ${expected}`);
+        }
+        await write("native-parent-compaction-matrix.json", { transitions: transitions.rows, agent: transitions.agent, history: parentHistory, assertion: "real installed-Pi compaction_start/end frames preserved completed, aborted, and failed outcomes; the live final hold leaves the parent compacting" });
+        return { transition_count: transitions.rows.length, outcomes: [...new Set(transitions.rows.map((row) => row.outcome).filter(Boolean))], parent_activity: transitions.agent.agent.activity_state, history_count: parentHistory.length };
+      } catch (error) {
+        await write("native-parent-compaction-matrix-debug.json", { transitions: await sqliteRows(router.database, "SELECT * FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [CHILD_AGENT]), agent: await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then((response) => response.json()).catch(() => undefined), stderr: await readFile(router.piStderr, "utf8").catch(() => "") });
+        throw error;
+      }
+    });
+
+    await step("bcb-desktop-window", async () => {
+      const visibility = await selectAndRevealManagedChildren(bcb, tab);
+      const proof = await snapshot(bcb, tab);
+      if (proof.viewport.width !== DESKTOP_VIEWPORT_WIDTH || proof.scrollWidth !== DESKTOP_VIEWPORT_WIDTH) fail(`BCB desktop evidence has horizontal overflow or wrong width (${proof.viewport.width}/${proof.scrollWidth})`);
+      const childText = await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] .managed-child-list')?.textContent ?? ""`);
+      if (!childText.includes("Managed release child") || !childText.includes("compacting")) fail("BCB desktop view did not show the real managed child compaction");
+      const capture = await screenshot(bcb, tab, join(output, "managed-child-compacting-desktop.png"), visualTask, "compacting");
+      await write("managed-child-compacting-desktop.json", { viewport: proof.viewport, scroll_width: proof.scrollWidth, screenshot: capture.path, screenshot_sha256: capture.sha256, screenshot_target: capture.target, route: "window.resizeTo on the script-opened BCB task popup", visibility, child_visible: true });
+      return { viewport: proof.viewport, screenshot: capture.path, screenshot_target: capture.target, visibility };
+    });
+
+    await step("bcb-ui-live-reconnect-compacting", async () => {
+      await execBrowser(bcb, tab, "location.reload(); true");
+      await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelector('[aria-label=\"Connection status\"]')?.textContent?.includes('Connected')")) ? true : undefined, "BCB managed UI reconnect while compacting");
+      const visibility = await selectAndRevealManagedChildren(bcb, tab);
+      await waitFor(async () => (await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] .managed-child-list')?.textContent?.includes('compacting')`)) ? true : undefined, "compacting child after BCB UI reconnect");
+      const proof = await snapshot(bcb, tab);
+      if (proof.viewport.width !== DESKTOP_VIEWPORT_WIDTH || proof.scrollWidth !== DESKTOP_VIEWPORT_WIDTH) fail(`BCB compacting reconnect evidence lost the desktop layout (${proof.viewport.width}/${proof.scrollWidth})`);
+      const capture = await screenshot(bcb, tab, join(output, "managed-child-compacting-desktop-reconnect.png"), visualTask, "compacting");
+      await write("managed-child-compacting-desktop-reconnect.json", { viewport: proof.viewport, scroll_width: proof.scrollWidth, screenshot: capture.path, screenshot_sha256: capture.sha256, screenshot_target: capture.target, visibility, reconnect: "controlled BCB task page reload and UI-live resubscription while the real child is compacting", child_compacting: true });
+      return { viewport: proof.viewport, screenshot: capture.path, screenshot_target: capture.target, visibility, child_compacting: true };
+    });
+
+    await step("real-child-compaction-completed", async () => {
+      try {
+        const result = await waitFor(async () => {
+          const response = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`);
+          if (!response.ok) return undefined;
+          const payload = await response.json();
+          const child = payload.children?.find((candidate) => candidate.compaction_state === "completed" && candidate.compaction?.count >= 1);
+          return child ? payload : undefined;
+        }, "real managed child completed compaction");
+        const visibility = await selectAndRevealManagedChildren(bcb, tab);
+        const childText = await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] .managed-child-list')?.textContent ?? ""`);
+        if (!childText.includes("Managed release child") || !childText.includes("completed")) fail("BCB did not receive the completed child compaction lifecycle update");
+        await write("managed-child-completed-endpoint.json", result);
+        return { endpoint: result, visibility };
+      } catch (error) {
+        const [children, agent, stderr] = await Promise.all([
+          fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => ({ unavailable: true })),
+          fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => ({ unavailable: true })),
+          readFile(router.piStderr, "utf8").catch(() => ""),
+        ]);
+        await write("managed-child-completed-debug.json", { children, agent, provider: provider.summary(), pi_stderr: stderr.slice(-4_000) });
+        throw error;
+      }
+    });
+
+    await step("bcb-ui-live-reconnect-completed", async () => {
+      await execBrowser(bcb, tab, "location.reload(); true");
+      await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelector('[aria-label=\"Connection status\"]')?.textContent?.includes('Connected')")) ? true : undefined, "BCB managed UI completed reconnect");
+      const visibility = await selectAndRevealManagedChildren(bcb, tab);
+      await waitFor(async () => (await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] .managed-child-list')?.textContent?.includes('completed')`)) ? true : undefined, "completed child after BCB UI reconnect");
+      const proof = await snapshot(bcb, tab);
+      if (proof.viewport.width !== DESKTOP_VIEWPORT_WIDTH || proof.scrollWidth !== DESKTOP_VIEWPORT_WIDTH) fail(`BCB completed reconnect evidence lost the desktop layout (${proof.viewport.width}/${proof.scrollWidth})`);
+      const capture = await screenshot(bcb, tab, join(output, "managed-child-completed-desktop-reconnect.png"), visualTask, "completed");
+      await write("managed-child-completed-desktop-reconnect.json", { viewport: proof.viewport, scroll_width: proof.scrollWidth, screenshot: capture.path, screenshot_sha256: capture.sha256, screenshot_target: capture.target, visibility, reconnect: "controlled BCB task page reload and UI-live resubscription after completion", child_completed: true });
+      return { viewport: proof.viewport, screenshot: capture.path, screenshot_target: capture.target, visibility, child_completed: true };
+    });
+
+    await step("parent-session-switch-recovery", async () => {
+      const sessionsBefore = (await readdir(router.sessions)).length;
+      const before = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`).then(async (response) => response.ok ? response.json() : { status: response.status });
+      try {
+        await execBrowser(bcb, tab, `(() => { const button = document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] button[aria-label^="Manage "]'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed parent action is unavailable'); button.click(); return true; })()`);
+        await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-lifecycle-actions button.secondary'))")) ? true : undefined, "managed reset action");
+        await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-lifecycle-actions button')].find((item) => item.textContent?.trim() === 'Reset'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed reset button is unavailable'); button.click(); return true; })()");
+        const endpoint = await waitFor(async () => {
+          const response = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`);
+          if (!response.ok) return undefined;
+          const payload = await response.json();
+          const recovered = payload.children?.filter((child) => child.recovery?.cause === "session_changed") ?? [];
+          return payload.recovery_state === "current" && recovered.length > 0 && payload.lifecycle_version < before.lifecycle_version ? payload : undefined;
+        }, "parent session switch current replacement snapshot", 60_000);
+        if (!before.children?.some((child) => child.status === "completed") || endpoint.children.some((child) => child.status === "completed") || !endpoint.children.every((child) => child.recovery?.cause === "session_changed" && child.recovery?.state === "interrupted_unknown")) fail("parent session switch retained, fabricated, or failed to mark an unconfirmed child state");
+        const sessionsAfter = (await readdir(router.sessions)).length;
+        await write("parent-session-switch-recovery.json", { sessions_before: sessionsBefore, sessions_after: sessionsAfter, before, endpoint, assertion: "the replacement parent preserves unconfirmed prior runs as session-changed interrupted_unknown rather than retaining the prior terminal child state" });
+        return { sessions_before: sessionsBefore, sessions_after: sessionsAfter, before_lifecycle_version: before.lifecycle_version, replacement_lifecycle_version: endpoint.lifecycle_version, replacement_child_count: endpoint.children.length, recovery_causes: [...new Set(endpoint.children.map((child) => child.recovery?.cause))] };
+      } catch (error) {
+        const [agent, children, browser] = await Promise.all([
+          fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => ({ unavailable: true })),
+          fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => ({ unavailable: true })),
+          execBrowser(bcb, tab, "document.body.innerText").catch(() => "unavailable"),
+        ]);
+        await write("parent-session-switch-recovery-debug.json", { sessions_before: sessionsBefore, sessions_after: await readdir(router.sessions).then((items) => items.length).catch(() => -1), agent, children, browser });
+        throw error;
+      }
+    });
+
+    await step("isolated-router-restart-recovery", async () => {
+      const before = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`).then((response) => response.json());
+      const restarted = await restartManagedRouter(router, root, { makeChildFenceUncertain: true });
+      router = restarted.router;
+      try {
+        await verifyRouterServesBuiltUI(router);
+        await execBrowser(bcb, tab, "location.reload(); true");
+        await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelector('[aria-label=\"Connection status\"]')?.textContent?.includes('Connected')")) ? true : undefined, "BCB reconnect after isolated router restart");
+        const after = await waitFor(async () => {
+          const response = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`);
+          if (!response.ok) return undefined;
+          const payload = await response.json();
+          const retainedUnknown = payload.children?.filter((child) => child.recovery?.state === "interrupted_unknown") ?? [];
+          return payload.recovery_state === "reconstructing" && retainedUnknown.length > 0 ? payload : undefined;
+        }, "router restart reconstructing child state");
+        if (after.children.some((child) => child.status === "completed")) fail("router restart fabricated a terminal child state instead of preserving it as interrupted unknown");
+        isolatedRestartRecovery = after;
+        await write("isolated-router-restart-recovery.json", { stopped: restarted.stopped, before, after, assertion: "a test-only unmatched persisted source fence after the isolated router stop is rendered as reconstructing while retaining the bounded unconfirmed child records as interrupted_unknown" });
+        return { stopped: restarted.stopped, before_recovery_state: before.recovery_state, after_recovery_state: after.recovery_state, child_count_after: after.children.length, recovery_states: [...new Set(after.children.map((child) => child.recovery?.state))] };
+      } catch (error) {
+        await write("isolated-router-restart-recovery-debug.json", { stopped: restarted.stopped, before, after: await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => undefined), agent: await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => undefined), readiness_sources: await sqliteRows(router.database, "SELECT agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation FROM managed_readiness_sources WHERE agent_id=?", [CHILD_AGENT]).catch(() => undefined) });
+        throw error;
+      }
+    });
+
+    await step("bcb-ui-live-reconnect-reconstructing", async () => {
+      const visibility = await selectAndRevealManagedChildren(bcb, tab);
+      if (!visibility.parent_text.includes("Reconstructing child state") || !visibility.parent_text.includes("Interrupted · outcome unknown")) fail("BCB did not render the retained interrupted-unknown state after isolated router restart");
+      const proof = await snapshot(bcb, tab);
+      if (proof.viewport.width !== DESKTOP_VIEWPORT_WIDTH || proof.scrollWidth !== DESKTOP_VIEWPORT_WIDTH) fail(`BCB reconstructing restart evidence lost the desktop layout (${proof.viewport.width}/${proof.scrollWidth})`);
+      const capture = await screenshotReconstructing(bcb, tab, join(output, "managed-child-reconstructing-desktop-restart.png"), visualTask);
+      await write("managed-child-reconstructing-desktop-restart.json", { viewport: proof.viewport, scroll_width: proof.scrollWidth, screenshot: capture.path, screenshot_sha256: capture.sha256, screenshot_target: capture.target, visibility, restart_endpoint: isolatedRestartRecovery, restart: "isolated managed-router restart followed by UI-live reconnect; the selected parent remains reconstructing and retains only interrupted-unknown child evidence", child_count: visibility.child_count });
+      return { viewport: proof.viewport, screenshot: capture.path, screenshot_target: capture.target, visibility, child_count: visibility.child_count };
+    });
+
+    await step("hard-kill-live-child-recovery", async () => {
+      const agentID = "hard-kill-parent";
+      const launch = await launchManagedFromDedicatedBcbTab(bcb, tab, router, agentID, "Spawn two live children for the hard-exit acceptance fixture.");
+      const before = await waitFor(async () => {
+        const [children, agent] = await Promise.all([
+          fetch(`${router.httpUrl}/v1/managed-agents/${agentID}/children`).then((response) => response.ok ? response.json() : undefined),
+          fetch(`${router.httpUrl}/v1/managed-agents/${agentID}`).then((response) => response.ok ? response.json() : undefined),
+        ]);
+        const liveChildren = children?.children?.filter((child) => child.compaction_state === "compacting") ?? [];
+        return liveChildren.length === 2 && agent?.agent?.activity_state === "compacting" ? { children, agent } : undefined;
+      }, "two live children and a live parent compaction before hard kill", 60_000);
+      const pid = await hardKillManagedPi(router.database, agentID);
+      const after = await waitFor(async () => {
+        const [children, agent, recoveries, transitions, history] = await Promise.all([
+          fetch(`${router.httpUrl}/v1/managed-agents/${agentID}/children`).then((response) => response.ok ? response.json() : undefined),
+          fetch(`${router.httpUrl}/v1/managed-agents/${agentID}`).then((response) => response.ok ? response.json() : undefined),
+          sqliteRows(router.database, "SELECT recovery_cause,recovery_state,prior_pi_session_id,prior_process_incarnation,prior_runtime_generation FROM managed_child_recoveries WHERE agent_id=? ORDER BY rowid", [agentID]),
+          sqliteRows(router.database, "SELECT state,outcome FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [agentID]),
+          fetch(`${router.httpUrl}/v1/history?view=complete&limit=100`).then((response) => response.json()),
+        ]);
+        const recovered = children?.children?.filter((child) => child.recovery?.cause === "parent_process_lost") ?? [];
+        // The public history page is intentionally redacted; source binding is
+        // established by the agent-specific transition ledger above.
+        const parentUnknown = transitions.some((transition) => transition.outcome === "reconciled_unknown") && (history?.entries ?? []).some((entry) => entry.message === "Managed parent compaction reconciled_unknown");
+        return agent?.agent?.lifecycle_state === "failed" && recovered.length === 2 && recoveries.length === 2 && recoveries.every((row) => row.recovery_cause === "parent_process_lost") && parentUnknown ? { children, agent, recoveries, transitions, history } : undefined;
+      }, "hard parent exit child recovery projection", 60_000);
+      await waitFor(async () => {
+        const rendered = await execBrowser(bcb, tab, `(() => { const row = document.querySelector('[data-agent-id=${agentID}]'); const select = row?.querySelector('.agent-row-select'); if (!(row instanceof HTMLElement) || !(select instanceof HTMLElement)) return undefined; if (row.getAttribute('aria-selected') !== 'true') select.click(); const toggle = row.querySelector('button[aria-label*=subagent]'); if (toggle instanceof HTMLButtonElement && !row.querySelector('.managed-child-list li')) toggle.click(); const text = row.innerText; return row.querySelectorAll('.managed-child-list li').length === 2 && text.includes('parent process ended before this child was confirmed') ? { text, children: row.querySelectorAll('.managed-child-list li').length } : undefined; })()`);
+        return rendered;
+      }, "BCB hard-exit recovered children", 60_000);
+      const capture = await screenshotManagedChildren(bcb, tab, join(output, "managed-child-parent-process-lost-desktop.png"), visualTask, agentID, "Interrupted · outcome unknown");
+      const history = (after.history.entries ?? []).filter((entry) => entry.agent_id === agentID && (entry.category === "managed_child" || entry.category === "managed_parent_compaction"));
+      await write("hard-kill-live-child-recovery.json", { launch, before, killed_process: pid, after: { children: after.children, agent: after.agent, recoveries: after.recoveries, history }, screenshot: capture, assertion: "the exact managed Pi PID was SIGKILLed while two children and parent compaction were live; both children became source-fenced parent_process_lost recoveries and the missing parent end became reconciled_unknown" });
+      return { agent_id: agentID, killed_pid: pid.process_pid, recovered_children: after.children.children.length, recovery_causes: after.recoveries.map((row) => row.recovery_cause), screenshot: capture.path };
+    });
+
+    await step("final-browser", async () => {
+      const proof = await snapshot(bcb, tab);
+      if (proof.resources.some((url) => url.includes(":8765"))) fail("BCB loaded the live router");
+      if (proof.resources.some((url) => url.includes("vite") || url.includes("/@vite/"))) fail("BCB loaded a Vite development resource instead of the router-served bundle");
+      if (!proof.resources.some((url) => url.startsWith(`${router.httpUrl}/assets/`))) fail("BCB did not load a built router UI asset from the isolated router");
+      if (proof.viewport.width !== DESKTOP_VIEWPORT_WIDTH || proof.scrollWidth !== DESKTOP_VIEWPORT_WIDTH) fail(`final BCB evidence is not desktop width without overflow (${proof.viewport.width}/${proof.scrollWidth})`);
+      const browserBoundary = await execBrowser(bcb, tab, "({ cookies_empty: document.cookie === '', session_storage_empty: sessionStorage.length === 0 })");
+      if (browserBoundary?.cookies_empty !== true || browserBoundary?.session_storage_empty !== true) fail("dedicated BCB task window unexpectedly held browser session state");
+      const console = await bcbCommand(bcb, ["cli.bcb_console", "--json", "--tab", String(tab), "--limit", "500"]);
+      const errors = Array.isArray(console) ? console.filter((entry) => entry?.level === "error") : [];
+      if (errors.length) fail(`browser console errors: ${JSON.stringify(errors)}`);
+      return { viewport: proof.viewport, scroll_width: proof.scrollWidth, router_served_assets: proof.resources.filter((url) => url.startsWith(`${router.httpUrl}/assets/`)), console_errors: errors.length, browser_boundary: browserBoundary };
+    });
+    report.result = "automated_pass_visual_identity_verified";
+    report.visual_identity_verification = {
+      status: "passed",
+      technique: "Each screenshot assigns the disposable popup a unique document title, confirms its exact BCB tab ID/URL/title and selected parent with the expected child state, then sets that exact Chrome window AXMain through macOS System Events immediately before capture.",
+      artifacts: ["managed-child-compacting-desktop.json", "managed-child-compacting-desktop-reconnect.json", "managed-child-completed-desktop-reconnect.json", "managed-child-reconstructing-desktop-restart.json"],
+    };
+  } catch (error) {
+    report.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    const cleanup = [];
+    try { if (bcb) cleanup.push({ dedicated_bcb_window_closed: await clearAndCloseControlledBcbWindow(bcb, tab) }); } catch (error) { cleanup.push({ dedicated_bcb_window_close_error: String(error) }); }
+    try { if (router) await stopRouterProcess(router); } catch (error) { cleanup.push({ router: String(error) }); }
+    try { if (tmuxPeer) cleanup.push({ canonical_tmux_peer: await tmuxPeer.stop() }); } catch (error) { cleanup.push({ canonical_tmux_peer: String(error) }); }
+    try { if (provider) await provider.close(); } catch (error) { cleanup.push({ provider: String(error) }); }
+    if (root) await rm(root, { recursive: true, force: true });
+    report.cleanup = cleanup;
+    report.finished_at = new Date().toISOString();
+    await write("REPORT.json", report);
+  }
+  return report;
+}

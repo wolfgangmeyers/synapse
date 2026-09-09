@@ -90,11 +90,30 @@ describe("AgentRow", () => {
     expect(screen.queryByText("Run tests")).not.toBeInTheDocument();
   });
 
+  it("keeps managed children available while the parent compacts", () => {
+    render(<AgentRow agent={{ agent_id: "managed-build", source: "router-managed", activity_state: "compacting", subagent_count: 1, subagents: [{ id: "child-1", description: "Run the focused check" }], managed_children: [{ id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed", cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running", compaction_state: "compacting", compaction: { state: "compacting", count: 1 } }] }} expanded />);
+    expect(screen.getByText("Compacting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "1 subagent" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Children for managed-build" })).toHaveTextContent("compacting");
+  });
+
   it("shows a count-only subagent badge without an expand control", () => {
     render(<AgentRow agent={{ agent_id: "build-agent", activity_state: "idle", subagent_count: 2 }} expanded />);
     const badge = screen.getByText("2 subagents");
     expect(badge.closest(".subagent-indicator")).not.toHaveClass("expandable");
     expect(screen.queryByRole("button", { name: "2 subagents" })).not.toBeInTheDocument();
+  });
+
+  it("keeps expanded managed children below the source-qualified card controls", () => {
+    render(<AgentRow agent={{ agent_id: "managed-build", source: "router-managed", activity_state: "idle", subagent_count: 1, subagents: [{ id: "child-1", description: "Run the focused check" }], managed_children: [{ id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed", cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running", compaction_state: "none", compaction: { state: "idle", count: 0 } }] }} expanded />);
+
+    const children = screen.getByRole("list", { name: "Children for managed-build" });
+    const row = children.parentElement;
+    expect(screen.getByText("router-managed")).toBeInTheDocument();
+    expect(row).not.toBeNull();
+    if (row === null) throw new Error("managed child list is not contained by its card");
+    expect(row).toHaveClass("expanded");
+    expect(children).toHaveClass("managed-child-list");
   });
 
   it("shows working and subagent state accessibly", () => {

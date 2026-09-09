@@ -483,7 +483,7 @@ p:empty { display: none; }
 .agent-row.compacting::after {
   background: conic-gradient(from var(--agent-border-angle), rgba(192,132,252,0) 0deg, rgba(192,132,252,0.18) 6deg, rgba(192,132,252,0.95) 22deg 98deg, rgba(192,132,252,0.18) 114deg, rgba(192,132,252,0) 120deg 360deg);
 }
-.agent-row.expanded { align-items: center; }
+.agent-row.expanded { align-items: center; flex-wrap: wrap; }
 .agent-row-text { min-width: 0; overflow: hidden; flex: 1 1 auto; display: block; }
 .agent-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arrival-indicator,

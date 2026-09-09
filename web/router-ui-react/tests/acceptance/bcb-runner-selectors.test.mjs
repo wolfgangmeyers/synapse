@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import {
   ARRIVAL_DIALOG_SELECTOR,
   browserHelpers,
@@ -14,8 +16,24 @@ import {
   NARROW_VIEWPORT,
   requireDesktopViewport,
   requireNarrowViewport,
+  runRequested,
   setViewport,
 } from "./bcb-runner.mjs";
+
+test("release dispatcher requires the complete isolated managed-RPC mode pair", async () => {
+  await assert.rejects(runRequested(["--managed-rpc"]), /Usage: test:acceptance:bcb \[--managed-rpc --release\]/);
+  await assert.rejects(runRequested(["--release"]), /Usage: test:acceptance:bcb \[--managed-rpc --release\]/);
+});
+
+test("managed release runner uses the router-built UI and visible child selection", async () => {
+  const runner = await readFile(fileURLToPath(new URL("./bcb-managed-rpc-release-runner.mjs", import.meta.url)), "utf8");
+  assert.match(runner, /buildRouterUI/);
+  assert.match(runner, /--static-ui-root/);
+  assert.match(runner, /selectAndRevealManagedChildren/);
+  assert.match(runner, /parent_selected/);
+  assert.match(runner, /child_visible/);
+  assert.doesNotMatch(runner, /startVite|startLoopbackGateway/);
+});
 
 test("control result uses the forwarded target identity", () => {
   const request = {

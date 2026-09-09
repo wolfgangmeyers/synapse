@@ -186,7 +186,7 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
 	require.Greater(t, len(migrations), 22)
-	require.Equal(t, "031_managed_quiet_send_authorizations", migrations[len(migrations)-1].ID)
+	require.Equal(t, "033_managed_parent_compaction_transitions", migrations[len(migrations)-1].ID)
 	// Preserve this 023-to-025 regression as a historical slice. The full 027
 	// fixture below is covered separately and deliberately requires no starting
 	// launch row.

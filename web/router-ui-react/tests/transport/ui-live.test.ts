@@ -90,7 +90,7 @@ describe("direct UI-live transport", () => {
       onFrame: (frame) => frames.push(frame),
       onRecovery: recoveries,
     });
-    const child = { id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery_state: "current", status: "running", compaction_state: "none", compaction: { state: "idle", count: 0 } };
+    const child = { id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed", cause: null, observed_at: "2030-01-01T00:00:00Z" }, status: "running", compaction_state: "none", compaction: { state: "idle", count: 0 } };
     const childSnapshot = (version: number) => ({ type: "managed_children_snapshot", protocol: "mecha.web/v1", lifecycle_version: version, generated_at: "2030-01-01T00:00:00.000Z", children: [{ agent_id: "managed-alpha", source: "router-managed", lifecycle_version: version, recovery_state: "current", children: [child] }] });
     client.connect();
     sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 7, generated_at: "2030-01-01T00:00:00.000Z", agents: [agent] }) });

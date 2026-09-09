@@ -818,6 +818,15 @@ export interface ManagedChildCompaction {
   started_at?: RouterTimestamp;
   last_outcome?: "completed" | "failed" | "aborted" | "reconciled_unknown";
 }
+export type ManagedChildRecovery = {
+  state: "confirmed";
+  cause: null;
+  observed_at: string;
+} | {
+  state: "interrupted_unknown";
+  cause: "snapshot_omitted" | "parent_process_lost" | "session_changed";
+  observed_at: string;
+};
 export interface ManagedChild {
   // This opaque digest represents the parent/session/process/task/run tuple.
   // Browser state never receives the private runtime fence itself.
@@ -826,7 +835,7 @@ export interface ManagedChild {
   task_id: string;
   run_id: string;
   sequence: number;
-  recovery_state: "current";
+  recovery: ManagedChildRecovery;
   description?: string;
   model?: ManagedChildModel;
   status: LifecycleChildStatus | "unknown";

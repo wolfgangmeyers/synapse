@@ -169,9 +169,14 @@ function isManagedChildCompaction(value: unknown): boolean {
     && (value.started_at === undefined || isRouterUtcTimestamp(value.started_at))
     && (value.last_outcome === undefined || value.last_outcome === "completed" || value.last_outcome === "failed" || value.last_outcome === "aborted" || value.last_outcome === "reconciled_unknown");
 }
+function isManagedChildRecovery(value: unknown): boolean {
+  if (!isRecord(value) || !isRouterUtcTimestamp(value.observed_at)) return false;
+  if (value.state === "confirmed") return isExactRecord(value, ["state", "cause", "observed_at"]) && value.cause === null;
+  return isExactRecord(value, ["state", "cause", "observed_at"]) && value.state === "interrupted_unknown" && (value.cause === "snapshot_omitted" || value.cause === "parent_process_lost" || value.cause === "session_changed");
+}
 function isManagedChild(value: unknown): value is ManagedChild {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "parent_entry_id", "task_id", "run_id", "sequence", "recovery_state", "description", "model", "status", "started_at", "ended_at", "duration_ms", "compaction", "compaction_state"])) return false;
-  return isSafeString(value.id, 1, 128) && isSafeString(value.parent_entry_id, 1, 128) && isSafeString(value.task_id, 1, 128) && isSafeString(value.run_id, 1, 128) && isSafeInteger(value.sequence, 0) && value.recovery_state === "current"
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "parent_entry_id", "task_id", "run_id", "sequence", "recovery", "description", "model", "status", "started_at", "ended_at", "duration_ms", "compaction", "compaction_state"])) return false;
+  return isSafeString(value.id, 1, 128) && isSafeString(value.parent_entry_id, 1, 128) && isSafeString(value.task_id, 1, 128) && isSafeString(value.run_id, 1, 128) && isSafeInteger(value.sequence, 0) && isManagedChildRecovery(value.recovery)
     && (value.description === undefined || isSafeString(value.description, 0, 512)) && (value.model === undefined || isManagedChildModel(value.model)) && (isChildStatus(value.status) || value.status === "unknown")
     && (value.started_at === undefined || isRouterUtcTimestamp(value.started_at)) && (value.ended_at === undefined || isRouterUtcTimestamp(value.ended_at)) && (value.duration_ms === undefined || isSafeInteger(value.duration_ms, 0))
     && isManagedChildCompaction(value.compaction) && typeof value.compaction_state === "string" && ["none", "compacting", "completed", "unknown"].includes(value.compaction_state);
