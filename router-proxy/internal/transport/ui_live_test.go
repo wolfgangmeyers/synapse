@@ -1,0 +1,197 @@
+package transport
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
+	"github.com/stretchr/testify/require"
+)
+
+func newUILiveTestRouter(t *testing.T) (*Router, *store.Store, *httptest.Server) {
+	t.Helper()
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: false}, Manifest: manifest})
+	require.NoError(t, err)
+	router, err := New(Options{Store: durable, Managed: manager})
+	require.NoError(t, err)
+	server := httptest.NewServer(router)
+	t.Cleanup(func() { server.Close(); _ = router.Close(context.Background()); _ = durable.Close() })
+	return router, durable, server
+}
+
+func dialUILive(t *testing.T, server *httptest.Server, origin string) *websocket.Conn {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + uiLivePath
+	headers := http.Header{}
+	if origin != "" {
+		headers.Set("Origin", origin)
+	}
+	conn, response, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{HTTPHeader: headers})
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	require.NoError(t, err)
+	return conn
+}
+
+func readUILiveFrame(t *testing.T, conn *websocket.Conn) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, body, err := conn.Read(ctx)
+	require.NoError(t, err)
+	var frame map[string]any
+	require.NoError(t, json.Unmarshal(body, &frame))
+	return frame
+}
+
+func reserveUILiveAgent(t *testing.T, durable *store.Store, id string) {
+	t.Helper()
+	require.NoError(t, durable.ReserveManagedLaunch(context.Background(), store.ManagedAgentRecord{AgentID: id, Name: id, SlotHeld: true, Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}, store.ManagedOperation{OperationID: id + "-operation", Method: http.MethodPost, CanonicalPath: "/v1/managed-agents", RequestID: id + "-request", CanonicalBodyHash: strings.Repeat("b", 64), ResponseStatus: http.StatusAccepted, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}))
+}
+
+func TestUILiveIsDirectAndStartsWithRedactedSnapshot(t *testing.T) {
+	router, durable, server := newUILiveTestRouter(t)
+	reserveUILiveAgent(t, durable, "alpha")
+	first := dialUILive(t, server, "https://unrelated.example")
+	defer first.Close(websocket.StatusNormalClosure, "done")
+	frame := readUILiveFrame(t, first)
+	require.Equal(t, "managed_agents_snapshot", frame["type"])
+	require.Equal(t, uiLiveProtocol, frame["protocol"])
+	require.NotEmpty(t, frame["projection_version"])
+	agents, ok := frame["agents"].([]any)
+	require.True(t, ok)
+	require.Len(t, agents, 1)
+	agent, ok := agents[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "router-managed", agent["source"])
+	forbidden := []string{"pi_session_id", "session_epoch", "process_pid", "credential_path", "pending_initial_instruction"}
+	for _, field := range forbidden {
+		_, present := agent[field]
+		require.False(t, present, field)
+	}
+
+	children := readUILiveFrame(t, first)
+	require.Equal(t, "managed_children_snapshot", children["type"])
+
+	second := dialUILive(t, server, "")
+	defer second.Close(websocket.StatusNormalClosure, "done")
+	require.Equal(t, frame["type"], readUILiveFrame(t, second)["type"])
+	require.Equal(t, "managed_children_snapshot", readUILiveFrame(t, second)["type"])
+
+	queryURL := "ws" + strings.TrimPrefix(server.URL, "http") + uiLivePath + "?ticket=forbidden"
+	_, response, err := websocket.Dial(context.Background(), queryURL, nil)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	require.Error(t, err)
+
+	require.NoError(t, durable.MarkManagedReady(context.Background(), "alpha"))
+	router.uiLive.publish(context.Background())
+	delta := readUILiveFrame(t, first)
+	require.Equal(t, "managed_agent_delta", delta["type"])
+	require.Equal(t, frame["projection_version"], delta["base_version"])
+}
+
+func TestUILiveTransitionUsesSnapshotForVersionGapsAndRemovalForOneRecord(t *testing.T) {
+	prior := &uiLiveProjection{version: 3, generatedAt: "2030-01-01T00:00:00.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha"}}}
+	removed := uiLiveTransition(prior, &uiLiveProjection{version: 4, generatedAt: "2030-01-01T00:00:01.000Z", agents: map[string]map[string]any{}})
+	require.Equal(t, "managed_agent_removed", removed["type"])
+	require.Equal(t, "alpha", removed["agent_id"])
+	gap := uiLiveTransition(prior, &uiLiveProjection{version: 5, generatedAt: "2030-01-01T00:00:02.000Z", agents: map[string]map[string]any{"alpha": {"agent_id": "alpha"}}})
+	require.Equal(t, "managed_agents_snapshot", gap["type"])
+}
+
+func TestManagedLifecycleHistoryFactsOnlyUseAllowlistedLifecycleChanges(t *testing.T) {
+	prior := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "starting", "pi_session_id": "private"}, "gone": {"lifecycle_state": "stopped"}}}
+	current := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "running", "pi_session_id": "still-private"}, "beta": {"lifecycle_state": "starting"}}}
+	facts := managedLifecycleHistoryFacts(prior, current)
+	require.Equal(t, []managedLifecycleHistoryFact{
+		{agentID: "alpha", message: "Managed worker changed from starting to running"},
+		{agentID: "beta", message: "Managed worker entered starting"},
+		{agentID: "gone", message: "Managed worker was removed"},
+	}, facts)
+	for _, fact := range facts {
+		require.NotContains(t, fact.message, "private")
+	}
+}
+
+func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "child"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "not-a-folder"), []byte("x"), 0o600))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest})
+	require.NoError(t, err)
+	router, err := New(Options{Store: durable, Managed: manager})
+	require.NoError(t, err)
+	defer func() { _ = router.Close(context.Background()); _ = durable.Close() }()
+	request := httptest.NewRequest(http.MethodGet, "/v1/managed-directories?path="+url.QueryEscape(root), nil)
+	request.Header.Set("Origin", "https://unrelated.example")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+	directories, ok := body["directories"].([]any)
+	require.True(t, ok)
+	require.Len(t, directories, 1)
+	directory, ok := directories[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "child", directory["name"])
+}
+
+func TestStaticUIRejectsSymlinkedAssetsAndRechecksContainment(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "index.html"), []byte("ok"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "secret.js"), []byte("not an asset"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "secret.js"), filepath.Join(root, "escape.js")))
+	_, err := newStaticUI(root)
+	require.Error(t, err)
+
+	require.NoError(t, os.Remove(filepath.Join(root, "escape.js")))
+	ui, err := newStaticUI(root)
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(filepath.Join(outside, "secret.js"), filepath.Join(root, "escape.js")))
+	_, ok := ui.staticUIFile("escape.js")
+	require.False(t, ok, "a symlink introduced after startup must not be served")
+}
+
+func TestRouterServesContainedStaticUIWithoutAuthorityState(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "index.html"), []byte("<!doctype html><div id=\"root\"></div>"), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "assets"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "assets", "app.js"), []byte("console.log('ok')"), 0o600))
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	router, err := New(Options{Store: durable, StaticUIRoot: root})
+	require.NoError(t, err)
+	defer func() { _ = router.Close(context.Background()); _ = durable.Close() }()
+	request := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	request.Header.Set("Origin", "https://unrelated.example")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+	require.Empty(t, response.Header().Get("Set-Cookie"))
+	require.Empty(t, response.Header().Get("Access-Control-Allow-Credentials"))
+	require.Contains(t, response.Header().Get("Content-Security-Policy"), "connect-src 'self'")
+}

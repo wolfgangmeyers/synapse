@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -188,6 +189,9 @@ func (r *Router) runSweep(ctx context.Context) error {
 	// Policies are observational and must not hold the lifecycle sweep mutex.
 	// A timed-out or noncooperative policy cannot delay durable recovery.
 	r.runPoliciesAsync(ctx)
+	if r.uiLive != nil {
+		r.uiLive.publish(ctx)
+	}
 	return nil
 }
 
@@ -433,6 +437,7 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 			"state":      outcome.State,
 			"reason":     "delivery_timeout",
 		})
+		r.recordCompleteHistory(ctx, outcome.AgentID, "delivery", "error", "Message delivery timed out", "delivery-timeout:"+outcome.MessageID+":"+strconv.Itoa(outcome.Attempt))
 		if outcome.State == "dead_letter" {
 			r.emit("message_dead_lettered", map[string]any{
 				"message_id": outcome.MessageID,
@@ -465,6 +470,12 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 	r.sweepAttachmentsBestEffort()
 	// Node publishes activity expiry before its heartbeat/sweep record.
 	r.sweepLiveState()
+	// Managed startup, recovery, and P1 child snapshots commit outside an HTTP
+	// response. The bounded sweep observes those durable changes and publishes
+	// the authoritative projection without making manager code own UI sockets.
+	if r.uiLive != nil && r.managed != nil {
+		r.uiLive.publish(ctx)
+	}
 	r.emitSweepRecord(result, len(expired), len(timedOut), reminderSuccess, reminderFailure)
 	return result, nil
 }

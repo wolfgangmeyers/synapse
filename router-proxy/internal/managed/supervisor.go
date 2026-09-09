@@ -180,6 +180,12 @@ type Manager struct {
 	closeErr                                   error
 }
 
+// AllowedWorkingDirectoryRoots returns a copy of the startup allowlist for the
+// direct folder browser. It exposes no process or auth state.
+func (m *Manager) AllowedWorkingDirectoryRoots() []string {
+	return append([]string(nil), m.config.AllowedWorkingDirectoryRoots...)
+}
+
 func NewManager(options ManagerOptions) (*Manager, error) {
 	if options.Store == nil {
 		return nil, errors.New("managed store is required")
@@ -1715,6 +1721,7 @@ func (m *Manager) OfferDirect(agentID string) {
 func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code, detail string) {
 	terminal, err := m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
 	if err == nil {
+		_, _ = m.store.RecordManagedCompleteHistory(context.Background(), attempt.Fence.AgentID, "managed_delivery", "error", "Managed message delivery was not confirmed", "managed-delivery:"+attempt.MessageID+":"+fmt.Sprint(attempt.AttemptNumber)+":"+code)
 		if !terminal {
 			m.scheduleDirectRetry(attempt.Fence.AgentID)
 		}
@@ -1739,6 +1746,7 @@ func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code,
 func (m *Manager) releaseManagedDirectRecovery(attempt store.ManagedDirectAttempt, code string) {
 	terminal, err := m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, code)
 	if err == nil {
+		_, _ = m.store.RecordManagedCompleteHistory(context.Background(), attempt.Fence.AgentID, "managed_delivery", "error", "Managed message delivery was not confirmed", "managed-delivery:"+attempt.MessageID+":"+fmt.Sprint(attempt.AttemptNumber)+":"+code)
 		if !terminal {
 			m.scheduleDirectRetry(attempt.Fence.AgentID)
 		}
@@ -1782,6 +1790,7 @@ func (m *Manager) retryManagedDirectRelease(attempt store.ManagedDirectAttempt, 
 				terminal, err = m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
 			}
 			if err == nil {
+				_, _ = m.store.RecordManagedCompleteHistory(context.Background(), attempt.Fence.AgentID, "managed_delivery", "error", "Managed message delivery was not confirmed", "managed-delivery:"+attempt.MessageID+":"+fmt.Sprint(attempt.AttemptNumber)+":"+code)
 				if !terminal {
 					m.scheduleDirectRetry(attempt.Fence.AgentID)
 				}

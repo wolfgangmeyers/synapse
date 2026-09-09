@@ -63,6 +63,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--body", required=True, help="Message body")
     result.add_argument("--subject", help="Optional message subject")
     result.add_argument("--from", dest="sender", help="Explicit sender agent ID")
+    result.add_argument("--managed-control-request-id", help=argparse.SUPPRESS)
     result.add_argument(
         "--router-url",
         default=os.environ.get("MECHA_ROUTER_URL", DEFAULT_ROUTER_URL),
@@ -109,11 +110,14 @@ def router_endpoint(router_url: str, path: str) -> str:
     return f"{router_url.rstrip('/')}{path}"
 
 
-def post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def post_json(url: str, payload: dict[str, Any], managed_control_request_id: str | None = None) -> tuple[int, dict[str, Any]]:
+    headers = {"content-type": "application/json"}
+    if managed_control_request_id is not None:
+        headers["X-Mecha-Managed-Control-Request-ID"] = managed_control_request_id
     request = Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"content-type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -210,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
 
     retry_prefix = ""
     try:
-        status, response = post_json(endpoint, envelope)
+        status, response = post_json(endpoint, envelope, args.managed_control_request_id)
     except ValueError as error:
         return report_delivery_failure(args.to, f"Router response invalid: {error}")
     except URLError as error:
@@ -222,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             if kickstart_error is not None else ""
         )
         try:
-            status, response = post_json(endpoint, envelope)
+            status, response = post_json(endpoint, envelope, args.managed_control_request_id)
         except ValueError as retry_error:
             return report_delivery_failure(
                 args.to, f"{retry_prefix}Router response invalid after one kickstart retry: {retry_error}"

@@ -4,11 +4,19 @@ import { matchesActiveScope, type RouterScope } from "./scopes";
 import type { Arrival } from "../domain/arrivals";
 import type { HistoryMessage } from "../domain/history";
 import { createInitialState, type AppState, type PendingControl } from "./app-state";
+import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
 
 export type AppAction =
   | { type: "scope/reset"; scope: RouterScope }
   | { type: "connection/status"; status: AppState["connection"]; generation?: number; instanceId?: string; leaseId?: string }
   | { type: "agents/set"; scope: RouterScope; agents: Agent[] }
+  | { type: "managed/enabled"; scope: RouterScope; enabled: boolean }
+  | { type: "managed/snapshot"; scope: RouterScope; version: number; agents: ManagedAgent[] }
+  | { type: "managed/delta"; scope: RouterScope; version: number; baseVersion: number; agent: ManagedAgent }
+  | { type: "managed/removed"; scope: RouterScope; version: number; baseVersion: number; agentId: string }
+  | { type: "managed/children"; scope: RouterScope; children: ManagedChildrenProjection[]; version?: number }
+  | { type: "managed/recover"; scope: RouterScope }
+  | { type: "managed/history"; scope: RouterScope; view: "quiet" | "complete"; entry: ManagedHistoryEntry }
   | { type: "message/append"; scope: RouterScope; peer: string; message: HistoryMessage }
   | { type: "history/reconcile"; scope: RouterScope; peer: string; snapshot: HistoryMessage[]; highWaterSequence: number }
   | { type: "send/replace"; scope: RouterScope; peer: string; localId: string; message: HistoryMessage }
@@ -47,6 +55,39 @@ export function reducer(state: AppState, action: AppAction): AppState {
   if ("scope" in action && !scoped(state, action)) return state;
   switch (action.type) {
     case "agents/set": { const next = cloneMaps(state); const changed = state.agents.some((agent) => { const current = action.agents.find((candidate) => candidate.agent_id === agent.agent_id); return current?.instance_id !== undefined && agent.instance_id !== undefined && current.instance_id !== agent.instance_id; }); const targetDisappeared = [...state.pendingControls.values()].some((pending) => !action.agents.some((agent) => agent.agent_id === pending.peer)); next.agents = projectConnectedAgents(action.agents, state.agentId, state.agents); next.pendingLifecycle = new Map(next.pendingLifecycle ?? []); for (const [agentId, lifecycle] of next.pendingLifecycle) { if (!action.agents.some((agent) => agent.agent_id === agentId)) { next.pendingLifecycle.delete(agentId); continue; } next.agents = upsertLifecycleAgent(next.agents, lifecycle); next.pendingLifecycle.delete(agentId); } if (changed || targetDisappeared) { next.pendingControls.clear(); next.reminderLocks.clear(); next.modelProjections.clear(); } return next; }
+    case "managed/enabled": {
+      if (action.enabled === state.managedAvailable) return state;
+      if (action.enabled) return { ...state, managedAvailable: true };
+      const { managedProjectionVersion: _discardedVersion, managedChildrenProjectionVersion: _discardedChildrenVersion, ...withoutProjectionVersion } = state;
+      return { ...withoutProjectionVersion, managedAvailable: false, managedAgents: [], managedChildren: {}, managedHistory: { quiet: [], complete: [] } };
+    }
+    case "managed/snapshot": return { ...state, managedAvailable: true, managedProjectionVersion: action.version, managedAgents: action.agents };
+    case "managed/delta": {
+      if (state.managedProjectionVersion !== action.baseVersion || action.version !== action.baseVersion + 1) return state;
+      const agents = state.managedAgents ?? [];
+      const existing = agents.some((agent) => agent.agent_id === action.agent.agent_id);
+      return { ...state, managedProjectionVersion: action.version, managedAgents: existing ? agents.map((agent) => agent.agent_id === action.agent.agent_id ? action.agent : agent) : [...agents, action.agent] };
+    }
+    case "managed/removed": {
+      if (state.managedProjectionVersion !== action.baseVersion || action.version !== action.baseVersion + 1) return state;
+      const managedChildren = { ...state.managedChildren };
+      delete managedChildren[action.agentId];
+      return { ...state, managedProjectionVersion: action.version, managedAgents: (state.managedAgents ?? []).filter((agent) => agent.agent_id !== action.agentId), managedChildren };
+    }
+    case "managed/children": {
+      if (action.version !== undefined && state.managedChildrenProjectionVersion !== undefined && action.version !== state.managedChildrenProjectionVersion + 1) return state;
+      return { ...state, ...(action.version === undefined ? {} : { managedChildrenProjectionVersion: action.version }), managedChildren: Object.fromEntries(action.children.map((projection) => [projection.agent_id, projection])) };
+    }
+    case "managed/recover": {
+      const { managedProjectionVersion: _discardedVersion, managedChildrenProjectionVersion: _discardedChildrenVersion, ...withoutVersions } = state;
+      return { ...withoutVersions, managedAgents: [], managedChildren: {} };
+    }
+    case "managed/history": {
+      const history = state.managedHistory ?? { quiet: [], complete: [] };
+      const entries = history[action.view];
+      if (entries.some((entry) => entry.id === action.entry.id)) return state;
+      return { ...state, managedHistory: { ...history, [action.view]: [...entries, action.entry].slice(-200) } };
+    }
     case "message/append": {
       const messages = appendConversation({ messages: state.messagesByPeer[action.peer] ?? [], highWaterSequence: 0, followMessages: true }, action.message).messages;
       return { ...state, ...(state.selectedPeer === undefined ? { selectedPeer: action.peer } : {}), messagesByPeer: { ...state.messagesByPeer, [action.peer]: messages } };

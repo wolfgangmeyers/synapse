@@ -368,15 +368,41 @@ func ValidateIdentity(identity ProcessIdentity) error {
 
 func RedactedStderr(value string) string {
 	fields := strings.Fields(value)
+	redactFollowing := 0
 	for index, field := range fields {
 		lower := strings.ToLower(field)
-		if strings.Contains(lower, "token") || strings.Contains(lower, "key") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") {
+		if redactFollowing > 0 {
 			fields[index] = "[REDACTED]"
+			redactFollowing--
+			continue
+		}
+		// Keep a bounded operational reason while never retaining credential
+		// values in durable errors, complete history, or UI projections.
+		if strings.HasPrefix(lower, "bearer") {
+			fields[index] = "[REDACTED]"
+			redactFollowing = 1
+			continue
+		}
+		if lower == "authorization:" || lower == "authorization" {
+			fields[index] = "[REDACTED]"
+			// Authorization schemes such as `Bearer` are followed by the value.
+			redactFollowing = 2
+			continue
+		}
+		if strings.Contains(lower, "token") || strings.Contains(lower, "key") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "credential") || strings.Contains(lower, "apikey") || strings.Contains(lower, "session") || strings.Contains(lower, "process") || strings.Contains(lower, "runtime_generation") {
+			fields[index] = "[REDACTED]"
+			if !strings.ContainsAny(field, "=:") {
+				redactFollowing = 1
+			}
+			continue
+		}
+		if question := strings.IndexByte(field, '?'); question >= 0 {
+			fields[index] = field[:question] + "?[REDACTED]"
 		}
 	}
 	result := strings.Join(fields, " ")
-	if len(result) > 2000 {
-		result = result[:2000]
+	if len(result) > 512 {
+		result = result[:512]
 	}
 	return result
 }

@@ -10,6 +10,6 @@ describe("Sidebar", () => {
     expect(screen.getByRole("button", { name: /Alpha Bot/i })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Beta/i })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Alpha Bot/i }));
-    expect(onSelect).toHaveBeenCalledWith("alpha.bot");
+    expect(onSelect).toHaveBeenCalledWith("tmux:alpha.bot");
   });
 });

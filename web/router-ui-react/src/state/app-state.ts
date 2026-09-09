@@ -4,6 +4,7 @@ import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
 import type { Arrival } from "../domain/arrivals";
 import type { RouterScope } from "./scopes";
+import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
 export interface PendingControl { peer: string; instanceId?: string; leaseId?: string; connectionGeneration?: number; reminderId?: string; revision?: number; action?: string; afterCreate?: boolean }
@@ -13,6 +14,12 @@ export interface AppState extends RouterScope {
   instanceId?: string;
   leaseId?: string;
   agents: Agent[];
+  managedAvailable: boolean;
+  managedAgents?: ManagedAgent[];
+  managedProjectionVersion?: number;
+  managedChildrenProjectionVersion?: number;
+  managedChildren: Record<string, ManagedChildrenProjection>;
+  managedHistory?: { quiet: ManagedHistoryEntry[]; complete: ManagedHistoryEntry[] };
   reminders: Reminder[];
   templates: PromptTemplate[];
   selectedPeer?: string;
@@ -31,4 +38,4 @@ export interface AppState extends RouterScope {
   drafts: Record<string, string>;
   reminderLocks: Map<string, boolean>;
 }
-export function createInitialState(scope: RouterScope, connection: ConnectionStatus = "disconnected"): AppState { return { ...scope, connection, connectionGeneration: 0, agents: [], reminders: [], templates: [], filter: "", messagesByPeer: {}, pendingSends: {}, pendingControls: new Map(), modelProjections: new Map(), lifecycleVersion: 0, pendingLifecycle: new Map(), arrivals: new Map(), expandedSubagents: new Set(), drafts: {}, reminderLocks: new Map() }; }
+export function createInitialState(scope: RouterScope, connection: ConnectionStatus = "disconnected"): AppState { return { ...scope, connection, connectionGeneration: 0, agents: [], managedAvailable: false, managedAgents: [], managedChildren: {}, managedHistory: { quiet: [], complete: [] }, reminders: [], templates: [], filter: "", messagesByPeer: {}, pendingSends: {}, pendingControls: new Map(), modelProjections: new Map(), lifecycleVersion: 0, pendingLifecycle: new Map(), arrivals: new Map(), expandedSubagents: new Set(), drafts: {}, reminderLocks: new Map() }; }

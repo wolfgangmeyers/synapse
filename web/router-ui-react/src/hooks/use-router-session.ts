@@ -8,12 +8,19 @@ import { isAgentId } from "../protocol/guards";
 import type { AppAction } from "../state/reducer";
 import type { Agent } from "../state/agent-projection";
 import { createRouterTransport, type RouterTransport, type RouterTransportOptions, type TransportEvent } from "../transport/router-transport";
+import { createUILiveClient, type UILiveClient } from "../transport/ui-live-client";
+import type { WebSocketFactory } from "../transport/websocket-client";
 
-export interface RouterSessionOptions extends Omit<RouterTransportOptions, "routerUrl"> { routerUrl: string; initialState?: AppState; connect?: boolean }
+export interface RouterSessionOptions extends Omit<RouterTransportOptions, "routerUrl"> { routerUrl: string; initialState?: AppState; connect?: boolean; uiLiveWebSocketFactory?: WebSocketFactory }
+
+function canConnectUILive(options: RouterSessionOptions): boolean {
+  return options.uiLiveWebSocketFactory !== undefined || typeof WebSocket !== "undefined";
+}
 export interface RouterSession {
   state: AppState;
   transport: RouterTransport;
   dispatch: Dispatch<AppAction>;
+  uiLive: UILiveClient;
   reconnect(): void;
   disconnect(): void;
 }
@@ -53,12 +60,55 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
   const transport = useMemo(() => createRouterTransport({ ...options, routerUrl: scope.routerUrl, agentId: scope.agentId, defaultAgentId: scope.agentId }), [scope.routerUrl, scope.agentId, options.storage, options.fetchImpl, options.webSocketFactory, options.autoReconnect, options.persistDelivery]);
   const [state, dispatch] = useReducer(reducer, options.initialState ?? createInitialState(scope));
   const scopeRef = useRef(scope); scopeRef.current = scope;
+  const uiLive = useMemo(() => createUILiveClient({
+    routerUrl: scope.routerUrl,
+    ...(options.uiLiveWebSocketFactory === undefined ? {} : { webSocketFactory: options.uiLiveWebSocketFactory }),
+    onFrame: (frame) => {
+      const currentScope = scopeRef.current;
+      if (frame.type === "managed_agents_snapshot") dispatch({ type: "managed/snapshot", scope: currentScope, version: frame.projection_version, agents: frame.agents });
+      else if (frame.type === "managed_agent_delta") dispatch({ type: "managed/delta", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agent: frame.changes });
+      else if (frame.type === "managed_agent_removed") dispatch({ type: "managed/removed", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agentId: frame.agent_id });
+      else if (frame.type === "managed_children_snapshot") dispatch({ type: "managed/children", scope: currentScope, version: frame.lifecycle_version, children: frame.children });
+      else if (frame.type === "history_entry") dispatch({ type: "managed/history", scope: currentScope, view: frame.view, entry: frame.entry });
+    },
+    onRecovery: () => dispatch({ type: "managed/recover", scope: scopeRef.current }),
+  }), [scope.routerUrl, options.uiLiveWebSocketFactory]);
   useEffect(() => {
+    let active = true;
+    const startManagedSurface = async (): Promise<void> => {
+      try {
+        const capabilities = await transport.http.capabilities();
+        // Older routers did not advertise this capability. They remain
+        // compatible; only an explicit false is a disabled-mode boundary.
+        const enabled = capabilities.managed_v1 !== false;
+        if (!active) return;
+        dispatch({ type: "managed/enabled", scope, enabled });
+        if (!enabled) return;
+        const snapshot = await transport.http.managedAgents();
+        if (!active) return;
+        dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
+        const [children, quietHistory, completeHistory] = await Promise.all([
+          Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id))),
+          transport.http.managedHistory("quiet", { limit: 200 }),
+          transport.http.managedHistory("complete", { limit: 200 }),
+        ]);
+        if (!active) return;
+        dispatch({ type: "managed/children", scope, children });
+        for (const entry of quietHistory.entries) dispatch({ type: "managed/history", scope, view: "quiet", entry });
+        for (const entry of completeHistory.entries) dispatch({ type: "managed/history", scope, view: "complete", entry });
+        if (capabilities.ui_live_v1 !== false && canConnectUILive(options)) uiLive.connect();
+      } catch {
+        if (active) dispatch({ type: "managed/enabled", scope, enabled: false });
+      }
+    };
     dispatch({ type: "scope/reset", scope });
     const unsubscribe = transport.subscribe((event) => { const action = eventAction(event, scopeRef.current); if (action) dispatch(action); });
-    if (options.connect !== false) transport.connect();
-    return () => { unsubscribe(); transport.close(); };
-  }, [transport, scope, options.connect]);
+    if (options.connect !== false) {
+      transport.connect();
+      void startManagedSurface();
+    }
+    return () => { active = false; unsubscribe(); transport.close(); uiLive.close(); };
+  }, [transport, uiLive, scope, options.connect, options.uiLiveWebSocketFactory]);
   // useReducer keeps its previous value while props change. Keep a confirmed peer
   // during an identity-only reset so the conversation hook does not briefly switch
   // to an unselected peer while the replacement transport connects.
@@ -67,5 +117,5 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     : state.routerUrl === scope.routerUrl && state.selectedPeer !== undefined
       ? { ...createInitialState(scope), selectedPeer: state.selectedPeer }
       : createInitialState(scope);
-  return { state: scopedState, transport, dispatch, reconnect: transport.connect, disconnect: transport.close };
+  return { state: scopedState, transport, dispatch, uiLive, reconnect: () => { transport.connect(); if (canConnectUILive(options)) uiLive.connect(); }, disconnect: () => { transport.close(); uiLive.close(); } };
 }

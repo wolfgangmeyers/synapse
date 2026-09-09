@@ -199,7 +199,7 @@ func routeID(path, prefix string) (string, string, bool) {
 }
 
 func (r *Router) capabilities() map[string]any {
-	result := map[string]any{"model_catalog_v1": true, "model_catalog_limits": map[string]any{"frame_bytes": min(60*1024, r.maxFrame)}, "model_control_limits": map[string]any{"pending_ttl_ms": r.controlTTL.Milliseconds()}, "inline_tool_control_v1": true, "goal_control_v1": r.goalAvailable, "subagent_lifecycle_v2": r.lifecycleAvailable}
+	result := map[string]any{"model_catalog_v1": true, "model_catalog_limits": map[string]any{"frame_bytes": min(60*1024, r.maxFrame)}, "model_control_limits": map[string]any{"pending_ttl_ms": r.controlTTL.Milliseconds()}, "inline_tool_control_v1": true, "goal_control_v1": r.goalAvailable, "subagent_lifecycle_v2": r.lifecycleAvailable, "managed_v1": r.managed != nil, "ui_live_v1": r.managed != nil}
 	if r.goalAvailable {
 		result["goal_control_limits"] = map[string]any{"desired_ttl_ms": 600000}
 	} else {
@@ -400,8 +400,17 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 	}
 	source := r.httpMessageSource(envelope)
 	envelope.Source = &source
+	quietEligible := false
+	// Ordinary local HTTP traffic remains unauthenticated and can never opt
+	// itself into quiet history by declaring source.kind=agent. Only the fenced
+	// managed mail.send path consumes the one-time control authorization.
+	if controlRequestID := req.Header.Get("X-Mecha-Managed-Control-Request-ID"); controlRequestID != "" {
+		if recipient, settingErr := r.store.GetCanonicalQuietRecipient(req.Context()); settingErr == nil && recipient != "" && envelope.To == recipient {
+			quietEligible, _ = r.store.ConsumeManagedQuietSendAuthorization(req.Context(), controlRequestID, envelope.From, envelope.To)
+		}
+	}
 	releaseConversation := r.lockConversation(envelope.From, envelope.To)
-	result, err := r.store.Enqueue(req.Context(), envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &conversation.Body, Attachments: conversation.Attachments, Source: &source}})
+	result, err := r.store.Enqueue(req.Context(), envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &conversation.Body, Attachments: conversation.Attachments, Source: &source, QuietEligible: quietEligible}})
 	if err != nil {
 		releaseConversation()
 		for _, item := range pending {
@@ -414,6 +423,10 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 		_ = item
 	}
 	r.afterEnqueue(result)
+	r.recordCompleteHistory(req.Context(), envelope.From, "message", "info", fmt.Sprintf("Message sent to %s", envelope.To), "message:"+envelope.ID)
+	if quietEligible && result.ConversationCreated && result.ConversationMessage != nil && r.uiLive != nil {
+		r.uiLive.publishHistory("quiet", map[string]any{"id": result.ConversationMessage.ID, "at": result.ConversationMessage.RecordedAt, "level": "message", "message": result.ConversationMessage.Body})
+	}
 	releaseConversation()
 	message := result.Message
 	messageJSON := map[string]any{}
@@ -1031,6 +1044,7 @@ func (r *Router) sweepReminders(ctx context.Context) (int, int) {
 				"agent_id":          outcome.Message.To,
 			})
 			r.afterEnqueue(store.EnqueueResult{Message: *outcome.Message, ConversationMessage: outcome.ConversationMessage, ConversationCreated: outcome.ConversationMessage != nil})
+			r.recordCompleteHistory(ctx, outcome.Message.To, "reminder", "info", "Reminder delivered", "reminder:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID])
 			continue
 		}
 		failed++
@@ -1039,6 +1053,7 @@ func (r *Router) sweepReminders(ctx context.Context) (int, int) {
 			"scheduled_for": scheduledForByReminderID[outcome.ReminderID],
 			"error_code":    outcome.ErrorCode,
 		})
+		r.recordCompleteHistory(ctx, "", "reminder", "error", "Reminder delivery failed", "reminder-failed:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID])
 	}
 	return succeeded, failed
 }

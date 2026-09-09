@@ -12,7 +12,8 @@ import (
 
 type conversationCandidate struct {
 	protocol.Envelope
-	Attachments []json.RawMessage
+	Attachments   []json.RawMessage
+	QuietEligible bool
 }
 
 func prepareConversation(candidate protocol.Envelope, options *ConversationOptions) (*conversationCandidate, error) {
@@ -28,7 +29,7 @@ func prepareConversation(candidate protocol.Envelope, options *ConversationOptio
 		source = protocol.NormalizeSource(options.Source)
 	}
 	attachments := append([]json.RawMessage{}, options.Attachments...)
-	return &conversationCandidate{Envelope: protocol.Envelope{ID: candidate.ID, From: candidate.From, To: candidate.To, Subject: candidate.Subject, Body: body, CreatedAt: candidate.CreatedAt, Sentinel: candidate.Sentinel, Source: &source}, Attachments: attachments}, nil
+	return &conversationCandidate{Envelope: protocol.Envelope{ID: candidate.ID, From: candidate.From, To: candidate.To, Subject: candidate.Subject, Body: body, CreatedAt: candidate.CreatedAt, Sentinel: candidate.Sentinel, Source: &source}, Attachments: attachments, QuietEligible: options.QuietEligible}, nil
 }
 func (s *Store) latestConversation(ctx context.Context, id string) (*domain.ConversationMessage, error) {
 	var c domain.ConversationMessage
@@ -66,7 +67,11 @@ func (s *Store) insertConversation(ctx context.Context, candidate *conversationC
 		a, b = b, a
 	}
 	attachments, _ := json.Marshal(candidate.Attachments)
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO conversation_messages (message_id,message_incarnation_id,delivery_message_id,sender,recipient,participant_a,participant_b,subject,body,created_at,recorded_at,attachments_json,source_kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, candidate.ID, incarnation, deliveryID, candidate.From, candidate.To, a, b, nullableSubject(candidate.Subject), candidate.Body, candidate.CreatedAt, recorded, string(attachments), candidate.Source.Kind)
+	quietEligible := 0
+	if candidate.QuietEligible {
+		quietEligible = 1
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO conversation_messages (message_id,message_incarnation_id,delivery_message_id,sender,recipient,participant_a,participant_b,subject,body,created_at,recorded_at,attachments_json,source_kind,quiet_eligible) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, candidate.ID, incarnation, deliveryID, candidate.From, candidate.To, a, b, nullableSubject(candidate.Subject), candidate.Body, candidate.CreatedAt, recorded, string(attachments), candidate.Source.Kind, quietEligible)
 	if err != nil {
 		return nil, err
 	}

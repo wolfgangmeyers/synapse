@@ -59,6 +59,10 @@ import type {
   SubagentStateUpdateFrame,
   SubagentSummary,
   SubagentSyncEnableFrame,
+  UILiveFrame,
+  ManagedAgent,
+  ManagedChild,
+  ManagedChildrenProjection,
 } from "./types";
 
 type RecordValue = Record<string, unknown>;
@@ -73,6 +77,7 @@ const reminderIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,98}$/;
 const attachmentIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const v4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const utcMillisPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const routerUtcTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
 const lifecycleEpochPattern = /^[0-9a-fA-F-]{36}$/;
 const failureReasonPattern = /^[a-z][a-z0-9_]*$/;
 
@@ -109,6 +114,10 @@ function isPatternString(value: unknown, pattern: RegExp, minimum: number, maxim
   return isSafeString(value, minimum, maximum) && pattern.test(value);
 }
 
+function isExactRecord(value: unknown, keys: readonly string[]): value is RecordValue {
+  return isRecord(value) && Object.keys(value).length === keys.length && hasOnlyKeys(value, keys);
+}
+
 export function isFrameId(value: unknown): value is string { return isPatternString(value, frameIdPattern, 1, 128); }
 export function isAgentId(value: unknown): value is string { return isPatternString(value, agentIdPattern, 1, 128); }
 export function isMessageId(value: unknown): value is string { return isPatternString(value, messageIdPattern, 1, 128); }
@@ -121,6 +130,76 @@ export function isUtcMillis(value: unknown): value is string {
   if (!isPatternString(value, utcMillisPattern, 24, 24)) return false;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+// Router-managed projections are formatted by Go with time.RFC3339Nano. Keep
+// this separate from the established millisecond-only P1/P2 wire validators.
+export function isRouterUtcTimestamp(value: unknown): value is string {
+  if (!isSafeString(value, 20, 30)) return false;
+  const match = routerUtcTimestampPattern.exec(value);
+  if (match === null) return false;
+  const [, year, month, day, hour, minute, second] = match;
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  parsed.setUTCHours(Number(hour), Number(minute), Number(second), 0);
+  return Number.isFinite(parsed.getTime())
+    && parsed.getUTCFullYear() === Number(year)
+    && parsed.getUTCMonth() === Number(month) - 1
+    && parsed.getUTCDate() === Number(day)
+    && parsed.getUTCHours() === Number(hour)
+    && parsed.getUTCMinutes() === Number(minute)
+    && parsed.getUTCSeconds() === Number(second);
+}
+
+export function isManagedAgent(value: unknown): value is ManagedAgent {
+  if (!isExactRecord(value, ["agent_id", "source", "cwd", "model", "desired_state", "lifecycle_state", "activity_state", "accepting_prompts", "manifest", "created_at", "started_at", "updated_at", "last_error"])) return false;
+  const model = value.model; const manifest = value.manifest; const lastError = value.last_error;
+  if (!isAgentId(value.agent_id) || value.source !== "router-managed" || !isSafeString(value.cwd, 1, 4096) || !isSafeString(value.desired_state, 1, 64) || !isSafeString(value.lifecycle_state, 1, 64) || !isSafeString(value.activity_state, 1, 64) || typeof value.accepting_prompts !== "boolean" || !isRouterUtcTimestamp(value.created_at) || (value.started_at !== null && !isRouterUtcTimestamp(value.started_at)) || !isRouterUtcTimestamp(value.updated_at)) return false;
+  if (!isExactRecord(model, ["provider", "id"]) || !isSafeString(model.provider, 1, 128) || !isSafeString(model.id, 1, 256)) return false;
+  if (!isExactRecord(manifest, ["revision", "sha256", "installed_tool_count"]) || !isSafeInteger(manifest.revision, 1) || !isPatternString(manifest.sha256, /^[0-9a-f]{64}$/, 64, 64) || !isSafeInteger(manifest.installed_tool_count, 0, 1024)) return false;
+  return lastError === null || isExactRecord(lastError, ["code", "message", "at"]) && isSafeString(lastError.code, 1, 128) && isSafeString(lastError.message, 1, 1024) && isRouterUtcTimestamp(lastError.at);
+}
+
+function isManagedChildModel(value: unknown): boolean {
+  return isRecord(value) && hasOnlyKeys(value, ["provider", "id", "name"]) && isSafeString(value.provider, 1, 128) && isSafeString(value.id, 1, 256) && (value.name === undefined || isSafeString(value.name, 1, 256));
+}
+function isManagedChildCompaction(value: unknown): boolean {
+  return isRecord(value) && hasOnlyKeys(value, ["state", "count", "started_at", "last_outcome"])
+    && (value.state === "idle" || value.state === "compacting") && isSafeInteger(value.count, 0)
+    && (value.started_at === undefined || isRouterUtcTimestamp(value.started_at))
+    && (value.last_outcome === undefined || value.last_outcome === "completed" || value.last_outcome === "failed" || value.last_outcome === "aborted" || value.last_outcome === "reconciled_unknown");
+}
+function isManagedChild(value: unknown): value is ManagedChild {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["id", "parent_entry_id", "task_id", "run_id", "sequence", "recovery_state", "description", "model", "status", "started_at", "ended_at", "duration_ms", "compaction", "compaction_state"])) return false;
+  return isSafeString(value.id, 1, 128) && isSafeString(value.parent_entry_id, 1, 128) && isSafeString(value.task_id, 1, 128) && isSafeString(value.run_id, 1, 128) && isSafeInteger(value.sequence, 0) && value.recovery_state === "current"
+    && (value.description === undefined || isSafeString(value.description, 0, 512)) && (value.model === undefined || isManagedChildModel(value.model)) && (isChildStatus(value.status) || value.status === "unknown")
+    && (value.started_at === undefined || isRouterUtcTimestamp(value.started_at)) && (value.ended_at === undefined || isRouterUtcTimestamp(value.ended_at)) && (value.duration_ms === undefined || isSafeInteger(value.duration_ms, 0))
+    && isManagedChildCompaction(value.compaction) && typeof value.compaction_state === "string" && ["none", "compacting", "completed", "unknown"].includes(value.compaction_state);
+}
+export function isManagedChildrenProjection(value: unknown): value is ManagedChildrenProjection {
+  return isExactRecord(value, ["agent_id", "source", "lifecycle_version", "recovery_state", "children"]) && isAgentId(value.agent_id) && value.source === "router-managed" && isSafeInteger(value.lifecycle_version, 0) && (value.recovery_state === "current" || value.recovery_state === "reconstructing") && Array.isArray(value.children) && value.children.length <= 999 && value.children.every(isManagedChild);
+}
+
+function isHistoryEntry(value: unknown): boolean {
+  return isRecord(value) && hasOnlyKeys(value, ["id", "at", "level", "message"])
+    && isSafeString(value.id, 1, 128)
+    && (value.at === undefined || isRouterUtcTimestamp(value.at))
+    && (value.level === undefined || isSafeString(value.level, 1, 64))
+    && (value.message === undefined || isSafeString(value.message, 0, 65536));
+}
+
+export function isUILiveFrame(value: unknown): value is UILiveFrame {
+  if (!isRecord(value) || value.protocol !== "mecha.web/v1") return false;
+  if (value.type === "managed_children_snapshot") return isExactRecord(value, ["type", "protocol", "lifecycle_version", "generated_at", "children"]) && isSafeInteger(value.lifecycle_version, 0) && isRouterUtcTimestamp(value.generated_at) && Array.isArray(value.children) && value.children.every(isManagedChildrenProjection);
+  if (!isSafeInteger(value.projection_version, 0)) return false;
+  if (value.type === "managed_agents_snapshot") return isExactRecord(value, ["type", "protocol", "projection_version", "generated_at", "agents"]) && isRouterUtcTimestamp(value.generated_at) && Array.isArray(value.agents) && value.agents.every(isManagedAgent);
+  if (value.type === "managed_agent_delta") return isExactRecord(value, ["type", "protocol", "projection_version", "base_version", "agent_id", "changes"]) && isSafeInteger(value.base_version, 0) && isAgentId(value.agent_id) && isManagedAgent(value.changes) && value.changes.agent_id === value.agent_id;
+  if (value.type === "managed_agent_removed") return isExactRecord(value, ["type", "protocol", "projection_version", "base_version", "agent_id"]) && isSafeInteger(value.base_version, 0) && isAgentId(value.agent_id);
+  if (value.type === "history_entry") return isExactRecord(value, ["type", "protocol", "projection_version", "view", "entry"]) && (value.view === "quiet" || value.view === "complete") && isHistoryEntry(value.entry);
+  // Provider frame names are reserved for P4. Their strict parsing keeps P3
+  // forward-compatible without adding provider enrollment or route authority.
+  if (value.type === "provider_auth_prompt") return isExactRecord(value, ["type", "protocol", "projection_version", "operation_id", "prompt_id"]) && isSafeString(value.operation_id, 1, 128) && isSafeString(value.prompt_id, 1, 128);
+  return value.type === "provider_auth_state" && isExactRecord(value, ["type", "protocol", "projection_version", "operation_id", "status"]) && isSafeString(value.operation_id, 1, 128) && isSafeString(value.status, 1, 64);
 }
 
 function isAgentRole(value: unknown): value is "agent" | "user_interaction" { return value === "agent" || value === "user_interaction"; }

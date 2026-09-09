@@ -9,6 +9,7 @@ export interface HttpRoute {
 export interface ProtocolManifest {
   version: "v1";
   http: readonly HttpRoute[];
+  ui_live: { path: "/v1/ui-live"; protocol: "mecha.web/v1"; frames: readonly string[] };
   websocket: {
     path: "/v1/agents";
     client_frames: readonly string[];
@@ -57,11 +58,22 @@ export const httpRoutes = [
   { methods: ["GET", "POST"], path: "/v1/tmux/windows" },
   { methods: ["DELETE", "PATCH"], path: "/v1/tmux/windows/{window}" },
   { methods: ["POST"], path: "/v1/tmux/windows/{window}/{action}", actions: ["keys", "start", "stop", "restart", "resume", "rename"] },
+  { methods: ["GET", "POST"], path: "/v1/managed-agents" },
+  { methods: ["GET"], path: "/v1/managed-directories" },
+  { methods: ["GET"], path: "/v1/history" },
+  { methods: ["POST"], path: "/v1/managed-agents/restart-all" },
+  { methods: ["GET", "DELETE"], path: "/v1/managed-agents/{id}" },
+  { methods: ["GET"], path: "/v1/managed-agents/{id}/children" },
+  { methods: ["POST"], path: "/v1/managed-agents/{agent_id}/restart" },
+  { methods: ["POST"], path: "/v1/managed-agents/{id}/reset" },
 ] as const satisfies readonly HttpRoute[];
+
+export const uiLiveFrameNames = ["managed_agents_snapshot", "managed_agent_delta", "managed_agent_removed", "managed_children_snapshot", "history_entry", "provider_auth_prompt", "provider_auth_state"] as const satisfies readonly string[];
 
 export const manifest = {
   version: "v1",
   http: httpRoutes,
+  ui_live: { path: "/v1/ui-live", protocol: "mecha.web/v1", frames: uiLiveFrameNames },
   websocket: {
     path: "/v1/agents",
     client_frames: clientFrameNames,
