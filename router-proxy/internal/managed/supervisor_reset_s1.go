@@ -379,7 +379,7 @@ func (m *Manager) startResetTargetInLane(actionID string, source store.ManagedRu
 			return
 		}
 	}
-	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: targetSession, LaunchMode: mode, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, targetGeneration, epoch)}
+	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: targetSession, LaunchMode: mode, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, CursorExtension: m.config.CursorExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, targetGeneration, epoch)}
 	process, err := m.processFactory.Start(m.runCtx, spec)
 	if err != nil {
 		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_TARGET_START_FAILED", true, source)

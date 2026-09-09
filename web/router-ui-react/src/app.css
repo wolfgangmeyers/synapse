@@ -956,3 +956,12 @@ p:empty { display: none; }
   .agent-row-actions button { min-height: 36px; padding: 0 9px; }
   .managed-child-list { margin-left: 20px; }
 }
+
+.provider-auth-dialog { width: min(560px, calc(100vw - 32px)); }
+.provider-auth-dialog section { display: grid; gap: 10px; margin-top: 16px; }
+.provider-auth-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px; border-radius: 14px; background: var(--canvas); }
+.provider-auth-row p { margin-top: 2px; font-size: 13px; }
+.provider-auth-prompt { padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-raised); }
+.provider-auth-prompt label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; }
+.provider-auth-dialog select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 14px; background: #10141f; color: var(--text); }
+.provider-auth-dialog .status { min-height: 1.4em; }

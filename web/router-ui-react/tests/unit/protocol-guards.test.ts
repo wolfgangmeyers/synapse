@@ -91,6 +91,16 @@ describe("protocol guards", () => {
     expect(isManagedAgent({ ...managedAgent, updated_at: "2026-09-09T09:48:28.4142040030Z" })).toBe(false);
   });
 
+  it("accepts only bounded provider-auth live frames", () => {
+    const prompt = { type: "provider_auth_prompt", protocol: "mecha.web/v1", projection_version: 1, operation_id: "auth-1", provider: "google", prompt: { id: "prompt-1", kind: "secret", message: "Enter the requested sign-in value.", url: "https://accounts.google.com/device" } };
+    expect(isUILiveFrame(prompt)).toBe(true);
+    expect(isUILiveFrame({ ...prompt, prompt: { ...prompt.prompt, url: "http://accounts.google.com/device" } })).toBe(false);
+    expect(isUILiveFrame({ ...prompt, prompt: { ...prompt.prompt, kind: "oauth_callback" } })).toBe(false);
+    const state = { type: "provider_auth_state", protocol: "mecha.web/v1", projection_version: 1, operation_id: "auth-1", provider: "google", status: "pending" };
+    expect(isUILiveFrame(state)).toBe(true);
+    expect(isUILiveFrame({ ...state, status: "provider-sdk-detail" })).toBe(false);
+  });
+
   it("requires a closed per-child recovery object", () => {
     const child = {
       id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1,

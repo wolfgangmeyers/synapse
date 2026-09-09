@@ -1,5 +1,6 @@
 {
   "protocol": "mecha.phase1-acceptance-contract/v1",
+  "schema": "mecha.rpc.acceptance-evidence/v1",
   "required_fork_head": "06ed583c720ed0fe6d6cc099b26eeb384795ea39",
   "required_pi_version": "0.85.0",
   "artifact_directory": "/tmp/mecha-rpc-acceptance/<mecha-developer-head>/<run-id>",
@@ -49,5 +50,1849 @@
     "managed HTTP and authentication",
     "mailbox recovery",
     "browser acceptance and release gates"
-  ]
+  ],
+  "generated_from": {
+    "path": "RPC_SPEC.html",
+    "sha256": "b7b2754b5b5662e42db82b796e5f8de0968650975083ed48be6147132bb629e6",
+    "selection": "tr#ac-001 through tr#ac-090"
+  },
+  "criteria": [
+    {
+      "id": "AC-001",
+      "setup": "Managed config enabled; no agent named alpha.",
+      "action": "POST valid launch for alpha.",
+      "predicates": [
+        "202 once; one direct Pi RPC process; no tmux window; ready snapshot after mandatory manifest."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-001",
+      "proof_symbols": [
+        "rpc-ac-001"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-002",
+      "setup": "Allowed root contains a directory, file, and escaping symlink.",
+      "action": "Launch each path.",
+      "predicates": [
+        "Directory succeeds; file and escape return 422 INVALID_WORKING_DIRECTORY; no process for failures."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-002",
+      "proof_symbols": [
+        "rpc-ac-002"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-003",
+      "setup": "Current model catalog and saved default are known.",
+      "action": "Launch with explicit, omitted, unavailable saved-default, unavailable explicit, and unavailable Terra cases.",
+      "predicates": [
+        "Exact explicit model; saved default; Terra fallback; 422 for unavailable explicit; 422 when Terra unavailable. No arbitrary fallback."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-003",
+      "proof_symbols": [
+        "rpc-ac-003"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-004",
+      "setup": "Launch includes a 32 KiB-minus-one instruction; fake provider records requests.",
+      "action": "Launch and await ready.",
+      "predicates": [
+        "Manifest accepted before the instruction creates the first model request; the instruction appears once. A 32 KiB-plus-one body returns 413."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-004",
+      "proof_symbols": [
+        "rpc-ac-004"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-005",
+      "setup": "Ready idle agent.",
+      "action": "Send ordinary prompt and complete turn.",
+      "predicates": [
+        "Structured states progress idle → waiting → active → idle from accepted prompt/agent events; no transcript-text parser called."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-005",
+      "proof_symbols": [
+        "rpc-ac-005"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-006",
+      "setup": "Ready agent with recorded session ID/history.",
+      "action": "Restart through API, then UI.",
+      "predicates": [
+        "Each creates a new process incarnation and mandatory manifest, preserves Pi session ID/epoch/history, and returns ready."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-006",
+      "proof_symbols": [
+        "rpc-ac-006"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-007",
+      "setup": "Ready agent with both histories and policy state.",
+      "action": "Confirm Reset context.",
+      "predicates": [
+        "New session ID and incremented epoch; same name/model/cwd/histories/policies; old session deleted only after new ready."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-007",
+      "proof_symbols": [
+        "rpc-ac-007"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-008",
+      "setup": "Ready agent with session, child, control, and both histories.",
+      "action": "Confirm Terminate.",
+      "predicates": [
+        "Process stops; owned session/control/child/policy/history/agent rows disappear; cwd untouched; final removal delta; name reusable."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-008",
+      "proof_symbols": [
+        "rpc-ac-008"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-009",
+      "setup": "Force owned session-file deletion to fail.",
+      "action": "Terminate.",
+      "predicates": [
+        "Agent remains as failed tombstone with TERMINATION_CLEANUP_FAILED; success/removal is not published; retry works after fault clears."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-009",
+      "proof_symbols": [
+        "rpc-ac-009"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-010",
+      "setup": "Two managed agents and one live tmux agent.",
+      "action": "Confirm Restart All.",
+      "predicates": [
+        "Two managed process incarnations change on same sessions; tmux PID/session receives no signal; aggregate has exactly two rows."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-010",
+      "proof_symbols": [
+        "rpc-ac-010"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-011",
+      "setup": "Ready agent; persisted crash ledger; controlled monotonic clock.",
+      "action": "Crash at t=0, t=119.999 s, and t=119.999 s; repeat with the oldest exit exactly 120.000 s old.",
+      "predicates": [
+        "First series restarts after 1 s/5 s then fails CRASH_LOOP with no fourth timer. At exactly 120 s the oldest exit is excluded, so the new exit is second, not third."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-011",
+      "proof_symbols": [
+        "rpc-ac-011"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-012",
+      "setup": "Agent has one prior unexpected exit and a controlled clock.",
+      "action": "Keep continuously ready for 599.999 s and crash; repeat after exactly 600.000 s.",
+      "predicates": [
+        "First retains the prior exit; exactly ten ready minutes clears it before the new crash, which schedules the one-second first retry."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-012",
+      "proof_symbols": [
+        "rpc-ac-012"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-013",
+      "setup": "Agent stopped at crash threshold.",
+      "action": "Request manual restart, then force startup failure.",
+      "predicates": [
+        "Persisted counter clears before one same-session startup; that startup failure is the first exit of a new window and schedules one second."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-013",
+      "proof_symbols": [
+        "rpc-ac-013"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-014",
+      "setup": "Two desired-running agents, active sessions, durable DB.",
+      "action": "Kill router ungracefully and restart it.",
+      "predicates": [
+        "Only verified orphan groups are reaped; both agents return on prior sessions; full manifest/child snapshot precede ready/deltas; recovery does not reset persisted crash history."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-014",
+      "proof_symbols": [
+        "rpc-ac-014"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-015",
+      "setup": "Persisted PID now belongs to a different start marker.",
+      "action": "Restart router.",
+      "predicates": [
+        "Router sends no signal, records ORPHAN_IDENTITY_UNSAFE, and does not claim recovery."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-015",
+      "proof_symbols": [
+        "rpc-ac-015"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-016",
+      "setup": "Active turn plus pending manual restart.",
+      "action": "Issue reset, then terminate before settle.",
+      "predicates": [
+        "Reset supersedes restart; terminate supersedes reset and aborts; one stop sequence; no replacement process."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-016",
+      "proof_symbols": [
+        "rpc-ac-016"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-017",
+      "setup": "Current and old process callbacks retained by fake supervisor.",
+      "action": "Emit old exit/state/result after restart.",
+      "predicates": [
+        "All old-incarnation callbacks are ignored and logged stale; current projection is unchanged."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-017",
+      "proof_symbols": [
+        "rpc-ac-017"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": false,
+      "release_required": true
+    },
+    {
+      "id": "AC-018",
+      "setup": "One ready managed and one tmux agent.",
+      "action": "GET /v1/agents with an existing consumer and open UI.",
+      "predicates": [
+        "Existing fields still parse; both rows appear; only visible source labels are router-managed and tmux."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-018",
+      "proof_symbols": [
+        "rpc-ac-018"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-019",
+      "setup": "Desktop UI; managed agent cycles all states.",
+      "action": "Operate launch/restart/reset/terminate controls by mouse and keyboard.",
+      "predicates": [
+        "State badges match snapshots, focus is visible/retained, labels are announced, no horizontal page overflow, confirmations name destructive effects."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-019",
+      "proof_symbols": [
+        "rpc-ac-019"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-020",
+      "setup": "Managed agent contains every nullable state field.",
+      "action": "Open state popup.",
+      "predicates": [
+        "Valid pretty-printed ManagedAgent JSON appears in a scrollable code viewer; no secret/internal path/PID; Escape closes and restores focus."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-020",
+      "proof_symbols": [
+        "rpc-ac-020"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-021",
+      "setup": "Allowed directory tree.",
+      "action": "Select a folder in picker and launch; repeat with typed path.",
+      "predicates": [
+        "Both submit identical canonical cwd. Picker lists folders only and cannot leave configured roots."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-021",
+      "proof_symbols": [
+        "rpc-ac-021"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-022",
+      "setup": "Prompt template text available.",
+      "action": "Insert and paste it into optional instruction; also launch with field empty.",
+      "predicates": [
+        "Text is submitted unchanged once; empty launch sends no first prompt."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-022",
+      "proof_symbols": [
+        "rpc-ac-022"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-023",
+      "setup": "Clean isolated Pi auth store; project helper fakes structured interactions and live discovery for all three providers.",
+      "action": "Complete ChatGPT, Google, and Cursor login in Web UI one at a time.",
+      "predicates": [
+        "Each reaches authenticated only after provider resolution, refreshes its real model rows, increments auth revision once, uses no terminal/console, and stores no secret in router/browser persistence."
+      ],
+      "owner_phase": "P4-auth-models",
+      "artifact_id": "rpc-ac-023",
+      "proof_symbols": [
+        "rpc-ac-023"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0",
+        "provider-helper-fake",
+        "browser-ui"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-024",
+      "setup": "For each provider in turn: authenticated state, two managed agents (active/idle), known sessions/models.",
+      "action": "Logout that provider in UI.",
+      "predicates": [
+        "Credential is unavailable, discovery refreshes, revision increments once, idle restarts immediately, active settles then restarts, sessions stay the same, unavailable selected models fail without fallback, and no intervening prompt is accepted."
+      ],
+      "owner_phase": "P4-auth-models",
+      "artifact_id": "rpc-ac-024",
+      "proof_symbols": [
+        "rpc-ac-024"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0",
+        "provider-helper-fake",
+        "browser-ui"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-025",
+      "setup": "For each provider, helper returns failure, cancel, expiry, and malformed/oversized output.",
+      "action": "Attempt login and logout.",
+      "predicates": [
+        "Sanitized failure and complete-history entry; helper exits; no revision increment, credential echo, model mutation, or agent restart."
+      ],
+      "owner_phase": "P4-auth-models",
+      "artifact_id": "rpc-ac-025",
+      "proof_symbols": [
+        "rpc-ac-025"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0",
+        "provider-helper-fake",
+        "browser-ui"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-026",
+      "setup": "Capture DB, logs, WebSocket, HTTP responses, URLs, browser storage, and access logs during a sensitive prompt.",
+      "action": "Submit a sentinel secret.",
+      "predicates": [
+        "Sentinel exists only transiently in helper input and the configured Pi auth store; absent from every captured router/browser artifact and history."
+      ],
+      "owner_phase": "P4-auth-models",
+      "artifact_id": "rpc-ac-026",
+      "proof_symbols": [
+        "rpc-ac-026"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0",
+        "provider-helper-fake",
+        "browser-ui"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-027",
+      "setup": "Ready managed recipient; current message API.",
+      "action": "Send ordinary mailbox message.",
+      "predicates": [
+        "Durable row delivered by RPC custom message once; Pi turn triggers; ACK follows matching message_end; no managed WebSocket client. See DM-RETRY-001, DM-DIAG-002, and DM-CONFLICT-001."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-027",
+      "proof_symbols": [
+        "rpc-ac-027"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-028",
+      "setup": "Managed and tmux agents.",
+      "action": "Send managed→tmux and tmux→managed through same message API/tool.",
+      "predicates": [
+        "Both intended recipients receive ordinary content once with correct derived sender; existing API shape unchanged."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-028",
+      "proof_symbols": [
+        "rpc-ac-028"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-029",
+      "setup": "Fault after Pi appends mailbox custom entry but before router ACK.",
+      "action": "Restart process/router and redeliver.",
+      "predicates": [
+        "Entry scan finds message ID; router ACKs without appending a duplicate. See DM-RETRY-002 and DM-DIAG-001."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-029",
+      "proof_symbols": [
+        "rpc-ac-029"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-030",
+      "setup": "Managed sender and canonical Wolfgang recipient.",
+      "action": "Call mecha_mailbox_send successfully.",
+      "predicates": [
+        "Quiet gets exactly the ordinary message; complete gets tool/request/result/message activity; control records never enter quiet."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-030",
+      "proof_symbols": [
+        "rpc-ac-030"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-031",
+      "setup": "Qualifying and nonqualifying events.",
+      "action": "Generate received mail, reminders, parent mail, errors, compactions, lifecycle, API mail, and direct Wolfgang tool mail.",
+      "predicates": [
+        "Only direct Wolfgang tool mail appears in quiet; every named type appears in complete."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-031",
+      "proof_symbols": [
+        "rpc-ac-031"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-032",
+      "setup": "One pair with 201 quiet messages and dates around 30 days.",
+      "action": "Run write and hourly retention.",
+      "predicates": [
+        "Newest 200 and only ≤30-day records remain for that pair; another pair is unchanged."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-032",
+      "proof_symbols": [
+        "rpc-ac-032"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-033",
+      "setup": "200 retained quiet messages; 201 complete activities.",
+      "action": "Insert another complete activity.",
+      "predicates": [
+        "Complete retains newest 200 total; all 200 quiet messages remain."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-033",
+      "proof_symbols": [
+        "rpc-ac-033"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-034",
+      "setup": "Agent has both histories.",
+      "action": "Reset context.",
+      "predicates": [
+        "Both histories retain identical IDs/content across new session; subsequent entries use new session fence."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-034",
+      "proof_symbols": [
+        "rpc-ac-034"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-035",
+      "setup": "History UI at desktop with filters.",
+      "action": "Switch quiet/complete and filters.",
+      "predicates": [
+        "Views announce selected state, show correct independent data/order, and no source-specific alternate workflow appears."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-035",
+      "proof_symbols": [
+        "rpc-ac-035"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-036",
+      "setup": "Actual router, dynamic tool, handler spy.",
+      "action": "Invoke one valid tool.",
+      "predicates": [
+        "One exact request has name/tool-call ID/raw args/definition/manifest/generation; closure returns queued before delayed handler; spy invoked once."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-036",
+      "proof_symbols": [
+        "rpc-ac-036"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-037",
+      "setup": "Fixtures for malformed/unknown/wrong-action/oversized requests.",
+      "action": "Feed each completed custom message.",
+      "predicates": [
+        "Exact protocol error in complete history; zero handler calls; zero ordinary mailbox records."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-037",
+      "proof_symbols": [
+        "rpc-ac-037"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-038",
+      "setup": "Tool inputs include from, agent/session/process/context-like fields.",
+      "action": "Invoke send/control tools.",
+      "predicates": [
+        "Schema rejects unsupported fields; sender/fences come from channel; no forged identity is stored or delivered."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-038",
+      "proof_symbols": [
+        "rpc-ac-038"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-039",
+      "setup": "Same request frame delivered twice before and after completion.",
+      "action": "Replay it.",
+      "predicates": [
+        "One ledger row, one handler invocation, one side effect; duplicate receives/reuses existing outcome."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-039",
+      "proof_symbols": [
+        "rpc-ac-039"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-040",
+      "setup": "Fault after external/router effect but before completion state.",
+      "action": "Restart router.",
+      "predicates": [
+        "Handler-specific reconciliation observes intended effect, commits once, and does not repeat it."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-040",
+      "proof_symbols": [
+        "rpc-ac-040"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-041",
+      "setup": "Active fake-provider stream, current live child binding, and completed handler.",
+      "action": "Send the later result through the current pending child request during the stream.",
+      "predicates": [
+        "Original tool result stays queued; no extra model request; the package validates and appends exactly one hidden model-visible mecha.control.result.v1 custom_message after the turn with triggerTurn:false and no deliverAs; router waits for its matching message_end."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-041",
+      "proof_symbols": [
+        "rpc-ac-041"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-042",
+      "setup": "Pending child result with old process/reference, then same-session process restart, resume, disposal, and separate context reset.",
+      "action": "Deliver the old result in each case.",
+      "predicates": [
+        "Same-session router restoration cannot revive an old child reference; only a current matching live binding can continue. Old, terminal, disposed, resumed, forged, or mismatched references return STALE_CHILD_CONTEXT with no append or parent fallback; reset rejects/cancels as STALE_SESSION with no insertion in the new context."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-042",
+      "proof_symbols": [
+        "rpc-ac-042"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-043",
+      "setup": "Router dies after result prompt acceptance at each child append boundary.",
+      "action": "Restart and reconcile the exact child-session entry by result_id.",
+      "predicates": [
+        "A present result_id becomes delivered without replay. An absent ID is restored and appended once; repeated identical payload returns already_present, and a changed payload returns CONFLICT."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-043",
+      "proof_symbols": [
+        "rpc-ac-043"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-044",
+      "setup": "Controlled handler blocks >30 s; queues at limits.",
+      "action": "Submit timeout and 65th per-agent/513th global requests.",
+      "predicates": [
+        "Timeout returns HANDLER_TIMEOUT; excess returns bounded busy error; no leaked goroutine/side effect; queue counts recover."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-044",
+      "proof_symbols": [
+        "rpc-ac-044"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-045",
+      "setup": "Fresh installed Pi 0.85, fake provider, mandatory revision-one full production manifest.",
+      "action": "Bootstrap then make the first model request.",
+      "predicates": [
+        "Accepted hash matches independent RFC 8785/SHA-256 fixture before ready; provider sees exactly all 16 required baseline names and normalized schemas; no earlier model request."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-045",
+      "proof_symbols": [
+        "rpc-ac-045"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-046",
+      "setup": "Fixtures cover malformed/duplicate-key JSON, invalid UTF-8/base64url, every unlisted keyword/type, null/composition/reference/const/format/pattern, open or schema-valued additionalProperties, missing maximum for string/array/number/integer, reversed ranges, depth/node/property/enum limits, duplicate canonical definitions, and encoded/decoded size boundaries.",
+      "action": "Attempt each full and supplemental install.",
+      "predicates": [
+        "Exact rejection occurs before any registration or target-state change; no model request; boundary-valid counterpart accepts. Independent canonicalizer produces the same accepted bytes/hash."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-046",
+      "proof_symbols": [
+        "rpc-ac-046"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-047",
+      "setup": "Partially invalid full manifest; tool collision with built-in/extension; each of six reserved application commands pre-collided; forced registration exception at positions 1, 8, and 16.",
+      "action": "Bootstrap each fresh process.",
+      "predicates": [
+        "Validation/collision rejects with no registration. Unexpected registration exception kills the process before ready/model use and leaves committed desired state unchanged; no usable partial runtime survives. Commands never appear as model tools."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-047",
+      "proof_symbols": [
+        "rpc-ac-047"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-048",
+      "setup": "Ready 16-tool runtime between turns; staged target adds one valid hash-namespaced previously unused capability/name.",
+      "action": "Install it, replay the same delivery, then try stale-base, changed-existing, removed-existing, reordered, two-addition, over-32, stale-fence, and collision targets.",
+      "predicates": [
+        "First target commits once and next provider request has 17 tools; same delivery returns same receipt; every invalid target leaves the exact 17-tool registry/hash unchanged with no model request during staging."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-048",
+      "proof_symbols": [
+        "rpc-ac-048"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-049",
+      "setup": "Valid schemas and raw calls at each scalar/collection bound, including numeric string, boolean string, unknown object key, deep node, oversized string, and array one item over max.",
+      "action": "Invoke tools and capture pre-closure/router calls.",
+      "predicates": [
+        "Only exact bounded values pass; every coercion/open/over-limit input fails before request and side effect; router independently rejects it too; Type.Unsafe/Value.Convert are absent."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-049",
+      "proof_symbols": [
+        "rpc-ac-049-manifest",
+        "rpc-ac-049-installed-pi"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-050",
+      "setup": "Committed definition changes; harness covers process restart, resume into new process, session switch, fork, and extension reload.",
+      "action": "Activate changed target and trigger each fresh-generation cause.",
+      "predicates": [
+        "Changed definition uses capability_id__<full new hash>; old Pi-visible name is never reused for changed bytes; each fresh generation receives the complete current 16–32-tool full manifest before ready/first turn; no in-place replace/remove/deactivate occurs."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-050",
+      "proof_symbols": [
+        "rpc-ac-050"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-051",
+      "setup": "Goal lock/evaluator fake clock/model; restore and meaningful activity fixtures.",
+      "action": "Exercise goal set/status/off, settle, NOT_DONE/rearm, completion, restart.",
+      "predicates": [
+        "Outputs/state/wake limits/lock/restore match current effective contract; only structured activity advances rearm."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-051",
+      "proof_symbols": [
+        "rpc-ac-051"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-052",
+      "setup": "Goal snooze disabled/enabled, budget and compaction/child gates.",
+      "action": "Invoke goal_snooze in each state.",
+      "predicates": [
+        "Disabled/gated calls error; valid call schedules one durable wakeup with current budget/refill behavior."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-052",
+      "proof_symbols": [
+        "rpc-ac-052"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-053",
+      "setup": "Root, current child, stale/disposed child contexts.",
+      "action": "Invoke mecha_parent_message.",
+      "predicates": [
+        "Only current child sends one ordinary message to bound parent; root/stale fail; no fallback sender."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-053",
+      "proof_symbols": [
+        "rpc-ac-053"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-054",
+      "setup": "Root/child senders and pair rate clock.",
+      "action": "Invoke mecha_mailbox_send, including from and over-rate cases.",
+      "predicates": [
+        "Derived sender and API-equivalent delivery; from rejected; current pair rate limit preserved."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-054",
+      "proof_symbols": [
+        "rpc-ac-054"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-055",
+      "setup": "Parent inline guard and native child.",
+      "action": "Grant 1–5 credits; run allowed tools through exhaustion; test invalid tool/count and child.",
+      "predicates": [
+        "Exact credits consumed once and synced; next parent call blocked; invalid rejected; child remains exempt without changing parent credits."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-055",
+      "proof_symbols": [
+        "rpc-ac-055"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-056",
+      "setup": "Configured Markdown stores with bounded sentinel content.",
+      "action": "Enable/select/status/disable mecha_recall and start turns.",
+      "predicates": [
+        "Selected content is ephemeral before-turn context only when enabled; status exact; no duplicate persistent session entry; unsafe store rejected."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-056",
+      "proof_symbols": [
+        "rpc-ac-056"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-057",
+      "setup": "Configured recipient, fake clock, settle then later activity/child.",
+      "action": "Enable/status/disable mecha_settled_notifications.",
+      "predicates": [
+        "One notice after valid settle/cooldown; later activity/child suppresses; disabled sends none; current status fields preserved."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-057",
+      "proof_symbols": [
+        "rpc-ac-057"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-058",
+      "setup": "Context policy fixtures and active turn.",
+      "action": "Status/set policy/invoke compact.",
+      "predicates": [
+        "Policy forms validate; compact reports deferred immediately, runs only at structured settled boundary, carries handoff, and records exact success/failure."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-058",
+      "proof_symbols": [
+        "rpc-ac-058"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-059",
+      "setup": "Isolated supervisor state store.",
+      "action": "Exercise every mecha_state action and invalid field mix.",
+      "predicates": [
+        "Query/create/update effects/output match source; invalid action fields invoke no adapter; retry is idempotent."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-059",
+      "proof_symbols": [
+        "rpc-ac-059"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-060",
+      "setup": "Isolated priority state.",
+      "action": "Exercise create/update/status both terminal/nonterminal and invalid task IDs/evidence.",
+      "predicates": [
+        "All current action rules and terminal evidence requirement match; duplicate request has one effect."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-060",
+      "proof_symbols": [
+        "rpc-ac-060"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-061",
+      "setup": "Task and one-shot reminder.",
+      "action": "Invoke mecha_verification_handoff record variants.",
+      "predicates": [
+        "Exact handoff row updates once with validated three-state remote value; invalid input has no effect."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-061",
+      "proof_symbols": [
+        "rpc-ac-061"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-062",
+      "setup": "Owned and foreign reminders; fake clock/lock.",
+      "action": "List/create/update/delete one-shot, absolute, recurring, foreign, and locked cases.",
+      "predicates": [
+        "Current timing/ownership/lock behavior matches; only derived current target listed/mutated; retries do not duplicate."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-062",
+      "proof_symbols": [
+        "rpc-ac-062"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-063",
+      "setup": "Fixed worker adapters and aliases.",
+      "action": "Exercise list/launch/cleanup/send plus invalid alias/output secret.",
+      "predicates": [
+        "Exact allowed argv/action runs without shell; desired state reconciles idempotently; secret redacted; no arbitrary command."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-063",
+      "proof_symbols": [
+        "rpc-ac-063"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-064",
+      "setup": "Fake PR/git adapters with valid/invalid JSON.",
+      "action": "Invoke mecha_pr and mecha_git.",
+      "predicates": [
+        "Valid parsed details match current contract; invalid identifier/JSON yields bounded error and no unsafe execution."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-064",
+      "proof_symbols": [
+        "rpc-ac-064"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-065",
+      "setup": "Router store contains health/retry/dead-letter messages.",
+      "action": "Exercise all mecha_router actions.",
+      "predicates": [
+        "Health and exact retry/dismiss transitions match current routes once; unknown message yields current-equivalent error."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-065",
+      "proof_symbols": [
+        "rpc-ac-065"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-066",
+      "setup": "Fixture for all nine legacy commands and current root/child contexts.",
+      "action": "Invoke each through stock RPC prompt.",
+      "predicates": [
+        "Exact argument grammar and availability preserved through named handlers; each emits one typed control; no extra model request/UI console."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-066",
+      "proof_symbols": [
+        "rpc-ac-066"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-067",
+      "setup": "Parent starts children with all exact statuses/models/times and a live manager-issued context binding.",
+      "action": "Read the service snapshot/event projection and open the nested list while active and after terminal states.",
+      "predicates": [
+        "Service rows expose the opaque nullable binding only to the root bridge; router child snapshot/delta envelopes omit it. Stable task/run rows show description, known model, exact structured lifecycle, live elapsed or fixed finished timing; unknowns are labeled, not inferred."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-067",
+      "proof_symbols": [
+        "rpc-ac-067"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-068",
+      "setup": "Current child run and structured terminal deltas for old process/session/run/entry/lower sequence, plus old or replaced child references.",
+      "action": "Deliver each stale delta or result.",
+      "predicates": [
+        "None changes the current child, clears uncertainty, or appends a result; each stale delta is recorded with its exact fence reason and each stale reference returns STALE_CHILD_CONTEXT. No old terminal attaches to a resumed run."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-068",
+      "proof_symbols": [
+        "rpc-ac-068"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-069",
+      "setup": "Reachable UI-live client with active children; live delta log has contiguous and gapped cases.",
+      "action": "Disconnect/reconnect directly and inject duplicate/regression/gap.",
+      "predicates": [
+        "First frame is the current snapshot; contiguous applies; duplicate ignored; regression/gap reconnects for a snapshot and performs no best-effort merge."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-069",
+      "proof_symbols": [
+        "rpc-ac-069"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-070",
+      "setup": "Two active child runs and parent compaction in durable state; replacement package snapshot contains one run and omits one.",
+      "action": "Restart router and reconcile after same-session process bootstrap.",
+      "predicates": [
+        "Contained run reflects exact source. Omitted run keeps last source lifecycle plus interrupted_unknown/snapshot_omitted, is excluded from active count, and is not marked stopped/completed; snapshot publishes before deltas; old events stay fenced."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-070",
+      "proof_symbols": [
+        "rpc-ac-070"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-071",
+      "setup": "Parent session with active child rows; old-session events delayed.",
+      "action": "Reset/switch parent session.",
+      "predicates": [
+        "Prior runs keep last source lifecycle plus interrupted_unknown/session_changed; new snapshot starts current; no fabricated terminal; old events cannot attach to new epoch."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-071",
+      "proof_symbols": [
+        "rpc-ac-071"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-072",
+      "setup": "Parent compaction fixtures for start/success/aborted/error and missing end.",
+      "action": "Drive each and reconnect with isCompacting true/false.",
+      "predicates": [
+        "Badge starts/clears exactly; failure distinct; missing start repaired; missing end becomes reconciled_unknown, never success; complete entries exact."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-072",
+      "proof_symbols": [
+        "rpc-ac-072"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-073",
+      "setup": "Child compaction fixtures for start/success/failure and lost end.",
+      "action": "Drive events and snapshot reconciliation.",
+      "predicates": [
+        "Only nested child changes; count/outcome/times exact; explicit failure clears; lost terminal becomes reconciled_unknown without child terminal inference; quiet unchanged."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-073",
+      "proof_symbols": [
+        "rpc-ac-073"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-074",
+      "setup": "Parent with live children and child compaction.",
+      "action": "Kill parent process hard.",
+      "predicates": [
+        "Before replacement snapshot, every live run keeps its last lifecycle with interrupted_unknown/parent_process_lost, elapsed timers stop, compaction becomes reconciled_unknown, and complete history records uncertainty; no terminal state is manufactured."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-074",
+      "proof_symbols": [
+        "rpc-ac-074"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-075",
+      "setup": "Generate parent/child activity and compaction transitions.",
+      "action": "Compare histories.",
+      "predicates": [
+        "Every transition appears once in complete with fences; none appears in quiet."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-075",
+      "proof_symbols": [
+        "rpc-ac-075"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-076",
+      "setup": "Desktop nested list with long bounded text and many children.",
+      "action": "Navigate disclosure/rows by keyboard and screen-reader labels.",
+      "predicates": [
+        "No overlap/page overflow; text wraps/truncates with accessible full label; focus order and expanded state are correct."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-076",
+      "proof_symbols": [
+        "rpc-ac-076"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-077",
+      "setup": "Two equivalent agents named supervisor and ordinary.",
+      "action": "Run launch/restart/reset/crash/message/tool flows.",
+      "predicates": [
+        "Lifecycle and permissions are identical apart from displayed name and content-derived state."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-077",
+      "proof_symbols": [
+        "rpc-ac-077"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-078",
+      "setup": "Managed feature disabled after records exist.",
+      "action": "Restart router in rollback mode.",
+      "predicates": [
+        "Tmux router works; no new managed launch/mutation; controlled managed processes stop; records/sessions remain for forward recovery."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-078",
+      "proof_symbols": [
+        "rpc-ac-078"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-079",
+      "setup": "Generated route matrix covers every new route, method, body, size, resource, and state condition.",
+      "action": "Exercise its declared success and 400/404/409/413/422/500/502/503 cases.",
+      "predicates": [
+        "Each response matches the new envelope/status/code matrix and request/operation correlation; no route contains a caller-authentication outcome; existing routes retain prior bodies/errors; every failure creates one bounded complete-history error when an agent/operation is known and no side effect otherwise."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-079",
+      "proof_symbols": [
+        "rpc-ac-079"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-080",
+      "setup": "Full current tmux regression suite and normal managed activity.",
+      "action": "Run both concurrently, including current protocol registration/delivery.",
+      "predicates": [
+        "Tmux extension/protocol behavior and APIs pass unchanged; managed process never connects by Mailbox WebSocket."
+      ],
+      "owner_phase": "P2-router-handlers",
+      "artifact_id": "rpc-ac-080",
+      "proof_symbols": [
+        "rpc-ac-080"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-081",
+      "setup": "All acceptance rows in this matrix; browser recording tooling enabled.",
+      "action": "Run actual-router installed-Pi end-to-end and browser suite.",
+      "predicates": [
+        "Each acceptance ID links to automated output or browser artifact showing its exact setup/action/result; isolated dynamic/control proofs are not reused as router evidence."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-081",
+      "proof_symbols": [
+        "rpc-ac-081"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-082",
+      "setup": "Two unrelated HTTP(S) origins and a non-browser client without Origin. No browser authority state exists.",
+      "action": "Make valid managed GETs and mutations from each client and connect/reconnect /v1/ui-live directly.",
+      "predicates": [
+        "Every valid request succeeds identically. No cookie, CSRF value, ticket, bearer value, Origin allowlist, or browser auth storage exists. The existing agent WebSocket still works."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-082",
+      "proof_symbols": [
+        "rpc-ac-082"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-083",
+      "setup": "One valid direct mutation, a mutation effect spy, and one request ID with same and different canonical bodies/paths.",
+      "action": "Submit the original, exact replay, changed path/body replay, router restart, and 24-hour expiry boundary.",
+      "predicates": [
+        "One effect occurs. An exact replay returns the retained response and operation ID. Changed input returns 409 IDEMPOTENCY_CONFLICT. The retained replay works after router restart and expires only after 24 hours."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-083",
+      "proof_symbols": [
+        "rpc-ac-083"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-084",
+      "setup": "Fresh migration with explicit canonical recipient; retained eligible/ineligible messages; replacement config and unknown recipient.",
+      "action": "Start without/with config, send around config restart, and query quiet.",
+      "predicates": [
+        "Missing config prevents managed mode; exact configured ID alone qualifies future tool mail; replacement does not reclassify retained rows; unknown recipient creates no message/quiet row."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-084",
+      "proof_symbols": [
+        "rpc-ac-084"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-085",
+      "setup": "Canonical tmux client and managed process active; duplicate message/result IDs; correlated ACK fixtures; completed subagent.",
+      "action": "Deliver/retry messages and call get_subagent_result repeatedly.",
+      "predicates": [
+        "Tmux correlation and ID-reuse behavior stays byte-compatible, duplicate delivery is not consumed incorrectly, repeated subagent lookup returns snapshots without consumption, and managed traffic never alters tmux lease/ACK state."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-085",
+      "proof_symbols": [
+        "rpc-ac-085"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-086",
+      "setup": "Desktop settings UI; authenticated model catalogs; next-run capture; DOM route inventory.",
+      "action": "Discover/set/clear router default, refresh provider models, launch next agent, and inspect all managed navigation/actions.",
+      "predicates": [
+        "Saved available default drives the next omitted-model launch, unavailable default uses only Terra rule, selected state persists/refreshes, and no terminal, console, shell, or alternate auth/model path exists."
+      ],
+      "owner_phase": "P4-auth-models",
+      "artifact_id": "rpc-ac-086",
+      "proof_symbols": [
+        "rpc-ac-086-provider-auth",
+        "rpc-ac-086-session-restart"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0",
+        "provider-helper-fake",
+        "browser-ui"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-087",
+      "setup": "Build/test environment has installed Pi 0.85, project checkout, the wolfgangmeyers/pi-packages fork on main, and its pi-subagents workspace.",
+      "action": "Run the package’s existing checks and build:types, then build and launch while tracing import graph, cwd, argv, and runtime file opens.",
+      "predicates": [
+        "Managed Pi uses the installed pinned runtime; router/thin/helper come from this project; the checked fork workspace supplies the package-declared packages/pi-subagents/src/index.ts fixed extension path. No launch/import requires /Users/wolfgang/code/pi, a registry pi-subagents package/version, or a patched Pi core."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-087",
+      "proof_symbols": [
+        "rpc-ac-087"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-088",
+      "setup": "Agent is in persisted first/second crash backoff; invalid executable/config and graceful-stop timeout fixtures.",
+      "action": "Restart router during backoff, cross each due time, attempt invalid start, and force graceful→TERM→KILL escalation.",
+      "predicates": [
+        "One persisted timer resumes with remaining delay; no duplicate spawn; invalid config fails before child, startup exit counts once; planned escalated exit never counts as crash; exact five-second stages and errors are recorded."
+      ],
+      "owner_phase": "P3-supervision",
+      "artifact_id": "rpc-ac-088",
+      "proof_symbols": [
+        "rpc-ac-088"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-089",
+      "setup": "A current-fence snapshot omitted an active run and router marked it interrupted unknown; stale and current explicit terminal events available.",
+      "action": "Deliver stale prior-process terminal, then matching current-process/package terminal for that exact run.",
+      "predicates": [
+        "Stale event only records stale history. Matching structured terminal establishes the exact terminal state, clears recovery uncertainty, fixes finish/duration, and never updates another run."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-089",
+      "proof_symbols": [
+        "rpc-ac-089"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    },
+    {
+      "id": "AC-090",
+      "setup": "Fresh installed Pi 0.85 parent has the accepted 16-tool manifest, one real subagent spawn, a deterministic provider, and a duplicate child-factory name attempt.",
+      "action": "Register the parent’s fixed mecha child factory, spawn the child, and make its first model request; dispose the registration, spawn again, then release the parent service.",
+      "predicates": [
+        "The duplicate name rejects without replacement. The spawned child receives the factory snapshot in DefaultResourceLoader before reload/bind and its first provider request includes all 16 managed definitions. Its factory uses only the accepted parent manifest. The disposer excludes later children; owner release clears remaining registrations. No model input or global/file/socket/configuration/private-manager/service-registry/CLI-path backchannel selects or supplies the factory."
+      ],
+      "owner_phase": "P1-P3-preserved",
+      "artifact_id": "rpc-ac-090",
+      "proof_symbols": [
+        "rpc-ac-090"
+      ],
+      "evidence_class": [
+        "actual-go-router",
+        "installed-pi-0.85.0"
+      ],
+      "browser_required": true,
+      "release_required": true
+    }
+  ],
+  "composite_proofs": [
+    {
+      "id": "AC-049-composite",
+      "acceptance_id": "AC-049",
+      "proof_symbols": [
+        "rpc-ac-049-manifest",
+        "rpc-ac-049-installed-pi"
+      ],
+      "predicate": "The constituent proofs agree on one canonical revision-one manifest."
+    },
+    {
+      "id": "AC-086-composite",
+      "acceptance_id": "AC-086",
+      "proof_symbols": [
+        "rpc-ac-086-provider-auth",
+        "rpc-ac-086-session-restart"
+      ],
+      "predicate": "The authenticated catalog revision and managed-agent restart fence are observed in one candidate run."
+    }
+  ],
+  "closure": {
+    "required_acceptance_ids": [
+      "AC-001",
+      "AC-002",
+      "AC-003",
+      "AC-004",
+      "AC-005",
+      "AC-006",
+      "AC-007",
+      "AC-008",
+      "AC-009",
+      "AC-010",
+      "AC-011",
+      "AC-012",
+      "AC-013",
+      "AC-014",
+      "AC-015",
+      "AC-016",
+      "AC-017",
+      "AC-018",
+      "AC-019",
+      "AC-020",
+      "AC-021",
+      "AC-022",
+      "AC-023",
+      "AC-024",
+      "AC-025",
+      "AC-026",
+      "AC-027",
+      "AC-028",
+      "AC-029",
+      "AC-030",
+      "AC-031",
+      "AC-032",
+      "AC-033",
+      "AC-034",
+      "AC-035",
+      "AC-036",
+      "AC-037",
+      "AC-038",
+      "AC-039",
+      "AC-040",
+      "AC-041",
+      "AC-042",
+      "AC-043",
+      "AC-044",
+      "AC-045",
+      "AC-046",
+      "AC-047",
+      "AC-048",
+      "AC-049",
+      "AC-050",
+      "AC-051",
+      "AC-052",
+      "AC-053",
+      "AC-054",
+      "AC-055",
+      "AC-056",
+      "AC-057",
+      "AC-058",
+      "AC-059",
+      "AC-060",
+      "AC-061",
+      "AC-062",
+      "AC-063",
+      "AC-064",
+      "AC-065",
+      "AC-066",
+      "AC-067",
+      "AC-068",
+      "AC-069",
+      "AC-070",
+      "AC-071",
+      "AC-072",
+      "AC-073",
+      "AC-074",
+      "AC-075",
+      "AC-076",
+      "AC-077",
+      "AC-078",
+      "AC-079",
+      "AC-080",
+      "AC-081",
+      "AC-082",
+      "AC-083",
+      "AC-084",
+      "AC-085",
+      "AC-086",
+      "AC-087",
+      "AC-088",
+      "AC-089",
+      "AC-090"
+    ],
+    "no_skipped_release_blocking_cases": true
+  }
 }

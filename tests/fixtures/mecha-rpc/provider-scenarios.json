@@ -1,0 +1,25 @@
+{
+  "schema": "mecha.rpc.provider-scenarios/v1",
+  "providers": [
+    {
+      "provider": "openai-codex",
+      "label": "ChatGPT",
+      "login_prompt": {"kind": "manual_code", "message": "Complete the requested ChatGPT sign-in step."},
+      "model": {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra"}
+    },
+    {
+      "provider": "google",
+      "label": "Google",
+      "login_prompt": {"kind": "secret", "message": "Enter the requested sign-in value."},
+      "model": {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"}
+    },
+    {
+      "provider": "cursor",
+      "label": "Cursor",
+      "login_prompt": {"kind": "secret", "message": "Enter the requested sign-in value."},
+      "model": {"id": "cursor-fast", "name": "Cursor Fast"}
+    }
+  ],
+  "failure_modes": ["failed", "cancelled", "expired", "malformed_output"],
+  "secret_boundary": "Fixtures name no usable credential. Tests generate any sentinel at runtime and assert it is absent from router and browser artifacts."
+}

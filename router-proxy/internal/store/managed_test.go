@@ -186,7 +186,7 @@ func TestForwardMigration023To025PreservesManagedRowsAndRestartTransition(t *tes
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
 	require.Greater(t, len(migrations), 22)
-	require.Equal(t, "033_managed_parent_compaction_transitions", migrations[len(migrations)-1].ID)
+	require.Equal(t, "034_managed_provider_auth", migrations[len(migrations)-1].ID)
 	// Preserve this 023-to-025 regression as a historical slice. The full 027
 	// fixture below is covered separately and deliberately requires no starting
 	// launch row.
@@ -560,4 +560,37 @@ func TestManagedLaunchReservesNameSlotAndOperationAtomically(t *testing.T) {
 	secondOp.OperationID, secondOp.RequestID = "456", "456"
 	var slot *ManagedSlotLimitError
 	require.ErrorAs(t, durable.ReserveManagedLaunchWithLimit(ctx, second, secondOp, 1), &slot)
+}
+
+func TestManagedProviderSnapshotIsBoundedTransactionalAndNonSecret(t *testing.T) {
+	ctx := context.Background()
+	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	providers := []ManagedProviderStatus{
+		{Provider: "openai-codex", Label: "ChatGPT", Authenticated: true, Status: "authenticated"},
+		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
+		{Provider: "cursor", Label: "Cursor", Authenticated: true, Status: "authenticated"},
+	}
+	models := []ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}, {Provider: "cursor", ID: "cursor-fast", Name: "Cursor Fast", Available: true}}
+	revision, err := durable.CommitManagedProviderSnapshot(ctx, providers, models)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), revision)
+	snapshot, err := durable.ManagedProviderSnapshot(ctx)
+	require.NoError(t, err)
+	require.Equal(t, revision, snapshot.AuthRevision)
+	require.Len(t, snapshot.Providers, 3)
+	require.ElementsMatch(t, models, snapshot.Models)
+
+	// Invalid input fails before the transaction, retaining the old catalog and
+	// revision rather than creating auth history or a partial provider state.
+	_, err = durable.CommitManagedProviderSnapshot(ctx, providers[:2], nil)
+	require.Error(t, err)
+	after, err := durable.ManagedProviderSnapshot(ctx)
+	require.NoError(t, err)
+	require.Equal(t, snapshot, after)
+
+	var secretRows int
+	require.NoError(t, durable.db.QueryRow(`SELECT count(*) FROM pragma_table_info('managed_provider_status') WHERE lower(name) LIKE '%token%' OR lower(name) LIKE '%secret%' OR lower(name) LIKE '%credential%'`).Scan(&secretRows))
+	require.Zero(t, secretRows)
 }

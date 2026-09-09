@@ -15,7 +15,10 @@ type Model struct {
 	Name      string `json:"name,omitempty"`
 	Available bool   `json:"available"`
 }
-type Catalog struct{ Models []Model }
+type Catalog struct {
+	AuthRevision int64
+	Models       []Model
+}
 type ModelSource interface {
 	Catalog(context.Context) (Catalog, error)
 }
@@ -85,13 +88,32 @@ type StoreCatalogSource struct {
 }
 
 func (s StoreCatalogSource) Catalog(ctx context.Context) (Catalog, error) {
+	if s.Store == nil {
+		return Catalog{}, errors.New("managed model store is unavailable")
+	}
+	persisted, err := s.Store.ManagedProviderSnapshot(ctx)
+	if err != nil {
+		return Catalog{}, err
+	}
+	// Once provider orchestration has committed models, the router's durable
+	// catalog is launch truth. A compatibility helper is used only by older test
+	// seams; production passes no helper and therefore cannot launch from a
+	// signed-out migration row.
+	if len(persisted.Providers) > 0 && (len(persisted.Models) > 0 || s.Helper == nil) {
+		models := make([]Model, 0, len(persisted.Models))
+		for _, model := range persisted.Models {
+			models = append(models, Model{Provider: model.Provider, ID: model.ID, Name: model.Name, Available: model.Available})
+		}
+		return Catalog{AuthRevision: persisted.AuthRevision, Models: models}, nil
+	}
 	if s.Helper == nil {
-		return Catalog{}, errors.New("model helper is unavailable")
+		return Catalog{AuthRevision: persisted.AuthRevision, Models: []Model{}}, nil
 	}
 	catalog, err := s.Helper.Catalog(ctx)
 	if err != nil {
 		return Catalog{}, err
 	}
+	catalog.AuthRevision = persisted.AuthRevision
 	return catalog, nil
 }
 

@@ -42,6 +42,31 @@ describe("direct HTTP transport", () => {
     await expect(createHttpClient("http://router.test", fetchImpl).launchManaged({ name: "managed-alpha", cwd: "/tmp/project" })).resolves.toMatchObject({ agent: { agent_id: "managed-alpha" } });
   });
 
+  it("uses the provider-auth routes without cookies and rejects incomplete provider state", async () => {
+    const providerState = { auth_revision: 1, providers: [
+      { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: "2030-01-01T00:00:00.123456789Z" },
+      { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.123456789Z" },
+      { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: "2030-01-01T00:00:00.123456789Z" },
+    ] };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.credentials).toBe("omit");
+      expect(init?.headers).toEqual({ "x-request-id": expect.any(String), "content-type": "application/json" });
+      if (String(input).endsWith("/response")) {
+        expect(init?.body).toBe(JSON.stringify({ prompt_id: "key-1", value: "not-kept-by-the-client" }));
+        return response({ operation_id: "auth-1" }, 202);
+      }
+      expect(String(input)).toBe("http://router.test/v1/provider-auth/google/login");
+      return response({ operation_id: "auth-1" }, 202);
+    });
+    const client = createHttpClient("http://router.test", fetchImpl);
+    await expect(client.startProviderAuth("google", "login")).resolves.toEqual({ operation_id: "auth-1" });
+    await expect(client.respondProviderAuth("auth-1", "key-1", "not-kept-by-the-client")).resolves.toEqual({ operation_id: "auth-1" });
+    const statusClient = createHttpClient("http://router.test", async (_input, init) => { expect(init?.credentials).toBe("omit"); return response(providerState); });
+    await expect(statusClient.providerAuth()).resolves.toEqual(providerState);
+    const malformedClient = createHttpClient("http://router.test", async () => response({ ...providerState, providers: providerState.providers.slice(0, 2) }));
+    await expect(malformedClient.providerAuth()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("accepts an RFC3339Nano managed-agent snapshot", async () => {
     const managedAgent = { agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.123456Z", started_at: null, updated_at: "2030-01-01T00:00:00.123456789Z", last_error: null };
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
