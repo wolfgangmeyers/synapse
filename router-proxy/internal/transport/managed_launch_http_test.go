@@ -76,6 +76,7 @@ func (r managedTestRPC) WaitForChildSnapshot(context.Context) (map[string]any, e
 	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": *r.session, "sequence": int64(0), "runs": []any{}}, nil
 }
 func (r managedTestRPC) Prompt(context.Context, string) error { return nil }
+func (r managedTestRPC) Abort(context.Context) error          { return nil }
 func (r managedTestRPC) Close() error                         { return nil }
 
 type managedTestRPCFactory struct{ rpc managedTestRPC }

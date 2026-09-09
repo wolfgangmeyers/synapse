@@ -176,6 +176,7 @@ func (r replayRPC) WaitForChildSnapshot(context.Context) (map[string]any, error)
 	return map[string]any{"protocol": "mecha.children/v1", "snapshot_id": "snapshot", "owner_session_id": r.session, "sequence": int64(0), "runs": []any{}}, nil
 }
 func (r replayRPC) Prompt(context.Context, string) error { return nil }
+func (r replayRPC) Abort(context.Context) error          { return nil }
 func (r replayRPC) Close() error                         { return nil }
 
 type replayRPCFactory struct {

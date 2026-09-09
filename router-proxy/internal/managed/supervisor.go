@@ -54,12 +54,22 @@ type ManagerOptions struct {
 	// BeforeManagedDirectAcknowledge is a test seam for the durable
 	// append-before-ack crash boundary. Production leaves it nil.
 	BeforeManagedDirectAcknowledge func(context.Context, store.ManagedDirectAttempt) error
+	// BeforeManagedDirectRecovery pauses the lane-owned recovery scan in focused
+	// tests. Production leaves it nil.
+	BeforeManagedDirectRecovery func(context.Context, string)
 	// The target-start hooks model bounded reset/restart crash boundaries in
 	// focused/native tests. Production leaves them nil; they add no runtime
 	// control surface.
 	BeforeManagedResetOldArtifactCleanup              func(context.Context, string) error
 	AfterManagedResetTargetStartBeforeBind            func(context.Context, string, Process) error
 	AfterManagedLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
+	// BeforeManagedLaunchStart lets focused tests hold the post-reservation
+	// handoff. Production leaves it nil; it creates no runtime control surface.
+	BeforeManagedLaunchStart func(context.Context, string)
+	// BeforeManagedTerminationArtifactCleanup models a durable retry boundary
+	// after an exact group has been reaped but before session files are removed.
+	// Production leaves it nil.
+	BeforeManagedTerminationArtifactCleanup func(context.Context, string) error
 	// RestartAllDispatcher is a post-commit handoff seam. Test doubles record
 	// durable IDs only; production leaves it nil and uses the S3 restart bridge.
 	RestartAllDispatcher              RestartAllDispatcher
@@ -153,9 +163,12 @@ type Manager struct {
 	preparationDeadline                        RestartPreparationDeadlineFactory
 	preparationHook                            RestartPreparationHook
 	beforeDirectAcknowledge                    func(context.Context, store.ManagedDirectAttempt) error
+	beforeManagedDirectRecovery                func(context.Context, string)
 	beforeResetOldArtifactCleanup              func(context.Context, string) error
 	afterResetTargetStartBeforeBind            func(context.Context, string, Process) error
 	afterLifecycleRestartTargetStartBeforeBind func(context.Context, string, Process) error
+	beforeManagedLaunchStart                   func(context.Context, string)
+	beforeTerminationArtifactCleanup           func(context.Context, string) error
 	restartAllDispatcher                       RestartAllDispatcher
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
 	rootControlHandlers                        *RootControlHandlerRegistry
@@ -224,7 +237,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		deadlineFactory = context.WithTimeout
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	return manager, nil
 }
@@ -310,6 +323,12 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 		return LaunchResult{}, err
 	}
 	op := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"X-Request-ID": request.RequestID, "Content-Type": "application/json; charset=utf-8"}, ResponseBody: body, CreatedAt: now}
+	// Launch admission and every launch callback use this same lane. A
+	// termination that wins the handoff can tombstone the durable row before the
+	// start task reaches ProcessFactory.Start, never after it has escaped.
+	lane := m.laneFor(agent.AgentID)
+	lane.serial.Lock()
+	defer lane.serial.Unlock()
 	if err := m.store.ReserveManagedLaunchWithLimit(ctx, agent, op, m.config.Limits.MaxAgents); err != nil {
 		return LaunchResult{}, err
 	}
@@ -319,7 +338,7 @@ func (m *Manager) Launch(ctx context.Context, request LaunchRequest) (LaunchResu
 		_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "MANAGER_CLOSED", "managed manager closed")
 		return LaunchResult{}, errors.New("managed manager is closed")
 	}
-	binding := &managedBinding{agentID: agent.AgentID, lane: m.laneLocked(agent.AgentID), operationID: request.RequestID, lifecycleAction: "launch", token: agent.RuntimeGeneration, sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash}
+	binding := &managedBinding{agentID: agent.AgentID, lane: lane, operationID: request.RequestID, lifecycleAction: "launch", token: agent.RuntimeGeneration, sessionID: agent.PiSessionID, sessionEpoch: agent.SessionEpoch, runtimeGeneration: agent.RuntimeGeneration, manifestRevision: agent.ManifestRevision, manifestHash: agent.ManifestHash}
 	m.bindings[agent.AgentID] = binding
 	m.operationIDs[agent.AgentID] = request.RequestID
 	m.startWG.Add(1)
@@ -347,8 +366,35 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	// Close cancels ctx to stop process and RPC work. This goroutine owns its
 	// durable launch transitions, and Close waits for them before returning.
 	durableCtx := context.Background()
-	defer m.clearBinding(binding)
+	lane := binding.lane
+	if lane == nil {
+		lane = m.laneFor(agent.AgentID)
+		binding.lane = lane
+	}
+	if m.beforeManagedLaunchStart != nil {
+		m.beforeManagedLaunchStart(ctx, agent.AgentID)
+	}
+	lane.serial.Lock()
+	launchLaneHeld := true
+	defer func() {
+		if launchLaneHeld {
+			lane.serial.Unlock()
+		}
+		lane.serial.Lock()
+		m.clearBinding(binding)
+		lane.serial.Unlock()
+	}()
 	spec := CommandSpec{PiExecutable: m.config.PiExecutable, SessionRoot: m.config.SessionRoot, SessionID: agent.PiSessionID, LaunchMode: CreateNew, Cwd: agent.Cwd, Provider: agent.SelectedModel.Provider, ModelID: agent.SelectedModel.ID, MechaRPCExtension: m.config.MechaRPCExtension, PiSubagentsExtension: m.config.PiSubagentsExtension, TestOnlyExtensions: m.config.TestOnlyExtensions, Environment: ChildEnvironmentFor(m.config, agent.RuntimeGeneration, agent.SessionEpoch)}
+	pending, pendingErr := m.store.ManagedLaunchStillPending(durableCtx, agent.AgentID, request.RequestID)
+	if pendingErr != nil {
+		m.fail(agent.AgentID, "STATE_UPDATE_FAILED", sanitizeError(pendingErr))
+		return
+	}
+	if !pending {
+		// A lifecycle tombstone won before this goroutine reached its only
+		// external start boundary. It already terminalized the launch replay row.
+		return
+	}
 	process, err := m.processFactory.Start(ctx, spec)
 	if err != nil {
 		m.fail(agent.AgentID, "PROCESS_START_FAILED", sanitizeError(err))
@@ -454,11 +500,26 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	binding.lifecycleAction = ""
 	binding.serial.Unlock()
 	m.recoverManagedDirectAttemptsAsync(agent.AgentID)
+	// Readiness is the end of launch's synchronous ownership. Process exit and
+	// shutdown callbacks reacquire this lane before they inspect or mutate the
+	// binding, so termination cannot interleave a late launch callback.
+	lane.serial.Unlock()
+	launchLaneHeld = false
 	select {
 	case <-waitSignal:
+		lane.serial.Lock()
+		defer lane.serial.Unlock()
 		binding.serial.Lock()
 		waitErr := binding.waitErr
 		binding.serial.Unlock()
+		binding.serial.Lock()
+		terminating := binding.lifecycleAction == "terminate"
+		binding.serial.Unlock()
+		if terminating {
+			// Termination owns the durable tombstone and exact group proof. A
+			// cooperative Abort exit must not rewrite it as a generic failure.
+			return
+		}
 		if m.recordLifecycleRestartExit(binding) {
 			return
 		}
@@ -471,7 +532,14 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 			_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "PROCESS_EXITED", sanitizeError(waitErr))
 		}
 	case <-ctx.Done():
-		handled, shutdownErr := m.shutdownLifecycleRestartBinding(context.Background(), binding)
+		// Lifecycle-specific shutdown owners acquire the lane themselves. The
+		// generic fallback below acquires it only after they decline ownership.
+		handled, shutdownErr := m.shutdownTerminationBinding(context.Background(), binding)
+		if handled {
+			m.recordCloseError(shutdownErr)
+			return
+		}
+		handled, shutdownErr = m.shutdownLifecycleRestartBinding(context.Background(), binding)
 		if handled {
 			m.recordCloseError(shutdownErr)
 			return
@@ -481,6 +549,8 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 			m.recordCloseError(shutdownErr)
 			return
 		}
+		lane.serial.Lock()
+		defer lane.serial.Unlock()
 		_ = rpc.Close()
 		if stopErr := process.Stop(context.Background()); stopErr != nil {
 			m.fail(agent.AgentID, "PROCESS_STOP_FAILED", sanitizeError(stopErr))
@@ -1958,6 +2028,9 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 	lane := m.laneFor(agentID)
 	lane.serial.Lock()
 	defer lane.serial.Unlock()
+	if m.beforeManagedDirectRecovery != nil {
+		m.beforeManagedDirectRecovery(ctx, agentID)
+	}
 	attempts, err := m.store.ManagedActiveDirectAttempts(ctx, agentID)
 	if err != nil {
 		return err
@@ -2052,10 +2125,19 @@ func (m *Manager) Close(ctx context.Context) error {
 			m.recordCloseError(err)
 			continue
 		}
+		handled, err = m.shutdownTerminationBinding(ctx, binding)
+		if handled {
+			m.recordCloseError(err)
+			continue
+		}
 		handled, err = m.shutdownRestartBinding(ctx, binding)
 		if handled {
 			m.recordCloseError(err)
 			continue
+		}
+		lane := binding.lane
+		if lane != nil {
+			lane.serial.Lock()
 		}
 		binding.serial.Lock()
 		rpc, process := binding.rpc, binding.process
@@ -2065,6 +2147,9 @@ func (m *Manager) Close(ctx context.Context) error {
 		}
 		if process != nil {
 			m.recordCloseError(process.Stop(ctx))
+		}
+		if lane != nil {
+			lane.serial.Unlock()
 		}
 		genericAgentIDs = append(genericAgentIDs, binding.agentID)
 	}

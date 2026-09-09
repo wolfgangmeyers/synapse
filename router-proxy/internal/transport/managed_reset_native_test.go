@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -565,6 +566,7 @@ func (r *nativeResetFakeRPC) GetActiveTools(context.Context) ([]string, error) {
 	return append([]string(nil), r.active...), nil
 }
 func (r *nativeResetFakeRPC) Prompt(context.Context, string) error { return nil }
+func (r *nativeResetFakeRPC) Abort(context.Context) error          { return nil }
 func (r *nativeResetFakeRPC) Close() error                         { return nil }
 func (r *nativeResetFakeRPC) ApplyPolicy(_ context.Context, envelope map[string]any) (map[string]any, error) {
 	if r.failReadiness {
@@ -872,6 +874,34 @@ func TestManagedResetInstalledPi(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "unlinked", sourceArtifact.CleanupState)
 	require.False(t, after.InitialInstructionSent)
+	// The locked installed Pi receives the real wire-level Abort command before
+	// termination proves its owned group is gone and removes the target session
+	// artifact. This remains provider-free and uses no prompt turn.
+	targetArtifact, err := durable.ManagedSessionArtifactForSession(ctx, "native-reset", after.SessionEpoch, after.PiSessionID)
+	require.NoError(t, err)
+	terminate := func(id string) (int, []byte) {
+		req, requestErr := http.NewRequestWithContext(ctx, http.MethodDelete, httpURL+"/v1/managed-agents/native-reset", nil)
+		require.NoError(t, requestErr)
+		req.Header.Set("X-Request-ID", id)
+		response, requestErr := http.DefaultClient.Do(req)
+		require.NoError(t, requestErr)
+		defer response.Body.Close()
+		body, readErr := io.ReadAll(response.Body)
+		require.NoError(t, readErr)
+		return response.StatusCode, body
+	}
+	status, terminateFirst := terminate("123e4567-e89b-42d3-a456-426614174073")
+	require.Equal(t, http.StatusAccepted, status)
+	status, terminateReplay := terminate("123e4567-e89b-42d3-a456-426614174073")
+	require.Equal(t, http.StatusAccepted, status)
+	require.Equal(t, terminateFirst, terminateReplay)
+	require.Eventually(t, func() bool {
+		termination, actionErr := durable.ManagedLifecycleAction(ctx, "123e4567-e89b-42d3-a456-426614174073")
+		_, agentErr := durable.ManagedAgent(ctx, "native-reset")
+		return actionErr == nil && termination.State == "succeeded" && termination.TerminalCode == "TERMINATED" && errors.Is(agentErr, sql.ErrNoRows)
+	}, 20*time.Second, 100*time.Millisecond)
+	_, err = os.Stat(filepath.Join(sessionRoot, filepath.FromSlash(targetArtifact.RootRelativePath)))
+	require.ErrorIs(t, err, os.ErrNotExist)
 	matrix := runManagedResetNativeFailureMatrix(t, root, lockedPi)
 	writeManagedResetNativeArtifact(t, root, lockedPi, before, after, action, sourceArtifact.CleanupState == "unlinked", matrix)
 }

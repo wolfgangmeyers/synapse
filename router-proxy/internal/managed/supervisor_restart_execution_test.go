@@ -151,7 +151,8 @@ func (rpc *restartExecutionRPC) Prompt(_ context.Context, message string) error 
 	rpc.mu.Unlock()
 	return nil
 }
-func (rpc *restartExecutionRPC) Close() error { return nil }
+func (rpc *restartExecutionRPC) Abort(context.Context) error { return nil }
+func (rpc *restartExecutionRPC) Close() error                { return nil }
 func (rpc *restartExecutionRPC) SettlePreparedRestartTurn(ctx context.Context, _ store.ManagedRuntimeFence) error {
 	rpc.mu.Lock()
 	rpc.settleCalls++
