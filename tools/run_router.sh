@@ -19,6 +19,15 @@ MANAGED_MECHA_RPC="${MECHA_ROUTER_MANAGED_MECHA_RPC:-$ROOT_DIR/pi-extensions/mec
 MANAGED_PI_SUBAGENTS="${MECHA_ROUTER_MANAGED_PI_SUBAGENTS:-${HOME}/code/pi-packages/packages/pi-subagents/src/index.ts}"
 MANAGED_CWD_ROOTS="${MECHA_ROUTER_MANAGED_CWD_ROOTS:-$ROOT_DIR}"
 MANAGED_QUIET_RECIPIENT="${MECHA_ROUTER_MANAGED_QUIET_RECIPIENT:-supervisor}"
+# Serve a built UI when this checkout has one. A clean source checkout still
+# starts the legacy router normally; callers may set the path explicitly.
+if [[ "${MECHA_ROUTER_MANAGED_UI_DIST+x}" == "x" ]]; then
+  MANAGED_UI_DIST="$MECHA_ROUTER_MANAGED_UI_DIST"
+elif [[ -f "$ROOT_DIR/web/router-ui-react/dist/index.html" ]]; then
+  MANAGED_UI_DIST="$ROOT_DIR/web/router-ui-react/dist"
+else
+  MANAGED_UI_DIST=""
+fi
 
 usage() {
   printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." ""
@@ -50,7 +59,8 @@ case "${1:-}" in
       "ROUTER_MANAGED_MECHA_RPC=$MANAGED_MECHA_RPC" \
       "ROUTER_MANAGED_PI_SUBAGENTS=$MANAGED_PI_SUBAGENTS" \
       "ROUTER_MANAGED_CWD_ROOTS=$MANAGED_CWD_ROOTS" \
-      "ROUTER_MANAGED_QUIET_RECIPIENT=$MANAGED_QUIET_RECIPIENT"
+      "ROUTER_MANAGED_QUIET_RECIPIENT=$MANAGED_QUIET_RECIPIENT" \
+      "ROUTER_MANAGED_UI_DIST=$MANAGED_UI_DIST"
     ;;
   *)
     printf '%s\n' "run_router.sh: unknown argument: $1" >&2

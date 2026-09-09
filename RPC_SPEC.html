@@ -534,14 +534,16 @@
         <details>
           <summary>Live frames and snapshot rule</summary>
           <div class="details-body">
-            <p>The new UI-only WebSocket at <code>/v1/ui-live</code> is direct and has no query credential. Any client that can reach the router receives the first full snapshot; reconnecting opens a new direct connection. The existing agent WebSocket route remains untouched. UI-live carries only <code>managed_agents_snapshot</code>, <code>managed_agent_delta</code>, <code>managed_agent_removed</code>, <code>history_entry</code>, <code>provider_auth_prompt</code>, and <code>provider_auth_state</code>. Each frame carries <code>protocol:"mecha.web/v1"</code>, a monotonic router-wide <code>projection_version</code>, and its typed payload.</p>
+            <p>The new UI-only WebSocket at <code>/v1/ui-live</code> is direct and has no query credential. Any client that can reach the router receives the current projection; reconnecting opens a new direct connection. The existing agent WebSocket route remains untouched. UI-live carries exactly <code>managed_agents_snapshot</code>, <code>managed_agent_delta</code>, <code>managed_agent_removed</code>, <code>managed_children_snapshot</code>, <code>history_entry</code>, <code>provider_auth_prompt</code>, and <code>provider_auth_state</code>. The child frame is required for authoritative nested child visibility. It is a full child-projection replacement, not a generic event or another authority surface.</p>
 <pre>{"type":"managed_agents_snapshot","protocol":"mecha.web/v1","projection_version":42,
  "generated_at":"RFC3339","agents":[ManagedAgent]}
+{"type":"managed_children_snapshot","protocol":"mecha.web/v1","lifecycle_version":42,
+ "generated_at":"RFC3339","children":[ManagedChildrenProjection]}
 {"type":"managed_agent_delta","protocol":"mecha.web/v1","projection_version":43,
  "agent_id":"review-worker","base_version":42,"changes":{allowed ManagedAgent fields}}
 {"type":"managed_agent_removed","protocol":"mecha.web/v1","projection_version":44,
- "agent_id":"review-worker"}</pre>
-            <p>The first frame after connection is a full snapshot. Apply a delta only when <code>base_version</code> equals the locally applied version. On a duplicate, regression, or gap, discard deltas and request a new snapshot. There is no best-effort merge.</p>
+ "agent_id":"review-worker","base_version":43}</pre>
+            <p>The opening sequence is an agent snapshot followed by a child snapshot. Agent, history, and provider frames carry the monotonic router-wide <code>projection_version</code>. The child frame instead carries <code>lifecycle_version</code>, the router child-projection watermark captured with that full replacement. The outer value is sampled from the committed router snapshot so every parent is ordered together, but clients track it separately from the agent projection. It is not a task/run sequence or an agent <code>projection_version</code>. Each nested parent projection also carries its source lifecycle version; it is zero while <code>reconstructing</code>. The client accepts the first child snapshot, then only its next lifecycle version. A duplicate, regression, or gap clears live state and reconnects for new snapshots. A missing fence match or unreadable source publishes <code>reconstructing</code> with no child rows. It never creates a terminal child state. There is no best-effort merge.</p>
           </div>
         </details>
       </section>
@@ -1254,7 +1256,7 @@
               <tr><td>Small <code>pi-subagents</code> extension change</td><td>Raw parent RPC exposes neither current child registry nor child compaction; structured UI cannot infer them.</td><td>ADD-004/005/006; inspected package boundary.</td></tr>
               <tr><td>Managed REST routes</td><td>Each route corresponds to a required launch/control/state/model/auth/history/folder action not provided by an existing route.</td><td>CR-001, CR-029–035, CR-040, CR-042, CR-048–050.</td></tr>
               <tr><td>Direct UI-live and operation ledger</td><td>Managed UI state needs authoritative snapshots, bounded connections, secret redaction, and restart-safe duplicate suppression. It does not need caller authentication.</td><td>ADD-009; narrowly limited to new managed routes and UI-live socket.</td></tr>
-              <tr><td>Six UI live frame types</td><td>Snapshots/deltas, removals, history append, and interactive auth cannot be represented by the current connected snapshot alone.</td><td>CR-038–044, ADD-003–007. No generic event frame.</td></tr>
+              <tr><td>Seven UI live frame types</td><td>Agent snapshots/deltas, authoritative child replacements, removals, history append, and interactive auth cannot be represented by the current connected snapshot alone.</td><td>CR-038–044, ADD-003–007. The child replacement is required for nested visibility; no generic event frame.</td></tr>
               <tr><td>Complete-history table; existing quiet store</td><td>Independent limits and inclusion rules cannot share one eviction stream.</td><td>CR-041–047, ADD-006.</td></tr>
               <tr><td>Project-owned one-shot auth helper</td><td>Installed core RPC has no auth login/logout/status command, while the Web UI must coordinate pinned provider interactions without a terminal.</td><td>CR-048–050, ADD-007; Wolfgang-fork ModelRuntime is supplementary design evidence, not a runtime dependency.</td></tr>
               <tr><td>React UI additions</td><td>No terminal exists; every required managed control/status/auth/history/child interaction must be available in the Web UI.</td><td>CR-027–044, ADD-003–007.</td></tr>

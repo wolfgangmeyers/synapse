@@ -39,19 +39,35 @@
     {"methods": ["GET", "POST"], "path": "/v1/tmux/windows", "source": "handleTmuxRequest"},
     {"methods": ["DELETE", "PATCH"], "path": "/v1/tmux/windows/{window}", "source": "handleTmuxRequest"},
     {"methods": ["POST"], "path": "/v1/tmux/windows/{window}/{action}", "actions": ["keys", "start", "stop", "restart", "resume", "rename"], "source": "handleTmuxRequest"},
-    {"methods": ["POST"], "path": "/v1/managed-agents", "source": "handleManagedHTTP", "managed": true},
+    {"methods": ["GET", "POST"], "path": "/v1/managed-agents", "source": "handleManagedHTTP", "managed": true},
+    {"methods": ["GET"], "path": "/v1/managed-directories", "source": "handleManagedHTTP", "managed": true},
+    {"methods": ["GET"], "path": "/v1/history", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["POST"], "path": "/v1/managed-agents/restart-all", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["GET"], "path": "/v1/managed-agents/{id}", "source": "handleManagedHTTP", "managed": true},
+    {"methods": ["GET"], "path": "/v1/managed-agents/{id}/children", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["DELETE"], "path": "/v1/managed-agents/{id}", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["POST"], "path": "/v1/managed-agents/{agent_id}/restart", "source": "handleManagedHTTP", "managed": true},
     {"methods": ["POST"], "path": "/v1/managed-agents/{id}/reset", "source": "handleManagedHTTP", "managed": true}
   ],
   "managed": {
     "enabled_by_default": false,
-    "routes": ["/v1/managed-agents", "/v1/managed-agents/restart-all", "/v1/managed-agents/{id}", "/v1/managed-agents/{agent_id}/restart", "/v1/managed-agents/{id}/reset"],
+    "routes": ["/v1/managed-agents", "/v1/managed-directories", "/v1/history", "/v1/managed-agents/restart-all", "/v1/managed-agents/{id}", "/v1/managed-agents/{id}/children", "/v1/managed-agents/{agent_id}/restart", "/v1/managed-agents/{id}/reset"],
     "authority": "locally unauthenticated direct worker control",
     "idempotency": "worker-wide method and request ID with canonical path/body comparison",
     "legacy_agents_additive_when_authenticated": false
+  },
+  "ui_live": {
+    "path": "/v1/ui-live",
+    "protocol": "mecha.web/v1",
+    "authority": "direct local reachability; no query credential or caller identity",
+    "frames": ["managed_agents_snapshot", "managed_agent_delta", "managed_agent_removed", "managed_children_snapshot", "history_entry", "provider_auth_prompt", "provider_auth_state"],
+    "frame_contracts": {
+      "managed_children_snapshot": {
+        "version_field": "lifecycle_version",
+        "delivery": "authoritative full replacement",
+        "recovery": "a stale or unreadable parent source publishes reconstructing with no children and never implies a terminal child state"
+      }
+    }
   },
   "websocket": {
     "path": "/v1/agents",

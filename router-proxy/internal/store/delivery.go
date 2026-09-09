@@ -58,9 +58,10 @@ func (e *DeliveryNotActiveError) Error() string {
 func (e *DeliveryNotActiveError) Code() string { return "delivery_not_active" }
 
 type ConversationOptions struct {
-	Body        *string
-	Attachments []json.RawMessage
-	Source      *protocol.MessageSource
+	Body          *string
+	Attachments   []json.RawMessage
+	Source        *protocol.MessageSource
+	QuietEligible bool
 }
 type EnqueueOptions struct {
 	DisableBatching bool

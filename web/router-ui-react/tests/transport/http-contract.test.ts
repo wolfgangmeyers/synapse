@@ -31,6 +31,27 @@ describe("direct HTTP transport", () => {
     expect(httpRoutes.map((route) => route.path)).toContain("/v1/messages/{message_id}/retry");
   });
 
+  it("sends managed controls directly with no browser credentials", async () => {
+    const managedAgent = { agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.123456Z", started_at: null, updated_at: "2030-01-01T00:00:00.123456789Z", last_error: null };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://router.test/v1/managed-agents");
+      expect(init?.credentials).toBe("omit");
+      expect(init?.headers).toEqual({ "x-request-id": expect.any(String), "content-type": "application/json" });
+      return response({ operation_id: "00000000-0000-4000-8000-000000000000", agent: managedAgent }, 202);
+    });
+    await expect(createHttpClient("http://router.test", fetchImpl).launchManaged({ name: "managed-alpha", cwd: "/tmp/project" })).resolves.toMatchObject({ agent: { agent_id: "managed-alpha" } });
+  });
+
+  it("accepts an RFC3339Nano managed-agent snapshot", async () => {
+    const managedAgent = { agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 }, created_at: "2030-01-01T00:00:00.123456Z", started_at: null, updated_at: "2030-01-01T00:00:00.123456789Z", last_error: null };
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.credentials).toBe("omit");
+      expect(init?.headers).toBeUndefined();
+      return response({ generated_at: "2030-01-01T00:00:00.123456789Z", projection_version: 1, agents: [managedAgent] });
+    });
+    await expect(createHttpClient("http://router.test", fetchImpl).managedAgents()).resolves.toMatchObject({ projection_version: 1, agents: [{ agent_id: "managed-alpha" }] });
+  });
+
   it("normalizes a null conversation message collection to an empty list", async () => {
     const fetchImpl = vi.fn(async () => response({ owner: "web-ui", peer: "worker", high_water_sequence: 4, messages: null }));
     await expect(createHttpClient("http://router.test", fetchImpl).conversations("web-ui", "worker")).resolves.toMatchObject({ messages: [] });

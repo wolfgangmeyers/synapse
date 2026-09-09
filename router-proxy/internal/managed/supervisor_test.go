@@ -269,6 +269,18 @@ func TestManagedDirectReleasePersistenceFailureRetriesWithoutStranding(t *testin
 		attempt, readErr := durable.ManagedDirectAttempt(context.Background(), "release-persistence-failure", 1)
 		return readErr == nil && attempt.State == "released" && attempt.FailureCode == "prompt_failed"
 	}, 2*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		history, readErr := durable.ManagedHistoryPage(context.Background(), "complete", 0, 10)
+		if readErr != nil {
+			return false
+		}
+		for _, entry := range history.Entries {
+			if entry.Message == "Managed message delivery was not confirmed" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
 }
 
 func TestOfferDirectAndCloseShareTaskAdmission(t *testing.T) {

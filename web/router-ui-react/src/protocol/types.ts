@@ -8,6 +8,7 @@ export type ReminderId = string;
 export type AttachmentId = string;
 export type MessageIncarnationId = string;
 export type UtcMillis = string;
+export type RouterTimestamp = string;
 
 export type AgentRole = "agent" | "user_interaction";
 export type ClientActivityState = "active" | "settled" | "compacting";
@@ -804,3 +805,117 @@ export interface SubagentLifecycleAcknowledgedFrame {
 
 export type MailboxFrame = ClientFrame | ServerFrame;
 export type Frame = MailboxFrame;
+
+// P3 UI-live is independent from the legacy agent WebSocket above. Its
+// connection is a local projection subscription, never a browser session.
+export interface ManagedModel { provider: string; id: string }
+export interface ManagedManifest { revision: number; sha256: string; installed_tool_count: number }
+export interface ManagedError { code: string; message: string; at: RouterTimestamp }
+export interface ManagedChildModel { provider: string; id: string; name?: string }
+export interface ManagedChildCompaction {
+  state: "idle" | "compacting";
+  count: number;
+  started_at?: RouterTimestamp;
+  last_outcome?: "completed" | "failed" | "aborted" | "reconciled_unknown";
+}
+export interface ManagedChild {
+  // This opaque digest represents the parent/session/process/task/run tuple.
+  // Browser state never receives the private runtime fence itself.
+  id: string;
+  parent_entry_id: string;
+  task_id: string;
+  run_id: string;
+  sequence: number;
+  recovery_state: "current";
+  description?: string;
+  model?: ManagedChildModel;
+  status: LifecycleChildStatus | "unknown";
+  started_at?: RouterTimestamp;
+  ended_at?: RouterTimestamp;
+  duration_ms?: number;
+  compaction: ManagedChildCompaction;
+  compaction_state: "none" | "compacting" | "completed" | "unknown";
+}
+export interface ManagedAgent {
+  agent_id: AgentId;
+  source: "router-managed";
+  cwd: string;
+  model: ManagedModel;
+  desired_state: string;
+  lifecycle_state: string;
+  activity_state: string;
+  accepting_prompts: boolean;
+  manifest: ManagedManifest;
+  created_at: RouterTimestamp;
+  started_at: RouterTimestamp | null;
+  updated_at: RouterTimestamp;
+  last_error: ManagedError | null;
+}
+// Child telemetry is intentionally separate from PublicAgent. It has its own
+// managed lifecycle path, so a future PublicAgent field cannot accidentally
+// turn runtime child data into the common agent projection.
+export interface ManagedChildrenProjection {
+  agent_id: AgentId;
+  source: "router-managed";
+  lifecycle_version: number;
+  // A stale parent fence never leaves an old child terminal state on screen.
+  recovery_state: "current" | "reconstructing";
+  children: ManagedChild[];
+}
+export interface ManagedHistoryEntry {
+  id: string;
+  at?: RouterTimestamp;
+  level?: string;
+  message?: string;
+}
+export interface ManagedAgentsSnapshotFrame {
+  type: "managed_agents_snapshot";
+  protocol: "mecha.web/v1";
+  projection_version: number;
+  generated_at: RouterTimestamp;
+  agents: ManagedAgent[];
+}
+export interface ManagedAgentDeltaFrame {
+  type: "managed_agent_delta";
+  protocol: "mecha.web/v1";
+  projection_version: number;
+  base_version: number;
+  agent_id: AgentId;
+  changes: ManagedAgent;
+}
+export interface ManagedAgentRemovedFrame {
+  type: "managed_agent_removed";
+  protocol: "mecha.web/v1";
+  projection_version: number;
+  base_version: number;
+  agent_id: AgentId;
+}
+export interface ManagedChildrenSnapshotFrame {
+  type: "managed_children_snapshot";
+  protocol: "mecha.web/v1";
+  lifecycle_version: number;
+  generated_at: RouterTimestamp;
+  children: ManagedChildrenProjection[];
+}
+export interface HistoryEntryFrame {
+  type: "history_entry";
+  protocol: "mecha.web/v1";
+  projection_version: number;
+  view: "quiet" | "complete";
+  entry: ManagedHistoryEntry;
+}
+export interface ProviderAuthPromptFrame {
+  type: "provider_auth_prompt";
+  protocol: "mecha.web/v1";
+  projection_version: number;
+  operation_id: string;
+  prompt_id: string;
+}
+export interface ProviderAuthStateFrame {
+  type: "provider_auth_state";
+  protocol: "mecha.web/v1";
+  projection_version: number;
+  operation_id: string;
+  status: string;
+}
+export type UILiveFrame = ManagedAgentsSnapshotFrame | ManagedAgentDeltaFrame | ManagedAgentRemovedFrame | ManagedChildrenSnapshotFrame | HistoryEntryFrame | ProviderAuthPromptFrame | ProviderAuthStateFrame;

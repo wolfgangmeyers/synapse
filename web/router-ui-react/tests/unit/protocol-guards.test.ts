@@ -5,6 +5,8 @@ import {
   isInlineToolControlFrame,
   isInlineToolControlResultFrame,
   isInlineToolStateFrame,
+  isManagedAgent,
+  isRouterUtcTimestamp,
   isModelControlResultFrame,
   isServerFrame,
   parseServerFrame,
@@ -67,8 +69,25 @@ describe("protocol guards", () => {
   it("rejects malformed IDs, timestamps, nulls, and unpaired surrogates", () => {
     expect(isEnvelope({ ...validEnvelope, id: "bad id" })).toBe(false);
     expect(isEnvelope({ ...validEnvelope, created_at: "2026-08-30T12:00:00Z" })).toBe(false);
+    expect(isEnvelope({ ...validEnvelope, created_at: "2026-08-30T12:00:00.123456Z" })).toBe(false);
     expect(isEnvelope({ ...validEnvelope, body: "contains\u0000null" })).toBe(false);
     expect(isEnvelope({ ...validEnvelope, body: "lone\ud800" })).toBe(false);
+  });
+
+  it("accepts canonical router nanosecond timestamps only on the managed surface", () => {
+    const managedAgent = {
+      agent_id: "managed-alpha", source: "router-managed", cwd: "/tmp/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" },
+      desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true,
+      manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 16 },
+      created_at: "2026-09-09T09:48:28.414204Z", started_at: "2026-09-09T09:48:29.414204003Z", updated_at: "2026-09-09T09:48:30Z", last_error: null,
+    };
+    expect(isRouterUtcTimestamp("2026-09-09T09:48:28.414204003Z")).toBe(true);
+    expect(isRouterUtcTimestamp("2026-09-09T09:48:28Z")).toBe(true);
+    expect(isRouterUtcTimestamp("2026-02-29T09:48:28.414204003Z")).toBe(false);
+    expect(isRouterUtcTimestamp("2026-09-09T09:48:28.414204003+00:00")).toBe(false);
+    expect(isRouterUtcTimestamp("2026-09-09T09:48:28.4142040030Z")).toBe(false);
+    expect(isManagedAgent(managedAgent)).toBe(true);
+    expect(isManagedAgent({ ...managedAgent, updated_at: "2026-09-09T09:48:28.4142040030Z" })).toBe(false);
   });
 
   it("validates goal conditional fields and settings bounds", () => {

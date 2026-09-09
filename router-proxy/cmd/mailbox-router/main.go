@@ -28,6 +28,7 @@ type config struct {
 	auditSupervisorTarget string
 	auditTmuxSession      string
 	policyTimeout         time.Duration
+	managedUIDist         string
 	managed               managed.Config
 }
 
@@ -43,6 +44,7 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.auditSupervisorTarget, "audit-supervisor-target", "supervisor", "supervisor agent ID for tmux/router audit delivery")
 	flags.StringVar(&result.auditTmuxSession, "audit-tmux-session", "mecha", "tmux session for read-only tmux/router audit inventory")
 	flags.DurationVar(&result.policyTimeout, "policy-timeout", transport.DefaultPolicyTimeout, "maximum duration for one native policy run")
+	flags.StringVar(&result.managedUIDist, "managed-ui-dist", "", "built React UI directory served by the router")
 	var managedEnabled bool
 	flags.BoolVar(&managedEnabled, "managed", false, "enable router-managed Pi launches")
 	var managedPi, managedHome, managedSession, managedManifest, managedExtension, managedSubagents, managedRoots, managedRecipient string
@@ -157,7 +159,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager})
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, StaticUIRoot: options.managedUIDist})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()

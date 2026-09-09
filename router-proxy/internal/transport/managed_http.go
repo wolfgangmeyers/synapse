@@ -7,10 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -27,7 +31,7 @@ type managedHTTPError struct {
 func (e *managedHTTPError) Error() string { return e.code }
 
 func managedPath(path string) bool {
-	return path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/")
+	return path == "/v1/history" || path == "/v1/managed-directories" || path == "/v1/managed-agents" || strings.HasPrefix(path, "/v1/managed-agents/")
 }
 
 // handleManagedHTTP exposes direct local worker controls. Reachability is the
@@ -38,17 +42,29 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		return false
 	}
 	if r.managed == nil {
-		if req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents/restart-all" {
-			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not restart managed agents"})
+		// A constructed router without a store is an invalid test/bootstrap
+		// object, not a configured disabled router. Preserve its existing safe
+		// internal failure; real disabled mode owns the entire direct surface.
+		if r.store == nil {
+			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not complete the request"})
 			return true
 		}
-		if req.Method == http.MethodDelete && managedTerminatePath(req.URL.Path) != "" {
-			r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not terminate the managed agent"})
-			return true
-		}
-		return false
+		// Disabled mode owns the entire direct surface. Falling through would
+		// make the same absent capability look like unrelated legacy routing and
+		// lets the UI mistake a router configuration change for a bad path.
+		r.writeManagedError(w, req, &managedHTTPError{503, "MANAGED_DISABLED", "Router-managed workers are disabled"})
+		return true
 	}
 	switch {
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/history":
+		r.handleManagedHistoryGET(w, req)
+		return true
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/managed-directories":
+		r.handleManagedDirectoriesGET(w, req)
+		return true
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/managed-agents":
+		r.handleManagedAgentsGET(w, req)
+		return true
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/managed-agents":
 		r.handleManagedLaunch(w, req)
 		return true
@@ -63,6 +79,9 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 		return true
 	case req.Method == http.MethodDelete && managedTerminatePath(req.URL.Path) != "":
 		r.handleManagedTerminate(w, req, managedTerminatePath(req.URL.Path))
+		return true
+	case req.Method == http.MethodGet && managedChildrenPath(req.URL.Path) != "":
+		r.handleManagedChildrenGET(w, req, managedChildrenPath(req.URL.Path))
 		return true
 	case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/v1/managed-agents/"):
 		r.handleManagedAgentGET(w, req)
@@ -225,7 +244,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 			r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
 			return
 		}
-		r.writeManagedRaw(w, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
 		return
 	}
 	result, launchErr := r.managed.Launch(req.Context(), managed.LaunchRequest{Name: name, Cwd: cwd, Model: selected, InitialInstruction: instruction, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
@@ -239,7 +258,7 @@ func (r *Router) handleManagedLaunch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	body, _ := json.Marshal(map[string]any{"operation_id": requestID, "agent": managed.PublicAgent(result.Agent)})
-	r.writeManagedRaw(w, 202, map[string]string{"X-Request-ID": requestID, "Content-Type": "application/json; charset=utf-8"}, body)
+	r.writeManagedRaw(w, req, 202, map[string]string{"X-Request-ID": requestID, "Content-Type": "application/json; charset=utf-8"}, body)
 }
 
 // handleManagedRestartAll keeps the same local-only, strict-empty-object
@@ -278,7 +297,19 @@ func (r *Router) handleManagedRestartAll(w http.ResponseWriter, req *http.Reques
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the restart batch"})
 		return
 	}
-	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+	r.writeManagedRaw(w, req, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+}
+
+func managedChildrenPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/children") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/children")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
 }
 
 func managedResetPath(path string) string {
@@ -354,7 +385,7 @@ func (r *Router) handleManagedRestart(w http.ResponseWriter, req *http.Request, 
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the restart operation"})
 		return
 	}
-	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+	r.writeManagedRaw(w, req, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
 }
 
 // handleManagedReset uses the same strict local boundary as restart. Replay is
@@ -393,7 +424,7 @@ func (r *Router) handleManagedReset(w http.ResponseWriter, req *http.Request, ag
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the reset operation"})
 		return
 	}
-	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+	r.writeManagedRaw(w, req, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
 }
 
 // handleManagedTerminate is intentionally a no-body DELETE. It has the same
@@ -434,7 +465,7 @@ func (r *Router) handleManagedTerminate(w http.ResponseWriter, req *http.Request
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not create the termination operation"})
 		return
 	}
-	r.writeManagedRaw(w, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
+	r.writeManagedRaw(w, req, result.Operation.ResponseStatus, result.Operation.ResponseHeaders, result.Operation.ResponseBody)
 }
 
 func managedTerminationError(err error) error {
@@ -519,7 +550,7 @@ func (r *Router) replayManagedOperation(w http.ResponseWriter, req *http.Request
 		r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
 		return
 	}
-	r.writeManagedRaw(w, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+	r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
 }
 func canonicalManagedBody(payload map[string]json.RawMessage) []byte {
 	keys := make([]string, 0, len(payload))
@@ -592,6 +623,94 @@ func managedLaunchError(err error) error {
 	}
 	return &managedHTTPError{422, "VALIDATION_FAILED", "Launch request is invalid"}
 }
+func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Request) {
+	query := req.URL.Query()
+	view := query.Get("view")
+	for key, values := range query {
+		if (key != "view" && key != "before" && key != "limit") || len(values) != 1 {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_HISTORY_QUERY", "History query is invalid"})
+			return
+		}
+	}
+	if len(query) < 1 || view == "" || (view != "quiet" && view != "complete") {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_HISTORY_QUERY", "History query is invalid"})
+		return
+	}
+	before, limit := int64(0), 100
+	var err error
+	if raw := query.Get("before"); raw != "" {
+		before, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || before < 1 {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_HISTORY_QUERY", "History query is invalid"})
+			return
+		}
+	}
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 200 {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_HISTORY_QUERY", "History query is invalid"})
+			return
+		}
+	}
+	page, err := r.store.ManagedHistoryPage(req.Context(), view, before, limit)
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read history"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, page, nil)
+}
+
+func (r *Router) handleManagedDirectoriesGET(w http.ResponseWriter, req *http.Request) {
+	if len(req.URL.Query()) != 1 || req.URL.Query().Get("path") == "" {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_WORKING_DIRECTORY", "Working directory is invalid"})
+		return
+	}
+	path, err := managed.ValidateWorkingDirectory(req.URL.Query().Get("path"), r.managed.AllowedWorkingDirectoryRoots())
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_WORKING_DIRECTORY", "Working directory is invalid"})
+		return
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read directories"})
+		return
+	}
+	directories := make([]map[string]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			directories = append(directories, map[string]string{"name": entry.Name(), "path": filepath.Join(path, entry.Name())})
+		}
+	}
+	sort.Slice(directories, func(left, right int) bool { return directories[left]["name"] < directories[right]["name"] })
+	parent := filepath.Dir(path)
+	if _, err := managed.ValidateWorkingDirectory(parent, r.managed.AllowedWorkingDirectoryRoots()); err != nil {
+		parent = ""
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"path": path, "parent": parent, "directories": directories}, nil)
+}
+
+func (r *Router) handleManagedAgentsGET(w http.ResponseWriter, req *http.Request) {
+	snapshot, err := r.store.ManagedAgentsProjectionSnapshot(req.Context())
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed agents"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, managed.ProjectionListEnvelope(snapshot), nil)
+}
+
+func (r *Router) handleManagedChildrenGET(w http.ResponseWriter, req *http.Request, agentID string) {
+	projection, err := r.managedChildrenProjection(req.Context(), agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+		return
+	}
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read managed children"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, projection, nil)
+}
+
 func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request) {
 	id := strings.TrimPrefix(req.URL.Path, "/v1/managed-agents/")
 	if id == "" || strings.Contains(id, "/") {
@@ -613,7 +732,7 @@ func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request)
 	}
 	r.writeManagedJSON(w, req, 200, managed.ProjectionEnvelope(snapshot), nil)
 }
-func (r *Router) writeManagedRaw(w http.ResponseWriter, status int, headers map[string]string, body []byte) {
+func (r *Router) writeManagedRaw(w http.ResponseWriter, req *http.Request, status int, headers map[string]string, body []byte) {
 	w.Header().Set("Cache-Control", "no-store")
 	for key, value := range headers {
 		w.Header().Set(key, value)
@@ -623,10 +742,49 @@ func (r *Router) writeManagedRaw(w http.ResponseWriter, status int, headers map[
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+	if r.uiLive != nil {
+		r.uiLive.publish(req.Context())
+	}
+	r.recordManagedHTTPHistory(req, status)
 }
+
+func (r *Router) recordManagedHTTPHistory(req *http.Request, status int) {
+	if req.Method != http.MethodPost && req.Method != http.MethodDelete {
+		return
+	}
+	level, outcome := "info", "completed"
+	if status >= 400 {
+		level, outcome = "error", "failed"
+	}
+	agentID := managedAgentIDFromPath(req.URL.Path)
+	message := fmt.Sprintf("Managed %s %s", req.Method, outcome)
+	r.recordCompleteHistory(req.Context(), agentID, "managed_http", level, message, "managed-http:"+req.Method+":"+requestIDForHistory(req))
+}
+
+func requestIDForHistory(req *http.Request) string {
+	if requestID := req.Header.Get("X-Request-ID"); canonicalUUID(requestID) {
+		return requestID
+	}
+	return req.URL.Path
+}
+
+func managedAgentIDFromPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	id := strings.TrimPrefix(path, prefix)
+	id = strings.TrimSuffix(id, "/restart")
+	id = strings.TrimSuffix(id, "/reset")
+	if strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
 func (r *Router) writeManagedJSON(w http.ResponseWriter, req *http.Request, status int, value any, headers map[string]string) {
 	body, _ := json.Marshal(value)
-	r.writeManagedRaw(w, status, headers, body)
+	r.writeManagedRaw(w, req, status, headers, body)
 }
 func (r *Router) writeManagedError(w http.ResponseWriter, req *http.Request, err error) {
 	candidate, ok := err.(*managedHTTPError)

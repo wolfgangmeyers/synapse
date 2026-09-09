@@ -143,7 +143,7 @@ def request_router(path: str, method: str = "GET", payload: dict[str, Any] | Non
     return result("ok", canonical(decoded), decoded if isinstance(decoded, dict) else {"value": decoded})
 
 
-def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str, settings: dict[str, Any]) -> dict[str, Any]:
+def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str, settings: dict[str, Any], request_id: str) -> dict[str, Any]:
     action = arguments.get("action")
     if operation == "ops.state":
         if action == "query":
@@ -205,7 +205,10 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
     if operation == "ops.git_status":
         return invoke_script("git_task_status.py", ["--task", identifier(arguments.get("task"), "task"), "--json"])
     if operation == "mail.send":
-        values = ["--to", identifier(arguments.get("recipient"), "recipient"), "--body", text(arguments.get("body"), "body"), "--from", agent_id]
+        # The router validates this control request against its durable, fenced
+        # authorization before it can enter quiet history. It is provenance,
+        # not browser authentication: ordinary direct HTTP remains credentialless.
+        values = ["--to", identifier(arguments.get("recipient"), "recipient"), "--body", text(arguments.get("body"), "body"), "--from", agent_id, "--managed-control-request-id", identifier(request_id, "request_id")]
         if arguments.get("subject") is not None:
             values += ["--subject", text(arguments["subject"], "subject")]
         return invoke_script("mailbox_send.py", values)
@@ -252,7 +255,7 @@ def run(mode: str, home: Path) -> int:
                 print(canonical(result("error", "The root operation has no recoverable host record.", {}, "ROOT_OPERATION_UNKNOWN", "the root operation has no recoverable host record")))
                 return 0
             try:
-                completed = execute_supervisor(operation, arguments, fence["agent_id"], state["settings"])
+                completed = execute_supervisor(operation, arguments, fence["agent_id"], state["settings"], request_id)
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
                 completed = result("error", "The root operation could not be completed.", {}, "ROOT_OPERATION_FAILED", str(exc)[:2000])
             state["requests"][request_id] = {"fingerprint": fingerprint, "recorded_at": now, "result": completed}

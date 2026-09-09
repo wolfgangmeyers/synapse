@@ -78,6 +78,14 @@ func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBi
 	if err != nil || reservation.RequestID == "" {
 		return
 	}
+	if event.OperationID == "mail.send" {
+		arguments, ok := event.Arguments.(map[string]any)
+		recipient, recipientOK := arguments["recipient"].(string)
+		if !ok || !recipientOK || m.store.ReserveManagedQuietSendAuthorization(ctx, event.RequestID, binding.agentID, recipient) != nil {
+			return
+		}
+	}
+	m.recordRootControlHistory(ctx, binding.agentID, event.OperationID, "requested", "info", event.RequestID)
 	m.resumeRootControl(ctx, binding, event.RequestID, event.Arguments)
 }
 
@@ -192,6 +200,7 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	fence := bindingFence(binding.agentID, binding)
 	if executeErr != nil {
 		_ = m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, "HANDLER_FAILED", boundedRootError(executeErr))
+		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.OperationID, "failed", "error", claim.Request.RequestID)
 		return
 	}
 	if result.Details == nil {
@@ -228,8 +237,23 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	}
 	completed, err := m.store.CompleteManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, store.ManagedControlResult{Status: result.Status, Content: result.Content, DetailsJSON: string(details), PayloadSHA256: fmt.Sprintf("%x", sha256.Sum256(canonical)), DecodedPayloadBytes: len(canonical), ErrorCode: result.ErrorCode, ErrorMessage: result.ErrorMessage, Retryable: result.Retryable})
 	if err == nil && completed != nil {
+		outcome, level := "completed", "info"
+		if result.Status == "error" {
+			outcome, level = "failed", "error"
+		}
+		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.OperationID, outcome, level, claim.Request.RequestID)
 		m.appendRootControlResult(ctx, binding, *completed)
 	}
+}
+
+// recordRootControlHistory intentionally records only immutable operation names
+// and outcomes. Tool arguments and result content can include human-entered
+// text, so they remain in the fenced control ledger rather than browser history.
+func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, operationID, outcome, level, requestID string) {
+	if operationID == "" || requestID == "" {
+		return
+	}
+	_, _ = m.store.RecordManagedCompleteHistory(ctx, agentID, "managed_control", level, fmt.Sprintf("Managed tool %s %s", operationID, outcome), "managed-control:"+requestID+":"+outcome)
 }
 
 func rootControlPayload(row store.ManagedControlRequest, result RootControlHandlerResult, details map[string]any) map[string]any {

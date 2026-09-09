@@ -174,6 +174,18 @@ type ManagedAgentSnapshot struct {
 	Agent             *ManagedAgentRecord
 }
 
+// ManagedAgentsSnapshot is an atomic whole-projection read for UI-live and
+// direct list clients. It intentionally exposes only durable records; callers
+// turn them into the redacted public projection at the transport boundary.
+type ManagedAgentsSnapshot struct {
+	GeneratedAt       time.Time
+	ProjectionVersion int64
+	Agents            []*ManagedAgentRecord
+	// ReadinessSources are read in the same transaction as Agents so child
+	// telemetry can never mix a newer runtime snapshot with an older agent row.
+	ReadinessSources map[string]*ManagedReadinessSource
+}
+
 type ManagedNameConflictError struct{ Name string }
 
 func (e *ManagedNameConflictError) Error() string { return "managed agent name is already reserved" }
@@ -2527,6 +2539,71 @@ func loadManagedLaunchOperationTx(ctx context.Context, db *sql.DB, agent *Manage
 	}
 	agent.LaunchOperationID = link.String
 	return nil
+}
+
+// ManagedAgentsProjectionSnapshot reads the current version and every durable
+// managed row in one transaction. A UI client can therefore treat its result as
+// an authoritative snapshot without combining rows from different versions.
+func (s *Store) ManagedAgentsProjectionSnapshot(ctx context.Context) (ManagedAgentsSnapshot, error) {
+	if ctx == nil {
+		return ManagedAgentsSnapshot{}, errors.New("context is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ManagedAgentsSnapshot{}, errors.New("store is closed")
+	}
+	if _, err := s.db.ExecContext(ctx, "BEGIN"); err != nil {
+		return ManagedAgentsSnapshot{}, err
+	}
+	rollback := func(err error) (ManagedAgentsSnapshot, error) {
+		_, _ = s.db.ExecContext(context.Background(), "ROLLBACK")
+		return ManagedAgentsSnapshot{}, err
+	}
+	var version int64
+	if err := s.db.QueryRowContext(ctx, `SELECT projection_version FROM managed_settings WHERE singleton_id = 1`).Scan(&version); err != nil {
+		return rollback(err)
+	}
+	rows, err := s.db.QueryContext(ctx, managedAgentSelect+` ORDER BY name ASC`)
+	if err != nil {
+		return rollback(err)
+	}
+	agents := make([]*ManagedAgentRecord, 0)
+	for rows.Next() {
+		agent, scanErr := scanManagedAgent(rows, nil)
+		if scanErr != nil {
+			_ = rows.Close()
+			return rollback(scanErr)
+		}
+		agents = append(agents, agent)
+	}
+	if err := rows.Close(); err != nil {
+		return rollback(err)
+	}
+	sourceRows, err := s.db.QueryContext(ctx, `SELECT agent_id, desired_policy_canonical, desired_policy_sha256,
+		pi_session_id, session_epoch, process_pid, process_start_marker, process_incarnation, runtime_generation, manifest_revision, manifest_hash,
+		applied_policy_canonical, applied_policy_sha256, policy_confirmed_at,
+		snapshot_id, snapshot_owner_session_id, snapshot_sequence, snapshot_canonical, snapshot_sha256, snapshot_confirmed_at
+		FROM managed_readiness_sources`)
+	if err != nil {
+		return rollback(err)
+	}
+	sources := make(map[string]*ManagedReadinessSource)
+	for sourceRows.Next() {
+		source, scanErr := scanManagedReadinessSource(sourceRows)
+		if scanErr != nil {
+			_ = sourceRows.Close()
+			return rollback(scanErr)
+		}
+		sources[source.AgentID] = source
+	}
+	if err := sourceRows.Close(); err != nil {
+		return rollback(err)
+	}
+	if _, err := s.db.ExecContext(ctx, "COMMIT"); err != nil {
+		return ManagedAgentsSnapshot{}, err
+	}
+	return ManagedAgentsSnapshot{GeneratedAt: s.clock.Now().UTC(), ProjectionVersion: version, Agents: agents, ReadinessSources: sources}, nil
 }
 
 func (s *Store) ManagedAgentSnapshot(ctx context.Context, agentID string) (ManagedAgentSnapshot, error) {

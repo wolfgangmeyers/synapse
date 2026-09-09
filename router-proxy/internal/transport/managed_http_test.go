@@ -423,6 +423,66 @@ func TestManagedRestartAllHTTPRejectsEveryStrictRequestBoundary(t *testing.T) {
 	}
 }
 
+func TestQuietHistoryRequiresConsumedManagedMailSendAuthorization(t *testing.T) {
+	server, durable := newManagedHTTPTestServer(t)
+	require.NoError(t, durable.SetCanonicalQuietRecipient(context.Background(), "supervisor"))
+	post := func(id, controlRequestID string) {
+		payload := strings.NewReader(`{"id":"` + id + `","from":"managed-agent","to":"supervisor","body":"quiet candidate ` + id + `","created_at":"2030-01-01T00:00:00.000Z","source":{"kind":"agent"}}`)
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", payload)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		if controlRequestID != "" {
+			req.Header.Set("X-Mecha-Managed-Control-Request-ID", controlRequestID)
+		}
+		response, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer response.Body.Close()
+		require.Equal(t, http.StatusCreated, response.StatusCode)
+	}
+	post("ordinary-agent-message", "")
+	quiet, err := http.Get(server.URL + "/v1/history?view=quiet")
+	require.NoError(t, err)
+	defer quiet.Body.Close()
+	var empty store.ManagedHistoryPage
+	require.NoError(t, json.NewDecoder(quiet.Body).Decode(&empty))
+	require.Empty(t, empty.Entries, "caller-provided source.kind must not classify a message as quiet")
+
+	require.NoError(t, durable.ReserveManagedQuietSendAuthorization(context.Background(), "control-1", "managed-agent", "supervisor"))
+	post("trusted-tool-message", "control-1")
+	quiet, err = http.Get(server.URL + "/v1/history?view=quiet")
+	require.NoError(t, err)
+	defer quiet.Body.Close()
+	var page store.ManagedHistoryPage
+	require.NoError(t, json.NewDecoder(quiet.Body).Decode(&page))
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, "trusted-tool-message", page.Entries[0].ID)
+}
+
+func TestManagedHistoryUsesTheDirectPagedContract(t *testing.T) {
+	server, durable := newManagedHTTPTestServer(t)
+	_, err := durable.AppendManagedCompleteHistory(context.Background(), "alpha", "lifecycle", "info", "Managed worker entered running")
+	require.NoError(t, err)
+	response, err := http.Get(server.URL + "/v1/history?view=complete&limit=1")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var body struct {
+		View    string `json:"view"`
+		Entries []struct {
+			ID      string `json:"id"`
+			Message string `json:"message"`
+		} `json:"entries"`
+	}
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&body))
+	require.Equal(t, "complete", body.View)
+	require.Len(t, body.Entries, 1)
+	require.Equal(t, "Managed worker entered running", body.Entries[0].Message)
+	invalid, err := http.Get(server.URL + "/v1/history?view=complete&unknown=value")
+	require.NoError(t, err)
+	defer invalid.Body.Close()
+	require.Equal(t, http.StatusUnprocessableEntity, invalid.StatusCode)
+}
+
 func TestManagedRestartAllMissingManagerReturnsSafeInternalError(t *testing.T) {
 	router := &Router{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/managed-agents/restart-all", strings.NewReader(`{}`))

@@ -1,11 +1,12 @@
 import { normalizeRouterUrl } from "../persistence/settings-repository";
 import { httpRoutes } from "../protocol/manifest";
-import { isAgentId, isConversationMessage, isModelSummary, isRecord } from "../protocol/guards";
+import { isAgentId, isConversationMessage, isManagedAgent, isManagedChildrenProjection, isModelSummary, isRecord, isRouterUtcTimestamp } from "../protocol/guards";
 import { normalizeGoalState } from "../domain/goals";
 import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
 import type { PromptTemplate } from "../domain/prompt-templates";
+import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
 import { resolveAttachmentUrl, withAbsoluteAttachmentUrls } from "./attachment-urls";
 
 export interface Capabilities extends Record<string, unknown> {}
@@ -15,6 +16,12 @@ export interface ConversationResponse { owner: string; peer: string; high_water_
 export interface ReminderResponse { reminders: Reminder[] }
 export interface ReminderWriteResponse { reminder: Reminder }
 export interface PromptTemplateResponse { prompt_templates: PromptTemplate[] }
+export interface ManagedAgentsResponse { generated_at: string; projection_version: number; agents: ManagedAgent[] }
+export interface ManagedAgentResponse { generated_at: string; projection_version: number; agent: ManagedAgent }
+export interface ManagedOperationResponse { operation_id: string; agent?: ManagedAgent; agents?: Array<{ agent_id: string; operation_id: string; status: string }> }
+export interface ManagedDirectoriesResponse { path: string; parent: string; directories: Array<{ name: string; path: string }> }
+export interface ManagedChildrenResponse extends ManagedChildrenProjection {}
+export interface ManagedHistoryResponse { view: "quiet" | "complete"; entries: ManagedHistoryEntry[]; next_before: number | null }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export class HttpRequestError extends Error {
@@ -147,6 +154,40 @@ function templates(value: unknown): PromptTemplateResponse {
   if (!root || !Array.isArray(rawTemplates) || !rawTemplates.every(validTemplate)) throw invalidResponse("Router returned an invalid prompt-template list", value);
   return { prompt_templates: rawTemplates };
 }
+function managedAgents(value: unknown): ManagedAgentsResponse {
+  const root = recordValue(value);
+  if (!root || !isRouterUtcTimestamp(root.generated_at) || !safeInteger(root.projection_version) || !Array.isArray(root.agents) || !root.agents.every(isManagedAgent)) throw invalidResponse("Router returned an invalid managed-agent list", value);
+  return { generated_at: root.generated_at, projection_version: root.projection_version, agents: root.agents };
+}
+function managedAgent(value: unknown): ManagedAgentResponse {
+  const root = recordValue(value);
+  if (!root || !isRouterUtcTimestamp(root.generated_at) || !safeInteger(root.projection_version) || !isManagedAgent(root.agent)) throw invalidResponse("Router returned an invalid managed-agent response", value);
+  return { generated_at: root.generated_at, projection_version: root.projection_version, agent: root.agent };
+}
+function managedHistory(value: unknown): ManagedHistoryResponse {
+  const root = recordValue(value); const entries = root?.entries;
+  if (!root || (root.view !== "quiet" && root.view !== "complete") || !Array.isArray(entries) || !entries.every((entry) => { const item = recordValue(entry); return !!item && Object.keys(item).every((key) => ["id", "at", "level", "message"].includes(key)) && nonEmptyString(item.id) && (!Object.hasOwn(item, "at") || isRouterUtcTimestamp(item.at)) && (!Object.hasOwn(item, "level") || typeof item.level === "string") && (!Object.hasOwn(item, "message") || typeof item.message === "string"); }) || (root.next_before !== null && !safeInteger(root.next_before, 1))) throw invalidResponse("Router returned invalid managed history", value);
+  return { view: root.view, entries: entries.flatMap((entry) => { const item = recordValue(entry); return item && nonEmptyString(item.id) ? [{ id: item.id, ...(typeof item.at === "string" ? { at: item.at } : {}), ...(typeof item.level === "string" ? { level: item.level } : {}), ...(typeof item.message === "string" ? { message: item.message } : {}) }] : []; }), next_before: root.next_before };
+}
+function managedChildren(value: unknown): ManagedChildrenResponse {
+  if (!isManagedChildrenProjection(value)) throw invalidResponse("Router returned invalid managed children", value);
+  return value;
+}
+function managedDirectories(value: unknown): ManagedDirectoriesResponse {
+  const root = recordValue(value);
+  if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
+  return { path: root.path, parent: root.parent, directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
+}
+function managedOperation(value: unknown): ManagedOperationResponse {
+  const root = recordValue(value);
+  if (!root || !nonEmptyString(root.operation_id)) throw invalidResponse("Router returned an invalid managed operation", value);
+  if (Object.hasOwn(root, "agent") && !isManagedAgent(root.agent)) throw invalidResponse("Router returned an invalid managed operation", value);
+  if (Object.hasOwn(root, "agents") && (!Array.isArray(root.agents) || !root.agents.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.agent_id) && nonEmptyString(item.operation_id) && nonEmptyString(item.status); }))) throw invalidResponse("Router returned an invalid managed operation", value);
+  const result: ManagedOperationResponse = { operation_id: root.operation_id };
+  if (isManagedAgent(root.agent)) result.agent = root.agent;
+  if (Array.isArray(root.agents)) result.agents = root.agents.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.agent_id) && nonEmptyString(item.operation_id) && nonEmptyString(item.status) ? [{ agent_id: item.agent_id, operation_id: item.operation_id, status: item.status }] : []; });
+  return result;
+}
 
 export interface RouterHttpClient {
   readonly routerUrl: string;
@@ -171,6 +212,16 @@ export interface RouterHttpClient {
   updatePromptTemplate(id: string, payload: unknown): Promise<unknown>;
   deletePromptTemplate(id: string): Promise<unknown>;
   attachmentUrl(reference: string): string;
+  managedAgents(): Promise<ManagedAgentsResponse>;
+  managedAgent(id: string): Promise<ManagedAgentResponse>;
+  managedDirectories(path: string): Promise<ManagedDirectoriesResponse>;
+  managedChildren(id: string): Promise<ManagedChildrenResponse>;
+  managedHistory(view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
+  launchManaged(payload: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
+  restartManaged(id: string): Promise<ManagedOperationResponse>;
+  resetManaged(id: string): Promise<ManagedOperationResponse>;
+  terminateManaged(id: string): Promise<ManagedOperationResponse>;
+  restartAllManaged(): Promise<ManagedOperationResponse>;
 }
 
 export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globalThis.fetch.bind(globalThis)): RouterHttpClient {
@@ -182,6 +233,15 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     return body;
   };
   const jsonRequest = (path: string, method: string, payload?: unknown): Promise<unknown> => request(path, { method, headers: { "content-type": "application/json" }, ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
+  // Managed P3 calls have no browser authority material. The request ID is a
+  // worker-wide idempotency key, and fetch is explicitly forbidden to attach
+  // cookies should a browser happen to hold any for this origin.
+  const managedRequest = async (path: string, method: "GET" | "POST" | "DELETE", payload?: unknown): Promise<unknown> => {
+    const headers: Record<string, string> = {};
+    if (payload !== undefined) headers["content-type"] = "application/json";
+    if (method !== "GET") headers["x-request-id"] = crypto.randomUUID();
+    return request(path, { method, credentials: "omit", ...(Object.keys(headers).length === 0 ? {} : { headers }), ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
+  };
   return {
     routerUrl: base,
     request,
@@ -192,7 +252,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     },
     capabilities: async () => {
       const body = recordValue(await request("/v1/capabilities"));
-      if (!body || (Object.hasOwn(body, "goal_control_v1") && typeof body.goal_control_v1 !== "boolean") || (Object.hasOwn(body, "inline_tool_control_v1") && typeof body.inline_tool_control_v1 !== "boolean") || (Object.hasOwn(body, "subagent_lifecycle_v2") && typeof body.subagent_lifecycle_v2 !== "boolean")) throw invalidResponse("Router returned invalid capabilities", body);
+      if (!body || (Object.hasOwn(body, "goal_control_v1") && typeof body.goal_control_v1 !== "boolean") || (Object.hasOwn(body, "inline_tool_control_v1") && typeof body.inline_tool_control_v1 !== "boolean") || (Object.hasOwn(body, "subagent_lifecycle_v2") && typeof body.subagent_lifecycle_v2 !== "boolean") || (Object.hasOwn(body, "managed_v1") && typeof body.managed_v1 !== "boolean") || (Object.hasOwn(body, "ui_live_v1") && typeof body.ui_live_v1 !== "boolean")) throw invalidResponse("Router returned invalid capabilities", body);
       return body;
     },
     agents: async (options = {}) => { const includeModels = typeof options === "boolean" ? options : options.includeModels !== false; return agentList(await request(includeModels ? "/v1/agents" : "/v1/agents?models=omit"), includeModels); },
@@ -213,6 +273,21 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     updatePromptTemplate: async (id, payload) => templateWrite(await jsonRequest(`/v1/prompt-templates/${encodeURIComponent(id)}`, "PATCH", payload)),
     deletePromptTemplate: (id) => request(`/v1/prompt-templates/${encodeURIComponent(id)}`, { method: "DELETE" }),
     attachmentUrl: (reference) => resolveAttachmentUrl(base, reference),
+    managedAgents: async () => managedAgents(await managedRequest("/v1/managed-agents", "GET")),
+    managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),
+    managedDirectories: async (path) => managedDirectories(await managedRequest(`/v1/managed-directories?path=${encodeURIComponent(path)}`, "GET")),
+    managedChildren: async (id) => managedChildren(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/children`, "GET")),
+    managedHistory: async (view, options = {}) => {
+      const query = new URLSearchParams({ view });
+      if (options.before !== undefined) query.set("before", String(options.before));
+      if (options.limit !== undefined) query.set("limit", String(options.limit));
+      return managedHistory(await managedRequest(`/v1/history?${query.toString()}`, "GET"));
+    },
+    launchManaged: async (payload) => managedOperation(await managedRequest("/v1/managed-agents", "POST", payload)),
+    restartManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/restart`, "POST", {})),
+    resetManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/reset`, "POST", {})),
+    terminateManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "DELETE")),
+    restartAllManaged: async () => managedOperation(await managedRequest("/v1/managed-agents/restart-all", "POST", {})),
   };
 }
 
