@@ -32,10 +32,15 @@ describe("direct WebSocket transport", () => {
     expect(statuses).toContain("connected"); expect(client.identity.leaseId).toBe("lease"); client.close();
   });
 
-  it("renews an active lease on the ten-second cadence", () => {
-    vi.useFakeTimers(); const factory = new FakeFactory(); const client = createWebSocketClient({ routerUrl: "http://router.test", agentId: "web", webSocketFactory: factory.create });
+  it("accepts the server acknowledgement for every active lease renewal", () => {
+    vi.useFakeTimers(); const factory = new FakeFactory(); const statuses: string[] = []; const errors: string[] = []; const frames: string[] = [];
+    const client = createWebSocketClient({ routerUrl: "http://router.test", agentId: "web", webSocketFactory: factory.create, onStatus: (status) => statuses.push(status), onProtocolError: (error) => errors.push(error.message), onFrame: (frame) => frames.push(frame.type) });
     client.connect(); const socket = factory.latest; socket.readyState = 1; socket.emit("open", {}); const register = sentFrame(socket, 0); socket.emit("message", { data: JSON.stringify(registered(stringField(register, "frame_id"), stringField(register, "instance_id"))) });
-    vi.advanceTimersByTime(10_000); expect(socket.sent.filter((frame) => typeof frame === "object" && frame !== null && "type" in frame && frame.type === "lease_renew")).toHaveLength(1); client.close(); vi.useRealTimers();
+    vi.advanceTimersByTime(10_000); const renewal = sentFrame(socket, 1); expect(renewal.type).toBe("lease_renew");
+    socket.emit("message", { data: JSON.stringify(registered(stringField(renewal, "frame_id"), stringField(renewal, "instance_id"))) });
+    vi.advanceTimersByTime(10_000); const secondRenewal = sentFrame(socket, 2); expect(secondRenewal.type).toBe("lease_renew");
+    socket.emit("message", { data: JSON.stringify(registered(stringField(secondRenewal, "frame_id"), stringField(secondRenewal, "instance_id"))) });
+    expect(errors).toEqual([]); expect(statuses.filter((status) => status === "connected")).toHaveLength(1); expect(frames).toEqual(["registered"]); client.close(); vi.useRealTimers();
   });
 
   it("uses a new instance and generation after reconnect", () => {

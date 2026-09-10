@@ -74,13 +74,14 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
   let generation = 0;
   let closed = false;
   let isRegistered = false;
-  let requestId = "";
+  let registrationRequestId = "";
+  const pendingRenewalRequestIds = new Set<string>();
   let identity: WebSocketIdentity = { agentId: configuredAgentId, instanceId: "", leaseId: "", generation: 0 };
   const factory = options.webSocketFactory ?? defaultFactory;
   const retryDelay = options.retryDelayMs ?? 1_000;
   const renewInterval = options.renewIntervalMs ?? 10_000;
   const report = (status: WebSocketStatus): void => options.onStatus?.(status, { ...identity });
-  const invalidate = (): void => { isRegistered = false; identity = { ...identity, leaseId: "" }; options.onInvalidate?.({ ...identity }); };
+  const invalidate = (): void => { isRegistered = false; pendingRenewalRequestIds.clear(); identity = { ...identity, leaseId: "" }; options.onInvalidate?.({ ...identity }); };
   const clearTimers = (): void => { if (reconnectTimer !== undefined) clearTimeout(reconnectTimer); if (renewTimer !== undefined) clearInterval(renewTimer); reconnectTimer = undefined; renewTimer = undefined; };
   const scheduleReconnect = (): void => {
     if (closed || options.autoReconnect === false) return;
@@ -93,7 +94,11 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
   };
   const renew = (): boolean => {
     if (!isRegistered) return false;
-    return send(buildLeaseRenewFrame({ agentId: identity.agentId, instanceId: identity.instanceId, leaseId: identity.leaseId }));
+    const frame = buildLeaseRenewFrame({ agentId: identity.agentId, instanceId: identity.instanceId, leaseId: identity.leaseId });
+    pendingRenewalRequestIds.add(frame.frame_id);
+    if (send(frame)) return true;
+    pendingRenewalRequestIds.delete(frame.frame_id);
+    return false;
   };
   const handleFrame = (value: unknown, activeGeneration: number): void => {
     if (activeGeneration !== generation) return;
@@ -101,9 +106,12 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
     if (!parsed.ok) { options.onProtocolError?.(new Error(parsed.error.message), { ...identity }); return; }
     const frame = parsed.value;
     if (frame.type === "registered") {
-      if (frame.request_id !== requestId || frame.agent_id !== identity.agentId || frame.instance_id !== identity.instanceId) {
+      const initialRegistration = !isRegistered && frame.request_id === registrationRequestId;
+      const renewal = isRegistered && pendingRenewalRequestIds.delete(frame.request_id);
+      if ((!initialRegistration && !renewal) || frame.agent_id !== identity.agentId || frame.instance_id !== identity.instanceId || (renewal && frame.lease_id !== identity.leaseId)) {
         options.onProtocolError?.(new Error("Router registration did not match this connection"), { ...identity }); return;
       }
+      if (renewal) return;
       identity = { ...identity, leaseId: frame.lease_id }; isRegistered = true;
       if (renewTimer !== undefined) clearInterval(renewTimer);
       renewTimer = setInterval(renew, renewInterval);
@@ -124,7 +132,7 @@ export function createWebSocketClient(options: WebSocketClientOptions): WebSocke
     next.addEventListener("open", () => {
       if (activeGeneration !== generation) return;
       const register = buildRegisterFrame({ agentId: identity.agentId, instanceId: identity.instanceId });
-      requestId = register.frame_id;
+      registrationRequestId = register.frame_id;
       send(register);
     });
     next.addEventListener("message", (event) => {

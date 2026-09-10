@@ -61,10 +61,7 @@ func (r *Router) scheduleDeliveryOffer(agentID string) {
 	if r.deliveryOffersClosed || r.pendingDeliveryOffers[agentID] != nil {
 		return
 	}
-	r.mu.RLock()
-	sessionExists := r.sessions[agentID] != nil
-	r.mu.RUnlock()
-	if !sessionExists {
+	if r.deliverySession(agentID) == nil {
 		return
 	}
 	pending := &pendingDeliveryOffer{done: make(chan struct{})}
@@ -87,11 +84,9 @@ func (r *Router) runDeliveryOffer(agentID string, pending *pendingDeliveryOffer)
 		r.deliveryOfferWG.Done()
 	}()
 
-	// Resolve the session after the timer fires. Registration may have replaced
-	// the socket during the coalescing window.
-	r.mu.RLock()
-	session := r.sessions[agentID]
-	r.mu.RUnlock()
+	// Resolve the delivery owner after the timer fires. A Pi registration always
+	// wins; otherwise the current memory-only browser owner receives the batch.
+	session := r.deliverySession(agentID)
 	fields := func() map[string]any {
 		defer r.deliveryStoreWG.Done()
 		return r.deliveryOfferFields(r.deliveryOffersContext, session)

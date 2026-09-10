@@ -441,10 +441,18 @@ func (r *Router) sessionClosed(s *session, registered bool) {
 		return
 	}
 	if s.hasUILease() {
+		var replacement *session
 		r.mu.Lock()
 		delete(r.uiSessions, s)
+		if r.uiDeliveryOwners[s.agentID] == s {
+			delete(r.uiDeliveryOwners, s.agentID)
+			replacement = r.promoteUIDeliveryOwnerLocked(s.agentID)
+		}
 		r.removePendingForSessionLocked(s)
 		r.mu.Unlock()
+		if replacement != nil {
+			r.offer(replacement)
+		}
 		return
 	}
 	transition := r.beginOwnership(s.agentID)
@@ -513,6 +521,12 @@ func (r *Router) sessionClosedSerialized(s *session) {
 	}
 	if primary {
 		_, _ = r.store.ReleaseAgentLease(context.Background(), store.LeaseRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID})
+		r.mu.Lock()
+		fallback := r.promoteUIDeliveryOwnerLocked(s.agentID)
+		r.mu.Unlock()
+		if fallback != nil {
+			r.offer(fallback)
+		}
 	}
 }
 

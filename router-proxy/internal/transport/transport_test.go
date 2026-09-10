@@ -356,11 +356,115 @@ func TestBrowserRefreshNeverCreatesDurableAgentRecords(t *testing.T) {
 	require.Len(t, agents, 1)
 	require.Equal(t, "preserved-tmux-worker", agents[0].(map[string]any)["agent_id"])
 
-	// The worker remains the delivery owner after the browser refreshes.
+	// A browser sharing the worker's label must not steal its delivery. The
+	// durable Pi owner receives the queued message while the browser remains an
+	// observer of the conversation.
+	payload, err := json.Marshal(map[string]any{"id": "worker-precedence", "from": "sender", "to": "preserved-tmux-worker", "body": "priority", "created_at": "2026-08-29T12:00:00.000Z"})
+	require.NoError(t, err)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", bytesReader(payload))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	delivered, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, delivered.StatusCode)
+	delivered.Body.Close()
+	workerMessage := readJSONWithTimeout(t, worker, time.Second)
+	if workerMessage["type"] == "conversation_message" {
+		workerMessage = readJSONWithTimeout(t, worker, time.Second)
+	}
+	require.Equal(t, "message", workerMessage["type"])
+	require.Equal(t, "worker-precedence", workerMessage["message"].(map[string]any)["id"])
+
 	sendJSON(t, worker, map[string]any{
 		"version": "v1", "frame_id": "worker-ping", "type": "ping",
 	})
 	require.Equal(t, "pong", readJSON(t, worker)["type"])
+}
+
+func TestBrowserDeliveryClientDrainsWolfgangMailboxWithoutDurableBrowserIdentity(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	browser, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	defer browser.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, browser, map[string]any{
+		"version": "v1", "frame_id": "browser-register", "type": "register",
+		"agent_id": "wolfgang", "instance_id": "browser-instance",
+		"agent_role": "user_interaction", "client_type": "web",
+		"ack_confirmation": "correlated_v1", "conversation_sync": "v1",
+		"delivery_receipts": "delivery_items_v1",
+	})
+	registered := readJSONWithTimeout(t, browser, time.Second)
+	require.Equal(t, "registered", registered["type"])
+	leaseID := registered["lease_id"].(string)
+
+	// The browser is a connection-local delivery client. Its registration and
+	// renewals must not create a persistent agent, lease, or recipient source.
+	require.Zero(t, persistentAgentCount(t, database))
+	lease, err := durable.LeaseFor(context.Background(), "wolfgang")
+	require.NoError(t, err)
+	require.Nil(t, lease)
+	source, err := durable.RecipientSource(context.Background(), "wolfgang")
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	require.Nil(t, source)
+	sendJSON(t, browser, map[string]any{"version": "v1", "frame_id": "browser-renew", "type": "lease_renew", "agent_id": "wolfgang", "instance_id": "browser-instance", "lease_id": leaseID})
+	renewed := readJSONWithTimeout(t, browser, time.Second)
+	require.Equal(t, "registered", renewed["type"])
+	require.Equal(t, leaseID, renewed["lease_id"])
+
+	client := httptest.NewServer(router)
+	defer client.Close()
+	for _, id := range []string{"browser-delivery-1", "browser-delivery-2", "browser-delivery-3"} {
+		payload, marshalErr := json.Marshal(map[string]any{"id": id, "from": "sender", "to": "wolfgang", "body": id, "created_at": "2026-08-29T12:00:00.000Z"})
+		require.NoError(t, marshalErr)
+		request, requestErr := http.NewRequest(http.MethodPost, client.URL+"/v1/messages", bytesReader(payload))
+		require.NoError(t, requestErr)
+		request.Header.Set("Content-Type", "application/json")
+		response, responseErr := http.DefaultClient.Do(request)
+		require.NoError(t, responseErr)
+		require.Equal(t, http.StatusCreated, response.StatusCode)
+		response.Body.Close()
+
+		conversation := readJSONWithTimeout(t, browser, time.Second)
+		require.Equal(t, "conversation_message", conversation["type"])
+		offered := readJSONWithTimeout(t, browser, time.Second)
+		require.Equal(t, "message", offered["type"])
+		require.Equal(t, id, offered["message"].(map[string]any)["id"])
+		durableLease, ownerLease := deliveryAttemptLeases(t, database, id)
+		require.False(t, durableLease.Valid, "browser delivery must not create a durable lease reference")
+		require.Equal(t, leaseID, ownerLease)
+		sendJSON(t, browser, map[string]any{"version": "v1", "frame_id": "injection-" + id, "type": "injection_requested", "agent_id": "wolfgang", "instance_id": "browser-instance", "lease_id": leaseID, "message_id": id, "attempt_number": 1})
+		sendJSON(t, browser, map[string]any{"version": "v1", "frame_id": "ack-" + id, "type": "ack", "agent_id": "wolfgang", "instance_id": "browser-instance", "lease_id": leaseID, "message_id": id, "attempt_number": 1})
+		acknowledged := readJSONWithTimeout(t, browser, time.Second)
+		require.Equal(t, "delivery_acknowledged", acknowledged["type"])
+		stored, lookupErr := durable.MessageFor(context.Background(), id)
+		require.NoError(t, lookupErr)
+		require.Nil(t, stored, "the browser acknowledgement must drain %s", id)
+	}
+
+	require.Equal(t, 1, persistentAgentCount(t, database), "only the queued recipient, never a browser hostname, is persisted")
+	lease, err = durable.LeaseFor(context.Background(), "wolfgang")
+	require.NoError(t, err)
+	require.Nil(t, lease, "browser delivery remains memory-only after acknowledgements")
+}
+
+func deliveryAttemptLeases(t *testing.T, database, messageID string) (sql.NullString, string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", database)
+	require.NoError(t, err)
+	defer db.Close()
+	var durableLease sql.NullString
+	var ownerLease string
+	require.NoError(t, db.QueryRow("SELECT lease_id, owner_lease_id FROM delivery_attempts WHERE message_id = ?", messageID).Scan(&durableLease, &ownerLease))
+	return durableLease, ownerLease
 }
 
 func persistentAgentCount(t *testing.T, database string) int {
