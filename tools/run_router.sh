@@ -10,7 +10,20 @@ MAX_BATCH_CHARS="${MECHA_ROUTER_MAX_BATCH_CHARS:-4096}"
 AUDIT_SUPERVISOR_TARGET="${MECHA_ROUTER_AUDIT_SUPERVISOR_TARGET:-supervisor}"
 AUDIT_TMUX_SESSION="${MECHA_ROUTER_AUDIT_TMUX_SESSION:-mecha}"
 POLICY_TIMEOUT="${MECHA_ROUTER_POLICY_TIMEOUT:-5s}"
-MANAGED="${MECHA_ROUTER_MANAGED:-false}"
+# Router-managed Pi is on by default. Only the explicit string "false" opts
+# out; reject other values so a typo cannot silently change the router mode.
+case "${MECHA_ROUTER_MANAGED:-true}" in
+  true)
+    MANAGED=true
+    ;;
+  false)
+    MANAGED=false
+    ;;
+  *)
+    printf '%s\n' "run_router.sh: MECHA_ROUTER_MANAGED must be true or false" >&2
+    exit 2
+    ;;
+esac
 MANAGED_PI="${MECHA_ROUTER_MANAGED_PI:-$(command -v pi || true)}"
 MANAGED_HOME="${MECHA_ROUTER_MANAGED_HOME:-${HOME}/.mecha-developer/managed-pi}"
 MANAGED_PI_AGENT_DIR="${MECHA_ROUTER_MANAGED_PI_AGENT_DIR:-${HOME}/.pi/agent}"
@@ -23,8 +36,8 @@ MANAGED_AUTH_HELPER="${MECHA_ROUTER_MANAGED_AUTH_HELPER:-$ROOT_DIR/auth-helper/i
 MANAGED_RUNTIME_ROOT="${MECHA_ROUTER_MANAGED_RUNTIME_ROOT:-$ROOT_DIR}"
 MANAGED_CWD_ROOTS="${MECHA_ROUTER_MANAGED_CWD_ROOTS:-$ROOT_DIR}"
 MANAGED_QUIET_RECIPIENT="${MECHA_ROUTER_MANAGED_QUIET_RECIPIENT:-supervisor}"
-# Serve a built UI when this checkout has one. A clean source checkout still
-# starts the legacy router normally; callers may set the path explicitly.
+# Serve a built UI when this checkout has one. A clean source checkout leaves
+# the UI path unset; callers may set the path explicitly.
 if [[ "${MECHA_ROUTER_MANAGED_UI_DIST+x}" == "x" ]]; then
   MANAGED_UI_DIST="$MECHA_ROUTER_MANAGED_UI_DIST"
 elif [[ -f "$ROOT_DIR/web/router-ui-react/dist/index.html" ]]; then
@@ -34,7 +47,7 @@ else
 fi
 
 usage() {
-  printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." ""
+  printf '%s\n' "Usage: tools/run_router.sh" "" "Runs the Go Mailbox router through router-proxy/Makefile." "Router-managed Pi is enabled by default; set MECHA_ROUTER_MANAGED=false for legacy-only routing." ""
 }
 
 case "${1:-}" in

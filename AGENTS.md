@@ -30,7 +30,7 @@ Prefix the command with `sudo` only when the global npm prefix is root-owned. It
 
 ## Router Proxy
 
-`router-proxy/` contains the official Go Mailbox V2 router and its optional Go reverse proxy. Start the router from the repository root with `tools/run_router.sh`; it binds loopback by default (`127.0.0.1:8765`) and multiplexes HTTP REST plus WebSocket upgrades on `/v1/agents` over one port. The proxy does not reimplement any router routes; it transparently forwards every HTTP request and WebSocket frame to an upstream router over plain HTTP.
+`router-proxy/` contains the official Go Mailbox V2 router and its optional Go reverse proxy. Start the router from the repository root with `tools/run_router.sh`; router-managed Pi is enabled by default, and `MECHA_ROUTER_MANAGED=false` preserves legacy-only routing when necessary. It binds loopback by default (`127.0.0.1:8765`) and multiplexes HTTP REST plus WebSocket upgrades on `/v1/agents` over one port. The proxy does not reimplement any router routes; it transparently forwards every HTTP request and WebSocket frame to an upstream router over plain HTTP.
 
 Use it when another machine on the LAN, or a local process on a different port, needs the full router API surface without changing the upstream router bind address. Typical local test: upstream `127.0.0.1:8765`, listen `0.0.0.0:9876`, then point clients at `http://127.0.0.1:9876`.
 

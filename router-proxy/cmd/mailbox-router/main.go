@@ -48,7 +48,7 @@ func parseConfig(args []string) (config, error) {
 	flags.DurationVar(&result.policyTimeout, "policy-timeout", transport.DefaultPolicyTimeout, "maximum duration for one native policy run")
 	flags.StringVar(&result.managedUIDist, "managed-ui-dist", "", "built React UI directory served by the router")
 	var managedEnabled bool
-	flags.BoolVar(&managedEnabled, "managed", false, "enable router-managed Pi launches")
+	flags.BoolVar(&managedEnabled, "managed", true, "enable router-managed Pi launches (set false to preserve legacy-only routing)")
 	var managedPi, managedHome, managedPiAgentDir, managedSession, managedManifest, managedExtension, managedSubagents, managedCursorExtension, managedAuthHelper, managedRuntimeRoot, managedRoots, managedRecipient string
 	flags.StringVar(&managedPi, "managed-pi", "", "installed Pi executable")
 	flags.StringVar(&managedHome, "managed-home", "", "managed Pi HOME root")
@@ -95,7 +95,7 @@ func parseConfig(args []string) (config, error) {
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--help" {
-		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--managed=false|true] [managed launch flags]")
+		fmt.Println("Usage: mailbox-router --database <sqlite-path> [--log <jsonl-path>] [--host 127.0.0.1|::1|0.0.0.0] [--port 8765] [--managed=true|false] [managed launch flags]")
 		return
 	}
 	options, err := parseConfig(os.Args[1:])
