@@ -90,6 +90,8 @@ describe("App integration", () => {
 
   it("opens provider settings from managed actions and remembers a default-model launch folder", async () => {
     const storage = new MemoryStorage();
+    const recentFolders = Array.from({ length: 10 }, (_, index) => `/projects/recent-${index}`);
+    storage.setItem(MANAGED_RECENT_FOLDERS_KEY, JSON.stringify(recentFolders));
     const user = (await import("@testing-library/user-event")).default.setup();
     let launchPayload: unknown;
     const timestamp = "2030-01-01T00:00:00.000Z";
@@ -130,12 +132,15 @@ describe("App integration", () => {
     await user.click(menuButton);
     await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
+    await user.click(screen.getByLabelText("Working folder"));
+    expect(screen.getByRole("list", { name: "Recent folders" })).toHaveTextContent("/projects/recent-0");
+    expect(screen.getAllByRole("listitem")).toHaveLength(10);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "managed-alpha" } });
     fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/project" } });
     await user.click(screen.getByRole("button", { name: "Launch" }));
 
     await waitFor(() => expect(launchPayload).toEqual({ name: "managed-alpha", cwd: "/allowed/project" }));
-    await waitFor(() => expect(storage.getItem(MANAGED_RECENT_FOLDERS_KEY)).toBe(JSON.stringify(["/allowed/project"])));
+    await waitFor(() => expect(storage.getItem(MANAGED_RECENT_FOLDERS_KEY)).toBe(JSON.stringify(["/allowed/project", ...recentFolders.slice(0, 9)])));
   });
 
   it("requires an explicit router URL and does not contact a default router", () => {
