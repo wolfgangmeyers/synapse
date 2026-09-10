@@ -14,7 +14,7 @@ This keeps notifications off by default. It adds no polling, daemon/service, sta
 --notify-on-settled <mailbox-recipient>
 ```
 
-The option configures a possible recipient but does not enable notifications by itself. The launcher validates `<mailbox-recipient>` as a Mailbox agent ID and exports the recipient to that process as `MECHA_PI_NOTIFY_ON_SETTLED`. Normal Pi launches use Pi's default configured extensions and pass neither `--extension` nor `--no-extensions`/`-ne`; the extension remains available through Pi settings, and explicit flags are reserved for deliberate extension-test tools. It is invalid for non-Pi agents. The agent enables or disables delivery at runtime with the `mecha_settled_notifications` tool.
+The option configures a possible recipient but does not enable notifications by itself. The launcher validates `<mailbox-recipient>` as a Mailbox agent ID and exports the recipient to that process as `MECHA_PI_NOTIFY_ON_SETTLED`. Managed Pi launches use `--no-extensions` and explicitly load the canonical `pi-subagents` and `mecha-messaging` entrypoints. Other runtimes retain their normal extension policy. It is invalid for non-Pi agents. The agent enables or disables delivery at runtime with the `mecha_settled_notifications` tool.
 
 The extension reads that one process-local value. It uses its existing `createMailboxClient().sendReply()` path, which POSTs the normal Mailbox V2 envelope to `MECHA_ROUTER_URL/v1/messages`. The router owns durable queueing and delivery to the recipient. No new transport, extension installation path, or background process is introduced.
 
