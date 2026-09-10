@@ -43,12 +43,35 @@ describe("ModelPicker", () => {
     expect(document.activeElement).toBe(button);
   });
 
-  it("portals the menu to its dialog so fieldset layout cannot crop it", async () => {
+  it("uses dialog-local absolute coordinates so a native dialog picker stays in the viewport", async () => {
     const user = userEvent.setup();
-    const { container } = render(<dialog open><ModelPicker models={models} onChange={vi.fn()} /></dialog>);
-    const button = container.querySelector<HTMLButtonElement>(".model-current");
-    if (!button) throw new Error("model trigger is missing");
-    await user.click(button);
-    expect(screen.getByRole("dialog", { name: "Choose agent model" }).parentElement).toBe(container.querySelector("dialog"));
+    const originalWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    const originalHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 725 });
+    try {
+      const { container } = render(<dialog open><ModelPicker models={models} onChange={vi.fn()} /></dialog>);
+      const dialog = container.querySelector("dialog");
+      const button = container.querySelector<HTMLButtonElement>(".model-current");
+      if (!dialog || !button) throw new Error("model picker dialog is missing");
+      vi.spyOn(dialog, "getBoundingClientRect").mockReturnValue({ left: 200, top: 50, right: 880, bottom: 700, width: 680, height: 650, x: 200, y: 50, toJSON: () => ({}) });
+      vi.spyOn(button, "getBoundingClientRect").mockReturnValue({ left: 400, top: 640, right: 620, bottom: 674, width: 220, height: 34, x: 400, y: 640, toJSON: () => ({}) });
+      await user.click(button);
+      const menu = screen.getByRole("dialog", { name: "Choose agent model" });
+      expect(menu.parentElement).toBe(dialog);
+      expect(menu).toHaveStyle({ position: "absolute", top: "auto", left: "60px", bottom: "68px" });
+    } finally {
+      if (originalWidth) Object.defineProperty(window, "innerWidth", originalWidth);
+      if (originalHeight) Object.defineProperty(window, "innerHeight", originalHeight);
+    }
+  });
+
+  it("keeps the main picker body-portalled and viewport-fixed", async () => {
+    const user = userEvent.setup();
+    render(<ModelPicker models={models} onChange={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Select model" }));
+    const menu = screen.getByRole("dialog", { name: "Choose agent model" });
+    expect(menu.parentElement).toBe(document.body);
+    expect(menu).toHaveStyle({ position: "fixed" });
   });
 });
