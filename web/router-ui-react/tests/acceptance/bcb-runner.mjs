@@ -62,7 +62,7 @@ async function copyBcb(taskRoot, wsPort) {
   return destination;
 }
 
-async function startBcb(taskRoot) {
+export async function startBcb(taskRoot) {
   const httpPort = await allocateLoopbackPort();
   const wsPort = await allocateLoopbackPort();
   const bcbRoot = await copyBcb(taskRoot, wsPort);
@@ -112,13 +112,17 @@ async function startVite() {
   return vite;
 }
 
-async function startChrome(taskRoot, bcb, downloads, url) {
+export async function startChrome(taskRoot, bcb, downloads, url, windowSize = INITIAL_WINDOW_SIZE) {
   const cdpPort = await allocateLoopbackPort();
   const profile = join(taskRoot, "cft-profile");
   await mkdir(join(profile, "Default"), { recursive: true, mode: 0o700 });
   await writeFile(join(profile, "Default", "Preferences"), `${JSON.stringify({ download: { default_directory: downloads, prompt_for_download: false, directory_upgrade: true } })}\n`, { mode: 0o600 });
   const extension = join(bcb.root, "extension");
-  const chrome = spawnLogged(cftBinary(), buildChromeArgs({ profile, cdpPort, extension, url }), {
+  const chromeArgs = buildChromeArgs({ profile, cdpPort, extension, url });
+  const windowSizeIndex = chromeArgs.findIndex((argument) => argument.startsWith("--window-size="));
+  if (windowSizeIndex < 0) throw new Error("Chromium launch arguments did not include a window size");
+  chromeArgs[windowSizeIndex] = `--window-size=${windowSize.width},${windowSize.height}`;
+  const chrome = spawnLogged(cftBinary(), chromeArgs, {
     cwd: taskRoot,
     env: { ...process.env, BCB_HTTP_PORT: String(bcb.httpPort), BCB_WS_PORT: String(bcb.wsPort) },
   });
@@ -130,6 +134,38 @@ async function startChrome(taskRoot, bcb, downloads, url) {
     }
   })(), TIMEOUTS.startup, "Chromium for Testing startup");
   return { chrome, profile, cdpPort, downloads, url };
+}
+
+// Release acceptance must never attach to or open a window in the user's Chrome
+// profile. This starts a disposable Chromium-for-Testing profile and private BCB
+// bridge, then returns its only explicitly-addressable tab.
+export async function startIsolatedBcbBrowser(taskRoot, url, windowSize = INITIAL_WINDOW_SIZE) {
+  const bcb = await startBcb(taskRoot);
+  const downloads = join(taskRoot, "downloads");
+  await mkdir(downloads, { recursive: true, mode: 0o700 });
+  const chrome = await startChrome(taskRoot, bcb, downloads, url, windowSize);
+  await withTimeout((async () => {
+    for (;;) {
+      const health = await (await fetch(`${bcb.baseUrl}/health`)).json();
+      if (health.extension_connected === true) return;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+  })(), TIMEOUTS.startup, "isolated BCB extension connection");
+  const controlledTabs = await tabs(bcb);
+  if (!Array.isArray(controlledTabs) || controlledTabs.length !== 1 || controlledTabs[0]?.url !== url) {
+    await stopChild(chrome.chrome, "isolated Chromium for Testing").catch(() => undefined);
+    await stopChild(bcb.server, "isolated BCB bridge").catch(() => undefined);
+    throw new Error(`isolated BCB expected exactly one task tab at ${url}`);
+  }
+  return {
+    bcb,
+    chrome,
+    tab: controlledTabs[0],
+    close: async () => {
+      await stopChild(chrome.chrome, "isolated Chromium for Testing");
+      await stopChild(bcb.server, "isolated BCB bridge");
+    },
+  };
 }
 
 async function bcbCommand(bcb, args, timeoutMs = TIMEOUTS.browser) {

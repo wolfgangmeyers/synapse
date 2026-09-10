@@ -108,16 +108,8 @@ p:empty { display: none; }
 }
 .router-selector small { display: block; color: var(--muted); font-weight: 600; }
 .router-selector strong { display: block; overflow: hidden; text-overflow: ellipsis; }
-.router-dialog {
-  width: min(720px, calc(100vw - 32px));
-  border: 1px solid var(--line);
-  border-radius: 28px;
-  background: var(--surface);
-  color: var(--text);
-  padding: 0;
-  box-shadow: 0 24px 80px rgba(0,0,0,0.45);
-}
-.router-dialog::backdrop { background: rgba(5,7,12,0.68); }
+.router-dialog { width: min(720px, calc(100vw - 32px)); }
+.router-dialog .dialog-shell { max-height: calc(100dvh - 48px); overflow-y: auto; }
 .message-dialog {
   width: min(680px, calc(100vw - 32px));
   border: 1px solid var(--line);
@@ -418,6 +410,7 @@ p:empty { display: none; }
 .dialog-shell { padding: 22px; }
 .dialog-shell header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
 .dialog-actions { display: flex; gap: 8px; }
+.router-dialog-actions { justify-content: space-between; margin-bottom: 14px; }
 .dialog-shell header button { min-width: 44px; width: 44px; padding: 0; font-size: 24px; background: var(--surface-raised); color: var(--text); }
 .saved-routers { display: grid; gap: 10px; margin-bottom: 22px; }
 .router-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 14px; border-radius: 18px; background: var(--canvas); cursor: pointer; }
@@ -987,6 +980,15 @@ p:empty { display: none; }
 .managed-confirmation { padding: 12px; border: 1px solid rgba(255,180,171,.42); border-radius: 14px; }
 .managed-state-dialog { width: min(760px, calc(100vw - 32px)); }
 .managed-state-json { max-height: min(65dvh, 680px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border-radius: 14px; background: var(--canvas); color: var(--text); }
+.managed-control-dialog { width: min(560px, calc(100vw - 32px)); }
+.managed-control-body { display: grid; gap: 16px; }
+.managed-control-summary { padding: 14px; border-radius: 16px; background: var(--canvas); }
+.managed-control-summary-label { margin-bottom: 3px; font-size: 13px; font-weight: 700; }
+.managed-control-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.managed-control-actions button { min-width: 0; }
+.managed-confirmation { padding: 14px; border: 1px solid rgba(255,180,171,.42); border-radius: 16px; background: rgba(255,180,171,.08); }
+.managed-confirmation-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.managed-control-error { color: var(--danger); }
 .managed-child-list { display: grid; gap: 8px; margin: 0; padding-left: 20px; }
 .managed-child-list li { display: grid; gap: 3px; overflow-wrap: anywhere; }
 .managed-child-list time { color: var(--muted); font-size: 12px; }
@@ -998,16 +1000,26 @@ p:empty { display: none; }
   .managed-global-controls { grid-template-columns: 1fr; }
   .managed-agent-form fieldset { grid-template-columns: 1fr; }
   .dialog-actions { flex-wrap: wrap; }
+  .managed-control-actions { grid-template-columns: 1fr; }
+  .managed-confirmation-actions { flex-wrap: wrap; }
   .agent-row-actions { flex-wrap: wrap; justify-content: flex-end; }
   .agent-row-actions button { min-height: 36px; padding: 0 9px; }
   .managed-child-list { margin-left: 20px; }
 }
 
 .provider-auth-dialog { width: min(560px, calc(100vw - 32px)); }
-.provider-auth-dialog section { display: grid; gap: 10px; margin-top: 16px; }
-.provider-auth-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px; border-radius: 14px; background: var(--canvas); }
-.provider-auth-row p { margin-top: 2px; font-size: 13px; }
-.provider-auth-prompt { padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-raised); }
+.provider-auth-dialog .dialog-shell { display: grid; gap: 18px; }
+.provider-auth-dialog .dialog-shell header { margin-bottom: 0; }
+.provider-auth-section, .provider-auth-prompt { display: grid; gap: 12px; }
+.provider-auth-section-heading { display: grid; gap: 2px; }
+.provider-auth-section-heading h3, .provider-auth-prompt h3 { font-size: 16px; }
+.provider-auth-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px; border-radius: 16px; background: var(--canvas); }
+.provider-auth-provider { min-width: 0; }
+.provider-auth-connection { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 13px; }
+.provider-auth-connection .status-dot { width: 8px; height: 8px; }
+.provider-auth-prompt { padding: 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-raised); }
 .provider-auth-prompt label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; }
+.provider-auth-actions { display: flex; justify-content: flex-end; }
 .provider-auth-dialog select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 14px; background: #10141f; color: var(--text); }
-.provider-auth-dialog .status { min-height: 1.4em; }
+.provider-auth-dialog select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(157,168,255,0.14); outline: none; }
+.provider-auth-status { min-height: 1.4em; }

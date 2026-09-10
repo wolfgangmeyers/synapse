@@ -1,11 +1,11 @@
 # Browser Console Bridge acceptance
 
-This checklist is opt-in. It uses a fresh task-named Chrome tab and a task-temporary Go router. It does not use the live router.
+This checklist is opt-in. It uses a disposable Chromium-for-Testing profile and a task-temporary Go router. It does not use the live router or attach to the user's Chrome profile.
 
 ## Before the run
 
-- Check BCB `/health` and confirm `extension_connected: true`.
-- Keep existing human tabs, their URLs, and their window sizes unchanged.
+- Start the runner's private Browser Console Bridge and wait for its disposable Chromium-for-Testing extension to connect.
+- Do not attach to, navigate, resize, focus, or open tabs in the user's Chrome profile.
 - Start the isolated Go router with a temporary database, JSONL log, attachment directory, and loopback port.
 - Standard UI acceptance may start Vite on a separate temporary loopback port. The managed-RPC release proof below instead serves a production build directly from its isolated Go router.
 - Record the task process IDs, working directories, arguments, ports, database path, log path, and attachment path.
@@ -13,7 +13,7 @@ This checklist is opt-in. It uses a fresh task-named Chrome tab and a task-tempo
 
 ## Browser steps
 
-1. Open a fresh Chrome tab through BCB and navigate to the Vite URL.
+1. Start the runner's disposable Chromium-for-Testing profile at the Vite URL and address its only BCB tab explicitly.
 2. Configure the isolated router URL and the deterministic UI agent ID.
 3. Confirm the page reports connected after registration. Confirm the isolated agent appears and is excluded from the peer list.
 4. Use fixture agents to show active, working, compacting, and expanded subagent states.
@@ -27,7 +27,7 @@ This checklist is opt-in. It uses a fresh task-named Chrome tab and a task-tempo
 12. Click the prompt manager's `data-testid="prompt-export"` hook as its own step. Confirm the browser download is triggered and record the downloaded JSON.
 13. Exercise a message arrival. Check source filtering, replacement, dismissal, expiry, safe body rendering, and separation from conversation history.
 14. Inspect the console and network panel for uncaught errors, failed imports, invalid requests, stale-state updates, and unexpected router URLs.
-15. Record the viewport BCB reports for every visual check. The managed-RPC release proof opens its own BCB-controlled desktop popup, adjusts that popup with `window.resizeTo`, and requires `innerWidth=1480` with no horizontal overflow. Mobile and 390 px browser work are outside this delivery. Device emulation is not release evidence. Before every release screenshot, the runner gives that popup a unique title, checks the exact BCB tab ID, URL, title, selected parent, and nested child, then makes the matching Chrome window the macOS accessibility main window. If that focus check is unavailable or fails, the screenshot is not release evidence.
+15. Record the viewport BCB reports for every visual check. The managed-RPC release proof starts its disposable Chromium-for-Testing browser at desktop width and requires `innerWidth=1480` with no horizontal overflow. Mobile and 390 px browser work are outside this delivery. Device emulation is not release evidence. Before every release screenshot, the runner gives that controlled tab a unique title and checks the exact BCB tab ID, URL, title, selected parent, and nested child. It does not use macOS focus automation.
 
 ## Managed-RPC release proof
 
@@ -37,15 +37,15 @@ Run the real managed-Pi path with:
 npm --prefix web/router-ui-react run test:acceptance:bcb -- --managed-rpc --release
 ```
 
-It requires `MECHA_PI_SOURCE_LOCK`, `MECHA_PI_PACKAGE_ROOT`, `MECHA_PI_BIN`, and a working BCB checkout with its extension connected. The runner builds `web/router-ui-react`, compiles `cmd/managed-acceptance-router`, and passes that disposable built directory to the isolated router's static-UI boundary. It creates its own database, log, attachment directory, managed HOME/session root, and deterministic local provider, then launches installed Pi through that router. No Vite server or UI gateway participates. The runner opens one local BCB popup directly on the isolated router, clears its storage, and closes only that popup during cleanup. It writes `REPORT.json`, endpoint snapshots, recovery artifacts, and desktop BCB screenshots to `MECHA_BCB_ARTIFACT_DIR` (or a new directory under `/private/tmp`).
+It requires `MECHA_PI_SOURCE_LOCK`, `MECHA_PI_PACKAGE_ROOT`, `MECHA_PI_BIN`, a Browser Console Bridge checkout, and `MECHA_CFT_BIN` or `CHROME_FOR_TESTING_BIN`. The runner builds `web/router-ui-react`, compiles `cmd/managed-acceptance-router`, and passes that disposable built directory to the isolated router's static-UI boundary. It creates its own database, log, attachment directory, managed HOME/session root, deterministic local provider, private Browser Console Bridge, and disposable Chromium-for-Testing profile, then launches installed Pi through that router. No Vite server, UI gateway, or user Chrome tab participates. The disposable browser stops during cleanup. It writes `REPORT.json`, endpoint snapshots, recovery artifacts, and desktop BCB screenshots to `MECHA_BCB_ARTIFACT_DIR` (or a new directory under `/private/tmp`).
 
-The acceptance-only router command is the only path that installs `pi-extensions/mecha-rpc/tests/fixtures/managed-rpc-release-probe.mjs`; production `mailbox-router` continues to omit test extensions and test environment values. The automated run proves the real nested child from installed Pi, the existing `mecha.child.delta.v1` lifecycle path durably merged through the current managed fence, selected/expanded desktop DOM visibility while compacting, reconnect while compacting and after completion, parent-session reset/recovery, and an isolated-router restart that reports bounded `reconstructing` state rather than inventing a terminal child result. It captures the compacting state, compacting reconnect, completed reconnect, and the restart's reconstructing state with retained child records marked `interrupted_unknown`. Because `bcb_screenshot` captures Chrome's foreground tab, the runner uses macOS System Events to make its uniquely titled popup the exact main Chrome window immediately before each capture. Each image artifact records its SHA-256 plus the BCB tab ID, URL, title, selected parent, and visible child state. Missing prerequisites, lifecycle evidence, a passed focus/identity record, or a supported desktop popup route block acceptance.
+The acceptance-only router command is the only path that installs `pi-extensions/mecha-rpc/tests/fixtures/managed-rpc-release-probe.mjs`; production `mailbox-router` continues to omit test extensions and test environment values. The automated run proves the real nested child from installed Pi, the existing `mecha.child.delta.v1` lifecycle path durably merged through the current managed fence, selected/expanded desktop DOM visibility while compacting, reconnect while compacting and after completion, parent-session reset/recovery, and an isolated-router restart that reports bounded `reconstructing` state rather than inventing a terminal child result. It captures the compacting state, compacting reconnect, completed reconnect, and the restart's reconstructing state with retained child records marked `interrupted_unknown`. The private bridge owns one active Chromium-for-Testing tab, which the runner verifies by exact tab ID, URL, title, selected parent, and visible child state before each `bcb_screenshot`. Each image artifact records its SHA-256 plus those values. Missing prerequisites, lifecycle evidence, an identity record, or a supported desktop browser route block acceptance.
 
 ## After the run
 
 - Recheck task process and listener ownership.
 - Stop the isolated Go router (and Vite only when running the standard UI acceptance). Confirm the task database, log, attachments, and temporary ports are gone.
-- Confirm unrelated processes, files, runtimes, and browser tabs remain unchanged.
+- Confirm unrelated processes, files, runtimes, and user-browser tabs remain unchanged; the disposable Chromium-for-Testing process must be stopped.
 - If a live-state proof was authorized, capture the same read-only fingerprints and compare them with the pre-run values. Attribute changes only after checking task process paths and arguments.
 
 BCB is not run as part of the transport test command. This document records the required acceptance procedure.

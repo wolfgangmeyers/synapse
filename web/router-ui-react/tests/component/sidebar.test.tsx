@@ -10,6 +10,7 @@ describe("Sidebar", () => {
   it("filters and selects agents", () => {
     const onSelect = vi.fn();
     render(<Sidebar routerLabel="local" connection="connected" agents={[{ agent_id: "alpha.bot" }, { agent_id: "beta" }]} onSelectAgent={onSelect} />);
+    expect(screen.getByRole("button", { name: "Router local and provider sign-in settings" })).toHaveTextContent("Router & sign-in");
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "alpha" } });
     expect(screen.getByRole("button", { name: /Alpha Bot/i })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Beta/i })).toBeNull();
