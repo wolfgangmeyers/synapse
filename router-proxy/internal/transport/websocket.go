@@ -359,6 +359,9 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	s.setPaused(r.agentCompacting(agentID))
 	r.cancelPendingDeliveryOffer(agentID)
 	r.mu.Lock()
+	// A real Pi session is always the delivery owner. Keep any open browser as
+	// a control/observer session, but stop it from claiming this mailbox.
+	delete(r.uiDeliveryOwners, agentID)
 	r.sessions[agentID] = s
 	if s.conversationSync == "v1" {
 		r.convos[agentID] = map[string]*session{instanceID: s}
@@ -397,9 +400,9 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 
 // registerUserInteraction creates a connection-local control session for the
 // Web UI. Its requested agent ID remains useful for filtering conversation
-// broadcasts, but it must never create an agents row, lease, recipient source,
-// or delivery owner. Browser storage and hostnames are therefore not router
-// identity authority.
+// broadcasts, but it must never create an agents row, durable lease, recipient
+// source, or replace a Pi delivery owner. Browser storage and hostnames are not
+// router identity authority.
 func (r *Router) registerUserInteraction(s *session, frame map[string]json.RawMessage) error {
 	leaseID, err := r.nextID()
 	if err != nil {
@@ -410,15 +413,27 @@ func (r *Router) registerUserInteraction(s *session, frame map[string]json.RawMe
 	s.setUILease(now, now.Add(r.lease))
 	r.mu.Lock()
 	r.uiSessions[s] = struct{}{}
+	// Only the Web UI may act as a delivery client. It is a fallback while no
+	// real Pi owns the target, never a replacement for an active Pi session.
+	ownsDelivery := s.clientType == "web" && r.sessions[s.agentID] == nil
+	if ownsDelivery {
+		r.uiDeliveryOwners[s.agentID] = s
+	}
 	r.mu.Unlock()
 	lease := s.uiLeaseSnapshot()
 	if err := r.sendRegistered(s, frame, lease); err != nil {
 		r.mu.Lock()
 		delete(r.uiSessions, s)
+		if r.uiDeliveryOwners[s.agentID] == s {
+			delete(r.uiDeliveryOwners, s.agentID)
+		}
 		r.removePendingForSessionLocked(s)
 		r.mu.Unlock()
 		_ = s.close(websocket.StatusInternalError, "registration failed")
 		return err
+	}
+	if ownsDelivery {
+		r.offer(s)
 	}
 	return nil
 }
@@ -560,6 +575,65 @@ func (s *session) hasUILease() bool {
 	s.stateMu.RLock()
 	defer s.stateMu.RUnlock()
 	return s.uiLease
+}
+
+func (s *session) isWebUIDeliveryClient() bool {
+	return s.hasUILease() && s.clientType == "web"
+}
+
+func (r *Router) isDeliveryOwner(s *session) bool {
+	if s == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if s.hasUILease() {
+		return r.sessions[s.agentID] == nil && r.uiDeliveryOwners[s.agentID] == s
+	}
+	return r.sessions[s.agentID] == s
+}
+
+func (r *Router) deliverySession(agentID string) *session {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if owner := r.sessions[agentID]; owner != nil {
+		return owner
+	}
+	return r.uiDeliveryOwners[agentID]
+}
+
+func (r *Router) uiDeliverySourceOwner(ctx context.Context, s *session) string {
+	if !s.isWebUIDeliveryClient() {
+		return ""
+	}
+	source, err := r.store.RecipientSource(ctx, s.agentID)
+	if err != nil || source == nil || source.SourceKind != "tmux" || source.State != "active" {
+		return ""
+	}
+	return source.OwnerIdentity
+}
+
+// promoteUIDeliveryOwnerLocked chooses one still-renewing browser only after
+// the ordinary Pi owner has gone away. The UI lease stays in memory and is
+// never written to agents, agent_leases, or recipient_sources.
+func (r *Router) promoteUIDeliveryOwnerLocked(agentID string) *session {
+	if r.sessions[agentID] != nil {
+		return nil
+	}
+	now := r.now()
+	var selected *session
+	for candidate := range r.uiSessions {
+		if candidate.agentID != agentID || !candidate.isWebUIDeliveryClient() || !candidate.uiLeaseActive(now) {
+			continue
+		}
+		if selected == nil || candidate.instanceID < selected.instanceID {
+			selected = candidate
+		}
+	}
+	if selected != nil {
+		r.uiDeliveryOwners[agentID] = selected
+	}
+	return selected
 }
 
 func (s *session) uiLeaseSnapshot() domain.Lease {
@@ -1421,7 +1495,7 @@ func (r *Router) receipt(s *session, frame map[string]json.RawMessage) error {
 	if !r.sessionMatches(s, frame) {
 		return r.leaseError(s, frame)
 	}
-	request := store.ReceiptRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, MessageID: frameString(frame, "message_id"), AttemptNumber: int(mustInt(frame, "attempt_number")), AllowBatchWithoutDeliveryItems: s.deliveryReceipts != "delivery_items_v1"}
+	request := store.ReceiptRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, MessageID: frameString(frame, "message_id"), AttemptNumber: int(mustInt(frame, "attempt_number")), AllowBatchWithoutDeliveryItems: s.deliveryReceipts != "delivery_items_v1", AllowMemoryLease: s.isWebUIDeliveryClient()}
 	if raw, ok := frame["delivery_items"]; ok {
 		_ = json.Unmarshal(raw, &request.DeliveryItems)
 	}
@@ -1493,11 +1567,16 @@ func (r *Router) offerContext(ctx context.Context, s *session) {
 }
 func (r *Router) deliveryOfferFields(ctx context.Context, s *session) map[string]any {
 	// Conversation-sync sockets share a lease, but only the primary socket owns
-	// durable delivery. Secondary activity must not claim the same queue.
-	if s == nil || r.isClosed() || ctx.Err() != nil || !r.isPrimarySession(s) || !r.activeLeaseContext(ctx, s) || s.isPaused() {
+	// durable delivery. A memory-only Web UI may be the fallback owner when no
+	// Pi session exists; its lease is validated by the router, not SQLite.
+	if s == nil || r.isClosed() || ctx.Err() != nil || !r.isDeliveryOwner(s) || !r.activeLeaseContext(ctx, s) || s.isPaused() {
 		return nil
 	}
-	delivery, err := r.store.ClaimNextMessage(ctx, store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, SourceOwnerID: s.tmuxSourceID, DeliveryLeaseDuration: r.delivery})
+	sourceOwnerID := s.tmuxSourceID
+	if s.isWebUIDeliveryClient() {
+		sourceOwnerID = r.uiDeliverySourceOwner(ctx, s)
+	}
+	delivery, err := r.store.ClaimNextMessage(ctx, store.ClaimRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, SourceOwnerID: sourceOwnerID, DeliveryLeaseDuration: r.delivery, AllowMemoryLease: s.isWebUIDeliveryClient()})
 	if err != nil || delivery == nil || ctx.Err() != nil {
 		return nil
 	}

@@ -619,7 +619,14 @@ func (r *Router) afterEnqueue(result store.EnqueueResult) {
 	// Source selection belongs to the router-owned durable directory. The
 	// caller's HTTP/reminder/policy origin never chooses a transport.
 	target, err := r.store.ResolveMessageTarget(context.Background(), result.Message.ID)
-	if err != nil || target == nil {
+	if err != nil {
+		return
+	}
+	if target == nil {
+		// A Web UI delivery client may be the only live receiver. It owns no
+		// recipient source, so source resolution intentionally leaves this row
+		// unclaimed until the router selects its in-memory delivery lease.
+		r.offerAgent(result.Message.To)
 		return
 	}
 	if target.SourceKind == "managed" {

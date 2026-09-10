@@ -11,8 +11,10 @@ import (
 )
 
 func (s *Store) requireDeliveryBatch(ctx context.Context, request ReceiptRequest, now string) ([]storedDelivery, error) {
-	if err := s.requireActiveLease(ctx, request.AgentID, request.InstanceID, request.LeaseID, now); err != nil {
-		return nil, err
+	if !request.AllowMemoryLease {
+		if err := s.requireActiveLease(ctx, request.AgentID, request.InstanceID, request.LeaseID, now); err != nil {
+			return nil, err
+		}
 	}
 	first, err := s.selectDelivery(ctx, request.MessageID, request.AttemptNumber)
 	if err != nil || first == nil {

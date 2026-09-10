@@ -84,12 +84,20 @@ type ClaimRequest struct {
 	// Empty preserves direct Store test fixtures that predate source snapshots.
 	SourceOwnerID         string
 	DeliveryLeaseDuration time.Duration
+	// AllowMemoryLease is reserved for the router's connection-local Web UI
+	// delivery owner. The router validates that lease before entering the store,
+	// so a browser never creates or renews an agent_leases row just to read mail.
+	AllowMemoryLease bool
 }
 type ReceiptRequest struct {
 	AgentID, InstanceID, LeaseID, MessageID string
 	AttemptNumber                           int
 	DeliveryItems                           []protocol.DeliveryItem
 	AllowBatchWithoutDeliveryItems          bool
+	// AllowMemoryLease has the same router-validated Web UI boundary as the
+	// matching ClaimRequest. Delivery ownership still has to match the stored
+	// owner_lease_id for every receipt.
+	AllowMemoryLease bool
 }
 type FailureResult struct {
 	MessageID                string            `json:"message_id"`
@@ -326,10 +334,12 @@ func (s *Store) ClaimNextMessage(ctx context.Context, request ClaimRequest) (*do
 	}
 	var result *domain.Delivery
 	err = s.runImmediate(ctx, func() error {
-		if err := s.requireActiveLease(ctx, request.AgentID, request.InstanceID, request.LeaseID, now); err != nil {
-			return err
+		if !request.AllowMemoryLease {
+			if err := s.requireActiveLease(ctx, request.AgentID, request.InstanceID, request.LeaseID, now); err != nil {
+				return err
+			}
 		}
-		active, err := s.activeDelivery(ctx, request.AgentID, request.LeaseID)
+		active, err := s.activeDelivery(ctx, request.AgentID, request.LeaseID, request.AllowMemoryLease)
 		if err != nil {
 			return err
 		}
@@ -347,6 +357,12 @@ func (s *Store) ClaimNextMessage(ctx context.Context, request ClaimRequest) (*do
 		batchID, err := s.ids.Next()
 		if err != nil {
 			return err
+		}
+		// delivery_attempts.lease_id is a foreign key to durable agent leases.
+		// The router fences a memory-only Web UI with owner_lease_id instead.
+		leaseReference := any(request.LeaseID)
+		if request.AllowMemoryLease {
+			leaseReference = nil
 		}
 		items := make([]protocol.DeliveryItem, 0, len(rows))
 		for i := range rows {
@@ -368,7 +384,7 @@ func (s *Store) ClaimNextMessage(ctx context.Context, request ClaimRequest) (*do
 				return err
 			}
 			rows[i].State = domain.MessageLeased
-			if _, err := s.db.ExecContext(ctx, `INSERT INTO delivery_attempts (message_id, attempt_number, lease_id, owner_lease_id, state, created_at, updated_at, delivery_expires_at, delivery_batch_id) VALUES (?, ?, ?, ?, 'leased', ?, ?, ?, ?)`, rows[i].ID, attempt, request.LeaseID, request.LeaseID, now, now, expires, batchID); err != nil {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO delivery_attempts (message_id, attempt_number, lease_id, owner_lease_id, state, created_at, updated_at, delivery_expires_at, delivery_batch_id) VALUES (?, ?, ?, ?, 'leased', ?, ?, ?, ?)`, rows[i].ID, attempt, leaseReference, request.LeaseID, now, now, expires, batchID); err != nil {
 				return err
 			}
 			items = append(items, protocol.DeliveryItem{MessageID: rows[i].ID, MessageIncarnationID: rows[i].MessageIncarnationID, AttemptNumber: attempt, DeliveryExpiresAt: expires})
@@ -1672,7 +1688,7 @@ func (s *Store) ManagedActiveDirectAttempts(ctx context.Context, agentID string)
 	return result, nil
 }
 
-func (s *Store) activeDelivery(ctx context.Context, agent, lease string) (*domain.Delivery, error) {
+func (s *Store) activeDelivery(ctx context.Context, agent, lease string, allowMemoryLease bool) (*domain.Delivery, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT messages.enqueue_sequence,messages.id,messages.sender,messages.recipient,messages.subject,messages.body,messages.created_at,messages.expires_at,messages.message_incarnation_id,messages.state,messages.sentinel_json,messages.source_kind,delivery_attempts.attempt_number,delivery_attempts.delivery_expires_at,delivery_attempts.delivery_batch_id,delivery_attempts.owner_lease_id FROM messages JOIN delivery_attempts ON delivery_attempts.message_id = messages.id WHERE messages.recipient = ? AND messages.state IN ('leased','injection_requested') AND delivery_attempts.state IN ('leased','injection_requested') ORDER BY messages.enqueue_sequence ASC`, agent)
 	if err != nil {
 		return nil, err
@@ -1721,12 +1737,16 @@ func (s *Store) activeDelivery(ctx context.Context, agent, lease string) (*domai
 			}
 		}
 	}
+	leaseReference := any(lease)
+	if allowMemoryLease {
+		leaseReference = nil
+	}
 	for _, r := range selected {
 		if r.owner != lease {
 			if batch == "" {
-				_, err = s.db.ExecContext(ctx, "UPDATE delivery_attempts SET lease_id = ?, owner_lease_id = ? WHERE message_id = ? AND state IN ('leased','injection_requested')", lease, lease, r.ID)
+				_, err = s.db.ExecContext(ctx, "UPDATE delivery_attempts SET lease_id = ?, owner_lease_id = ? WHERE message_id = ? AND state IN ('leased','injection_requested')", leaseReference, lease, r.ID)
 			} else {
-				_, err = s.db.ExecContext(ctx, "UPDATE delivery_attempts SET lease_id = ?, owner_lease_id = ? WHERE delivery_batch_id = ? AND state IN ('leased','injection_requested')", lease, lease, batch)
+				_, err = s.db.ExecContext(ctx, "UPDATE delivery_attempts SET lease_id = ?, owner_lease_id = ? WHERE delivery_batch_id = ? AND state IN ('leased','injection_requested')", leaseReference, lease, batch)
 			}
 			if err != nil {
 				return nil, err
