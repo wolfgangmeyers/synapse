@@ -263,6 +263,9 @@ func (s *session) close(code websocket.StatusCode, reason string) error {
 }
 
 func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
+	if frameString(frame, "agent_role") == "user_interaction" {
+		return r.registerUserInteraction(s, frame)
+	}
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
 	transition := r.beginOwnership(agentID)
 	defer r.finishOwnership(agentID, transition)
@@ -392,6 +395,34 @@ func (r *Router) register(s *session, frame map[string]json.RawMessage) error {
 	return nil
 }
 
+// registerUserInteraction creates a connection-local control session for the
+// Web UI. Its requested agent ID remains useful for filtering conversation
+// broadcasts, but it must never create an agents row, lease, recipient source,
+// or delivery owner. Browser storage and hostnames are therefore not router
+// identity authority.
+func (r *Router) registerUserInteraction(s *session, frame map[string]json.RawMessage) error {
+	leaseID, err := r.nextID()
+	if err != nil {
+		return err
+	}
+	now := r.now()
+	r.configureSession(s, frame, leaseID, frameString(frame, "instance_id"))
+	s.setUILease(now, now.Add(r.lease))
+	r.mu.Lock()
+	r.uiSessions[s] = struct{}{}
+	r.mu.Unlock()
+	lease := s.uiLeaseSnapshot()
+	if err := r.sendRegistered(s, frame, lease); err != nil {
+		r.mu.Lock()
+		delete(r.uiSessions, s)
+		r.removePendingForSessionLocked(s)
+		r.mu.Unlock()
+		_ = s.close(websocket.StatusInternalError, "registration failed")
+		return err
+	}
+	return nil
+}
+
 func (r *Router) registerConversationSync(s *session, frame map[string]json.RawMessage, owner, reconnecting *session, subscribers map[string]*session, conversationOrder []string, transition *ownershipTransition) (bool, error) {
 	agentID, instanceID := frameString(frame, "agent_id"), frameString(frame, "instance_id")
 	lease, leaseErr := r.store.LeaseFor(context.Background(), agentID)
@@ -496,7 +527,45 @@ func (r *Router) configureSession(s *session, frame map[string]json.RawMessage, 
 	s.conversationSync = frameString(frame, "conversation_sync")
 	s.deliveryReceipts = frameString(frame, "delivery_receipts")
 	s.inlineToolControl = frameString(frame, "inline_tool_control") == "v1"
-	r.clearInlineToolState(s.agentID)
+	// A browser's display label may match a real agent. Only a durable agent
+	// registration may reset that agent's control projection.
+	if s.role != "user_interaction" {
+		r.clearInlineToolState(s.agentID)
+	}
+}
+
+func (s *session) setUILease(connectedAt, expiresAt time.Time) {
+	s.stateMu.Lock()
+	s.uiLease, s.uiConnectedAt, s.uiExpiresAt = true, connectedAt, expiresAt
+	s.stateMu.Unlock()
+}
+
+func (s *session) renewUILease(now time.Time, duration time.Duration) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if !s.uiLease || !s.uiExpiresAt.After(now) {
+		return false
+	}
+	s.uiExpiresAt = now.Add(duration)
+	return true
+}
+
+func (s *session) uiLeaseActive(now time.Time) bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.uiLease && s.uiExpiresAt.After(now)
+}
+
+func (s *session) hasUILease() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.uiLease
+}
+
+func (s *session) uiLeaseSnapshot() domain.Lease {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return domain.Lease{LeaseID: s.leaseID, AgentID: s.agentID, InstanceID: s.instanceID, AcquiredAt: timestamp(s.uiConnectedAt), ExpiresAt: timestamp(s.uiExpiresAt)}
 }
 
 func (r *Router) sendRegistered(s *session, frame map[string]json.RawMessage, lease domain.Lease) error {
@@ -644,6 +713,10 @@ func (r *Router) activeSession(s *session) bool {
 }
 
 func (r *Router) activeSessionLocked(s *session) bool {
+	if s.hasUILease() {
+		_, active := r.uiSessions[s]
+		return active
+	}
 	if s.conversationSync == "v1" {
 		return r.convos[s.agentID][s.instanceID] == s
 	}
@@ -653,6 +726,9 @@ func (r *Router) activeLease(s *session) bool {
 	return r.activeLeaseContext(context.Background(), s)
 }
 func (r *Router) activeLeaseContext(ctx context.Context, s *session) bool {
+	if s.hasUILease() {
+		return s.uiLeaseActive(r.now())
+	}
 	lease, err := r.store.LeaseFor(ctx, s.agentID)
 	return err == nil && lease != nil && lease.LeaseID == s.leaseID && lease.InstanceID == s.deliveryInstance && lease.ExpiresAt > timestamp(r.now())
 }
@@ -669,6 +745,12 @@ func (r *Router) leaseError(s *session, frame map[string]json.RawMessage) error 
 func (r *Router) renew(s *session, frame map[string]json.RawMessage) error {
 	if !r.sessionMatches(s, frame) {
 		return r.leaseError(s, frame)
+	}
+	if s.hasUILease() {
+		if !s.renewUILease(r.now(), r.lease) {
+			return r.leaseError(s, frame)
+		}
+		return r.sendRegistered(s, frame, s.uiLeaseSnapshot())
 	}
 	lease, err := r.store.RenewAgentLease(context.Background(), store.LeaseRequest{AgentID: s.agentID, InstanceID: s.deliveryInstance, LeaseID: s.leaseID, LeaseDuration: r.lease})
 	if err != nil {

@@ -2,6 +2,7 @@ package transport_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func TestHTTPEnvelopeParityRejectsNullEscapedNewlineAndGoOnlyDedupField(t *testing.T) {
@@ -277,6 +279,98 @@ func registerTestSession(t *testing.T, wsURL, agentID, instanceID, conversationS
 	}
 	sendJSON(t, conn, frame)
 	return conn, readJSON(t, conn)
+}
+
+func TestBrowserRefreshNeverCreatesDurableAgentRecords(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "router.db")
+	durable, err := store.Open(context.Background(), database, store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	router, err := transport.New(transport.Options{Store: durable, Port: 0})
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(context.Background()))
+	defer router.Close(context.Background())
+	_, wsURL := router.URLs()
+
+	worker, workerRegistration := registerTestSession(t, wsURL, "preserved-tmux-worker", "worker-instance", "v1")
+	defer worker.Close(websocket.StatusNormalClosure, "test done")
+	initialCount := persistentAgentCount(t, database)
+	require.Equal(t, 1, initialCount)
+
+	for _, hostname := range []string{"web-ui-localhost", "web-ui-tailnet", "web-ui-preview"} {
+		browser, _, err := websocket.Dial(context.Background(), wsURL, nil)
+		require.NoError(t, err)
+		sendJSON(t, browser, map[string]any{
+			"version": "v1", "frame_id": "register-" + hostname, "type": "register",
+			"agent_id": hostname, "instance_id": hostname + "-instance",
+			"agent_role": "user_interaction", "client_type": "web", "conversation_sync": "v1",
+		})
+		registered := readJSON(t, browser)
+		require.Equal(t, "registered", registered["type"])
+		leaseID, ok := registered["lease_id"].(string)
+		require.True(t, ok && leaseID != "")
+		// A normal Web UI tab renews its connection every ten seconds. Renewal
+		// must stay in memory just like the initial browser registration.
+		sendJSON(t, browser, map[string]any{
+			"version": "v1", "frame_id": "renew-" + hostname, "type": "lease_renew",
+			"agent_id": hostname, "instance_id": hostname + "-instance", "lease_id": leaseID,
+		})
+		renewed := readJSON(t, browser)
+		require.Equal(t, "registered", renewed["type"])
+		require.Equal(t, leaseID, renewed["lease_id"])
+		lease, leaseErr := durable.LeaseFor(context.Background(), hostname)
+		require.NoError(t, leaseErr)
+		require.Nil(t, lease, "browser label %q must not own a durable lease", hostname)
+		source, sourceErr := durable.RecipientSource(context.Background(), hostname)
+		require.ErrorIs(t, sourceErr, sql.ErrNoRows, "browser label %q must not reserve a recipient source", hostname)
+		require.Nil(t, source)
+		require.Equal(t, initialCount, persistentAgentCount(t, database), "refresh through %q created a durable agent", hostname)
+		require.NoError(t, browser.Close(websocket.StatusNormalClosure, "refresh"))
+	}
+
+	// A browser may reuse a human-friendly label already held by a tmux agent.
+	// It must become a second UI observer, not a replacement delivery owner.
+	collision, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	require.NoError(t, err)
+	defer collision.Close(websocket.StatusNormalClosure, "test done")
+	sendJSON(t, collision, map[string]any{
+		"version": "v1", "frame_id": "register-collision", "type": "register",
+		"agent_id": "preserved-tmux-worker", "instance_id": "browser-instance",
+		"agent_role": "user_interaction", "client_type": "web", "conversation_sync": "v1",
+	})
+	collisionRegistered := readJSON(t, collision)
+	require.Equal(t, "registered", collisionRegistered["type"])
+	workerLease, workerLeaseErr := durable.LeaseFor(context.Background(), "preserved-tmux-worker")
+	require.NoError(t, workerLeaseErr)
+	require.NotNil(t, workerLease)
+	require.Equal(t, workerRegistration["lease_id"], workerLease.LeaseID)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	response, err := http.Get(server.URL + "/v1/agents")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	var snapshot map[string]any
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&snapshot))
+	agents := snapshot["agents"].([]any)
+	require.Len(t, agents, 1)
+	require.Equal(t, "preserved-tmux-worker", agents[0].(map[string]any)["agent_id"])
+
+	// The worker remains the delivery owner after the browser refreshes.
+	sendJSON(t, worker, map[string]any{
+		"version": "v1", "frame_id": "worker-ping", "type": "ping",
+	})
+	require.Equal(t, "pong", readJSON(t, worker)["type"])
+}
+
+func persistentAgentCount(t *testing.T, database string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", database)
+	require.NoError(t, err)
+	defer db.Close()
+	var count int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM agents").Scan(&count))
+	return count
 }
 
 func TestPostReminderBroadcastsLiveInvalidation(t *testing.T) {

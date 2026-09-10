@@ -186,19 +186,23 @@ type Router struct {
 	ownershipGeneration uint64
 	// deliveryOfferMu protects one coalescing timer per agent. Close marks the
 	// timer set closed before waiting so no callback can be added concurrently.
-	deliveryOfferMu          sync.Mutex
-	pendingDeliveryOffers    map[string]*pendingDeliveryOffer
-	deliveryOfferWG          sync.WaitGroup
-	deliveryStoreWG          sync.WaitGroup
-	deliveryOffersClosed     bool
-	deliveryOffersCancel     context.CancelFunc
-	server                   *http.Server
-	listener                 net.Listener
-	serveDone                chan struct{}
-	sweepCancel              context.CancelFunc
-	sweepDone                chan struct{}
-	closed                   bool
-	sessions                 map[string]*session
+	deliveryOfferMu       sync.Mutex
+	pendingDeliveryOffers map[string]*pendingDeliveryOffer
+	deliveryOfferWG       sync.WaitGroup
+	deliveryStoreWG       sync.WaitGroup
+	deliveryOffersClosed  bool
+	deliveryOffersCancel  context.CancelFunc
+	server                *http.Server
+	listener              net.Listener
+	serveDone             chan struct{}
+	sweepCancel           context.CancelFunc
+	sweepDone             chan struct{}
+	closed                bool
+	sessions              map[string]*session
+	// uiSessions are connected browsers, not mailbox recipients. Keeping them
+	// outside sessions prevents a page refresh from claiming a durable agent
+	// identity or replacing a tmux/managed delivery owner with the same label.
+	uiSessions               map[*session]struct{}
 	convos                   map[string]map[string]*session
 	conversationOrder        map[string][]string
 	activities               map[string]activity
@@ -240,6 +244,11 @@ type session struct {
 	conversationSync  string
 	deliveryReceipts  string
 	inlineToolControl bool
+	// A user-interaction lease is connection-local and never enters SQLite.
+	// Browser-provided agent_id is only a display/conversation filter label.
+	uiLease       bool
+	uiConnectedAt time.Time
+	uiExpiresAt   time.Time
 	// tmuxSourceID is durable across this socket and primary replacements.
 	tmuxSourceID     string
 	paused           bool
@@ -464,7 +473,7 @@ func New(options Options) (*Router, error) {
 	}
 	deliveryOffersContext, deliveryOffersCancel := context.WithCancel(context.Background())
 	policyContext, policyCancel := context.WithCancel(context.Background())
-	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, providerAuth: options.ProviderAuth, staticUI: static}
+	r := &Router{store: options.Store, clock: clock, ids: ids, host: host, port: port, path: path, maxFrame: maxFrame, maxRequest: maxRequest, lease: lease, delivery: delivery, maxAttempts: attempts, activityTTL: activityTTL, controlTTL: controlTTL, sweepInterval: sweepInterval, sweepHeartbeat: sweepHeartbeat, maxControls: maxControls, maxPerSrc: maxPerSrc, memory: options.Memory, tmux: options.Tmux, attachments: options.Attachments, log: logger, policies: policies, policyTimeout: policyTimeout, policySender: options.PolicySender, policyRunning: map[string]bool{}, policyLastRun: map[string]time.Time{}, policyContext: policyContext, policyCancel: policyCancel, sessions: map[string]*session{}, uiSessions: map[*session]struct{}{}, convos: map[string]map[string]*session{}, conversationLocks: map[string]*conversationLock{}, conversationOrder: map[string][]string{}, activities: map[string]activity{}, models: map[string]modelProjection{}, goals: map[string]goalState{}, inlineToolStates: map[string]inlineToolState{}, latestGoalRevision: map[string]int64{}, pendingMod: map[string]*pendingControl{}, pendingGoal: map[string]*pendingControl{}, pendingLock: map[string]*pendingControl{}, pendingInlineTool: map[string]*pendingControl{}, lifecycleState: map[string]lifecycleAgent{}, rates: map[string][]time.Time{}, windowIDs: map[string]string{}, tmuxProvisionals: map[string]*tmuxProvisioning{}, ownership: map[string]*ownershipTransition{}, pendingDeliveryOffers: map[string]*pendingDeliveryOffer{}, deliveryOffersContext: deliveryOffersContext, deliveryOffersCancel: deliveryOffersCancel, managed: options.Managed, providerAuth: options.ProviderAuth, staticUI: static}
 	r.uiLive = newUILiveHub(r)
 	if options.Managed != nil {
 		// Managed lifecycle snapshots commit in the supervisor, outside an HTTP
