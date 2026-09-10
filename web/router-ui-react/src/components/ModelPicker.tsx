@@ -75,7 +75,7 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
   const close = () => { setOpen(false); setQuery(""); buttonRef.current?.focus(); };
   const choose = (model: ModelSummary) => { setOptimisticModel(model); onChange(model); close(); };
   const chooseEmpty = () => { setOptimisticModel(undefined); emptyOption?.onSelect(); close(); };
-  const menu = open && menuHost ? <div id={listId} className="model-menu model-menu-portal" style={menuPosition} role="dialog" aria-label="Choose agent model">
+  const menu = open && menuHost ? <div id={listId} className="model-menu model-menu-portal" style={menuPosition} role="dialog" aria-label="Choose agent model" onKeyDown={(event) => { if (event.key === "Escape") close(); }}>
     <input ref={searchRef} className="model-search" type="search" aria-label="Search available models" placeholder="Search models…" value={query} onChange={(event) => setQuery(event.target.value)} />
     {truncated ? <p className="model-catalog-note">Showing {normalized.length} of {Math.max(normalized.length, totalCount)} models.</p> : null}
     <div className="model-options" role="listbox" aria-busy={pending || loading}>

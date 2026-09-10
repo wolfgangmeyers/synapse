@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import userEvent from "@testing-library/user-event";
@@ -36,8 +36,9 @@ describe("ModelPicker", () => {
     render(<ModelPicker models={models} onChange={vi.fn()} />);
     const button = screen.getByRole("button", { name: "Select model" });
     await user.click(button);
-    await screen.findByRole("searchbox");
-    await user.keyboard("{Escape}");
+    const search = await screen.findByRole("searchbox");
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    fireEvent.keyDown(search, { key: "Escape" });
     expect(button).toHaveAttribute("aria-expanded", "false");
     expect(document.activeElement).toBe(button);
   });

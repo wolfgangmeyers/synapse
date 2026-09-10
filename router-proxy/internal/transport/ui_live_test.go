@@ -156,6 +156,16 @@ func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {
 	directory, ok := directories[0].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "child", directory["name"])
+
+	emptyRequest := httptest.NewRequest(http.MethodGet, "/v1/managed-directories?path=", nil)
+	emptyResponse := httptest.NewRecorder()
+	router.ServeHTTP(emptyResponse, emptyRequest)
+	require.Equal(t, http.StatusOK, emptyResponse.Code)
+	var emptyBody map[string]any
+	require.NoError(t, json.Unmarshal(emptyResponse.Body.Bytes(), &emptyBody))
+	expectedRoot, expectedRootErr := filepath.EvalSymlinks(root)
+	require.NoError(t, expectedRootErr)
+	require.Equal(t, expectedRoot, emptyBody["path"])
 }
 
 func TestStaticUIRejectsSymlinkedAssetsAndRechecksContainment(t *testing.T) {

@@ -602,6 +602,7 @@ async function auditBrowserStorage(bcb, tab, sentinel) {
       "mecha.web.selectedPeers",
       "mecha.web.agentId",
       "mecha.web.drafts",
+      "mecha.web.managedRecentFolders",
     ]);
     const secretMarker = /(?:api[-_ ]?key|secret|password|authorization|bearer|access[-_]?token|refresh[-_]?token|cookie)/i;
     const utf8 = new TextEncoder();
@@ -625,6 +626,7 @@ async function auditBrowserStorage(bcb, tab, sentinel) {
       if (key === "mecha.web.selectedPeers" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && Object.values(parsed).every((entryValue) => typeof entryValue === "string")) classification = "selected-peer-map";
       if (key === "mecha.web.agentId" && typeof value === "string") classification = "legacy-agent-id";
       if (key === "mecha.web.drafts" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) classification = "draft-record-map";
+      if (key === "mecha.web.managedRecentFolders" && Array.isArray(parsed) && parsed.length <= 10 && parsed.every((folder) => typeof folder === "string" && (/^[/]/.test(folder) || folder === "~" || folder.startsWith("~/")))) classification = "managed-recent-folder-list";
       // The caller writes this value only after the allowlist and secret scan
       // pass. A failed audit becomes a failed step artifact without this data.
       entries.push({ key, value, byte_length: utf8.encode(value).byteLength, value_sha256: await sha256(value), known_key: knownKeys.has(key), classification, secret_marker_present: secretMarker.test(key) || secretMarker.test(value), sentinel_present: sentinel !== "" && value.includes(sentinel) });
@@ -932,9 +934,9 @@ export async function runManagedRpcRelease() {
     });
 
     await step("provider-auth-three-provider-ui", async () => {
-      await execBrowser(bcb, tab, "(() => { const routerButton = document.querySelector('.router-selector'); if (!(routerButton instanceof HTMLButtonElement)) throw new Error('router selector missing'); routerButton.click(); return true; })()");
-      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.router-dialog'))")) ? true : undefined, "router settings dialog");
-      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.router-dialog button')].find((item) => item.textContent?.trim() === 'Provider settings'); if (!(button instanceof HTMLButtonElement)) throw new Error('Provider settings button missing'); button.click(); return true; })()");
+      await execBrowser(bcb, tab, "(() => { const actions = document.querySelector('.managed-actions-trigger'); if (!(actions instanceof HTMLButtonElement)) throw new Error('managed actions menu missing'); actions.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-actions-menu [role=menuitem]'))")) ? true : undefined, "managed actions menu");
+      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-actions-menu [role=menuitem]')].find((item) => item.textContent?.trim() === 'Provider settings'); if (!(button instanceof HTMLButtonElement)) throw new Error('Provider settings menu item missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.provider-auth-dialog'))")) ? true : undefined, "provider settings dialog");
       await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelectorAll('.provider-auth-row').length === 3")) === true ? true : undefined, "three provider settings rows");
       const before = await fetch(`${router.httpUrl}/v1/provider-auth`).then((response) => response.json());
@@ -965,16 +967,26 @@ export async function runManagedRpcRelease() {
     });
 
     await step("launch-real-managed-pi", async () => {
-      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent button missing'); button.click(); return true; })()");
+      await execBrowser(bcb, tab, "document.querySelector('.provider-auth-dialog button[aria-label=\"Close provider settings\"]')?.click(); true;");
+      await waitFor(async () => (await execBrowser(bcb, tab, "!document.querySelector('.provider-auth-dialog[open]')")) ? true : undefined, "provider settings close");
+      await execBrowser(bcb, tab, "(() => { const actions = document.querySelector('.managed-actions-trigger'); if (!(actions instanceof HTMLButtonElement)) throw new Error('managed actions menu missing'); actions.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-actions-menu [role=menuitem]'))")) ? true : undefined, "managed actions menu");
+      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-actions-menu [role=menuitem]')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent menu item missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-agent-dialog form'))")) ? true : undefined, "managed launch dialog");
-      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog input:nth-of-type(1)", CHILD_AGENT));
-      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog input[placeholder='/Users/me/project']", router.cwd));
-      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog fieldset label:nth-of-type(1) input", "mecha-router-test"));
-      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog fieldset label:nth-of-type(2) input", "managed-rpc-release"));
+      await execBrowser(bcb, tab, "(() => { const button = document.querySelector('.managed-agent-dialog .model-current'); if (!(button instanceof HTMLButtonElement) || button.textContent?.trim() !== 'Use router default') throw new Error('router default model trigger missing'); button.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.model-menu-portal input[aria-label=\"Search available models\"]'))")) ? true : undefined, "searchable model picker");
+      await execBrowser(bcb, tab, reactInputScript(".model-menu-portal input[aria-label='Search available models']", "managed-rpc-release"));
+      const picker = await waitFor(async () => {
+        const rendered = await execBrowser(bcb, tab, "(() => { const menu = document.querySelector('.model-menu-portal'); const option = [...document.querySelectorAll('.model-menu-portal [role=option]')].find((item) => item.textContent?.includes('managed-rpc-release')); if (!(menu instanceof HTMLElement) || !(option instanceof HTMLElement)) return undefined; const menuRect = menu.getBoundingClientRect(); const optionRect = option.getBoundingClientRect(); return { menu: menuRect.toJSON(), option: optionRect.toJSON(), visible: menuRect.top >= 0 && menuRect.bottom <= innerHeight && optionRect.top >= menuRect.top && optionRect.bottom <= menuRect.bottom, host: menu.parentElement?.tagName ?? '' }; })()");
+        return rendered?.visible === true && rendered.host === "DIALOG" ? rendered : undefined;
+      }, "unclipped searchable model picker");
+      await execBrowser(bcb, tab, "(() => { const search = document.querySelector('.model-menu-portal input[aria-label=\"Search available models\"]'); if (!(search instanceof HTMLInputElement)) throw new Error('model search missing'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; if (!setter) throw new Error('model search setter missing'); setter.call(search, ''); search.dispatchEvent(new Event('input', { bubbles: true })); search.dispatchEvent(new Event('change', { bubbles: true })); const defaultOption = [...document.querySelectorAll('.model-menu-portal [role=option]')].find((item) => item.textContent?.includes('Use router default')); if (!(defaultOption instanceof HTMLButtonElement)) throw new Error('router default option missing'); defaultOption.click(); return true; })()");
+      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog form label:first-of-type input", CHILD_AGENT));
+      await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog input[placeholder='~/code/project']", router.cwd));
       await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog textarea", "Spawn the acceptance child compaction fixture."));
       await execBrowser(bcb, tab, "(() => { const button = document.querySelector('.managed-agent-dialog form button[type=submit]'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed launch submit missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}]')?.textContent?.includes('router-managed')`)) ? true : undefined, "managed Pi row");
-      return { agent_id: CHILD_AGENT };
+      return { agent_id: CHILD_AGENT, picker };
     });
 
     const compacting = await step("real-child-compaction", async () => {

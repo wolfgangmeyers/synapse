@@ -10,6 +10,7 @@ export interface ManagedAgentDialogProps {
   agent?: ManagedAgent;
   pending?: boolean;
   error?: string;
+  recentFolders?: readonly string[];
   onClose(): void;
   onLaunch(input: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<void>;
   onAction(agentId: string, action: "restart" | "reset" | "terminate"): Promise<void>;
@@ -17,7 +18,7 @@ export interface ManagedAgentDialogProps {
   onModels?(): Promise<ModelsResponse>;
 }
 
-export function ManagedAgentDialog({ open, agent, pending = false, error, onClose, onLaunch, onAction, onListDirectories, onModels }: ManagedAgentDialogProps): ReactElement {
+export function ManagedAgentDialog({ open, agent, pending = false, error, recentFolders, onClose, onLaunch, onAction, onListDirectories, onModels }: ManagedAgentDialogProps): ReactElement {
   const [name, setName] = useState("");
   const [cwd, setCwd] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelSummary>();
@@ -46,7 +47,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, onClos
       {confirmTermination ? <div className="managed-confirmation" role="alert"><p>Terminate {agent.agent_id}?</p><button type="button" className="danger-button" disabled={pending} onClick={() => { void onAction(agent.agent_id, "terminate"); }}>Terminate agent</button><button type="button" className="secondary" onClick={() => setConfirmTermination(false)}>Cancel</button></div> : null}
     </section> : <form className="managed-agent-form" onSubmit={submit}>
       <label>Name<input required value={name} onChange={(event) => setName(event.currentTarget.value)} autoComplete="off" /></label>
-      <ManagedDirectoryPicker value={cwd} onChange={setCwd} list={onListDirectories} />
+      <ManagedDirectoryPicker value={cwd} {...(recentFolders === undefined ? {} : { recentFolders })} onChange={setCwd} list={onListDirectories} />
       <fieldset><legend>Model (optional)</legend><ModelPicker models={availableModels} {...(selectedModel ? { currentModel: selectedModel } : {})} loading={catalogLoading} {...(catalog && availableModels.length === 0 ? { emptyMessage: "No connected models. Connect a provider in Provider settings." } : {})} pending={pending} disabled={pending} emptyOption={{ label: "Use router default", description: "Uses the router default when you launch.", onSelect: () => setSelectedModel(undefined) }} onChange={setSelectedModel} /></fieldset>
       {catalogError ? <p className="error" role="alert">{catalogError}</p> : null}
       <label>Initial instruction (optional)<textarea value={instruction} onChange={(event) => setInstruction(event.currentTarget.value)} /></label>
