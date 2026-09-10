@@ -35,8 +35,15 @@ type managedRootControlRunnerRequest struct {
 }
 
 type managedRootControlFence struct {
-	AgentID, PiSessionID, ProcessStartMarker, ProcessIncarnation, RuntimeGeneration, ManifestHash string
-	SessionEpoch, ProcessPID, ManifestRevision                                                    int64
+	AgentID            string `json:"agent_id"`
+	PiSessionID        string `json:"pi_session_id"`
+	SessionEpoch       int64  `json:"session_epoch"`
+	ProcessPID         int64  `json:"process_pid"`
+	ProcessStartMarker string `json:"process_start_marker"`
+	ProcessIncarnation string `json:"process_incarnation"`
+	RuntimeGeneration  string `json:"runtime_generation"`
+	ManifestRevision   int64  `json:"manifest_revision"`
+	ManifestHash       string `json:"manifest_hash"`
 }
 
 type managedRootControlRunnerResult struct {

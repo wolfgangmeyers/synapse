@@ -1,6 +1,13 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
+const routerUrl = process.env.MECHA_WEBUI_ROUTER_URL ?? process.env.MECHA_ROUTER_URL ?? "http://127.0.0.1:8765";
+const publicRouterUrl = process.env.MECHA_WEBUI_ROUTER_URL;
+const allowedHosts = (() => {
+  if (publicRouterUrl === undefined) return [];
+  try { return [new URL(publicRouterUrl).hostname]; } catch { return []; }
+})();
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -12,6 +19,12 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 5173,
     strictPort: false,
+    ...(allowedHosts.length === 0 ? {} : { allowedHosts }),
+    // Keep browser traffic on the web UI origin so remote clients can use the
+    // same API and WebSocket surface without needing direct router access.
+    proxy: {
+      "/v1": { target: routerUrl, changeOrigin: true, ws: true },
+    },
   },
   test: {
     environment: "jsdom",
