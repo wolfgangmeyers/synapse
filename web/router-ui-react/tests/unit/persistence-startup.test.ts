@@ -10,7 +10,7 @@ import {
   type IndexedDbFactory,
 } from "../../src/persistence/indexed-db";
 import { initializePersistence } from "../../src/persistence/history-repository";
-import { AGENT_IDS_KEY, LEGACY_AGENT_ID_KEY, ROUTERS_KEY, createSettingsRepository, setActiveRouter } from "../../src/persistence/settings-repository";
+import { AGENT_IDS_KEY, LEGACY_AGENT_ID_KEY, ROUTERS_KEY, createSettingsRepository, migrateBootstrapRouter, setActiveRouter } from "../../src/persistence/settings-repository";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -37,6 +37,26 @@ async function deleteDatabase(): Promise<void> {
 }
 
 describe("settings identity persistence", () => {
+  it("removes only an unambiguous legacy bootstrap router", () => {
+    const intendedRouter = "http://intended-router.test:43123";
+    const bootstrapRouter = "http://web-ui.test:8787";
+    const migrated = migrateBootstrapRouter({
+      activeRouter: bootstrapRouter,
+      routers: [intendedRouter, bootstrapRouter],
+      aliases: { [intendedRouter]: "Intended", [bootstrapRouter]: "Old web UI" },
+      agentIds: { [intendedRouter]: "web", [bootstrapRouter]: "web" },
+      selectedPeers: { [`${intendedRouter}\u001fweb`]: "worker-one", [`${bootstrapRouter}\u001fweb`]: "worker-one" },
+    }, bootstrapRouter);
+
+    expect(migrated).toEqual({
+      activeRouter: intendedRouter,
+      routers: [intendedRouter],
+      aliases: { [intendedRouter]: "Intended" },
+      agentIds: { [intendedRouter]: "web" },
+      selectedPeers: { [`${intendedRouter}\u001fweb`]: "worker-one" },
+    });
+  });
+
   it("keeps the first router on the default identity while preserving the second router identity across save and reload", () => {
     const storage = new MemoryStorage();
     const firstRouter = "http://first-router.test:43123";
