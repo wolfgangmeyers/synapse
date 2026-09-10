@@ -10,6 +10,7 @@ import { normalizeRouterUrl, persistedActiveRouter, createSettingsRepository, mi
 import { loadManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "./persistence/managed-folder-history";
 import { type RouterTransport, type RouterTransportOptions } from "./transport/router-transport";
 import { isRecord } from "./protocol/guards";
+import { secureUuid } from "./platform/secure-uuid";
 import { useRouterSession } from "./hooks/use-router-session";
 import { useAgentReconciliation } from "./hooks/use-agent-reconciliation";
 import { useConversation } from "./hooks/use-conversation";
@@ -344,7 +345,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const send = async (peer: string, body: string, images: ImageInput[]): Promise<void> => {
     // Use one client message ID for the optimistic row and the HTTP envelope.
     // The router preserves it, so reconnect history can settle this row safely.
-    const localId = crypto.randomUUID();
+    const localId = secureUuid();
     const payload = { id: localId, from: resolvedAgentId, to: peer, body, created_at: new Date().toISOString(), source: { kind: "web_ui" }, ...(images.length > 0 ? { attachments: images.map((image) => ({ type: "image", data_url: image.dataUrl, ...(image.name === undefined ? {} : { name: image.name }) })) } : {}) };
     const pending = pendingMessage(body, peer, resolvedAgentId, images.map((image) => ({ url: image.dataUrl, mime_type: image.mimeType, size_bytes: image.sizeBytes, ...(image.name === undefined ? {} : { name: image.name }) })), localId);
     session.dispatch({ type: "message/append", scope, peer, message: pending });
@@ -378,7 +379,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const saveGoal = (payload: { action: "set" | "off"; goal: string; settings: GoalControlSettings }): void => {
     if (!selectedAgent?.instance_id || !selectedLegacyPeer) return;
     if (!goalControlAvailable || !session.transport.goalControlAvailable) { setGoalError("Goal controls are not available on this router."); return; }
-    const controlId = crypto.randomUUID();
+    const controlId = secureUuid();
     setGoalError(undefined);
     if (!session.transport.sendGoalControl(selectedLegacyPeer, selectedAgent.instance_id, { controlId, action: payload.action, goal: payload.goal, settings: payload.settings })) {
       setGoalError(goalErrorMessage("router_reconnecting"));
@@ -396,7 +397,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     }
     if (lockAfterCreate && selectedAgent?.instance_id) {
       const reminderId = result.reminder.id;
-      const controlId = crypto.randomUUID();
+      const controlId = secureUuid();
       pendingReminderControls.current.set(controlId, { action: "set", afterCreate: true });
       setReminderStatus("Reminder created. Locking…");
       const accepted = session.transport.sendReminderLockControl(payload.target, selectedAgent.instance_id, reminderId, "set", controlId);
@@ -422,7 +423,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   };
   const lockReminder = (reminder: Reminder, action: ReminderLockAction): void => {
     if (!selectedAgent?.instance_id) return;
-    const controlId = crypto.randomUUID();
+    const controlId = secureUuid();
     pendingReminderControls.current.set(controlId, { action, afterCreate: false });
     if (!session.transport.sendReminderLockControl(reminder.target, selectedAgent.instance_id, reminder.id, action, controlId)) {
       pendingReminderControls.current.delete(controlId);

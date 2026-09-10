@@ -1,4 +1,5 @@
 import { normalizeRouterUrl } from "../persistence/settings-repository";
+import { secureUuid } from "../platform/secure-uuid";
 import { httpRoutes } from "../protocol/manifest";
 import { isAgentId, isConversationMessage, isManagedAgent, isManagedChildrenProjection, isModelSummary, isRecord, isRouterUtcTimestamp } from "../protocol/guards";
 import { normalizeGoalState } from "../domain/goals";
@@ -281,7 +282,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
   const managedRequest = async (path: string, method: "GET" | "POST" | "PUT" | "DELETE", payload?: unknown): Promise<unknown> => {
     const headers: Record<string, string> = {};
     if (payload !== undefined) headers["content-type"] = "application/json";
-    if (method !== "GET") headers["x-request-id"] = crypto.randomUUID();
+    if (method !== "GET") headers["x-request-id"] = secureUuid();
     return request(path, { method, credentials: "omit", ...(Object.keys(headers).length === 0 ? {} : { headers }), ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
   };
   return {

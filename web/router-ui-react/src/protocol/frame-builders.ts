@@ -1,3 +1,4 @@
+import { secureUuid } from "../platform/secure-uuid";
 import {
   isAckFrame,
   isActivityFrame,
@@ -63,8 +64,8 @@ function inputRecord(input: unknown): RecordValue {
 }
 
 function generatedFrameId(): string {
-  const uuid = globalThis.crypto?.randomUUID();
-  if (typeof uuid !== "string" || !isFrameId(uuid)) throw new ProtocolValidationError("Unable to create a valid frame ID");
+  const uuid = secureUuid();
+  if (!isFrameId(uuid)) throw new ProtocolValidationError("Unable to create a valid frame ID");
   return uuid;
 }
 

@@ -32,6 +32,24 @@ describe("direct WebSocket transport", () => {
     expect(statuses).toContain("connected"); expect(client.identity.leaseId).toBe("lease"); client.close();
   });
 
+  it("registers with secure random UUID bytes when randomUUID is unavailable", () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => { bytes.fill(0x11); return bytes; });
+    vi.stubGlobal("crypto", { getRandomValues });
+    try {
+      const factory = new FakeFactory();
+      const client = createWebSocketClient({ routerUrl: "http://router.test", agentId: "web", webSocketFactory: factory.create });
+      client.connect(); factory.latest.readyState = 1; factory.latest.emit("open", {});
+      const register = sentFrame(factory.latest, 0);
+      expect(factory.latest.url).toBe("ws://router.test/v1/agents");
+      expect(stringField(register, "frame_id")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(stringField(register, "instance_id")).toMatch(/^[0-9a-f-]+-1$/);
+      expect(getRandomValues).toHaveBeenCalled();
+      client.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("accepts the server acknowledgement for every active lease renewal", () => {
     vi.useFakeTimers(); const factory = new FakeFactory(); const statuses: string[] = []; const errors: string[] = []; const frames: string[] = [];
     const client = createWebSocketClient({ routerUrl: "http://router.test", agentId: "web", webSocketFactory: factory.create, onStatus: (status) => statuses.push(status), onProtocolError: (error) => errors.push(error.message), onFrame: (frame) => frames.push(frame.type) });

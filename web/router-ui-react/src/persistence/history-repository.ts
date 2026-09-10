@@ -21,6 +21,7 @@ import {
   type MessageRecord,
   type ThumbnailRecord,
 } from "./retention";
+import { secureUuid } from "../platform/secure-uuid";
 import {
   normalizeRouterUrl,
   ownerScope,
@@ -61,9 +62,7 @@ export const cacheKeyForAttachment = thumbnailCacheKey;
 const persistenceInitializations = new WeakMap<IndexedDbFactory, Map<StorageAdapter | undefined, Promise<void>>>();
 
 function randomKey(): string {
-  const crypto = globalThis.crypto;
-  if (crypto !== undefined && typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  return `${Date.now()}-${Math.random()}`;
+  return secureUuid();
 }
 
 function isUnknownArray(value: unknown): value is unknown[] {

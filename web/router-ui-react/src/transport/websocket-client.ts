@@ -1,4 +1,5 @@
 import { buildLeaseRenewFrame, buildRegisterFrame } from "../protocol/frame-builders";
+import { secureUuid } from "../platform/secure-uuid";
 import { isAgentId, parseServerFrame } from "../protocol/guards";
 import type { ClientFrame, RegisteredFrame, ServerFrame } from "../protocol/types";
 import { loadSettings, normalizeRouterUrl, saveSettings, setAgentId, type StorageAdapter } from "../persistence/settings-repository";
@@ -58,7 +59,7 @@ function wsUrl(routerUrl: string): string {
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
-function freshId(): string { return crypto.randomUUID(); }
+function freshId(): string { return secureUuid(); }
 function eventString(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
 
 export function createWebSocketClient(options: WebSocketClientOptions): WebSocketClient {
