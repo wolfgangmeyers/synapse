@@ -1,10 +1,17 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManagedAgentDialog } from "../../src/components/ManagedAgentDialog";
 
 describe("ManagedAgentDialog", () => {
+  afterEach(cleanup);
+
+  it("uses the shared Goal dialog presentation", () => {
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
+    expect(screen.getByRole("dialog", { name: "Launch managed agent" })).toHaveClass("message-dialog", "managed-agent-dialog");
+  });
+
   it("uses the folders-only picker and submits a direct launch payload", async () => {
     const user = userEvent.setup();
     const onLaunch = vi.fn(async () => undefined);
