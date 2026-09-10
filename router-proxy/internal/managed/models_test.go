@@ -44,13 +44,14 @@ func TestProductionModelSourceReadsPersistedDefault(t *testing.T) {
 	require.Equal(t, "gpt-5.6-terra", selected.ID)
 }
 
-func TestSelectModelRejectsUnavailableExplicitAndTerra(t *testing.T) {
+func TestSelectModelRejectsUnavailableExplicitButUsesServerFallbackWhenOmitted(t *testing.T) {
 	_, err := SelectModel(&Model{Provider: "missing", ID: "model"}, nil, Catalog{Models: []Model{}})
 	require.Error(t, err)
 	require.True(t, IsModelUnavailable(err))
-	_, err = SelectModel(nil, nil, Catalog{Models: []Model{}})
-	require.Error(t, err)
-	require.True(t, IsModelUnavailable(err))
+
+	selected, err := SelectModel(nil, nil, Catalog{Models: []Model{}})
+	require.NoError(t, err)
+	require.Equal(t, Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}, selected)
 }
 
 func TestPublicAgentOmitsPrivateProcessAndSessionIdentity(t *testing.T) {

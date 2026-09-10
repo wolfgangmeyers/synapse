@@ -64,6 +64,9 @@ test("provider auth protocol binds each prompt and terminal snapshot to one mapp
   assert.deepEqual(promptEvent(request, { id: "prompt-1", kind: "secret", message: "Gemini API key" }), {
     type: "prompt", operation_id: "operation-1", provider: "google", prompt: { id: "prompt-1", kind: "secret", message: "Gemini API key" },
   });
+  assert.deepEqual(promptEvent(request, { id: "prompt-2", kind: "manual_code", message: "Open the sign-in page", url: "https://accounts.google.com/device" }), {
+    type: "prompt", operation_id: "operation-1", provider: "google", prompt: { id: "prompt-2", kind: "manual_code", message: "Open the sign-in page", url: "https://accounts.google.com/device" },
+  });
   const terminal = terminalResult(request, "succeeded", {
     providers: [
       { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out" },

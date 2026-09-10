@@ -3,6 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManagedAgentDialog } from "../../src/components/ManagedAgentDialog";
+import type { ModelsResponse } from "../../src/transport/http-client";
 
 describe("ManagedAgentDialog", () => {
   afterEach(cleanup);
@@ -11,7 +12,6 @@ describe("ManagedAgentDialog", () => {
     render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} />);
     expect(screen.getByRole("dialog", { name: "Launch managed agent" })).toHaveClass("message-dialog", "managed-agent-dialog");
   });
-
   it("uses the folders-only picker and submits a direct launch payload", async () => {
     const user = userEvent.setup();
     const onLaunch = vi.fn(async () => undefined);
@@ -23,6 +23,32 @@ describe("ManagedAgentDialog", () => {
     await user.click(await screen.findByRole("button", { name: "project" }));
     await user.click(screen.getByRole("button", { name: "Launch" }));
     expect(onLaunch).toHaveBeenCalledWith({ name: "managed-alpha", cwd: "/allowed/project" });
+  });
+
+  it("uses the searchable model picker and only submits available models", async () => {
+    const user = userEvent.setup();
+    const onLaunch = vi.fn(async () => undefined);
+    const onModels = vi.fn(async (): Promise<ModelsResponse> => ({ auth_revision: 1, default_model: null, models: [
+      { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true },
+      { provider: "google", id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", available: false },
+    ] }));
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={onLaunch} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onModels={onModels} />);
+    const modelButton = await screen.findByRole("button", { name: "Use router default" });
+    await user.click(modelButton);
+    await user.type(screen.getByRole("searchbox"), "terra");
+    await user.click(screen.getByRole("option", { name: /GPT-5\.6 Terra/ }));
+    expect(screen.queryByRole("option", { name: /Gemini/ })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Name"), "managed-alpha");
+    await user.type(screen.getByLabelText("Working folder"), "/allowed/project");
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+    expect(onLaunch).toHaveBeenCalledWith({ name: "managed-alpha", cwd: "/allowed/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" } });
+  });
+
+  it("explains when no authenticated provider has model choices", async () => {
+    const user = userEvent.setup();
+    render(<ManagedAgentDialog open onClose={() => undefined} onLaunch={async () => undefined} onAction={async () => undefined} onListDirectories={async () => ({ path: "/allowed", parent: "", directories: [] })} onModels={async (): Promise<ModelsResponse> => ({ auth_revision: 1, default_model: null, models: [] })} />);
+    await user.click(await screen.findByRole("button", { name: "Use router default" }));
+    expect(screen.getByText("No connected models. Connect a provider in Provider settings.")).toBeInTheDocument();
   });
 
   it("requires a deliberate termination confirmation", async () => {
