@@ -3,6 +3,15 @@ import App from "./App";
 
 const rootElement = document.getElementById("root");
 
+function browserStorage(): Storage | undefined {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 if (rootElement !== null) {
-  createRoot(rootElement).render(<App />);
+  const storage = browserStorage();
+  createRoot(rootElement).render(<App {...(storage === undefined ? {} : { storage })} />);
 }
