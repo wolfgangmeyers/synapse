@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -9,12 +12,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestFixedAuthHelperSnapshotUsesOrdinaryPiAgentDirectory(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node is required for the fixed auth helper")
+	}
+	root := t.TempDir()
+	managedHome := filepath.Join(root, "managed-home")
+	piAgentDir := filepath.Join(root, "ordinary", ".pi", "agent")
+	require.NoError(t, os.MkdirAll(managedHome, 0o700))
+	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
+	helperPath := filepath.Join(root, "helper.mjs")
+	script := fmt.Sprintf(`if (process.env.PI_CODING_AGENT_DIR !== %q || process.env.MECHA_PI_AUTH_PATH !== %q) process.exit(1);
+console.log(JSON.stringify({providers:[{provider:"openai-codex",label:"ChatGPT",authenticated:true,status:"authenticated"},{provider:"google",label:"Google",authenticated:false,status:"signed_out"},{provider:"cursor",label:"Cursor",authenticated:false,status:"signed_out"}],models:[{provider:"openai-codex",id:"gpt-5.6-terra",name:"GPT-5.6 Terra",available:true}]}));
+`, piAgentDir, filepath.Join(piAgentDir, "auth.json"))
+	require.NoError(t, os.WriteFile(helperPath, []byte(script), 0o600))
+
+	providers, models, err := (fixedAuthHelper{config: managed.Config{ManagedHome: managedHome, PiAgentDir: piAgentDir, AuthHelperPath: helperPath}, nodeExecutable: node}).Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, providers, 3)
+	require.Equal(t, "openai-codex", providers[0].Provider)
+	require.Len(t, models, 1)
+	require.Equal(t, "gpt-5.6-terra", models[0].ID)
+}
+
 func TestManagedStartupUsesOnlyCoreLaunchInputs(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
+	piAgentDir := filepath.Join(root, "ordinary-pi", "agent")
 	session := filepath.Join(home, "sessions")
 	work := filepath.Join(root, "work")
 	require.NoError(t, os.MkdirAll(session, 0o700))
+	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
 	require.NoError(t, os.MkdirAll(work, 0o700))
 	write := func(name, value string, mode os.FileMode) string {
 		path := filepath.Join(root, name)
@@ -22,7 +51,7 @@ func TestManagedStartupUsesOnlyCoreLaunchInputs(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte(value), mode))
 		return path
 	}
-	config := managed.Config{Enabled: true, PiExecutable: write("bin/pi", "#!/bin/sh\n", 0o700), ManagedHome: home, SessionRoot: session, ManifestPath: write("contract/managed.json", `{}`, 0o600), MechaRPCExtension: write("extensions/rpc.ts", "export {}", 0o600), PiSubagentsExtension: write("extensions/subagents.ts", "export {}", 0o600), AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}
+	config := managed.Config{Enabled: true, PiExecutable: write("bin/pi", "#!/bin/sh\n", 0o700), ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: session, ManifestPath: write("contract/managed.json", `{}`, 0o600), MechaRPCExtension: write("extensions/rpc.ts", "export {}", 0o600), PiSubagentsExtension: write("extensions/subagents.ts", "export {}", 0o600), AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}
 	require.NoError(t, validateManagedStartup(config))
 	config.PiSubagentsExtension = ""
 	require.Error(t, validateManagedStartup(config))

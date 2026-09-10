@@ -347,6 +347,7 @@ func TestManagedTerminateInstalledPi(t *testing.T) {
 	home := t.TempDir()
 	sessionRoot := filepath.Join(home, "sessions")
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700))
 	factory := &nativeBlockingProcessFactory{base: managed.DefaultProcessFactory(), entered: make(chan struct{}), release: make(chan struct{})}
 	defer func() {
 		select {
@@ -359,7 +360,7 @@ func TestManagedTerminateInstalledPi(t *testing.T) {
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store: durable, Manifest: manifest, ProcessFactory: factory, RPCFactory: nativeTerminationTraceRPCFactory{base: managed.DefaultRPCFactory(), trace: trace},
 		Config: managed.Config{
-			Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, SessionRoot: sessionRoot,
+			Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot,
 			ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry,
 			AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor",
 			Limits: managed.Limits{GracefulStop: 5 * time.Second, TermStop: 5 * time.Second},

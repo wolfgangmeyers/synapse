@@ -531,7 +531,7 @@ func newLockedLifecycleRestartManager(t *testing.T, durable *store.Store, root s
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store:    durable,
-		Config:   managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
+		Config:   managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		Manifest: manifest, ProcessFactory: processFactory, RPCFactory: rpcFactory,
 		CatalogSource:   managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		ProcessGroupOps: ops, AfterManagedLifecycleRestartTargetStartBeforeBind: hook,
@@ -551,6 +551,7 @@ func startLockedLifecycleRestartSource(t *testing.T, root string, lockedPi manag
 	home := t.TempDir()
 	sessionRoot := filepath.Join(home, "sessions")
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700))
 	tracking := &nativeLifecycleTrackingFactory{base: managed.DefaultProcessFactory()}
 	blocking := &nativeBlockingProcessFactory{base: tracking, entered: make(chan struct{}), release: make(chan struct{})}
 	op := &nativeLifecycleRecordingOps{base: managed.DefaultProcessGroupOps()}
@@ -751,6 +752,7 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 	home := t.TempDir()
 	sessionRoot := filepath.Join(home, "sessions")
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700))
 	mecha := filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts")
 	factory := &nativeBlockingProcessFactory{base: managed.DefaultProcessFactory(), entered: make(chan struct{}), release: make(chan struct{})}
 	defer func() {
@@ -771,7 +773,7 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 			interruptAppend.Do(func() { close(appendBeforeAck) })
 			return errors.New("native append-before-ack interruption")
 		},
-		Config: managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, SessionRoot: sessionRoot,
+		Config: managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot,
 			ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: mecha,
 			PiSubagentsExtension: subagents, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		Manifest: manifest, ProcessFactory: factory,

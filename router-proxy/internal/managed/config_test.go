@@ -24,11 +24,13 @@ func managedLaunchConfigFixture(t *testing.T) (Config, map[string]string) {
 	cursor := write("auth-helper/node_modules/pi-cursor-sdk/dist/index.js", "export default function extension() {}\n", 0o600)
 	helper := write("auth-helper/index.mjs", "#!/usr/bin/env node\n", 0o700)
 	home := filepath.Join(root, "home")
+	piAgentDir := filepath.Join(root, "ordinary-pi", "agent")
 	session := filepath.Join(home, "sessions")
 	work := filepath.Join(root, "work")
 	require.NoError(t, os.MkdirAll(session, 0o700))
+	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
 	require.NoError(t, os.MkdirAll(work, 0o700))
-	return Config{Enabled: true, PiExecutable: pi, ManagedHome: home, SessionRoot: session, ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents, CursorExtension: cursor, AuthHelperPath: helper, RuntimeRoot: root, RequireProviderRuntime: true, AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "subagents": subagents, "cursor": cursor, "helper": helper, "home": home, "session": session, "work": work}
+	return Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: session, ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents, CursorExtension: cursor, AuthHelperPath: helper, RuntimeRoot: root, RequireProviderRuntime: true, AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "subagents": subagents, "cursor": cursor, "helper": helper, "home": home, "pi_agent_dir": piAgentDir, "session": session, "work": work}
 }
 
 func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {

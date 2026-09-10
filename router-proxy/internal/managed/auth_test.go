@@ -35,12 +35,54 @@ func (f fakeProviderAuthHelper) Start(_ context.Context, _, _, _ string) (Provid
 	return f.run, nil
 }
 
+type fakeProviderAuthSnapshotHelper struct {
+	fakeProviderAuthHelper
+	providers []store.ManagedProviderStatus
+	models    []store.ManagedProviderModel
+	err       error
+}
+
+func (f fakeProviderAuthSnapshotHelper) Snapshot(context.Context) ([]store.ManagedProviderStatus, []store.ManagedProviderModel, error) {
+	return f.providers, f.models, f.err
+}
+
 func providerTerminal(id, provider string) ProviderAuthEvent {
 	return ProviderAuthEvent{Kind: "terminal", OperationID: id, Provider: provider, Status: "succeeded", Providers: []store.ManagedProviderStatus{
 		{Provider: "openai-codex", Label: "ChatGPT", Authenticated: true, Status: "authenticated"},
 		{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
 		{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
 	}, Models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}}}
+}
+
+func TestProviderAuthCoordinatorReadsCurrentOrdinaryPiStatusBeforeAnyLogin(t *testing.T) {
+	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, durable.Close()) })
+	helper := fakeProviderAuthSnapshotHelper{
+		fakeProviderAuthHelper: fakeProviderAuthHelper{run: newFakeProviderAuthRun()},
+		providers: []store.ManagedProviderStatus{
+			{Provider: "openai-codex", Label: "ChatGPT", Authenticated: true, Status: "authenticated"},
+			{Provider: "google", Label: "Google", Authenticated: false, Status: "signed_out"},
+			{Provider: "cursor", Label: "Cursor", Authenticated: false, Status: "signed_out"},
+		},
+		models: []store.ManagedProviderModel{{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}},
+	}
+	coordinator, err := NewProviderAuthCoordinator(durable, nil, helper)
+	require.NoError(t, err)
+	t.Cleanup(coordinator.Close)
+
+	snapshot, err := coordinator.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), snapshot.AuthRevision)
+	require.Len(t, snapshot.Providers, 3)
+	foundChatGPT := false
+	for _, provider := range snapshot.Providers {
+		if provider.Provider == "openai-codex" && provider.Authenticated && provider.Status == "authenticated" {
+			foundChatGPT = true
+		}
+	}
+	require.True(t, foundChatGPT)
+	require.Len(t, snapshot.Models, 1)
 }
 
 func TestProviderAuthCoordinatorConsumesPromptOnceAndCommitsOnlySuccess(t *testing.T) {

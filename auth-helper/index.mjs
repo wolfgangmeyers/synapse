@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline";
-import { discoverAvailableModels, executeProviderOperation } from "./providers.mjs";
+import { discoverProviderSnapshot, executeProviderOperation } from "./providers.mjs";
 import { encodeResult, parseRequest, parseResponse, promptEvent, safeError, terminalResult } from "./protocol.mjs";
 
 const OPERATION_TIMEOUT_MS = 10 * 60 * 1000;
@@ -69,7 +69,7 @@ try {
     // for EOF prevents a second JSONL line from being ignored as it was in P3.
     await lines.closed();
     if (oversized || lines.length !== 0) throw new Error("invalid request count");
-    emit(await discoverAvailableModels({ authPath: process.env.MECHA_MANAGED_AUTH_PATH }));
+    emit(await discoverProviderSnapshot({ authPath: process.env.MECHA_PI_AUTH_PATH }));
   } else {
     const controller = new AbortController();
     const expiration = setTimeout(() => controller.abort(), OPERATION_TIMEOUT_MS);
@@ -101,7 +101,7 @@ try {
     emit({ type: "state", operation_id: request.operation_id, provider: request.provider, status: "pending" });
     try {
       const result = await executeProviderOperation({
-        authPath: process.env.MECHA_MANAGED_AUTH_PATH,
+        authPath: process.env.MECHA_PI_AUTH_PATH,
         provider: request.provider,
         operation: request.operation,
         interaction,

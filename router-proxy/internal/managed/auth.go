@@ -52,6 +52,12 @@ type ProviderAuthHelper interface {
 	Start(context.Context, string, string, string) (ProviderAuthRun, error)
 }
 
+// ProviderAuthSnapshotHelper reads the ordinary Pi credential store through a
+// fixed local helper. Its result is a bounded, non-secret status/catalog view.
+type ProviderAuthSnapshotHelper interface {
+	Snapshot(context.Context) ([]store.ManagedProviderStatus, []store.ManagedProviderModel, error)
+}
+
 type ProviderAuthCoordinator struct {
 	store   *store.Store
 	manager *Manager
@@ -104,7 +110,22 @@ func (a *ProviderAuthCoordinator) publishEvent(event ProviderAuthEvent) {
 }
 
 func (a *ProviderAuthCoordinator) Snapshot(ctx context.Context) (store.ManagedProviderSnapshot, error) {
-	return a.store.ManagedProviderSnapshot(ctx)
+	reader, ok := a.helper.(ProviderAuthSnapshotHelper)
+	if !ok {
+		return a.store.ManagedProviderSnapshot(ctx)
+	}
+	providers, models, err := reader.Snapshot(ctx)
+	if err != nil {
+		return store.ManagedProviderSnapshot{}, errors.New("provider status is unavailable")
+	}
+	if _, err := a.store.CommitManagedProviderSnapshot(ctx, providers, models); err != nil {
+		return store.ManagedProviderSnapshot{}, errors.New("provider status is unavailable")
+	}
+	snapshot, err := a.store.ManagedProviderSnapshot(ctx)
+	if err != nil {
+		return store.ManagedProviderSnapshot{}, errors.New("provider status is unavailable")
+	}
+	return snapshot, nil
 }
 
 // CurrentPrompt returns a copy of the one live prompt, if any, so a direct

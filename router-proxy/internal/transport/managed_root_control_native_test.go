@@ -593,6 +593,7 @@ func TestManagedRootControlInstalledPi(t *testing.T) {
 	home := t.TempDir()
 	sessionRoot := filepath.Join(home, "sessions")
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700))
 	factory := &nativeBlockingProcessFactory{base: managed.DefaultProcessFactory(), entered: make(chan struct{}), release: make(chan struct{})}
 	trace := &nativeRootControlTrace{}
 	controls := &nativeRootControlProofControls{releaseFirstResult: true}
@@ -607,7 +608,7 @@ func TestManagedRootControlInstalledPi(t *testing.T) {
 	}()
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store: durable, Manifest: manifest, ProcessFactory: factory, RPCFactory: rpcFactory, RootControlHandlers: rootControlNativeHandlers(t, manifest, tracker, &observed),
-		Config:        managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, TestOnlyExtensions: []string{filepath.Join(root, "tests", "fixtures", "mecha-rpc", "s4-native-root-control-probe.ts")}, TestOnlyEnvironment: []string{"MECHA_RPC_TEST_ROOT_CONTROL_PROBE=1", "MECHA_RPC_TEST_ROOT_CONTROL_HOLD_FIRST_EMISSION=1", "MECHA_RPC_TEST_ROOT_CONTROL_DETACH_EMISSION=1", "MECHA_RPC_TEST_ROOT_CONTROL_SEND_FAILURE_AT=2", "MECHA_RPC_TEST_ROOT_CONTROL_OBSERVATION_PATH=" + observationPath, "MECHA_RPC_PROVIDER_INTERCEPTOR_LOG=" + providerLog, "NODE_OPTIONS=--require=" + providerModule}, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
+		Config:        managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, TestOnlyExtensions: []string{filepath.Join(root, "tests", "fixtures", "mecha-rpc", "s4-native-root-control-probe.ts")}, TestOnlyEnvironment: []string{"MECHA_RPC_TEST_ROOT_CONTROL_PROBE=1", "MECHA_RPC_TEST_ROOT_CONTROL_HOLD_FIRST_EMISSION=1", "MECHA_RPC_TEST_ROOT_CONTROL_DETACH_EMISSION=1", "MECHA_RPC_TEST_ROOT_CONTROL_SEND_FAILURE_AT=2", "MECHA_RPC_TEST_ROOT_CONTROL_OBSERVATION_PATH=" + observationPath, "MECHA_RPC_PROVIDER_INTERCEPTOR_LOG=" + providerLog, "NODE_OPTIONS=--require=" + providerModule}, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 	})
 	require.NoError(t, err)

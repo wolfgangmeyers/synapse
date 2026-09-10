@@ -8,7 +8,7 @@ import { parseRequest, parseResponse, projectCatalog, promptEvent, terminalResul
 
 async function runHelper(input, env = {}) {
   const child = spawn(process.execPath, [join(import.meta.dirname, "index.mjs")], {
-    env: { PATH: process.env.PATH, HOME: env.HOME, MECHA_MANAGED_AUTH_PATH: env.authPath, MECHA_TEST_SENTINEL: "do-not-leak" },
+    env: { PATH: process.env.PATH, HOME: env.HOME, MECHA_PI_AUTH_PATH: env.authPath, MECHA_TEST_SENTINEL: "do-not-leak" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stdin.end(input);
@@ -58,6 +58,18 @@ test("an unsupported OpenAI API-key credential is never treated as ChatGPT subsc
   assert.equal(result.stdout.includes("synthetic-test-key"), false);
 });
 
+test("ordinary Pi ChatGPT OAuth reports connected without exposing the fixture credential", async () => {
+  const home = await mkdtemp(join(tmpdir(), "mecha-auth-helper-"));
+  const authPath = join(home, "auth.json");
+  await writeFile(authPath, JSON.stringify({ "openai-codex": { type: "oauth", access: "synthetic-access", refresh: "synthetic-refresh", expires: Date.now() + 60_000 } }), { mode: 0o600 });
+  const result = await runHelper('{"operation":"models"}\n', { HOME: home, authPath });
+  assert.equal(result.exitCode, 0);
+  const snapshot = JSON.parse(result.stdout);
+  assert.deepEqual(snapshot.providers.find((provider) => provider.provider === "openai-codex"), { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated" });
+  assert.equal(result.stdout.includes("synthetic-access"), false);
+  assert.equal(result.stdout.includes("synthetic-refresh"), false);
+});
+
 test("provider auth protocol binds each prompt and terminal snapshot to one mapped provider", () => {
   const request = parseRequest('{"operation":"login","operation_id":"operation-1","provider":"google"}');
   assert.deepEqual(parseResponse('{"type":"response","prompt_id":"prompt-1","value":"synthetic-key"}'), { type: "response", prompt_id: "prompt-1", value: "synthetic-key" });
@@ -99,7 +111,14 @@ test("one bounded JSONL request succeeds without leaking environment or credenti
   await writeFile(authPath, "{}", { mode: 0o600 });
   const result = await runHelper('{"operation":"models"}\n', { HOME: home, authPath });
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(JSON.parse(result.stdout), { models: [] });
+  assert.deepEqual(JSON.parse(result.stdout), {
+    providers: [
+      { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out" },
+      { provider: "google", label: "Google", authenticated: false, status: "signed_out" },
+      { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out" },
+    ],
+    models: [],
+  });
   assert.equal(result.stderr, "");
   assert.equal(result.stdout.includes("do-not-leak"), false);
 });

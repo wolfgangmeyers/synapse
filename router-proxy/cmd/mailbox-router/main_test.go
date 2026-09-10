@@ -51,16 +51,18 @@ func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string)
 	write(subagents, "export default function extension() {}\n", 0o600)
 	write(filepath.Join(subagentsRoot, "src", "child.ts"), "export const child = true;\n", 0o600)
 	home := filepath.Join(root, "home")
+	piAgentDir := filepath.Join(root, "ordinary-pi", "agent")
 	sessionRoot := filepath.Join(home, "sessions")
 	workRoot := filepath.Join(root, "work")
 	require.NoError(t, os.MkdirAll(sessionRoot, 0o700))
+	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
 	require.NoError(t, os.MkdirAll(workRoot, 0o700))
 	config := managed.Config{
-		Enabled: true, PiExecutable: pi, ManagedHome: home, SessionRoot: sessionRoot,
+		Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: sessionRoot,
 		ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents,
 		AllowedWorkingDirectoryRoots: []string{workRoot}, CanonicalQuietRecipientID: "supervisor",
 	}
-	return config, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "subagents": subagents, "home": home, "session": sessionRoot, "work": workRoot}
+	return config, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "subagents": subagents, "home": home, "pi_agent_dir": piAgentDir, "session": sessionRoot, "work": workRoot}
 }
 
 func TestManagedStartupAcceptsChangedValidInputsAndRejectsMissingCorePaths(t *testing.T) {
