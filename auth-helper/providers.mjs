@@ -20,7 +20,7 @@ function modelSummary(model) {
 }
 
 async function createRuntime({ authPath, signal }) {
-  if (typeof authPath !== "string" || authPath.length === 0) throw new Error("managed auth path is required");
+  if (typeof authPath !== "string" || authPath.length === 0) throw new Error("ordinary Pi auth path is required");
   const runtime = await ModelRuntime.create({
     authPath,
     modelsPath: null,
@@ -65,6 +65,9 @@ async function refreshCursorCatalog(runtime, signal) {
 }
 
 async function snapshot(runtime, signal) {
+  // ModelRuntime snapshots credentials during refresh. Keep that refresh local:
+  // it validates the current auth file without contacting a provider.
+  await runtime.refresh({ allowNetwork: false, signal });
   await refreshCursorCatalog(runtime, signal);
   const statuses = Object.entries(PROVIDERS).map(([provider, config]) => {
     const auth = runtime.getProviderAuthStatus(provider);
@@ -83,10 +86,14 @@ async function snapshot(runtime, signal) {
   return { providers: statuses, models: projectCatalog(available.filter((model) => authenticated.has(model.provider)).map(modelSummary)).models };
 }
 
-export async function discoverAvailableModels({ authPath }) {
+export async function discoverProviderSnapshot({ authPath }) {
   const signal = AbortSignal.timeout(CATALOG_TIMEOUT_MS);
   const runtime = await createRuntime({ authPath, signal });
-  return projectCatalog((await snapshot(runtime, signal)).models);
+  return snapshot(runtime, signal);
+}
+
+export async function discoverAvailableModels({ authPath }) {
+  return projectCatalog((await discoverProviderSnapshot({ authPath })).models);
 }
 
 // executeProviderOperation accepts only one mapped provider. All interaction

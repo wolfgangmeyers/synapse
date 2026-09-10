@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -33,8 +35,8 @@ func parseManagedRoots(value string) []string {
 }
 
 // fixedAuthHelper starts the project-owned helper with no shell and a closed
-// child environment. The auth-store path is deterministic under the managed
-// home; it is never logged, persisted, or returned through HTTP.
+// child environment. The auth-store path is ordinary Pi's local credential
+// file; it is never logged, persisted, or returned through HTTP.
 type fixedAuthHelper struct {
 	config         managed.Config
 	nodeExecutable string
@@ -48,7 +50,7 @@ func (h fixedAuthHelper) Start(ctx context.Context, operationID, provider, actio
 		return nil, errors.New("provider helper runtime is unavailable")
 	}
 	command := exec.Command(h.nodeExecutable, h.config.AuthHelperPath)
-	command.Env = append(managed.ChildEnvironment(h.config), "MECHA_MANAGED_AUTH_PATH="+h.config.ManagedHome+"/.pi/agent/auth.json")
+	command.Env = h.environment()
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -87,6 +89,61 @@ func (h fixedAuthHelper) Start(ctx context.Context, operationID, provider, actio
 		}
 	}()
 	return run, nil
+}
+
+// Snapshot invokes the same fixed helper without an interactive provider
+// operation. Only its bounded status/catalog result crosses this boundary; a
+// parse or runtime failure stays a generic unavailable state.
+func (h fixedAuthHelper) Snapshot(ctx context.Context) ([]store.ManagedProviderStatus, []store.ManagedProviderModel, error) {
+	if h.config.AuthHelperPath == "" || h.nodeExecutable == "" {
+		return nil, nil, errors.New("provider status is unavailable")
+	}
+	command := exec.CommandContext(ctx, h.nodeExecutable, h.config.AuthHelperPath)
+	command.Env = h.environment()
+	command.Stdin = strings.NewReader(`{"operation":"models"}` + "\n")
+	stdout := &boundedHelperOutput{limit: 128 * 1024}
+	command.Stdout = stdout
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
+		return nil, nil, errors.New("provider status is unavailable")
+	}
+	providers, models, ok := decodeHelperSnapshot(stdout.Bytes())
+	if !ok {
+		return nil, nil, errors.New("provider status is unavailable")
+	}
+	return providers, models, nil
+}
+
+func (h fixedAuthHelper) environment() []string {
+	return append(managed.ChildEnvironment(h.config), "MECHA_PI_AUTH_PATH="+filepath.Join(h.config.PiAgentDir, "auth.json"))
+}
+
+type boundedHelperOutput struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *boundedHelperOutput) Write(value []byte) (int, error) {
+	if b.Len()+len(value) > b.limit {
+		return 0, errors.New("provider helper output is too large")
+	}
+	return b.Buffer.Write(value)
+}
+
+func decodeHelperSnapshot(raw []byte) ([]store.ManagedProviderStatus, []store.ManagedProviderModel, bool) {
+	if len(raw) == 0 || len(raw) > 128*1024 {
+		return nil, nil, false
+	}
+	var wire struct {
+		Providers []store.ManagedProviderStatus `json:"providers"`
+		Models    []store.ManagedProviderModel  `json:"models"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&wire) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, nil, false
+	}
+	return wire.Providers, wire.Models, true
 }
 
 type helperRun struct {

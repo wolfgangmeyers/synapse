@@ -26,9 +26,13 @@ type Limits struct {
 }
 
 type Config struct {
-	Enabled              bool
-	PiExecutable         string
-	ManagedHome          string
+	Enabled      bool
+	PiExecutable string
+	ManagedHome  string
+	// PiAgentDir is the existing ordinary Pi agent directory. Managed RPC runs
+	// with its own HOME and session root, but reads provider credentials directly
+	// from this local Pi directory.
+	PiAgentDir           string
 	SessionRoot          string
 	ManifestPath         string
 	MechaRPCExtension    string
@@ -84,7 +88,7 @@ func ValidateManagedLaunchConfig(config Config) error {
 	}
 	copy := config
 	copy.normalize()
-	if copy.PiExecutable == "" || copy.ManagedHome == "" || copy.SessionRoot == "" || copy.ManifestPath == "" || copy.MechaRPCExtension == "" || copy.PiSubagentsExtension == "" {
+	if copy.PiExecutable == "" || copy.ManagedHome == "" || copy.PiAgentDir == "" || copy.SessionRoot == "" || copy.ManifestPath == "" || copy.MechaRPCExtension == "" || copy.PiSubagentsExtension == "" {
 		return errors.New("managed mode requires core launch inputs")
 	}
 	if copy.RequireProviderRuntime && (copy.CursorExtension == "" || copy.AuthHelperPath == "" || copy.RuntimeRoot == "") {
@@ -103,6 +107,9 @@ func ValidateManagedLaunchConfig(config Config) error {
 		return err
 	}
 	if err := ValidateContainedDirectory(copy.ManagedHome, "managed home"); err != nil {
+		return err
+	}
+	if err := ValidateContainedDirectory(copy.PiAgentDir, "ordinary Pi agent directory"); err != nil {
 		return err
 	}
 	if err := ValidateContainedDirectory(copy.SessionRoot, "managed session root"); err != nil {
@@ -275,7 +282,8 @@ func ChildEnvironmentFor(c Config, runtimeGeneration string, sessionEpoch int64)
 	home, _ := filepath.Abs(c.ManagedHome)
 	session, _ := filepath.Abs(c.SessionRoot)
 	temp := filepath.Join(home, "tmp")
-	environment := []string{"HOME=" + home, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=" + temp, "LANG=C", "LC_ALL=C", "PI_CODING_AGENT_DIR=" + filepath.Join(home, ".pi", "agent"), "MECHA_MANAGED_SESSION_ROOT=" + session, "MECHA_MANAGED_ACTIVE_ONLY=1"}
+	piAgentDir, _ := filepath.Abs(c.PiAgentDir)
+	environment := []string{"HOME=" + home, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=" + temp, "LANG=C", "LC_ALL=C", "PI_CODING_AGENT_DIR=" + piAgentDir, "MECHA_MANAGED_SESSION_ROOT=" + session, "MECHA_MANAGED_ACTIVE_ONLY=1"}
 	if runtimeGeneration != "" {
 		environment = append(environment, "MECHA_RPC_RUNTIME_GENERATION="+runtimeGeneration, fmt.Sprintf("MECHA_RPC_SESSION_EPOCH=%d", sessionEpoch))
 	}

@@ -49,9 +49,10 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&result.managedUIDist, "managed-ui-dist", "", "built React UI directory served by the router")
 	var managedEnabled bool
 	flags.BoolVar(&managedEnabled, "managed", false, "enable router-managed Pi launches")
-	var managedPi, managedHome, managedSession, managedManifest, managedExtension, managedSubagents, managedCursorExtension, managedAuthHelper, managedRuntimeRoot, managedRoots, managedRecipient string
+	var managedPi, managedHome, managedPiAgentDir, managedSession, managedManifest, managedExtension, managedSubagents, managedCursorExtension, managedAuthHelper, managedRuntimeRoot, managedRoots, managedRecipient string
 	flags.StringVar(&managedPi, "managed-pi", "", "installed Pi executable")
 	flags.StringVar(&managedHome, "managed-home", "", "managed Pi HOME root")
+	flags.StringVar(&managedPiAgentDir, "managed-pi-agent-dir", "", "existing ordinary Pi agent directory")
 	flags.StringVar(&managedSession, "managed-session-root", "", "managed Pi session root")
 	flags.StringVar(&managedManifest, "managed-manifest", "", "managed tool manifest")
 	flags.StringVar(&managedExtension, "managed-mecha-rpc", "", "fixed mecha-rpc extension")
@@ -88,7 +89,7 @@ func parseConfig(args []string) (config, error) {
 	if result.policyTimeout <= 0 {
 		return config{}, errors.New("--policy-timeout must be positive")
 	}
-	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
+	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 
@@ -175,6 +176,12 @@ func main() {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()
 			log.Fatal(err)
+		}
+		// Provider settings starts from ordinary Pi's current local auth. This
+		// records only the bounded status/catalog projection; credentials never
+		// enter router storage or logs.
+		if _, err := providerAuth.Snapshot(ctx); err != nil {
+			log.Print("managed provider status is unavailable")
 		}
 	}
 	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist})
