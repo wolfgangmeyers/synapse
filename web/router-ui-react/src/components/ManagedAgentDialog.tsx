@@ -26,7 +26,7 @@ export function ManagedAgentDialog({ open, agent, pending = false, error, onClos
     event.preventDefault();
     void onLaunch({ name: name.trim(), cwd: cwd.trim(), ...(provider.trim() && modelID.trim() ? { model: { provider: provider.trim(), id: modelID.trim() } } : {}), ...(instruction.trim() ? { initial_instruction: instruction } : {}) });
   };
-  return <DialogShell open={open} title={agent ? `Manage ${agent.agent_id}` : "Launch managed agent"} titleId="managed-agent-dialog-title" description="Router-managed agents run locally through the router." onClose={onClose} closeLabel="Close managed agent dialog" className="managed-agent-dialog">
+  return <DialogShell open={open} title={agent ? `Manage ${agent.agent_id}` : "Launch managed agent"} titleId="managed-agent-dialog-title" description="Router-managed agents run locally through the router." onClose={onClose} closeLabel="Close managed agent dialog" className="message-dialog managed-agent-dialog">
     {agent ? <section className="managed-lifecycle-actions" aria-label={`Actions for ${agent.agent_id}`}>
       <p>State: {agent.lifecycle_state} · {agent.activity_state}</p>
       <div className="dialog-actions"><button type="button" disabled={pending} onClick={() => { void onAction(agent.agent_id, "restart"); }}>Restart</button><button type="button" className="secondary" disabled={pending} onClick={() => { void onAction(agent.agent_id, "reset"); }}>Reset</button><button type="button" className="danger-button" disabled={pending} onClick={() => setConfirmTermination(true)}>Terminate</button></div>
