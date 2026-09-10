@@ -21,8 +21,7 @@ describe("Sidebar", () => {
     const user = userEvent.setup();
     const onLaunchManaged = vi.fn();
     const onRestartAllManaged = vi.fn();
-    const onHistoryManaged = vi.fn();
-    render(<Sidebar routerLabel="local" connection="connected" connectionIdentity="wolfgang" agents={[]} onLaunchManaged={onLaunchManaged} onRestartAllManaged={onRestartAllManaged} onHistoryManaged={onHistoryManaged} />);
+    render(<Sidebar routerLabel="local" connection="connected" connectionIdentity="wolfgang" agents={[]} onLaunchManaged={onLaunchManaged} onRestartAllManaged={onRestartAllManaged} />);
 
     const connection = screen.getByLabelText("Connection status");
     const menuButton = screen.getByRole("button", { name: "Managed actions" });
@@ -37,7 +36,7 @@ describe("Sidebar", () => {
     const menu = screen.getByRole("menu", { name: "Managed actions" });
     expect(menu).toHaveTextContent("Launch managed agent");
     expect(menu).toHaveTextContent("Restart all managed");
-    expect(menu).toHaveTextContent("History");
+    expect(menu).not.toHaveTextContent("History");
 
     await user.keyboard("{Escape}");
     expect(menuButton).toHaveAttribute("aria-expanded", "false");
@@ -52,8 +51,5 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("menuitem", { name: "Restart all managed" }));
     expect(onRestartAllManaged).toHaveBeenCalledOnce();
 
-    await user.click(menuButton);
-    await user.click(screen.getByRole("menuitem", { name: "History" }));
-    expect(onHistoryManaged).toHaveBeenCalledOnce();
   });
 });

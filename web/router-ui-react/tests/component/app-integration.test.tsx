@@ -7,6 +7,7 @@ import { createInitialState } from "../../src/state/app-state";
 import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, ownerScope } from "../../src/persistence/settings-repository";
 import { HistoryRepository } from "../../src/persistence/history-repository";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
+import type { ManagedAgent } from "../../src/protocol/types";
 import { afterEach } from "vitest";
 
 afterEach(cleanup);
@@ -39,6 +40,41 @@ class AppSocket implements WebSocketLike {
 }
 
 describe("App integration", () => {
+  it("keeps selected managed-agent messages in both header modes and adds activity only in Complete", async () => {
+    const managedAgent: ManagedAgent = { agent_id: "managed-worker", source: "router-managed", cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
+    const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
+    state.selectedPeer = "router-managed:managed-worker";
+    const user = (await import("@testing-library/user-event")).default.setup();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true, ui_live_v1: false });
+      if (url.endsWith("/v1/managed-agents")) return jsonResponse({ generated_at: "2030-01-01T00:00:00.000Z", projection_version: 1, agents: [managedAgent] });
+      if (url.endsWith(`/v1/managed-agents/${managedAgent.agent_id}/children`)) return jsonResponse({ agent_id: managedAgent.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+      if (url.includes("/v1/history?")) return jsonResponse({ view: url.includes("view=complete") ? "complete" : "quiet", entries: url.includes("view=complete") ? [{ id: "activity-1", level: "info", message: "Managed worker restarted", at: "2030-01-01T10:01:00.000Z" }] : [], next_before: null });
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: managedAgent.agent_id, high_water_sequence: 1, messages: [{ sequence: 1, id: "conversation-1", message_incarnation_id: "00000000-0000-4000-8000-000000000001", from: managedAgent.agent_id, to: "web-ui", body: "Existing conversation", created_at: "2030-01-01T10:00:00.000Z", recorded_at: "2030-01-01T10:00:00.000Z", attachments: [] }] });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl={state.routerUrl} agentId={state.agentId} state={state} transportOptions={{ fetchImpl, webSocketFactory }} />);
+    const quiet = await screen.findByRole("tab", { name: "Quiet messages" });
+    expect(quiet).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Existing conversation")).toBeInTheDocument();
+    expect(screen.queryByText("Managed worker restarted")).not.toBeInTheDocument();
+    expect(screen.queryByText("History")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Complete: messages + activity" }));
+    expect(screen.getByText("Existing conversation")).toBeInTheDocument();
+    expect(screen.getByText("Managed worker restarted")).toBeInTheDocument();
+  });
+
   it("runs persistence cleanup before rendering the app that reads it", async () => {
     const storage = new MemoryStorage();
     storage.setItem("mecha.web.messages", "deprecated");
