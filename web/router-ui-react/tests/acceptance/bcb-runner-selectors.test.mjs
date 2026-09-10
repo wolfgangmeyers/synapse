@@ -32,7 +32,8 @@ test("managed release runner uses the router-built UI and visible child selectio
   assert.match(runner, /selectAndRevealManagedChildren/);
   assert.match(runner, /parent_selected/);
   assert.match(runner, /child_visible/);
-  assert.doesNotMatch(runner, /startVite|startLoopbackGateway/);
+  assert.match(runner, /startIsolatedBcbBrowser/);
+  assert.doesNotMatch(runner, /startVite|startLoopbackGateway|window\.open|System Events/);
 });
 
 test("control result uses the forwarded target identity", () => {

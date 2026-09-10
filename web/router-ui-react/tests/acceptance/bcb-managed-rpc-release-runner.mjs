@@ -13,6 +13,7 @@ import {
   spawnRouterProcess,
   stopRouterProcess,
 } from "../support/isolated-go-router.mjs";
+import { startIsolatedBcbBrowser } from "./bcb-runner.mjs";
 
 const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -166,26 +167,6 @@ async function waitFor(probe, label, timeout = TIMEOUT) {
   fail(`${label} timed out${lastError instanceof Error ? `: ${lastError.message}` : ""}`);
 }
 
-function bcbSettings(python) {
-  const host = process.env.MECHA_BCB_HOST ?? process.env.BCB_HOST ?? "127.0.0.1";
-  if (!["127.0.0.1", "localhost", "::1"].includes(host)) fail("BCB host must be loopback");
-  const httpPort = Number(process.env.MECHA_BCB_HTTP_PORT ?? process.env.BCB_HTTP_PORT ?? "18080");
-  const wsPort = Number(process.env.MECHA_BCB_WS_PORT ?? process.env.BCB_WS_PORT ?? "18081");
-  if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535 || !Number.isInteger(wsPort) || wsPort < 1 || wsPort > 65535) fail("BCB ports must be valid TCP ports");
-  const printableHost = host.includes(":") ? `[${host}]` : host;
-  return { python, host, httpPort, wsPort, baseUrl: `http://${printableHost}:${httpPort}` };
-}
-
-async function connectedBcb(python) {
-  const bcb = bcbSettings(python);
-  let health;
-  try { health = await (await fetch(`${bcb.baseUrl}/health`)).json(); } catch { fail(`BCB health endpoint is unavailable at ${bcb.baseUrl}`); }
-  if (health?.extension_connected !== true) {
-    fail("BCB extension is not connected. Start the bridge, then reload its Chrome extension as documented by Browser Console Bridge setup.");
-  }
-  return { ...bcb, health };
-}
-
 async function buildRouterUI(root) {
   const staticUIRoot = join(root, "router-ui");
   await execFileAsync("npm", ["run", "build", "--", "--outDir", staticUIRoot], { cwd: PROJECT, timeout: 120_000 });
@@ -198,8 +179,8 @@ const BCB_TAB_EDIT_RETRIES = 12;
 const BCB_TAB_EDIT_RETRY_DELAY_MS = 250;
 
 function isTransientBcbTabEditError(error) {
-  // BCB can briefly reject a command while Chrome is navigating a controlled
-  // popup or while the extension finishes a prior command. Retry only these
+  // BCB can briefly reject a command while the disposable test browser is
+  // navigating or while the extension finishes a prior command. Retry only these
   // documented transport conditions, never a browser JavaScript assertion.
   return error instanceof Error && /tabs cannot be edited right now|extension did not respond within/i.test(error.message);
 }
@@ -245,123 +226,23 @@ async function execBrowser(bcb, tab, code) {
   return result.result;
 }
 
-async function openControlledBcbWindow(bcb, url, name) {
-  const before = await tabs(bcb);
-  if (!Array.isArray(before)) fail("BCB did not return its tab list");
-  const known = new Set(before.map((tab) => String(tab?.id)));
-  // This is the only command sent without a tab target. It opens an isolated
-  // local popup and reads no document, storage, cookie, or session data from
-  // the existing active Chrome tab.
-  // Do not request noopener: Chrome permits resizeTo only for a script-opened popup
-  // that retains its opener. The task URL is a separate loopback origin and never
-  // reads or writes the opener.
-  await execBrowser(bcb, undefined, `window.open(${JSON.stringify(url)}, ${JSON.stringify(name)}, "popup=yes,width=1560,height=980"); true`);
-  const tab = await waitFor(async () => {
-    const current = await tabs(bcb);
-    if (!Array.isArray(current)) return undefined;
-    return current.find((candidate) => candidate?.url === url && !known.has(String(candidate.id)));
-  }, "dedicated BCB release window");
-  await execBrowser(bcb, tab.id, "window.focus(); true");
-  await waitFor(async () => {
-    const current = await tabs(bcb);
-    return Array.isArray(current) && current.some((candidate) => String(candidate?.id) === String(tab.id) && candidate.active === true) ? true : undefined;
-  }, "dedicated BCB release window focus");
-  return { tab: tab.id, existing_tab_count: before.length };
-}
 
-// The release tab is a script-opened popup, so browser policy permits a real
-// window resize. This is not device emulation and does not resize any existing
-// user tab or window.
-async function resetControlledBcbWindowZoom(bcb, tab) {
-  if (process.platform !== "darwin") return { reset: "not-applicable" };
-  await execBrowser(bcb, tab, "window.focus(); true");
-  // Chrome keeps zoom per origin. Reset only the disposable loopback task tab:
-  // a non-default scale changes its CSS minimum window width and would make a
-  // physical popup resize falsely look like device emulation.
-  const script = `tell application "System Events"
-  tell process "Google Chrome"
-    set frontmost to true
-    keystroke "0" using command down
-    delay 0.2
-  end tell
-end tell`;
-  await execFileAsync("osascript", ["-e", script], { timeout: TIMEOUT });
-  return waitFor(async () => {
-    const scale = await execBrowser(bcb, tab, "visualViewport?.scale ?? 1");
-    return scale === 1 ? { reset: "Command-0 on dedicated BCB task popup", visual_viewport_scale: scale } : undefined;
-  }, "dedicated BCB popup zoom reset");
-}
-
-async function setControlledBcbWindowInnerWidth(bcb, tab, wantedWidth) {
-  let observed;
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const current = await execBrowser(bcb, tab, "({ width: innerWidth, height: innerHeight, outerWidth, outerHeight, scrollWidth: document.documentElement.scrollWidth })");
-    observed = current;
-    if (current?.width === wantedWidth) return current;
-    const innerWidth = Number(current?.width);
-    const outerWidth = Number(current?.outerWidth);
-    const innerHeight = Number(current?.height);
-    const outerHeight = Number(current?.outerHeight);
-    if (![innerWidth, outerWidth, innerHeight, outerHeight].every(Number.isFinite)) fail("BCB task popup did not report window dimensions");
-    const nextWidth = Math.max(200, Math.round(outerWidth + wantedWidth - innerWidth));
-    const nextHeight = Math.max(300, Math.round(outerHeight + 900 - innerHeight));
-    // Chrome's macOS frame insets can change after a resize. Recalculate from
-    // every settled geometry instead of retrying one stale outer-width estimate.
-    for (const adjustment of [0, -1, 1]) {
-      await execBrowser(bcb, tab, `window.resizeTo(${nextWidth + adjustment}, ${nextHeight}); window.focus(); true`);
-      await delay(150);
-      const settled = await execBrowser(bcb, tab, "({ width: innerWidth, height: innerHeight, outerWidth, outerHeight, scrollWidth: document.documentElement.scrollWidth })");
-      observed = settled;
-      if (settled?.width === wantedWidth) return settled;
-    }
-  }
-  fail(`dedicated BCB popup resize did not reach ${wantedWidth}px (last ${JSON.stringify(observed)})`);
-}
-
-function appleScriptString(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-async function focusTaskPopupForScreenshot(bcb, tab, task) {
-  if (process.platform !== "darwin") fail("BCB screenshot proof requires macOS window focus verification");
+async function verifyIsolatedTaskBrowserForScreenshot(bcb, tab, task) {
   const identity = await execBrowser(bcb, tab, `document.title = ${JSON.stringify(task.document_title)}; ({ url: location.href, title: document.title })`);
-  if (identity?.url !== task.url || identity?.title !== task.document_title) fail("dedicated BCB release popup did not retain its expected URL and title");
+  if (identity?.url !== task.url || identity?.title !== task.document_title) fail("isolated BCB release browser did not retain its expected URL and title");
   const selected = await waitFor(async () => {
     const current = await tabs(bcb);
     if (!Array.isArray(current)) return undefined;
     return current.find((candidate) => String(candidate?.id) === String(tab) && candidate.url === task.url && candidate.title === task.document_title && candidate.active === true);
-  }, "dedicated BCB release popup selection");
-  const nativeWindowTitle = `${task.document_title} - Google Chrome`;
-  const script = `tell application "System Events"
-  tell process "Google Chrome"
-    set frontmost to true
-    set matches to every window whose name contains "${appleScriptString(task.document_title)}"
-    if (count of matches) = 0 then return "missing"
-    set targetWindow to item 1 of matches
-    try
-      perform action "AXRaise" of targetWindow
-    end try
-    set value of attribute "AXMain" of targetWindow to true
-    delay 0.2
-    return (value of attribute "AXMain" of targetWindow) as text
-  end tell
-end tell`;
-  let focusError;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const { stdout: focusResult } = await execFileAsync("osascript", ["-e", script], { timeout: TIMEOUT });
-      if (focusResult.trim() === "true") return { tab_id: tab, url: task.url, document_title: task.document_title, native_window_title: nativeWindowTitle, bcb_tab_selected: selected.active === true, macos_ax_main: true, focus_attempts: attempt + 1 };
-    } catch (error) {
-      focusError = error;
-    }
-    await execBrowser(bcb, tab, "window.focus(); true");
-    await delay(200);
-  }
-  fail(focusError instanceof Error ? `could not focus the dedicated BCB release popup: ${focusError.message}` : "macOS did not mark the dedicated BCB release popup as the main Chrome window");
+  }, "isolated BCB release browser selection");
+  // This private bridge owns one disposable Chromium-for-Testing tab. Verify
+  // that exact active tab, rather than calling macOS automation that could
+  // foreground a human's normal Chrome window.
+  return { tab_id: tab, url: task.url, document_title: task.document_title, bcb_tab_selected: selected.active === true, private_browser: true };
 }
 
 async function screenshotManagedChildren(bcb, tab, path, task, agentID, expectedChildState) {
-  const target = await focusTaskPopupForScreenshot(bcb, tab, task);
+  const target = await verifyIsolatedTaskBrowserForScreenshot(bcb, tab, task);
   const rendered = await execBrowser(bcb, tab, `(() => { const row = document.querySelector('[data-agent-id=${agentID}]'); const children = [...(row?.querySelectorAll('.managed-child-list li') ?? [])].map((child) => child.innerText); return { url: location.href, title: document.title, parent_selected: row?.getAttribute('aria-selected') === 'true', parent_text: row?.innerText ?? '', child_text: children.join('\\n'), child_count: children.length }; })()`);
   if (rendered?.url !== task.url || rendered?.title !== task.document_title || rendered?.parent_selected !== true || rendered.child_count < 1 || !rendered.child_text.includes(expectedChildState)) {
     fail(`BCB screenshot target did not render the selected managed ${expectedChildState} child`);
@@ -376,7 +257,7 @@ async function screenshot(bcb, tab, path, task, expectedChildState) {
 }
 
 async function screenshotReconstructing(bcb, tab, path, task) {
-  const target = await focusTaskPopupForScreenshot(bcb, tab, task);
+  const target = await verifyIsolatedTaskBrowserForScreenshot(bcb, tab, task);
   const rendered = await execBrowser(bcb, tab, `(() => { const row = document.querySelector('[data-agent-id=${CHILD_AGENT}]'); return { url: location.href, title: document.title, parent_selected: row?.getAttribute('aria-selected') === 'true', parent_text: row?.innerText ?? '', child_count: row?.querySelectorAll('.managed-child-list li').length ?? -1 }; })()`);
   if (rendered?.url !== task.url || rendered?.title !== task.document_title || rendered?.parent_selected !== true || !rendered.parent_text.includes("Reconstructing child state") || !rendered.parent_text.includes("Interrupted · outcome unknown") || rendered.child_count < 1) {
     fail("BCB screenshot target did not render the selected reconstructing managed restart state");
@@ -384,17 +265,6 @@ async function screenshotReconstructing(bcb, tab, path, task) {
   const result = await bcbCommand(bcb, ["cli.bcb_screenshot", "--tab", String(tab), "--output", path]);
   if (result !== path) fail("BCB screenshot CLI did not write the requested proof artifact");
   return { path, sha256: await sha256File(path), target: { ...target, rendered } };
-}
-
-async function clearAndCloseControlledBcbWindow(bcb, tab) {
-  if (tab === undefined) return false;
-  try { await execBrowser(bcb, tab, "localStorage.clear(); sessionStorage.clear(); true"); } catch { /* close still limits cleanup to the known task tab */ }
-  await bcbCommand(bcb, ["cli.bcb_close_tabs", String(tab)]);
-  await waitFor(async () => {
-    const current = await tabs(bcb);
-    return Array.isArray(current) && !current.some((candidate) => String(candidate?.id) === String(tab)) ? true : undefined;
-  }, "dedicated BCB release window close");
-  return true;
 }
 
 function providerCompletion(response, delta, finishReason = "stop") {
@@ -880,6 +750,7 @@ export async function runManagedRpcRelease() {
   let provider;
   let router;
   let bcb;
+  let controlledBrowser;
   let staticUIRoot;
   let tmuxPeer;
   let tab;
@@ -897,18 +768,17 @@ export async function runManagedRpcRelease() {
     router = await step("managed-router", () => startManagedRouter(root, prerequisites, provider, staticUIRoot));
     await step("router-serves-built-ui", () => verifyRouterServesBuiltUI(router));
     tmuxPeer = await step("canonical-tmux-peer", () => startCanonicalTmuxPeer(root, router));
-    bcb = await step("bcb", () => connectedBcb(prerequisites.python));
     const taskUrl = `${router.httpUrl}/?managed-rpc-release=${encodeURIComponent(`run-${Date.now()}-${Math.random().toString(16).slice(2)}`)}`;
     const visualTask = { url: taskUrl, document_title: `BCB Managed RPC Release ${Date.now()}-${Math.random().toString(16).slice(2)}` };
-    const taskWindow = await step("bcb-task-window", async () => {
-      const opened = await openControlledBcbWindow(bcb, taskUrl, `managed-rpc-release-${Date.now()}`);
-      tab = opened.tab;
-      const zoom = await resetControlledBcbWindowZoom(bcb, tab);
-      const viewport = await setControlledBcbWindowInnerWidth(bcb, tab, DESKTOP_VIEWPORT_WIDTH);
-      if (viewport.width !== DESKTOP_VIEWPORT_WIDTH) fail(`BCB task popup reported ${viewport.width ?? "unknown"}px instead of ${DESKTOP_VIEWPORT_WIDTH}px`);
-      return { ...opened, zoom, viewport: { width: viewport.width, height: viewport.height }, resize: "script-opened BCB popup window.resizeTo" };
+    const taskWindow = await step("isolated-bcb-task-browser", async () => {
+      controlledBrowser = await startIsolatedBcbBrowser(root, taskUrl, { width: DESKTOP_VIEWPORT_WIDTH, height: 980 });
+      bcb = controlledBrowser.bcb;
+      tab = controlledBrowser.tab.id;
+      const viewport = await execBrowser(bcb, tab, "({ width: innerWidth, height: innerHeight, scrollWidth: document.documentElement.scrollWidth, scale: visualViewport?.scale ?? 1 })");
+      if (viewport?.width !== DESKTOP_VIEWPORT_WIDTH || viewport?.scale !== 1) fail(`isolated BCB task browser reported ${viewport?.width ?? "unknown"}px at scale ${viewport?.scale ?? "unknown"} instead of ${DESKTOP_VIEWPORT_WIDTH}px at scale 1`);
+      return { tab, viewport: { width: viewport.width, height: viewport.height }, browser: "disposable Chromium for Testing profile" };
     });
-    await write("environment.json", { candidate: report.candidate, health: bcb.health, router: { http: router.httpUrl, ws: router.websocketUrl, database: router.database, log: router.log, managed_home: router.home, session_root: router.sessions, cwd: router.cwd, static_ui_root: staticUIRoot }, tmux_peer: { session: tmuxPeer.session, pane: tmuxPeer.pane, log: tmuxPeer.log, registered: tmuxPeer.registered }, bcb: { host: bcb.host, http: bcb.httpPort, existing_extension_connection: true, task_tab: tab, preexisting_tab_count: taskWindow.existing_tab_count }, browser: { task_url: taskUrl, document_title: visualTask.document_title, dedicated_window: true, device_emulation: false, ui_origin: router.httpUrl }, live_router_used: false });
+    await write("environment.json", { candidate: report.candidate, health: await fetch(`${bcb.baseUrl}/health`).then((response) => response.json()), router: { http: router.httpUrl, ws: router.websocketUrl, database: router.database, log: router.log, managed_home: router.home, session_root: router.sessions, cwd: router.cwd, static_ui_root: staticUIRoot }, tmux_peer: { session: tmuxPeer.session, pane: tmuxPeer.pane, log: tmuxPeer.log, registered: tmuxPeer.registered }, bcb: { host: bcb.host, http: bcb.httpPort, private_extension_connection: true, task_tab: tab }, browser: { task_url: taskUrl, document_title: visualTask.document_title, disposable_profile: true, device_emulation: false, ui_origin: router.httpUrl }, live_router_used: false });
 
     await step("connect-ui", async () => {
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('input[placeholder=\"http://127.0.0.1:4000\"]'))")) ? true : undefined, "BCB configuration screen");
@@ -967,11 +837,7 @@ export async function runManagedRpcRelease() {
     });
 
     await step("launch-real-managed-pi", async () => {
-      await execBrowser(bcb, tab, "document.querySelector('.provider-auth-dialog button[aria-label=\"Close provider settings\"]')?.click(); true;");
-      await waitFor(async () => (await execBrowser(bcb, tab, "!document.querySelector('.provider-auth-dialog[open]')")) ? true : undefined, "provider settings close");
-      await execBrowser(bcb, tab, "(() => { const actions = document.querySelector('.managed-actions-trigger'); if (!(actions instanceof HTMLButtonElement)) throw new Error('managed actions menu missing'); actions.click(); return true; })()");
-      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-actions-menu [role=menuitem]'))")) ? true : undefined, "managed actions menu");
-      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-actions-menu [role=menuitem]')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent menu item missing'); button.click(); return true; })()");
+      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent button missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-agent-dialog form'))")) ? true : undefined, "managed launch dialog");
       await execBrowser(bcb, tab, "(() => { const button = document.querySelector('.managed-agent-dialog .model-current'); if (!(button instanceof HTMLButtonElement) || button.textContent?.trim() !== 'Use router default') throw new Error('router default model trigger missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.model-menu-portal input[aria-label=\"Search available models\"]'))")) ? true : undefined, "searchable model picker");
@@ -1043,7 +909,7 @@ export async function runManagedRpcRelease() {
       const childText = await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] .managed-child-list')?.textContent ?? ""`);
       if (!childText.includes("Managed release child") || !childText.includes("compacting")) fail("BCB desktop view did not show the real managed child compaction");
       const capture = await screenshot(bcb, tab, join(output, "managed-child-compacting-desktop.png"), visualTask, "compacting");
-      await write("managed-child-compacting-desktop.json", { viewport: proof.viewport, scroll_width: proof.scrollWidth, screenshot: capture.path, screenshot_sha256: capture.sha256, screenshot_target: capture.target, route: "window.resizeTo on the script-opened BCB task popup", visibility, child_visible: true });
+      await write("managed-child-compacting-desktop.json", { viewport: proof.viewport, scroll_width: proof.scrollWidth, screenshot: capture.path, screenshot_sha256: capture.sha256, screenshot_target: capture.target, route: "disposable Chromium for Testing task browser", visibility, child_visible: true });
       return { viewport: proof.viewport, screenshot: capture.path, screenshot_target: capture.target, visibility };
     });
 
@@ -1211,7 +1077,7 @@ export async function runManagedRpcRelease() {
     report.result = "automated_pass_visual_identity_verified";
     report.visual_identity_verification = {
       status: "passed",
-      technique: "Each screenshot assigns the disposable popup a unique document title, confirms its exact BCB tab ID/URL/title and selected parent with the expected child state, then sets that exact Chrome window AXMain through macOS System Events immediately before capture.",
+      technique: "Each screenshot assigns the disposable Chromium for Testing tab a unique document title and confirms its exact BCB tab ID/URL/title and selected parent with the expected child state. The runner never invokes macOS browser focus automation.",
       artifacts: ["managed-child-compacting-desktop.json", "managed-child-compacting-desktop-reconnect.json", "managed-child-completed-desktop-reconnect.json", "managed-child-reconstructing-desktop-restart.json"],
     };
     report.acceptance_run = await writeCandidateAcceptanceRun(output, candidate, write);
@@ -1220,7 +1086,7 @@ export async function runManagedRpcRelease() {
     throw error;
   } finally {
     const cleanup = [];
-    try { if (bcb) cleanup.push({ dedicated_bcb_window_closed: await clearAndCloseControlledBcbWindow(bcb, tab) }); } catch (error) { cleanup.push({ dedicated_bcb_window_close_error: String(error) }); }
+    try { if (controlledBrowser) { await controlledBrowser.close(); cleanup.push({ isolated_bcb_browser_stopped: true }); } } catch (error) { cleanup.push({ isolated_bcb_browser_stop_error: String(error) }); }
     try { if (router) await stopRouterProcess(router); } catch (error) { cleanup.push({ router: String(error) }); }
     try { if (tmuxPeer) cleanup.push({ canonical_tmux_peer: await tmuxPeer.stop() }); } catch (error) { cleanup.push({ canonical_tmux_peer: String(error) }); }
     try { if (provider) await provider.close(); } catch (error) { cleanup.push({ provider: String(error) }); }
