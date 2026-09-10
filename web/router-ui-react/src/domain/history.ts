@@ -1,3 +1,5 @@
+import { secureUuid } from "../platform/secure-uuid";
+
 export const HISTORY_LIMIT = 200;
 export const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -74,7 +76,7 @@ export function stripDataUrls(message: HistoryMessage): HistoryMessage {
   return { ...message, attachments: message.attachments.filter((attachment) => !attachment.url?.startsWith("data:image/")).map(({ url, id, mime_type, size_bytes, name, cacheKey }) => ({ ...(url !== undefined ? { url } : {}), ...(id !== undefined ? { id } : {}), ...(mime_type !== undefined ? { mime_type } : {}), ...(size_bytes !== undefined ? { size_bytes } : {}), ...(name !== undefined ? { name } : {}), ...(cacheKey !== undefined ? { cacheKey } : {}) })) };
 }
 
-export function pendingMessage(body: string, peer: string, from: string, images: MessageAttachment[] = [], id = crypto.randomUUID(), createdAt = new Date().toISOString()): HistoryMessage {
+export function pendingMessage(body: string, peer: string, from: string, images: MessageAttachment[] = [], id = secureUuid(), createdAt = new Date().toISOString()): HistoryMessage {
   const text = body.trim();
   const visibleBody = images.length === 0 ? body : `${text}${text ? "\n\n" : ""}Attached image${images.length === 1 ? "" : "s"}:\n${images.map((image, index) => `${index + 1}. ${image.name || "image.jpg"}`).join("\n")}`;
   return { id, from, to: peer, body: visibleBody, attachments: images, created_at: createdAt, direction: "outgoing", pending: true };

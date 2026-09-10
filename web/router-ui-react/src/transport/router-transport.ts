@@ -1,3 +1,4 @@
+import { secureUuid } from "../platform/secure-uuid";
 import { buildAckFrame, buildActivityFrame, buildGoalControlFrame, buildInjectionRequestedFrame, buildInlineToolControlFrame, buildModelControlFrame, buildNackFrame, buildReminderLockControlFrame, buildSubagentStateResyncFrame, buildSubagentSyncEnableFrame } from "../protocol/frame-builders";
 import { isDeliveryItem, isRecord } from "../protocol/guards";
 import type { Agent } from "../state/agent-projection";
@@ -117,7 +118,7 @@ export interface RouterTransport {
   sendLifecycleResync(afterVersion: number): boolean;
 }
 
-function controlId(): string { return crypto.randomUUID(); }
+function controlId(): string { return secureUuid(); }
 function controlFor(kind: ControlKind, id: string, targetAgentId: string, targetInstanceId: string, socket: WebSocketIdentity, revision?: number, reminderId?: string): PendingControl { return { kind, controlId: id, sourceAgentId: socket.agentId, targetAgentId, targetInstanceId, leaseId: socket.leaseId, sourceInstanceId: socket.instanceId, sourceLeaseId: socket.leaseId, connectionGeneration: socket.generation, ...(revision === undefined ? {} : { revision }), ...(reminderId === undefined ? {} : { reminderId }) }; }
 
 type RefreshRepairReason = "registered" | "message_arrival" | "agent_projection_frame" | "conversation_message";
