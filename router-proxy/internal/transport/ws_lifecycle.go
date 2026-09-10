@@ -245,21 +245,36 @@ func (r *Router) conversationRecipients(agentIDs ...string) []*session {
 	defer r.mu.Unlock()
 	recipients := make([]*session, 0)
 	seen := map[*session]bool{}
+	addSession := func(candidate *session) {
+		if !seen[candidate] {
+			seen[candidate] = true
+			recipients = append(recipients, candidate)
+		}
+	}
 	add := func(subscribers map[string]*session) {
 		for _, candidate := range subscribers {
-			if !seen[candidate] {
-				seen[candidate] = true
-				recipients = append(recipients, candidate)
-			}
+			addSession(candidate)
 		}
 	}
 	if len(agentIDs) == 0 {
 		for _, subscribers := range r.convos {
 			add(subscribers)
 		}
+		for candidate := range r.uiSessions {
+			if candidate.conversationSync == "v1" {
+				addSession(candidate)
+			}
+		}
 	} else {
 		for _, agentID := range agentIDs {
 			add(r.convos[agentID])
+		}
+		// UI agent IDs are display labels only. Retain the old conversation
+		// filtering semantics without putting browsers in the durable map.
+		for candidate := range r.uiSessions {
+			if candidate.conversationSync == "v1" && contains(agentIDs, candidate.agentID) {
+				addSession(candidate)
+			}
 		}
 	}
 	return recipients
@@ -423,6 +438,13 @@ func (r *Router) finishOwnership(agentID string, transition *ownershipTransition
 
 func (r *Router) sessionClosed(s *session, registered bool) {
 	if !registered || s.agentID == "" {
+		return
+	}
+	if s.hasUILease() {
+		r.mu.Lock()
+		delete(r.uiSessions, s)
+		r.removePendingForSessionLocked(s)
+		r.mu.Unlock()
 		return
 	}
 	transition := r.beginOwnership(s.agentID)

@@ -197,6 +197,7 @@ func (r *Router) runSweep(ctx context.Context) error {
 
 func (r *Router) sweepLiveState() {
 	now := r.now()
+	r.closeExpiredUISessions(now)
 	r.mu.RLock()
 	expiredAgents := make([]string, 0)
 	for agentID, activity := range r.activities {
@@ -241,6 +242,24 @@ func (r *Router) sweepLiveState() {
 		if item.pending.source != nil && r.sessionMatchesIdentity(item.pending.source) {
 			_ = item.pending.source.sendError(item.code, item.pending.requestID)
 		}
+	}
+}
+
+// closeExpiredUISessions bounds connection-local browser state when a tab or
+// network disappears without a WebSocket close. These sessions never have a
+// SQLite lease to sweep.
+func (r *Router) closeExpiredUISessions(now time.Time) {
+	r.mu.RLock()
+	expired := make([]*session, 0)
+	for candidate := range r.uiSessions {
+		if !candidate.uiLeaseActive(now) {
+			expired = append(expired, candidate)
+		}
+	}
+	r.mu.RUnlock()
+	for _, candidate := range expired {
+		_ = candidate.sendError("lease_expired", "")
+		_ = candidate.close(4001, "lease expired")
 	}
 }
 
