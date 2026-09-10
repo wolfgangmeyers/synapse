@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,61 @@ func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	require.Equal(t, "supervisor", parsed.auditSupervisorTarget)
 	require.Equal(t, "mecha", parsed.auditTmuxSession)
 	require.Equal(t, transport.DefaultPolicyTimeout, parsed.policyTimeout)
+	require.True(t, parsed.managed.Enabled)
+}
+
+func TestParseConfigAllowsExplicitManagedOptOutAndRejectsInvalidValue(t *testing.T) {
+	disabled, err := parseConfig([]string{"--database", "/tmp/router.db", "--managed=false"})
+	require.NoError(t, err)
+	require.False(t, disabled.managed.Enabled)
+
+	_, err = parseConfig([]string{"--database", "/tmp/router.db", "--managed=invalid"})
+	require.Error(t, err)
+}
+
+func TestLauncherDefaultsManagedModeOnAndRejectsInvalidEnvironment(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	temporaryDirectory := t.TempDir()
+	capture := filepath.Join(temporaryDirectory, "make-args")
+	managedHome := filepath.Join(temporaryDirectory, "managed-home")
+	fakeBin := filepath.Join(temporaryDirectory, "bin")
+	require.NoError(t, os.MkdirAll(fakeBin, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(fakeBin, "make"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MECHA_TEST_CAPTURE\"\n"), 0o700))
+
+	environment := func(managed string) []string {
+		filtered := make([]string, 0, len(os.Environ())+5)
+		for _, value := range os.Environ() {
+			if !strings.HasPrefix(value, "MECHA_ROUTER_MANAGED") && !strings.HasPrefix(value, "PATH=") {
+				filtered = append(filtered, value)
+			}
+		}
+		filtered = append(filtered, "PATH="+fakeBin+":"+os.Getenv("PATH"), "MECHA_TEST_CAPTURE="+capture, "MECHA_ROUTER_MANAGED_HOME="+managedHome, "MECHA_ROUTER_MANAGED_SESSION_ROOT="+filepath.Join(managedHome, "sessions"))
+		if managed != "" {
+			filtered = append(filtered, "MECHA_ROUTER_MANAGED="+managed)
+		}
+		return filtered
+	}
+	run := func(managed string) *exec.Cmd {
+		command := exec.Command("bash", filepath.Join(repositoryRoot, "tools", "run_router.sh"))
+		command.Env = environment(managed)
+		return command
+	}
+
+	require.NoError(t, run("").Run())
+	arguments, err := os.ReadFile(capture)
+	require.NoError(t, err)
+	require.Contains(t, string(arguments), "ROUTER_MANAGED=true")
+
+	require.NoError(t, run("false").Run())
+	arguments, err = os.ReadFile(capture)
+	require.NoError(t, err)
+	require.Contains(t, string(arguments), "ROUTER_MANAGED=false")
+
+	invalid := run("invalid")
+	output, err := invalid.CombinedOutput()
+	require.Error(t, err)
+	require.Contains(t, string(output), "MECHA_ROUTER_MANAGED must be true or false")
 }
 
 func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string) {
@@ -112,7 +168,7 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
 	build.Dir = filepath.Dir(filepath.Join(".", "main.go"))
 	require.NoError(t, build.Run())
-	command := exec.Command(binary, "--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port))
+	command := exec.Command(binary, "--database", database, "--log", logPath, "--host", "127.0.0.1", "--port", formatPort(port), "--managed=false")
 	stdout, err := command.StdoutPipe()
 	require.NoError(t, err)
 	stderr, err := command.StderrPipe()
@@ -135,7 +191,6 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 		case line := <-lines:
 			if strings.HasPrefix(line, "MECHA_V2_ROUTER_READY ") {
 				ready = line
-				require.NoError(t, command.Process.Signal(syscall.SIGTERM))
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for isolated Go router readiness")
@@ -143,12 +198,21 @@ func TestCommandStartsWithDistinctDatabaseLogAttachmentsAndPort(t *testing.T) {
 	}
 	require.Contains(t, ready, "database="+database)
 	require.Contains(t, ready, "log="+logPath)
+	legacyHealth, err := http.Get("http://127.0.0.1:" + formatPort(port) + "/v1/health")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, legacyHealth.StatusCode)
+	require.NoError(t, legacyHealth.Body.Close())
+	disabledManagedRoute, err := http.Get("http://127.0.0.1:" + formatPort(port) + "/v1/managed-agents")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, disabledManagedRoute.StatusCode)
+	require.NoError(t, disabledManagedRoute.Body.Close())
 	require.FileExists(t, database)
 	attachmentInfo, err := os.Stat(database + ".attachments")
 	require.NoError(t, err)
 	require.True(t, attachmentInfo.IsDir())
 	require.FileExists(t, logPath)
 
+	require.NoError(t, command.Process.Signal(syscall.SIGTERM))
 	require.NoError(t, command.Wait())
 	logBytes, err := os.ReadFile(logPath)
 	require.NoError(t, err)

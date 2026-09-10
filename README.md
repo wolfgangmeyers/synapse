@@ -31,7 +31,7 @@ Allowed values are `pi`, `claude`, `codex`, and `cursor`; missing config falls b
 
 ## Shell fallbacks and service scripts
 
-The Go Mailbox V2 router is the official router and the default local service. From the repository root, start it with `tools/run_router.sh`.
+The Go Mailbox V2 router is the official router and the default local service. From the repository root, start it with `tools/run_router.sh`. Router-managed Pi is enabled by default; set `MECHA_ROUTER_MANAGED=false` only when the legacy router behavior is needed. Invalid values are rejected before startup.
 
 Use the managed Python tools first. When a model-session tool is unavailable, these shell-invoked fallbacks have narrow roles:
 
