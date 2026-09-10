@@ -1,19 +1,40 @@
 import "@testing-library/jest-dom/vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState, type ReactElement } from "react";
 import { describe, expect, it } from "vitest";
-import { ManagedHistory } from "../../src/components/ManagedHistory";
+import { Conversation } from "../../src/components/Conversation";
+import type { ConversationView } from "../../src/components/ConversationHeader";
 
-describe("ManagedHistory", () => {
-  it("keeps quiet and complete data separate and filters the selected view", async () => {
+function ConversationModes(): ReactElement {
+  const [view, setView] = useState<ConversationView>("quiet");
+  return <Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} conversationView={view} onConversationViewChange={setView} messages={[{ id: "message-1", from: "managed-worker", to: "wolfgang", body: "Conversation message", created_at: "2030-01-01T10:00:00.000Z" }]} activityEntries={[{ id: "activity-1", level: "info", message: "Managed worker restarted", at: "2030-01-01T10:01:00.000Z" }, { id: "activity-untimed", message: "Managed worker activity without a timestamp" }]} />;
+}
+
+describe("Selected-agent conversation modes", () => {
+  it("keeps Quiet as the conversation and makes Complete include messages plus activity", async () => {
     const user = userEvent.setup();
-    render(<ManagedHistory quiet={[{ id: "quiet-1", level: "message", message: "Called Wolfgang" }]} complete={[{ id: "complete-1", level: "error", message: "Restart failed" }]} />);
-    expect(screen.getByText("Called Wolfgang")).toBeInTheDocument();
-    expect(screen.queryByText("Restart failed")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Complete" }));
-    expect(screen.getByRole("tab", { name: "Complete" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("Restart failed")).toBeInTheDocument();
-    await user.type(screen.getByLabelText("Filter history"), "message");
-    expect(screen.getByText("No history matches this filter.")).toBeInTheDocument();
+    render(<ConversationModes />);
+
+    const quiet = screen.getByRole("tab", { name: "Quiet messages" });
+    const complete = screen.getByRole("tab", { name: "Complete: messages + activity" });
+    expect(quiet).toHaveAttribute("aria-selected", "true");
+    expect(quiet).toHaveAttribute("aria-controls", "conversation-view-panel");
+    expect(screen.getByText("Conversation message")).toBeInTheDocument();
+    expect(screen.queryByText("Managed worker restarted")).not.toBeInTheDocument();
+
+    await user.click(complete);
+    expect(complete).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Conversation message")).toBeInTheDocument();
+    expect(screen.getByText("Managed worker restarted")).toBeInTheDocument();
+    expect(screen.getByText("Managed worker activity without a timestamp")).toBeInTheDocument();
+    expect(document.querySelector("[data-message-id='message-1']")).toBeInTheDocument();
+    expect(document.querySelector("[data-activity-id='activity-1']")).toBeInTheDocument();
+    expect([...screen.getByRole("tabpanel").querySelectorAll("[data-message-id], [data-activity-id]")].map((item) => item.getAttribute("data-message-id") ?? item.getAttribute("data-activity-id"))).toEqual(["message-1", "activity-1", "activity-untimed"]);
+
+    await user.click(quiet);
+    expect(screen.getByText("Conversation message")).toBeInTheDocument();
+    expect(screen.queryByText("Managed worker restarted")).not.toBeInTheDocument();
+    expect(screen.queryByText("Managed worker activity without a timestamp")).not.toBeInTheDocument();
   });
 });
