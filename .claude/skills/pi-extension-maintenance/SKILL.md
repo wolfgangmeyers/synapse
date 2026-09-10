@@ -100,11 +100,11 @@ installer, create a symlink, or restore an old installed artifact. Existing bare
 Pi processes need a reload after an authorized source change; do not claim the
 new packages are active before that reload and a controlled wakeup check.
 
-Registration keeps the checkout package available through Pi settings. Normal
-Pi supervisor, worker, service, and recovery launches use Pi's default configured
-extensions and pass neither `--extension` nor `--no-extensions`/`-ne`; those flags
-are reserved for deliberate extension-test tools. Keep the managed launch's
-provider, model, router environment, and default extensions unchanged.
+Registration keeps the checkout package available through Pi settings. Managed
+Pi supervisor, worker, service, and recovery launches use `--no-extensions` and
+explicitly load the canonical `pi-subagents` and `mecha-messaging` entrypoints.
+Other runtimes keep their normal extension policy. Keep the managed launch's
+provider, model, and router environment unchanged.
 
 ## Installer recovery
 

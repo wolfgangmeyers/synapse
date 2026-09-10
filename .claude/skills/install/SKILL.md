@@ -323,11 +323,10 @@ test -f "$REPO_ROOT/pi-extensions/mecha-messaging/mailbox-client.js"
 (cd "$REPO_ROOT/pi-extensions/mecha-messaging" && npm run check:mailbox-client-drift)
 ```
 
-Global registration keeps the package available through Pi settings. Normal Pi
-supervisor, worker, and service launches use Pi's default configured extensions and
-pass neither `--extension` nor `--no-extensions`/`-ne`; those flags are reserved for
-deliberate extension-test tools. If an existing bare Pi process needs the updated
-package, reload it after the authorized source change.
+Global registration keeps the package available through Pi settings. Managed Pi supervisor, worker, and service launches use `--no-extensions` and
+explicitly load the canonical `pi-subagents` and `mecha-messaging` entrypoints.
+Other runtimes keep their normal extension policy. If an existing bare Pi process
+needs the updated package, reload it after the authorized source change.
 
 ### 8. Symlink Hooks
 
