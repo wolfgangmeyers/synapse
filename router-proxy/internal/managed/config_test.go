@@ -48,6 +48,20 @@ func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {
 	require.Error(t, ValidateManagedLaunchConfig(config))
 }
 
+func TestValidateWorkingDirectoryExpandsHomeRelativePaths(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "code", "project")
+	require.NoError(t, os.MkdirAll(project, 0o700))
+	t.Setenv("HOME", home)
+
+	resolved, err := ValidateWorkingDirectory("~/code/project", []string{filepath.Join(home, "code")})
+	expected, expectedErr := filepath.EvalSymlinks(project)
+
+	require.NoError(t, err)
+	require.NoError(t, expectedErr)
+	require.Equal(t, expected, resolved)
+}
+
 func TestManagedLaunchConfigRejectsUnsafeCorePaths(t *testing.T) {
 	config, paths := managedLaunchConfigFixture(t)
 	outside := t.TempDir()

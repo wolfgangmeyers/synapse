@@ -953,11 +953,22 @@ func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Reques
 }
 
 func (r *Router) handleManagedDirectoriesGET(w http.ResponseWriter, req *http.Request) {
-	if len(req.URL.Query()) != 1 || req.URL.Query().Get("path") == "" {
+	if len(req.URL.Query()) != 1 {
 		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_WORKING_DIRECTORY", "Working directory is invalid"})
 		return
 	}
-	path, err := managed.ValidateWorkingDirectory(req.URL.Query().Get("path"), r.managed.AllowedWorkingDirectoryRoots())
+	requestedPath := req.URL.Query().Get("path")
+	if requestedPath == "" {
+		roots := r.managed.AllowedWorkingDirectoryRoots()
+		if len(roots) == 0 {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_WORKING_DIRECTORY", "Working directory is invalid"})
+			return
+		}
+		// The empty browser field starts at the first configured root, so Browse
+		// remains useful before the user has typed a path.
+		requestedPath = roots[0]
+	}
+	path, err := managed.ValidateWorkingDirectory(requestedPath, r.managed.AllowedWorkingDirectoryRoots())
 	if err != nil {
 		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_WORKING_DIRECTORY", "Working directory is invalid"})
 		return

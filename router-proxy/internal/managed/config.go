@@ -236,6 +236,17 @@ func ValidateWorkingDirectory(path string, roots []string) (string, error) {
 	if path == "" {
 		return "", errors.New("invalid working directory")
 	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("working directory home is unavailable: %w", err)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", err

@@ -966,14 +966,23 @@ p:empty { display: none; }
 .managed-agent-dialog { width: min(680px, calc(100vw - 32px)); }
 .managed-agent-form { display: grid; gap: 12px; }
 .managed-agent-form label, .managed-agent-form fieldset { display: grid; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
-.managed-agent-form fieldset { grid-template-columns: 1fr 1fr; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 14px; }
+.managed-agent-form fieldset { grid-template-columns: 1fr; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 14px; }
 .managed-agent-form legend { grid-column: 1 / -1; padding: 0 5px; }
+.managed-agent-form fieldset .model-controls { width: 100%; margin-left: 0; }
+.managed-agent-form fieldset .model-current { width: 100%; min-width: 0; }
 .managed-agent-form textarea { min-height: 130px; resize: vertical; }
-.managed-directory-picker { display: grid; gap: 8px; }
-.managed-directory-picker > label { display: grid; gap: 6px; }
+.managed-directory-picker { display: grid; gap: 8px; padding: 8px; border: 1px solid transparent; border-radius: 16px; }
+.managed-directory-picker.dragging { border-color: var(--secondary); background: rgba(120,224,205,0.08); }
+.managed-directory-field { display: grid; gap: 6px; }
+.managed-directory-field > label { color: var(--muted); font-size: 13px; font-weight: 700; }
+.directory-picker-input-row { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px; align-items: center; }
+.directory-browse-button { display: inline-flex; align-items: center; justify-content: center; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; }
 .directory-picker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .managed-directory-picker ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 6px; max-height: 160px; margin: 0; padding: 0; overflow: auto; list-style: none; }
 .managed-directory-picker li button { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.managed-recent-folders { grid-template-columns: 1fr !important; }
+.managed-recent-folders li button { text-align: left; }
+.managed-directory-drop-hint { font-size: 12px; }
 .managed-lifecycle-actions, .managed-confirmation { display: grid; gap: 12px; }
 .managed-confirmation { padding: 12px; border: 1px solid rgba(255,180,171,.42); border-radius: 14px; }
 .managed-state-dialog { width: min(760px, calc(100vw - 32px)); }

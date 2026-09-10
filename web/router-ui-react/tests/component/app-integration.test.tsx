@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { App } from "../../src/App";
 import { createInitialState } from "../../src/state/app-state";
 import { ACTIVE_ROUTER_KEY, AGENT_IDS_KEY, ROUTERS_KEY, SELECTED_PEERS_KEY, ownerScope } from "../../src/persistence/settings-repository";
+import { MANAGED_RECENT_FOLDERS_KEY } from "../../src/persistence/managed-folder-history";
 import { HistoryRepository } from "../../src/persistence/history-repository";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 import type { ManagedAgent } from "../../src/protocol/types";
@@ -85,6 +86,56 @@ describe("App integration", () => {
     await waitFor(() => expect(storage.getItem("mecha.web.messages")).toBeNull());
     expect(storage.getItem("mecha.web.conversations")).toBeNull();
     expect(storage.getItem("mecha.web.drafts")).toContain("draft");
+  });
+
+  it("opens provider settings from managed actions and remembers a default-model launch folder", async () => {
+    const storage = new MemoryStorage();
+    const user = (await import("@testing-library/user-event")).default.setup();
+    let launchPayload: unknown;
+    const timestamp = "2030-01-01T00:00:00.000Z";
+    const launchedAgent: ManagedAgent = { agent_id: "managed-alpha", source: "router-managed", cwd: "/allowed/project", model: { provider: "openai-codex", id: "gpt-5.6-terra" }, desired_state: "running", lifecycle_state: "starting", activity_state: "starting", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: timestamp, started_at: null, updated_at: timestamp, last_error: null };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true });
+      if (url.endsWith("/v1/managed-agents")) {
+        if (init?.method === "POST") { launchPayload = JSON.parse(String(init.body)); return jsonResponse({ operation_id: "00000000-0000-4000-8000-000000000001", agent: launchedAgent }, 202); }
+        return jsonResponse({ generated_at: timestamp, projection_version: 1, agents: [] });
+      }
+      if (url.includes("/v1/history?")) return jsonResponse({ view: new URL(url).searchParams.get("view"), entries: [], next_before: null });
+      if (url.endsWith("/v1/provider-auth")) return jsonResponse({ auth_revision: 0, providers: [
+        { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
+      ] });
+      if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 0, default_model: null, models: [{ provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", available: true }] });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory }} />);
+    const menuButton = await screen.findByRole("button", { name: "Managed actions" });
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: "Provider settings" }));
+    expect(await screen.findByRole("dialog", { name: "Provider settings" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(3);
+    await user.click(screen.getByRole("button", { name: "Close provider settings" }));
+
+    await user.click(menuButton);
+    await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "managed-alpha" } });
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/project" } });
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+
+    await waitFor(() => expect(launchPayload).toEqual({ name: "managed-alpha", cwd: "/allowed/project" }));
+    await waitFor(() => expect(storage.getItem(MANAGED_RECENT_FOLDERS_KEY)).toBe(JSON.stringify(["/allowed/project"])));
   });
 
   it("requires an explicit router URL and does not contact a default router", () => {
