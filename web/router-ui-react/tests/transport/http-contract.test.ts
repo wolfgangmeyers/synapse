@@ -37,6 +37,7 @@ describe("direct HTTP transport", () => {
       expect(String(input)).toBe("http://router.test/v1/managed-agents");
       expect(init?.credentials).toBe("omit");
       expect(init?.headers).toEqual({ "x-request-id": expect.any(String), "content-type": "application/json" });
+      expect(init?.body).toBe(JSON.stringify({ name: "managed-alpha", cwd: "/tmp/project" }));
       return response({ operation_id: "00000000-0000-4000-8000-000000000000", agent: managedAgent }, 202);
     });
     await expect(createHttpClient("http://router.test", fetchImpl).launchManaged({ name: "managed-alpha", cwd: "/tmp/project" })).resolves.toMatchObject({ agent: { agent_id: "managed-alpha" } });

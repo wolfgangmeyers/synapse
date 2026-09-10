@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -185,6 +186,20 @@ type helperWirePrompt struct {
 	URL         string `json:"url"`
 }
 
+// safeProviderPromptURL admits only the ChatGPT OAuth endpoint needed to
+// complete sign-in. Every other helper-owned string remains untrusted display
+// data, so an injected child cannot turn the router UI into an open redirect.
+func safeProviderPromptURL(provider, raw string) string {
+	if provider != "openai-codex" || raw == "" || len(raw) > 2048 {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), "auth.openai.com") || parsed.Port() != "" || parsed.User != nil || parsed.Fragment != "" {
+		return ""
+	}
+	return parsed.String()
+}
+
 func decodeHelperEvent(raw []byte) (managed.ProviderAuthEvent, bool) {
 	if len(raw) == 0 || len(raw) > 64*1024 {
 		return managed.ProviderAuthEvent{}, false
@@ -207,7 +222,7 @@ func decodeHelperEvent(raw []byte) (managed.ProviderAuthEvent, bool) {
 		if wire.Prompt.ID == "" || len(wire.Prompt.ID) > 128 || (wire.Prompt.Kind != "text" && wire.Prompt.Kind != "secret" && wire.Prompt.Kind != "select" && wire.Prompt.Kind != "manual_code") {
 			return managed.ProviderAuthEvent{}, false
 		}
-		event.Prompt = &managed.ProviderAuthPrompt{ID: wire.Prompt.ID, Kind: wire.Prompt.Kind, Message: "Enter the requested sign-in value."}
+		event.Prompt = &managed.ProviderAuthPrompt{ID: wire.Prompt.ID, Kind: wire.Prompt.Kind, Message: "Enter the requested sign-in value.", URL: safeProviderPromptURL(wire.Provider, wire.Prompt.URL)}
 	}
 	if event.Kind == "prompt" && event.Prompt == nil {
 		return managed.ProviderAuthEvent{}, false

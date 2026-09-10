@@ -87,6 +87,7 @@ try {
           kind: prompt.type,
           message: prompt.message,
           ...(typeof prompt.placeholder === "string" ? { placeholder: prompt.placeholder } : {}),
+          ...(typeof prompt.url === "string" ? { url: prompt.url } : {}),
         }));
         while (true) {
           const response = parseResponse(await lines.next(controller.signal));

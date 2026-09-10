@@ -20,4 +20,34 @@ describe("ModelPicker", () => {
 
   it("searches the catalog and reports truncation", async () => { const user = userEvent.setup(); render(<ModelPicker models={models} currentModel={firstModel} totalCount={10} truncated onChange={vi.fn()} />); await user.click(screen.getByRole("button", { name: "openai/gpt-5" })); expect(screen.getByText("Showing 2 of 10 models.")).toBeInTheDocument(); await user.type(screen.getByRole("searchbox"), "claude"); expect(screen.getByRole("option", { name: /claude/ })).toBeInTheDocument(); expect(screen.queryByRole("option", { name: /GPT 5/ })).not.toBeInTheDocument(); });
   it("returns the selected model and restores focus", async () => { const user = userEvent.setup(); const onChange = vi.fn(); render(<ModelPicker models={models} onChange={onChange} />); const button = screen.getByRole("button", { name: "Select model" }); await user.click(button); await user.click(screen.getByRole("option", { name: /GPT 5/ })); expect(onChange).toHaveBeenCalledWith(firstModel); expect(document.activeElement).toBe(button); });
+  it("offers the router default", async () => {
+    const user = userEvent.setup();
+    const onDefault = vi.fn();
+    render(<ModelPicker models={models} onChange={vi.fn()} emptyOption={{ label: "Use router default", description: "Uses the router default", onSelect: onDefault }} />);
+    const button = screen.getByRole("button", { name: "Use router default" });
+    await user.click(button);
+    expect(button).toHaveAttribute("aria-haspopup", "dialog");
+    await user.click(screen.getByRole("option", { name: /Use router default/ }));
+    expect(onDefault).toHaveBeenCalledOnce();
+  });
+
+  it("closes with Escape and restores trigger focus", async () => {
+    const user = userEvent.setup();
+    render(<ModelPicker models={models} onChange={vi.fn()} />);
+    const button = screen.getByRole("button", { name: "Select model" });
+    await user.click(button);
+    await screen.findByRole("searchbox");
+    await user.keyboard("{Escape}");
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("portals the menu to its dialog so fieldset layout cannot crop it", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<dialog open><ModelPicker models={models} onChange={vi.fn()} /></dialog>);
+    const button = container.querySelector<HTMLButtonElement>(".model-current");
+    if (!button) throw new Error("model trigger is missing");
+    await user.click(button);
+    expect(screen.getByRole("dialog", { name: "Choose agent model" }).parentElement).toBe(container.querySelector("dialog"));
+  });
 });

@@ -73,13 +73,10 @@ func SelectModel(explicit *Model, saved *store.ManagedModel, catalog Catalog) (M
 			return candidate, nil
 		}
 	}
-	// The first slice uses one static local catalog. Keep the fallback aligned
-	// with the provider/model pair that the launcher passes to Pi.
-	terra := Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra"}
-	if available(terra) {
-		return terra, nil
-	}
-	return Model{}, &modelUnavailableError{terra.Provider, terra.ID}
+	// An omitted model delegates to the router's built-in Pi default. Provider
+	// catalogs gate explicit choices, but must not turn the optional launch field
+	// into a validation error while a catalog refresh or sign-in is unavailable.
+	return Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Available: true}, nil
 }
 
 type StoreCatalogSource struct {

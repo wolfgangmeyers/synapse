@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderAuthDialog } from "../../src/components/ProviderAuthDialog";
 import type { ProviderAuthClient } from "../../src/components/ProviderAuthDialog";
 
@@ -25,15 +25,28 @@ function clientFixture(): ProviderAuthClient {
   };
 }
 
+afterEach(cleanup);
+
 describe("ProviderAuthDialog", () => {
   it("renders the bounded three-provider shared auth surface", async () => {
     const client = clientFixture();
     render(<ProviderAuthDialog open client={client} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    const dialog = screen.getByRole("dialog", { name: "Provider settings" });
+    expect(dialog).toHaveClass("message-dialog", "provider-auth-dialog");
+    expect(screen.getByRole("heading", { name: "Providers" })).toBeInTheDocument();
     expect(await screen.findByText("ChatGPT")).toBeInTheDocument();
     expect(screen.getByText("Google")).toBeInTheDocument();
     expect(screen.getByText("Cursor")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(2);
+  });
+
+  it("keeps a provider's sign-in link available without opening a new window", async () => {
+    const client = clientFixture();
+    const prompt = { type: "provider_auth_prompt" as const, protocol: "mecha.web/v1" as const, projection_version: 2, operation_id: "auth-1", provider: "openai-codex" as const, prompt: { id: "code-1", kind: "manual_code" as const, message: "Complete ChatGPT sign-in, then paste the code.", url: "https://auth.openai.com/authorize" } };
+    render(<ProviderAuthDialog open client={client} prompt={prompt} onClose={() => undefined} onPromptHandled={() => undefined} />);
+    expect(screen.getByRole("link", { name: "Open ChatGPT sign-in page" })).toHaveAttribute("href", "https://auth.openai.com/authorize");
+    expect(screen.getByRole("link", { name: "Open ChatGPT sign-in page" })).not.toHaveAttribute("target");
   });
 
   it("submits a secret prompt once and clears input before the next prompt", async () => {
