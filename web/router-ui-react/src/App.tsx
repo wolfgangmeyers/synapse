@@ -6,7 +6,7 @@ import { mergeAgentSources, sourceAgentKey } from "./state/agent-projection";
 import { activeRemindersForPeer, lockAfterCreateStatus, lockResultState, reminderLockErrorMessage, reminderLockKey, type Reminder, type ReminderCreateInput, type ReminderLockAction } from "./domain/reminders";
 import { normalizeModelSummary } from "./domain/models";
 import { mergeMessages, pendingMessage, reconcileHistoryMessages, settlePendingMessages, type HistoryMessage } from "./domain/history";
-import { normalizeRouterUrl, persistedActiveRouter, createSettingsRepository, setActiveRouter, setAgentId, setRouterAlias, LEGACY_AGENT_ID_KEY, setSelectedPeer as persistSelectedPeer, selectedPeerFor, removeRouter as removeSavedRouter, type SettingsState, type StorageAdapter } from "./persistence/settings-repository";
+import { normalizeRouterUrl, persistedActiveRouter, createSettingsRepository, migrateBootstrapRouter, setActiveRouter, setAgentId, setRouterAlias, LEGACY_AGENT_ID_KEY, setSelectedPeer as persistSelectedPeer, selectedPeerFor, removeRouter as removeSavedRouter, type SettingsState, type StorageAdapter } from "./persistence/settings-repository";
 import { type RouterTransport, type RouterTransportOptions } from "./transport/router-transport";
 import { isRecord } from "./protocol/guards";
 import { useRouterSession } from "./hooks/use-router-session";
@@ -59,10 +59,21 @@ export interface AppProps {
 
 type Dialog = "routers" | "provider-settings" | "goal" | "reminders" | "inline-tools" | "prompts" | "arrival" | "managed" | "managed-state" | undefined;
 
-function configuredRouterUrl(props: AppProps): string | undefined {
-  const explicit = props.routerUrl ?? props.state?.routerUrl ?? import.meta.env.VITE_ROUTER_URL;
-  if (typeof explicit === "string" && explicit.trim() !== "") return explicit;
-  return persistedActiveRouter(props.storage);
+interface RouterConfiguration {
+  routerUrl: string;
+  bootstrapRouterUrl?: string;
+}
+
+function configuredRouterUrl(props: AppProps): RouterConfiguration | undefined {
+  const explicit = props.routerUrl ?? props.state?.routerUrl;
+  if (typeof explicit === "string" && explicit.trim() !== "") return { routerUrl: explicit };
+
+  const configuredBootstrapRouterUrl: unknown = import.meta.env.VITE_ROUTER_URL;
+  const bootstrapRouterUrl = typeof configuredBootstrapRouterUrl === "string" && configuredBootstrapRouterUrl.trim() !== "" ? configuredBootstrapRouterUrl : undefined;
+  const persisted = persistedActiveRouter(props.storage, bootstrapRouterUrl);
+  if (persisted !== undefined) return { routerUrl: persisted, ...(bootstrapRouterUrl === undefined ? {} : { bootstrapRouterUrl }) };
+  if (bootstrapRouterUrl !== undefined) return { routerUrl: bootstrapRouterUrl, bootstrapRouterUrl };
+  return undefined;
 }
 
 function responseMessage(value: unknown, routerUrl: string): HistoryMessage | undefined {
@@ -101,14 +112,14 @@ function ConfigurationScreen({ initialValue = "", initialError = "Router URL is 
 }
 
 export function App(props: AppProps): ReactElement {
-  const [configured, setConfigured] = useState<string | undefined>(() => configuredRouterUrl(props));
+  const [configured, setConfigured] = useState<RouterConfiguration | undefined>(() => configuredRouterUrl(props));
   const candidate = configured ?? configuredRouterUrl(props);
-  if (candidate === undefined) return <ConfigurationScreen onConfigure={setConfigured} />;
+  if (candidate === undefined) return <ConfigurationScreen onConfigure={(routerUrl) => setConfigured({ routerUrl })} />;
   try {
-    const normalized = normalizeRouterUrl(candidate);
-    return <ConfiguredApp {...props} routerUrl={normalized} />;
+    const normalized = normalizeRouterUrl(candidate.routerUrl);
+    return <ConfiguredApp {...props} routerUrl={normalized} {...(candidate.bootstrapRouterUrl === undefined ? {} : { bootstrapRouterUrl: candidate.bootstrapRouterUrl })} />;
   } catch {
-    return <ConfigurationScreen initialValue={candidate} initialError="Router URL is invalid" onConfigure={setConfigured} />;
+    return <ConfigurationScreen initialValue={candidate.routerUrl} initialError="Router URL is invalid" onConfigure={(routerUrl) => setConfigured({ routerUrl })} />;
   }
 }
 
@@ -116,7 +127,7 @@ function PersistenceStartupScreen({ error }: { error?: string }): ReactElement {
   return <main className="configuration-screen"><section className="empty-state" aria-labelledby="persistence-title"><h1 id="persistence-title">Loading Mecha</h1>{error ? <p className="error" role="alert">{error}</p> : <p>Loading local history…</p>}</section></main>;
 }
 
-function ConfiguredApp(props: AppProps & { routerUrl: string }): ReactElement {
+function ConfiguredApp(props: AppProps & { routerUrl: string; bootstrapRouterUrl?: string }): ReactElement {
   const [initializationError, setInitializationError] = useState<string>();
   const [ready, setReady] = useState(false);
   useEffect(() => {
@@ -133,10 +144,10 @@ function ConfiguredApp(props: AppProps & { routerUrl: string }): ReactElement {
   return <ConfiguredAppContent {...props} />;
 }
 
-function ConfiguredAppContent({ routerUrl, agentId: requestedAgentId, connect = true, state: suppliedState, storage, transportOptions, onRefresh, onSelectAgent, onFilterChange, onRouterClick, onSend: externalSend, onGoal: externalGoal, onReminders: externalReminders, onInlineToolSettings: externalInlineToolSettings, onOpenArrival, onDismissArrival, onToggleSubagents }: AppProps & { routerUrl: string }): ReactElement {
+function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requestedAgentId, connect = true, state: suppliedState, storage, transportOptions, onRefresh, onSelectAgent, onFilterChange, onRouterClick, onSend: externalSend, onGoal: externalGoal, onReminders: externalReminders, onInlineToolSettings: externalInlineToolSettings, onOpenArrival, onDismissArrival, onToggleSubagents }: AppProps & { routerUrl: string; bootstrapRouterUrl?: string }): ReactElement {
   const settingsRepository = useMemo(() => createSettingsRepository(storage, routerUrl), [storage, routerUrl]);
   const [settings, setSettings] = useState<SettingsState>(() => {
-    const loaded = setActiveRouter(settingsRepository.load(), routerUrl);
+    const loaded = setActiveRouter(migrateBootstrapRouter(settingsRepository.load(), bootstrapRouterUrl), routerUrl);
     const configured = settingsRepository.agentId(loaded, loaded.activeRouter, "wolfgang");
     const persisted = loaded.agentIds[loaded.activeRouter] !== undefined
       || (loaded.routers[0] === loaded.activeRouter && storage?.getItem(LEGACY_AGENT_ID_KEY)?.trim() !== "");

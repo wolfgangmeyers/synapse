@@ -10,7 +10,7 @@ import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-c
 import type { ManagedAgent } from "../../src/protocol/types";
 import { afterEach } from "vitest";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllEnvs(); });
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -153,6 +153,30 @@ describe("App integration", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /Router persisted-router.test:43123/ })).toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: "Connect Mecha" })).not.toBeInTheDocument();
     expect(document.querySelector(".router-row.active")).toHaveTextContent("persisted-router.test:43123");
+  });
+
+  it("keeps the saved router and conversation selection when Vite provides a bootstrap URL", async () => {
+    const storage = new MemoryStorage();
+    const intendedRouter = "http://intended-router.test:43123";
+    const bootstrapRouter = "http://web-ui.test:8787";
+    const owner = ownerScope(intendedRouter, "wolfgang");
+    storage.setItem(ACTIVE_ROUTER_KEY, bootstrapRouter);
+    storage.setItem(ROUTERS_KEY, JSON.stringify([intendedRouter, bootstrapRouter]));
+    storage.setItem(SELECTED_PEERS_KEY, JSON.stringify({ [owner]: "worker-one", [ownerScope(bootstrapRouter, "wolfgang")]: "worker-one" }));
+    await new HistoryRepository(undefined, storage).savePeer("worker-one", { routerUrl: intendedRouter, agentId: "wolfgang" }, [{ id: "saved-history", from: "worker-one", to: "wolfgang", body: "Keep this conversation", created_at: "2030-01-01T00:00:00.000Z" }]);
+    vi.stubEnv("VITE_ROUTER_URL", bootstrapRouter);
+
+    for (let refresh = 0; refresh < 5; refresh += 1) {
+      render(<App storage={storage} connect={false} />);
+      await waitFor(() => expect(screen.getByRole("button", { name: /Router intended-router.test:43123/ })).toBeInTheDocument());
+      expect(document.querySelector(".router-row.active")).toHaveTextContent("intended-router.test:43123");
+      cleanup();
+    }
+
+    expect(storage.getItem(ACTIVE_ROUTER_KEY)).toBe(intendedRouter);
+    expect(JSON.parse(storage.getItem(ROUTERS_KEY) ?? "[]")).toEqual([intendedRouter]);
+    expect(JSON.parse(storage.getItem(SELECTED_PEERS_KEY) ?? "{}")).toEqual({ [owner]: "worker-one" });
+    expect((await new HistoryRepository(undefined, storage).load({ routerUrl: intendedRouter, agentId: "wolfgang" }))["worker-one"]).toEqual([expect.objectContaining({ body: "Keep this conversation" })]);
   });
 
   it("keeps each router identity and its history when adding another router", async () => {

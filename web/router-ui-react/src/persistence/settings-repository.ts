@@ -108,11 +108,12 @@ export function emptySettings(defaultRouter = DEFAULT_ROUTER_URL): SettingsState
   return { activeRouter: router, routers: [router], aliases: {}, agentIds: {}, selectedPeers: {} };
 }
 
-export function persistedActiveRouter(storage: StorageAdapter | undefined = storageOrUndefined()): string | undefined {
+export function persistedActiveRouter(storage: StorageAdapter | undefined = storageOrUndefined(), bootstrapRouterUrl?: string): string | undefined {
   const value = storage?.getItem(ACTIVE_ROUTER_KEY);
   if (value === null || value === undefined || value.trim() === "") return undefined;
   try {
-    return normalizeRouterUrl(value);
+    normalizeRouterUrl(value);
+    return migrateBootstrapRouter(loadSettings(storage), bootstrapRouterUrl).activeRouter;
   } catch {
     return undefined;
   }
@@ -190,7 +191,9 @@ export function saveSettings(settings: SettingsState, storage: StorageAdapter | 
     const parts = key.split(SCOPE_SEPARATOR);
     if (parts.length !== 2 || value === "") continue;
     try {
-      selectedPeers[ownerScope(parts[0] ?? "", parts[1] ?? "")] = value;
+      const router = normalizeRouterUrl(parts[0] ?? "");
+      if (!routers.includes(router)) continue;
+      selectedPeers[ownerScope(router, parts[1] ?? "")] = value;
     } catch {
       // Ignore malformed scope keys when serializing settings.
     }
@@ -205,6 +208,29 @@ export function saveSettings(settings: SettingsState, storage: StorageAdapter | 
 export function removeDeprecatedLocalStorage(storage: StorageAdapter | undefined = storageOrUndefined()): void {
   storage?.removeItem("mecha.web.messages");
   storage?.removeItem("mecha.web.conversations");
+}
+
+// Older builds treated VITE_ROUTER_URL as a router selection on every load. The
+// appended final entry is unambiguous only when there was one existing router;
+// leave multi-router profiles alone because their previous selection is unknown.
+export function migrateBootstrapRouter(settings: SettingsState, bootstrapRouterUrl?: string): SettingsState {
+  if (bootstrapRouterUrl === undefined) return settings;
+  let bootstrapRouter: string;
+  try {
+    bootstrapRouter = normalizeRouterUrl(bootstrapRouterUrl);
+  } catch {
+    return settings;
+  }
+  if (settings.activeRouter !== bootstrapRouter || settings.routers.length !== 2 || settings.routers[1] !== bootstrapRouter) return settings;
+
+  const intendedRouter = settings.routers[0];
+  if (intendedRouter === undefined) return settings;
+  const aliases = { ...settings.aliases };
+  delete aliases[bootstrapRouter];
+  const agentIds = { ...settings.agentIds };
+  delete agentIds[bootstrapRouter];
+  const selectedPeers = Object.fromEntries(Object.entries(settings.selectedPeers).filter(([scope]) => !scope.startsWith(`${bootstrapRouter}${SCOPE_SEPARATOR}`)));
+  return { activeRouter: intendedRouter, routers: [intendedRouter], aliases, agentIds, selectedPeers };
 }
 
 export function setActiveRouter(settings: SettingsState, routerUrl: string): SettingsState {
