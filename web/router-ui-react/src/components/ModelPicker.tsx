@@ -49,7 +49,8 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
   useLayoutEffect(() => {
     if (!open || !buttonRef.current) { setMenuHost(undefined); setMenuPosition(undefined); return; }
     const trigger = buttonRef.current;
-    setMenuHost(trigger.closest("dialog") ?? document.body);
+    const dialog = trigger.closest("dialog");
+    setMenuHost(dialog ?? document.body);
     const positionMenu = () => {
       const rect = trigger.getBoundingClientRect();
       const width = Math.min(360, Math.max(0, window.innerWidth - 32));
@@ -57,7 +58,10 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
       const spaceBelow = window.innerHeight - rect.bottom - 16;
       const spaceAbove = rect.top - 16;
       const above = spaceBelow < 280 && spaceAbove > spaceBelow;
-      setMenuPosition({ position: "fixed", zIndex: 100, left, right: "auto", width, ...(above ? { bottom: window.innerHeight - rect.top + 8 } : { top: rect.bottom + 8 }), maxHeight: Math.max(120, Math.min(440, (above ? spaceAbove : spaceBelow) - 8)) });
+      const dialogRect = dialog?.getBoundingClientRect();
+      // A native dialog is in the top layer. Keep its menu there, but position it
+      // against the dialog rather than treating its fixed containing block as the viewport.
+      setMenuPosition({ position: dialogRect ? "absolute" : "fixed", zIndex: 100, left: dialogRect ? left - dialogRect.left : left, right: "auto", width, ...(above ? { top: "auto", bottom: dialogRect ? dialogRect.bottom - rect.top + 8 : window.innerHeight - rect.top + 8 } : { top: dialogRect ? rect.bottom - dialogRect.top + 8 : rect.bottom + 8, bottom: "auto" }), maxHeight: Math.max(120, Math.min(440, (above ? spaceAbove : spaceBelow) - 8)) });
     };
     positionMenu();
     window.addEventListener("resize", positionMenu);
