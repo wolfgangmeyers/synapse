@@ -46,6 +46,14 @@ func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {
 
 	config.PiExecutable = ""
 	require.Error(t, ValidateManagedLaunchConfig(config))
+
+	// CursorExtension is optional.
+	config, paths = managedLaunchConfigFixture(t)
+	config.CursorExtension = ""
+	require.NoError(t, ValidateManagedLaunchConfig(config))
+
+	config.CursorExtension = filepath.Join(paths["work"], "nonexistent.js")
+	require.Error(t, ValidateManagedLaunchConfig(config))
 }
 
 func TestValidateWorkingDirectoryExpandsHomeRelativePaths(t *testing.T) {

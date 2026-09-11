@@ -31,7 +31,13 @@ MANAGED_SESSION_ROOT="${MECHA_ROUTER_MANAGED_SESSION_ROOT:-${HOME}/.mecha-develo
 MANAGED_MANIFEST="${MECHA_ROUTER_MANAGED_MANIFEST:-$ROOT_DIR/router/contract/managed-tools-v1.json}"
 MANAGED_MECHA_RPC="${MECHA_ROUTER_MANAGED_MECHA_RPC:-$ROOT_DIR/pi-extensions/mecha-rpc/index.ts}"
 MANAGED_PI_SUBAGENTS="${MECHA_ROUTER_MANAGED_PI_SUBAGENTS:-${HOME}/code/pi-packages/packages/pi-subagents/src/index.ts}"
-MANAGED_CURSOR_EXTENSION="${MECHA_ROUTER_MANAGED_CURSOR_EXTENSION:-$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js}"
+if [[ "${MECHA_ROUTER_MANAGED_CURSOR_EXTENSION+x}" == "x" ]]; then
+  MANAGED_CURSOR_EXTENSION="$MECHA_ROUTER_MANAGED_CURSOR_EXTENSION"
+elif [[ -f "$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js" ]]; then
+  MANAGED_CURSOR_EXTENSION="$ROOT_DIR/auth-helper/node_modules/pi-cursor-sdk/dist/index.js"
+else
+  MANAGED_CURSOR_EXTENSION=""
+fi
 MANAGED_AUTH_HELPER="${MECHA_ROUTER_MANAGED_AUTH_HELPER:-$ROOT_DIR/auth-helper/index.mjs}"
 MANAGED_RUNTIME_ROOT="${MECHA_ROUTER_MANAGED_RUNTIME_ROOT:-$ROOT_DIR}"
 MANAGED_CWD_ROOTS="${MECHA_ROUTER_MANAGED_CWD_ROOTS:-$ROOT_DIR}"
