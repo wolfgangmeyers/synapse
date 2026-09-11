@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManagedAgentDialog } from "../../src/components/ManagedAgentDialog";
@@ -20,7 +20,9 @@ describe("ManagedAgentDialog", () => {
     await user.type(screen.getByLabelText("Name"), "managed-alpha");
     await user.type(screen.getByLabelText("Working folder"), "/allowed");
     await user.click(screen.getByRole("button", { name: "Browse folders" }));
-    await user.click(await screen.findByRole("button", { name: "project" }));
+    const folderBrowser = await screen.findByRole("dialog", { name: "Choose working folder" });
+    await user.click(within(folderBrowser).getByRole("button", { name: "project" }));
+    await user.click(within(folderBrowser).getByRole("button", { name: "Select folder" }));
     await user.click(screen.getByRole("button", { name: "Launch" }));
     expect(onLaunch).toHaveBeenCalledWith({ name: "managed-alpha", cwd: "/allowed/project" });
   });

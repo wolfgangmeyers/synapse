@@ -975,11 +975,16 @@ p:empty { display: none; }
 .directory-picker-input-row { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 8px; align-items: center; }
 .directory-browse-button { display: inline-flex; align-items: center; justify-content: center; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; }
 .directory-picker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.managed-directory-picker ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 6px; max-height: 160px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.managed-directory-picker ul { display: grid; grid-template-columns: 1fr; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .managed-directory-picker li button { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.managed-recent-folders { grid-template-columns: 1fr !important; }
 .managed-recent-folders li button { text-align: left; }
 .managed-directory-drop-hint { font-size: 12px; }
+.managed-directory-browser { width: min(620px, calc(100vw - 32px)); }
+.managed-directory-browser-body { display: grid; gap: 12px; }
+.managed-directory-path { overflow-wrap: anywhere; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+.managed-directory-browser-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; max-height: min(48dvh, 440px); margin: 0; padding: 0; overflow: auto; list-style: none; }
+.managed-directory-browser-list button { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.managed-directory-browser-list button.selected { border-color: var(--primary); background: rgba(157,168,255,0.16); }
 .managed-lifecycle-actions, .managed-confirmation { display: grid; gap: 12px; }
 .managed-confirmation { padding: 12px; border: 1px solid rgba(255,180,171,.42); border-radius: 14px; }
 .managed-state-dialog { width: min(760px, calc(100vw - 32px)); }
