@@ -105,8 +105,17 @@ type ParentCompactionRPC interface {
 
 type DirectMailboxReceipt struct{ EntryIdentity string }
 
+// DirectMailboxReply is the final visible assistant text from one direct
+// mailbox turn. Its entry identity makes downstream persistence idempotent.
+type DirectMailboxReply struct {
+	EntryIdentity string
+	Body          string
+}
+
 type DirectMailboxEvent struct {
 	Receipt        *DirectMailboxReceipt
+	Reply          *DirectMailboxReply
+	Settled        bool
 	DiagnosticCode string
 }
 
@@ -140,10 +149,13 @@ type directMailboxToken struct {
 	epoch       int64
 	watermark   uint64
 	receiptSeen bool
+	reply       *DirectMailboxReply
 	result      chan directMailboxResult
 }
 type directMailboxResult struct {
 	receipt        *DirectMailboxReceipt
+	reply          *DirectMailboxReply
+	settled        bool
 	diagnosticCode string
 	err            error
 }
@@ -897,8 +909,8 @@ func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.Mana
 				if value.err != nil {
 					return
 				}
-				event := DirectMailboxEvent{Receipt: value.receipt, DiagnosticCode: value.diagnosticCode}
-				if event.Receipt != nil || event.DiagnosticCode != "" {
+				event := DirectMailboxEvent{Receipt: value.receipt, Reply: value.reply, Settled: value.settled, DiagnosticCode: value.diagnosticCode}
+				if event.Receipt != nil || event.Reply != nil || event.Settled || event.DiagnosticCode != "" {
 					out <- event
 				}
 			case responseValue := <-responseCh:
@@ -941,31 +953,77 @@ func (c *rpcClient) noteStaleDirectMailboxEventsLocked(token *directMailboxToken
 }
 
 func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *directMailboxToken) (directMailboxResult, bool) {
-	if kind, _ := event["type"].(string); kind == "message_start" {
-		return directMailboxResult{}, false
+	kind, _ := event["type"].(string)
+	if kind == "agent_settled" {
+		// A direct turn owns the lane until it settles. This keeps a follow-up
+		// command from racing the response that follows the persisted receipt and
+		// returns only the final visible assistant text after tool turns finish.
+		return directMailboxResult{reply: token.reply, settled: token.receiptSeen}, true
 	}
-	if kind, _ := event["type"].(string); kind != "message_end" {
-		return directMailboxResult{diagnosticCode: "unrelated_receipt"}, true
+	if kind != "message_end" {
+		// Activity and streaming frames are expected while the model works. They
+		// are not receipt failures and must not flood direct diagnostics.
+		return directMailboxResult{}, true
 	}
-	if receiptCustomType(event) != "mecha.mailbox.appended.v1" {
-		return directMailboxResult{diagnosticCode: "wrong_custom_type"}, true
+	if receiptCustomType(event) == "mecha.mailbox.appended.v1" {
+		details := receiptDetails(event)
+		if details == nil {
+			return directMailboxResult{diagnosticCode: "malformed_receipt"}, true
+		}
+		if details["protocol"] != "mecha.mailbox/v1" || details["message_id"] != token.messageID || details["runtime_generation"] != token.generation || !sameEpoch(details["session_epoch"], token.epoch) {
+			return directMailboxResult{diagnosticCode: "mismatched_receipt"}, true
+		}
+		if c.eventSequence <= token.watermark {
+			return directMailboxResult{diagnosticCode: "stale_receipt"}, true
+		}
+		if token.receiptSeen {
+			return directMailboxResult{diagnosticCode: "duplicate_receipt"}, true
+		}
+		token.receiptSeen = true
+		identity := directMailboxEntryIdentity(event, c.eventSequence)
+		return directMailboxResult{receipt: &DirectMailboxReceipt{EntryIdentity: identity}}, true
 	}
-	details := receiptDetails(event)
-	if details == nil {
-		return directMailboxResult{diagnosticCode: "malformed_receipt"}, true
+	if !token.receiptSeen {
+		return directMailboxResult{}, true
 	}
-	if details["protocol"] != "mecha.mailbox/v1" || details["message_id"] != token.messageID || details["runtime_generation"] != token.generation || !sameEpoch(details["session_epoch"], token.epoch) {
-		return directMailboxResult{diagnosticCode: "mismatched_receipt"}, true
+	body, ok := directMailboxAssistantText(event)
+	if !ok {
+		return directMailboxResult{}, true
 	}
-	if c.eventSequence <= token.watermark {
-		return directMailboxResult{diagnosticCode: "stale_receipt"}, true
+	// A tool-using turn can emit more than one assistant message. Keep the last
+	// visible text and publish it only with agent_settled.
+	token.reply = &DirectMailboxReply{EntryIdentity: directMailboxEntryIdentity(event, c.eventSequence), Body: body}
+	return directMailboxResult{}, true
+}
+
+func directMailboxAssistantText(event map[string]any) (string, bool) {
+	message := nestedMessage(event)
+	if message == nil || message["role"] != "assistant" {
+		return "", false
 	}
-	if token.receiptSeen {
-		return directMailboxResult{diagnosticCode: "duplicate_receipt"}, true
+	content, ok := message["content"].([]any)
+	if !ok {
+		return "", false
 	}
-	token.receiptSeen = true
-	identity := directMailboxEntryIdentity(event, c.eventSequence)
-	return directMailboxResult{receipt: &DirectMailboxReceipt{EntryIdentity: identity}}, true
+	var text strings.Builder
+	for _, raw := range content {
+		block, ok := raw.(map[string]any)
+		if !ok || block["type"] != "text" {
+			continue
+		}
+		value, ok := block["text"].(string)
+		if !ok {
+			return "", false
+		}
+		text.WriteString(value)
+		if text.Len() > 64*1024 {
+			return "", false
+		}
+	}
+	if text.Len() == 0 {
+		return "", false
+	}
+	return text.String(), true
 }
 
 func directMailboxEntryIdentity(event map[string]any, sequence uint64) string {

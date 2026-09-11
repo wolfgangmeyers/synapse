@@ -3,7 +3,9 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/attachments"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/domain"
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/managed"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/protocol"
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -627,6 +630,33 @@ func attachmentBody(body string, pending []attachments.Pending) string {
 		suffix = ""
 	}
 	return fmt.Sprintf("%s%sAttached image%s:\n%s", text, separator, suffix, strings.Join(refs, "\n"))
+}
+
+// persistManagedDirectReply turns the trusted final text from a fenced managed
+// turn into a normal conversation message. The stable ID makes a retry safe
+// without allowing the managed process to choose a recipient or message ID.
+func (r *Router) persistManagedDirectReply(ctx context.Context, attempt store.ManagedDirectAttempt, reply managed.DirectMailboxReply) error {
+	if reply.EntryIdentity == "" || reply.Body == "" {
+		return errors.New("managed direct reply is incomplete")
+	}
+	digest := sha256.Sum256([]byte(attempt.MessageID + "\x00" + reply.EntryIdentity))
+	source := protocol.MessageSource{Kind: "agent"}
+	envelope := protocol.Envelope{
+		ID:        "managed-reply-" + hex.EncodeToString(digest[:]),
+		From:      attempt.Fence.AgentID,
+		To:        attempt.Message.From,
+		Body:      reply.Body,
+		CreatedAt: r.clock.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Source:    &source,
+	}
+	releaseConversation := r.lockConversation(envelope.From, envelope.To)
+	defer releaseConversation()
+	result, err := r.store.Enqueue(ctx, envelope, store.EnqueueOptions{Conversation: &store.ConversationOptions{Body: &reply.Body, Source: &source}})
+	if err != nil {
+		return err
+	}
+	r.afterEnqueue(result)
+	return nil
 }
 
 func (r *Router) afterEnqueue(result store.EnqueueResult) {

@@ -476,6 +476,7 @@ func TestManagedRestartHTTPContract(t *testing.T) {
 	assertError(request("not-a-uuid", `{}`), http.StatusBadRequest, "INVALID_REQUEST_ID", nil)
 	valid := "123e4567-e89b-42d3-a456-426614174081"
 	assertError(request(valid, `{"unexpected":true}`), http.StatusBadRequest, "UNKNOWN_FIELD", valid)
+	assertError(request(valid, `{"model":{"provider":"openai-codex"}}`), http.StatusUnprocessableEntity, "INVALID_MODEL", valid)
 	assertError(request(valid, `{}`), http.StatusNotFound, "AGENT_NOT_FOUND", valid)
 }
 

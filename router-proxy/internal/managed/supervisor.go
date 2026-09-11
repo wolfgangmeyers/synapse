@@ -89,6 +89,9 @@ type RestartRequest struct {
 	CanonicalPath     string
 	RequestID         string
 	CanonicalBodyHash string
+	// Model is applied atomically with the restart so the replacement process
+	// cannot begin with a model other than the one shown to the user.
+	Model *Model
 }
 
 type RestartResult struct {
@@ -174,6 +177,7 @@ type Manager struct {
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
 	rootControlHandlers                        *RootControlHandlerRegistry
 	projectionPublisher                        func()
+	directReplyPublisher                       DirectReplyPublisher
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
 	cancel                                     context.CancelFunc
@@ -776,6 +780,23 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	if !m.liveBinding(agent, binding) {
 		return RestartResult{}, &store.ManagedAgentNotReadyError{AgentID: request.AgentID}
 	}
+	selectedModel := agent.SelectedModel
+	if request.Model != nil {
+		var selected Model
+		if selector, ok := m.catalog.(ModelSelector); ok {
+			selected, err = selector.Select(ctx, request.Model)
+		} else {
+			var catalog Catalog
+			catalog, err = m.catalog.Catalog(ctx)
+			if err == nil {
+				selected, err = SelectModel(request.Model, nil, catalog)
+			}
+		}
+		if err != nil {
+			return RestartResult{}, err
+		}
+		selectedModel = store.ManagedModel{Provider: selected.Provider, ID: selected.ID, Name: selected.Name}
+	}
 	current, err := m.store.ManagedOperation(ctx, binding.operationID)
 	if err != nil || current.State != "terminal" || restartActionHigherPriority(binding.lifecycleAction) {
 		return RestartResult{}, &store.ManagedLifecycleConflictError{AgentID: request.AgentID}
@@ -785,6 +806,7 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 		return RestartResult{}, err
 	}
 	responseAgent := *agent
+	responseAgent.SelectedModel = selectedModel
 	responseAgent.LifecycleState, responseAgent.AcceptingPrompts = "restarting", false
 	body, err := json.Marshal(map[string]any{"operation_id": request.RequestID, "agent": PublicAgent(&responseAgent)})
 	if err != nil {
@@ -792,7 +814,7 @@ func (m *Manager) ReserveRestart(ctx context.Context, request RestartRequest) (R
 	}
 	operation := store.ManagedOperation{OperationID: request.RequestID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": request.RequestID}, ResponseBody: body, CreatedAt: formatManagedTime(m.clock.Now())}
 	source := bindingFence(request.AgentID, binding)
-	admission, err := m.store.ReserveManagedLifecycleRestart(ctx, store.ManagedLifecycleRestartReservation{AgentID: request.AgentID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Source: "direct", CurrentOperationID: binding.operationID, SourceFence: source, PlannedTargetRuntimeGeneration: targetGeneration, Operation: operation})
+	admission, err := m.store.ReserveManagedLifecycleRestart(ctx, store.ManagedLifecycleRestartReservation{AgentID: request.AgentID, Method: request.Method, CanonicalPath: request.CanonicalPath, RequestID: request.RequestID, CanonicalBodyHash: request.CanonicalBodyHash, Source: "direct", CurrentOperationID: binding.operationID, SourceFence: source, PlannedTargetRuntimeGeneration: targetGeneration, SelectedModel: selectedModel, Operation: operation})
 	if err != nil {
 		return RestartResult{}, err
 	}
@@ -2007,55 +2029,84 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 			m.releaseManagedDirect(*attempt, "prompt_state_persistence_failed", sanitizeError(err))
 			return
 		}
-		// A prompt response is never an acknowledgment. The matcher stays armed
-		// for the fixed 30-second persisted append-receipt window.
-		directCtx, cancel := context.WithTimeout(m.runCtx, 30*time.Second)
-		events, err := rpc.PromptManagedMailbox(directCtx, *attempt)
+		// The append receipt has a bounded delivery deadline. Once it is durable,
+		// keep this lane with the turn until Pi settles so a second direct command
+		// cannot overtake the first response.
+		receiptCtx, cancelReceipt := context.WithTimeout(m.runCtx, 30*time.Second)
+		receiptDone := receiptCtx.Done()
+		turnCtx, cancelTurn := context.WithCancel(m.runCtx)
+		events, err := rpc.PromptManagedMailbox(turnCtx, *attempt)
 		if err != nil {
-			cancel()
+			cancelTurn()
+			cancelReceipt()
 			m.releaseManagedDirect(*attempt, "prompt_failed", sanitizeError(err))
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_failed", "")
 			return
 		}
-		var receipt *DirectMailboxReceipt
-		for receipt == nil {
+		var acknowledged bool
+		for {
 			select {
 			case event, open := <-events:
 				if !open {
-					cancel()
-					m.releaseManagedDirect(*attempt, "receipt_stream_closed", "")
-					_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_stream_closed", "")
+					cancelTurn()
+					cancelReceipt()
+					if !acknowledged {
+						m.releaseManagedDirect(*attempt, "receipt_stream_closed", "")
+						_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_stream_closed", "")
+					}
 					return
 				}
 				if event.DiagnosticCode != "" {
 					_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, event.DiagnosticCode, "")
 				}
-				if event.Receipt != nil {
-					receipt = event.Receipt
+				if event.Receipt != nil && !acknowledged {
+					binding.serial.Lock()
+					current := m.liveBindingForFence(context.Background(), binding, fence)
+					binding.serial.Unlock()
+					if !current {
+						cancelTurn()
+						cancelReceipt()
+						m.releaseManagedDirect(*attempt, "stale_fence", "")
+						return
+					}
+					if m.beforeDirectAcknowledge != nil {
+						if err := m.beforeDirectAcknowledge(context.Background(), *attempt); err != nil {
+							cancelTurn()
+							cancelReceipt()
+							_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "acknowledgment_interrupted", "")
+							return
+						}
+					}
+					if !m.acknowledgeManagedDirect(*attempt, event.Receipt.EntryIdentity) {
+						cancelTurn()
+						cancelReceipt()
+						return
+					}
+					acknowledged = true
+					cancelReceipt()
+					receiptDone = nil
 				}
-			case <-directCtx.Done():
-				cancel()
-				m.releaseManagedDirect(*attempt, "receipt_timeout", "")
-				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_timeout", "")
+				if acknowledged && event.Reply != nil {
+					m.publishDirectReply(*attempt, *event.Reply)
+				}
+				if acknowledged && event.Settled {
+					cancelTurn()
+					for range events {
+					}
+					return
+				}
+			case <-receiptDone:
+				if !acknowledged {
+					cancelTurn()
+					m.releaseManagedDirect(*attempt, "receipt_timeout", "")
+					_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_timeout", "")
+				}
+				return
+			case <-m.runCtx.Done():
+				cancelTurn()
+				cancelReceipt()
 				return
 			}
-		}
-		cancel()
-		binding.serial.Lock()
-		current := m.liveBindingForFence(context.Background(), binding, fence)
-		binding.serial.Unlock()
-		if !current {
-			m.releaseManagedDirect(*attempt, "stale_fence", "")
-			return
-		}
-		if m.beforeDirectAcknowledge != nil {
-			if err := m.beforeDirectAcknowledge(context.Background(), *attempt); err != nil {
-				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "acknowledgment_interrupted", "")
-				return
-			}
-		}
-		if !m.acknowledgeManagedDirect(*attempt, receipt.EntryIdentity) {
-			return
 		}
 		// The lane is intentionally one-at-a-time. A burst gets one fixed Pi
 		// command per original ordinary row, then the next oldest row.

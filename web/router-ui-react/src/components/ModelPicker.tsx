@@ -18,11 +18,12 @@ export interface ModelPickerProps {
   loading?: boolean;
   emptyMessage?: string;
   emptyOption?: ModelPickerEmptyOption;
+  status?: string;
   onChange: (model: ModelSummary) => void;
   label?: string;
 }
 
-export function ModelPicker({ models, currentModel, totalCount = models.length, truncated = false, pending = false, disabled = false, loading = false, emptyMessage = "No matching models", emptyOption, onChange, label = "Model" }: ModelPickerProps) {
+export function ModelPicker({ models, currentModel, totalCount = models.length, truncated = false, pending = false, disabled = false, loading = false, emptyMessage = "No matching models", emptyOption, status, onChange, label = "Model" }: ModelPickerProps) {
   const normalized = useMemo(() => normalizeModelSummaries(models), [models]);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -93,5 +94,6 @@ export function ModelPicker({ models, currentModel, totalCount = models.length, 
       <button ref={buttonRef} type="button" className="model-current" aria-haspopup="dialog" aria-expanded={open} aria-controls={listId} disabled={disabled} onClick={() => setOpen((value) => !value)}>{displayedModel ? modelKey(displayedModel) : emptyOption?.label ?? "Select model"}<i className="fa-solid fa-chevron-down" aria-hidden="true" /></button>
     </div>
     {menu && menuHost ? createPortal(menu, menuHost) : null}
+    {status ? <p className="model-status" role="alert">{status}</p> : null}
   </div>;
 }

@@ -64,7 +64,7 @@ export const httpRoutes = [
   { methods: ["POST"], path: "/v1/managed-agents/restart-all" },
   { methods: ["GET", "DELETE"], path: "/v1/managed-agents/{id}" },
   { methods: ["GET"], path: "/v1/managed-agents/{id}/children" },
-  { methods: ["POST"], path: "/v1/managed-agents/{agent_id}/restart" },
+  { methods: ["POST"], path: "/v1/managed-agents/{agent_id}/restart", actions: ["restart", "change_model"] },
   { methods: ["POST"], path: "/v1/managed-agents/{id}/reset" },
   { methods: ["GET"], path: "/v1/models" },
   { methods: ["PUT"], path: "/v1/settings/default-model" },

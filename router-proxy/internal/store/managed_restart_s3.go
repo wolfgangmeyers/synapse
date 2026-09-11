@@ -19,6 +19,7 @@ type ManagedLifecycleRestartReservation struct {
 	CurrentOperationID                                           string
 	SourceFence                                                  ManagedRuntimeFence
 	PlannedTargetRuntimeGeneration                               string
+	SelectedModel                                                ManagedModel
 	Operation                                                    ManagedOperation
 }
 
@@ -33,7 +34,9 @@ func restartStartAttempt(owner string) bool {
 }
 
 func restartReservationInputValid(reservation ManagedLifecycleRestartReservation) bool {
-	if !isLifecycleText(reservation.AgentID) || reservation.Method == "" || reservation.CanonicalPath == "" || reservation.RequestID == "" || reservation.CanonicalBodyHash == "" || reservation.CurrentOperationID == "" || !validManagedRuntimeFence(reservation.SourceFence) || reservation.SourceFence.AgentID != reservation.AgentID || reservation.PlannedTargetRuntimeGeneration == "" {
+	modelOmitted := reservation.SelectedModel.Provider == "" && reservation.SelectedModel.ID == ""
+	modelValid := managedIdentifierRE.MatchString(reservation.SelectedModel.Provider) && managedIdentifierRE.MatchString(reservation.SelectedModel.ID)
+	if !isLifecycleText(reservation.AgentID) || reservation.Method == "" || reservation.CanonicalPath == "" || reservation.RequestID == "" || reservation.CanonicalBodyHash == "" || reservation.CurrentOperationID == "" || !validManagedRuntimeFence(reservation.SourceFence) || reservation.SourceFence.AgentID != reservation.AgentID || reservation.PlannedTargetRuntimeGeneration == "" || (!modelOmitted && !modelValid) {
 		return false
 	}
 	if reservation.Source != "direct" && reservation.Source != "restart_all_child" {
@@ -107,6 +110,10 @@ func (s *Store) ReserveManagedLifecycleRestart(ctx context.Context, reservation 
 		if !sameManagedRestartFence(restartFenceFromAgent(agent), reservation.SourceFence) || agent.DesiredState != "running" || agent.LifecycleState != "running" || !agent.AcceptingPrompts || !agent.SlotHeld || (agent.ActivityState != "active" && agent.ActivityState != "idle") {
 			return &ManagedAgentNotReadyError{AgentID: reservation.AgentID}
 		}
+		selectedModel := reservation.SelectedModel
+		if selectedModel.Provider == "" && selectedModel.ID == "" {
+			selectedModel = agent.SelectedModel
+		}
 		current, err := managedOperationForTx(ctx, s.db, reservation.CurrentOperationID)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && current.State != "terminal") {
 			return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
@@ -153,7 +160,9 @@ func (s *Store) ReserveManagedLifecycleRestart(ctx context.Context, reservation 
 		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, args...); err != nil {
 			return err
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='restarting',accepting_prompts=0,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND accepting_prompts=1 AND slot_held=1 AND activity_state IN ('active','idle')`, append([]any{now}, managedFenceValues(reservation.SourceFence)...)...)
+		// The selected model and prompt-admission closure share this transaction.
+		// The replacement process reads this durable row after the source exits.
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET selected_model_provider=?,selected_model_id=?,lifecycle_state='restarting',accepting_prompts=0,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND accepting_prompts=1 AND slot_held=1 AND activity_state IN ('active','idle')`, append([]any{selectedModel.Provider, selectedModel.ID, now}, managedFenceValues(reservation.SourceFence)...)...)
 		if err != nil {
 			return err
 		}
@@ -171,6 +180,7 @@ func (s *Store) ReserveManagedLifecycleRestart(ctx context.Context, reservation 
 		if err != nil {
 			return err
 		}
+		agent.SelectedModel = selectedModel
 		admission.Operation, admission.Action, admission.Agent = &reservation.Operation, action, agent
 		return nil
 	})

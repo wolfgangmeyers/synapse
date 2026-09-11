@@ -484,6 +484,7 @@ func New(options Options) (*Router, error) {
 		// handler. Wake UI-live only after that durable commit; the hub reads its
 		// own projection and never trusts a manager-supplied browser payload.
 		options.Managed.SetProjectionPublisher(func() { r.uiLive.publish(context.Background()) })
+		options.Managed.SetDirectReplyPublisher(r.persistManagedDirectReply)
 	}
 	if options.ProviderAuth != nil {
 		options.ProviderAuth.SetPublisher(r.publishProviderAuth)
