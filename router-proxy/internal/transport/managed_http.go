@@ -982,7 +982,9 @@ func (r *Router) handleManagedDirectoriesGET(w http.ResponseWriter, req *http.Re
 	}
 	directories := make([]map[string]string, 0)
 	for _, entry := range entries {
-		if entry.IsDir() {
+		// Hidden cache and configuration directories make the picker noisy. They
+		// remain launchable when typed, but are not routine navigation choices.
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
 			directories = append(directories, map[string]string{"name": entry.Name(), "path": filepath.Join(path, entry.Name())})
 		}
 	}

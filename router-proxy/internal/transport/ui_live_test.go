@@ -133,6 +133,7 @@ func TestManagedLifecycleHistoryFactsOnlyUseAllowlistedLifecycleChanges(t *testi
 func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, "child"), 0o700))
+	require.NoError(t, os.Mkdir(filepath.Join(root, ".cache"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "not-a-folder"), []byte("x"), 0o600))
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
@@ -156,6 +157,7 @@ func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {
 	directory, ok := directories[0].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "child", directory["name"])
+	require.NotContains(t, response.Body.String(), ".cache")
 
 	emptyRequest := httptest.NewRequest(http.MethodGet, "/v1/managed-directories?path=", nil)
 	emptyResponse := httptest.NewRecorder()
