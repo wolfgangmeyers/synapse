@@ -120,7 +120,7 @@ func TestHTTPRejectsReservedNativePolicySender(t *testing.T) {
 	require.Nil(t, message)
 }
 
-func TestHTTPOriginAndPreflightMatchCurrentNodeContract(t *testing.T) {
+func TestHTTPPermissiveCORSIsTransportOnlyForAnyFrontendOrigin(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "router.db")
 	clock := deterministic.NewFixedClock(time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC))
 	durable, err := store.Open(context.Background(), database, store.Options{Clock: clock})
@@ -133,24 +133,33 @@ func TestHTTPOriginAndPreflightMatchCurrentNodeContract(t *testing.T) {
 
 	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/agents", nil)
 	require.NoError(t, err)
-	request.Header.Set("Origin", "https://untrusted.example")
+	request.Header.Set("Origin", "http://127.0.0.1:8787")
 	response, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusOK, response.StatusCode)
 	require.Equal(t, "*", response.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "GET, POST, PATCH, DELETE, OPTIONS", response.Header.Get("Access-Control-Allow-Methods"))
-	require.Equal(t, "content-type", response.Header.Get("Access-Control-Allow-Headers"))
+	require.Equal(t, "GET, POST, PUT, PATCH, DELETE, OPTIONS", response.Header.Get("Access-Control-Allow-Methods"))
+	require.Equal(t, "content-type, x-request-id, x-correlation-id", response.Header.Get("Access-Control-Allow-Headers"))
+	require.Equal(t, "x-correlation-id, x-request-id", response.Header.Get("Access-Control-Expose-Headers"))
+	require.Empty(t, response.Header.Get("Access-Control-Allow-Credentials"))
+	require.Empty(t, response.Header.Get("Set-Cookie"))
 
-	request, err = http.NewRequest(http.MethodOptions, server.URL+"/v1/agents", nil)
+	request, err = http.NewRequest(http.MethodOptions, server.URL+"/v1/managed-agents", nil)
 	require.NoError(t, err)
-	request.Header.Set("Origin", "https://untrusted.example")
-	request.Header.Set("Access-Control-Request-Method", "GET")
+	request.Header.Set("Origin", "https://any-frontend.example")
+	request.Header.Set("Access-Control-Request-Method", "POST")
+	request.Header.Set("Access-Control-Request-Headers", "content-type, x-request-id")
 	response, err = http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusNoContent, response.StatusCode)
 	require.Equal(t, "*", response.Header.Get("Access-Control-Allow-Origin"))
+	require.Equal(t, "GET, POST, PUT, PATCH, DELETE, OPTIONS", response.Header.Get("Access-Control-Allow-Methods"))
+	require.Equal(t, "content-type, x-request-id, x-correlation-id", response.Header.Get("Access-Control-Allow-Headers"))
+	require.Equal(t, "x-correlation-id, x-request-id", response.Header.Get("Access-Control-Expose-Headers"))
+	require.Empty(t, response.Header.Get("Access-Control-Allow-Credentials"))
+	require.Empty(t, response.Header.Get("Set-Cookie"))
 	require.Equal(t, "no-store", response.Header.Get("Cache-Control"))
 
 	request, err = http.NewRequest(http.MethodOptions, server.URL+"/v1/agents", nil)

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/deterministic"
 	"github.com/stretchr/testify/require"
 )
 
@@ -313,6 +314,9 @@ func TestLifecycleBatchRowsAndGraphRetentionAreAtomic(t *testing.T) {
 
 func TestLifecycleGraphRetentionKeepsAnExpiredParentForAnUnexpiredCoalescedChild(t *testing.T) {
 	store, ctx, agent, _ := restartFixture(t)
+	// This retention boundary is about the relative age of the two operations,
+	// not the wall clock when the test happens to run.
+	store.clock = deterministic.NewFixedClock(time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC))
 	source := restartFenceFromAgent(&agent)
 	parentID, childID := lifecycleUUID(30), lifecycleUUID(31)
 	parent := lifecycleActionInput(parentID, "", "restart_all", "direct", ManagedRuntimeFence{})
