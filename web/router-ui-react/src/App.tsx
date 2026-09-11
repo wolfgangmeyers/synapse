@@ -4,7 +4,7 @@ import { createInitialState, type AppState } from "./state/app-state";
 import { selectArrival, selectMessages, selectModels } from "./state/selectors";
 import { mergeAgentSources, sourceAgentKey } from "./state/agent-projection";
 import { activeRemindersForPeer, lockAfterCreateStatus, lockResultState, reminderLockErrorMessage, reminderLockKey, type Reminder, type ReminderCreateInput, type ReminderLockAction } from "./domain/reminders";
-import { normalizeModelSummary } from "./domain/models";
+import { normalizeModelSummary, type ModelSummary } from "./domain/models";
 import { mergeMessages, pendingMessage, reconcileHistoryMessages, settlePendingMessages, type HistoryMessage } from "./domain/history";
 import { normalizeRouterUrl, persistedActiveRouter, createSettingsRepository, migrateBootstrapRouter, setActiveRouter, setAgentId, setRouterAlias, LEGACY_AGENT_ID_KEY, setSelectedPeer as persistSelectedPeer, selectedPeerFor, removeRouter as removeSavedRouter, type SettingsState, type StorageAdapter } from "./persistence/settings-repository";
 import { loadManagedRecentFolders, recordManagedRecentFolder, saveManagedRecentFolders } from "./persistence/managed-folder-history";
@@ -207,6 +207,9 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const [managedAgentID, setManagedAgentID] = useState<string>();
   const [managedError, setManagedError] = useState<string>();
   const [managedPending, setManagedPending] = useState(false);
+  const [managedHeaderModels, setManagedHeaderModels] = useState<ModelSummary[]>([]);
+  const [managedHeaderModelsLoading, setManagedHeaderModelsLoading] = useState(false);
+  const [managedHeaderModelError, setManagedHeaderModelError] = useState<string>();
   const [managedRecentFolders, setManagedRecentFolders] = useState(() => loadManagedRecentFolders(storage));
   const [managedTerminationConfirmation, setManagedTerminationConfirmation] = useState(false);
   const [goalError, setGoalError] = useState<string>();
@@ -358,6 +361,21 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const selectedLegacyPeer = selectedAgent?.source === "router-managed" ? undefined : selectedAgent?.agent_id;
   const selectedManagedAgent = useMemo(() => managedAgentID === undefined ? undefined : (session.state.managedAgents ?? []).find((agent) => agent.agent_id === managedAgentID), [managedAgentID, session.state.managedAgents]);
   useEffect(() => {
+    if (selectedAgent?.source !== "router-managed") {
+      setManagedHeaderModels([]); setManagedHeaderModelsLoading(false); setManagedHeaderModelError(undefined);
+      return;
+    }
+    let active = true;
+    setManagedHeaderModelsLoading(true); setManagedHeaderModelError(undefined);
+    void session.transport.http.models().then((catalog) => {
+      if (!active) return;
+      setManagedHeaderModels(catalog.models.filter((model) => model.available).map(({ provider, id, name }) => ({ provider, id, name })));
+    }).catch((cause: unknown) => {
+      if (active) setManagedHeaderModelError(cause instanceof Error ? cause.message : "Models could not be loaded.");
+    }).finally(() => { if (active) setManagedHeaderModelsLoading(false); });
+    return () => { active = false; };
+  }, [selectedAgent?.agent_id, selectedAgent?.source, session.transport.http]);
+  useEffect(() => {
     if (!session.state.managedAvailable || selectedAgent?.source !== "router-managed") return;
     let active = true;
     void session.transport.http.managedHistory(selectedAgent.agent_id, "complete", { limit: 200 }).then((page) => {
@@ -503,9 +521,10 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const selectRouter = (router: SavedRouter): void => { setSettings((current) => setActiveRouter(current, router.url)); setDialog(undefined); };
   const removeRouter = (url: string): void => { setSettings((current) => removeSavedRouter(current, url)); };
   const routerLabel = new URL(activeUrl).host;
-  const modelOptions = selectModels(selectedAgent);
+  const modelOptions = selectedAgent?.source === "router-managed" ? managedHeaderModels : selectModels(selectedAgent);
   const selectedModel = normalizeModelSummary(selectedAgent?.current_model);
   const pendingModelControl = [...session.state.pendingControls.values()].some((pending) => pending.action === "model" && pending.peer === selectedAgent?.agent_id && pending.instanceId === selectedAgent?.instance_id);
+  const pendingManagedModelChange = selectedAgent?.source === "router-managed" && managedPending;
   const pendingGoalControl = [...session.state.pendingControls.values()].some((pending) => pending.action === "goal" && pending.peer === selectedAgent?.agent_id && pending.instanceId === selectedAgent?.instance_id);
   const pendingInlineToolControl = [...session.state.pendingControls.values()].some((pending) => pending.action === "inline-tool" && pending.peer === selectedAgent?.agent_id && pending.instanceId === selectedAgent?.instance_id);
   const selectedAgentActiveReminderCount = selectedLegacyPeer === undefined ? 0 : activeRemindersForPeer(session.state.reminders, selectedLegacyPeer).length;
@@ -515,6 +534,16 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     if (!session.state.managedAvailable) return;
     const snapshot = await session.transport.http.managedAgents();
     session.dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
+  };
+  const changeManagedModel = async (model: ModelSummary): Promise<void> => {
+    if (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts !== true) return;
+    setManagedPending(true); setManagedError(undefined);
+    try {
+      await session.transport.http.restartManaged(selectedAgent.agent_id, { provider: model.provider, id: model.id });
+      await refreshManaged();
+    } catch (cause) {
+      setManagedError(cause instanceof Error ? cause.message : "Managed model could not be changed.");
+    } finally { setManagedPending(false); }
   };
   const launchManaged = async (input: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<void> => {
     setManagedPending(true); setManagedError(undefined);
@@ -550,7 +579,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   return <>
     <AppShell
       sidebar={<Sidebar routerLabel={routerLabel} connection={session.state.connection} connectionIdentity={resolvedAgentId} connectionDetail={reconciliation.error?.message} agents={visibleAgents} {...(selectedSourceKey === undefined ? {} : { selectedAgentId: selectedSourceKey })} filter={session.state.filter} arrivals={session.state.arrivals} reminderCounts={Object.fromEntries(session.state.agents.map((agent) => [agent.agent_id, activeRemindersForPeer(session.state.reminders, agent.agent_id).length]))} expandedAgentIds={expanded} onRefresh={() => { void reconciliation.refresh(); void refreshManaged().catch(() => undefined); onRefresh?.(); }} onRouterClick={() => { setDialog("routers"); onRouterClick?.(); }} onFilterChange={(filter) => { session.dispatch({ type: "filter/set", scope, filter }); onFilterChange?.(filter); }} onSelectAgent={setSelection} onGoal={openGoalForAgent} onReminders={openRemindersForAgent} onToggleSubagents={(id) => { toggleSubagents(id); onToggleSubagents?.(id); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => { session.dispatch({ type: "arrival/remove", scope, agent: id }); onDismissArrival?.(id); }} {...(session.state.managedAvailable ? { onLaunchManaged: () => { setManagedAgentID(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); setDialog("managed"); }, onRestartAllManaged: restartAllManaged, onProviderSettings: () => { setManagedError(undefined); setDialog("provider-settings"); } } : {})} />}
-      conversation={<div className="conversation-runtime"><Conversation {...(selectedAgent ? { peer: selectedAgent } : {})} activeReminderCount={selectedAgentActiveReminderCount} ownerId={resolvedAgentId} routerUrl={activeUrl} messages={mergeMessages(selectMessages(session.state, selectedConversationPeer), conversation.messages)} {...(selectedAgent?.source === "router-managed" ? { conversationView, activityEntries: session.state.managedHistory?.[selectedAgent.agent_id]?.complete ?? [], onConversationViewChange: setConversationView } : {})} composeEnabled={selectedConversationPeer !== undefined && (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts === true)} showAgentControls={selectedLegacyPeer !== undefined} value={composerDraft} onChange={setComposerDraft} onSelectionChange={setComposerSelection} {...(modelOptions.length > 0 && selectedLegacyPeer ? { modelControls: <ModelPicker models={modelOptions} {...(selectedModel ? { currentModel: selectedModel } : {})} pending={pendingModelControl} disabled={session.state.connection !== "connected" || pendingModelControl} onChange={chooseModel} /> } : {})} {...(selectedAgent && selectedLegacyPeer ? { promptControls: <PromptControls templates={session.state.templates} loaded={templatesLoaded} disabled={session.state.connection !== "connected"} onManage={() => setDialog("prompts")} onUse={(template) => { setTemplateToUse(template); setDialog("prompts"); }} /> } : {})} loading={conversation.loading} {...(conversation.error ? { error: conversation.error.message } : {})} {...(arrival ? { arrival } : {})} onSend={(body, images) => { if (selectedConversationPeer) void send(selectedConversationPeer, body, images).catch(() => undefined); }} onManageManaged={() => { if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); setManagedError(undefined); setManagedTerminationConfirmation(false); setDialog("managed"); } }} onManagedState={() => { if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); setDialog("managed-state"); } }} onGoal={() => { if (selectedLegacyPeer) { setDialog("goal"); externalGoal?.(selectedLegacyPeer); } }} onReminders={() => { if (selectedLegacyPeer) { setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setDialog("reminders"); externalReminders?.(selectedLegacyPeer); } }} onInlineToolSettings={() => { if (selectedLegacyPeer) openInlineToolSettingsForAgent(selectedLegacyPeer); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} onToggleSubagents={() => { if (selectedSourceKey) { toggleSubagents(selectedSourceKey); onToggleSubagents?.(selectedSourceKey); } }} expanded={selectedSourceKey !== undefined && expanded.has(selectedSourceKey)} /></div>}
+      conversation={<div className="conversation-runtime"><Conversation {...(selectedAgent ? { peer: selectedAgent } : {})} activeReminderCount={selectedAgentActiveReminderCount} ownerId={resolvedAgentId} routerUrl={activeUrl} messages={mergeMessages(selectMessages(session.state, selectedConversationPeer), conversation.messages)} {...(selectedAgent?.source === "router-managed" ? { conversationView, activityEntries: session.state.managedHistory?.[selectedAgent.agent_id]?.complete ?? [], onConversationViewChange: setConversationView } : {})} composeEnabled={selectedConversationPeer !== undefined && (selectedAgent?.source !== "router-managed" || selectedAgent.managed_agent?.accepting_prompts === true)} showAgentControls={selectedLegacyPeer !== undefined} value={composerDraft} onChange={setComposerDraft} onSelectionChange={setComposerSelection} {...(selectedAgent && (selectedLegacyPeer !== undefined || selectedAgent.source === "router-managed") ? { modelControls: <ModelPicker models={modelOptions} {...(selectedModel ? { currentModel: selectedModel } : {})} pending={selectedAgent.source === "router-managed" ? pendingManagedModelChange : pendingModelControl} loading={selectedAgent.source === "router-managed" && managedHeaderModelsLoading} {...(selectedAgent.source === "router-managed" && managedHeaderModelError ? { emptyMessage: managedHeaderModelError } : {})} {...(selectedAgent.source === "router-managed" && managedError ? { status: managedError } : selectedAgent.source === "router-managed" && managedHeaderModelError ? { status: managedHeaderModelError } : {})} disabled={selectedAgent.source === "router-managed" ? selectedAgent.managed_agent?.accepting_prompts !== true || pendingManagedModelChange : session.state.connection !== "connected" || pendingModelControl} onChange={selectedAgent.source === "router-managed" ? changeManagedModel : chooseModel} /> } : {})} {...(selectedAgent ? { promptControls: <PromptControls templates={session.state.templates} loaded={templatesLoaded} disabled={selectedAgent.source === "router-managed" ? selectedAgent.managed_agent?.accepting_prompts !== true : session.state.connection !== "connected"} onManage={() => setDialog("prompts")} onUse={(template) => { setTemplateToUse(template); setDialog("prompts"); }} /> } : {})} loading={conversation.loading} {...(conversation.error ? { error: conversation.error.message } : {})} {...(arrival ? { arrival } : {})} onSend={(body, images) => { if (selectedConversationPeer) void send(selectedConversationPeer, body, images).catch(() => undefined); }} onManageManaged={() => { if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); setManagedError(undefined); setManagedTerminationConfirmation(false); setDialog("managed"); } }} onManagedState={() => { if (selectedAgent?.source === "router-managed") { setManagedAgentID(selectedAgent.agent_id); setDialog("managed-state"); } }} onGoal={() => { if (selectedLegacyPeer) { setDialog("goal"); externalGoal?.(selectedLegacyPeer); } }} onReminders={() => { if (selectedLegacyPeer) { setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setDialog("reminders"); externalReminders?.(selectedLegacyPeer); } }} onInlineToolSettings={() => { if (selectedLegacyPeer) openInlineToolSettingsForAgent(selectedLegacyPeer); }} onOpenArrival={(item) => { setArrivalAgent(item.agent); setDialog("arrival"); onOpenArrival?.(item.agent); }} onDismissArrival={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} onToggleSubagents={() => { if (selectedSourceKey) { toggleSubagents(selectedSourceKey); onToggleSubagents?.(selectedSourceKey); } }} expanded={selectedSourceKey !== undefined && expanded.has(selectedSourceKey)} /></div>}
     />
     <RouterManagerDialog open={dialog === "routers"} routers={settings.routers.map((url) => ({ url, ...(settings.aliases[url] ? { alias: settings.aliases[url] } : {}), agentId: settings.agentIds[url] ?? (url === activeUrl ? resolvedAgentId : requestedAgentId ?? "wolfgang") }))} activeUrl={activeUrl} defaultAgentId={requestedAgentId ?? "wolfgang"} onClose={() => setDialog(undefined)} onSave={saveRouter} onSelect={selectRouter} onRemove={removeRouter} onProviderSettings={() => setDialog("provider-settings")} />
     <ProviderAuthDialog open={dialog === "provider-settings"} client={session.transport.http} refreshKey={providerRefresh} {...(providerPrompt ? { prompt: providerPrompt } : {})} onClose={() => setDialog(undefined)} onPromptHandled={() => setProviderPrompt(undefined)} />

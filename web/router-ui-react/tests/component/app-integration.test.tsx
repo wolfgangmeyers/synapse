@@ -54,6 +54,7 @@ describe("App integration", () => {
       if (url.endsWith(`/v1/managed-agents/${managedAgent.agent_id}/children`)) return jsonResponse({ agent_id: managedAgent.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
       if (url.includes("/v1/history?")) return jsonResponse({ view: url.includes("view=complete") ? "complete" : "quiet", entries: url.includes("view=complete") ? [{ id: "activity-1", agent_id: managedAgent.agent_id, level: "info", message: "Managed worker restarted", at: "2030-01-01T10:01:00.000Z" }, { id: "activity-other", agent_id: "other-worker", level: "info", message: "Other worker restarted", at: "2030-01-01T10:01:00.000Z" }] : [], next_before: null });
       if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: managedAgent.agent_id, high_water_sequence: 1, messages: [{ sequence: 1, id: "conversation-1", message_incarnation_id: "00000000-0000-4000-8000-000000000001", from: managedAgent.agent_id, to: "web-ui", body: "Existing conversation", created_at: "2030-01-01T10:00:00.000Z", recorded_at: "2030-01-01T10:00:00.000Z", attachments: [] }] });
+      if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 1, models: [{ provider: "openai-codex", id: "gpt-5.6-luna", name: "GPT-5.6 Luna", available: true }], default_model: null });
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
       if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
       throw new Error(`Unexpected request: ${url}`);
@@ -67,6 +68,8 @@ describe("App integration", () => {
     render(<App routerUrl={state.routerUrl} agentId={state.agentId} state={state} transportOptions={{ fetchImpl, webSocketFactory }} />);
     const quiet = await screen.findByRole("tab", { name: "Quiet messages" });
     expect(quiet).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("button", { name: "openai-codex/gpt-5.6-luna" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select prompt" })).toBeInTheDocument();
     expect(screen.getByText("Existing conversation")).toBeInTheDocument();
     expect(screen.queryByText("Managed worker restarted")).not.toBeInTheDocument();
     expect(screen.queryByText("History")).not.toBeInTheDocument();
@@ -92,6 +95,7 @@ describe("App integration", () => {
       if (url.endsWith(`/v1/managed-agents/${managedAgent.agent_id}/children`)) return jsonResponse({ agent_id: managedAgent.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
       if (url.includes("/v1/history?")) return jsonResponse({ view: "complete", entries: [], next_before: null });
       if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: managedAgent.agent_id, high_water_sequence: 0, messages: [] });
+      if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 1, models: [{ provider: "openai-codex", id: "gpt-5.6-luna", name: "GPT-5.6 Luna", available: true }], default_model: null });
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
       if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
       if (url.endsWith("/v1/messages")) return jsonResponse({ message: { enqueue_sequence: 1, id: "managed-direct-message", from: "wolfgang", to: managedAgent.agent_id, body: "Direct managed message", created_at: "2030-01-01T00:00:00.000Z", expires_at: "2030-01-02T00:00:00.000Z", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174000", state: "queued", source: { kind: "web_ui" } } }, 201);

@@ -150,7 +150,7 @@ func TestManagedDirectReceiptDiagnostics(t *testing.T) {
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "entry-a", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
 	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "entry-a-duplicate", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
 	var codes []string
-	for index := 0; index < 7; index++ {
+	for index := 0; index < 5; index++ {
 		select {
 		case event := <-events:
 			if event.DiagnosticCode != "" {
@@ -166,7 +166,48 @@ func TestManagedDirectReceiptDiagnostics(t *testing.T) {
 	cancel()
 	for range events {
 	}
-	require.ElementsMatch(t, []string{"stale_receipt", "unrelated_receipt", "wrong_custom_type", "malformed_receipt", "mismatched_receipt", "duplicate_receipt"}, codes)
+	// Normal turn/activity frames and unrelated model output are expected while
+	// the direct turn runs. Only malformed candidate receipts are diagnostic.
+	require.ElementsMatch(t, []string{"stale_receipt", "malformed_receipt", "mismatched_receipt", "duplicate_receipt"}, codes)
+}
+
+func TestManagedDirectMailboxCapturesAssistantReplyUntilSettled(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	direct := client.(DirectMailboxRPC)
+	requests := readJSONLRequests(stdinReader)
+	events, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
+	require.NoError(t, err)
+	request := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "interim-entry", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "working"}}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "reply-entry", "role": "assistant", "content": []any{map[string]any{"type": "thinking", "thinking": "hidden"}, map[string]any{"type": "text", "text": "reply works"}}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+
+	var gotReceipt, gotSettled bool
+	var reply *DirectMailboxReply
+	for index := 0; index < 2; index++ {
+		select {
+		case event := <-events:
+			if event.Receipt != nil {
+				gotReceipt = true
+				require.Equal(t, "append-entry", event.Receipt.EntryIdentity)
+			}
+			if event.Reply != nil {
+				reply = event.Reply
+			}
+			gotSettled = gotSettled || event.Settled
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for direct mailbox turn")
+		}
+	}
+	require.True(t, gotReceipt)
+	require.True(t, gotSettled)
+	require.Equal(t, &DirectMailboxReply{EntryIdentity: "reply-entry", Body: "reply works"}, reply)
 }
 
 func TestManagedDirectMatcherClearsAfterCanceledWait(t *testing.T) {

@@ -43,6 +43,17 @@ describe("direct HTTP transport", () => {
     await expect(createHttpClient("http://router.test", fetchImpl).launchManaged({ name: "managed-alpha", cwd: "/tmp/project" })).resolves.toMatchObject({ agent: { agent_id: "managed-alpha" } });
   });
 
+  it("restarts a managed agent with an explicitly selected model", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://router.test/v1/managed-agents/managed-alpha/restart");
+      expect(init?.credentials).toBe("omit");
+      expect(init?.headers).toEqual({ "x-request-id": expect.any(String), "content-type": "application/json" });
+      expect(init?.body).toBe(JSON.stringify({ model: { provider: "google", id: "gemini-2.5-pro" } }));
+      return response({ operation_id: "00000000-0000-4000-8000-000000000000" }, 202);
+    });
+    await expect(createHttpClient("http://router.test", fetchImpl).restartManaged("managed-alpha", { provider: "google", id: "gemini-2.5-pro" })).resolves.toMatchObject({ operation_id: "00000000-0000-4000-8000-000000000000" });
+  });
+
   it("requests only the selected managed agent's activity history", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).toBe("http://router.test/v1/history?agent_id=managed-alpha&view=complete&limit=50");

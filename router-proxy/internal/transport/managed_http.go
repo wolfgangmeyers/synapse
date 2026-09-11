@@ -659,16 +659,33 @@ func (r *Router) handleManagedRestart(w http.ResponseWriter, req *http.Request, 
 		r.writeManagedError(w, req, err)
 		return
 	}
-	if len(payload) != 0 {
-		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
-		return
+	for key := range payload {
+		if key != "model" {
+			r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+			return
+		}
+	}
+	var selected *managed.Model
+	if raw, ok := payload["model"]; ok {
+		var model map[string]json.RawMessage
+		if json.Unmarshal(raw, &model) != nil || model == nil || len(model) != 2 {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+			return
+		}
+		provider, providerErr := managedString(model, "provider", true)
+		id, idErr := managedString(model, "id", true)
+		if providerErr != nil || idErr != nil {
+			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"})
+			return
+		}
+		selected = &managed.Model{Provider: provider, ID: id}
 	}
 	canonicalPath := req.URL.Path
 	if r.managedPathCanonicalizer != nil {
 		canonicalPath = r.managedPathCanonicalizer(req)
 	}
 	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
-	result, restartErr := r.managed.ReserveRestart(req.Context(), managed.RestartRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:])})
+	result, restartErr := r.managed.ReserveRestart(req.Context(), managed.RestartRequest{AgentID: agentID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), Model: selected})
 	if restartErr != nil {
 		r.writeManagedError(w, req, managedRestartError(restartErr))
 		return
@@ -810,6 +827,12 @@ func managedRestartAllError(err error) error {
 }
 
 func managedRestartError(err error) error {
+	if managed.IsModelUnavailable(err) {
+		return &managedHTTPError{422, "MODEL_UNAVAILABLE", "The selected model is unavailable"}
+	}
+	if strings.Contains(err.Error(), "invalid model") {
+		return &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"}
+	}
 	var missing *store.ManagedAgentNotFoundError
 	if errors.As(err, &missing) {
 		return &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"}

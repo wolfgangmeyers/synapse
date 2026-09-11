@@ -257,7 +257,7 @@ export interface RouterHttpClient {
   managedChildren(id: string): Promise<ManagedChildrenResponse>;
   managedHistory(agentId: string, view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
   launchManaged(payload: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
-  restartManaged(id: string): Promise<ManagedOperationResponse>;
+  restartManaged(id: string, model?: { provider: string; id: string }): Promise<ManagedOperationResponse>;
   resetManaged(id: string): Promise<ManagedOperationResponse>;
   terminateManaged(id: string): Promise<ManagedOperationResponse>;
   restartAllManaged(): Promise<ManagedOperationResponse>;
@@ -328,7 +328,7 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
       return managedHistory(await managedRequest(`/v1/history?${query.toString()}`, "GET"));
     },
     launchManaged: async (payload) => managedOperation(await managedRequest("/v1/managed-agents", "POST", payload)),
-    restartManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/restart`, "POST", {})),
+    restartManaged: async (id, model) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/restart`, "POST", model === undefined ? {} : { model })),
     resetManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/reset`, "POST", {})),
     terminateManaged: async (id) => managedOperation(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "DELETE")),
     restartAllManaged: async () => managedOperation(await managedRequest("/v1/managed-agents/restart-all", "POST", {})),

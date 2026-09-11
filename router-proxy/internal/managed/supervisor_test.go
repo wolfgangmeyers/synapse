@@ -163,6 +163,39 @@ func (r *failingDirectRPC) directPromptCount() int {
 	return r.directPrompts
 }
 
+type replyingDirectRPC struct {
+	launchRPC
+}
+
+func (r *replyingDirectRPC) PrepareManagedMailbox(context.Context) (string, error) {
+	return "reply-cursor", nil
+}
+func (r *replyingDirectRPC) PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
+	events := make(chan DirectMailboxEvent, 3)
+	events <- DirectMailboxEvent{Receipt: &DirectMailboxReceipt{EntryIdentity: "append-entry"}}
+	events <- DirectMailboxEvent{Reply: &DirectMailboxReply{EntryIdentity: "reply-entry", Body: "managed reply works"}}
+	events <- DirectMailboxEvent{Settled: true}
+	close(events)
+	return events, nil
+}
+func (r *replyingDirectRPC) RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
+	return DirectMailboxRecovery{}, nil
+}
+
+type replyingDirectFactory struct {
+	process *launchProcess
+	rpc     *replyingDirectRPC
+}
+
+func (f replyingDirectFactory) Start(_ context.Context, spec CommandSpec) (Process, error) {
+	f.rpc.session = spec.SessionID
+	return f.process, nil
+}
+
+type replyingDirectRPCFactory struct{ rpc *replyingDirectRPC }
+
+func (f replyingDirectRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
+
 type failingDirectFactory struct {
 	process *launchProcess
 	rpc     *failingDirectRPC
@@ -208,6 +241,61 @@ func readyFailingDirectManager(t *testing.T) (*Manager, *store.Store, string, *f
 	time.Sleep(25 * time.Millisecond)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	return manager, durable, path, rpc
+}
+
+func TestManagedDirectReplyPublishesAfterAppendAndBeforeNextOffer(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	process := &launchProcess{identity: ProcessIdentity{PID: 994, StartMarker: "reply-start", Incarnation: "reply-incarnation"}, stopped: make(chan struct{})}
+	rpc := &replyingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}}
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		ProcessFactory: replyingDirectFactory{process: process, rpc: rpc}, RPCFactory: replyingDirectRPCFactory{rpc: rpc},
+		CatalogSource:              CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	defer manager.Close(context.Background())
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "reply-agent", Cwd: root, RequestID: "reply-launch"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "reply-agent")
+		return readErr == nil && agent.LifecycleState == "running" && agent.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+
+	published := make(chan struct {
+		attempt store.ManagedDirectAttempt
+		reply   DirectMailboxReply
+	}, 1)
+	manager.SetDirectReplyPublisher(func(_ context.Context, attempt store.ManagedDirectAttempt, reply DirectMailboxReply) error {
+		published <- struct {
+			attempt store.ManagedDirectAttempt
+			reply   DirectMailboxReply
+		}{attempt: attempt, reply: reply}
+		return nil
+	})
+	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "reply-message", From: "sender", To: "reply-agent", Body: "reply please", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(ctx, "reply-message")
+	require.NoError(t, err)
+	manager.OfferDirect("reply-agent")
+
+	select {
+	case result := <-published:
+		require.Equal(t, "reply-message", result.attempt.MessageID)
+		require.Equal(t, DirectMailboxReply{EntryIdentity: "reply-entry", Body: "managed reply works"}, result.reply)
+	case <-time.After(time.Second):
+		t.Fatal("managed direct reply was not published")
+	}
+	require.Eventually(t, func() bool {
+		message, readErr := durable.MessageFor(ctx, "reply-message")
+		return readErr == nil && message == nil
+	}, time.Second, time.Millisecond)
 }
 
 func TestManagedDirectPromptStatePersistenceFailureReleasesAttempt(t *testing.T) {
@@ -605,7 +693,7 @@ type restartPreparationRPCFactory struct{ rpc *restartPreparationRPC }
 
 func (f restartPreparationRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
 
-func readyRestartManager(t *testing.T, preparationError error) (*Manager, *store.Store, *restartPreparationRPC) {
+func readyRestartManager(t *testing.T, preparationError error, models ...Model) (*Manager, *store.Store, *restartPreparationRPC) {
 	t.Helper()
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
@@ -618,7 +706,10 @@ func readyRestartManager(t *testing.T, preparationError error) (*Manager, *store
 	require.NoError(t, os.WriteFile(sessionFile, []byte("{}"), 0600))
 	process := &launchProcess{identity: ProcessIdentity{PID: 321, StartMarker: "restart-start", Incarnation: "restart-incarnation"}, stopped: make(chan struct{})}
 	rpc := &restartPreparationRPC{active: expectedManagedActiveTools(manifest), preparationError: preparationError, sessionFile: sessionFile}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: restartPreparationFactory{process: process, rpc: rpc}, RPCFactory: restartPreparationRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), IDSource: deterministic.NewSequenceIDSource("restart-session", "initial-generation", "replacement-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	if len(models) == 0 {
+		models = []Model{{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}}
+	}
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{SessionRoot: root, AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: restartPreparationFactory{process: process, rpc: rpc}, RPCFactory: restartPreparationRPCFactory{rpc: rpc}, CatalogSource: CatalogFromModels(models...), IDSource: deterministic.NewSequenceIDSource("restart-session", "initial-generation", "replacement-generation", "123e4567-e89b-42d3-a456-000000000004"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "restart-agent", Cwd: root, RequestID: "launch-operation"})
 	require.NoError(t, err)
@@ -655,6 +746,25 @@ func TestReserveManagedRestartAtomicallyDisablesPromptAdmission(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "restarting", stored.LifecycleState)
 	require.False(t, stored.AcceptingPrompts)
+	close(rpc.releasePrepare)
+}
+
+func TestReserveRestartAtomicallyChangesTheReplacementModel(t *testing.T) {
+	manager, durable, rpc := readyRestartManager(t, nil,
+		Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true},
+		Model{Provider: "google", ID: "gemini-2.5-pro", Available: true},
+	)
+	defer manager.Close(context.Background())
+	rpc.prepareStarted, rpc.releasePrepare = make(chan struct{}), make(chan struct{})
+	request := RestartRequest{AgentID: "restart-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/restart-agent/restart", RequestID: "restart-with-model", CanonicalBodyHash: "new-model", Model: &Model{Provider: "google", ID: "gemini-2.5-pro"}}
+	result, err := manager.ReserveRestart(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, "google", result.Agent.SelectedModel.Provider)
+	require.Equal(t, "gemini-2.5-pro", result.Agent.SelectedModel.ID)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(context.Background(), "restart-agent")
+		return readErr == nil && agent.LifecycleState == "restarting" && agent.SelectedModel.Provider == "google" && agent.SelectedModel.ID == "gemini-2.5-pro"
+	}, time.Second, time.Millisecond)
 	close(rpc.releasePrepare)
 }
 
