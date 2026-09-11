@@ -225,7 +225,9 @@ export async function startIsolatedGoRouter({ repositoryRoot = REPOSITORY_ROOT, 
     }
     processInfo = await spawnRouterProcess({
       command: binaryPath,
-      args: ["--database", databasePath, "--log", logPath, "--host", "127.0.0.1", "--port", String(port)],
+      // Transport tests exercise the ordinary router protocol. Keep managed Pi
+      // off so this fixture does not require its production launch runtime.
+      args: ["--database", databasePath, "--log", logPath, "--host", "127.0.0.1", "--port", String(port), "--managed=false"],
       cwd: repositoryRoot,
       root,
       expectedPort: port,
