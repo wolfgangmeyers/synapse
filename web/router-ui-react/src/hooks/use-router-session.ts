@@ -90,15 +90,9 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         const snapshot = await transport.http.managedAgents();
         if (!active) return;
         dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
-        const [children, quietHistory, completeHistory] = await Promise.all([
-          Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id))),
-          transport.http.managedHistory("quiet", { limit: 200 }),
-          transport.http.managedHistory("complete", { limit: 200 }),
-        ]);
+        const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
         if (!active) return;
         dispatch({ type: "managed/children", scope, children });
-        for (const entry of quietHistory.entries) dispatch({ type: "managed/history", scope, view: "quiet", entry });
-        for (const entry of completeHistory.entries) dispatch({ type: "managed/history", scope, view: "complete", entry });
         if (capabilities.ui_live_v1 !== false && canConnectUILive(options)) uiLive.connect();
       } catch {
         if (active) dispatch({ type: "managed/enabled", scope, enabled: false });

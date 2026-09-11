@@ -18,12 +18,10 @@ export interface AgentRowProps {
   onToggleSubagents?: ((agentId: string) => void) | undefined;
   onOpenArrival?: ((arrival: Arrival) => void) | undefined;
   onDismissArrival?: ((agentId: string) => void) | undefined;
-  onManageManaged?: ((agentId: string) => void) | undefined;
-  onManagedState?: ((agentId: string) => void) | undefined;
 }
 function initial(id: string): string { return id.trim().charAt(0).toUpperCase() || "?"; }
 
-export function AgentRow({ agent, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival, onManageManaged, onManagedState }: AgentRowProps): ReactElement {
+export function AgentRow({ agent, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival }: AgentRowProps): ReactElement {
   const working = agent.activity_state === "active";
   const compacting = agent.activity_state === "compacting";
   const hasSubagents = agent.source === "router-managed" ? (agent.managed_children?.length ?? 0) > 0 : (agent.subagent_count ?? agent.subagents?.length ?? 0) > 0;
@@ -44,7 +42,7 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
         <span className="agent-name-line">
           {hasGoal && !onGoal ? <span className="goal-indicator" title="Goal active" aria-label="Goal active"><i className="fa-solid fa-flag" aria-hidden="true" /></span> : null}
           {hasReminders && !onReminders ? <span className="reminder-row-indicator" title={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`} aria-label={`${reminderCount} reminder${reminderCount === 1 ? "" : "s"}`}><i className="fa-solid fa-clock" aria-hidden="true" /></span> : null}
-          <strong>{humanName(agent.agent_id)}</strong><small className="agent-source">{agent.source === "router-managed" ? "router-managed" : "tmux"}</small>
+          <strong>{humanName(agent.agent_id)}</strong><small className="agent-source">{agent.source === "router-managed" ? "RPC" : "tmux"}</small>
         </span>
         {hasSignals ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
           {showSubagentBadge ? <SubagentBadge count={agent.subagent_count} subagents={agent.subagents} expanded={expanded} listId={`agent-row-subagents-${agent.agent_id}`} onToggle={() => onToggleSubagents?.(agent.agent_id)} /> : null}
@@ -54,11 +52,9 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
       </span>
       {working ? <span className="working-indicator" aria-label="Working"><span /></span> : null}
     </div>
-    {hasGoal && onGoal || hasReminders && onReminders || agent.source === "router-managed" ? <div className="agent-row-actions">
+    {hasGoal && onGoal || hasReminders && onReminders ? <div className="agent-row-actions">
       {hasGoal && onGoal ? <button type="button" className="goal-indicator" title="Set goal" aria-label="Set goal" onClick={(event) => { stopActionPropagation(event); onGoal(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-flag" aria-hidden="true" /></button> : null}
       {hasReminders && onReminders ? <button type="button" className="reminder-row-indicator" title="Add reminder" aria-label="Add reminder" onClick={(event) => { stopActionPropagation(event); onReminders(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-clock" aria-hidden="true" /></button> : null}
-      {agent.source === "router-managed" && onManageManaged ? <button type="button" className="secondary" aria-label={`Manage ${agent.agent_id}`} onClick={(event) => { stopActionPropagation(event); onManageManaged(agent.agent_id); }}>Manage</button> : null}
-      {agent.source === "router-managed" && onManagedState ? <button type="button" className="secondary" aria-label={`View state for ${agent.agent_id}`} onClick={(event) => { stopActionPropagation(event); onManagedState(agent.agent_id); }}>State</button> : null}
     </div> : null}
     {expanded && agent.source === "router-managed" && agent.managed_children_recovery === "reconstructing" ? <span className="managed-child-recovery">Reconstructing child state</span> : null}
     {expanded && agent.source === "router-managed" ? <ManagedChildList agentId={agent.agent_id} children={agent.managed_children ?? []} /> : null}

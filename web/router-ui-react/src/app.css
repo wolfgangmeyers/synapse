@@ -956,6 +956,10 @@ p:empty { display: none; }
 .secondary { background: transparent; color: var(--primary); border: 1px solid var(--line); }
 .danger-button { background: transparent; color: var(--danger); border: 1px solid rgba(255,180,171,.42); }
 .agent-source { margin-left: 7px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.managed-agent-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.managed-agent-controls button { min-height: 32px; padding: 0 10px; font-size: 12px; }
+.managed-termination-state { color: var(--warning, #c9841d); font-weight: 800; }
+.avatar.terminating { box-shadow: 0 0 0 3px rgba(201,132,29,.28); }
 .managed-agent-dialog { width: min(680px, calc(100vw - 32px)); }
 .managed-agent-form { display: grid; gap: 12px; }
 .managed-agent-form label, .managed-agent-form fieldset { display: grid; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 700; }

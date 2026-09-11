@@ -17,25 +17,52 @@ func TestManagedHistoryKeepsQuietEligibilityAtWriteAndCapsComplete(t *testing.T)
 	result, err := durable.Enqueue(ctx, protocol.Envelope{ID: "quiet-message", From: "worker", To: "supervisor", Body: body, CreatedAt: "2030-01-01T00:00:00.000Z", Source: &source}, EnqueueOptions{Conversation: &ConversationOptions{Body: &body, Source: &source, QuietEligible: true}})
 	require.NoError(t, err)
 	require.True(t, result.ConversationCreated)
-	page, err := durable.ManagedHistoryPage(ctx, "quiet", 0, 10)
+	page, err := durable.ManagedHistoryPage(ctx, "worker", "quiet", 0, 10)
 	require.NoError(t, err)
-	require.Equal(t, []ManagedHistoryEntry{{ID: "quiet-message", At: result.ConversationMessage.RecordedAt, Level: "message", Message: body}}, page.Entries)
+	require.Equal(t, []ManagedHistoryEntry{{ID: "quiet-message", AgentID: "worker", At: result.ConversationMessage.RecordedAt, Level: "message", Message: body}}, page.Entries)
 
 	for index := 0; index < maxManagedHistoryEntries+1; index++ {
 		_, err := durable.AppendManagedCompleteHistory(ctx, "worker", "test", "info", fmt.Sprintf("event-%03d", index))
 		require.NoError(t, err)
 	}
-	complete, err := durable.ManagedHistoryPage(ctx, "complete", 0, maxManagedHistoryEntries-1)
+	complete, err := durable.ManagedHistoryPage(ctx, "worker", "complete", 0, maxManagedHistoryEntries-1)
 	require.NoError(t, err)
 	require.Len(t, complete.Entries, maxManagedHistoryEntries-1)
 	require.Equal(t, "event-200", complete.Entries[0].Message)
 	require.Equal(t, "event-002", complete.Entries[len(complete.Entries)-1].Message)
 	require.NotNil(t, complete.NextBefore)
-	_, err = durable.ManagedHistoryPage(ctx, "complete", *complete.NextBefore, 10)
+	_, err = durable.ManagedHistoryPage(ctx, "worker", "complete", *complete.NextBefore, 10)
 	require.NoError(t, err)
-	quietAfterCompleteCap, err := durable.ManagedHistoryPage(ctx, "quiet", 0, 10)
+	quietAfterCompleteCap, err := durable.ManagedHistoryPage(ctx, "worker", "quiet", 0, 10)
 	require.NoError(t, err)
 	require.Equal(t, page.Entries, quietAfterCompleteCap.Entries, "complete-history retention must never evict quiet history")
+}
+
+func TestManagedHistoryPageScopesFactsAndQuietMailToItsAgent(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+	_, err := durable.AppendManagedCompleteHistory(ctx, "managed-alpha", "lifecycle", "info", "Alpha entered running")
+	require.NoError(t, err)
+	_, err = durable.AppendManagedCompleteHistory(ctx, "managed-beta", "lifecycle", "info", "Beta entered running")
+	require.NoError(t, err)
+	_, err = durable.AppendManagedCompleteHistory(ctx, "managed-alpha", "managed_http", "info", "Managed POST completed")
+	require.NoError(t, err)
+	_, err = durable.AppendManagedCompleteHistory(ctx, "managed-alpha", "message", "info", "Message sent to another worker")
+	require.NoError(t, err)
+
+	alpha, err := durable.ManagedHistoryPage(ctx, "managed-alpha", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, alpha.Entries, 1)
+	require.Equal(t, "managed-alpha", alpha.Entries[0].AgentID)
+	require.Equal(t, "Alpha entered running", alpha.Entries[0].Message)
+
+	body := "alpha quiet mail"
+	source := protocol.MessageSource{Kind: "agent"}
+	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "alpha-quiet", From: "managed-alpha", To: "supervisor", Body: body, CreatedAt: "2030-01-01T00:00:00.000Z", Source: &source}, EnqueueOptions{Conversation: &ConversationOptions{Body: &body, Source: &source, QuietEligible: true}})
+	require.NoError(t, err)
+	quiet, err := durable.ManagedHistoryPage(ctx, "managed-beta", "quiet", 0, 10)
+	require.NoError(t, err)
+	require.Empty(t, quiet.Entries)
 }
 
 func TestManagedQuietSendAuthorizationIsSingleUseAndCompleteHistoryProducerIsIdempotent(t *testing.T) {
@@ -53,7 +80,7 @@ func TestManagedQuietSendAuthorizationIsSingleUseAndCompleteHistoryProducerIsIde
 	second, err := durable.RecordManagedCompleteHistory(ctx, "managed-agent", "control", "info", "Managed tool requested", "control:1")
 	require.NoError(t, err)
 	require.Equal(t, first, second)
-	page, err := durable.ManagedHistoryPage(ctx, "complete", 0, 10)
+	page, err := durable.ManagedHistoryPage(ctx, "managed-agent", "complete", 0, 10)
 	require.NoError(t, err)
 	require.Len(t, page.Entries, 1)
 }
@@ -62,8 +89,10 @@ func TestManagedHistoryRejectsInvalidInputs(t *testing.T) {
 	durable := openTestStore(t)
 	_, err := durable.AppendManagedCompleteHistory(context.Background(), "worker", "", "info", "message")
 	require.Error(t, err)
-	_, err = durable.ManagedHistoryPage(context.Background(), "not-a-view", 0, 1)
+	_, err = durable.AppendManagedCompleteHistory(context.Background(), "", "lifecycle", "info", "message")
 	require.Error(t, err)
-	_, err = durable.ManagedHistoryPage(context.Background(), "quiet", 0, maxManagedHistoryEntries+1)
+	_, err = durable.ManagedHistoryPage(context.Background(), "worker", "not-a-view", 0, 1)
+	require.Error(t, err)
+	_, err = durable.ManagedHistoryPage(context.Background(), "worker", "quiet", 0, maxManagedHistoryEntries+1)
 	require.Error(t, err)
 }

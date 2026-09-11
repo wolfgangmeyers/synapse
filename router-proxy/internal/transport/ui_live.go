@@ -230,7 +230,7 @@ func (h *uiLiveHub) publish(ctx context.Context) {
 	for _, fact := range historyFacts {
 		entry, appendErr := h.router.store.AppendManagedCompleteHistory(ctx, fact.agentID, "managed_lifecycle", "info", fact.message)
 		if appendErr == nil {
-			h.publishHistory("complete", map[string]any{"id": entry.ID, "at": entry.At, "level": entry.Level, "message": entry.Message})
+			h.publishHistory("complete", map[string]any{"id": entry.ID, "agent_id": entry.AgentID, "at": entry.At, "level": entry.Level, "message": entry.Message})
 		}
 	}
 }
@@ -350,7 +350,7 @@ func (r *Router) recordCompleteHistory(ctx context.Context, agentID, category, l
 	}
 	entry, err := r.store.RecordManagedCompleteHistory(ctx, agentID, category, level, message, eventKey)
 	if err == nil && r.uiLive != nil {
-		r.uiLive.publishHistory("complete", map[string]any{"id": entry.ID, "at": entry.At, "level": entry.Level, "message": entry.Message})
+		r.uiLive.publishHistory("complete", map[string]any{"id": entry.ID, "agent_id": entry.AgentID, "at": entry.At, "level": entry.Level, "message": entry.Message})
 	}
 }
 

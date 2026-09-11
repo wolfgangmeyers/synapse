@@ -104,12 +104,14 @@ describe("AgentRow", () => {
     expect(screen.queryByRole("button", { name: "2 subagents" })).not.toBeInTheDocument();
   });
 
-  it("keeps expanded managed children below the source-qualified card controls", () => {
+  it("labels managed rows as RPC and leaves their controls in the selected-agent header", () => {
     render(<AgentRow agent={{ agent_id: "managed-build", source: "router-managed", activity_state: "idle", subagent_count: 1, subagents: [{ id: "child-1", description: "Run the focused check" }], managed_children: [{ id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed", cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running", compaction_state: "none", compaction: { state: "idle", count: 0 } }] }} expanded />);
 
     const children = screen.getByRole("list", { name: "Children for managed-build" });
     const row = children.parentElement;
-    expect(screen.getByText("router-managed")).toBeInTheDocument();
+    expect(screen.getByText("RPC")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Manage" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
     expect(row).not.toBeNull();
     if (row === null) throw new Error("managed child list is not contained by its card");
     expect(row).toHaveClass("expanded");

@@ -851,7 +851,7 @@ export async function runManagedRpcRelease() {
       await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog input[placeholder='~/code/project']", router.cwd));
       await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog textarea", "Spawn the acceptance child compaction fixture."));
       await execBrowser(bcb, tab, "(() => { const button = document.querySelector('.managed-agent-dialog form button[type=submit]'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed launch submit missing'); button.click(); return true; })()");
-      await waitFor(async () => (await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}]')?.textContent?.includes('router-managed')`)) ? true : undefined, "managed Pi row");
+      await waitFor(async () => (await execBrowser(bcb, tab, `document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}]')?.textContent?.includes('RPC')`)) ? true : undefined, "managed Pi row");
       return { agent_id: CHILD_AGENT, picker };
     });
 
@@ -884,11 +884,10 @@ export async function runManagedRpcRelease() {
           const agent = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then((response) => response.json());
           return outcomes.has("completed") && outcomes.has("aborted") && outcomes.has("failed") && agent.agent?.activity_state === "compacting" ? { rows, agent } : undefined;
         }, "native installed-Pi parent compaction outcome matrix");
-        const history = await fetch(`${router.httpUrl}/v1/history?view=complete&limit=100`).then((response) => response.json());
-        // The browser history contract deliberately exposes only redacted
-        // operational facts, not agent IDs or producer categories. This
-        // isolated router has one managed parent; the transition rows above
-        // bind these expected messages to its installed-Pi event stream.
+        const history = await fetch(`${router.httpUrl}/v1/history?agent_id=${encodeURIComponent(CHILD_AGENT)}&view=complete&limit=100`).then((response) => response.json());
+        // The browser history contract is scoped by the selected managed
+        // parent and exposes only redacted operational facts. The transition
+        // rows above bind these expected messages to its installed-Pi stream.
         const parentHistory = history.entries ?? [];
         const messages = parentHistory.map((entry) => entry.message);
         for (const expected of ["Managed parent compaction completed", "Managed parent compaction aborted", "Managed parent compaction failed"]) {
@@ -966,7 +965,7 @@ export async function runManagedRpcRelease() {
       const sessionsBefore = (await readdir(router.sessions)).length;
       const before = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`).then(async (response) => response.ok ? response.json() : { status: response.status });
       try {
-        await execBrowser(bcb, tab, `(() => { const button = document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] button[aria-label^="Manage "]'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed parent action is unavailable'); button.click(); return true; })()`);
+        await execBrowser(bcb, tab, `(() => { const button = document.querySelector('.conversation-header .managed-agent-controls button'); if (!(button instanceof HTMLButtonElement) || button.textContent?.trim() !== 'Manage') throw new Error('managed parent action is unavailable'); button.click(); return true; })()`);
         await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-lifecycle-actions button.secondary'))")) ? true : undefined, "managed reset action");
         await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-lifecycle-actions button')].find((item) => item.textContent?.trim() === 'Reset'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed reset button is unavailable'); button.click(); return true; })()");
         const endpoint = await waitFor(async () => {
@@ -1044,7 +1043,7 @@ export async function runManagedRpcRelease() {
           fetch(`${router.httpUrl}/v1/managed-agents/${agentID}`).then((response) => response.ok ? response.json() : undefined),
           sqliteRows(router.database, "SELECT recovery_cause,recovery_state,prior_pi_session_id,prior_process_incarnation,prior_runtime_generation FROM managed_child_recoveries WHERE agent_id=? ORDER BY rowid", [agentID]),
           sqliteRows(router.database, "SELECT state,outcome FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [agentID]),
-          fetch(`${router.httpUrl}/v1/history?view=complete&limit=100`).then((response) => response.json()),
+          fetch(`${router.httpUrl}/v1/history?agent_id=${encodeURIComponent(agentID)}&view=complete&limit=100`).then((response) => response.json()),
         ]);
         const recovered = children?.children?.filter((child) => child.recovery?.cause === "parent_process_lost") ?? [];
         // The public history page is intentionally redacted; source binding is
@@ -1057,7 +1056,7 @@ export async function runManagedRpcRelease() {
         return rendered;
       }, "BCB hard-exit recovered children", 60_000);
       const capture = await screenshotManagedChildren(bcb, tab, join(output, "managed-child-parent-process-lost-desktop.png"), visualTask, agentID, "Interrupted · outcome unknown");
-      const history = (after.history.entries ?? []).filter((entry) => entry.agent_id === agentID && (entry.category === "managed_child" || entry.category === "managed_parent_compaction"));
+      const history = after.history.entries ?? [];
       await write("hard-kill-live-child-recovery.json", { launch, before, killed_process: pid, after: { children: after.children, agent: after.agent, recoveries: after.recoveries, history }, screenshot: capture, assertion: "the exact managed Pi PID was SIGKILLed while two children and parent compaction were live; both children became source-fenced parent_process_lost recoveries and the missing parent end became reconciled_unknown" });
       return { agent_id: agentID, killed_pid: pid.process_pid, recovered_children: after.children.children.length, recovery_causes: after.recoveries.map((row) => row.recovery_cause), screenshot: capture.path };
     });

@@ -52,7 +52,7 @@ describe("App integration", () => {
       if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true, ui_live_v1: false });
       if (url.endsWith("/v1/managed-agents")) return jsonResponse({ generated_at: "2030-01-01T00:00:00.000Z", projection_version: 1, agents: [managedAgent] });
       if (url.endsWith(`/v1/managed-agents/${managedAgent.agent_id}/children`)) return jsonResponse({ agent_id: managedAgent.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
-      if (url.includes("/v1/history?")) return jsonResponse({ view: url.includes("view=complete") ? "complete" : "quiet", entries: url.includes("view=complete") ? [{ id: "activity-1", level: "info", message: "Managed worker restarted", at: "2030-01-01T10:01:00.000Z" }] : [], next_before: null });
+      if (url.includes("/v1/history?")) return jsonResponse({ view: url.includes("view=complete") ? "complete" : "quiet", entries: url.includes("view=complete") ? [{ id: "activity-1", agent_id: managedAgent.agent_id, level: "info", message: "Managed worker restarted", at: "2030-01-01T10:01:00.000Z" }, { id: "activity-other", agent_id: "other-worker", level: "info", message: "Other worker restarted", at: "2030-01-01T10:01:00.000Z" }] : [], next_before: null });
       if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: managedAgent.agent_id, high_water_sequence: 1, messages: [{ sequence: 1, id: "conversation-1", message_incarnation_id: "00000000-0000-4000-8000-000000000001", from: managedAgent.agent_id, to: "web-ui", body: "Existing conversation", created_at: "2030-01-01T10:00:00.000Z", recorded_at: "2030-01-01T10:00:00.000Z", attachments: [] }] });
       if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
       if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
@@ -70,10 +70,52 @@ describe("App integration", () => {
     expect(screen.getByText("Existing conversation")).toBeInTheDocument();
     expect(screen.queryByText("Managed worker restarted")).not.toBeInTheDocument();
     expect(screen.queryByText("History")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([input]) => String(input).includes("/v1/history?agent_id=managed-worker&view=complete"))).toBe(true));
 
     await user.click(screen.getByRole("tab", { name: "Complete: messages + activity" }));
     expect(screen.getByText("Existing conversation")).toBeInTheDocument();
     expect(screen.getByText("Managed worker restarted")).toBeInTheDocument();
+    expect(screen.queryByText("Other worker restarted")).not.toBeInTheDocument();
+  });
+
+  it("sends directly to the selected managed worker and settles the receipt", async () => {
+    const managedAgent: ManagedAgent = { agent_id: "managed-direct", source: "router-managed", cwd: "/tmp/managed-direct", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "running", activity_state: "idle", accepting_prompts: true, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
+    const state = createInitialState({ routerUrl: "http://isolated-router.test:43123", agentId: "web-ui" });
+    state.managedAgents = [managedAgent];
+    state.selectedPeer = "router-managed:managed-direct";
+    const user = (await import("@testing-library/user-event")).default.setup();
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true, ui_live_v1: false });
+      if (url.endsWith("/v1/managed-agents")) return jsonResponse({ generated_at: "2030-01-01T00:00:00.000Z", projection_version: 1, agents: [managedAgent] });
+      if (url.endsWith(`/v1/managed-agents/${managedAgent.agent_id}/children`)) return jsonResponse({ agent_id: managedAgent.agent_id, source: "router-managed", lifecycle_version: 1, recovery_state: "current", children: [] });
+      if (url.includes("/v1/history?")) return jsonResponse({ view: "complete", entries: [], next_before: null });
+      if (url.includes("/v1/conversations?")) return jsonResponse({ owner: "web-ui", peer: managedAgent.agent_id, high_water_sequence: 0, messages: [] });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      if (url.endsWith("/v1/messages")) return jsonResponse({ message: { enqueue_sequence: 1, id: "managed-direct-message", from: "wolfgang", to: managedAgent.agent_id, body: "Direct managed message", created_at: "2030-01-01T00:00:00.000Z", expires_at: "2030-01-02T00:00:00.000Z", message_incarnation_id: "123e4567-e89b-42d3-a456-426614174000", state: "queued", source: { kind: "web_ui" } } }, 201);
+      throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl={state.routerUrl} agentId={state.agentId} state={state} transportOptions={{ fetchImpl, webSocketFactory }} />);
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    await waitFor(() => expect(composer).toBeEnabled());
+    await user.type(composer, "Direct managed message");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([input, init]) => String(input).endsWith("/v1/messages") && init?.method === "POST")).toBe(true));
+    const sendCall = fetchImpl.mock.calls.find(([input, init]) => String(input).endsWith("/v1/messages") && init?.method === "POST");
+    expect(sendCall).toBeDefined();
+    const request = sendCall?.[1];
+    expect(request?.body).toBeTypeOf("string");
+    expect(JSON.parse(String(request?.body))).toMatchObject({ from: "wolfgang", to: "managed-direct", body: "Direct managed message" });
+    await waitFor(() => expect(screen.getByText("Direct managed message")).toBeInTheDocument());
   });
 
   it("runs persistence cleanup before rendering the app that reads it", async () => {

@@ -204,8 +204,9 @@ function isProviderPrompt(value: unknown): boolean {
 }
 
 function isHistoryEntry(value: unknown): boolean {
-  return isRecord(value) && hasOnlyKeys(value, ["id", "at", "level", "message"])
+  return isRecord(value) && hasOnlyKeys(value, ["id", "agent_id", "at", "level", "message"])
     && isSafeString(value.id, 1, 128)
+    && isAgentId(value.agent_id)
     && (value.at === undefined || isRouterUtcTimestamp(value.at))
     && (value.level === undefined || isSafeString(value.level, 1, 64))
     && (value.message === undefined || isSafeString(value.message, 0, 65536));

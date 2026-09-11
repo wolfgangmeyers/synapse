@@ -441,9 +441,8 @@ func (r *Router) handleMessage(w http.ResponseWriter, req *http.Request) {
 		_ = item
 	}
 	r.afterEnqueue(result)
-	r.recordCompleteHistory(req.Context(), envelope.From, "message", "info", fmt.Sprintf("Message sent to %s", envelope.To), "message:"+envelope.ID)
 	if quietEligible && result.ConversationCreated && result.ConversationMessage != nil && r.uiLive != nil {
-		r.uiLive.publishHistory("quiet", map[string]any{"id": result.ConversationMessage.ID, "at": result.ConversationMessage.RecordedAt, "level": "message", "message": result.ConversationMessage.Body})
+		r.uiLive.publishHistory("quiet", map[string]any{"id": result.ConversationMessage.ID, "agent_id": envelope.From, "at": result.ConversationMessage.RecordedAt, "level": "message", "message": result.ConversationMessage.Body})
 	}
 	releaseConversation()
 	message := result.Message

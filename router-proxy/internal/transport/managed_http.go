@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -921,12 +920,13 @@ func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Reques
 	query := req.URL.Query()
 	view := query.Get("view")
 	for key, values := range query {
-		if (key != "view" && key != "before" && key != "limit") || len(values) != 1 {
+		if (key != "agent_id" && key != "view" && key != "before" && key != "limit") || len(values) != 1 {
 			r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_HISTORY_QUERY", "History query is invalid"})
 			return
 		}
 	}
-	if len(query) < 1 || view == "" || (view != "quiet" && view != "complete") {
+	agentID := query.Get("agent_id")
+	if len(query) < 2 || !managedName(agentID) || view == "" || (view != "quiet" && view != "complete") {
 		r.writeManagedError(w, req, &managedHTTPError{422, "INVALID_HISTORY_QUERY", "History query is invalid"})
 		return
 	}
@@ -946,7 +946,7 @@ func (r *Router) handleManagedHistoryGET(w http.ResponseWriter, req *http.Reques
 			return
 		}
 	}
-	page, err := r.store.ManagedHistoryPage(req.Context(), view, before, limit)
+	page, err := r.store.ManagedHistoryPage(req.Context(), agentID, view, before, limit)
 	if err != nil {
 		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read history"})
 		return
@@ -1050,41 +1050,6 @@ func (r *Router) writeManagedRaw(w http.ResponseWriter, req *http.Request, statu
 	if r.uiLive != nil {
 		r.uiLive.publish(req.Context())
 	}
-	r.recordManagedHTTPHistory(req, status)
-}
-
-func (r *Router) recordManagedHTTPHistory(req *http.Request, status int) {
-	if req.Method != http.MethodPost && req.Method != http.MethodDelete {
-		return
-	}
-	level, outcome := "info", "completed"
-	if status >= 400 {
-		level, outcome = "error", "failed"
-	}
-	agentID := managedAgentIDFromPath(req.URL.Path)
-	message := fmt.Sprintf("Managed %s %s", req.Method, outcome)
-	r.recordCompleteHistory(req.Context(), agentID, "managed_http", level, message, "managed-http:"+req.Method+":"+requestIDForHistory(req))
-}
-
-func requestIDForHistory(req *http.Request) string {
-	if requestID := req.Header.Get("X-Request-ID"); canonicalUUID(requestID) {
-		return requestID
-	}
-	return req.URL.Path
-}
-
-func managedAgentIDFromPath(path string) string {
-	const prefix = "/v1/managed-agents/"
-	if !strings.HasPrefix(path, prefix) {
-		return ""
-	}
-	id := strings.TrimPrefix(path, prefix)
-	id = strings.TrimSuffix(id, "/restart")
-	id = strings.TrimSuffix(id, "/reset")
-	if strings.Contains(id, "/") {
-		return ""
-	}
-	return id
 }
 
 func (r *Router) writeManagedJSON(w http.ResponseWriter, req *http.Request, status int, value any, headers map[string]string) {
