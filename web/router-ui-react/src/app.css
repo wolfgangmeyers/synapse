@@ -981,6 +981,11 @@ p:empty { display: none; }
 .managed-directory-drop-hint { font-size: 12px; }
 .managed-directory-browser { width: min(620px, calc(100vw - 32px)); }
 .managed-directory-browser-body { display: grid; gap: 12px; }
+.managed-directory-breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.managed-directory-breadcrumbs > span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.managed-directory-breadcrumbs button { min-height: 32px; padding: 0 10px; border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+.managed-directory-breadcrumbs button:disabled { color: var(--text); border-color: transparent; background: var(--surface-raised); }
+.managed-directory-breadcrumb-separator { color: var(--muted); }
 .managed-directory-path { overflow-wrap: anywhere; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
 .managed-directory-browser-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; max-height: min(48dvh, 440px); margin: 0; padding: 0; overflow: auto; list-style: none; }
 .managed-directory-browser-list button { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }

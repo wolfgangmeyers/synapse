@@ -20,7 +20,7 @@ export interface PromptTemplateResponse { prompt_templates: PromptTemplate[] }
 export interface ManagedAgentsResponse { generated_at: string; projection_version: number; agents: ManagedAgent[] }
 export interface ManagedAgentResponse { generated_at: string; projection_version: number; agent: ManagedAgent }
 export interface ManagedOperationResponse { operation_id: string; agent?: ManagedAgent; agents?: Array<{ agent_id: string; operation_id: string; status: string }> }
-export interface ManagedDirectoriesResponse { path: string; parent: string; directories: Array<{ name: string; path: string }> }
+export interface ManagedDirectoriesResponse { path: string; parent: string; breadcrumbs?: Array<{ name: string; path: string }>; directories: Array<{ name: string; path: string }> }
 export interface ManagedChildrenResponse extends ManagedChildrenProjection {}
 export interface ManagedHistoryResponse { view: "quiet" | "complete"; entries: ManagedHistoryEntry[]; next_before: number | null }
 export interface ProviderModel { provider: "openai-codex" | "google" | "cursor"; id: string; name: string; available: boolean }
@@ -181,8 +181,9 @@ function managedChildren(value: unknown): ManagedChildrenResponse {
 }
 function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   const root = recordValue(value);
-  if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
-  return { path: root.path, parent: root.parent, directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
+  const breadcrumbItems = root?.breadcrumbs;
+  if (!root || !nonEmptyString(root.path) || typeof root.parent !== "string" || (breadcrumbItems !== undefined && (!Array.isArray(breadcrumbItems) || !breadcrumbItems.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); }))) || !Array.isArray(root.directories) || !root.directories.every((candidate) => { const item = recordValue(candidate); return !!item && nonEmptyString(item.name) && nonEmptyString(item.path); })) throw invalidResponse("Router returned an invalid directory list", value);
+  return { path: root.path, parent: root.parent, ...(breadcrumbItems === undefined ? {} : { breadcrumbs: breadcrumbItems.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) }), directories: root.directories.flatMap((candidate) => { const item = recordValue(candidate); return item && nonEmptyString(item.name) && nonEmptyString(item.path) ? [{ name: item.name, path: item.path }] : []; }) };
 }
 function providerName(value: unknown): value is ProviderModel["provider"] { return value === "openai-codex" || value === "google" || value === "cursor"; }
 function providerModel(value: unknown): value is ProviderModel {

@@ -9,6 +9,7 @@ interface ManagedDirectory {
 interface DirectoryListing {
   path: string;
   parent: string;
+  breadcrumbs?: ManagedDirectory[];
   directories: ManagedDirectory[];
 }
 
@@ -48,10 +49,14 @@ async function localFolderFromDrop(transfer: DataTransfer): Promise<string | und
     if (path !== undefined) return path;
   }
   for (const item of Array.from(transfer.items)) {
-    const entry = item.kind === "file" && "webkitGetAsEntry" in item ? (item as DataTransferItem & { webkitGetAsEntry?: () => FileSystemEntry | null }).webkitGetAsEntry?.() : null;
-    const path = pathFromText(entry?.isDirectory ? entry.fullPath : "");
+    if (item.kind !== "file" || typeof item.getAsFile !== "function") continue;
+    const droppedFile = item.getAsFile() as (File & { path?: unknown }) | null;
+    const path = pathFromText(typeof droppedFile?.path === "string" ? droppedFile.path : "");
     if (path !== undefined) return path;
   }
+  // Chromium's FileSystemEntry.fullPath is relative to the dropped-item
+  // virtual root (for example, `/linear-mcp-cli`), not a local filesystem
+  // path. It cannot safely become a launch directory.
   return undefined;
 }
 
@@ -64,6 +69,7 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
   const [pickerOpen, setPickerOpen] = useState(false);
   const [directories, setDirectories] = useState<ManagedDirectory[]>([]);
   const [parent, setParent] = useState("");
+  const [breadcrumbs, setBreadcrumbs] = useState<ManagedDirectory[]>([]);
   const [currentPath, setCurrentPath] = useState("");
   const [selectedPath, setSelectedPath] = useState("");
   const [error, setError] = useState("");
@@ -76,6 +82,7 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
     setPickerOpen(false);
     setDirectories([]);
     setParent("");
+    setBreadcrumbs([]);
     setCurrentPath("");
     setSelectedPath("");
     setError("");
@@ -87,6 +94,7 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
       if (id !== requestID.current) return;
       setCurrentPath(result.path);
       setParent(result.parent);
+      setBreadcrumbs(result.breadcrumbs ?? []);
       setDirectories(result.directories);
       setSelectedPath(result.path);
     }).catch((cause: unknown) => {
@@ -98,6 +106,7 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
     setRecentOpen(false);
     setDirectories([]);
     setParent("");
+    setBreadcrumbs([]);
     setCurrentPath("");
     setSelectedPath("");
     setError("");
@@ -108,7 +117,7 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
     event.preventDefault();
     setDragging(false);
     void localFolderFromDrop(event.dataTransfer).then((folder) => {
-      if (folder === undefined) { setError("Drop a local folder path from Finder."); return; }
+      if (folder === undefined) { setError("Finder did not provide the local folder path. Use Browse or paste it."); return; }
       onChange(folder);
       setRecentOpen(false);
       setError("");
@@ -124,6 +133,7 @@ export function ManagedDirectoryPicker({ value, recentFolders = [], onChange, li
     {error ? <p className="error" role="alert">{error}</p> : null}
     <DialogShell open={pickerOpen} title="Choose working folder" titleId="managed-directory-browser-title" description="Choose a folder, then select it to use it." onClose={resetPicker} closeLabel="Close folder browser" className="message-dialog managed-directory-browser">
       <div className="managed-directory-browser-body">
+        <nav className="managed-directory-breadcrumbs" aria-label="Folder path">{breadcrumbs.map((breadcrumb, index) => <span key={breadcrumb.path}>{index > 0 ? <span className="managed-directory-breadcrumb-separator" aria-hidden="true">/</span> : null}<button type="button" className="secondary" disabled={breadcrumb.path === currentPath} aria-current={breadcrumb.path === currentPath ? "page" : undefined} onClick={() => browse(breadcrumb.path)}>{breadcrumb.name}</button></span>)}</nav>
         <p className="managed-directory-path" aria-live="polite">{currentPath || "Loading folders…"}</p>
         <div className="directory-picker-actions">{parent ? <button type="button" className="secondary" onClick={() => browse(parent)}>Up one folder</button> : null}</div>
         {directories.length > 0 ? <ul className="managed-directory-browser-list" aria-label="Folders">{directories.map((directory) => <li key={directory.path}><button type="button" className={selectedPath === directory.path ? "secondary selected" : "secondary"} onClick={() => { setSelectedPath(directory.path); browse(directory.path); }}>{directory.name}</button></li>)}</ul> : currentPath && !error ? <p>No folders here.</p> : null}

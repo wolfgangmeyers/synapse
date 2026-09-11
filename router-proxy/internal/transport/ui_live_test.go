@@ -132,8 +132,11 @@ func TestManagedLifecycleHistoryFactsOnlyUseAllowlistedLifecycleChanges(t *testi
 
 func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {
 	root := t.TempDir()
+	project := filepath.Join(root, "child", "project")
 	require.NoError(t, os.Mkdir(filepath.Join(root, "child"), 0o700))
+	require.NoError(t, os.Mkdir(project, 0o700))
 	require.NoError(t, os.Mkdir(filepath.Join(root, ".cache"), 0o700))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "OrbStack"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "not-a-folder"), []byte("x"), 0o600))
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
@@ -158,6 +161,7 @@ func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "child", directory["name"])
 	require.NotContains(t, response.Body.String(), ".cache")
+	require.NotContains(t, response.Body.String(), "OrbStack")
 
 	emptyRequest := httptest.NewRequest(http.MethodGet, "/v1/managed-directories?path=", nil)
 	emptyResponse := httptest.NewRecorder()
@@ -168,6 +172,28 @@ func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {
 	expectedRoot, expectedRootErr := filepath.EvalSymlinks(root)
 	require.NoError(t, expectedRootErr)
 	require.Equal(t, expectedRoot, emptyBody["path"])
+
+	realProject, realProjectErr := filepath.EvalSymlinks(project)
+	require.NoError(t, realProjectErr)
+	projectRequest := httptest.NewRequest(http.MethodGet, "/v1/managed-directories?path="+url.QueryEscape(project), nil)
+	projectResponse := httptest.NewRecorder()
+	router.ServeHTTP(projectResponse, projectRequest)
+	require.Equal(t, http.StatusOK, projectResponse.Code)
+	var projectBody struct {
+		Path        string `json:"path"`
+		Parent      string `json:"parent"`
+		Breadcrumbs []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"breadcrumbs"`
+	}
+	require.NoError(t, json.Unmarshal(projectResponse.Body.Bytes(), &projectBody))
+	require.Equal(t, realProject, projectBody.Path)
+	require.Equal(t, filepath.Dir(realProject), projectBody.Parent)
+	require.Equal(t, []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}{{Name: filepath.Base(expectedRoot), Path: expectedRoot}, {Name: "child", Path: filepath.Join(expectedRoot, "child")}, {Name: "project", Path: realProject}}, projectBody.Breadcrumbs)
 }
 
 func TestStaticUIRejectsSymlinkedAssetsAndRechecksContainment(t *testing.T) {

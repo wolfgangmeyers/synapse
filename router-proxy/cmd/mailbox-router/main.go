@@ -60,7 +60,7 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&managedCursorExtension, "managed-cursor-extension", "", "fixed pi-cursor-sdk extension")
 	flags.StringVar(&managedAuthHelper, "managed-auth-helper", "", "fixed provider auth helper entry")
 	flags.StringVar(&managedRuntimeRoot, "managed-runtime-root", "", "checked project runtime root")
-	flags.StringVar(&managedRoots, "managed-cwd-roots", "", "comma-separated allowed working-directory roots")
+	flags.StringVar(&managedRoots, "managed-cwd-roots", "", "comma-separated allowed working-directory roots (defaults to the current user home)")
 	flags.StringVar(&managedRecipient, "managed-quiet-recipient", "", "canonical quiet recipient")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
@@ -89,7 +89,15 @@ func parseConfig(args []string) (config, error) {
 	if result.policyTimeout <= 0 {
 		return config{}, errors.New("--policy-timeout must be positive")
 	}
-	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: parseManagedRoots(managedRoots), CanonicalQuietRecipientID: managedRecipient}
+	roots := parseManagedRoots(managedRoots)
+	if len(roots) == 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return config{}, fmt.Errorf("managed working-directory home is unavailable: %w", err)
+		}
+		roots = []string{home}
+	}
+	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: roots, CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 
