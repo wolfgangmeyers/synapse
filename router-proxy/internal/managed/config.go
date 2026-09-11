@@ -37,11 +37,11 @@ type Config struct {
 	ManifestPath         string
 	MechaRPCExtension    string
 	PiSubagentsExtension string
-	// CursorExtension is the fixed pi-cursor-sdk extension loaded only by
-	// managed Pi. It is never available to ordinary/tmux Pi sessions.
+	// CursorExtension is the optional fixed pi-cursor-sdk extension loaded only by
+	// managed Pi when available. It is never available to ordinary/tmux Pi sessions.
 	CursorExtension string
 	// RuntimeRoot is the checked project root that owns the thin extension,
-	// generated manifest, helper, and Cursor extension.
+	// generated manifest, helper, and optional Cursor extension.
 	RuntimeRoot string
 	// AuthHelperPath is the fixed project helper entry. It is a process path,
 	// not a credential path; Pi credentials stay under ManagedHome.
@@ -91,7 +91,7 @@ func ValidateManagedLaunchConfig(config Config) error {
 	if copy.PiExecutable == "" || copy.ManagedHome == "" || copy.PiAgentDir == "" || copy.SessionRoot == "" || copy.ManifestPath == "" || copy.MechaRPCExtension == "" || copy.PiSubagentsExtension == "" {
 		return errors.New("managed mode requires core launch inputs")
 	}
-	if copy.RequireProviderRuntime && (copy.CursorExtension == "" || copy.AuthHelperPath == "" || copy.RuntimeRoot == "") {
+	if copy.RequireProviderRuntime && (copy.AuthHelperPath == "" || copy.RuntimeRoot == "") {
 		return errors.New("managed mode requires fixed provider runtime paths")
 	}
 	if !managedRecipientRE.MatchString(copy.CanonicalQuietRecipientID) {
@@ -141,15 +141,21 @@ func ValidateManagedLaunchConfig(config Config) error {
 		}
 	}
 	if copy.RequireProviderRuntime {
-		for _, input := range []struct {
+		requiredFiles := []struct {
 			name string
 			path string
 		}{
 			{"managed manifest", copy.ManifestPath},
 			{"thin extension", copy.MechaRPCExtension},
-			{"Cursor extension", copy.CursorExtension},
 			{"auth helper", copy.AuthHelperPath},
-		} {
+		}
+		if copy.CursorExtension != "" {
+			requiredFiles = append(requiredFiles, struct {
+				name string
+				path string
+			}{"Cursor extension", copy.CursorExtension})
+		}
+		for _, input := range requiredFiles {
 			if err := ValidateContainedRegularFile(input.path, copy.RuntimeRoot, input.name); err != nil {
 				return err
 			}
