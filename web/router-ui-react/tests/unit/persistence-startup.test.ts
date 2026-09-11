@@ -57,6 +57,20 @@ describe("settings identity persistence", () => {
     });
   });
 
+  it("keeps the same-host Web UI proxy instead of treating it as a legacy bootstrap router", () => {
+    const directRouter = "http://web-ui.test:8765";
+    const bootstrapRouter = "http://web-ui.test:8787";
+    const settings = {
+      activeRouter: bootstrapRouter,
+      routers: [directRouter, bootstrapRouter],
+      aliases: {},
+      agentIds: { [bootstrapRouter]: "wolfgang" },
+      selectedPeers: { [`${bootstrapRouter}\u001fwolfgang`]: "worker-one" },
+    };
+
+    expect(migrateBootstrapRouter(settings, bootstrapRouter)).toEqual(settings);
+  });
+
   it("keeps the first router on the default identity while preserving the second router identity across save and reload", () => {
     const storage = new MemoryStorage();
     const firstRouter = "http://first-router.test:43123";

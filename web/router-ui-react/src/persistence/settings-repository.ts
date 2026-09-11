@@ -225,6 +225,15 @@ export function migrateBootstrapRouter(settings: SettingsState, bootstrapRouterU
 
   const intendedRouter = settings.routers[0];
   if (intendedRouter === undefined) return settings;
+  try {
+    const intended = new URL(intendedRouter);
+    const bootstrap = new URL(bootstrapRouter);
+    // A same-host, different-origin bootstrap is the Web UI proxy replacing a
+    // direct router connection. It is not the obsolete appended selection.
+    if (intended.hostname === bootstrap.hostname && intended.origin !== bootstrap.origin) return settings;
+  } catch {
+    return settings;
+  }
   const aliases = { ...settings.aliases };
   delete aliases[bootstrapRouter];
   const agentIds = { ...settings.agentIds };
