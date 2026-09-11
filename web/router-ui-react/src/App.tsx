@@ -67,6 +67,16 @@ interface RouterConfiguration {
   bootstrapRouterUrl?: string;
 }
 
+function shouldUseBootstrapProxy(persistedRouterUrl: string, bootstrapRouterUrl: string): boolean {
+  try {
+    const persisted = new URL(normalizeRouterUrl(persistedRouterUrl));
+    const bootstrap = new URL(normalizeRouterUrl(bootstrapRouterUrl));
+    return persisted.hostname === bootstrap.hostname && persisted.origin !== bootstrap.origin;
+  } catch {
+    return false;
+  }
+}
+
 function configuredRouterUrl(props: AppProps): RouterConfiguration | undefined {
   const explicit = props.routerUrl ?? props.state?.routerUrl;
   if (typeof explicit === "string" && explicit.trim() !== "") return { routerUrl: explicit };
@@ -74,7 +84,15 @@ function configuredRouterUrl(props: AppProps): RouterConfiguration | undefined {
   const configuredBootstrapRouterUrl: unknown = import.meta.env.VITE_ROUTER_URL;
   const bootstrapRouterUrl = typeof configuredBootstrapRouterUrl === "string" && configuredBootstrapRouterUrl.trim() !== "" ? configuredBootstrapRouterUrl : undefined;
   const persisted = persistedActiveRouter(props.storage, bootstrapRouterUrl);
-  if (persisted !== undefined) return { routerUrl: persisted, ...(bootstrapRouterUrl === undefined ? {} : { bootstrapRouterUrl }) };
+  if (persisted !== undefined) {
+    // A prior direct router setting on this host bypasses the Web UI proxy and
+    // therefore revives the cross-origin launch path. Keep other saved routers
+    // untouched, but make the public Web UI origin active on startup.
+    const routerUrl = bootstrapRouterUrl !== undefined && shouldUseBootstrapProxy(persisted, bootstrapRouterUrl)
+      ? bootstrapRouterUrl
+      : persisted;
+    return { routerUrl, ...(bootstrapRouterUrl === undefined ? {} : { bootstrapRouterUrl }) };
+  }
   if (bootstrapRouterUrl !== undefined) return { routerUrl: bootstrapRouterUrl, bootstrapRouterUrl };
   return undefined;
 }
