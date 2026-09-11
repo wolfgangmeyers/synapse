@@ -873,6 +873,7 @@ export interface ManagedChildrenProjection {
 }
 export interface ManagedHistoryEntry {
   id: string;
+  agent_id: AgentId;
   at?: RouterTimestamp;
   level?: string;
   message?: string;

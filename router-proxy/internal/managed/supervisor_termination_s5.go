@@ -90,6 +90,10 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 	if admission.Replayed {
 		return TerminateResult{Operation: admission.Operation, Replayed: true}, nil
 	}
+	// Admission is the durable point at which the selected worker becomes
+	// non-interactive. Wake UI-live now so the browser shows that in-progress
+	// state instead of presenting a running worker until cleanup finishes.
+	m.publishProjection()
 
 	var binding *managedBinding
 	if sourcePtr != nil {
@@ -118,6 +122,10 @@ func (m *Manager) Terminate(ctx context.Context, request TerminateRequest) (Term
 }
 
 func (m *Manager) executeTerminationInLane(actionID string, candidate *managedBinding) {
+	// Every exit follows a durable lifecycle transition. Publishing afterward
+	// lets UI-live replace the terminating row only after terminal cleanup has
+	// removed it, and exposes a retained failure when cleanup cannot complete.
+	defer m.publishProjection()
 	action, err := m.store.ManagedLifecycleAction(context.Background(), actionID)
 	if err != nil || action.Kind != "terminate" || lifecycleTerminal(action) {
 		return

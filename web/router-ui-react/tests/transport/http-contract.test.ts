@@ -43,6 +43,15 @@ describe("direct HTTP transport", () => {
     await expect(createHttpClient("http://router.test", fetchImpl).launchManaged({ name: "managed-alpha", cwd: "/tmp/project" })).resolves.toMatchObject({ agent: { agent_id: "managed-alpha" } });
   });
 
+  it("requests only the selected managed agent's activity history", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("http://router.test/v1/history?agent_id=managed-alpha&view=complete&limit=50");
+      expect(init?.credentials).toBe("omit");
+      return response({ view: "complete", entries: [{ id: "complete-1", agent_id: "managed-alpha", level: "info", message: "Managed worker entered running", at: "2030-01-01T00:00:00.000Z" }], next_before: null });
+    });
+    await expect(createHttpClient("http://router.test", fetchImpl).managedHistory("managed-alpha", "complete", { limit: 50 })).resolves.toMatchObject({ entries: [{ agent_id: "managed-alpha" }] });
+  });
+
   it("uses the provider-auth routes without cookies and rejects incomplete provider state", async () => {
     const providerState = { auth_revision: 1, providers: [
       { provider: "openai-codex", label: "ChatGPT", authenticated: true, status: "authenticated", updated_at: "2030-01-01T00:00:00.123456789Z" },

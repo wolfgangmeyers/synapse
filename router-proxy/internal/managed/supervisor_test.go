@@ -270,7 +270,7 @@ func TestManagedDirectReleasePersistenceFailureRetriesWithoutStranding(t *testin
 		return readErr == nil && attempt.State == "released" && attempt.FailureCode == "prompt_failed"
 	}, 2*time.Second, time.Millisecond)
 	require.Eventually(t, func() bool {
-		history, readErr := durable.ManagedHistoryPage(context.Background(), "complete", 0, 10)
+		history, readErr := durable.ManagedHistoryPage(context.Background(), "direct-agent", "complete", 0, 10)
 		if readErr != nil {
 			return false
 		}

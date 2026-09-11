@@ -172,8 +172,8 @@ function managedAgent(value: unknown): ManagedAgentResponse {
 }
 function managedHistory(value: unknown): ManagedHistoryResponse {
   const root = recordValue(value); const entries = root?.entries;
-  if (!root || (root.view !== "quiet" && root.view !== "complete") || !Array.isArray(entries) || !entries.every((entry) => { const item = recordValue(entry); return !!item && Object.keys(item).every((key) => ["id", "at", "level", "message"].includes(key)) && nonEmptyString(item.id) && (!Object.hasOwn(item, "at") || isRouterUtcTimestamp(item.at)) && (!Object.hasOwn(item, "level") || typeof item.level === "string") && (!Object.hasOwn(item, "message") || typeof item.message === "string"); }) || (root.next_before !== null && !safeInteger(root.next_before, 1))) throw invalidResponse("Router returned invalid managed history", value);
-  return { view: root.view, entries: entries.flatMap((entry) => { const item = recordValue(entry); return item && nonEmptyString(item.id) ? [{ id: item.id, ...(typeof item.at === "string" ? { at: item.at } : {}), ...(typeof item.level === "string" ? { level: item.level } : {}), ...(typeof item.message === "string" ? { message: item.message } : {}) }] : []; }), next_before: root.next_before };
+  if (!root || (root.view !== "quiet" && root.view !== "complete") || !Array.isArray(entries) || !entries.every((entry) => { const item = recordValue(entry); return !!item && Object.keys(item).every((key) => ["id", "agent_id", "at", "level", "message"].includes(key)) && nonEmptyString(item.id) && isAgentId(item.agent_id) && (!Object.hasOwn(item, "at") || isRouterUtcTimestamp(item.at)) && (!Object.hasOwn(item, "level") || typeof item.level === "string") && (!Object.hasOwn(item, "message") || typeof item.message === "string"); }) || (root.next_before !== null && !safeInteger(root.next_before, 1))) throw invalidResponse("Router returned invalid managed history", value);
+  return { view: root.view, entries: entries.flatMap((entry) => { const item = recordValue(entry); return item && nonEmptyString(item.id) && isAgentId(item.agent_id) ? [{ id: item.id, agent_id: item.agent_id, ...(typeof item.at === "string" ? { at: item.at } : {}), ...(typeof item.level === "string" ? { level: item.level } : {}), ...(typeof item.message === "string" ? { message: item.message } : {}) }] : []; }), next_before: root.next_before };
 }
 function managedChildren(value: unknown): ManagedChildrenResponse {
   if (!isManagedChildrenProjection(value)) throw invalidResponse("Router returned invalid managed children", value);
@@ -254,7 +254,7 @@ export interface RouterHttpClient {
   managedAgent(id: string): Promise<ManagedAgentResponse>;
   managedDirectories(path: string): Promise<ManagedDirectoriesResponse>;
   managedChildren(id: string): Promise<ManagedChildrenResponse>;
-  managedHistory(view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
+  managedHistory(agentId: string, view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
   launchManaged(payload: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
   restartManaged(id: string): Promise<ManagedOperationResponse>;
   resetManaged(id: string): Promise<ManagedOperationResponse>;
@@ -320,8 +320,8 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),
     managedDirectories: async (path) => managedDirectories(await managedRequest(`/v1/managed-directories?path=${encodeURIComponent(path)}`, "GET")),
     managedChildren: async (id) => managedChildren(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/children`, "GET")),
-    managedHistory: async (view, options = {}) => {
-      const query = new URLSearchParams({ view });
+    managedHistory: async (agentId, view, options = {}) => {
+      const query = new URLSearchParams({ agent_id: agentId, view });
       if (options.before !== undefined) query.set("before", String(options.before));
       if (options.limit !== undefined) query.set("limit", String(options.limit));
       return managedHistory(await managedRequest(`/v1/history?${query.toString()}`, "GET"));

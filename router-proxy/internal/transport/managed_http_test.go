@@ -615,7 +615,7 @@ func TestQuietHistoryRequiresConsumedManagedMailSendAuthorization(t *testing.T) 
 		require.Equal(t, http.StatusCreated, response.StatusCode)
 	}
 	post("ordinary-agent-message", "")
-	quiet, err := http.Get(server.URL + "/v1/history?view=quiet")
+	quiet, err := http.Get(server.URL + "/v1/history?agent_id=managed-agent&view=quiet")
 	require.NoError(t, err)
 	defer quiet.Body.Close()
 	var empty store.ManagedHistoryPage
@@ -624,7 +624,7 @@ func TestQuietHistoryRequiresConsumedManagedMailSendAuthorization(t *testing.T) 
 
 	require.NoError(t, durable.ReserveManagedQuietSendAuthorization(context.Background(), "control-1", "managed-agent", "supervisor"))
 	post("trusted-tool-message", "control-1")
-	quiet, err = http.Get(server.URL + "/v1/history?view=quiet")
+	quiet, err = http.Get(server.URL + "/v1/history?agent_id=managed-agent&view=quiet")
 	require.NoError(t, err)
 	defer quiet.Body.Close()
 	var page store.ManagedHistoryPage
@@ -637,7 +637,7 @@ func TestManagedHistoryUsesTheDirectPagedContract(t *testing.T) {
 	server, durable := newManagedHTTPTestServer(t)
 	_, err := durable.AppendManagedCompleteHistory(context.Background(), "alpha", "lifecycle", "info", "Managed worker entered running")
 	require.NoError(t, err)
-	response, err := http.Get(server.URL + "/v1/history?view=complete&limit=1")
+	response, err := http.Get(server.URL + "/v1/history?agent_id=alpha&view=complete&limit=1")
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusOK, response.StatusCode)
@@ -645,14 +645,16 @@ func TestManagedHistoryUsesTheDirectPagedContract(t *testing.T) {
 		View    string `json:"view"`
 		Entries []struct {
 			ID      string `json:"id"`
+			AgentID string `json:"agent_id"`
 			Message string `json:"message"`
 		} `json:"entries"`
 	}
 	require.NoError(t, json.NewDecoder(response.Body).Decode(&body))
 	require.Equal(t, "complete", body.View)
 	require.Len(t, body.Entries, 1)
+	require.Equal(t, "alpha", body.Entries[0].AgentID)
 	require.Equal(t, "Managed worker entered running", body.Entries[0].Message)
-	invalid, err := http.Get(server.URL + "/v1/history?view=complete&unknown=value")
+	invalid, err := http.Get(server.URL + "/v1/history?agent_id=alpha&view=complete&unknown=value")
 	require.NoError(t, err)
 	defer invalid.Body.Close()
 	require.Equal(t, http.StatusUnprocessableEntity, invalid.StatusCode)

@@ -19,7 +19,7 @@ export interface AppState extends RouterScope {
   managedProjectionVersion?: number;
   managedChildrenProjectionVersion?: number;
   managedChildren: Record<string, ManagedChildrenProjection>;
-  managedHistory?: { quiet: ManagedHistoryEntry[]; complete: ManagedHistoryEntry[] };
+  managedHistory?: Record<string, { quiet: ManagedHistoryEntry[]; complete: ManagedHistoryEntry[] }>;
   reminders: Reminder[];
   templates: PromptTemplate[];
   selectedPeer?: string;
@@ -38,4 +38,4 @@ export interface AppState extends RouterScope {
   drafts: Record<string, string>;
   reminderLocks: Map<string, boolean>;
 }
-export function createInitialState(scope: RouterScope, connection: ConnectionStatus = "disconnected"): AppState { return { ...scope, connection, connectionGeneration: 0, agents: [], managedAvailable: false, managedAgents: [], managedChildren: {}, managedHistory: { quiet: [], complete: [] }, reminders: [], templates: [], filter: "", messagesByPeer: {}, pendingSends: {}, pendingControls: new Map(), modelProjections: new Map(), lifecycleVersion: 0, pendingLifecycle: new Map(), arrivals: new Map(), expandedSubagents: new Set(), drafts: {}, reminderLocks: new Map() }; }
+export function createInitialState(scope: RouterScope, connection: ConnectionStatus = "disconnected"): AppState { return { ...scope, connection, connectionGeneration: 0, agents: [], managedAvailable: false, managedAgents: [], managedChildren: {}, managedHistory: {}, reminders: [], templates: [], filter: "", messagesByPeer: {}, pendingSends: {}, pendingControls: new Map(), modelProjections: new Map(), lifecycleVersion: 0, pendingLifecycle: new Map(), arrivals: new Map(), expandedSubagents: new Set(), drafts: {}, reminderLocks: new Map() }; }

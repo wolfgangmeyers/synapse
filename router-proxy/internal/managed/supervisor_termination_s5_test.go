@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,8 @@ func TestTerminateFencesAbortButReapsAndDeletesArtifactsAfterEOF(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	var projectionPublications atomic.Int32
+	manager.SetProjectionPublisher(func() { projectionPublications.Add(1) })
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	_, err = manager.Launch(ctx, LaunchRequest{Name: "termination-agent", Cwd: root, RequestID: "123e4567-e89b-42d3-a456-426614174203"})
 	require.NoError(t, err)
@@ -59,6 +62,7 @@ func TestTerminateFencesAbortButReapsAndDeletesArtifactsAfterEOF(t *testing.T) {
 	first, err := manager.Terminate(ctx, request)
 	require.NoError(t, err)
 	require.NotNil(t, first.Operation)
+	require.Eventually(t, func() bool { return projectionPublications.Load() > 0 }, time.Second, time.Millisecond, "termination admission must wake UI-live before cleanup can remove the row")
 	replay, err := manager.Terminate(ctx, request)
 	require.NoError(t, err)
 	require.True(t, replay.Replayed)

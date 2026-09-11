@@ -59,7 +59,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
       if (action.enabled === state.managedAvailable) return state;
       if (action.enabled) return { ...state, managedAvailable: true };
       const { managedProjectionVersion: _discardedVersion, managedChildrenProjectionVersion: _discardedChildrenVersion, ...withoutProjectionVersion } = state;
-      return { ...withoutProjectionVersion, managedAvailable: false, managedAgents: [], managedChildren: {}, managedHistory: { quiet: [], complete: [] } };
+      return { ...withoutProjectionVersion, managedAvailable: false, managedAgents: [], managedChildren: {}, managedHistory: {} };
     }
     case "managed/snapshot": return { ...state, managedAvailable: true, managedProjectionVersion: action.version, managedAgents: action.agents };
     case "managed/delta": {
@@ -83,10 +83,11 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return { ...withoutVersions, managedAgents: [], managedChildren: {} };
     }
     case "managed/history": {
-      const history = state.managedHistory ?? { quiet: [], complete: [] };
-      const entries = history[action.view];
+      const history = state.managedHistory ?? {};
+      const agentHistory = history[action.entry.agent_id] ?? { quiet: [], complete: [] };
+      const entries = agentHistory[action.view];
       if (entries.some((entry) => entry.id === action.entry.id)) return state;
-      return { ...state, managedHistory: { ...history, [action.view]: [...entries, action.entry].slice(-200) } };
+      return { ...state, managedHistory: { ...history, [action.entry.agent_id]: { ...agentHistory, [action.view]: [...entries, action.entry].slice(-200) } } };
     }
     case "message/append": {
       const messages = appendConversation({ messages: state.messagesByPeer[action.peer] ?? [], highWaterSequence: 0, followMessages: true }, action.message).messages;
