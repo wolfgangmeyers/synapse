@@ -30,6 +30,9 @@ func TestParseConfigUsesIsolatedRouterDefaults(t *testing.T) {
 	require.Equal(t, "mecha", parsed.auditTmuxSession)
 	require.Equal(t, transport.DefaultPolicyTimeout, parsed.policyTimeout)
 	require.True(t, parsed.managed.Enabled)
+	home, homeErr := os.UserHomeDir()
+	require.NoError(t, homeErr)
+	require.Equal(t, []string{home}, parsed.managed.AllowedWorkingDirectoryRoots)
 }
 
 func TestParseConfigAllowsExplicitManagedOptOutAndRejectsInvalidValue(t *testing.T) {
@@ -74,6 +77,9 @@ func TestLauncherDefaultsManagedModeOnAndRejectsInvalidEnvironment(t *testing.T)
 	arguments, err := os.ReadFile(capture)
 	require.NoError(t, err)
 	require.Contains(t, string(arguments), "ROUTER_MANAGED=true")
+	home, homeErr := os.UserHomeDir()
+	require.NoError(t, homeErr)
+	require.Contains(t, string(arguments), "ROUTER_MANAGED_CWD_ROOTS="+home)
 
 	require.NoError(t, run("false").Run())
 	arguments, err = os.ReadFile(capture)

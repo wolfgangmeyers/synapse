@@ -40,7 +40,10 @@ else
 fi
 MANAGED_AUTH_HELPER="${MECHA_ROUTER_MANAGED_AUTH_HELPER:-$ROOT_DIR/auth-helper/index.mjs}"
 MANAGED_RUNTIME_ROOT="${MECHA_ROUTER_MANAGED_RUNTIME_ROOT:-$ROOT_DIR}"
-MANAGED_CWD_ROOTS="${MECHA_ROUTER_MANAGED_CWD_ROOTS:-$ROOT_DIR}"
+# Managed agents normally work in Wolfgang's local projects, which live under
+# the home directory. An explicit configuration remains the only way to widen
+# or narrow this router's launch scope.
+MANAGED_CWD_ROOTS="${MECHA_ROUTER_MANAGED_CWD_ROOTS:-$HOME}"
 MANAGED_QUIET_RECIPIENT="${MECHA_ROUTER_MANAGED_QUIET_RECIPIENT:-supervisor}"
 # Serve a built UI when this checkout has one. A clean source checkout leaves
 # the UI path unset; callers may set the path explicitly.

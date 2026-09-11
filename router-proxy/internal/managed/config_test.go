@@ -70,6 +70,19 @@ func TestValidateWorkingDirectoryExpandsHomeRelativePaths(t *testing.T) {
 	require.Equal(t, expected, resolved)
 }
 
+func TestValidateWorkingDirectoryRejectsDirectoriesOutsideConfiguredRoots(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "code", "project")
+	outside := t.TempDir()
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+
+	resolved, err := ValidateWorkingDirectory(workspace, []string{home})
+	require.NoError(t, err)
+	require.NotEmpty(t, resolved)
+	_, err = ValidateWorkingDirectory(outside, []string{home})
+	require.EqualError(t, err, "working directory is outside allowed roots")
+}
+
 func TestManagedLaunchConfigRejectsUnsafeCorePaths(t *testing.T) {
 	config, paths := managedLaunchConfigFixture(t)
 	outside := t.TempDir()

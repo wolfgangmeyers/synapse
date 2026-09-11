@@ -28,20 +28,27 @@ describe("ManagedDirectoryPicker", () => {
     expect(document.querySelector(".managed-directory-picker > [aria-label='Folders']")).not.toBeInTheDocument();
   });
 
-  it("navigates in the folder dialog and commits only with Select folder", async () => {
+  it("navigates by breadcrumb or Up and commits only with Select folder", async () => {
     const user = userEvent.setup();
-    const list = vi.fn(async (path: string) => path === "/allowed/project" ? ({ path, parent: "/allowed", directories: [{ name: "nested", path: "/allowed/project/nested" }] }) : ({ path: path || "/allowed", parent: "", directories: [{ name: "project", path: "/allowed/project" }] }));
+    const list = vi.fn(async (path: string) => path === "/Users/wolfgang/code/project" ? ({ path, parent: "/Users/wolfgang/code", breadcrumbs: [{ name: "wolfgang", path: "/Users/wolfgang" }, { name: "code", path: "/Users/wolfgang/code" }, { name: "project", path }], directories: [{ name: "nested", path: "/Users/wolfgang/code/project/nested" }] }) : path === "/Users/wolfgang/code" ? ({ path, parent: "/Users/wolfgang", breadcrumbs: [{ name: "wolfgang", path: "/Users/wolfgang" }, { name: "code", path }], directories: [{ name: "project", path: "/Users/wolfgang/code/project" }] }) : ({ path: path || "/Users/wolfgang", parent: "", breadcrumbs: [{ name: "wolfgang", path: path || "/Users/wolfgang" }], directories: [{ name: "code", path: "/Users/wolfgang/code" }] }));
     render(<StatefulPicker list={list} />);
 
     await user.click(screen.getByRole("button", { name: "Browse folders" }));
     const dialog = await screen.findByRole("dialog", { name: "Choose working folder" });
+    await user.click(within(dialog).getByRole("button", { name: "code" }));
     await user.click(within(dialog).getByRole("button", { name: "project" }));
-    await waitFor(() => expect(list).toHaveBeenCalledWith("/allowed/project"));
+    await waitFor(() => expect(list).toHaveBeenCalledWith("/Users/wolfgang/code/project"));
     expect(screen.getByLabelText("Working folder")).toHaveValue("");
-    expect(within(dialog).getByText("/allowed/project")).toBeInTheDocument();
+    expect(within(dialog).getByRole("navigation", { name: "Folder path" })).toHaveTextContent("wolfgang");
+    await user.click(within(dialog).getByRole("button", { name: "code" }));
+    await waitFor(() => expect(list).toHaveBeenCalledWith("/Users/wolfgang/code"));
+    await user.click(within(dialog).getByRole("button", { name: "Up one folder" }));
+    await waitFor(() => expect(list).toHaveBeenCalledWith("/Users/wolfgang"));
+    await user.click(within(dialog).getByRole("button", { name: "code" }));
+    await user.click(within(dialog).getByRole("button", { name: "project" }));
     await user.click(within(dialog).getByRole("button", { name: "Select folder" }));
     expect(screen.queryByRole("dialog", { name: "Choose working folder" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Working folder")).toHaveValue("/allowed/project");
+    expect(screen.getByLabelText("Working folder")).toHaveValue("/Users/wolfgang/code/project");
   });
 
   it("clears picker state on cancel and ignores an old listing when reopened", async () => {
@@ -86,13 +93,23 @@ describe("ManagedDirectoryPicker", () => {
     expect(screen.queryByRole("dialog", { name: "Choose working folder" })).not.toBeInTheDocument();
   });
 
-  it("accepts a Finder file URL carried in plain text", async () => {
+  it("keeps Finder's absolute file URL when the entry fallback only has a root-relative name", async () => {
     const onChange = vi.fn();
     const { container } = render(<ManagedDirectoryPicker value="" onChange={onChange} list={async (path) => ({ path, parent: "", directories: [] })} />);
     const picker = container.querySelector(".managed-directory-picker");
     if (!(picker instanceof HTMLDivElement)) throw new Error("directory picker is missing");
-    fireEvent.drop(picker, { dataTransfer: { getData: (type: string) => type === "text/plain" ? "file:///allowed/plain-folder" : "", files: [], items: [] } });
-    await waitFor(() => expect(onChange).toHaveBeenCalledWith("/allowed/plain-folder"));
+    fireEvent.drop(picker, { dataTransfer: { getData: (type: string) => type === "public.file-url" ? "file:///Users/wolfgang/code/linear-mcp-cli\r\n" : "", files: [], items: [{ kind: "file", webkitGetAsEntry: () => ({ isDirectory: true, fullPath: "/linear-mcp-cli" }) }] } });
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith("/Users/wolfgang/code/linear-mcp-cli"));
+  });
+
+  it("does not turn Finder's root-relative entry name into a launch path", async () => {
+    const onChange = vi.fn();
+    const { container } = render(<ManagedDirectoryPicker value="" onChange={onChange} list={async (path) => ({ path, parent: "", directories: [] })} />);
+    const picker = container.querySelector(".managed-directory-picker");
+    if (!(picker instanceof HTMLDivElement)) throw new Error("directory picker is missing");
+    fireEvent.drop(picker, { dataTransfer: { getData: () => "", files: [], items: [{ kind: "file", webkitGetAsEntry: () => ({ isDirectory: true, fullPath: "/linear-mcp-cli" }) }] } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Finder did not provide the local folder path. Use Browse or paste it.");
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("accepts a Finder item string when getData is unavailable", async () => {
@@ -104,13 +121,22 @@ describe("ManagedDirectoryPicker", () => {
     await waitFor(() => expect(onChange).toHaveBeenCalledWith("/allowed/item-folder"));
   });
 
-  it("accepts a Finder directory entry path", async () => {
+  it("accepts an absolute path exposed by Finder's File payload", async () => {
     const onChange = vi.fn();
     const { container } = render(<ManagedDirectoryPicker value="" onChange={onChange} list={async (path) => ({ path, parent: "", directories: [] })} />);
     const picker = container.querySelector(".managed-directory-picker");
     if (!(picker instanceof HTMLDivElement)) throw new Error("directory picker is missing");
-    fireEvent.drop(picker, { dataTransfer: { getData: () => "", files: [], items: [{ kind: "file", webkitGetAsEntry: () => ({ isDirectory: true, fullPath: "/allowed/entry-folder" }) }] } });
-    await waitFor(() => expect(onChange).toHaveBeenCalledWith("/allowed/entry-folder"));
+    fireEvent.drop(picker, { dataTransfer: { getData: () => "", files: [{ path: "/Users/wolfgang/code/linear-mcp-cli" }], items: [] } });
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith("/Users/wolfgang/code/linear-mcp-cli"));
+  });
+
+  it("keeps Finder's absolute DataTransferItem File path over its root-relative entry path", async () => {
+    const onChange = vi.fn();
+    const { container } = render(<ManagedDirectoryPicker value="" onChange={onChange} list={async (path) => ({ path, parent: "", directories: [] })} />);
+    const picker = container.querySelector(".managed-directory-picker");
+    if (!(picker instanceof HTMLDivElement)) throw new Error("directory picker is missing");
+    fireEvent.drop(picker, { dataTransfer: { getData: () => "", files: [], items: [{ kind: "file", getAsFile: () => ({ path: "/Users/wolfgang/code/linear-mcp-cli" }), webkitGetAsEntry: () => ({ isDirectory: true, fullPath: "/linear-mcp-cli" }) }] } });
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith("/Users/wolfgang/code/linear-mcp-cli"));
   });
 
   it("reports a clear error for a drop without a local folder path", async () => {
@@ -118,6 +144,6 @@ describe("ManagedDirectoryPicker", () => {
     const picker = container.querySelector(".managed-directory-picker");
     if (!(picker instanceof HTMLDivElement)) throw new Error("directory picker is missing");
     fireEvent.drop(picker, { dataTransfer: { getData: () => "", files: [], items: [] } });
-    expect(await screen.findByRole("alert")).toHaveTextContent("Drop a local folder path from Finder.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Finder did not provide the local folder path. Use Browse or paste it.");
   });
 });

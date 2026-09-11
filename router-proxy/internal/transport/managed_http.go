@@ -982,9 +982,10 @@ func (r *Router) handleManagedDirectoriesGET(w http.ResponseWriter, req *http.Re
 	}
 	directories := make([]map[string]string, 0)
 	for _, entry := range entries {
-		// Hidden cache and configuration directories make the picker noisy. They
-		// remain launchable when typed, but are not routine navigation choices.
-		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+		// Hidden cache/configuration directories and the macOS OrbStack NFS mount
+		// make the picker noisy. They remain launchable when typed, but are not
+		// routine navigation choices.
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") && entry.Name() != "OrbStack" {
 			directories = append(directories, map[string]string{"name": entry.Name(), "path": filepath.Join(path, entry.Name())})
 		}
 	}
@@ -993,7 +994,42 @@ func (r *Router) handleManagedDirectoriesGET(w http.ResponseWriter, req *http.Re
 	if _, err := managed.ValidateWorkingDirectory(parent, r.managed.AllowedWorkingDirectoryRoots()); err != nil {
 		parent = ""
 	}
-	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"path": path, "parent": parent, "directories": directories}, nil)
+	// Breadcrumbs are built only from the configured root to the validated
+	// directory. The UI can navigate them without discovering paths outside
+	// the launch allowlist.
+	breadcrumbs := managedDirectoryBreadcrumbs(path, r.managed.AllowedWorkingDirectoryRoots())
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"path": path, "parent": parent, "breadcrumbs": breadcrumbs, "directories": directories}, nil)
+}
+
+func managedDirectoryBreadcrumbs(path string, roots []string) []map[string]string {
+	var selectedRoot string
+	for _, root := range roots {
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(resolvedRoot, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+			continue
+		}
+		if len(resolvedRoot) > len(selectedRoot) {
+			selectedRoot = resolvedRoot
+		}
+	}
+	if selectedRoot == "" {
+		return nil
+	}
+	breadcrumbs := []map[string]string{{"name": filepath.Base(selectedRoot), "path": selectedRoot}}
+	relative, err := filepath.Rel(selectedRoot, path)
+	if err != nil || relative == "." {
+		return breadcrumbs
+	}
+	current := selectedRoot
+	for _, element := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, element)
+		breadcrumbs = append(breadcrumbs, map[string]string{"name": element, "path": current})
+	}
+	return breadcrumbs
 }
 
 func (r *Router) handleManagedAgentsGET(w http.ResponseWriter, req *http.Request) {
