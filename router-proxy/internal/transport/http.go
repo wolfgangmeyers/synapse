@@ -22,6 +22,14 @@ import (
 
 var dataURLRE = regexp.MustCompile(`^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$`)
 
+const (
+	permissiveCORSMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+	// Browser clients use these request IDs for idempotency and diagnostics.
+	// This list grants no capability; router reachability remains the boundary.
+	permissiveCORSHeaders = "content-type, x-request-id, x-correlation-id"
+	permissiveCORSExposed = "x-correlation-id, x-request-id"
+)
+
 var recallPolicy = map[string]any{
 	"inactivity_seconds":     30,
 	"maximum_window_seconds": 120,
@@ -90,6 +98,21 @@ func httpCode(code string) int {
 	}
 }
 
+// applyPermissiveCORS provides browser transport compatibility for every
+// origin. Origin is intentionally never parsed, matched, logged as identity,
+// or used for authorization: this router has no cookie/session-based authority
+// and does not allow credentialed CORS.
+func applyPermissiveCORS(w http.ResponseWriter, req *http.Request) bool {
+	if _, originPresent := req.Header["Origin"]; !originPresent {
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", permissiveCORSMethods)
+	w.Header().Set("Access-Control-Allow-Headers", permissiveCORSHeaders)
+	w.Header().Set("Access-Control-Expose-Headers", permissiveCORSExposed)
+	return true
+}
+
 func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	correlation := req.Header.Get("X-Correlation-Id")
 	if correlation == "" {
@@ -103,12 +126,7 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	if correlation != "" {
 		w.Header().Set("X-Correlation-Id", correlation)
 	}
-	_, originPresent := req.Header["Origin"]
-	if originPresent {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "content-type")
-	}
+	originPresent := applyPermissiveCORS(w, req)
 	if req.Method == http.MethodOptions {
 		if originPresent {
 			w.Header().Set("Cache-Control", "no-store")

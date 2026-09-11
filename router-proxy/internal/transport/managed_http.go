@@ -35,8 +35,9 @@ func managedPath(path string) bool {
 }
 
 // handleManagedHTTP exposes direct local worker controls. Reachability is the
-// authority boundary, so this path deliberately has no session, CSRF, Origin,
-// or managed CORS handling.
+// authority boundary, so this path deliberately has no session, CSRF, or Origin
+// authorization. The shared HTTP handler adds non-credentialed CORS transport
+// compatibility before this dispatch; it never treats CORS as authority.
 func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) bool {
 	if !managedPath(req.URL.Path) {
 		return false
@@ -720,8 +721,9 @@ func (r *Router) handleManagedReset(w http.ResponseWriter, req *http.Request, ag
 }
 
 // handleManagedTerminate is intentionally a no-body DELETE. It has the same
-// local-only boundary and stored-operation replay rules as reset/restart, but
-// it never permits JSON, CORS preflight, or a caller-supplied cleanup shape.
+// local-only boundary and stored-operation replay rules as reset/restart. The
+// shared HTTP handler may answer a browser preflight, but that transport step
+// carries no identity or authority; this operation never accepts a JSON body.
 func (r *Router) handleManagedTerminate(w http.ResponseWriter, req *http.Request, agentID string) {
 	requestID := req.Header.Get("X-Request-ID")
 	if requestID == "" {
