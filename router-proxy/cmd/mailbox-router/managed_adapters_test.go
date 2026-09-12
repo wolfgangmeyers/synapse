@@ -51,7 +51,7 @@ func TestManagedStartupUsesOnlyCoreLaunchInputs(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte(value), mode))
 		return path
 	}
-	config := managed.Config{Enabled: true, PiExecutable: write("bin/pi", "#!/bin/sh\n", 0o700), ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: session, ManifestPath: write("contract/managed.json", `{}`, 0o600), MechaRPCExtension: write("extensions/rpc.ts", "export {}", 0o600), PiSubagentsExtension: write("extensions/subagents.ts", "export {}", 0o600), AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}
+	config := managed.Config{Enabled: true, PiExecutable: write("bin/pi", "#!/bin/sh\n", 0o700), ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: session, RouterURL: "http://127.0.0.1:18775", ManifestPath: write("contract/managed.json", `{}`, 0o600), MechaRPCExtension: write("extensions/rpc.ts", "export {}", 0o600), PiSubagentsExtension: write("extensions/subagents.ts", "export {}", 0o600), AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}
 	require.NoError(t, validateManagedStartup(config))
 	config.PiSubagentsExtension = ""
 	require.Error(t, validateManagedStartup(config))

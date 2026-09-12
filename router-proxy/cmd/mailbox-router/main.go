@@ -85,6 +85,10 @@ func parseConfig(args []string) (config, error) {
 	if result.port < 1 || result.port > 65535 {
 		return config{}, errors.New("--port must be an integer from 1 through 65535")
 	}
+	managedRouterURL, err := managed.ManagedRouterURLForListener(result.host, result.port)
+	if err != nil {
+		return config{}, err
+	}
 	if result.maxBatch < 0 {
 		return config{}, errors.New("--max-batch-chars must be a non-negative integer")
 	}
@@ -105,7 +109,7 @@ func parseConfig(args []string) (config, error) {
 		}
 		roots = []string{home}
 	}
-	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: roots, CanonicalQuietRecipientID: managedRecipient}
+	result.managed = managed.Config{Enabled: managedEnabled, PiExecutable: managedPi, ManagedHome: managedHome, PiAgentDir: managedPiAgentDir, SessionRoot: managedSession, RouterURL: managedRouterURL, ManifestPath: managedManifest, MechaRPCExtension: managedExtension, PiSubagentsExtension: managedSubagents, CursorExtension: managedCursorExtension, AuthHelperPath: managedAuthHelper, RuntimeRoot: managedRuntimeRoot, RequireProviderRuntime: managedEnabled, AllowedWorkingDirectoryRoots: roots, CanonicalQuietRecipientID: managedRecipient}
 	return result, nil
 }
 

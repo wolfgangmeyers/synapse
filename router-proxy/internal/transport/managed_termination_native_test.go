@@ -399,7 +399,7 @@ func TestManagedTerminateInstalledPi(t *testing.T) {
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store: durable, Manifest: manifest, ProcessFactory: factory, RPCFactory: nativeTerminationTraceRPCFactory{base: managed.DefaultRPCFactory(), trace: trace},
 		Config: managed.Config{
-			Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot,
+			Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775",
 			ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry,
 			AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor",
 			Limits: managed.Limits{GracefulStop: 5 * time.Second, TermStop: 5 * time.Second},

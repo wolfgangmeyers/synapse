@@ -280,12 +280,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	routerURL, err := managed.ManagedRouterURLForListener(options.host, options.port)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	testEnvironment := []string{"MECHA_TEST_BASE_URL=" + options.providerURL}
 	if options.fixtureMode != "" {
 		testEnvironment = append(testEnvironment, "MECHA_TEST_FIXTURE_MODE="+options.fixtureMode)
 	}
 	config := managed.Config{
-		Enabled: true, PiExecutable: options.pi, ManagedHome: options.home, PiAgentDir: filepath.Join(options.home, ".pi", "agent"), SessionRoot: options.sessions,
+		Enabled: true, PiExecutable: options.pi, ManagedHome: options.home, PiAgentDir: filepath.Join(options.home, ".pi", "agent"), SessionRoot: options.sessions, RouterURL: routerURL,
 		ManifestPath: options.manifest, MechaRPCExtension: options.mechaRPC, PiSubagentsExtension: options.subagents,
 		TestOnlyExtensions: []string{options.probe}, TestOnlyEnvironment: testEnvironment,
 		AllowedWorkingDirectoryRoots: []string{options.cwdRoot}, CanonicalQuietRecipientID: "phase3-supervisor",

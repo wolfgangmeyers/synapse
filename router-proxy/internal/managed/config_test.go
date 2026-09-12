@@ -30,7 +30,7 @@ func managedLaunchConfigFixture(t *testing.T) (Config, map[string]string) {
 	require.NoError(t, os.MkdirAll(session, 0o700))
 	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
 	require.NoError(t, os.MkdirAll(work, 0o700))
-	return Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: session, ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents, CursorExtension: cursor, AuthHelperPath: helper, RuntimeRoot: root, RequireProviderRuntime: true, AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "subagents": subagents, "cursor": cursor, "helper": helper, "home": home, "pi_agent_dir": piAgentDir, "session": session, "work": work}
+	return Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: session, RouterURL: "http://127.0.0.1:18775", ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents, CursorExtension: cursor, AuthHelperPath: helper, RuntimeRoot: root, RequireProviderRuntime: true, AllowedWorkingDirectoryRoots: []string{work}, CanonicalQuietRecipientID: "supervisor"}, map[string]string{"pi": pi, "manifest": manifest, "mecha": mecha, "subagents": subagents, "cursor": cursor, "helper": helper, "home": home, "pi_agent_dir": piAgentDir, "session": session, "work": work}
 }
 
 func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {
@@ -54,6 +54,18 @@ func TestManagedLaunchConfigRequiresOnlyCorePathsAndLimits(t *testing.T) {
 
 	config.CursorExtension = filepath.Join(paths["work"], "nonexistent.js")
 	require.Error(t, ValidateManagedLaunchConfig(config))
+}
+
+func TestManagedRouterURLForListenerUsesAnOwningLoopbackURL(t *testing.T) {
+	url, err := ManagedRouterURLForListener("0.0.0.0", 18775)
+	require.NoError(t, err)
+	require.Equal(t, "http://127.0.0.1:18775", url)
+
+	url, err = ManagedRouterURLForListener("::1", 18776)
+	require.NoError(t, err)
+	require.Equal(t, "http://[::1]:18776", url)
+	_, err = ManagedRouterURLForListener("0.0.0.0", 0)
+	require.Error(t, err)
 }
 
 func TestValidateWorkingDirectoryExpandsHomeRelativePaths(t *testing.T) {

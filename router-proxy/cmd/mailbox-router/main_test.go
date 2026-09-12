@@ -120,7 +120,7 @@ func managedStartupTestFixture(t *testing.T) (managed.Config, map[string]string)
 	require.NoError(t, os.MkdirAll(piAgentDir, 0o700))
 	require.NoError(t, os.MkdirAll(workRoot, 0o700))
 	config := managed.Config{
-		Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: sessionRoot,
+		Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: piAgentDir, SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775",
 		ManifestPath: manifest, MechaRPCExtension: mecha, PiSubagentsExtension: subagents,
 		AllowedWorkingDirectoryRoots: []string{workRoot}, CanonicalQuietRecipientID: "supervisor",
 	}

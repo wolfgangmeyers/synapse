@@ -71,14 +71,25 @@ func TestProcessGroupOps(t *testing.T) {
 
 func TestCommandSpecUsesDirectPiRPCAndRequiredExtensions(t *testing.T) {
 	spec := CommandSpec{SessionRoot: "/managed/sessions", SessionID: "session", LaunchMode: CreateNew, Provider: "openai-codex", ModelID: "gpt-5.6-terra", MechaRPCExtension: "rpc.ts", PiSubagentsExtension: "subagents.ts", CursorExtension: "cursor-sdk.js"}
-	require.Equal(t, []string{"--mode", "rpc", "--session-dir", "/managed/sessions", "--session-id", "session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline", "--provider", "openai-codex", "--model", "gpt-5.6-terra", "-e", "rpc.ts", "-e", "subagents.ts", "-e", "cursor-sdk.js"}, spec.Args())
-	env := ChildEnvironmentFor(Config{ManagedHome: "/managed/home", PiAgentDir: "/ordinary/.pi/agent", SessionRoot: filepath.Join("/managed/home", "sessions")}, "123e4567-e89b-42d3-a456-426614174000", 2)
+	require.Equal(t, []string{"--mode", "rpc", "--session-dir", "/managed/sessions", "--session-id", "session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--approve", "--offline", "--provider", "openai-codex", "--model", "gpt-5.6-terra", "-e", "rpc.ts", "-e", "subagents.ts", "-e", "cursor-sdk.js"}, spec.Args())
+	env := ChildEnvironmentFor(Config{ManagedHome: "/managed/home", PiAgentDir: "/ordinary/.pi/agent", SessionRoot: filepath.Join("/managed/home", "sessions"), RouterURL: "http://127.0.0.1:18775"}, "123e4567-e89b-42d3-a456-426614174000", 2)
 	require.Equal(t, []string{
 		"HOME=/managed/home", "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=/managed/home/tmp", "LANG=C", "LC_ALL=C",
-		"PI_CODING_AGENT_DIR=/ordinary/.pi/agent", "MECHA_MANAGED_SESSION_ROOT=/managed/home/sessions", "MECHA_MANAGED_ACTIVE_ONLY=1",
+		"PI_CODING_AGENT_DIR=/ordinary/.pi/agent", "MECHA_MANAGED_SESSION_ROOT=/managed/home/sessions", "MECHA_MANAGED_ACTIVE_ONLY=1", "MECHA_ROUTER_URL=http://127.0.0.1:18775",
 		"MECHA_RPC_RUNTIME_GENERATION=123e4567-e89b-42d3-a456-426614174000", "MECHA_RPC_SESSION_EPOCH=2",
 	}, env)
 	require.NotContains(t, env, "OPENAI_API_KEY=secret")
+}
+
+func TestExpectedManagedActiveToolsIncludesBuiltinCodingTools(t *testing.T) {
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+
+	active := expectedManagedActiveTools(manifest)
+	for _, name := range []string{"read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent"} {
+		require.Contains(t, active, name)
+	}
+	require.Len(t, active, len(manifest.Tools)+7)
 }
 
 func TestManagedStderrTailRetainsAUsefulRedactedExitReason(t *testing.T) {
