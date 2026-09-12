@@ -678,6 +678,19 @@ func TestManagedRestartAllMissingManagerReturnsSafeInternalError(t *testing.T) {
 	require.Equal(t, "INTERNAL", payload.Error.Code)
 }
 
+func TestManagedLaunchErrorsDescribeNameCollisionsForEveryReservationLayer(t *testing.T) {
+	for _, launchErr := range []error{
+		&store.ManagedNameConflictError{Name: "alpha"},
+		&store.RecipientSourceConflictError{Recipient: "alpha"},
+	} {
+		candidate, ok := managedLaunchError(launchErr).(*managedHTTPError)
+		require.True(t, ok)
+		require.Equal(t, http.StatusConflict, candidate.status)
+		require.Equal(t, "NAME_IN_USE", candidate.code)
+		require.Equal(t, "That name is in use by an active or launching agent. Choose another name or wait for it to stop.", candidate.message)
+	}
+}
+
 func TestManagedRestartAllErrorStaysWithinTheSafeRouteContract(t *testing.T) {
 	idempotency := managedRestartAllError(&store.ManagedIdempotencyConflictError{})
 	candidate, ok := idempotency.(*managedHTTPError)

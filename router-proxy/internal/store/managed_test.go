@@ -554,6 +554,13 @@ func TestManagedLaunchReservesNameSlotAndOperationAtomically(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hash", stored.CanonicalBodyHash)
 
+	sameName := agent
+	sameName.AgentID = "different-alpha"
+	sameNameOp := op
+	sameNameOp.OperationID, sameNameOp.RequestID = "124", "124"
+	var nameConflict *ManagedNameConflictError
+	require.ErrorAs(t, durable.ReserveManagedLaunch(ctx, sameName, sameNameOp), &nameConflict)
+
 	second := agent
 	second.AgentID, second.Name = "beta", "beta"
 	secondOp := op

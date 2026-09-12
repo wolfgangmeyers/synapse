@@ -79,6 +79,35 @@ func TestManagedTerminationRetryResumesItsExactCleanupStage(t *testing.T) {
 	require.Equal(t, "agent_cleanup", retry.Action.Stage)
 }
 
+func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T) {
+	durable, ctx, agent, action := terminationActionAtDurableWrite(t)
+	require.NoError(t, durable.RetireManagedRecipientSourceForTermination(ctx, agent.AgentID, agent.Name))
+	require.NoError(t, durable.CompleteManagedTermination(ctx, action.ActionID))
+
+	replacement := agent
+	replacement.PiSessionID = ""
+	replacement.ProcessPID = 0
+	replacement.ProcessStartMarker = ""
+	replacement.ProcessIncarnation = ""
+	replacement.RuntimeGeneration = ""
+	replacement.DesiredState = "running"
+	replacement.LifecycleState = "starting"
+	replacement.ActivityState = "starting"
+	replacement.AcceptingPrompts = false
+	replacement.CreatedAt = ""
+	replacement.StartedAt = ""
+	replacement.UpdatedAt = ""
+	replacementOperationID := lifecycleUUID(952)
+	replacementOperation := ManagedOperation{OperationID: replacementOperationID, Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: replacementOperationID, CanonicalBodyHash: testManifestHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	require.NoError(t, durable.ReserveManagedLaunch(ctx, replacement, replacementOperation))
+
+	source, err := durable.RecipientSource(ctx, agent.Name)
+	require.NoError(t, err)
+	require.Equal(t, "managed", source.SourceKind)
+	require.Equal(t, agent.AgentID, source.OwnerIdentity)
+	require.Equal(t, "reserved", source.State)
+}
+
 func TestCompleteManagedTerminationRollsBackEveryDurableBoundary(t *testing.T) {
 	for _, stage := range []string{"before_artifact_check", "before_lifecycle_cleanup", "before_operation_cleanup", "before_agent_delete", "before_terminalize"} {
 		t.Run(stage, func(t *testing.T) {

@@ -602,20 +602,19 @@ func TestRetireManagedRecipientSourceForTerminationRejectsEveryOtherSourceShape(
 	}
 }
 
-func TestRetireManagedRecipientSourceForTerminationIsIdempotentAndReusesOnlyForAnotherOwner(t *testing.T) {
+func TestRetireManagedRecipientSourceForTerminationIsIdempotentAndReusesForTheSameOwner(t *testing.T) {
 	fixture := newDirectTerminationFixture(t)
 	require.NoError(t, fixture.store.RetireManagedRecipientSourceForTermination(context.Background(), fixture.fence.AgentID, fixture.fence.AgentID))
 	require.NoError(t, fixture.store.RetireManagedRecipientSourceForTermination(context.Background(), fixture.fence.AgentID, fixture.fence.AgentID))
 	stale := fixture.attempts["prompted"]
 	requireOldManagedRouteInvalid(t, fixture.store, stale)
-	var conflict *RecipientSourceConflictError
-	err := reserveDirectSourceForTest(context.Background(), fixture.store, fixture.fence.AgentID, "managed", fixture.fence.AgentID)
-	require.ErrorAs(t, err, &conflict)
-	require.NoError(t, reserveDirectSourceForTest(context.Background(), fixture.store, fixture.fence.AgentID, "managed", "later-agent"))
-	requireDirectTerminationFinal(t, fixture, true, false)
-	require.NoError(t, fixture.store.RecordManagedDirectDiagnostic(context.Background(), fixture.fence.AgentID, stale.MessageID, stale.AttemptNumber, "late", ""))
-	require.NoError(t, fixture.store.RecordManagedDirectDiagnostic(context.Background(), fixture.fence.AgentID, "", 0, "late", ""))
-	requireDirectTerminationFinal(t, fixture, true, false)
+	requireDirectTerminationFinal(t, fixture, false, false)
+	require.NoError(t, reserveDirectSourceForTest(context.Background(), fixture.store, fixture.fence.AgentID, "managed", fixture.fence.AgentID))
+	source, err := fixture.store.RecipientSource(context.Background(), fixture.fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "managed", source.SourceKind)
+	require.Equal(t, fixture.fence.AgentID, source.OwnerIdentity)
+	require.Equal(t, "reserved", source.State)
 }
 
 func TestRetireManagedRecipientSourceForTerminationCleansReachableMissingSourceHistory(t *testing.T) {

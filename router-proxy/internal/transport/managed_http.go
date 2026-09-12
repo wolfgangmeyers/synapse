@@ -928,8 +928,9 @@ func managedLaunchError(err error) error {
 		return &managedHTTPError{409, "CONFLICT", "The managed process limit has been reached"}
 	}
 	var name *store.ManagedNameConflictError
-	if errors.As(err, &name) {
-		return &managedHTTPError{409, "NAME_IN_USE", "The managed agent name is already in use"}
+	var recipient *store.RecipientSourceConflictError
+	if errors.As(err, &name) || errors.As(err, &recipient) {
+		return &managedHTTPError{409, "NAME_IN_USE", "That name is in use by an active or launching agent. Choose another name or wait for it to stop."}
 	}
 	if strings.Contains(err.Error(), "invalid model") || strings.Contains(err.Error(), "model is not available") {
 		return &managedHTTPError{422, "INVALID_MODEL", "Model is invalid"}
