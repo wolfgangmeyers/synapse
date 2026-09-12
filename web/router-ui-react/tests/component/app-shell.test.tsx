@@ -87,9 +87,16 @@ describe("AppShell", () => {
     expect(document.getElementById("conversation-header-subagents-typescript-extensions")).toBeInTheDocument();
   });
 
-  it("keeps the legacy compacting fallback in the header detail line", () => {
+  it("does not add managed-only ready or working language", () => {
+    const agent: Agent = { agent_id: "managed-peer", source: "router-managed", activity_state: "idle", subagent_count: 0, subagents: [] };
+    render(<ConversationHeader agent={agent} />);
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+    expect(screen.queryByText("Working…")).not.toBeInTheDocument();
+  });
+
+  it("uses the shared compacting indicator in the header detail line", () => {
     const agent: Agent = { agent_id: "fixture-peer", activity_state: "compacting", subagent_count: 0, subagents: [] };
     render(<ConversationHeader agent={agent} />);
-    expect(screen.getByRole("banner").querySelector(".peer-heading > p")).toHaveTextContent("Mailbox is compacting; delivery is queued.");
+    expect(screen.getByRole("banner").querySelector(".peer-heading > p")).toHaveTextContent("Compacting");
   });
 });

@@ -22,7 +22,7 @@ const RUNTIME_GENERATION = "123e4567-e89b-42d3-a456-426614174000";
 const ACCEPTANCE_EVIDENCE = join(ROOT, "tests/fixtures/mecha-rpc/acceptance-evidence-v1.json");
 const ACCEPTANCE_ARTIFACT_DIR = "/tmp/mecha-rpc-acceptance";
 const EXPECTED_COMMANDS = new Set([
-  "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1",
+  "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
   "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
 ]);
 

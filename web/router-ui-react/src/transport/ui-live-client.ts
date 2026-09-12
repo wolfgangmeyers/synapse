@@ -92,9 +92,10 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     if (!isUILiveFrame(raw)) { recover(protocolError("frame_invalid")); return; }
     if (!agentSnapshotAccepted && raw.type !== "managed_agents_snapshot") { recover(protocolError("snapshot_missing")); return; }
     if (raw.type === "managed_agents_snapshot") {
-      // A connection has exactly one authoritative opening agent snapshot.
-      // A duplicate/regressed replacement can hide a missed delta, so reconnect.
-      if (agentSnapshotAccepted) { recover(protocolError("snapshot_duplicate")); return; }
+      // The router deliberately uses an authoritative snapshot to repair a
+      // missed projection delta. It is safe to replace an equal or newer local
+      // version; only a regressed snapshot could resurrect stale agent state.
+      if (version !== undefined && raw.projection_version < version) { recover(protocolError("projection_version_regressed")); return; }
       version = raw.projection_version;
       agentSnapshotAccepted = true;
       options.onFrame(raw);

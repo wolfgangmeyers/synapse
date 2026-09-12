@@ -88,10 +88,10 @@ function bootstrap(current: ReturnType<typeof fixture>) {
   return current.commands.get("mecha-bootstrap-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
 }
 
-test("the extension preflights all 15 command names and registers no Mailbox bridge", () => {
+test("the extension preflights all 16 command names and registers no Mailbox bridge", () => {
   const current = fixture();
   assert.deepEqual([...current.commands.keys()], [
-    "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1",
+    "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
     "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
   ]);
   assert.equal(current.commands.has("mecha-mailbox"), false);
@@ -100,7 +100,7 @@ test("the extension preflights all 15 command names and registers no Mailbox bri
 
 test("every legacy command preserves raw input and root or child availability in one typed request", async () => {
   const current = fixture();
-  for (const [index, name] of [...current.commands.keys()].slice(6).entries()) {
+  for (const [index, name] of [...current.commands.keys()].slice(7).entries()) {
     const raw = ` raw input ${index}  `;
     await current.commands.get(name)!.handler(raw, current.context);
     const call = current.sent.at(-1);
@@ -252,7 +252,25 @@ test("raw managed arguments reject boolean coercion, unknown keys, deep values, 
   assert.equal(current.sent.filter((entry) => entry.message.customType === "mecha.control.request.v1").length, 0);
 });
 
-test("three non-manifest hidden commands reject unknown envelope fields before side effects", async () => {
+test("a native post-compaction command emits a visible Pi handoff only after its fence validates", async () => {
+  const current = fixture();
+  await bootstrap(current);
+  await current.commands.get("mecha-post-compaction-notification-v1")!.handler(encodeHiddenEnvelope({
+    protocol: "mecha.post-compaction/v1",
+    notification: "COMPACTION-CERT-DONE",
+    runtime_generation: "123e4567-e89b-42d3-a456-426614174000",
+    session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()),
+  }), current.context);
+  const handoff = current.sent.at(-1);
+  assert.ok(handoff);
+  assert.equal(handoff!.message.customType, "mecha.post_compaction.v1");
+  assert.equal(handoff!.message.display, true);
+  assert.equal(handoff!.message.content, "COMPACTION-CERT-DONE");
+  assert.deepEqual(handoff!.options, { deliverAs: "followUp", triggerTurn: true });
+});
+
+test("four non-manifest hidden commands reject unknown envelope fields before side effects", async () => {
   const current = fixture();
   await bootstrap(current);
   const shared = {
@@ -270,7 +288,10 @@ test("three non-manifest hidden commands reject unknown envelope fields before s
   await assert.rejects(async () => current.commands.get("mecha-child-snapshot-v1")!.handler(encodeHiddenEnvelope({
     protocol: "mecha.child-snapshot/v1", ...shared,
   }), current.context));
-  assert.equal(current.sent.filter(({ message }) => message.customType === "mecha.mailbox.appended.v1" || message.customType === "mecha.policy.applied.v1" || message.customType === "mecha.child.snapshot.v1").length, 0);
+  await assert.rejects(async () => current.commands.get("mecha-post-compaction-notification-v1")!.handler(encodeHiddenEnvelope({
+    protocol: "mecha.post-compaction/v1", notification: "handoff", ...shared,
+  }), current.context));
+  assert.equal(current.sent.filter(({ message }) => message.customType === "mecha.mailbox.appended.v1" || message.customType === "mecha.policy.applied.v1" || message.customType === "mecha.child.snapshot.v1" || message.customType === "mecha.post_compaction.v1").length, 0);
 });
 
 test("tool-call hooks fail closed without raw managed input and consume only granted root inline credits", async () => {

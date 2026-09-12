@@ -68,6 +68,57 @@ func directMailboxAttempt(id string) store.ManagedDirectAttempt {
 	return store.ManagedDirectAttempt{MessageID: id, SessionEntryWatermark: "cursor-entry", Message: domain.Message{Body: "persisted body"}, Fence: store.ManagedRuntimeFence{AgentID: "agent-a", PiSessionID: "session-a", SessionEpoch: 2, ProcessPID: 3, ProcessStartMarker: "start", ProcessIncarnation: "incarnation", RuntimeGeneration: "generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}}
 }
 
+func TestRPCClientCompactUsesPiNativeCommand(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	result := make(chan error, 1)
+	go func() { result <- client.Compact(context.Background(), "Keep the delivery handoff.") }()
+	request := requireRequest(t, requests)
+	require.Equal(t, "compact", request["type"])
+	require.Equal(t, "Keep the delivery handoff.", request["customInstructions"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "compact", "success": true, "data": map[string]any{}}))
+	require.NoError(t, <-result)
+}
+
+func TestRPCClientPostCompactionNotificationUsesPiCommand(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	requests := readJSONLRequests(stdinReader)
+	result := make(chan error, 1)
+	envelope := map[string]any{"protocol": "mecha.post-compaction/v1", "notification": "COMPACTION-CERT-DONE", "runtime_generation": "generation", "session_epoch": int64(2), "manifest_sha256": strings.Repeat("a", 64)}
+	go func() { result <- client.PostCompactionNotification(context.Background(), envelope) }()
+	request := requireRequest(t, requests)
+	command, ok := request["message"].(string)
+	require.True(t, ok)
+	encoded := strings.TrimPrefix(command, "/mecha-post-compaction-notification-v1 ")
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	require.NoError(t, err)
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(decoded, &sent))
+	require.Equal(t, envelope["notification"], sent["notification"])
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "command": "prompt", "success": true}))
+	require.NoError(t, <-result)
+}
+
+func TestRPCClientDoesNotBacklogPostCompactionNotifications(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	for _, eventType := range []string{"message_start", "message_end"} {
+		require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": eventType, "message": map[string]any{"customType": "mecha.post_compaction.v1", "display": true, "content": "COMPACTION-CERT-DONE"}}))
+	}
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 2 && len(client.backlog) == 0
+	}, time.Second, time.Millisecond)
+}
+
 func TestManagedDirectReceiptRequiresMatchingAppendMarker(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()

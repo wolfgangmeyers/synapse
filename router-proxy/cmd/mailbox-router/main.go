@@ -21,6 +21,14 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/transport"
 )
 
+// These values are set by the deployment Make target. Keeping the identity in
+// the executable makes health a proof of the listener's source revision rather
+// than a claim about whichever checkout happens to be on disk.
+var (
+	buildSourceCommit = "unknown"
+	buildSourceTree   = "unknown"
+)
+
 type config struct {
 	database              string
 	logPath               string
@@ -192,7 +200,7 @@ func main() {
 			log.Print("managed provider status is unavailable")
 		}
 	}
-	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist})
+	router, err := transport.New(transport.Options{Store: durable, Host: options.host, Port: options.port, Attachments: attachmentsStore, EventLogger: logger, Tmux: newTmuxAdapter("tmux"), EnableTmuxRouterAudit: true, AuditSupervisorTarget: options.auditSupervisorTarget, AuditTmuxSession: options.auditTmuxSession, PolicyTimeout: options.policyTimeout, Managed: managedManager, ProviderAuth: providerAuth, StaticUIRoot: options.managedUIDist, RuntimeIdentity: transport.RuntimeIdentity{SourceCommit: buildSourceCommit, SourceTree: buildSourceTree}})
 	if err != nil {
 		_, _ = attachmentsStore.Sweep(nil)
 		_ = durable.Close()

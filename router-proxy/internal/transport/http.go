@@ -150,7 +150,7 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	switch {
 	case req.Method == http.MethodGet && path == "/v1/health":
-		r.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": "v1", "schema_migrations": r.store.MigrationIDs()})
+		r.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": "v1", "schema_migrations": r.store.MigrationIDs(), "runtime": r.runtimeIdentity})
 		return
 	case req.Method == http.MethodGet && path == "/v1/capabilities":
 		r.writeJSON(w, http.StatusOK, r.capabilities())

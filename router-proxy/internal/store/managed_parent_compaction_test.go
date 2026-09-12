@@ -76,9 +76,14 @@ func TestManagedParentCompactionPreservesExactOutcomesAndFencesDelayedEvents(t *
 	require.NoError(t, err)
 	require.Equal(t, "compacting", agent.ActivityState)
 
-	updated, err = durable.ApplyManagedParentCompaction(ctx, fence, ManagedParentCompactionEvent{Sequence: 2, State: "idle", Outcome: "failed"})
+	failedTransition := ManagedParentCompactionEvent{Sequence: 2, State: "idle", Outcome: "failed"}
+	updated, err = durable.ApplyManagedParentCompaction(ctx, fence, failedTransition)
 	require.NoError(t, err)
 	require.True(t, updated)
+	liveEntry, err := durable.ManagedParentCompactionHistoryEntry(ctx, fence, failedTransition)
+	require.NoError(t, err)
+	require.Equal(t, "Context compaction failed", liveEntry.Message)
+	require.Equal(t, &ManagedHistoryPresentation{Kind: "compaction", Outcome: "failed"}, liveEntry.Presentation)
 	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "idle", agent.ActivityState)
