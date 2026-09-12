@@ -282,6 +282,19 @@ func TestNormalizeParentCompactionEventPreservesNativeOutcomes(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNormalizeParentActivityEventUsesOnlyNativeTurnBoundaries(t *testing.T) {
+	start, err := normalizeParentActivityEvent(map[string]any{"type": "agent_start"}, 1)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"sequence": int64(1), "state": "active"}, start)
+	settled, err := normalizeParentActivityEvent(map[string]any{"type": "agent_settled"}, 2)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"sequence": int64(2), "state": "idle"}, settled)
+	_, err = normalizeParentActivityEvent(map[string]any{"type": "turn_started"}, 3)
+	require.Error(t, err)
+	_, err = normalizeParentActivityEvent(map[string]any{"type": "agent_start"}, uint64(readinessMaxSafeInteger)+1)
+	require.Error(t, err)
+}
+
 func TestReadinessIntegerAcceptsWireNumberFormsAndRejectsUnsafeNumbers(t *testing.T) {
 	for _, value := range []any{int(1), int8(1), int16(1), int32(1), int64(1), uint(1), uint8(1), uint16(1), uint32(1), uint64(1), float32(1), float64(1)} {
 		actual, ok := readinessInteger(value)

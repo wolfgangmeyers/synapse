@@ -176,8 +176,9 @@ func (execProcessFactory) Start(ctx context.Context, spec CommandSpec) (Process,
 		}
 		return nil, errors.New("managed process start marker is unavailable")
 	}
-	process := &execProcess{cmd: command, stdin: stdin, stdout: stdout, stderr: stderr, identity: ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: incarnation}, waitDone: make(chan struct{}), stopDone: make(chan struct{})}
-	go drainStderr(stderr)
+	stderrTail := newManagedStderrTail()
+	process := &execProcess{cmd: command, stdin: stdin, stdout: stdout, stderr: stderr, stderrTail: stderrTail, identity: ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: incarnation}, waitDone: make(chan struct{}), stopDone: make(chan struct{})}
+	go stderrTail.drain(stderr)
 	return process, nil
 }
 
@@ -185,6 +186,7 @@ type execProcess struct {
 	cmd            *exec.Cmd
 	stdin          io.WriteCloser
 	stdout, stderr io.ReadCloser
+	stderrTail     *managedStderrTail
 	identity       ProcessIdentity
 	waitOnce       sync.Once
 	waitErr        error
@@ -200,6 +202,12 @@ func (p *execProcess) Wait() error {
 	p.waitOnce.Do(func() {
 		p.waitErr = p.cmd.Wait()
 		_ = p.stdout.Close()
+		if p.stderrTail != nil {
+			<-p.stderrTail.done
+			if p.waitErr != nil {
+				p.waitErr = managedProcessExitError{cause: p.waitErr, detail: p.stderrTail.summary()}
+			}
+		}
 		_ = p.stderr.Close()
 		close(p.waitDone)
 	})
@@ -341,12 +349,62 @@ func (ops defaultProcessGroupOps) WaitForProcessGroupEmpty(ctx context.Context, 
 	}
 }
 
-func drainStderr(reader io.Reader) {
+const managedStderrTailBytes = 2048
+
+type managedStderrTail struct {
+	mu       sync.Mutex
+	contents string
+	done     chan struct{}
+}
+
+func newManagedStderrTail() *managedStderrTail {
+	return &managedStderrTail{done: make(chan struct{})}
+}
+
+// drain retains only a short, redacted tail. Stderr is otherwise discarded,
+// but a crashed managed Pi needs a useful public reason instead of a bare exit
+// code. Redaction happens before retention so raw credentials never enter the
+// durable managed-agent error or survive in this process object.
+func (tail *managedStderrTail) drain(reader io.Reader) {
+	defer close(tail.done)
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 64*1024)
 	for scanner.Scan() {
+		line := strings.TrimSpace(RedactedStderr(scanner.Text()))
+		if line == "" {
+			continue
+		}
+		tail.mu.Lock()
+		tail.contents += line + "\n"
+		if len(tail.contents) > managedStderrTailBytes {
+			tail.contents = tail.contents[len(tail.contents)-managedStderrTailBytes:]
+		}
+		tail.mu.Unlock()
 	}
 }
+
+func (tail *managedStderrTail) summary() string {
+	if tail == nil {
+		return ""
+	}
+	tail.mu.Lock()
+	defer tail.mu.Unlock()
+	return strings.TrimSpace(tail.contents)
+}
+
+type managedProcessExitError struct {
+	cause  error
+	detail string
+}
+
+func (err managedProcessExitError) Error() string {
+	if err.detail == "" {
+		return err.cause.Error()
+	}
+	return err.cause.Error() + ": " + err.detail
+}
+
+func (err managedProcessExitError) Unwrap() error { return err.cause }
 
 func processStartMarker(pid int) (string, error) {
 	if pid <= 0 {

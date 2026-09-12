@@ -663,6 +663,56 @@ func TestRPCClientDeliversOnlyValidParentCompactionEventsOutsideReadinessBacklog
 	}, time.Second, time.Millisecond)
 }
 
+func TestRPCClientDeliversParentActivityWithoutBlockingDirectSettlement(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	direct := DirectMailboxRPC(client)
+	activity := make(chan map[string]any, 2)
+	ParentActivityRPC(client).SetParentActivityEventHandler(func(event map[string]any) { activity <- event })
+	requests := readJSONLRequests(stdinReader)
+	events, err := direct.PromptManagedMailbox(context.Background(), directMailboxAttempt("message-a"))
+	require.NoError(t, err)
+	request := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": request["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": "generation", "session_epoch": 2}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_start"}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+
+	var receipt, settled bool
+	for index := 0; index < 2; index++ {
+		select {
+		case event := <-events:
+			receipt = receipt || event.Receipt != nil
+			settled = settled || event.Settled
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for direct mailbox settlement")
+		}
+	}
+	require.True(t, receipt)
+	require.True(t, settled)
+	activityBySequence := map[int64]string{}
+	for range 2 {
+		select {
+		case event := <-activity:
+			sequence, ok := event["sequence"].(int64)
+			require.True(t, ok)
+			state, ok := event["state"].(string)
+			require.True(t, ok)
+			activityBySequence[sequence] = state
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for parent activity")
+		}
+	}
+	require.Equal(t, map[int64]string{2: "active", 3: "idle"}, activityBySequence)
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.eventSequence == 3 && len(client.backlog) == 0
+	}, time.Second, time.Millisecond)
+}
+
 func TestRPCClientDeliversOnlyValidChildDeltasOutsideReadinessBacklog(t *testing.T) {
 	stdoutReader, stdoutWriter := io.Pipe()
 	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)

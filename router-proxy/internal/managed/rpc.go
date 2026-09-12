@@ -103,6 +103,13 @@ type ParentCompactionRPC interface {
 	SetParentCompactionEventHandler(func(map[string]any))
 }
 
+// ParentActivityRPC receives Pi's native parent-turn start and settled events.
+// The router uses it for the durable managed-agent activity projection; prompt
+// acceptance itself is not evidence that Pi started work.
+type ParentActivityRPC interface {
+	SetParentActivityEventHandler(func(map[string]any))
+}
+
 type DirectMailboxReceipt struct{ EntryIdentity string }
 
 // DirectMailboxReply is the final visible assistant text from one direct
@@ -215,6 +222,7 @@ type rpcClient struct {
 	rootControlHandler      func(RootControlEvent)
 	childDeltaHandler       func(map[string]any)
 	parentCompactionHandler func(map[string]any)
+	parentActivityHandler   func(map[string]any)
 	rootResult              *rootResultToken
 
 	closeOnce sync.Once
@@ -267,6 +275,9 @@ func (c *rpcClient) readLoop() {
 		var childDelta map[string]any
 		var parentCompactionCallback func(map[string]any)
 		var parentCompaction map[string]any
+		var parentActivityCallback func(map[string]any)
+		var parentActivity map[string]any
+		var parentActivityCandidate bool
 		c.mu.Lock()
 		terminal := c.terminal != nil
 		if !terminal {
@@ -305,6 +316,12 @@ func (c *rpcClient) readLoop() {
 				}
 				continue
 			}
+			if event, candidate := classifyParentActivityEvent(raw, c.eventSequence); candidate {
+				parentActivityCandidate = true
+				if event != nil && c.parentActivityHandler != nil {
+					parentActivityCallback, parentActivity = c.parentActivityHandler, event
+				}
+			}
 			if token := c.rootResult; token != nil && classifyRootControlResultEvent(raw, token, c.eventSequence) {
 				select {
 				case token.result <- RootControlResultReceipt{Event: raw, Watermark: c.eventSequence}:
@@ -325,8 +342,18 @@ func (c *rpcClient) readLoop() {
 					c.sendDirectMailboxResultLocked(token, result)
 					c.signalLocked()
 					c.mu.Unlock()
+					if parentActivityCallback != nil {
+						go parentActivityCallback(parentActivity)
+					}
 					continue
 				}
+			}
+			if parentActivityCandidate {
+				c.mu.Unlock()
+				if parentActivityCallback != nil {
+					go parentActivityCallback(parentActivity)
+				}
+				continue
 			}
 			if len(c.backlog) == 128 {
 				c.terminalizeLocked(ErrReadinessBacklogFull)
@@ -1145,6 +1172,20 @@ func classifyParentCompactionEvent(event map[string]any, sequence uint64) (map[s
 	return normalized, true
 }
 
+// classifyParentActivityEvent admits only Pi's native lifecycle boundary. The
+// settled frame still reaches the direct-mail matcher below so its final reply
+// is persisted before the serialized parent lane returns to idle.
+func classifyParentActivityEvent(event map[string]any, sequence uint64) (map[string]any, bool) {
+	if event["type"] != "agent_start" && event["type"] != "agent_settled" {
+		return nil, false
+	}
+	normalized, err := normalizeParentActivityEvent(event, sequence)
+	if err != nil {
+		return nil, true
+	}
+	return normalized, true
+}
+
 func isRootControlResultEvent(event map[string]any) bool {
 	message := nestedMessage(event)
 	// Pi's live stdout receipt is a message_end frame, whereas get_entry and
@@ -1175,6 +1216,12 @@ func (c *rpcClient) SetChildDeltaEventHandler(handler func(map[string]any)) {
 func (c *rpcClient) SetParentCompactionEventHandler(handler func(map[string]any)) {
 	c.mu.Lock()
 	c.parentCompactionHandler = handler
+	c.mu.Unlock()
+}
+
+func (c *rpcClient) SetParentActivityEventHandler(handler func(map[string]any)) {
+	c.mu.Lock()
+	c.parentActivityHandler = handler
 	c.mu.Unlock()
 }
 
