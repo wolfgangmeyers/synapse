@@ -2,14 +2,17 @@ package managed
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,6 +34,29 @@ func TestRootControlRegistryIsClosedAndRootEventRejectsLegacyControlEnvelopes(t 
 	event, candidate = classifyRootControlEvent(legacy, 5)
 	require.True(t, candidate)
 	require.Nil(t, event)
+}
+
+func TestRootControlReceiptAcceptsStockPiOpaqueEntryID(t *testing.T) {
+	row := store.ManagedControlRequest{
+		RequestID: "123e4567-e89b-42d3-a456-426614174001", ResultID: "123e4567-e89b-42d3-a456-426614174002", ResultEntryID: "mcr1_123e4567e89b42d3a456426614174002",
+		ResultStatus: "ok", ResultContent: "Found the source.",
+		Fence: store.ManagedRuntimeFence{RuntimeGeneration: "123e4567-e89b-42d3-a456-426614174003", SessionEpoch: 1, ManifestHash: strings.Repeat("a", 64)},
+	}
+	result := RootControlHandlerResult{Status: "ok", Content: row.ResultContent, Details: map[string]any{"provider": "bing"}}
+	payload := rootControlPayload(row, result, result.Details)
+	canonical, err := canonicalJSON(payload)
+	require.NoError(t, err)
+	row.ResultPayloadSHA256 = fmt.Sprintf("%x", sha256.Sum256(canonical))
+	event := map[string]any{"type": "message_end", "entryId": "pi-opaque-entry", "message": map[string]any{
+		"customType": "mecha.control.result.v1", "display": false, "content": row.ResultContent,
+		"details": map[string]any{"protocol": "mecha.control/v1", "result_id": row.ResultID, "request_id": row.RequestID, "target_session_epoch": 1,
+			"runtime_generation": row.Fence.RuntimeGeneration, "manifest_sha256": row.Fence.ManifestHash, "status": "ok", "details": result.Details},
+	}}
+	require.True(t, validRootControlReceipt(event, row, 7, 6))
+	require.Equal(t, "pi-opaque-entry", rootControlReceiptEntryIdentity(event, row))
+	entrylessEvent := map[string]any{"type": "message_end", "message": event["message"]}
+	require.Equal(t, "root-result:"+row.ResultID, rootControlReceiptEntryIdentity(entrylessEvent, row))
+	require.False(t, validRootControlEntry(event, row), "opaque stock-Pi IDs are not reserved lookup IDs")
 }
 
 func TestRootControlResultArmCapturesReceiptAndUsesOnlyExactEntryLookup(t *testing.T) {

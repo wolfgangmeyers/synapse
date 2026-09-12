@@ -171,8 +171,12 @@ type directMailboxToken struct {
 	epoch       int64
 	watermark   uint64
 	receiptSeen bool
-	reply       *DirectMailboxReply
-	result      chan directMailboxResult
+	// Root controls are completed on a later Pi follow-up turn. Retain direct
+	// ownership across the provisional settle so WebUI stays working until the
+	// result has driven that turn's final response.
+	pendingRootRequests map[string]struct{}
+	reply               *DirectMailboxReply
+	result              chan directMailboxResult
 }
 type directMailboxResult struct {
 	receipt        *DirectMailboxReceipt
@@ -303,8 +307,11 @@ func (c *rpcClient) readLoop() {
 			if event, candidate := classifyRootControlEvent(raw, c.eventSequence); candidate {
 				// Root requests are control-plane input, not readiness receipts. Bad
 				// candidates are dropped locally and cannot fill the receipt backlog.
-				if event != nil && c.rootControlHandler != nil {
-					rootCallback, rootEvent = c.rootControlHandler, event
+				if event != nil {
+					c.noteDirectRootControlRequestLocked(event.RequestID)
+					if c.rootControlHandler != nil {
+						rootCallback, rootEvent = c.rootControlHandler, event
+					}
 				}
 				c.mu.Unlock()
 				if rootCallback != nil {
@@ -352,6 +359,9 @@ func (c *rpcClient) readLoop() {
 				if event != nil && c.parentActivityHandler != nil {
 					parentActivityCallback, parentActivity = c.parentActivityHandler, event
 				}
+			}
+			if isRootControlResultEvent(raw) {
+				c.noteDirectRootControlResultLocked(raw)
 			}
 			if token := c.rootResult; token != nil && classifyRootControlResultEvent(raw, token, c.eventSequence) {
 				select {
@@ -985,7 +995,7 @@ func (c *rpcClient) PromptManagedMailbox(ctx context.Context, attempt store.Mana
 	}
 	response := make(chan rpcResponse, 1)
 	c.pending[id] = response
-	token := &directMailboxToken{messageID: attempt.MessageID, generation: attempt.Fence.RuntimeGeneration, epoch: attempt.Fence.SessionEpoch, watermark: c.eventSequence, result: make(chan directMailboxResult, 128)}
+	token := &directMailboxToken{messageID: attempt.MessageID, generation: attempt.Fence.RuntimeGeneration, epoch: attempt.Fence.SessionEpoch, watermark: c.eventSequence, pendingRootRequests: map[string]struct{}{}, result: make(chan directMailboxResult, 128)}
 	c.directMailbox = token
 	c.noteStaleDirectMailboxEventsLocked(token)
 	if _, err = fmt.Fprintf(c.stdin, "%s\n", payload); err != nil {
@@ -1050,12 +1060,46 @@ func (c *rpcClient) noteStaleDirectMailboxEventsLocked(token *directMailboxToken
 	}
 }
 
+func (c *rpcClient) noteDirectRootControlRequestLocked(requestID string) {
+	token := c.directMailbox
+	if token == nil || !token.receiptSeen || !rootControlUUIDRE.MatchString(requestID) {
+		return
+	}
+	if token.pendingRootRequests == nil {
+		token.pendingRootRequests = map[string]struct{}{}
+	}
+	token.pendingRootRequests[requestID] = struct{}{}
+}
+
+func (c *rpcClient) noteDirectRootControlResultLocked(event map[string]any) {
+	token := c.directMailbox
+	if token == nil || len(token.pendingRootRequests) == 0 {
+		return
+	}
+	message := nestedMessage(event)
+	if message == nil {
+		message = event
+	}
+	details, ok := message["details"].(map[string]any)
+	if !ok || details["protocol"] != "mecha.control/v1" || details["runtime_generation"] != token.generation || !sameEpoch(details["target_session_epoch"], token.epoch) {
+		return
+	}
+	requestID, ok := details["request_id"].(string)
+	if !ok || !rootControlUUIDRE.MatchString(requestID) {
+		return
+	}
+	delete(token.pendingRootRequests, requestID)
+}
+
 func (c *rpcClient) classifyDirectMailboxEvent(event map[string]any, token *directMailboxToken) (directMailboxResult, bool) {
 	kind, _ := event["type"].(string)
 	if kind == "agent_settled" {
-		// A direct turn owns the lane until it settles. This keeps a follow-up
-		// command from racing the response that follows the persisted receipt and
-		// returns only the final visible assistant text after tool turns finish.
+		// A root tool completes on a triggerTurn follow-up. Its source result can
+		// arrive after the model's provisional response, so only the follow-up's
+		// settled event releases the direct delivery lane.
+		if len(token.pendingRootRequests) != 0 {
+			return directMailboxResult{}, true
+		}
 		return directMailboxResult{reply: token.reply, settled: token.receiptSeen}, true
 	}
 	if kind != "message_end" {

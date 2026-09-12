@@ -285,6 +285,58 @@ func TestManagedDirectMailboxCapturesAssistantReplyUntilSettled(t *testing.T) {
 	require.Equal(t, &DirectMailboxReply{EntryIdentity: "reply-entry", Body: "reply works"}, reply)
 }
 
+func TestManagedDirectMailboxWaitsForRootControlFollowUpBeforeSettling(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() })
+	defer client.Close()
+	direct := client.(DirectMailboxRPC)
+	requests := readJSONLRequests(stdinReader)
+	attempt := directMailboxAttempt("message-a")
+	generation := "123e4567-e89b-42d3-a456-426614174003"
+	attempt.Fence.RuntimeGeneration = generation
+	events, err := direct.PromptManagedMailbox(context.Background(), attempt)
+	require.NoError(t, err)
+	prompt := requireRequest(t, requests)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"id": prompt["id"], "type": "response", "data": map[string]any{}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "append-entry", "customType": "mecha.mailbox.appended.v1", "details": map[string]any{"protocol": "mecha.mailbox/v1", "message_id": "message-a", "runtime_generation": generation, "session_epoch": 2}}}))
+	select {
+	case event := <-events:
+		require.Equal(t, "append-entry", event.Receipt.EntryIdentity)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for direct mailbox receipt")
+	}
+
+	requestID := "123e4567-e89b-42d3-a456-426614174001"
+	definitionSHA := strings.Repeat("b", 64)
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{
+		"protocol": "mecha.control/v1", "request_id": requestID, "tool_call_id": "call-1", "capability_id": "web_search", "tool_name": "web_search__" + definitionSHA,
+		"definition_id": "def_" + definitionSHA, "definition_sha256": definitionSHA, "operation_id": "web.search", "manifest_sha256": strings.Repeat("a", 64),
+		"runtime_generation": generation, "session_epoch": 2, "context_ref": "root", "arguments": map[string]any{"query": "RFC 9110"},
+	}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "provisional", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "I am waiting."}}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-events:
+		t.Fatalf("root control let the provisional turn settle direct delivery: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "mcr1_result", "customType": "mecha.control.result.v1", "display": false, "details": map[string]any{
+		"protocol": "mecha.control/v1", "request_id": requestID, "result_id": "123e4567-e89b-42d3-a456-426614174002", "target_session_epoch": 2,
+		"runtime_generation": generation, "manifest_sha256": strings.Repeat("a", 64), "status": "ok", "details": map[string]any{},
+	}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"id": "final", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "RFC 9110 is HTTP Semantics."}}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "agent_settled"}))
+	select {
+	case event := <-events:
+		require.True(t, event.Settled)
+		require.Equal(t, &DirectMailboxReply{EntryIdentity: "final", Body: "RFC 9110 is HTTP Semantics."}, event.Reply)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the root-control follow-up to settle")
+	}
+}
+
 func TestManagedDirectMatcherClearsAfterCanceledWait(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()

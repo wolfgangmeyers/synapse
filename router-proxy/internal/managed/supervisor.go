@@ -122,9 +122,12 @@ type ResetResult struct {
 type managedAgentLane struct{ serial sync.Mutex }
 
 type managedBinding struct {
-	agentID              string
-	lane                 *managedAgentLane
-	serial               sync.Mutex
+	agentID string
+	lane    *managedAgentLane
+	serial  sync.Mutex
+	// Root controls can resolve an active direct turn. Keep their append path
+	// ordered without blocking the direct-delivery lane that needs that result.
+	rootControlSerial    sync.Mutex
 	preparationWG        sync.WaitGroup
 	process              Process
 	rpc                  RPC
