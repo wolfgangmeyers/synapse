@@ -685,7 +685,7 @@ func runManagedResetNativeFailureMatrix(t *testing.T, root string, lockedPi mana
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700))
 	fakeOps := &nativeResetProcessOps{base: managed.DefaultProcessGroupOps(), nextPID: 9000, fake: map[int]*nativeResetFakeProcess{}}
 	counting := &nativeResetCountingFactory{base: managed.DefaultProcessFactory(), sessionRoot: sessionRoot, fakeOps: fakeOps, fakeSource: true}
-	activeTools := []string{"subagent", "get_subagent_result", "steer_subagent"}
+	activeTools := []string{"read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent"}
 	for _, tool := range manifest.Tools {
 		activeTools = append(activeTools, tool.Name)
 	}
@@ -694,7 +694,7 @@ func runManagedResetNativeFailureMatrix(t *testing.T, root string, lockedPi mana
 	prebind := &nativeResetPrebindCrash{}
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store:    durable,
-		Config:   managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
+		Config:   managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775", ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		Manifest: manifest, ProcessFactory: counting, RPCFactory: rpcs,
 		CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupOps: fakeOps, ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true },
 		BeforeManagedResetOldArtifactCleanup: cleanup.before, AfterManagedResetTargetStartBeforeBind: prebind.after,
@@ -765,7 +765,7 @@ func runManagedResetNativeFailureMatrix(t *testing.T, root string, lockedPi mana
 	tracked := counting.captured()
 	require.NotNil(t, tracked)
 	startsBeforeRecovery := counting.starts()
-	recoveryManager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"}, Manifest: manifest, ProcessFactory: counting, RPCFactory: rpcs, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupOps: fakeOps, ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
+	recoveryManager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775", ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"}, Manifest: manifest, ProcessFactory: counting, RPCFactory: rpcs, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupOps: fakeOps, ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
 	defer func() { _ = recoveryManager.Close(context.Background()) }()
 	require.NoError(t, recoveryManager.RecoverManagedLifecycleControls(ctx))
@@ -814,7 +814,7 @@ func TestManagedResetInstalledPi(t *testing.T) {
 	}()
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store:    durable,
-		Config:   managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: subagents, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
+		Config:   managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775", ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: subagents, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		Manifest: manifest, ProcessFactory: factory, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 	})
 	require.NoError(t, err)

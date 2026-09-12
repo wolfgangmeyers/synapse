@@ -13,9 +13,11 @@ function fixture(
   sessionId = "root-session",
   parentSessionId?: string,
   explicitOutcome: "accepted" | "already_present" = "accepted",
+  installedToolNames: readonly string[] = [],
 ) {
   const commands = new Map<string, Command>();
   const tools = new Map<string, RecordValue>();
+  for (const name of installedToolNames) tools.set(name, { name });
   const handlers = new Map<string, (event: RecordValue, context: RecordValue) => unknown>();
   const sent: Array<{ message: RecordValue; options: RecordValue | undefined }> = [];
   const events = new Map<string, (event: RecordValue) => void>();
@@ -125,6 +127,44 @@ test("accepted receipt reports the runtime active tools and manifest revision", 
   assert.equal(details.manifest_revision, 2);
   assert.deepEqual(details.active_tools, [...current.pi.getActiveTools!()].sort());
   assert.equal((details.active_tools as unknown[]).length, 17);
+});
+
+test("managed active selection exposes Pi coding tools without turning them into manifest tools", async () => {
+  const previous = process.env.MECHA_MANAGED_ACTIVE_ONLY;
+  process.env.MECHA_MANAGED_ACTIVE_ONLY = "1";
+  try {
+    const codingTools = ["read", "bash", "edit", "write"];
+    const fixedSubagentTools = ["subagent", "get_subagent_result", "steer_subagent"];
+    const current = fixture("root-session", undefined, "accepted", [...codingTools, ...fixedSubagentTools, "ambient_extension_tool"]);
+    await bootstrap(current);
+
+    const manifestNames = (manifest().tools as RecordValue[]).map((tool) => String(tool.name));
+    assert.deepEqual(new Set(current.pi.getActiveTools!()), new Set([...codingTools, ...fixedSubagentTools, ...manifestNames]));
+    assert.equal(current.pi.getActiveTools!().includes("ambient_extension_tool"), false);
+    assert.equal(current.tools.has("read"), true);
+    assert.equal((manifest().tools as RecordValue[]).some((tool) => tool.name === "read"), false);
+
+    const hook = current.handlers.get("tool_call")!;
+    assert.equal(hook({ toolCallId: "read", toolName: "read" }, current.context), undefined);
+    for (const name of ["bash", "edit", "write"] as const) {
+      assert.deepEqual(hook({ toolCallId: `${name}-blocked`, toolName: name }, current.context), {
+        block: true,
+        reason: "This managed runtime requires an inline-tool allowance.",
+      });
+      await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
+        protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+        manifest_sha256: current.extension.hashManifest(manifest()), policy: { inline: { enabled: true, credits: { [name]: 1 } } },
+      }), current.context);
+      assert.equal(hook({ toolCallId: `${name}-allowed`, toolName: name }, current.context), undefined);
+      assert.deepEqual(hook({ toolCallId: `${name}-exhausted`, toolName: name }, current.context), {
+        block: true,
+        reason: "This managed runtime requires an inline-tool allowance.",
+      });
+    }
+  } finally {
+    if (previous === undefined) delete process.env.MECHA_MANAGED_ACTIVE_ONLY;
+    else process.env.MECHA_MANAGED_ACTIVE_ONLY = previous;
+  }
 });
 
 test("bootstrap is atomic before model tools exist and a raw coercive tool call fails before control traffic", async () => {

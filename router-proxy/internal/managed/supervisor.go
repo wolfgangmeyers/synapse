@@ -196,6 +196,18 @@ func (m *Manager) AllowedWorkingDirectoryRoots() []string {
 	return append([]string(nil), m.config.AllowedWorkingDirectoryRoots...)
 }
 
+// SetRouterURL records the exact listener URL for future managed launches.
+// Existing managed processes retain their inherited environment.
+func (m *Manager) SetRouterURL(raw string) error {
+	if err := ValidateManagedRouterURL(raw); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.RouterURL = raw
+	return nil
+}
+
 func NewManager(options ManagerOptions) (*Manager, error) {
 	if options.Store == nil {
 		return nil, errors.New("managed store is required")
@@ -1428,9 +1440,11 @@ var managedNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var hiddenCommands = []string{"mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1"}
 var legacyCommands = []string{"goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"}
 var fixedSubagentsTools = []string{"subagent", "get_subagent_result", "steer_subagent"}
+var fixedManagedCodingTools = []string{"read", "bash", "edit", "write"}
 
 func expectedManagedActiveTools(manifest Manifest) []string {
-	result := append([]string{}, fixedSubagentsTools...)
+	result := append([]string{}, fixedManagedCodingTools...)
+	result = append(result, fixedSubagentsTools...)
 	for _, tool := range manifest.Tools {
 		result = append(result, tool.Name)
 	}

@@ -568,7 +568,26 @@ func (r *Router) Listen(ctx context.Context) error {
 		return errors.New("router is already listening")
 	}
 	r.mu.Unlock()
+	// Bind before managed recovery so a recovered process inherits this exact
+	// listener URL, while delaying Serve until durable recovery is complete.
+	listener, err := net.Listen("tcp", net.JoinHostPort(r.host, fmt.Sprint(r.port)))
+	if err != nil {
+		return err
+	}
+	listenerPublished := false
+	defer func() {
+		if !listenerPublished {
+			_ = listener.Close()
+		}
+	}()
 	if r.managed != nil {
+		routerURL, urlErr := managed.ManagedRouterURLForListener(r.host, listener.Addr().(*net.TCPAddr).Port)
+		if urlErr != nil {
+			return urlErr
+		}
+		if urlErr := r.managed.SetRouterURL(routerURL); urlErr != nil {
+			return urlErr
+		}
 		if err := r.managed.RecoverPendingManagedLaunches(ctx); err != nil {
 			return err
 		}
@@ -593,14 +612,9 @@ func (r *Router) Listen(ctx context.Context) error {
 	if err := r.runSweep(ctx); err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", net.JoinHostPort(r.host, fmt.Sprint(r.port)))
-	if err != nil {
-		return err
-	}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		_ = listener.Close()
 		return errors.New("router is closed")
 	}
 	r.listener = listener
@@ -612,6 +626,7 @@ func (r *Router) Listen(ctx context.Context) error {
 	done := r.serveDone
 	sweepDone := r.sweepDone
 	server := r.server
+	listenerPublished = true
 	r.mu.Unlock()
 	_, websocketURL := r.URLs()
 	r.log("router_started", map[string]any{"host": r.host, "port": listener.Addr().(*net.TCPAddr).Port, "router_url": websocketURL})

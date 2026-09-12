@@ -4,9 +4,12 @@ package managed
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,8 +35,12 @@ type Config struct {
 	// PiAgentDir is the existing ordinary Pi agent directory. Managed RPC runs
 	// with its own HOME and session root, but reads provider credentials directly
 	// from this local Pi directory.
-	PiAgentDir           string
-	SessionRoot          string
+	PiAgentDir  string
+	SessionRoot string
+	// RouterURL is the exact validated loopback endpoint owned by this router.
+	// It is intentionally configured here instead of inherited from the parent
+	// environment so managed roots and their native children stay on this router.
+	RouterURL            string
 	ManifestPath         string
 	MechaRPCExtension    string
 	PiSubagentsExtension string
@@ -88,8 +95,11 @@ func ValidateManagedLaunchConfig(config Config) error {
 	}
 	copy := config
 	copy.normalize()
-	if copy.PiExecutable == "" || copy.ManagedHome == "" || copy.PiAgentDir == "" || copy.SessionRoot == "" || copy.ManifestPath == "" || copy.MechaRPCExtension == "" || copy.PiSubagentsExtension == "" {
+	if copy.PiExecutable == "" || copy.ManagedHome == "" || copy.PiAgentDir == "" || copy.SessionRoot == "" || copy.RouterURL == "" || copy.ManifestPath == "" || copy.MechaRPCExtension == "" || copy.PiSubagentsExtension == "" {
 		return errors.New("managed mode requires core launch inputs")
+	}
+	if err := ValidateManagedRouterURL(copy.RouterURL); err != nil {
+		return err
 	}
 	if copy.RequireProviderRuntime && (copy.AuthHelperPath == "" || copy.RuntimeRoot == "") {
 		return errors.New("managed mode requires fixed provider runtime paths")
@@ -165,6 +175,38 @@ func ValidateManagedLaunchConfig(config Config) error {
 		if err := ValidateContainedRegularFile(path, "", "test-only extension"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ManagedRouterURLForListener derives the loopback endpoint a managed process
+// can use for this router. A wildcard listener is still reached through its
+// local IPv4 loopback address.
+func ManagedRouterURLForListener(host string, port int) (string, error) {
+	endpointHost := host
+	if endpointHost == "0.0.0.0" {
+		endpointHost = "127.0.0.1"
+	}
+	raw := "http://" + net.JoinHostPort(endpointHost, strconv.Itoa(port))
+	if err := ValidateManagedRouterURL(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// ValidateManagedRouterURL accepts only one local base URL. Managed child
+// processes inherit this explicit value, never an ambient canonical-router URL.
+func ValidateManagedRouterURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.Host == "" {
+		return errors.New("managed router URL must be an http loopback base URL")
+	}
+	if parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "::1" {
+		return errors.New("managed router URL must use a loopback host")
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return errors.New("managed router URL must include a valid port")
 	}
 	return nil
 }
@@ -300,7 +342,7 @@ func ChildEnvironmentFor(c Config, runtimeGeneration string, sessionEpoch int64)
 	session, _ := filepath.Abs(c.SessionRoot)
 	temp := filepath.Join(home, "tmp")
 	piAgentDir, _ := filepath.Abs(c.PiAgentDir)
-	environment := []string{"HOME=" + home, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=" + temp, "LANG=C", "LC_ALL=C", "PI_CODING_AGENT_DIR=" + piAgentDir, "MECHA_MANAGED_SESSION_ROOT=" + session, "MECHA_MANAGED_ACTIVE_ONLY=1"}
+	environment := []string{"HOME=" + home, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=" + temp, "LANG=C", "LC_ALL=C", "PI_CODING_AGENT_DIR=" + piAgentDir, "MECHA_MANAGED_SESSION_ROOT=" + session, "MECHA_MANAGED_ACTIVE_ONLY=1", "MECHA_ROUTER_URL=" + c.RouterURL}
 	if runtimeGeneration != "" {
 		environment = append(environment, "MECHA_RPC_RUNTIME_GENERATION="+runtimeGeneration, fmt.Sprintf("MECHA_RPC_SESSION_EPOCH=%d", sessionEpoch))
 	}

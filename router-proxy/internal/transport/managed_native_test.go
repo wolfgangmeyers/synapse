@@ -531,7 +531,7 @@ func newLockedLifecycleRestartManager(t *testing.T, durable *store.Store, root s
 	require.NoError(t, err)
 	manager, err := managed.NewManager(managed.ManagerOptions{
 		Store:    durable,
-		Config:   managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
+		Config:   managed.Config{Enabled: true, PiExecutable: lockedPi.executable, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775", ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: filepath.Join(root, "pi-extensions", "mecha-rpc", "index.ts"), PiSubagentsExtension: lockedPi.subagentsEntry, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		Manifest: manifest, ProcessFactory: processFactory, RPCFactory: rpcFactory,
 		CatalogSource:   managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
 		ProcessGroupOps: ops, AfterManagedLifecycleRestartTargetStartBeforeBind: hook,
@@ -773,7 +773,7 @@ func runManagedDirectMailboxNativeProof(t *testing.T, recovery, emptyBody bool) 
 			interruptAppend.Do(func() { close(appendBeforeAck) })
 			return errors.New("native append-before-ack interruption")
 		},
-		Config: managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot,
+		Config: managed.Config{Enabled: true, PiExecutable: pi, ManagedHome: home, PiAgentDir: filepath.Join(home, ".pi", "agent"), SessionRoot: sessionRoot, RouterURL: "http://127.0.0.1:18775",
 			ManifestPath: filepath.Join(root, "router", "contract", "managed-tools-v1.json"), MechaRPCExtension: mecha,
 			PiSubagentsExtension: subagents, AllowedWorkingDirectoryRoots: []string{root}, CanonicalQuietRecipientID: "supervisor"},
 		Manifest: manifest, ProcessFactory: factory,

@@ -60,6 +60,9 @@ export type MechaRpcOptions = {
 
 const CHILD_FACTORY_NAME = "mecha-rpc-managed-child-v1";
 const FIXED_SUBAGENTS_TOOL_NAMES = ["subagent", "get_subagent_result", "steer_subagent"] as const;
+// Pi owns these built-ins. They remain outside the router manifest because
+// they execute locally; the existing tool_call policy guards mutations.
+const FIXED_MANAGED_CODING_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
 const MAX_INSTALL_DELIVERY_RECEIPTS = 128;
 
 // These hooks exist only while the installed-Pi S4 fixture is enabled. They
@@ -443,7 +446,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     const active = pi.getActiveTools?.() ?? [];
     const desiredNames = new Set(desired.tools.map((tool) => tool.name));
     const ambient = process.env.MECHA_MANAGED_ACTIVE_ONLY === "1"
-      ? FIXED_SUBAGENTS_TOOL_NAMES.filter((name) => installed.has(name))
+      ? [...FIXED_MANAGED_CODING_TOOL_NAMES, ...FIXED_SUBAGENTS_TOOL_NAMES].filter((name) => installed.has(name))
       : active.filter((name) => !desiredNames.has(name));
     pi.setActiveTools?.([
       ...ambient,

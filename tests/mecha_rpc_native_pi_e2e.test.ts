@@ -25,6 +25,8 @@ const EXPECTED_COMMANDS = new Set([
   "mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1",
   "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply",
 ]);
+const MANAGED_CODING_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
+const FIXED_SUBAGENT_TOOL_NAMES = ["subagent", "get_subagent_result", "steer_subagent"] as const;
 
 type JsonRecord = Record<string, unknown>;
 type PendingResponse = { resolve: (value: JsonRecord) => void; reject: (reason: Error) => void };
@@ -159,6 +161,9 @@ class StockPiRpc {
     probeMode?: string;
     probeName?: string;
     testCommandFailureAt?: number;
+    routerURL?: string;
+    managedActiveOnly?: boolean;
+    enableBuiltinTools?: boolean;
   } = {}) {
     configureDeterministicProvider(home, baseUrl);
     const persistSession = options.persistSession === true;
@@ -168,7 +173,8 @@ class StockPiRpc {
       : ["--session", options.sessionPath];
     const extensions = options.extensions ?? [EXTENSION, SUBAGENTS_EXTENSION];
     this.process = spawn(PI_TARGET.bin, [
-      "--mode", "rpc", ...sessionArgs, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--approve", "--offline",
+      "--mode", "rpc", ...sessionArgs, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
+      ...(options.enableBuiltinTools === true ? [] : ["--no-builtin-tools"]), "--approve", "--offline",
       "--provider", "mecha-router-test", "--model", "deterministic-model",
       ...extensions.flatMap((extension) => ["-e", extension]),
     ], {
@@ -179,6 +185,8 @@ class StockPiRpc {
         TMPDIR: join(home, "tmp"),
         MECHA_RPC_RUNTIME_GENERATION: runtimeGeneration,
         MECHA_RPC_SESSION_EPOCH: "1",
+        ...(options.managedActiveOnly === true ? { MECHA_MANAGED_ACTIVE_ONLY: "1" } : {}),
+        ...(options.routerURL === undefined ? {} : { MECHA_ROUTER_URL: options.routerURL }),
         MECHA_TEST_BASE_URL: baseUrl,
         PI_OFFLINE: "1",
         ...(options.probeMode === undefined ? {} : { MECHA_RPC_TEST_PROBE_MODE: options.probeMode }),
@@ -398,7 +406,7 @@ async function startChildHandoffProvider(): Promise<ChildHandoffProvider> {
   const requests: JsonRecord[] = [];
   const childRequests: JsonRecord[] = [];
   let parentSpawned = false;
-  let childGoalSent = false;
+  let childStage = 0;
   let releaseHeldChildTurn: (() => void) | undefined;
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -419,7 +427,7 @@ async function startChildHandoffProvider(): Promise<ChildHandoffProvider> {
       if (!parentSpawned) {
         parentSpawned = true;
         streamToolCall(response, "spawn-stock-child", "subagent", {
-          prompt: "Use goal status, then wait for the control result.",
+          prompt: "Read the fixture, confirm the task router URL, then use goal status and wait for the control result.",
           description: "Managed child handoff",
           subagent_type: "general-purpose",
         });
@@ -430,8 +438,18 @@ async function startChildHandoffProvider(): Promise<ChildHandoffProvider> {
     }
 
     childRequests.push(payload);
-    if (!childGoalSent) {
-      childGoalSent = true;
+    if (childStage === 0) {
+      childStage++;
+      streamToolCall(response, "child-read-fixture", "read", { path: join(ROOT, "package.json") });
+      return;
+    }
+    if (childStage === 1) {
+      childStage++;
+      streamToolCall(response, "child-router-url", "bash", { command: "printf %s \"$MECHA_ROUTER_URL\"" });
+      return;
+    }
+    if (childStage === 2) {
+      childStage++;
       streamToolCall(response, "child-managed-goal", "goal", { action: "status" });
       return;
     }
@@ -858,7 +876,7 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     assert.ok(Array.isArray(manifestTools));
     const expectedToolNames = new Set(manifestTools.flatMap((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as JsonRecord).name === "string" ? [(tool as JsonRecord).name] : []));
     for (const name of expectedToolNames) assert.ok(advertisedNames.has(name), `Pi did not advertise managed tool ${name}`);
-    assert.deepEqual(advertisedNames, new Set([...expectedToolNames, "subagent", "get_subagent_result", "steer_subagent"]));
+    assert.deepEqual(advertisedNames, new Set([...expectedToolNames, ...FIXED_SUBAGENT_TOOL_NAMES]));
     assert.equal(expectedToolNames.size, 17);
     const advertisedDefinitions = new Map(advertisedTools.flatMap((tool) => {
       if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return [];
@@ -1051,6 +1069,28 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
   }
 });
 
+test("stock Pi 0.85 exposes managed root coding tools outside the router manifest", { timeout: 30_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-coding-tools-"));
+  const provider = await startDeterministicProvider({ firstToolCall: false });
+  const rpc = new StockPiRpc(home, provider.baseUrl, {
+    managedActiveOnly: true,
+    enableBuiltinTools: true,
+    routerURL: "http://127.0.0.1:18775",
+  });
+  try {
+    const manifest = readManifest();
+    await bootstrapCurrentManifest(rpc, manifest, RUNTIME_GENERATION, "123e4567-e89b-42d3-a456-426614174092");
+    successful(await rpc.request({ type: "prompt", message: "Inspect the managed tools." }));
+    const request = await waitFor(() => provider.requests[0], "managed root model request");
+    const manifestNames = (manifest.tools as JsonRecord[]).map((tool) => String(tool.name));
+    assert.deepEqual(requestToolNames(request), new Set([...manifestNames, ...FIXED_SUBAGENT_TOOL_NAMES, ...MANAGED_CODING_TOOL_NAMES]));
+  } finally {
+    await rpc.stop();
+    await provider.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("stock Pi 0.85 fails closed on every reserved command or tool collision and on partial command registration", { timeout: 60_000 }, async () => {
   const collisionCases = [...EXPECTED_COMMANDS].flatMap((name) => [
     { mode: "command", name },
@@ -1175,7 +1215,8 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
   const home = mkdtempSync(join(tmpdir(), "mecha-rpc-stock-child-"));
   mkdirSync(join(home, "tmp"), { recursive: true });
   const provider = await startChildHandoffProvider();
-  const rpc = new StockPiRpc(home, provider.baseUrl, { persistSession: true });
+  const isolatedRouterURL = "http://127.0.0.1:18775";
+  const rpc = new StockPiRpc(home, provider.baseUrl, { persistSession: true, routerURL: isolatedRouterURL, managedActiveOnly: true, enableBuiltinTools: true });
   try {
     const manifest = readManifest();
     const manifestHash = hashCanonicalJson(manifest);
@@ -1227,9 +1268,14 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
       assert.equal(advertised.description, expected.description);
       assert.deepEqual(advertised.parameters, expected.parameters);
     }
-    assert.equal(advertisedNames.has("subagent"), false);
-    assert.equal(advertisedNames.has("get_subagent_result"), false);
-    assert.equal(advertisedNames.has("steer_subagent"), false);
+    for (const name of MANAGED_CODING_TOOL_NAMES) assert.equal(advertisedNames.has(name), true, `child did not receive builtin ${name}`);
+    assert.deepEqual(advertisedNames, new Set([...manifestTools.map((tool) => String((tool as JsonRecord).name)), ...MANAGED_CODING_TOOL_NAMES]));
+    for (const name of FIXED_SUBAGENT_TOOL_NAMES) assert.equal(advertisedNames.has(name), false);
+
+    const readResultRequest = await waitFor(() => provider.childRequests[1], "the child request after reading the disposable fixture");
+    assert.match(JSON.stringify(readResultRequest), /mecha-mailbox-v2/);
+    const routerURLResultRequest = await waitFor(() => provider.childRequests[2], "the child request after checking its router URL");
+    assert.ok(JSON.stringify(routerURLResultRequest).includes(isolatedRouterURL), `child router URL leaked or was absent: ${JSON.stringify(routerURLResultRequest)}`);
 
     const childControlRequest = await waitFor(() => {
       const entry = customRecords(recordsIn(join(home, "sessions")), "mecha.control.request.v1").find((candidate) => {
@@ -1258,7 +1304,7 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
     });
     successful(await rpc.request({ type: "prompt", message: `/mecha-control-result-v1 ${result}` }));
 
-    await waitFor(() => provider.childRequests[1] === undefined ? undefined : true, "the child continuation held during result append");
+    await waitFor(() => provider.childRequests[3] === undefined ? undefined : true, "the child continuation held during result append");
     provider.releaseChildTurn();
     successful(await parentTurn);
     successful(await rpc.request({ type: "prompt", message: `/mecha-mailbox-deliver-v1 ${encodeHiddenEnvelope({
