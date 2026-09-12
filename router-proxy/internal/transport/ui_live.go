@@ -228,25 +228,93 @@ func (h *uiLiveHub) publish(ctx context.Context) {
 		}
 	}
 	for _, fact := range historyFacts {
-		entry, appendErr := h.router.store.AppendManagedCompleteHistory(ctx, fact.agentID, "managed_lifecycle", "info", fact.message)
+		entry, appendErr := h.router.store.RecordManagedCompleteHistoryWithPresentation(ctx, fact.agentID, "managed_lifecycle", "info", fact.message, fact.eventKey, fact.presentation)
 		if appendErr == nil {
-			h.publishHistory("complete", map[string]any{"id": entry.ID, "agent_id": entry.AgentID, "at": entry.At, "level": entry.Level, "message": entry.Message})
+			h.publishHistory("complete", managedHistoryFrame(entry))
 		}
 	}
 }
 
 type managedLifecycleHistoryFact struct {
-	agentID string
-	message string
+	agentID      string
+	message      string
+	eventKey     string
+	presentation *store.ManagedHistoryPresentation
 }
 
 func managedLifecycleLabel(value string) string {
 	switch value {
-	case "launching", "starting", "running", "stopping", "stopped", "failed", "resetting", "terminating", "terminated":
-		return value
+	case "launching":
+		return "Launching"
+	case "starting":
+		return "Starting"
+	case "running":
+		return "Running"
+	case "stopping":
+		return "Stopping"
+	case "stopped":
+		return "Stopped"
+	case "failed":
+		return "Failed"
+	case "resetting":
+		return "Resetting"
+	case "terminating":
+		return "Stopping"
+	case "terminated":
+		return "Removed"
 	default:
-		return "updated"
+		return "Updated"
 	}
+}
+
+func managedActivityLabel(value string) string {
+	if value == "active" {
+		return "Working"
+	}
+	if value == "idle" {
+		return "Ready"
+	}
+	return "Compacting"
+}
+
+func managedModelSummary(value map[string]any) string {
+	provider, providerOK := value["provider"].(string)
+	id, idOK := value["id"].(string)
+	if !providerOK || !idOK || provider == "" || id == "" {
+		return "Selected model"
+	}
+	label := map[string]string{"openai-codex": "ChatGPT", "google": "Google", "cursor": "Cursor"}[provider]
+	if label == "" {
+		label = "Selected model"
+	}
+	return label + " · " + id
+}
+
+func managedLifecycleEntryLabel(state string) string {
+	switch state {
+	case "starting", "launching":
+		return "Starting agent"
+	case "running":
+		return "Agent ready"
+	case "stopping", "terminating":
+		return "Stopping agent"
+	case "stopped":
+		return "Agent stopped"
+	case "resetting":
+		return "Resetting context"
+	case "terminated":
+		return "Agent removed"
+	default:
+		return "Agent updated"
+	}
+}
+
+func managedHistoryFrame(entry store.ManagedHistoryEntry) map[string]any {
+	frame := map[string]any{"id": entry.ID, "agent_id": entry.AgentID, "at": entry.At, "level": entry.Level, "message": entry.Message}
+	if entry.Presentation != nil {
+		frame["presentation"] = entry.Presentation
+	}
+	return frame
 }
 
 // managedLifecycleHistoryFacts converts only the already allowlisted UI
@@ -264,37 +332,34 @@ func managedLifecycleHistoryFacts(prior, current *uiLiveProjection) []managedLif
 		if !nextOK {
 			continue
 		}
-		nextState = managedLifecycleLabel(nextState)
+		nextDisplayState := managedLifecycleLabel(nextState)
 		if !existed {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: fmt.Sprintf("Managed worker entered %s", nextState)})
+			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: managedLifecycleEntryLabel(nextState), eventKey: fmt.Sprintf("lifecycle:%s:%d:entered", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "lifecycle"}})
 			continue
 		}
 		previousState, previousOK := previous["lifecycle_state"].(string)
 		if previousOK && previousState != nextState {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: fmt.Sprintf("Managed worker changed from %s to %s", managedLifecycleLabel(previousState), nextState)})
+			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "State changed", eventKey: fmt.Sprintf("lifecycle:%s:%d:state", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "state", From: managedLifecycleLabel(previousState), To: nextDisplayState}})
 		}
 		previousActivity, previousActivityOK := previous["activity_state"].(string)
 		nextActivity, nextActivityOK := next["activity_state"].(string)
-		if previousActivityOK && nextActivityOK && previousActivity != nextActivity {
-			if nextActivity == "compacting" {
-				facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Managed worker began compaction"})
-			} else if previousActivity == "compacting" {
-				facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Managed worker finished compaction"})
-			} else {
-				facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Managed worker activity changed"})
-			}
+		if previousActivityOK && nextActivityOK && previousActivity != nextActivity && previousActivity != "compacting" && nextActivity != "compacting" {
+			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "State changed", eventKey: fmt.Sprintf("activity:%s:%d:state", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "state", From: managedActivityLabel(previousActivity), To: managedActivityLabel(nextActivity)}})
+		}
+		previousModel, previousModelOK := previous["model"].(map[string]any)
+		nextModel, nextModelOK := next["model"].(map[string]any)
+		if previousModelOK && nextModelOK && !reflect.DeepEqual(previousModel, nextModel) {
+			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Model changed", eventKey: fmt.Sprintf("model:%s:%d", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "model", Outcome: "success", Summary: managedModelSummary(nextModel)}})
 		}
 		previousError, _ := previous["last_error"].(map[string]any)
 		nextError, nextErrorOK := next["last_error"].(map[string]any)
 		if nextErrorOK && !reflect.DeepEqual(previousError, nextError) {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Managed worker reported an operational error"})
+			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Agent failed", eventKey: fmt.Sprintf("agent-error:%s:%d", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "error", Summary: "The agent reported an operational failure", Error: &store.ManagedHistoryError{Code: "AGENT_FAILURE", Retryable: false, DetailAvailable: false}}})
 		}
 	}
-	for id := range prior.agents {
-		if _, exists := current.agents[id]; !exists {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "Managed worker was removed"})
-		}
-	}
+	// Termination deletes an agent's private Complete history in the same
+	// durable cleanup transaction. Do not reinsert an "Agent removed" row from
+	// this later snapshot publication.
 	sort.Slice(facts, func(left, right int) bool { return facts[left].agentID < facts[right].agentID })
 	return facts
 }
@@ -345,12 +410,19 @@ func (client *uiLiveClient) send(frame map[string]any) bool {
 // recordCompleteHistory keeps all local producers on one redacted, capped
 // ledger. Failures to write history never alter the underlying router action.
 func (r *Router) recordCompleteHistory(ctx context.Context, agentID, category, level, message, eventKey string) {
-	if r.store == nil {
+	r.recordCompleteHistoryWithPresentation(ctx, agentID, category, level, message, eventKey, nil)
+}
+
+// recordCompleteHistoryWithPresentation gives transport-owned facts the same
+// closed display contract as managed producers. It never forwards a raw error,
+// request, or message payload to Complete.
+func (r *Router) recordCompleteHistoryWithPresentation(ctx context.Context, agentID, category, level, message, eventKey string, presentation *store.ManagedHistoryPresentation) {
+	if r.store == nil || agentID == "" {
 		return
 	}
-	entry, err := r.store.RecordManagedCompleteHistory(ctx, agentID, category, level, message, eventKey)
+	entry, err := r.store.RecordManagedCompleteHistoryWithPresentation(ctx, agentID, category, level, message, eventKey, presentation)
 	if err == nil && r.uiLive != nil {
-		r.uiLive.publishHistory("complete", map[string]any{"id": entry.ID, "agent_id": entry.AgentID, "at": entry.At, "level": entry.Level, "message": entry.Message})
+		r.uiLive.publishHistory("complete", managedHistoryFrame(entry))
 	}
 }
 
@@ -423,12 +495,15 @@ func (h *uiLiveHub) publishHistory(view string, raw map[string]any) {
 		return
 	}
 	entry := map[string]any{}
-	for _, key := range []string{"id", "at", "level", "message"} {
+	for _, key := range []string{"id", "agent_id", "at", "level", "message", "presentation"} {
 		if value, ok := raw[key]; ok {
 			entry[key] = value
 		}
 	}
 	if _, ok := entry["id"].(string); !ok {
+		return
+	}
+	if _, ok := entry["agent_id"].(string); !ok {
 		return
 	}
 	h.mu.Lock()

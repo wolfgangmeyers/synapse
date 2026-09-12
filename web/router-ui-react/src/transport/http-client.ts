@@ -1,7 +1,7 @@
 import { normalizeRouterUrl } from "../persistence/settings-repository";
 import { secureUuid } from "../platform/secure-uuid";
 import { httpRoutes } from "../protocol/manifest";
-import { isAgentId, isConversationMessage, isManagedAgent, isManagedChildrenProjection, isModelSummary, isRecord, isRouterUtcTimestamp } from "../protocol/guards";
+import { isAgentId, isConversationMessage, isManagedAgent, isManagedChildrenProjection, isManagedCompleteHistoryEntry, isManagedHistoryEntry, isModelSummary, isRecord, isRouterUtcTimestamp } from "../protocol/guards";
 import { normalizeGoalState } from "../domain/goals";
 import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
@@ -215,8 +215,8 @@ function managedAgent(value: unknown): ManagedAgentResponse {
 }
 function managedHistory(value: unknown): ManagedHistoryResponse {
   const root = recordValue(value); const entries = root?.entries;
-  if (!root || (root.view !== "quiet" && root.view !== "complete") || !Array.isArray(entries) || !entries.every((entry) => { const item = recordValue(entry); return !!item && Object.keys(item).every((key) => ["id", "agent_id", "at", "level", "message"].includes(key)) && nonEmptyString(item.id) && isAgentId(item.agent_id) && (!Object.hasOwn(item, "at") || isRouterUtcTimestamp(item.at)) && (!Object.hasOwn(item, "level") || typeof item.level === "string") && (!Object.hasOwn(item, "message") || typeof item.message === "string"); }) || (root.next_before !== null && !safeInteger(root.next_before, 1))) throw invalidResponse("Router returned invalid managed history", value);
-  return { view: root.view, entries: entries.flatMap((entry) => { const item = recordValue(entry); return item && nonEmptyString(item.id) && isAgentId(item.agent_id) ? [{ id: item.id, agent_id: item.agent_id, ...(typeof item.at === "string" ? { at: item.at } : {}), ...(typeof item.level === "string" ? { level: item.level } : {}), ...(typeof item.message === "string" ? { message: item.message } : {}) }] : []; }), next_before: root.next_before };
+  if (!root || (root.view !== "quiet" && root.view !== "complete") || !Array.isArray(entries) || !entries.every(root.view === "complete" ? isManagedCompleteHistoryEntry : isManagedHistoryEntry) || (root.next_before !== null && !safeInteger(root.next_before, 1))) throw invalidResponse("Router returned invalid managed history", value);
+  return { view: root.view, entries, next_before: root.next_before };
 }
 function managedChildren(value: unknown): ManagedChildrenResponse {
   if (!isManagedChildrenProjection(value)) throw invalidResponse("Router returned invalid managed children", value);

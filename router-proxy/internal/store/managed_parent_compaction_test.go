@@ -98,6 +98,11 @@ func TestManagedParentCompactionPreservesExactOutcomesAndFencesDelayedEvents(t *
 	var outcome string
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT outcome FROM managed_parent_compaction_transitions WHERE agent_id=? AND source_sequence=2`, fence.AgentID).Scan(&outcome))
 	require.Equal(t, "failed", outcome)
+	completePage, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, completePage.Entries, 2)
+	require.Equal(t, "Context compaction failed", completePage.Entries[0].Message)
+	require.Equal(t, &ManagedHistoryPresentation{Kind: "compaction", Outcome: "failed"}, completePage.Entries[0].Presentation)
 
 	stale := fence
 	stale.RuntimeGeneration = "stale-generation"

@@ -47,6 +47,7 @@ func (e *ReminderNotCancelableError) Code() string { return "reminder_not_cancel
 type ReminderFireAttempt struct{ ReminderID, ScheduledFor string }
 type ReminderFireOutcome struct {
 	ReminderID          string
+	Target              string
 	Reminder            *domain.Reminder
 	Message             *domain.Message
 	ConversationMessage *domain.ConversationMessage
@@ -232,11 +233,13 @@ func (s *Store) fireDueReminders(ctx context.Context, onAttempt func(ReminderFir
 		attempt := ReminderFireAttempt{ReminderID: due.id, ScheduledFor: due.due}
 		notifyBeforeAttempt(beforeAttempt, attempt)
 		var outcome *ReminderFireOutcome
+		var target string
 		err = s.runImmediate(ctx, func() error {
 			reminder, err := s.reminderForTx(ctx, due.id)
 			if err != nil || reminder == nil || reminder.State != "scheduled" || reminder.NextDueAt > now {
 				return err
 			}
+			target = reminder.Target
 			if reminder.IntervalMS == nil {
 				return s.fireOneShot(ctx, reminder, now, onAttempt, &outcome)
 			}
@@ -244,7 +247,7 @@ func (s *Store) fireDueReminders(ctx context.Context, onAttempt func(ReminderFir
 		})
 		if err != nil {
 			_ = s.recordReminderFailure(ctx, due.id, now)
-			outcomes = append(outcomes, ReminderFireOutcome{ReminderID: due.id, ErrorCode: reminderErrorCode(err)})
+			outcomes = append(outcomes, ReminderFireOutcome{ReminderID: due.id, Target: target, ErrorCode: reminderErrorCode(err)})
 			continue
 		}
 		if outcome != nil {
@@ -275,7 +278,7 @@ func (s *Store) fireOneShot(ctx context.Context, reminder *domain.Reminder, now 
 	if err != nil {
 		return err
 	}
-	*output = &ReminderFireOutcome{ReminderID: reminder.ID, Reminder: updated, Message: message, ConversationMessage: conversation}
+	*output = &ReminderFireOutcome{ReminderID: reminder.ID, Target: reminder.Target, Reminder: updated, Message: message, ConversationMessage: conversation}
 	return nil
 }
 
@@ -345,7 +348,7 @@ func (s *Store) fireRecurring(ctx context.Context, reminder *domain.Reminder, no
 	if err != nil {
 		return err
 	}
-	*output = &ReminderFireOutcome{ReminderID: reminder.ID, Reminder: updated, Message: message, ConversationMessage: conversation}
+	*output = &ReminderFireOutcome{ReminderID: reminder.ID, Target: reminder.Target, Reminder: updated, Message: message, ConversationMessage: conversation}
 	return nil
 }
 

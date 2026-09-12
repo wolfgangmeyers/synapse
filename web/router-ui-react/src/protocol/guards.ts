@@ -63,6 +63,7 @@ import type {
   ManagedAgent,
   ManagedChild,
   ManagedChildrenProjection,
+  ManagedHistoryEntry,
 } from "./types";
 
 type RecordValue = Record<string, unknown>;
@@ -80,6 +81,7 @@ const utcMillisPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const routerUtcTimestampPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
 const lifecycleEpochPattern = /^[0-9a-fA-F-]{36}$/;
 const failureReasonPattern = /^[a-z][a-z0-9_]*$/;
+const managedHistorySensitivePattern = /token|secret|password|authorization|cookie|credential|argument|request body|stdout|stderr|environment|session_|session id|process_|process id|runtime_generation|\/users\/|\/home\/|\/tmp\//i;
 
 const invalid = (path: string, message: string): ProtocolError => ({ code: "invalid_protocol_value", path, message });
 
@@ -203,13 +205,34 @@ function isProviderPrompt(value: unknown): boolean {
   return (value.placeholder === undefined || isSafeString(value.placeholder, 0, 256)) && (value.url === undefined || isSafeProviderURL(value.url));
 }
 
-function isHistoryEntry(value: unknown): boolean {
-  return isRecord(value) && hasOnlyKeys(value, ["id", "agent_id", "at", "level", "message"])
+function isSafeManagedHistoryString(value: unknown, minimum: number, maximum: number): value is string {
+  return isSafeString(value, minimum, maximum) && !managedHistorySensitivePattern.test(value);
+}
+function isManagedHistoryError(value: unknown): boolean {
+  return isRecord(value) && hasOnlyKeys(value, ["code", "retryable", "detail_available"])
+    && isPatternString(value.code, /^[A-Za-z][A-Za-z0-9_]*$/, 1, 128) && typeof value.retryable === "boolean" && typeof value.detail_available === "boolean";
+}
+function isManagedHistoryPresentation(value: unknown): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["kind", "tool_name", "outcome", "from", "to", "child_label", "child_state", "summary", "error"]) || typeof value.kind !== "string" || !["message", "lifecycle", "state", "tool", "child", "compaction", "recovery", "error", "reminder", "model", "auth"].includes(value.kind)) return false;
+  if (value.tool_name !== undefined && !isPatternString(value.tool_name, /^[A-Za-z][A-Za-z0-9_.-]*$/, 1, 128)) return false;
+  if (value.outcome !== undefined && (typeof value.outcome !== "string" || !["success", "warning", "error", "unknown", "compacting", "completed", "failed", "aborted", "reconciled_unknown"].includes(value.outcome))) return false;
+  if (value.from !== undefined && !isSafeManagedHistoryString(value.from, 1, 48)) return false;
+  if (value.to !== undefined && !isSafeManagedHistoryString(value.to, 1, 48)) return false;
+  if (value.child_label !== undefined && !isSafeManagedHistoryString(value.child_label, 1, 160)) return false;
+  if (value.child_state !== undefined && (typeof value.child_state !== "string" || !["queued", "running", "completed", "steered", "aborted", "stopped", "error", "confirmed", "interrupted_unknown"].includes(value.child_state))) return false;
+  return (value.summary === undefined || isSafeManagedHistoryString(value.summary, 1, 512)) && (value.error === undefined || isManagedHistoryError(value.error));
+}
+export function isManagedHistoryEntry(value: unknown): value is ManagedHistoryEntry {
+  return isRecord(value) && hasOnlyKeys(value, ["id", "agent_id", "at", "level", "message", "presentation"])
     && isSafeString(value.id, 1, 128)
     && isAgentId(value.agent_id)
     && (value.at === undefined || isRouterUtcTimestamp(value.at))
     && (value.level === undefined || isSafeString(value.level, 1, 64))
-    && (value.message === undefined || isSafeString(value.message, 0, 65536));
+    && (value.message === undefined || isSafeString(value.message, 0, 65536))
+    && (value.presentation === undefined || isManagedHistoryPresentation(value.presentation));
+}
+export function isManagedCompleteHistoryEntry(value: unknown): value is ManagedHistoryEntry {
+  return isManagedHistoryEntry(value) && (value.message === undefined || isSafeManagedHistoryString(value.message, 0, 512));
 }
 
 export function isUILiveFrame(value: unknown): value is UILiveFrame {
@@ -219,7 +242,7 @@ export function isUILiveFrame(value: unknown): value is UILiveFrame {
   if (value.type === "managed_agents_snapshot") return isExactRecord(value, ["type", "protocol", "projection_version", "generated_at", "agents"]) && isRouterUtcTimestamp(value.generated_at) && Array.isArray(value.agents) && value.agents.every(isManagedAgent);
   if (value.type === "managed_agent_delta") return isExactRecord(value, ["type", "protocol", "projection_version", "base_version", "agent_id", "changes"]) && isSafeInteger(value.base_version, 0) && isAgentId(value.agent_id) && isManagedAgent(value.changes) && value.changes.agent_id === value.agent_id;
   if (value.type === "managed_agent_removed") return isExactRecord(value, ["type", "protocol", "projection_version", "base_version", "agent_id"]) && isSafeInteger(value.base_version, 0) && isAgentId(value.agent_id);
-  if (value.type === "history_entry") return isExactRecord(value, ["type", "protocol", "projection_version", "view", "entry"]) && (value.view === "quiet" || value.view === "complete") && isHistoryEntry(value.entry);
+  if (value.type === "history_entry") return isExactRecord(value, ["type", "protocol", "projection_version", "view", "entry"]) && (value.view === "quiet" ? isManagedHistoryEntry(value.entry) : value.view === "complete" && isManagedCompleteHistoryEntry(value.entry));
   if (value.type === "provider_auth_prompt") return isExactRecord(value, ["type", "protocol", "projection_version", "operation_id", "provider", "prompt"]) && isSafeString(value.operation_id, 1, 128) && isProviderName(value.provider) && isProviderPrompt(value.prompt);
   if (value.type === "provider_auth_state") return isRecord(value) && hasOnlyKeys(value, ["type", "protocol", "projection_version", "operation_id", "provider", "status", "error"]) && isSafeString(value.operation_id, 1, 128) && isProviderName(value.provider) && typeof value.status === "string" && ["pending", "succeeded", "failed", "expired", "cancelled"].includes(value.status) && (value.error === undefined || isSafeString(value.error, 1, 512));
   return false;

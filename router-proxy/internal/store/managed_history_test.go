@@ -85,6 +85,28 @@ func TestManagedQuietSendAuthorizationIsSingleUseAndCompleteHistoryProducerIsIde
 	require.Len(t, page.Entries, 1)
 }
 
+func TestManagedHistoryProjectsClosedPresentationMetadata(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+	presentation := &ManagedHistoryPresentation{Kind: "tool", ToolName: "functions.bash", Outcome: "success", Summary: "Completed successfully"}
+	entry, err := durable.RecordManagedCompleteHistoryWithPresentation(ctx, "worker", "managed_control", "info", "Ran bash", "tool:1", presentation)
+	require.NoError(t, err)
+	require.Equal(t, presentation, entry.Presentation)
+
+	page, err := durable.ManagedHistoryPage(ctx, "worker", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, presentation, page.Entries[0].Presentation)
+	require.NotContains(t, fmt.Sprintf("%+v", page.Entries[0]), "arguments")
+
+	_, err = durable.RecordManagedCompleteHistoryWithPresentation(ctx, "worker", "managed_control", "info", "Ran bash", "tool:unsafe", &ManagedHistoryPresentation{Kind: "tool", ToolName: "bash", Summary: "token=not-safe"})
+	require.Error(t, err, "presentation text cannot become a secret-bearing diagnostic channel")
+	_, err = durable.RecordManagedCompleteHistoryWithPresentation(ctx, "worker", "managed_control", "info", "Ran bash", "tool:bad-kind", &ManagedHistoryPresentation{Kind: "unknown"})
+	require.Error(t, err)
+	_, err = durable.RecordManagedCompleteHistory(ctx, "worker", "managed_control", "info", "stdout: private output", "tool:raw-output")
+	require.Error(t, err, "raw process output cannot become Complete history")
+}
+
 func TestManagedHistoryRejectsInvalidInputs(t *testing.T) {
 	durable := openTestStore(t)
 	_, err := durable.AppendManagedCompleteHistory(context.Background(), "worker", "", "info", "message")

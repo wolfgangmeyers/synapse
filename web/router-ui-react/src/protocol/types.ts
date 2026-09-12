@@ -871,12 +871,33 @@ export interface ManagedChildrenProjection {
   recovery_state: "current" | "reconstructing";
   children: ManagedChild[];
 }
+export type ManagedHistoryKind = "message" | "lifecycle" | "state" | "tool" | "child" | "compaction" | "recovery" | "error" | "reminder" | "model" | "auth";
+export type ManagedHistoryOutcome = "success" | "warning" | "error" | "unknown" | "compacting" | "completed" | "failed" | "aborted" | "reconciled_unknown";
+export interface ManagedHistoryError {
+  code: string;
+  retryable: boolean;
+  detail_available: boolean;
+}
+// The router supplies only a closed presentation projection. It deliberately
+// excludes raw tool arguments, output, diagnostics, and runtime identifiers.
+export interface ManagedHistoryPresentation {
+  kind: ManagedHistoryKind;
+  tool_name?: string;
+  outcome?: ManagedHistoryOutcome;
+  from?: string;
+  to?: string;
+  child_label?: string;
+  child_state?: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "confirmed" | "interrupted_unknown";
+  summary?: string;
+  error?: ManagedHistoryError;
+}
 export interface ManagedHistoryEntry {
   id: string;
   agent_id: AgentId;
   at?: RouterTimestamp;
   level?: string;
   message?: string;
+  presentation?: ManagedHistoryPresentation;
 }
 export interface ManagedAgentsSnapshotFrame {
   type: "managed_agents_snapshot";

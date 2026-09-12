@@ -177,6 +177,7 @@ type Manager struct {
 	restartAllDispatchFailureRecorder          RestartAllDispatchFailureRecorder
 	rootControlHandlers                        *RootControlHandlerRegistry
 	projectionPublisher                        func()
+	completeHistoryPublisher                   CompleteHistoryPublisher
 	directReplyPublisher                       DirectReplyPublisher
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
@@ -1815,13 +1816,20 @@ func (m *Manager) OfferDirect(agentID string) {
 	})
 }
 
+func (m *Manager) recordManagedDeliveryFailure(attempt store.ManagedDirectAttempt, code string) {
+	entry, err := m.store.RecordManagedCompleteHistoryWithPresentation(context.Background(), attempt.Fence.AgentID, "managed_delivery", "error", "Message delivery failed", "managed-delivery:"+attempt.MessageID+":"+fmt.Sprint(attempt.AttemptNumber)+":"+code, &store.ManagedHistoryPresentation{Kind: "error", Summary: "The message could not be delivered.", Error: &store.ManagedHistoryError{Code: code, Retryable: false, DetailAvailable: false}})
+	if err == nil {
+		m.publishCompleteHistory(entry)
+	}
+}
+
 // releaseManagedDirect records an unsuccessful pre-acknowledgment delivery.
 // A transient SQLite failure must not leave the active attempt blocking every
 // later allocation, so it is retried until it reaches released or failed.
 func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code, detail string) {
 	terminal, err := m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
 	if err == nil {
-		_, _ = m.store.RecordManagedCompleteHistory(context.Background(), attempt.Fence.AgentID, "managed_delivery", "error", "Managed message delivery was not confirmed", "managed-delivery:"+attempt.MessageID+":"+fmt.Sprint(attempt.AttemptNumber)+":"+code)
+		m.recordManagedDeliveryFailure(attempt, code)
 		if !terminal {
 			m.scheduleDirectRetry(attempt.Fence.AgentID)
 		}
@@ -1846,7 +1854,7 @@ func (m *Manager) releaseManagedDirect(attempt store.ManagedDirectAttempt, code,
 func (m *Manager) releaseManagedDirectRecovery(attempt store.ManagedDirectAttempt, code string) {
 	terminal, err := m.store.ReleaseManagedDirectRecovery(context.Background(), attempt, code)
 	if err == nil {
-		_, _ = m.store.RecordManagedCompleteHistory(context.Background(), attempt.Fence.AgentID, "managed_delivery", "error", "Managed message delivery was not confirmed", "managed-delivery:"+attempt.MessageID+":"+fmt.Sprint(attempt.AttemptNumber)+":"+code)
+		m.recordManagedDeliveryFailure(attempt, code)
 		if !terminal {
 			m.scheduleDirectRetry(attempt.Fence.AgentID)
 		}
@@ -1890,7 +1898,7 @@ func (m *Manager) retryManagedDirectRelease(attempt store.ManagedDirectAttempt, 
 				terminal, err = m.store.ReleaseManagedDirect(context.Background(), attempt, code, detail)
 			}
 			if err == nil {
-				_, _ = m.store.RecordManagedCompleteHistory(context.Background(), attempt.Fence.AgentID, "managed_delivery", "error", "Managed message delivery was not confirmed", "managed-delivery:"+attempt.MessageID+":"+fmt.Sprint(attempt.AttemptNumber)+":"+code)
+				m.recordManagedDeliveryFailure(attempt, code)
 				if !terminal {
 					m.scheduleDirectRetry(attempt.Fence.AgentID)
 				}

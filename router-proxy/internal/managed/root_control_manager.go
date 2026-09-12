@@ -85,7 +85,6 @@ func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBi
 			return
 		}
 	}
-	m.recordRootControlHistory(ctx, binding.agentID, event.OperationID, "requested", "info", event.RequestID)
 	m.resumeRootControl(ctx, binding, event.RequestID, event.Arguments)
 }
 
@@ -200,7 +199,7 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	fence := bindingFence(binding.agentID, binding)
 	if executeErr != nil {
 		_ = m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, "HANDLER_FAILED", boundedRootError(executeErr))
-		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.OperationID, "failed", "error", claim.Request.RequestID)
+		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.ToolName, "error", claim.Request.RequestID)
 		return
 	}
 	if result.Details == nil {
@@ -237,23 +236,51 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	}
 	completed, err := m.store.CompleteManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, store.ManagedControlResult{Status: result.Status, Content: result.Content, DetailsJSON: string(details), PayloadSHA256: fmt.Sprintf("%x", sha256.Sum256(canonical)), DecodedPayloadBytes: len(canonical), ErrorCode: result.ErrorCode, ErrorMessage: result.ErrorMessage, Retryable: result.Retryable})
 	if err == nil && completed != nil {
-		outcome, level := "completed", "info"
+		outcome := "success"
 		if result.Status == "error" {
-			outcome, level = "failed", "error"
+			outcome = "error"
 		}
-		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.OperationID, outcome, level, claim.Request.RequestID)
+		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.ToolName, outcome, claim.Request.RequestID)
 		m.appendRootControlResult(ctx, binding, *completed)
 	}
 }
 
-// recordRootControlHistory intentionally records only immutable operation names
-// and outcomes. Tool arguments and result content can include human-entered
-// text, so they remain in the fenced control ledger rather than browser history.
-func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, operationID, outcome, level, requestID string) {
-	if operationID == "" || requestID == "" {
+// recordRootControlHistory uses the immutable tool name and terminal result.
+// Arguments and result content can contain human-entered text, so they never
+// cross into the timeline projection.
+func (m *Manager) recordRootControlHistory(ctx context.Context, agentID, toolName, outcome, requestID string) {
+	if toolName == "" || requestID == "" {
 		return
 	}
-	_, _ = m.store.RecordManagedCompleteHistory(ctx, agentID, "managed_control", level, fmt.Sprintf("Managed tool %s %s", operationID, outcome), "managed-control:"+requestID+":"+outcome)
+	level, message := "info", "Ran "+toolName
+	presentation := &store.ManagedHistoryPresentation{Kind: "tool", ToolName: toolName, Outcome: outcome, Summary: "Completed successfully"}
+	if toolName == "goal" {
+		message = "Updated goal"
+	}
+	if toolName == "mecha_reminder" {
+		message = "Reminder set"
+		presentation = &store.ManagedHistoryPresentation{Kind: "reminder", Outcome: outcome, Summary: "Completed successfully"}
+	}
+	if outcome == "error" {
+		level = "error"
+		presentation.Outcome = "error"
+		presentation.Summary = "The operation could not be completed."
+		presentation.Error = &store.ManagedHistoryError{Code: "TOOL_FAILED", Retryable: false, DetailAvailable: false}
+		switch toolName {
+		case "goal":
+			message = "Goal update failed"
+		case "mecha_reminder":
+			message = "Reminder failed"
+		case "bash":
+			message = "Bash failed"
+		default:
+			message = "Tool failed"
+		}
+	}
+	entry, err := m.store.RecordManagedCompleteHistoryWithPresentation(ctx, agentID, "managed_control", level, message, "managed-control:"+requestID+":"+outcome, presentation)
+	if err == nil {
+		m.publishCompleteHistory(entry)
+	}
 }
 
 func rootControlPayload(row store.ManagedControlRequest, result RootControlHandlerResult, details map[string]any) map[string]any {

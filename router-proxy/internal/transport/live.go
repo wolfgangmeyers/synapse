@@ -451,7 +451,7 @@ func (r *Router) sweep(ctx context.Context) (store.SweepResult, error) {
 			"state":      outcome.State,
 			"reason":     "delivery_timeout",
 		})
-		r.recordCompleteHistory(ctx, outcome.AgentID, "delivery", "error", "Message delivery timed out", "delivery-timeout:"+outcome.MessageID+":"+strconv.Itoa(outcome.Attempt))
+		r.recordCompleteHistoryWithPresentation(ctx, outcome.AgentID, "delivery", "error", "Message delivery failed", "delivery-timeout:"+outcome.MessageID+":"+strconv.Itoa(outcome.Attempt), &store.ManagedHistoryPresentation{Kind: "error", Summary: "The message could not be delivered.", Error: &store.ManagedHistoryError{Code: "DELIVERY_TIMEOUT", Retryable: false, DetailAvailable: false}})
 		if outcome.State == "dead_letter" {
 			r.emit("message_dead_lettered", map[string]any{
 				"message_id": outcome.MessageID,

@@ -1098,7 +1098,7 @@ func (r *Router) sweepReminders(ctx context.Context) (int, int) {
 				"agent_id":          outcome.Message.To,
 			})
 			r.afterEnqueue(store.EnqueueResult{Message: *outcome.Message, ConversationMessage: outcome.ConversationMessage, ConversationCreated: outcome.ConversationMessage != nil})
-			r.recordCompleteHistory(ctx, outcome.Message.To, "reminder", "info", "Reminder delivered", "reminder:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID])
+			r.recordCompleteHistoryWithPresentation(ctx, outcome.Message.To, "reminder", "info", "Reminder delivered", "reminder:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID], &store.ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"})
 			continue
 		}
 		failed++
@@ -1107,7 +1107,7 @@ func (r *Router) sweepReminders(ctx context.Context) (int, int) {
 			"scheduled_for": scheduledForByReminderID[outcome.ReminderID],
 			"error_code":    outcome.ErrorCode,
 		})
-		r.recordCompleteHistory(ctx, "", "reminder", "error", "Reminder delivery failed", "reminder-failed:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID])
+		r.recordCompleteHistoryWithPresentation(ctx, outcome.Target, "reminder", "error", "Reminder delivery failed", "reminder-failed:"+outcome.ReminderID+":"+scheduledForByReminderID[outcome.ReminderID], &store.ManagedHistoryPresentation{Kind: "reminder", Outcome: "error", Summary: "The reminder could not be delivered.", Error: &store.ManagedHistoryError{Code: "REMINDER_DELIVERY_FAILED", Retryable: false, DetailAvailable: false}})
 	}
 	return succeeded, failed
 }
