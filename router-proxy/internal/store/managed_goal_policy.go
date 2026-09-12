@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -37,17 +38,17 @@ type ManagedGoalConfig struct {
 // ManagedGoalPolicy is the sole durable managed-goal authority. The extension
 // only receives its fenced projection and reports lifecycle receipts.
 type ManagedGoalPolicy struct {
-	AgentID, HistoryScopeID                                string
-	DesiredRevision, AppliedRevision                       int64
-	Config                                                 ManagedGoalConfig
-	ProjectionState                                        string
-	ProjectionAttempts                                     int
-	NextProjectionAt                                       string
-	LastErrorCode, LastErrorMessage, LastErrorAt           string
-	EvaluatorState                                         string
-	EvaluatorAttempts, NotDoneWakeups, LastSettledSequence int64
-	NextWakeupAt, SnoozedUntil                             string
-	CreatedAt, UpdatedAt                                   string
+	AgentID, HistoryScopeID                                                    string
+	DesiredRevision, AppliedRevision                                           int64
+	Config                                                                     ManagedGoalConfig
+	ProjectionState                                                            string
+	ProjectionAttempts                                                         int
+	NextProjectionAt                                                           string
+	LastErrorCode, LastErrorMessage, LastErrorAt                               string
+	EvaluatorState, LastOutcome                                                string
+	EvaluatorAttempts, NotDoneWakeups, RearmActivityCount, LastSettledSequence int64
+	NextWakeupAt, SnoozedUntil                                                 string
+	CreatedAt, UpdatedAt                                                       string
 }
 
 func DefaultManagedGoalSettings() ManagedGoalSettings {
@@ -83,11 +84,11 @@ func scanManagedGoalPolicy(scanner interface{ Scan(...any) error }) (*ManagedGoa
 	var result ManagedGoalPolicy
 	var enabled int
 	var settingsJSON string
-	var nextProjection, errorCode, errorMessage, errorAt, nextWakeup, snoozed sql.NullString
+	var nextProjection, errorCode, errorMessage, errorAt, lastOutcome, nextWakeup, snoozed sql.NullString
 	err := scanner.Scan(&result.AgentID, &result.HistoryScopeID, &result.DesiredRevision, &result.AppliedRevision,
 		&enabled, &result.Config.Goal, &settingsJSON, &result.ProjectionState, &result.ProjectionAttempts,
-		&nextProjection, &errorCode, &errorMessage, &errorAt, &result.EvaluatorState, &result.EvaluatorAttempts,
-		&result.NotDoneWakeups, &nextWakeup, &snoozed, &result.LastSettledSequence, &result.CreatedAt, &result.UpdatedAt)
+		&nextProjection, &errorCode, &errorMessage, &errorAt, &result.EvaluatorState, &lastOutcome, &result.EvaluatorAttempts,
+		&result.NotDoneWakeups, &result.RearmActivityCount, &nextWakeup, &snoozed, &result.LastSettledSequence, &result.CreatedAt, &result.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -96,11 +97,12 @@ func scanManagedGoalPolicy(scanner interface{ Scan(...any) error }) (*ManagedGoa
 	}
 	result.Config.Enabled = enabled == 1
 	result.NextProjectionAt, result.LastErrorCode, result.LastErrorMessage, result.LastErrorAt = nextProjection.String, errorCode.String, errorMessage.String, errorAt.String
+	result.LastOutcome = lastOutcome.String
 	result.NextWakeupAt, result.SnoozedUntil = nextWakeup.String, snoozed.String
 	return &result, nil
 }
 
-const managedGoalPolicyColumns = `agent_id,history_scope_id,desired_revision,applied_revision,goal_enabled,goal_text,settings_json,projection_state,projection_attempts,next_projection_at,last_error_code,last_error_message,last_error_at,evaluator_state,evaluator_attempts,not_done_wakeups,next_wakeup_at,snoozed_until,last_settled_sequence,created_at,updated_at`
+const managedGoalPolicyColumns = `agent_id,history_scope_id,desired_revision,applied_revision,goal_enabled,goal_text,settings_json,projection_state,projection_attempts,next_projection_at,last_error_code,last_error_message,last_error_at,evaluator_state,last_outcome,evaluator_attempts,not_done_wakeups,rearm_activity_count,next_wakeup_at,snoozed_until,last_settled_sequence,created_at,updated_at`
 
 func (s *Store) ManagedGoalPolicyFor(ctx context.Context, agentID string) (*ManagedGoalPolicy, error) {
 	if agentID == "" {
@@ -170,7 +172,7 @@ func (s *Store) UpdateManagedGoalPolicy(ctx context.Context, fence ManagedRuntim
 		if err := s.ensureManagedGoalPolicyTx(ctx, fence.AgentID, now); err != nil {
 			return err
 		}
-		update, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET desired_revision=desired_revision+1,goal_enabled=?,goal_text=?,settings_json=?,projection_state='pending',projection_attempts=0,next_projection_at=?,last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,evaluator_state=CASE WHEN ?=1 THEN 'idle' ELSE 'done' END,evaluator_attempts=0,not_done_wakeups=0,next_wakeup_at=NULL,snoozed_until=NULL,updated_at=? WHERE agent_id=?`, boolInt(config.Enabled), config.Goal, settings, now, boolInt(config.Enabled), now, fence.AgentID)
+		update, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET desired_revision=desired_revision+1,goal_enabled=?,goal_text=?,settings_json=?,projection_state='pending',projection_attempts=0,next_projection_at=?,last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,evaluator_state=CASE WHEN ?=1 THEN 'idle' ELSE 'done' END,last_outcome=NULL,evaluator_attempts=0,not_done_wakeups=0,rearm_activity_count=0,next_wakeup_at=NULL,snoozed_until=NULL,updated_at=? WHERE agent_id=?`, boolInt(config.Enabled), config.Goal, settings, now, boolInt(config.Enabled), now, fence.AgentID)
 		if err != nil {
 			return err
 		}
@@ -240,6 +242,227 @@ func (s *Store) MarkManagedGoalPolicyProjectionFailure(ctx context.Context, fenc
 		return err
 	})
 	return result, err
+}
+
+const (
+	ManagedGoalEvaluationCompleted = "COMPLETED"
+	ManagedGoalEvaluationNotDone   = "NOT_DONE"
+	managedGoalRearmEvents         = 3
+)
+
+// ClaimManagedGoalEvaluation admits one evaluator run from one native settled
+// boundary. The gate reads the parent compaction state and current child
+// snapshot in the same transaction, so the evaluator cannot wake a parent
+// while the router knows it is still doing child work or compaction.
+func (s *Store) ClaimManagedGoalEvaluation(ctx context.Context, fence ManagedRuntimeFence, settledSequence int64) (*ManagedGoalPolicy, bool, error) {
+	if !validManagedRuntimeFence(fence) || settledSequence < 1 {
+		return nil, false, errors.New("managed goal evaluation claim is invalid")
+	}
+	var policy *ManagedGoalPolicy
+	claimed := false
+	err := s.runImmediate(ctx, func() error {
+		current, err := scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !current.Config.Enabled || current.ProjectionState != managedGoalProjectionApplied || current.DesiredRevision != current.AppliedRevision || current.EvaluatorState != "idle" || settledSequence <= current.LastSettledSequence {
+			return nil
+		}
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state='idle'`, managedFenceValues(fence)...).Scan(&present); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		var compacting int
+		err = s.db.QueryRowContext(ctx, `SELECT compacting FROM managed_parent_compaction_state WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&compacting)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if compacting != 0 {
+			return nil
+		}
+		var snapshot []byte
+		err = s.db.QueryRowContext(ctx, `SELECT snapshot_canonical FROM managed_readiness_sources WHERE `+readinessSourceFenceWhere(), readinessSourceFenceArgs(fence)...).Scan(&snapshot)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		if managedGoalSnapshotHasActiveChild(snapshot) {
+			return nil
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='evaluating',evaluator_attempts=evaluator_attempts+1,last_settled_sequence=?,updated_at=? WHERE agent_id=? AND evaluator_state='idle' AND last_settled_sequence<?`, settledSequence, now, fence.AgentID, settledSequence)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return nil
+		}
+		policy, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		claimed = err == nil
+		return err
+	})
+	return policy, claimed, err
+}
+
+func managedGoalSnapshotHasActiveChild(canonical []byte) bool {
+	var snapshot struct {
+		Runs []struct {
+			LifecycleState string `json:"lifecycle_state"`
+		} `json:"runs"`
+	}
+	if len(canonical) == 0 || json.Unmarshal(canonical, &snapshot) != nil {
+		// A missing or unreadable snapshot is not evidence that child work ended.
+		return true
+	}
+	for _, run := range snapshot.Runs {
+		if run.LifecycleState == "queued" || run.LifecycleState == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+// CompleteManagedGoalEvaluation records the verdict before a manager attempts
+// a wakeup. The next evaluation needs a later native settled sequence, which
+// prevents a failed or repeated delivery from becoming a timer-driven loop.
+func (s *Store) CompleteManagedGoalEvaluation(ctx context.Context, fence ManagedRuntimeFence, settledSequence int64, outcome string) (*ManagedGoalPolicy, bool, error) {
+	if !validManagedRuntimeFence(fence) || settledSequence < 1 || (outcome != ManagedGoalEvaluationCompleted && outcome != ManagedGoalEvaluationNotDone) {
+		return nil, false, errors.New("managed goal evaluation completion is invalid")
+	}
+	var policy *ManagedGoalPolicy
+	changed := false
+	err := s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		state := "done"
+		if outcome == ManagedGoalEvaluationNotDone {
+			state = "idle"
+		}
+		args := append([]any{outcome, state, outcome, outcome, now, fence.AgentID, settledSequence}, managedFenceValues(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state=CASE WHEN ?='NOT_DONE' AND not_done_wakeups+1>=1000 THEN 'scheduled' ELSE ? END,last_outcome=?,not_done_wakeups=not_done_wakeups+CASE WHEN ?='NOT_DONE' THEN 1 ELSE 0 END,rearm_activity_count=0,next_wakeup_at=NULL,snoozed_until=NULL,updated_at=? WHERE agent_id=? AND evaluator_state='evaluating' AND last_settled_sequence=? AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, args...)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return nil
+		}
+		policy, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		changed = err == nil
+		return err
+	})
+	return policy, changed, err
+}
+
+// SnoozeManagedGoalPolicy preserves a scheduled wakeup in router SQLite. A
+// process replacement can therefore re-register it without trusting a local
+// extension timer.
+func (s *Store) SnoozeManagedGoalPolicy(ctx context.Context, fence ManagedRuntimeFence) (*ManagedGoalPolicy, bool, error) {
+	if !validManagedRuntimeFence(fence) {
+		return nil, false, errors.New("managed goal snooze is invalid")
+	}
+	var policy *ManagedGoalPolicy
+	changed := false
+	err := s.runImmediate(ctx, func() error {
+		current, err := scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !current.Config.Enabled || !current.Config.Settings.SnoozeEnabled || current.EvaluatorState == "done" || current.ProjectionState != managedGoalProjectionApplied || current.DesiredRevision != current.AppliedRevision {
+			return nil
+		}
+		now := s.clock.Now()
+		wakeAt := formatTimestamp(now.Add(time.Duration(current.Config.Settings.SnoozeDurationMS) * time.Millisecond))
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='snoozed',next_wakeup_at=?,snoozed_until=?,updated_at=? WHERE agent_id=? AND evaluator_state NOT IN ('evaluating','done')`, wakeAt, wakeAt, formatTimestamp(now), fence.AgentID)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil || count != 1 {
+			return err
+		}
+		policy, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		changed = err == nil
+		return err
+	})
+	return policy, changed, err
+}
+
+// WakeSnoozedManagedGoalPolicy consumes only a due snooze for the current
+// fence. A stale timer cannot wake a reset, terminated, or reconfigured run.
+func (s *Store) WakeSnoozedManagedGoalPolicy(ctx context.Context, fence ManagedRuntimeFence) (*ManagedGoalPolicy, bool, error) {
+	if !validManagedRuntimeFence(fence) {
+		return nil, false, errors.New("managed goal wakeup is invalid")
+	}
+	var policy *ManagedGoalPolicy
+	changed := false
+	err := s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		args := append([]any{now, fence.AgentID, now}, managedFenceValues(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='idle',next_wakeup_at=NULL,snoozed_until=NULL,updated_at=? WHERE agent_id=? AND evaluator_state='snoozed' AND snoozed_until<=? AND goal_enabled=1 AND projection_state='applied' AND desired_revision=applied_revision AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, args...)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil || count != 1 {
+			return err
+		}
+		policy, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		changed = err == nil
+		return err
+	})
+	return policy, changed, err
+}
+
+// RecordManagedGoalMeaningfulActivity opens a capped NOT_DONE policy only
+// after three independently observed child/tool activity events. It does not
+// evaluate or wake by itself; the next native settled boundary does that.
+func (s *Store) RecordManagedGoalMeaningfulActivity(ctx context.Context, fence ManagedRuntimeFence) (*ManagedGoalPolicy, bool, error) {
+	if !validManagedRuntimeFence(fence) {
+		return nil, false, errors.New("managed goal activity is invalid")
+	}
+	var policy *ManagedGoalPolicy
+	rearmed := false
+	err := s.runImmediate(ctx, func() error {
+		args := append([]any{formatTimestamp(s.clock.Now()), fence.AgentID}, managedFenceValues(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET rearm_activity_count=rearm_activity_count+1,updated_at=? WHERE agent_id=? AND goal_enabled=1 AND evaluator_state='scheduled' AND not_done_wakeups>=1000 AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, args...)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil || count != 1 {
+			return err
+		}
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='idle',evaluator_attempts=0,not_done_wakeups=0,rearm_activity_count=0,updated_at=? WHERE agent_id=? AND rearm_activity_count>=?`, formatTimestamp(s.clock.Now()), fence.AgentID, managedGoalRearmEvents)
+		if err != nil {
+			return err
+		}
+		count, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		rearmed = count == 1
+		policy, err = scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=?`, fence.AgentID))
+		return err
+	})
+	return policy, rearmed, err
 }
 
 func (s *Store) PendingManagedGoalPolicyForFence(ctx context.Context, fence ManagedRuntimeFence) (*ManagedGoalPolicy, error) {
