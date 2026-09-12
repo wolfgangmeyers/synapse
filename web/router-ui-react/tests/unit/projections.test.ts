@@ -3,6 +3,7 @@ import { applyLifecycleReplay, applyLifecycleSnapshot, projectConnectedAgents, u
 import type { Agent } from "../../src/state/agent-projection";
 import { createInitialState } from "../../src/state/app-state";
 import { reducer } from "../../src/state/reducer";
+import type { ManagedChildrenProjection } from "../../src/protocol/types";
 const agent = (id: string, version = 1) => ({ agent_id: id, instance_id: "i", subagent_version: version, subagent_count: 1, subagents: [{ id: "child", description: "work" }] });
 describe("agent projections", () => { it("uses connected agents as authority and excludes UI", () => { expect(projectConnectedAgents([agent("web"), agent("peer")], "web").map((item) => item.agent_id)).toEqual(["peer"]); });
   it("preserves a catalog through an empty reconnect snapshot for the same instance", () => {
@@ -41,4 +42,13 @@ describe("agent projections", () => { it("uses connected agents as authority and
     expect(state.pendingLifecycle?.size).toBe(0);
     expect(state.agents.find((item) => item.agent_id === "supervisor")).toMatchObject({ subagent_version: 18249, subagent_count: 1 });
   });
-  it("applies lifecycle versions monotonically", () => { const current = [agent("peer", 2)]; expect(applyLifecycleSnapshot(current, [agent("peer", 1)], 1, 2).agents[0]?.subagent_version).toBe(2); }); });
+  it("applies lifecycle versions monotonically", () => { const current = [agent("peer", 2)]; expect(applyLifecycleSnapshot(current, [agent("peer", 1)], 1, 2).agents[0]?.subagent_version).toBe(2); });
+  it("accepts newer authoritative managed child snapshots that skip a global version", () => {
+    const scope = { routerUrl: "http://router.test:4000", agentId: "web" };
+    const children = (version: number): ManagedChildrenProjection[] => [{ agent_id: "managed-peer", source: "router-managed", lifecycle_version: version, recovery_state: "current", children: [] }];
+    let state = reducer(createInitialState(scope), { type: "managed/children", scope, version: 2, children: children(2) });
+    state = reducer(state, { type: "managed/children", scope, version: 4, children: children(4) });
+    state = reducer(state, { type: "managed/children", scope, version: 3, children: children(3) });
+    expect(state.managedChildrenProjectionVersion).toBe(4);
+    expect(state.managedChildren["managed-peer"]?.lifecycle_version).toBe(4);
+  }); });

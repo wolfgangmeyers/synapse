@@ -75,7 +75,10 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, managedProjectionVersion: action.version, managedAgents: (state.managedAgents ?? []).filter((agent) => agent.agent_id !== action.agentId), managedChildren };
     }
     case "managed/children": {
-      if (action.version !== undefined && state.managedChildrenProjectionVersion !== undefined && action.version !== state.managedChildrenProjectionVersion + 1) return state;
+      // Child frames replace the complete child projection. Their shared
+      // watermark may skip private store commits, so only an older snapshot is
+      // unsafe to apply.
+      if (action.version !== undefined && state.managedChildrenProjectionVersion !== undefined && action.version < state.managedChildrenProjectionVersion) return state;
       return { ...state, ...(action.version === undefined ? {} : { managedChildrenProjectionVersion: action.version }), managedChildren: Object.fromEntries(action.children.map((projection) => [projection.agent_id, projection])) };
     }
     case "managed/recover": {
