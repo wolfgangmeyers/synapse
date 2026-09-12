@@ -686,6 +686,13 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 				return err
 			}
 		}
+		// C2 gives every new managed lifetime one disabled, router-owned goal row.
+		// Reset retains it; termination removes it through the agent foreign key.
+		if err := s.ensureManagedGoalPolicyTx(ctx, agent.AgentID, agent.CreatedAt); err != nil {
+			if !strings.Contains(err.Error(), "no such table: managed_agent_policies") {
+				return err
+			}
+		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
