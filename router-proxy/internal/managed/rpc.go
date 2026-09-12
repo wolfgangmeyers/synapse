@@ -1215,10 +1215,18 @@ func rootControlEpoch(value any) (int64, bool) {
 // classifyRootControlEvent identifies only the documented completed hidden
 // request. It deliberately ignores partial frames and malformed candidates.
 func classifyRootControlEvent(event map[string]any, watermark uint64) (*RootControlEvent, bool) {
-	if event["type"] != "message_end" {
+	// Pi's RPC stream uses message_end, while the native custom-message stream
+	// exposes the same persisted entry directly. Both are durable completed
+	// entries; accept only these two shapes and apply the identical closed
+	// envelope validation below.
+	message := nestedMessage(event)
+	switch event["type"] {
+	case "message_end":
+	case "custom_message":
+		message = event
+	default:
 		return nil, false
 	}
-	message := nestedMessage(event)
 	if message == nil || message["customType"] != "mecha.control.request.v1" {
 		return nil, false
 	}

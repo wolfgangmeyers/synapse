@@ -30,6 +30,17 @@ func TestRootControlRegistryIsClosedAndRootEventRejectsLegacyControlEnvelopes(t 
 	event, candidate := classifyRootControlEvent(valid, 4)
 	require.True(t, candidate)
 	require.NotNil(t, event)
+
+	// Native Pi persists a completed hidden custom message as a direct stream
+	// frame, not a synthetic message_end wrapper. It must admit the same
+	// immutable request for later correlated result delivery.
+	native := valid["message"].(map[string]any)
+	native["type"] = "custom_message"
+	event, candidate = classifyRootControlEvent(native, 5)
+	require.True(t, candidate)
+	require.NotNil(t, event)
+	require.Equal(t, requestID, event.RequestID)
+	require.Equal(t, tool.OperationID, event.OperationID)
 	legacy := map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{"protocol": "mecha.control/v1", "request_id": requestID, "operation_id": "legacy.goal", "legacy_command": "goal", "raw_arguments": "status", "runtime_generation": "123e4567-e89b-42d3-a456-426614174002", "session_epoch": json.Number("1"), "availability": map[string]any{}}}}
 	event, candidate = classifyRootControlEvent(legacy, 5)
 	require.True(t, candidate)
