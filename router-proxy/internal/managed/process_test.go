@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -78,6 +79,20 @@ func TestCommandSpecUsesDirectPiRPCAndRequiredExtensions(t *testing.T) {
 		"MECHA_RPC_RUNTIME_GENERATION=123e4567-e89b-42d3-a456-426614174000", "MECHA_RPC_SESSION_EPOCH=2",
 	}, env)
 	require.NotContains(t, env, "OPENAI_API_KEY=secret")
+}
+
+func TestManagedStderrTailRetainsAUsefulRedactedExitReason(t *testing.T) {
+	tail := newManagedStderrTail()
+	go tail.drain(strings.NewReader("first detail\napi_key=do-not-retain\nlast useful detail\n"))
+	<-tail.done
+
+	summary := tail.summary()
+	require.Contains(t, summary, "last useful detail")
+	require.NotContains(t, summary, "do-not-retain")
+	require.Contains(t, summary, "[REDACTED]")
+	err := managedProcessExitError{cause: errors.New("exit status 1"), detail: summary}
+	require.Contains(t, err.Error(), "exit status 1")
+	require.Contains(t, err.Error(), "last useful detail")
 }
 
 func TestProcessFactoryRejectsAnUnspecifiedSessionLaunchMode(t *testing.T) {

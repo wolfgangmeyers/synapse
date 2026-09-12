@@ -298,11 +298,20 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
   });
   const policyBridge = createPolicyBridge();
   let runtimeRegistrationFailed = false;
-  const failClosedRegistration = (): void => {
+  const safeRegistrationFailure = (cause: unknown): string => {
+    if (cause instanceof Error && /^(Managed tool|Managed command) collision: [a-z_]+$/.test(cause.message)) {
+      // Tool and command names are fixed manifest identifiers, not user input.
+      return cause.message;
+    }
+    return "Managed extension registry setup failed.";
+  };
+  const failClosedRegistration = (cause?: unknown): void => {
     if (runtimeRegistrationFailed) return;
     runtimeRegistrationFailed = true;
     // Pi has no unregister API. Any failed registry write may leave a partial
     // command or tool set model-visible, so this process cannot safely continue.
+    // Keep one safe stderr diagnostic for the router's bounded crash projection.
+    console.error(safeRegistrationFailure(cause));
     const exit = setTimeout(() => process.exit(1), 0);
     exit.unref();
   };
@@ -347,7 +356,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       const sessionId = context.sessionManager.getSessionId();
       return typeof sessionId === "string" && sessionId.length > 0 ? "root" : undefined;
     },
-    onFatalRegistrationFailure: failClosedRegistration,
+    onFatalRegistrationFailure: (error) => failClosedRegistration(error),
     onRequestQueued: (request) => {
       const requestId = request.request_id;
       const contextRef = request.context_ref;
@@ -758,7 +767,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
       commandsRegistered = true;
     } catch (error) {
       commandRegistrationFailed = true;
-      failClosedRegistration();
+      failClosedRegistration(error);
       throw error;
     }
   };

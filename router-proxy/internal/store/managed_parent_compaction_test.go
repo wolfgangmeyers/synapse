@@ -32,6 +32,39 @@ func TestReconcileManagedParentCompactionNeverCallsMissingEndSuccess(t *testing.
 	require.Equal(t, "reconciled_unknown", outcome)
 }
 
+func TestManagedParentActivityTracksNativeTurnsWithoutOverridingCompaction(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+
+	updated, err := durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 1, State: "active"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+
+	updated, err = durable.ApplyManagedParentCompaction(ctx, fence, ManagedParentCompactionEvent{Sequence: 2, State: "compacting"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	updated, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 3, State: "idle"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "compacting", agent.ActivityState, "a settled turn cannot hide active compaction")
+
+	updated, err = durable.ApplyManagedParentCompaction(ctx, fence, ManagedParentCompactionEvent{Sequence: 4, State: "idle", Outcome: "completed"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+
+	updated, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 3, State: "active"})
+	require.NoError(t, err)
+	require.False(t, updated, "a delayed start cannot reactivate a settled later stream state")
+}
+
 func TestManagedParentCompactionPreservesExactOutcomesAndFencesDelayedEvents(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyParentCompactionFixture(t)

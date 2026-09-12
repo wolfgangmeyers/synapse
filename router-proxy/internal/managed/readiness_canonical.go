@@ -959,6 +959,23 @@ func normalizeParentCompactionEvent(event map[string]any, sequence uint64) (map[
 	}
 }
 
+// normalizeParentActivityEvent closes Pi's native parent turn boundary. The
+// sequence comes from rpcClient's single decoded stdout stream, not a timer or
+// a prompt submission, so it represents actual work and a real settle.
+func normalizeParentActivityEvent(event map[string]any, sequence uint64) (map[string]any, error) {
+	if sequence > uint64(readinessMaxSafeInteger) {
+		return nil, errors.New("parent activity sequence is invalid")
+	}
+	switch event["type"] {
+	case "agent_start":
+		return map[string]any{"sequence": int64(sequence), "state": "active"}, nil
+	case "agent_settled":
+		return map[string]any{"sequence": int64(sequence), "state": "idle"}, nil
+	default:
+		return nil, errors.New("parent activity event is invalid")
+	}
+}
+
 func normalizeChildSnapshotReceipt(value any) (map[string]any, error) {
 	nodes := 0
 	if err := validateReadinessJSONBounds(value, 1, &nodes, readinessMaxJSONStringBytes); err != nil {

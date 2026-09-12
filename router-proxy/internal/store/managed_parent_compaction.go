@@ -85,9 +85,10 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 	updated := false
 	err := s.runImmediate(ctx, func() error {
 		var lastSequence int64
-		err := s.db.QueryRowContext(ctx, `SELECT source_sequence FROM managed_parent_compaction_state
+		var active int
+		err := s.db.QueryRowContext(ctx, `SELECT source_sequence,active FROM managed_parent_compaction_state
 			WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`,
-			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&lastSequence)
+			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&lastSequence, &active)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -104,18 +105,15 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 		}
 		now := formatTimestamp(s.clock.Now())
 		compacting := boolInt(event.State == "compacting")
-		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_parent_compaction_state(agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation,source_sequence,compacting,updated_at)
-			VALUES (?,?,?,?,?,?,?,?)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_parent_compaction_state(agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation,source_sequence,compacting,active,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation)
-			DO UPDATE SET source_sequence=excluded.source_sequence, compacting=excluded.compacting, updated_at=excluded.updated_at`,
-			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, event.Sequence, compacting, now)
+			DO UPDATE SET source_sequence=excluded.source_sequence, compacting=excluded.compacting, active=excluded.active, updated_at=excluded.updated_at`,
+			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, event.Sequence, compacting, active, now)
 		if err != nil {
 			return err
 		}
-		activity := "idle"
-		if event.State == "compacting" {
-			activity = "compacting"
-		}
+		activity := managedParentProjectedActivity(event.State == "compacting", active != 0)
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')`, append([]any{activity, now}, managedFenceValues(fence)...)...)
 		if err != nil {
 			return err
@@ -155,4 +153,16 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 		return err
 	})
 	return updated, err
+}
+
+// managedParentProjectedActivity keeps compaction visible while Pi is paused,
+// then returns the actual parent-turn state when compaction ends.
+func managedParentProjectedActivity(compacting, active bool) string {
+	if compacting {
+		return "compacting"
+	}
+	if active {
+		return "active"
+	}
+	return "idle"
 }
