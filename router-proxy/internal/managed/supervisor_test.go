@@ -275,7 +275,7 @@ func readyFailingDirectManager(t *testing.T) (*Manager, *store.Store, string, *f
 	return manager, durable, path, rpc
 }
 
-func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
+func TestManagedDirectPromptShowsWorkingUntilSettled(t *testing.T) {
 	ctx := context.Background()
 	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
 	require.NoError(t, err)
@@ -301,6 +301,11 @@ func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	projectionPublications := make(chan struct{}, 2)
 	manager.SetProjectionPublisher(func() { projectionPublications <- struct{}{} })
+	replyPublished := make(chan DirectMailboxReply, 1)
+	manager.SetDirectReplyPublisher(func(_ context.Context, _ store.ManagedDirectAttempt, reply DirectMailboxReply) error {
+		replyPublished <- reply
+		return nil
+	})
 	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "holding-message", From: "sender", To: "holding-agent", Body: "work", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
 	require.NoError(t, err)
 	_, err = durable.ResolveMessageTarget(ctx, "holding-message")
@@ -323,6 +328,22 @@ func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
 
 	rpc.events <- DirectMailboxEvent{Receipt: &DirectMailboxReceipt{EntryIdentity: "holding-append"}}
 	rpc.events <- DirectMailboxEvent{Reply: &DirectMailboxReply{EntryIdentity: "holding-reply", Body: "done"}}
+	select {
+	case reply := <-replyPublished:
+		require.Equal(t, "done", reply.Body)
+	case <-time.After(time.Second):
+		t.Fatal("managed direct reply was not published")
+	}
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "holding-agent")
+		return readErr == nil && agent.ActivityState == "active"
+	}, time.Second, time.Millisecond, "a visible reply must not clear work before the turn settles")
+	select {
+	case <-projectionPublications:
+		t.Fatal("a visible reply cleared the working projection before the turn settled")
+	case <-time.After(50 * time.Millisecond):
+	}
+
 	rpc.events <- DirectMailboxEvent{Settled: true}
 	close(rpc.events)
 	require.Eventually(t, func() bool {
@@ -332,7 +353,7 @@ func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
 	select {
 	case <-projectionPublications:
 	case <-time.After(time.Second):
-		t.Fatal("completed direct prompt did not publish its cleared projection")
+		t.Fatal("settled direct prompt did not publish its cleared projection")
 	}
 }
 
