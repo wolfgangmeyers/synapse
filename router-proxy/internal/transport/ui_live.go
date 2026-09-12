@@ -242,41 +242,6 @@ type managedLifecycleHistoryFact struct {
 	presentation *store.ManagedHistoryPresentation
 }
 
-func managedLifecycleLabel(value string) string {
-	switch value {
-	case "launching":
-		return "Launching"
-	case "starting":
-		return "Starting"
-	case "running":
-		return "Running"
-	case "stopping":
-		return "Stopping"
-	case "stopped":
-		return "Stopped"
-	case "failed":
-		return "Failed"
-	case "resetting":
-		return "Resetting"
-	case "terminating":
-		return "Stopping"
-	case "terminated":
-		return "Removed"
-	default:
-		return "Updated"
-	}
-}
-
-func managedActivityLabel(value string) string {
-	if value == "active" {
-		return "Working"
-	}
-	if value == "idle" {
-		return "Ready"
-	}
-	return "Compacting"
-}
-
 func managedModelSummary(value map[string]any) string {
 	provider, providerOK := value["provider"].(string)
 	id, idOK := value["id"].(string)
@@ -288,25 +253,6 @@ func managedModelSummary(value map[string]any) string {
 		label = "Selected model"
 	}
 	return label + " · " + id
-}
-
-func managedLifecycleEntryLabel(state string) string {
-	switch state {
-	case "starting", "launching":
-		return "Starting agent"
-	case "running":
-		return "Agent ready"
-	case "stopping", "terminating":
-		return "Stopping agent"
-	case "stopped":
-		return "Agent stopped"
-	case "resetting":
-		return "Resetting context"
-	case "terminated":
-		return "Agent removed"
-	default:
-		return "Agent updated"
-	}
 }
 
 func managedHistoryFrame(entry store.ManagedHistoryEntry) map[string]any {
@@ -328,23 +274,12 @@ func managedLifecycleHistoryFacts(prior, current *uiLiveProjection) []managedLif
 	facts := make([]managedLifecycleHistoryFact, 0)
 	for id, next := range current.agents {
 		previous, existed := prior.agents[id]
-		nextState, nextOK := next["lifecycle_state"].(string)
-		if !nextOK {
-			continue
-		}
-		nextDisplayState := managedLifecycleLabel(nextState)
+		// Lifecycle and ordinary activity changes are progress indicators, not
+		// Complete-history facts. The timeline is reserved for work a person can
+		// act on: tool results, mail, child events, compaction, model changes,
+		// and a detailed terminal failure.
 		if !existed {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: managedLifecycleEntryLabel(nextState), eventKey: fmt.Sprintf("lifecycle:%s:%d:entered", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "lifecycle"}})
 			continue
-		}
-		previousState, previousOK := previous["lifecycle_state"].(string)
-		if previousOK && previousState != nextState {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "State changed", eventKey: fmt.Sprintf("lifecycle:%s:%d:state", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "state", From: managedLifecycleLabel(previousState), To: nextDisplayState}})
-		}
-		previousActivity, previousActivityOK := previous["activity_state"].(string)
-		nextActivity, nextActivityOK := next["activity_state"].(string)
-		if previousActivityOK && nextActivityOK && previousActivity != nextActivity && previousActivity != "compacting" && nextActivity != "compacting" {
-			facts = append(facts, managedLifecycleHistoryFact{agentID: id, message: "State changed", eventKey: fmt.Sprintf("activity:%s:%d:state", id, current.version), presentation: &store.ManagedHistoryPresentation{Kind: "state", From: managedActivityLabel(previousActivity), To: managedActivityLabel(nextActivity)}})
 		}
 		previousModel, previousModelOK := previous["model"].(map[string]any)
 		nextModel, nextModelOK := next["model"].(map[string]any)

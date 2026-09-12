@@ -19,6 +19,23 @@ import (
 
 var baselineManagedNames = []string{"goal", "goal_snooze", "mecha_context", "mecha_git", "mecha_mailbox_send", "mecha_parent_message", "mecha_pr", "mecha_priority", "mecha_recall", "mecha_reminder", "mecha_request_inline_tool_allowance", "mecha_router", "mecha_settled_notifications", "mecha_state", "mecha_verification_handoff", "mecha_worker"}
 
+// Managed manifest revision two retains every revision-one definition and
+// adds the immutable, source-backed web search bridge. The static router
+// consumes this whole current manifest at launch rather than treating search
+// as an unfenced browser-side capability.
+const managedManifestRevision = 2
+const managedWebSearchToolName = "web_search__4f4ca2a3ae8ea237531b8c5264d53d15474c0848fc8d7eeada0fef5b85b139ac"
+
+var managedCurrentToolNames = append(append([]string{}, baselineManagedNames...), managedWebSearchToolName)
+
+var managedManifestOperations = map[string]string{
+	"goal": "goal.control", "goal_snooze": "goal.snooze", "mecha_context": "context.control", "mecha_git": "ops.git_status",
+	"mecha_mailbox_send": "mail.send", "mecha_parent_message": "mail.parent", "mecha_pr": "ops.pr_status", "mecha_priority": "ops.priority",
+	"mecha_recall": "recall.control", "mecha_reminder": "reminder.control", "mecha_request_inline_tool_allowance": "policy.inline_allowance",
+	"mecha_router": "router.control", "mecha_settled_notifications": "notifications.settled", "mecha_state": "ops.state",
+	"mecha_verification_handoff": "ops.verification_handoff", "mecha_worker": "ops.worker", "web_search": "web.search",
+}
+
 type Manifest struct {
 	Protocol        string
 	Revision        int
@@ -83,16 +100,16 @@ func ValidateManifest(value any) (Manifest, error) {
 		return Manifest{}, errors.New("unsupported manifest protocol")
 	}
 	revision, ok := integer(root["revision"])
-	if !ok || revision != 1 {
-		return Manifest{}, errors.New("manifest revision must be one")
+	if !ok || revision != managedManifestRevision {
+		return Manifest{}, fmt.Errorf("manifest revision must be %d", managedManifestRevision)
 	}
 	rawTools, ok := root["tools"].([]any)
-	if !ok || len(rawTools) != 16 {
-		return Manifest{}, errors.New("manifest must contain exactly 16 baseline tools")
+	if !ok || len(rawTools) != len(managedManifestOperations) {
+		return Manifest{}, fmt.Errorf("manifest must contain exactly %d current tools", len(managedManifestOperations))
 	}
 	expected := map[string]bool{}
-	for _, name := range baselineManagedNames {
-		expected[name] = false
+	for capability := range managedManifestOperations {
+		expected[capability] = false
 	}
 	result := Manifest{Protocol: "mecha.tools/v1", Revision: revision, Raw: root, Tools: make([]ManifestTool, 0, len(rawTools))}
 	for _, raw := range rawTools {
@@ -109,16 +126,14 @@ func ValidateManifest(value any) (Manifest, error) {
 		definitionID, definitionIDOK := stringValue(tool["definition_id"])
 		definitionSHA, definitionSHAOK := stringValue(tool["definition_sha256"])
 		parameters, parametersOK := tool["parameters"].(map[string]any)
-		if !nameOK || !capOK || !opOK || !definitionIDOK || !definitionSHAOK || !parametersOK || !expectedName(name) || !safeManifestIdentity(capability, name, operation, definitionID, definitionSHA) {
+		expectedOperation, exists := managedManifestOperations[capability]
+		if !nameOK || !capOK || !opOK || !definitionIDOK || !definitionSHAOK || !parametersOK || !exists || expected[capability] || operation != expectedOperation || !expectedManifestName(capability, name, definitionSHA) || !safeManifestIdentity(capability, name, operation, definitionID, definitionSHA) {
 			return Manifest{}, errors.New("manifest tool identity is invalid")
 		}
 		if err := validateManifestParameters(parameters); err != nil {
 			return Manifest{}, fmt.Errorf("manifest tool %s schema: %w", name, err)
 		}
-		if _, exists := expected[name]; !exists || expected[name] {
-			return Manifest{}, errors.New("manifest contains duplicate or unexpected tool name")
-		}
-		expected[name] = true
+		expected[capability] = true
 		result.Tools = append(result.Tools, ManifestTool{CapabilityID: capability, Name: name, OperationID: operation, DefinitionID: definitionID, DefinitionSHA256: definitionSHA, Parameters: cloneJSONRecord(parameters)})
 	}
 	for name, found := range expected {
@@ -564,10 +579,13 @@ func validateValueEnum(schema map[string]any, value any) error {
 	return errors.New("control argument is outside its enum")
 }
 
-func expectedName(name string) bool {
+func expectedManifestName(capability, name, definitionSHA string) bool {
+	if capability == "web_search" {
+		return name == managedWebSearchToolName && name == capability+"__"+definitionSHA
+	}
 	for _, candidate := range baselineManagedNames {
-		if candidate == name {
-			return true
+		if candidate == capability {
+			return name == capability
 		}
 	}
 	return false

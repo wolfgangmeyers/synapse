@@ -75,7 +75,7 @@ describe("App integration", () => {
     expect(screen.queryByText("History")).not.toBeInTheDocument();
     await waitFor(() => expect(fetchImpl.mock.calls.some(([input]) => String(input).includes("/v1/history?agent_id=managed-worker&view=complete"))).toBe(true));
 
-    await user.click(screen.getByRole("tab", { name: "Complete: messages + activity" }));
+    await user.click(screen.getByRole("tab", { name: "Complete messages and activity" }));
     expect(screen.getByText("Existing conversation")).toBeInTheDocument();
     expect(screen.getByText("Managed worker restarted")).toBeInTheDocument();
     expect(screen.queryByText("Other worker restarted")).not.toBeInTheDocument();

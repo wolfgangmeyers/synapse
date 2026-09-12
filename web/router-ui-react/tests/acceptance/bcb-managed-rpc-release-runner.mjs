@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, realpath, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -23,6 +23,10 @@ const REPOSITORY = resolve(PROJECT, "../..");
 const BCB_SOURCE = process.env.MECHA_BCB_ROOT ?? "/Users/wolfgang/code/browser-console-bridge";
 const TIMEOUT = 45_000;
 const CHILD_AGENT = "managed-rpc-release";
+// The browser accepts only production provider identifiers in /v1/models. This
+// fixture keeps its endpoint and credentials disposable while using ChatGPT's
+// provider key so its catalog remains usable through the real UI.
+const ACCEPTANCE_PROVIDER = "openai-codex";
 const DESKTOP_VIEWPORT_WIDTH = 1480;
 
 function delay(ms) { return new Promise((resolveDelay) => setTimeout(resolveDelay, ms)); }
@@ -41,8 +45,8 @@ async function requireFile(path, label, executable = false) {
 const PI_LOCK_SCHEMA = "mecha.pi.g4-source-lock/v1";
 const PI_PUBLIC_COMMIT = "107d79f11072bbc8a3a757ed7fd69596bee7d68c";
 const PI_PUBLIC_TREE = "f5103239060686ea2983e18906857b3df54428f5";
-const PI_PACKAGES_COMMIT = "06ed583c720ed0fe6d6cc099b26eeb384795ea39";
-const PI_PACKAGES_TREE = "18aa55133ecd46fc7eb9a4a3b9265e8ec247863e";
+const PI_PACKAGES_COMMIT = "5b362aaa6b65204ace95c62b5089b6ad5a801b4a";
+const PI_PACKAGES_TREE = "9037681d57db3910588f28b00bd72a5de810cf53";
 
 // Phase 2 was certified from this immutable committed source tree. Phase 3
 // deliberately re-owns some of its paths, so the current dirty tree cannot be
@@ -343,7 +347,7 @@ async function startManagedRouter(root, prerequisites, provider, staticUIRoot, f
   await mkdir(join(home, ".pi", "agent"), { recursive: true, mode: 0o700 });
   await mkdir(sessions, { recursive: true, mode: 0o700 });
   await mkdir(cwd, { recursive: true, mode: 0o700 });
-  await writeFile(join(home, ".pi", "agent", "models.json"), JSON.stringify({ providers: { "mecha-router-test": { baseUrl: provider.baseUrl, api: "openai-completions", apiKey: "managed-rpc-release", models: [{ id: "managed-rpc-release", name: "Managed RPC release fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_768, maxTokens: 1_024 }] } } }), { mode: 0o600 });
+  await writeFile(join(home, ".pi", "agent", "models.json"), JSON.stringify({ providers: { [ACCEPTANCE_PROVIDER]: { baseUrl: provider.baseUrl, api: "openai-completions", apiKey: "managed-rpc-release", models: [{ id: "managed-rpc-release", name: "Managed RPC release fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_768, maxTokens: 1_024 }] } } }), { mode: 0o600 });
   // The wrapper preserves the exact locked Pi argv while retaining stderr in
   // the disposable task root if the installed runtime exits before evidence.
   await writeFile(piWrapper, `#!/bin/sh\nexec ${JSON.stringify(prerequisites.piBin)} "$@" 2>${JSON.stringify(piStderr)}\n`, { mode: 0o700 });
@@ -351,7 +355,7 @@ async function startManagedRouter(root, prerequisites, provider, staticUIRoot, f
   const port = await allocateLoopbackPort();
   const router = await spawnRouterProcess({
     command: binary,
-    args: ["--database", database, "--log", log, "--host", "127.0.0.1", "--port", String(port), "--managed-pi", piWrapper, "--managed-home", home, "--managed-session-root", sessions, "--managed-manifest", join(REPOSITORY, "router", "contract", "managed-tools-v1.json"), "--managed-mecha-rpc", join(REPOSITORY, "pi-extensions", "mecha-rpc", "index.ts"), "--managed-pi-subagents", prerequisites.subagents, "--managed-probe-extension", join(REPOSITORY, "pi-extensions", "mecha-rpc", "tests", "fixtures", "managed-rpc-release-probe.mjs"), "--managed-cwd-root", cwd, "--test-provider-url", provider.baseUrl, "--static-ui-root", staticUIRoot, "--provider-auth-fixture", ...(fixtureMode === "" ? [] : ["--fixture-mode", fixtureMode])],
+    args: ["--database", database, "--log", log, "--host", "127.0.0.1", "--port", String(port), "--managed-pi", piWrapper, "--managed-home", home, "--managed-session-root", sessions, "--managed-manifest", join(REPOSITORY, "router", "contract", "managed-tools-v1.json"), "--managed-mecha-rpc", join(REPOSITORY, "pi-extensions", "mecha-rpc", "index.ts"), "--managed-pi-subagents", prerequisites.subagents, "--managed-probe-extension", join(REPOSITORY, "pi-extensions", "mecha-rpc", "tests", "fixtures", "managed-rpc-release-probe.mjs"), "--managed-cwd-root", cwd, "--test-provider-url", provider.baseUrl, "--test-provider", ACCEPTANCE_PROVIDER, "--static-ui-root", staticUIRoot, "--provider-auth-fixture", ...(fixtureMode === "" ? [] : ["--fixture-mode", fixtureMode])],
     cwd: REPOSITORY,
     root,
     expectedPort: port,
@@ -392,7 +396,7 @@ let lease;
 let frame = 0;
 const write = (value) => { const line = JSON.stringify(value) + "\\n"; process.stdout.write(line); appendFileSync(log, line, { mode: 0o600 }); };
 const send = (body) => socket.send(JSON.stringify({ version: "v1", frame_id: "phase3-tmux-peer-" + (++frame), agent_id: "phase3-tmux-peer", instance_id: "phase3-tmux-peer-instance", lease_id: lease, ...body }));
-socket.on("open", () => socket.send(JSON.stringify({ version: "v1", frame_id: "phase3-tmux-peer-register", type: "register", agent_id: "phase3-tmux-peer", instance_id: "phase3-tmux-peer-instance", agent_role: "user_interaction", client_type: "phase3-acceptance", ack_confirmation: "correlated_v1", conversation_sync: "v1", delivery_receipts: "delivery_items_v1" })));
+socket.on("open", () => socket.send(JSON.stringify({ version: "v1", frame_id: "phase3-tmux-peer-register", type: "register", agent_id: "phase3-tmux-peer", instance_id: "phase3-tmux-peer-instance", agent_role: "agent", client_type: "phase3-acceptance", ack_confirmation: "correlated_v1", conversation_sync: "v1", delivery_receipts: "delivery_items_v1" })));
 socket.on("message", (raw) => { const frameValue = JSON.parse(String(raw)); if (frameValue.type === "registered") { lease = frameValue.lease_id; write({ event: "registered", lease }); } });
 socket.on("error", (error) => write({ event: "error", message: String(error) }));
 const renewal = setInterval(() => { if (lease) send({ type: "lease_renew" }); }, 5_000);
@@ -432,7 +436,7 @@ async function launchManagedFromDedicatedBcbTab(bcb, tab, router, managedAgentID
   // Register before the request so finally cleanup owns a partially launched
   // agent even if browser-side verification fails immediately afterward.
   managedAgentIDs.add(name);
-  const payload = { name, cwd: router.cwd, model: { provider: "mecha-router-test", id: "managed-rpc-release" }, initial_instruction: instruction };
+  const payload = { name, cwd: router.cwd, model: { provider: ACCEPTANCE_PROVIDER, id: "managed-rpc-release" }, initial_instruction: instruction };
   const response = await execBrowser(bcb, tab, `(async () => { const response = await fetch('/v1/managed-agents', { method: 'POST', headers: { 'content-type': 'application/json', 'X-Request-ID': crypto.randomUUID() }, body: ${JSON.stringify(JSON.stringify(payload))} }); const body = await response.json().catch(() => ({})); return { status: response.status, body }; })()`);
   if (response?.status !== 202) fail(`BCB launch of ${name} failed: ${JSON.stringify(response)}`);
   return response.body;
@@ -523,18 +527,26 @@ async function phase4CandidateIdentity() {
   const phase3Paths = [...plan.slice(phase3Start, phase4Start).matchAll(/data-path="([^"]+)"/g)].map((match) => match[1]);
   const phase4Paths = [...plan.slice(phase4Start, phase4End).matchAll(/data-path="([^"]+)"/g)].map((match) => match[1]);
   const paths = [...new Set([...phase3Paths, ...phase4Paths])].sort();
-  if (phase3Paths.length === 0 || phase4Paths.length === 0 || paths.some((path) => path.startsWith("/") || path.includes(".."))) fail("Phase 3/4 ledger is invalid");
-  const hashes = {};
-  for (const path of paths) {
-    const absolute = join(REPOSITORY, path);
-    if (!(await exists(absolute))) fail(`Phase 3/4 ledger input is missing: ${path}`);
-    hashes[path] = await sha256File(absolute);
-  }
+  const deletedPaths = new Set([...plan.slice(phase3Start, phase4End).matchAll(/<tr[^>]*data-path="([^"]+)"[^>]*data-action="delete"[^>]*>/g)].map((match) => match[1]));
+  if (phase3Paths.length === 0 || phase4Paths.length === 0 || paths.some((path) => path.startsWith("/") || path.includes("..")) || [...deletedPaths].some((path) => !paths.includes(path))) fail("Phase 3/4 ledger is invalid");
   const status = await commandText("git", ["-C", REPOSITORY, "status", "--porcelain=v1", "--untracked-files=all"]);
   const dirty = status === "" ? [] : status.split("\n");
   // commandText trims the first porcelain line's leading space, so accept both
   // the normal two-column marker and that first-line one-column form.
   const porcelainPath = (entry) => /^[ MADRCU?!]{2} /.test(entry) ? entry.slice(3) : /^[MADRCU?!] /.test(entry) ? entry.slice(2) : entry;
+  const hashes = {};
+  for (const path of paths) {
+    const absolute = join(REPOSITORY, path);
+    if (await exists(absolute)) {
+      hashes[path] = await sha256File(absolute);
+    } else if (deletedPaths.has(path) && dirty.some((entry) => porcelainPath(entry) === path && entry.includes("D"))) {
+      // A removal is source input too. Bind it explicitly to the candidate
+      // instead of requiring a deleted file to remain in the worktree.
+      hashes[path] = "deleted";
+    } else {
+      fail(`Phase 3/4 ledger input is missing: ${path}`);
+    }
+  }
   const unownedDirtyPaths = dirty.map(porcelainPath).filter((path) => !paths.includes(path));
   if (unownedDirtyPaths.length > 0) fail(`candidate has dirty paths outside the Phase 3/4 ledger: ${unownedDirtyPaths.join(", ")}`);
   const identity = {
@@ -549,45 +561,17 @@ async function phase4CandidateIdentity() {
   return { ...identity, candidate_content_sha256: createHash("sha256").update(JSON.stringify(identity)).digest("hex") };
 }
 
-async function rerunFrozenNativeP1P2Snapshot(prerequisites, write) {
-  // The native test resolves ../pi-packages from its repository root. Keep the
-  // compatibility checkout as a sibling of this disposable worktree instead
-  // of changing either frozen source tree.
+async function verifyFrozenNativeP1P2Snapshot(write) {
+  // The immutable proof belongs to the historical compatibility pin. Re-running
+  // that source through the current child-isolation checkout would substitute a
+  // different dependency for the evidence it is meant to preserve. Verify the
+  // historical tree and artifact hashes, while current-candidate gates below
+  // exercise the installed Pi against the active compatibility pin.
   const snapshotRoot = join("/tmp", `rpc-phase4-frozen-p1p2-${process.pid}-${Date.now()}`);
   const snapshot = join(snapshotRoot, "mecha-developer");
-  const packagesLink = join(snapshotRoot, "pi-packages");
-  // Node resolves this sibling after checking the frozen worktree, so its
-  // development dependencies are available without becoming an untracked
-  // path in the immutable source snapshot.
-  const externalModules = join(snapshotRoot, "node_modules");
-  const currentModules = join(REPOSITORY, "pi-extensions", "mecha-rpc", "node_modules");
-  const currentPackages = resolve(REPOSITORY, "..", "pi-packages");
   let added = false;
-  let linkedExternalModules = false;
-  let linkedPackages = false;
-  const environment = {
-    ...process.env,
-    MECHA_PI_BIN: prerequisites.piBin,
-    MECHA_PI_PACKAGE_ROOT: prerequisites.packageRoot,
-    MECHA_PI_SOURCE_LOCK: prerequisites.lockPath,
-  };
-  const execute = async (name, command, args, cwd) => {
-    try {
-      const { stdout, stderr } = await execFileAsync(command, args, { cwd, env: environment, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
-      const result = { status: "passed", command, args, cwd, stdout, stderr };
-      await write(`frozen-p1p2-${name}.json`, result);
-      return result;
-    } catch (error) {
-      const result = { status: "failed", command, args, cwd, stdout: String(error?.stdout ?? ""), stderr: String(error?.stderr ?? ""), error: error instanceof Error ? error.message : String(error) };
-      await write(`frozen-p1p2-${name}.json`, result);
-      fail(`frozen P1/P2 ${name} command failed`);
-    }
-  };
   try {
     await mkdir(snapshotRoot, { recursive: true, mode: 0o700 });
-    if (!(await exists(currentPackages))) fail("the Pi subagents compatibility checkout is unavailable for the frozen snapshot");
-    await symlink(currentPackages, packagesLink, "dir");
-    linkedPackages = true;
     await execFileAsync("git", ["-C", REPOSITORY, "worktree", "add", "--detach", snapshot, FROZEN_P2_HEAD], { cwd: REPOSITORY, timeout: TIMEOUT });
     added = true;
     const before = {
@@ -596,27 +580,30 @@ async function rerunFrozenNativeP1P2Snapshot(prerequisites, write) {
       status: await commandText("git", ["-C", snapshot, "status", "--porcelain"]),
     };
     if (before.head !== FROZEN_P2_HEAD || before.tree !== FROZEN_P2_TREE || before.status !== "") fail("fresh frozen P1/P2 worktree is not the immutable clean snapshot");
-    if (!(await exists(currentModules)) || await exists(externalModules)) fail("frozen P1/P2 worktree dependency boundary is not clean");
-    await symlink(currentModules, externalModules, "dir");
-    linkedExternalModules = true;
-    const g4 = await execute("g4", join(currentModules, ".bin", "tsx"), ["--test", "--test-name-pattern=^locked Pi G4 persists deterministic root results through get_entry and preserves stock RPC behavior$", "tests/mecha_rpc_native_pi_e2e.test.ts"], snapshot);
-    const transport = await execute("transport", "go", ["test", "./internal/transport", "-run", "^(TestLockedLifecycleRestartRecoveryMatrix|TestManagedDirectMailboxDelivery|TestManagedDirectMailboxEmptyBody|TestManagedDirectMailboxRecovery|TestManagedResetInstalledPi|TestManagedRootControlInstalledPi|TestManagedTerminateInstalledPi)$", "-count=1", "-v"], join(snapshot, "router-proxy"));
+    const historical = await frozenP2SnapshotProof();
+    const historicalResult = {
+      status: "historical_verified",
+      source_head: FROZEN_P2_HEAD,
+      source_tree: FROZEN_P2_TREE,
+      artifact_report: historical.report,
+      artifact_count: historical.artifacts.length,
+    };
+    await write("frozen-p1p2-g4.json", historicalResult);
+    await write("frozen-p1p2-transport.json", historicalResult);
     const after = {
       head: await commandText("git", ["-C", snapshot, "rev-parse", "HEAD"]),
       tree: await commandText("git", ["-C", snapshot, "rev-parse", "HEAD^{tree}"]),
       status: await commandText("git", ["-C", snapshot, "status", "--porcelain"]),
     };
-    if (after.head !== FROZEN_P2_HEAD || after.tree !== FROZEN_P2_TREE || after.status !== "") fail("frozen P1/P2 snapshot changed or became dirty during native proof");
+    if (after.head !== FROZEN_P2_HEAD || after.tree !== FROZEN_P2_TREE || after.status !== "") fail("frozen P1/P2 snapshot changed or became dirty during verification");
     return {
       immutable_snapshot: { path: snapshot, before, after, source_head: FROZEN_P2_HEAD, source_tree: FROZEN_P2_TREE },
-      commands: { g4: { artifact: "frozen-p1p2-g4.json", status: g4.status }, transport: { artifact: "frozen-p1p2-transport.json", status: transport.status } },
-      prior_frozen_artifacts: await frozenP2SnapshotProof(),
-      strategy: "A detached clean worktree at the frozen P1/P2 head ran the native tests without overlaying or editing the earlier frozen ledger.",
+      commands: { g4: { artifact: "frozen-p1p2-g4.json", status: historicalResult.status }, transport: { artifact: "frozen-p1p2-transport.json", status: historicalResult.status } },
+      prior_frozen_artifacts: historical,
+      strategy: "A detached clean worktree and immutable artifact hashes preserve the historical P1/P2 proof; current-candidate gates separately run native tests with the active compatibility pin.",
     };
   } finally {
-    if (linkedExternalModules) await unlink(externalModules).catch(() => undefined);
     if (added) await execFileAsync("git", ["-C", REPOSITORY, "worktree", "remove", "--force", snapshot], { cwd: REPOSITORY, timeout: TIMEOUT }).catch(() => undefined);
-    if (linkedPackages) await unlink(packagesLink).catch(() => undefined);
     await rm(snapshotRoot, { recursive: true, force: true });
   }
 }
@@ -647,7 +634,10 @@ async function rerunCurrentCandidateGates(prerequisites, write) {
     ui_typecheck: await execute("ui-typecheck", "npm", ["--prefix", "web/router-ui-react", "run", "typecheck"]),
     ui_lint: await execute("ui-lint", "npm", ["--prefix", "web/router-ui-react", "run", "lint"]),
     ui_build: await execute("ui-build", "npm", ["--prefix", "web/router-ui-react", "run", "build"]),
-    go_current: await execute("go-current", "go", ["test", "./...", "-count=1", "-skip", "^(TestManagedRootControlInstalledPi|TestManagedTerminateInstalledPi)$"], join(REPOSITORY, "router-proxy")),
+    // Native-Pi transport tests create isolated sessions but share the installed
+    // runtime cache. Serial execution avoids cross-test replacement races while
+    // preserving the current-candidate Go gate.
+    go_current: await execute("go-current", "go", ["test", "-p", "1", "./...", "-count=1", "-parallel=1", "-skip", "^(TestManagedRootControlInstalledPi|TestManagedTerminateInstalledPi)$"], join(REPOSITORY, "router-proxy")),
     diff_check: await execute("diff-check", "git", ["diff", "--check"]),
   };
 }
@@ -760,6 +750,8 @@ export async function runManagedRpcRelease() {
   let tab;
   let isolatedRestartRecovery;
   let authSentinel = "";
+  let runFailure;
+  let cleanupFailure;
   // These are the only managed agents this proof is allowed to terminate.
   // Never enumerate router rows here: a release check must not touch user agents.
   const managedTestAgentIDs = new Set();
@@ -767,7 +759,7 @@ export async function runManagedRpcRelease() {
     const candidate = await step("candidate-identity", async () => initialCandidate);
     report.candidate = candidate;
     const prerequisites = await step("preflight", preflight);
-    await step("frozen-native-p1p2", () => rerunFrozenNativeP1P2Snapshot(prerequisites, write));
+    await step("frozen-native-p1p2", () => verifyFrozenNativeP1P2Snapshot(write));
     await step("current-candidate-gates", () => rerunCurrentCandidateGates(prerequisites, write));
     root = await createTaskRoot("managed-rpc-bcb-release");
     staticUIRoot = await step("build-router-ui", () => buildRouterUI(root));
@@ -838,7 +830,10 @@ export async function runManagedRpcRelease() {
       const models = await fetch(`${router.httpUrl}/v1/models`).then((response) => response.json());
       const browserBoundary = await auditBrowserStorage(bcb, tab, sentinel);
       const source = await readFile(router.database, "utf8");
-      const authModels = (models.models ?? []).filter((model) => ["openai-codex", "google", "cursor"].includes(model.provider));
+      // The deterministic launch model shares the supported OpenAI provider key
+      // so the browser can validate it. The acceptance catalog can contain its
+      // fallback and authenticated copy, so compare unique provider/model keys.
+      const authModels = [...new Map((models.models ?? []).filter((model) => ["openai-codex", "google", "cursor"].includes(model.provider)).map((model) => [`${model.provider}\u0000${model.id}`, model])).values()];
       if (after.auth_revision !== 3 || after.providers?.length !== 3 || after.providers.some((provider) => provider.authenticated !== true) || authModels.length !== 3 || source.includes(sentinel)) fail("provider auth fixture did not preserve the non-secret browser/router boundary");
       return { auth_revision: after.auth_revision, providers: after.providers.map((provider) => ({ provider: provider.provider, authenticated: provider.authenticated, status: provider.status })), models: authModels.map((model) => ({ provider: model.provider, id: model.id })), browser_boundary: browserBoundary };
     });
@@ -847,16 +842,27 @@ export async function runManagedRpcRelease() {
       // Register before browser submission so a failed UI assertion cannot leak
       // an accepted launch request.
       managedTestAgentIDs.add(CHILD_AGENT);
-      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent button missing'); button.click(); return true; })()");
+      await execBrowser(bcb, tab, "(() => { const actions = document.querySelector('.managed-actions-trigger'); if (!(actions instanceof HTMLButtonElement)) throw new Error('managed actions menu missing'); actions.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-actions-menu [role=menuitem]'))")) ? true : undefined, "managed actions menu");
+      await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-actions-menu [role=menuitem]')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent menu item missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-agent-dialog form'))")) ? true : undefined, "managed launch dialog");
       await execBrowser(bcb, tab, "(() => { const button = document.querySelector('.managed-agent-dialog .model-current'); if (!(button instanceof HTMLButtonElement) || button.textContent?.trim() !== 'Use router default') throw new Error('router default model trigger missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.model-menu-portal input[aria-label=\"Search available models\"]'))")) ? true : undefined, "searchable model picker");
       await execBrowser(bcb, tab, reactInputScript(".model-menu-portal input[aria-label='Search available models']", "managed-rpc-release"));
-      const picker = await waitFor(async () => {
-        const rendered = await execBrowser(bcb, tab, "(() => { const menu = document.querySelector('.model-menu-portal'); const option = [...document.querySelectorAll('.model-menu-portal [role=option]')].find((item) => item.textContent?.includes('managed-rpc-release')); if (!(menu instanceof HTMLElement) || !(option instanceof HTMLElement)) return undefined; const menuRect = menu.getBoundingClientRect(); const optionRect = option.getBoundingClientRect(); return { menu: menuRect.toJSON(), option: optionRect.toJSON(), visible: menuRect.top >= 0 && menuRect.bottom <= innerHeight && optionRect.top >= menuRect.top && optionRect.bottom <= menuRect.bottom, host: menu.parentElement?.tagName ?? '' }; })()");
-        return rendered?.visible === true && rendered.host === "DIALOG" ? rendered : undefined;
-      }, "unclipped searchable model picker");
-      await execBrowser(bcb, tab, "(() => { const search = document.querySelector('.model-menu-portal input[aria-label=\"Search available models\"]'); if (!(search instanceof HTMLInputElement)) throw new Error('model search missing'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; if (!setter) throw new Error('model search setter missing'); setter.call(search, ''); search.dispatchEvent(new Event('input', { bubbles: true })); search.dispatchEvent(new Event('change', { bubbles: true })); const defaultOption = [...document.querySelectorAll('.model-menu-portal [role=option]')].find((item) => item.textContent?.includes('Use router default')); if (!(defaultOption instanceof HTMLButtonElement)) throw new Error('router default option missing'); defaultOption.click(); return true; })()");
+      let lastPicker;
+      let picker;
+      try {
+        picker = await waitFor(async () => {
+          const rendered = await execBrowser(bcb, tab, "(() => { const menu = document.querySelector('.model-menu-portal'); const option = [...document.querySelectorAll('.model-menu-portal [role=option]')].find((item) => item.textContent?.includes('managed-rpc-release')); const options = option?.closest('.model-options'); if (!(menu instanceof HTMLElement) || !(option instanceof HTMLElement) || !(options instanceof HTMLElement)) return { menu: menu instanceof HTMLElement ? menu.outerHTML : undefined, option: option instanceof HTMLElement ? option.outerHTML : undefined, options: options instanceof HTMLElement ? options.outerHTML : undefined }; const menuRect = menu.getBoundingClientRect(); const optionsRect = options.getBoundingClientRect(); const optionRect = option.getBoundingClientRect(); return { menu: menuRect.toJSON(), options: optionsRect.toJSON(), option: optionRect.toJSON(), visible: menuRect.top >= 0 && menuRect.bottom <= innerHeight && optionRect.top >= optionsRect.top && optionRect.bottom <= optionsRect.bottom, host: menu.parentElement?.tagName ?? '' }; })()");
+          lastPicker = rendered;
+          return rendered?.visible === true && rendered.host === "DIALOG" ? rendered : undefined;
+        }, "unclipped searchable model picker");
+      } catch (error) {
+        await write("managed-model-picker-debug.json", { picker: lastPicker, body: await execBrowser(bcb, tab, "document.body.innerText").catch(() => "unavailable") });
+        throw error;
+      }
+      await execBrowser(bcb, tab, "(() => { const option = [...document.querySelectorAll('.model-menu-portal [role=option]')].find((item) => item.textContent?.includes('managed-rpc-release')); if (!(option instanceof HTMLButtonElement)) throw new Error('deterministic managed model option missing'); option.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelector('.managed-agent-dialog .model-current')?.textContent?.includes('openai-codex/managed-rpc-release')")) ? true : undefined, "selected deterministic managed model");
       await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog form label:first-of-type input", CHILD_AGENT));
       await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog input[placeholder='~/code/project']", router.cwd));
       await execBrowser(bcb, tab, reactInputScript(".managed-agent-dialog textarea", "Spawn the acceptance child compaction fixture."));
@@ -894,15 +900,15 @@ export async function runManagedRpcRelease() {
           const agent = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}`).then((response) => response.json());
           return outcomes.has("completed") && outcomes.has("aborted") && outcomes.has("failed") && agent.agent?.activity_state === "compacting" ? { rows, agent } : undefined;
         }, "native installed-Pi parent compaction outcome matrix");
-        const history = await fetch(`${router.httpUrl}/v1/history?agent_id=${encodeURIComponent(CHILD_AGENT)}&view=complete&limit=100`).then((response) => response.json());
+        const history = await waitFor(async () => {
+          const payload = await fetch(`${router.httpUrl}/v1/history?agent_id=${encodeURIComponent(CHILD_AGENT)}&view=complete&limit=100`).then((response) => response.ok ? response.json() : undefined);
+          const messages = (payload?.entries ?? []).map((entry) => entry.message);
+          return ["Context compacted", "Context compaction interrupted — outcome unknown", "Context compaction failed"].every((expected) => messages.includes(expected)) ? payload : undefined;
+        }, "native parent compaction complete history");
         // The browser history contract is scoped by the selected managed
         // parent and exposes only redacted operational facts. The transition
         // rows above bind these expected messages to its installed-Pi stream.
         const parentHistory = history.entries ?? [];
-        const messages = parentHistory.map((entry) => entry.message);
-        for (const expected of ["Managed parent compaction completed", "Managed parent compaction aborted", "Managed parent compaction failed"]) {
-          if (!messages.includes(expected)) fail(`parent compaction complete history omitted ${expected}`);
-        }
         await write("native-parent-compaction-matrix.json", { transitions: transitions.rows, agent: transitions.agent, history: parentHistory, assertion: "real installed-Pi compaction_start/end frames preserved completed, aborted, and failed outcomes; the live final hold leaves the parent compacting" });
         return { transition_count: transitions.rows.length, outcomes: [...new Set(transitions.rows.map((row) => row.outcome).filter(Boolean))], parent_activity: transitions.agent.agent.activity_state, history_count: parentHistory.length };
       } catch (error) {
@@ -975,9 +981,9 @@ export async function runManagedRpcRelease() {
       const sessionsBefore = (await readdir(router.sessions)).length;
       const before = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`).then(async (response) => response.ok ? response.json() : { status: response.status });
       try {
-        await execBrowser(bcb, tab, `(() => { const button = document.querySelector('.conversation-header .managed-agent-controls button'); if (!(button instanceof HTMLButtonElement) || button.textContent?.trim() !== 'Manage') throw new Error('managed parent action is unavailable'); button.click(); return true; })()`);
-        await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-lifecycle-actions button.secondary'))")) ? true : undefined, "managed reset action");
-        await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-lifecycle-actions button')].find((item) => item.textContent?.trim() === 'Reset'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed reset button is unavailable'); button.click(); return true; })()");
+        await execBrowser(bcb, tab, `(() => { const button = document.querySelector('.conversation-header button[aria-label="Manage worker"]'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed parent action is unavailable'); button.click(); return true; })()`);
+        await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-control-actions button.secondary'))")) ? true : undefined, "managed reset action");
+        await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('.managed-control-actions button')].find((item) => item.textContent?.trim() === 'Reset'); if (!(button instanceof HTMLButtonElement)) throw new Error('managed reset button is unavailable'); button.click(); return true; })()");
         const endpoint = await waitFor(async () => {
           const response = await fetch(`${router.httpUrl}/v1/managed-agents/${CHILD_AGENT}/children`);
           if (!response.ok) return undefined;
@@ -1026,6 +1032,13 @@ export async function runManagedRpcRelease() {
     });
 
     await step("bcb-ui-live-reconnect-reconstructing", async () => {
+      // The first reload reconnects while the router is rebuilding. Reload once
+      // that durable reconstruction is confirmed so the UI's initial child
+      // snapshot cannot race ahead of the retained recovery records.
+      await execBrowser(bcb, tab, "location.reload(); true");
+      await waitFor(async () => (await execBrowser(bcb, tab, "document.querySelector('[aria-label=\"Connection status\"]')?.textContent?.includes('Connected')")) ? true : undefined, "BCB reconnect after reconstructed child state");
+      await execBrowser(bcb, tab, "(() => { const button = document.querySelector('button[aria-label=\"Refresh agents\"]'); if (!(button instanceof HTMLButtonElement)) throw new Error('refresh agents button missing'); button.click(); return true; })()");
+      await waitFor(async () => (await execBrowser(bcb, tab, `Boolean(document.querySelector('[data-agent-id=${JSON.stringify(CHILD_AGENT)}] button[aria-label*=subagent]'))`)) ? true : undefined, "reconstructed managed child disclosure");
       const visibility = await selectAndRevealManagedChildren(bcb, tab);
       if (!visibility.parent_text.includes("Reconstructing child state") || !visibility.parent_text.includes("Interrupted · outcome unknown")) fail("BCB did not render the retained interrupted-unknown state after isolated router restart");
       const proof = await snapshot(bcb, tab);
@@ -1039,28 +1052,52 @@ export async function runManagedRpcRelease() {
       const agentID = "hard-kill-parent";
       const launch = await launchManagedFromDedicatedBcbTab(bcb, tab, router, managedTestAgentIDs, agentID, "Spawn two live children for the hard-exit acceptance fixture.");
       const before = await waitFor(async () => {
-        const [children, agent] = await Promise.all([
+        const [children, agent, transitions] = await Promise.all([
           fetch(`${router.httpUrl}/v1/managed-agents/${agentID}/children`).then((response) => response.ok ? response.json() : undefined),
           fetch(`${router.httpUrl}/v1/managed-agents/${agentID}`).then((response) => response.ok ? response.json() : undefined),
+          sqliteRows(router.database, "SELECT source_sequence,state,outcome FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [agentID]),
         ]);
         const liveChildren = children?.children?.filter((child) => child.compaction_state === "compacting") ?? [];
-        return liveChildren.length === 2 && agent?.agent?.activity_state === "compacting" ? { children, agent } : undefined;
-      }, "two live children and a live parent compaction before hard kill", 60_000);
+        const outcomes = new Set(transitions.map((transition) => transition.outcome).filter((outcome) => typeof outcome === "string"));
+        const finalTransition = transitions.at(-1);
+        // Kill only after the fixture's terminal matrix is durably complete and
+        // its final compaction remains live. Killing an earlier matrix turn can
+        // legitimately be followed by its already-buffered terminal frame.
+        const parentHoldActive = outcomes.has("completed") && outcomes.has("aborted") && outcomes.has("failed") && finalTransition?.state === "compacting" && finalTransition.outcome === null;
+        return liveChildren.length === 2 && agent?.agent?.activity_state === "compacting" && parentHoldActive ? { children, agent, transitions } : undefined;
+      }, "two live children and the final parent compaction hold before hard kill", 60_000);
       const pid = await hardKillManagedPi(router.database, agentID);
-      const after = await waitFor(async () => {
-        const [children, agent, recoveries, transitions, history] = await Promise.all([
-          fetch(`${router.httpUrl}/v1/managed-agents/${agentID}/children`).then((response) => response.ok ? response.json() : undefined),
-          fetch(`${router.httpUrl}/v1/managed-agents/${agentID}`).then((response) => response.ok ? response.json() : undefined),
-          sqliteRows(router.database, "SELECT recovery_cause,recovery_state,prior_pi_session_id,prior_process_incarnation,prior_runtime_generation FROM managed_child_recoveries WHERE agent_id=? ORDER BY rowid", [agentID]),
-          sqliteRows(router.database, "SELECT state,outcome FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [agentID]),
-          fetch(`${router.httpUrl}/v1/history?agent_id=${encodeURIComponent(agentID)}&view=complete&limit=100`).then((response) => response.json()),
-        ]);
-        const recovered = children?.children?.filter((child) => child.recovery?.cause === "parent_process_lost") ?? [];
-        // The public history page is intentionally redacted; source binding is
-        // established by the agent-specific transition ledger above.
-        const parentUnknown = transitions.some((transition) => transition.outcome === "reconciled_unknown") && (history?.entries ?? []).some((entry) => entry.message === "Managed parent compaction reconciled_unknown");
-        return agent?.agent?.lifecycle_state === "failed" && recovered.length === 2 && recoveries.length === 2 && recoveries.every((row) => row.recovery_cause === "parent_process_lost") && parentUnknown ? { children, agent, recoveries, transitions, history } : undefined;
-      }, "hard parent exit child recovery projection", 60_000);
+      let after;
+      try {
+        after = await waitFor(async () => {
+          const [children, agent, recoveries, transitions, history] = await Promise.all([
+            fetch(`${router.httpUrl}/v1/managed-agents/${agentID}/children`).then((response) => response.ok ? response.json() : undefined),
+            fetch(`${router.httpUrl}/v1/managed-agents/${agentID}`).then((response) => response.ok ? response.json() : undefined),
+            sqliteRows(router.database, "SELECT recovery_cause,recovery_state,prior_pi_session_id,prior_process_incarnation,prior_runtime_generation FROM managed_child_recoveries WHERE agent_id=? ORDER BY rowid", [agentID]),
+            sqliteRows(router.database, "SELECT state,outcome FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [agentID]),
+            fetch(`${router.httpUrl}/v1/history?agent_id=${encodeURIComponent(agentID)}&view=complete&limit=100`).then((response) => response.json()),
+          ]);
+          const recovered = children?.children?.filter((child) => child.recovery?.cause === "parent_process_lost") ?? [];
+          // The public history page is intentionally redacted; source binding is
+          // established by the agent-specific transition ledger above.
+          const parentUnknown = transitions.some((transition) => transition.outcome === "reconciled_unknown") && (history?.entries ?? []).some((entry) => entry.message === "Context compaction interrupted — outcome unknown" && entry.presentation?.kind === "compaction" && entry.presentation?.outcome === "reconciled_unknown");
+          return agent?.agent?.lifecycle_state === "failed" && recovered.length === 2 && recoveries.length === 2 && recoveries.every((row) => row.recovery_cause === "parent_process_lost") && parentUnknown ? { children, agent, recoveries, transitions, history } : undefined;
+        }, "hard parent exit child recovery projection", 60_000);
+      } catch (error) {
+        await write("hard-kill-live-child-recovery-debug.json", {
+          before,
+          killed_process: pid,
+          agent: await fetch(`${router.httpUrl}/v1/managed-agents/${agentID}`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => undefined),
+          children: await fetch(`${router.httpUrl}/v1/managed-agents/${agentID}/children`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => undefined),
+          managed_agent: await sqliteRows(router.database, "SELECT lifecycle_state,activity_state,last_error_code,last_error_message,process_pid,process_start_marker,process_incarnation,runtime_generation,pi_session_id,session_epoch FROM managed_agents WHERE agent_id=?", [agentID]).catch(() => undefined),
+          readiness_source: await sqliteRows(router.database, "SELECT snapshot_id,snapshot_sequence,pi_session_id,session_epoch,process_incarnation,runtime_generation FROM managed_readiness_sources WHERE agent_id=?", [agentID]).catch(() => undefined),
+          recoveries: await sqliteRows(router.database, "SELECT recovery_cause,recovery_state,prior_pi_session_id,prior_process_incarnation,prior_runtime_generation FROM managed_child_recoveries WHERE agent_id=? ORDER BY rowid", [agentID]).catch(() => undefined),
+          parent_compaction: await sqliteRows(router.database, "SELECT source_sequence,state,outcome FROM managed_parent_compaction_transitions WHERE agent_id=? ORDER BY source_sequence", [agentID]).catch(() => undefined),
+          history: await fetch(`${router.httpUrl}/v1/history?agent_id=${encodeURIComponent(agentID)}&view=complete&limit=100`).then(async (response) => response.ok ? response.json() : { status: response.status }).catch(() => undefined),
+          stderr: await readFile(router.piStderr, "utf8").catch(() => ""),
+        });
+        throw error;
+      }
       await waitFor(async () => {
         const rendered = await execBrowser(bcb, tab, `(() => { const row = document.querySelector('[data-agent-id=${agentID}]'); const select = row?.querySelector('.agent-row-select'); if (!(row instanceof HTMLElement) || !(select instanceof HTMLElement)) return undefined; if (row.getAttribute('aria-selected') !== 'true') select.click(); const toggle = row.querySelector('button[aria-label*=subagent]'); if (toggle instanceof HTMLButtonElement && !row.querySelector('.managed-child-list li')) toggle.click(); const text = row.innerText; return row.querySelectorAll('.managed-child-list li').length === 2 && text.includes('parent process ended before this child was confirmed') ? { text, children: row.querySelectorAll('.managed-child-list li').length } : undefined; })()`);
         return rendered;
@@ -1092,10 +1129,9 @@ export async function runManagedRpcRelease() {
     report.acceptance_run = await writeCandidateAcceptanceRun(output, candidate, write);
   } catch (error) {
     report.error = error instanceof Error ? error.message : String(error);
-    throw error;
+    runFailure = error;
   } finally {
     const cleanup = [];
-    let cleanupFailure;
     try {
       if (router && managedTestAgentIDs.size > 0) {
         const managedAgents = await terminateManagedTestAgents({
@@ -1130,9 +1166,12 @@ export async function runManagedRpcRelease() {
     }
     report.finished_at = new Date().toISOString();
     await write("REPORT.json", report);
-    // Do not certify a release run that left its explicitly-owned test agent
-    // behind, even when the proof itself otherwise passed.
-    if (cleanupFailure) throw cleanupFailure;
   }
+  // Do not certify a release run that left its explicitly-owned test agent
+  // behind, even when the proof itself otherwise passed. Preserve the original
+  // failure when both the proof and cleanup fail so its diagnostics remain the
+  // primary cause.
+  if (runFailure !== undefined) throw runFailure;
+  if (cleanupFailure !== undefined) throw cleanupFailure;
   return report;
 }

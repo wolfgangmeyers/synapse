@@ -180,7 +180,7 @@ func (h *acceptanceProviderAuthHelper) snapshot() ([]store.ManagedProviderStatus
 	providers := make([]store.ManagedProviderStatus, 0, 3)
 	models := make([]store.ManagedProviderModel, 0, 3)
 	for _, value := range []struct{ provider, label, model string }{
-		{provider: "openai-codex", label: "ChatGPT", model: "gpt-5.6-terra"},
+		{provider: "openai-codex", label: "ChatGPT", model: "managed-rpc-release"},
 		{provider: "google", label: "Google", model: "gemini-2.5-pro"},
 		{provider: "cursor", label: "Cursor", model: "cursor-fast"},
 	} {
@@ -285,7 +285,7 @@ func main() {
 		testEnvironment = append(testEnvironment, "MECHA_TEST_FIXTURE_MODE="+options.fixtureMode)
 	}
 	config := managed.Config{
-		Enabled: true, PiExecutable: options.pi, ManagedHome: options.home, SessionRoot: options.sessions,
+		Enabled: true, PiExecutable: options.pi, ManagedHome: options.home, PiAgentDir: filepath.Join(options.home, ".pi", "agent"), SessionRoot: options.sessions,
 		ManifestPath: options.manifest, MechaRPCExtension: options.mechaRPC, PiSubagentsExtension: options.subagents,
 		TestOnlyExtensions: []string{options.probe}, TestOnlyEnvironment: testEnvironment,
 		AllowedWorkingDirectoryRoots: []string{options.cwdRoot}, CanonicalQuietRecipientID: "phase3-supervisor",

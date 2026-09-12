@@ -39,18 +39,16 @@ describe("Complete timeline entry", () => {
     expect(screen.queryByRole("button", { name: /details/i })).not.toBeInTheDocument();
   });
 
-  it("renders state, compaction, recovery, and child unknown outcomes as distinct facts", () => {
+  it("renders compaction, recovery, and child unknown outcomes as distinct facts", () => {
     const { container } = render(<>
-      <CompleteTimelineEntry entry={{ id: "complete:state", agent_id: "managed-worker", at, message: "State changed", presentation: { kind: "state", from: "Starting", to: "Running" } }} />
       <CompleteTimelineEntry entry={{ id: "complete:compaction", agent_id: "managed-worker", at, message: "Context compacted", presentation: { kind: "compaction", outcome: "completed" } }} />
       <CompleteTimelineEntry entry={{ id: "complete:child", agent_id: "managed-worker", at, message: "Child interrupted — outcome unknown", presentation: { kind: "recovery", child_state: "interrupted_unknown", outcome: "unknown" } }} />
       <CompleteTimelineEntry entry={{ id: "complete:child-compaction", agent_id: "managed-worker", at, message: "Child compaction failed", presentation: { kind: "compaction", child_label: "Child", outcome: "failed" } }} />
     </>);
-    expect(screen.getByText("Starting → Running")).toBeInTheDocument();
     expect(screen.getByText("Context compacted")).toBeInTheDocument();
     expect(screen.getByText("Child interrupted — outcome unknown")).toBeInTheDocument();
     expect(screen.getByText("Child compaction failed")).toBeInTheDocument();
-    expect(container.querySelector(".fa-arrow-right")).toBeInTheDocument();
+    expect(container.querySelector(".fa-arrow-right")).not.toBeInTheDocument();
     expect(container.querySelector(".fa-compress")).toBeInTheDocument();
     expect(container.querySelector(".fa-rotate")).toBeInTheDocument();
   });

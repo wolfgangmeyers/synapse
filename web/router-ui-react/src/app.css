@@ -611,7 +611,8 @@ p:empty { display: none; }
 .peer-heading h2 .goal-header-button,
 .peer-heading h2 .reminder-indicator,
 .peer-heading h2 .inline-tool-settings-button { flex: 0 0 24px; }
-.inline-tool-settings-button {
+.inline-tool-settings-button,
+.managed-agent-settings-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -628,10 +629,12 @@ p:empty { display: none; }
   font-size: 11px;
   line-height: 1;
 }
-.inline-tool-settings-button:hover { background: rgba(181,188,208,0.22); }
+.inline-tool-settings-button:hover,
+.managed-agent-settings-button:hover { background: rgba(181,188,208,0.22); }
+.managed-agent-controls { display: flex; margin-top: 6px; }
 .conversation-header-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-.conversation-view-tabs { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-.conversation-view-tabs button { min-height: 38px; padding: 0 12px; border-radius: 12px; font-size: 13px; white-space: nowrap; }
+.conversation-view-tabs { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.conversation-view-tabs button { display: inline-grid; place-items: center; width: 30px; min-width: 30px; min-height: 30px; height: 30px; padding: 0; border-radius: 999px; font-size: 12px; }
 .conversation-view-tabs button:focus-visible { outline: 2px solid var(--secondary); outline-offset: 2px; }
 
 .prompt-controls {
@@ -1021,8 +1024,6 @@ p:empty { display: none; }
 .managed-directory-browser-list button.selected { border-color: var(--primary); background: rgba(157,168,255,0.16); }
 .managed-lifecycle-actions, .managed-confirmation { display: grid; gap: 12px; }
 .managed-confirmation { padding: 12px; border: 1px solid rgba(255,180,171,.42); border-radius: 14px; }
-.managed-state-dialog { width: min(760px, calc(100vw - 32px)); }
-.managed-state-json { max-height: min(65dvh, 680px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border-radius: 14px; background: var(--canvas); color: var(--text); }
 .managed-control-dialog { width: min(560px, calc(100vw - 32px)); }
 .managed-control-body { display: grid; gap: 16px; }
 .managed-control-summary { padding: 14px; border-radius: 16px; background: var(--canvas); }

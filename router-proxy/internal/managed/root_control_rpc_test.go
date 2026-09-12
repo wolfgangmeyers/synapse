@@ -18,7 +18,7 @@ func TestRootControlRegistryIsClosedAndRootEventRejectsLegacyControlEnvelopes(t 
 	require.NoError(t, err)
 	registry, err := NewRootControlHandlerRegistry(manifest, nil)
 	require.NoError(t, err)
-	require.Len(t, registry.byOperation, 16)
+	require.Len(t, registry.byOperation, len(managedManifestOperations))
 	tool := manifest.Tools[0]
 	requestID := "123e4567-e89b-42d3-a456-426614174001"
 	valid := map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.control.request.v1", "display": false, "content": "Router control request queued.", "details": map[string]any{"protocol": "mecha.control/v1", "request_id": requestID, "tool_call_id": "call-1", "capability_id": tool.CapabilityID, "tool_name": tool.Name, "definition_id": tool.DefinitionID, "definition_sha256": tool.DefinitionSHA256, "operation_id": tool.OperationID, "manifest_sha256": manifest.CanonicalSHA256, "runtime_generation": "123e4567-e89b-42d3-a456-426614174002", "session_epoch": json.Number("1"), "context_ref": "root", "arguments": map[string]any{}}}}

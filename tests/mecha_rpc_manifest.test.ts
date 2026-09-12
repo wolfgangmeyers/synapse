@@ -43,11 +43,12 @@ test("the source-mapped manifest generator has no byte drift", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("revision one manifest has exactly the authorized 16 definitions and stable canonical identity", () => {
+test("revision two manifest retains the 16 baseline definitions and adds source-backed web search", () => {
   const desired = manifest();
-  const validated = validateDesiredManifest(desired, { requireBaseline: true });
+  const validated = validateDesiredManifest(desired, { requireBaselineCapabilities: true });
 
-  assert.equal(validated.tools.length, 16);
+  assert.equal(validated.revision, 2);
+  assert.equal(validated.tools.length, 17);
   assert.deepEqual(validated.tools.map((tool) => tool.name).sort(), [
     "goal",
     "goal_snooze",
@@ -65,6 +66,7 @@ test("revision one manifest has exactly the authorized 16 definitions and stable
     "mecha_state",
     "mecha_verification_handoff",
     "mecha_worker",
+    "web_search__4f4ca2a3ae8ea237531b8c5264d53d15474c0848fc8d7eeada0fef5b85b139ac",
   ]);
   assert.equal(hashCanonicalJson(validated), hashCanonicalJson(JSON.parse(canonicalizeJson(validated))));
   assert.equal(canonicalizeJson({ z: 1, a: [true, "x"] }), '{"a":[true,"x"],"z":1}');
@@ -190,8 +192,8 @@ test("full installs preflight atomically and supplemental installation is one un
     inline_policy: { enabled: true, credits: {} },
     recall_projection: { enabled: false, stores: [], content: "" },
   });
-  assert.equal(installed.tools.length, 16);
-  assert.equal(pi.tools.length, 16);
+  assert.equal(installed.tools.length, 17);
+  assert.equal(pi.tools.length, 17);
 
   const target = structuredClone(desired) as RecordValue;
   const tools = target.tools as RecordValue[];
@@ -207,7 +209,7 @@ test("full installs preflight atomically and supplemental installation is one un
   const extraName = `future_capability__${definitionHash}`;
   tools.push({ ...extra, name: extraName, definition_sha256: definitionHash, definition_id: `def_${definitionHash}` });
   tools.sort((left, right) => Buffer.compare(Buffer.from(String(left.capability_id), "utf8"), Buffer.from(String(right.capability_id), "utf8")));
-  target.revision = 2;
+  target.revision = 3;
   const added = registry.installSupplemental({
     protocol: "mecha.tools-install/v1",
     delivery_id: "123e4567-e89b-42d3-a456-426614174002",
@@ -218,8 +220,8 @@ test("full installs preflight atomically and supplemental installation is one un
     manifest_sha256: hashCanonicalJson(target),
     added_name: extraName,
   });
-  assert.equal(added.tools.length, 17);
-  assert.equal(pi.tools.length, 17);
+  assert.equal(added.tools.length, 18);
+  assert.equal(pi.tools.length, 18);
 
   await assert.rejects(async () => registry.installSupplemental({
     protocol: "mecha.tools-install/v1",
@@ -231,13 +233,13 @@ test("full installs preflight atomically and supplemental installation is one un
     manifest_sha256: hashCanonicalJson(target),
     added_name: extra.name,
   }));
-  assert.equal(pi.tools.length, 17);
+  assert.equal(pi.tools.length, 18);
   assert.deepEqual(emitted, []);
 });
 
-test("registry exceptions at positions 1, 8, and 16 make every partial manifest terminal", async () => {
+test("registry exceptions at positions 1, 8, and 17 make every partial manifest terminal", async () => {
   const desired = manifest();
-  for (const position of [1, 8, 16]) {
+  for (const position of [1, 8, 17]) {
     const pi = fakePi([], position);
     let fatal: unknown;
     const registry = createToolRegistry(pi, {
@@ -347,16 +349,16 @@ function sortedManifest(tools: RecordValue[], revision: number): RecordValue {
   };
 }
 
-test("fresh current manifests accept valid 17 through 32 tool states and changed definitions use hash names", () => {
+test("fresh current manifests accept valid 18 through 32 tool states and changed definitions use hash names", () => {
   const baseline = manifest();
   const baseTools = structuredClone(baseline.tools) as RecordValue[];
-  const current17 = sortedManifest([...baseTools, manifestTool("future_capability")], 2);
-  assert.equal(validateDesiredManifest(current17, { requireBaselineCapabilities: true }).tools.length, 17);
+  const current18 = sortedManifest([...baseTools, manifestTool("future_capability")], 3);
+  assert.equal(validateDesiredManifest(current18, { requireBaselineCapabilities: true }).tools.length, 18);
 
   const current32 = sortedManifest([
     ...baseTools,
-    ...Array.from({ length: 16 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
-  ], 2);
+    ...Array.from({ length: 15 }, (_, index) => manifestTool(`future_${String(index).padStart(2, "0")}`)),
+  ], 3);
   assert.equal(validateDesiredManifest(current32, { requireBaselineCapabilities: true }).tools.length, 32);
 
   const changedTools = structuredClone(baseline.tools) as RecordValue[];
@@ -377,11 +379,11 @@ test("fresh current manifests accept valid 17 through 32 tool states and changed
     definition_id: `def_${changedSha}`,
     definition_sha256: changedSha,
   });
-  const restarted = sortedManifest(changedTools, 2);
+  const restarted = sortedManifest(changedTools, 3);
   assert.doesNotThrow(() => validateDesiredManifest(restarted, { requireBaselineCapabilities: true }));
   assert.equal((restarted.tools as RecordValue[]).find((tool) => tool.capability_id === "goal")!.name, `goal__${changedSha}`);
 
-  const incorrectlyNamedAdditional = structuredClone(current17) as RecordValue;
+  const incorrectlyNamedAdditional = structuredClone(current18) as RecordValue;
   const additional = (incorrectlyNamedAdditional.tools as RecordValue[]).find((tool) => tool.capability_id === "future_capability")!;
   additional.name = "future_capability";
   assert.throws(() => validateDesiredManifest(incorrectlyNamedAdditional, { requireBaselineCapabilities: true }));

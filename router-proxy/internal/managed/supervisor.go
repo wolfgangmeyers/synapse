@@ -210,8 +210,8 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		}
 		manifest = loaded
 	}
-	if len(manifest.Tools) != 16 {
-		return nil, errors.New("managed manifest must have 16 tools")
+	if len(manifest.Tools) != len(managedManifestOperations) {
+		return nil, fmt.Errorf("managed manifest must have %d tools", len(managedManifestOperations))
 	}
 	rootHandlers, err := NewRootControlHandlerRegistry(manifest, options.RootControlHandlers)
 	if err != nil {

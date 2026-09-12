@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,38 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRootControlledWebSearchReturnsBoundedSourceResults(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required by the managed root-control runner")
+	}
+	search := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "/search", request.URL.Path)
+		require.Equal(t, "managed root control", request.URL.Query().Get("q"))
+		_, _ = writer.Write([]byte(`<!doctype html><ol><li class="b_algo"><h2><a href="https://source.example/report">Source report</a></h2><div class="b_caption"><p>Fresh source-backed result.</p></div></li></ol>`))
+	}))
+	defer search.Close()
+	t.Setenv("MECHA_MANAGED_WEB_SEARCH_ENDPOINT", search.URL+"/search")
+	toolsDir, err := filepath.Abs(filepath.Join("..", "..", "..", ".claude", "skills", "supervisor", "tools"))
+	require.NoError(t, err)
+	executor := mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: t.TempDir()}
+
+	result, err := executor.ExecuteRootControl(context.Background(), managed.RootControlHandlerIdentity{OperationID: "web.search"}, managed.RootControlInvocation{
+		RequestID: "request-1", ResultID: "result-1", ToolCallID: "call-1", OperationID: "web.search",
+		Arguments: map[string]any{"query": "managed root control", "freshness": "live", "maxResults": 1},
+		Fence:     store.ManagedRuntimeFence{AgentID: "managed-worker"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Status)
+	require.Contains(t, result.Content, "Source report")
+	require.Equal(t, "bing", result.Details["provider"])
+	sources, ok := result.Details["sources"].([]any)
+	require.True(t, ok)
+	require.Len(t, sources, 1)
+	require.Equal(t, "https://source.example/report", sources[0].(map[string]any)["url"])
+}
 
 func TestRootControlRunnerUsesSnakeCaseFenceContract(t *testing.T) {
 	python, err := exec.LookPath("python3")

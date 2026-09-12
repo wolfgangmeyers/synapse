@@ -21,19 +21,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This is the complete dirty Phase 2 candidate used by both locked native
-// proofs. Keeping every modified dependency here prevents a passing S4 proof
-// from silently omitting the termination implementation under test.
+// This explicit ledger is the complete dirty release candidate used by both
+// locked native proofs. It includes Phase 3 release and evidence paths as well
+// as Phase 2 implementation dependencies, so neither proof can be detached
+// from the exact candidate that will be released.
 var managedPhase2CandidatePaths = []string{
 	".claude/skills/supervisor/tools/managed_root_control.py",
+	"RPC_IMPLEMENTATION_PLAN.html",
+	"docs/rpc-phase2-lifecycle-controls-gate-record.md",
 	"pi-extensions/mecha-rpc/index.ts",
 	"pi-extensions/mecha-rpc/protocol.ts",
 	"pi-extensions/mecha-rpc/tool-registry.ts",
 	"router-proxy/cmd/mailbox-router/main.go",
 	"router-proxy/cmd/mailbox-router/managed_root_control.go",
+	"router-proxy/cmd/mailbox-router/managed_root_control_test.go",
+	"router-proxy/cmd/managed-acceptance-router/main.go",
 	"router-proxy/internal/managed/config.go",
 	"router-proxy/internal/managed/manifest.go",
+	"router-proxy/internal/managed/manifest_test.go",
 	"router-proxy/internal/managed/process.go",
+	"router-proxy/internal/managed/projection.go",
 	"router-proxy/internal/managed/root_control_handlers.go",
 	"router-proxy/internal/managed/root_control_manager.go",
 	"router-proxy/internal/managed/root_control_rpc_test.go",
@@ -51,6 +58,7 @@ var managedPhase2CandidatePaths = []string{
 	"router-proxy/internal/store/managed_lifecycle_s0.go",
 	"router-proxy/internal/store/managed_root_control_s4.go",
 	"router-proxy/internal/store/managed_root_control_s4_test.go",
+	"router-proxy/internal/store/managed_restart_all_s2.go",
 	"router-proxy/internal/store/managed_test.go",
 	"router-proxy/internal/store/managed_termination_s5.go",
 	"router-proxy/internal/store/managed_termination_s5_test.go",
@@ -66,10 +74,33 @@ var managedPhase2CandidatePaths = []string{
 	"router-proxy/internal/transport/managed_termination_http_test.go",
 	"router-proxy/internal/transport/managed_termination_native_test.go",
 	"router-proxy/internal/transport/transport_test.go",
+	"router-proxy/internal/transport/ui_live.go",
+	"router-proxy/internal/transport/ui_live_test.go",
 	"router/contract/http-outcomes.json",
+	"router/contract/managed-tools-v1.json",
 	"router/contract/manifest.json",
+	"tests/fixtures/mecha-rpc/acceptance-evidence-v1.json",
 	"tests/fixtures/mecha-rpc/s4-native-root-control-probe.ts",
 	"tests/mecha_rpc_extension.test.ts",
+	"tests/mecha_rpc_manifest.test.ts",
+	"tests/mecha_rpc_native_pi_e2e.test.ts",
+	"tools/check_rpc_acceptance.mjs",
+	"tools/generate_managed_tools.mjs",
+	"tools/validate_mecha_rpc_phase1.mjs",
+	"web/router-ui-react/src/App.tsx",
+	"web/router-ui-react/src/app.css",
+	"web/router-ui-react/src/components/AgentRow.tsx",
+	"web/router-ui-react/src/components/Conversation.tsx",
+	"web/router-ui-react/src/components/ConversationHeader.tsx",
+	"web/router-ui-react/src/components/ManagedStateDialog.tsx",
+	"web/router-ui-react/src/components/MessageList.tsx",
+	"web/router-ui-react/src/components/SubagentBadge.tsx",
+	"web/router-ui-react/tests/acceptance/bcb-managed-rpc-release-runner.mjs",
+	"web/router-ui-react/tests/acceptance/bcb-runner-selectors.test.mjs",
+	"web/router-ui-react/tests/component/app-integration.test.tsx",
+	"web/router-ui-react/tests/component/complete-timeline-entry.test.tsx",
+	"web/router-ui-react/tests/component/managed-children.test.tsx",
+	"web/router-ui-react/tests/component/managed-history.test.tsx",
 }
 
 func requireManagedPhase2CandidateLedger(t *testing.T, root string) {
@@ -94,6 +125,14 @@ func managedPhase2CandidateDigests(t *testing.T, root string) (string, map[strin
 	digests := make(map[string]string, len(managedPhase2CandidatePaths))
 	for _, relative := range managedPhase2CandidatePaths {
 		contents, err := os.ReadFile(filepath.Join(root, relative))
+		if os.IsNotExist(err) {
+			// The release removes this source path; retain that absence in the
+			// candidate identity rather than silently dropping it from the proof.
+			digests[relative] = "deleted"
+			_, err = fmt.Fprintf(hash, "%s\x00deleted\n", relative)
+			require.NoError(t, err)
+			continue
+		}
 		require.NoError(t, err)
 		sum := sha256.Sum256(contents)
 		digest := hex.EncodeToString(sum[:])

@@ -125,8 +125,8 @@ function resolveLockedPiTarget(): LockedPiTarget {
   ) throw new Error("Pi source lock does not match its source checkout");
   const piPackagesPath = realpathSync(lock.pi_packages.path);
   if (
-    lock.pi_packages.commit !== "06ed583c720ed0fe6d6cc099b26eeb384795ea39" ||
-    lock.pi_packages.tree !== "18aa55133ecd46fc7eb9a4a3b9265e8ec247863e" ||
+    lock.pi_packages.commit !== "5b362aaa6b65204ace95c62b5089b6ad5a801b4a" ||
+    lock.pi_packages.tree !== "9037681d57db3910588f28b00bd72a5de810cf53" ||
     commandOutput("git", ["-C", piPackagesPath, "rev-parse", "HEAD"]) !== lock.pi_packages.commit ||
     commandOutput("git", ["-C", piPackagesPath, "rev-parse", "HEAD^{tree}"]) !== lock.pi_packages.tree ||
     realpathSync(SUBAGENTS_EXTENSION) !== join(piPackagesPath, "packages/pi-subagents/src/index.ts")
@@ -526,7 +526,7 @@ function supplementalManifest(base: JsonRecord, capabilityId = "zz_stock_supplem
     const rightCapability = right !== null && typeof right === "object" && !Array.isArray(right) ? (right as JsonRecord).capability_id : "";
     return Buffer.compare(Buffer.from(String(leftCapability), "utf8"), Buffer.from(String(rightCapability), "utf8"));
   });
-  desired.revision = 2;
+  desired.revision = Number(desired.revision) + 1;
   return desired;
 }
 
@@ -554,7 +554,7 @@ function changedDefinitionManifest(base: JsonRecord): JsonRecord {
     definition_id: `def_${definitionSha}`,
     definition_sha256: definitionSha,
   });
-  desired.revision = 2;
+  desired.revision = Number(desired.revision) + 1;
   return desired;
 }
 
@@ -859,7 +859,7 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     const expectedToolNames = new Set(manifestTools.flatMap((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as JsonRecord).name === "string" ? [(tool as JsonRecord).name] : []));
     for (const name of expectedToolNames) assert.ok(advertisedNames.has(name), `Pi did not advertise managed tool ${name}`);
     assert.deepEqual(advertisedNames, new Set([...expectedToolNames, "subagent", "get_subagent_result", "steer_subagent"]));
-    assert.equal(expectedToolNames.size, 16);
+    assert.equal(expectedToolNames.size, 17);
     const advertisedDefinitions = new Map(advertisedTools.flatMap((tool) => {
       if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return [];
       const definition = (tool as JsonRecord).function;
@@ -933,9 +933,9 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     assert.equal(customMessages(rpc.events, "mecha.tools.accepted.v1").length, 3, "accepted supplemental replay returns a receipt without a second registration");
     const requestsBeforeSupplementalPrompt = provider.requests.length;
     successful(await rpc.request({ type: "prompt", message: "Confirm the supplemental managed definition." }));
-    const supplementalRequest = await waitFor(() => provider.requests[requestsBeforeSupplementalPrompt], "17-tool supplemental model request");
+    const supplementalRequest = await waitFor(() => provider.requests[requestsBeforeSupplementalPrompt], "18-tool supplemental model request");
     const supplementalManagedNames = new Set((supplemental.tools as JsonRecord[]).map((tool) => String(tool.name)));
-    assert.equal([...requestToolNames(supplementalRequest)].filter((name) => supplementalManagedNames.has(name)).length, 17, "the provider request has all 17 managed tools");
+    assert.equal([...requestToolNames(supplementalRequest)].filter((name) => supplementalManagedNames.has(name)).length, 18, "the provider request has all 18 managed tools");
     assert.ok(requestToolNames(supplementalRequest).has(String(supplementalTool.name)));
 
     const supplementalToolName = String(supplementalTool.name);
@@ -1007,7 +1007,7 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     const requestsBeforeUnchangedPrompt = provider.requests.length;
     successful(await rpc.request({ type: "prompt", message: "Confirm rejected supplemental updates left the registry unchanged." }));
     const unchangedRequest = await waitFor(() => provider.requests[requestsBeforeUnchangedPrompt], "unchanged supplemental model request");
-    assert.equal([...requestToolNames(unchangedRequest)].filter((name) => supplementalManagedNames.has(name)).length, 17);
+    assert.equal([...requestToolNames(unchangedRequest)].filter((name) => supplementalManagedNames.has(name)).length, 18);
     assert.ok(requestToolNames(unchangedRequest).has(supplementalToolName));
 
     successful(await rpc.request({ type: "prompt", message: `/mecha-mailbox-deliver-v1 ${encodeHiddenEnvelope({
@@ -1041,7 +1041,7 @@ test("stock Pi 0.85 advertises the managed manifest through a deterministic real
     assert.deepEqual(observedLegacy, new Set(legacyPrompts as string[]));
     writeAcceptanceArtifact("stock-pi-0.85-parent-commands.json", {
       protocol: "mecha.phase1-stock-proof/v1", pi_version: version, runtime_generation: RUNTIME_GENERATION,
-      prompted_hidden: hiddenPrompts, prompted_legacy: legacyPrompts, accepted_manifest_sizes: [16, 17],
+      prompted_hidden: hiddenPrompts, prompted_legacy: legacyPrompts, accepted_manifest_sizes: [17, 18],
       supplemental_replay: true, custom_message_types: ["mecha.mailbox.appended.v1", "mecha.policy.applied.v1", "mecha.child.snapshot.v1"],
     });
   } finally {
@@ -1112,7 +1112,6 @@ test("stock Pi 0.85 rejects an isolated supplemental collision without changing 
   const accepted = supplementalManifest(baseline);
   const acceptedHash = hashCanonicalJson(accepted);
   const collisionTarget = supplementalManifest(accepted, "zz_stock_collision");
-  collisionTarget.revision = 3;
   const collisionTool = (collisionTarget.tools as JsonRecord[]).find((tool) => tool.capability_id === "zz_stock_collision");
   assert.ok(collisionTool);
   const collisionName = String(collisionTool.name);
@@ -1138,7 +1137,7 @@ test("stock Pi 0.85 rejects an isolated supplemental collision without changing 
       const details = (event.message as JsonRecord).details;
       return details !== null && typeof details === "object" && !Array.isArray(details)
         && (details as JsonRecord).manifest_sha256 === acceptedHash ? true : undefined;
-    }), "accepted 17-tool manifest receipt");
+    }), "accepted 18-tool manifest receipt");
 
     const requestsBeforeCollision = provider.requests.length;
     successful(await rpc.request({ type: "prompt", message: `/mecha-install-tools-v1 ${encodeHiddenEnvelope({
@@ -1208,7 +1207,7 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
     const advertisedNames = requestToolNames(childRequest);
     const manifestTools = manifest.tools;
     assert.ok(Array.isArray(manifestTools));
-    assert.equal(manifestTools.length, 16);
+    assert.equal(manifestTools.length, 17);
     const advertisedDefinitions = new Map((childRequest.tools as unknown[]).flatMap((tool) => {
       if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return [];
       const definition = (tool as JsonRecord).function;
@@ -1312,7 +1311,7 @@ test("stock Pi 0.85 hands an accepted parent manifest to a real child before its
     assert.equal(customRecords(recordsIn(join(home, "sessions")), "mecha.control.result.v1").length, 1);
     writeAcceptanceArtifact("stock-pi-0.85-real-child.json", {
       protocol: "mecha.phase1-stock-proof/v1", runtime_generation: RUNTIME_GENERATION,
-      parent_first_request: true, child_first_request: true, child_manifest_size: 16,
+      parent_first_request: true, child_first_request: true, child_manifest_size: 17,
       child_context_result_append: true, stale_child_result_appended: false,
     });
     const sessionRecords = recordsIn(join(home, "sessions"));
@@ -1352,7 +1351,7 @@ test("stock Pi 0.85 proves AC-090 duplicate, disposer, and owner-release factory
     const request = await waitFor(() => provider.requests[requestIndex], description);
     const names = requestToolNames(request);
     const managed = new Set((manifest.tools as JsonRecord[]).map((tool) => String(tool.name)));
-    assert.equal([...names].filter((name) => managed.has(name)).length, 16, `${description} lost a Mecha child definition`);
+    assert.equal([...names].filter((name) => managed.has(name)).length, 17, `${description} lost a Mecha child definition`);
     assert.equal(names.has("phase1_ac090_marker"), markerExpected, description);
   };
   try {

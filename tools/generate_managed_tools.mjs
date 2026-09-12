@@ -9,6 +9,7 @@ const sources = {
   goal: resolve(root, "pi-extensions/mecha-goal/index.ts"),
   messaging: resolve(root, "pi-extensions/mecha-messaging/index.ts"),
   operational: resolve(root, "pi-extensions/mecha-messaging/operational-tools.ts"),
+  rootControl: resolve(root, ".claude/skills/supervisor/tools/managed_root_control.py"),
 };
 
 function canonicalize(value) {
@@ -27,16 +28,17 @@ function action(values, properties = {}, required = ["action"]) {
     : { type: "string", maxLength: 64, enum: values };
   return closed({ action: actionField, ...properties }, required);
 }
-function definition(capabilityId, label, description, parameters, operationId, metadata = {}) {
+function definition(capabilityId, label, description, parameters, operationId, metadata = {}, immutableName = false) {
   const base = { capability_id: capabilityId, label, description, parameters, operation_id: operationId, ...metadata };
   const definition_sha256 = hash(base);
-  return { ...base, name: capabilityId, definition_id: `def_${definition_sha256}`, definition_sha256 };
+  return { ...base, name: immutableName ? `${capabilityId}__${definition_sha256}` : capabilityId, definition_id: `def_${definition_sha256}`, definition_sha256 };
 }
 
 function assertSourceContract() {
   const goal = readFileSync(sources.goal, "utf8");
   const messaging = readFileSync(sources.messaging, "utf8");
   const operational = readFileSync(sources.operational, "utf8");
+  const rootControl = readFileSync(sources.rootControl, "utf8");
   for (const [text, marker, file] of [
     [goal, 'description: "Set, inspect, or disable the active goal evaluator."', sources.goal],
     [goal, 'description: "Deliberately wait before resuming an active goal when snooze is enabled."', sources.goal],
@@ -48,6 +50,7 @@ function assertSourceContract() {
     [operational, "createOperationalToolDefinitions", sources.operational],
     [operational, 'descriptor("mecha_state", "Supervisor state"', sources.operational],
     [operational, 'descriptor("mecha_priority", "Supervisor priority"', sources.operational],
+    [rootControl, 'if operation == "web.search":', sources.rootControl],
   ]) if (!text.includes(marker)) throw new Error(`Reviewed source no longer exposes ${marker}: ${file}`);
 }
 
@@ -66,6 +69,7 @@ function definitions() {
     mecha_recall: { prompt_snippet: "Enable, disable, or inspect process-local Markdown recall", prompt_guidelines: ["Use mecha_recall with action enable, disable, or status for recall stores.", "Call pi__mecha_recall through the Cursor pi bridge."] },
     mecha_settled_notifications: { prompt_snippet: "Enable, disable, or inspect settled mailbox notifications", prompt_guidelines: ["Use mecha_settled_notifications with action enable, disable, or status for worker settled notifications.", "Call pi__mecha_settled_notifications through the Cursor pi bridge."] },
     mecha_context: { prompt_snippet: "Inspect context-threshold policy or request Pi self-compaction", prompt_guidelines: ["Use mecha_context with action status, set_policy, or compact for context-threshold and compaction control.", "Call pi__mecha_context through the Cursor pi bridge."] },
+    web_search: { prompt_snippet: "Search the web and return linked source results", prompt_guidelines: ["Use web_search when current or external source-backed information is needed.", "Choose live for time-sensitive facts, cached for stable information, and indexed when freshness is not required."] },
   };
   return [
     definition("goal", "Goal", "Set, inspect, or disable the active goal evaluator.", action(["set", "status", "off"], { goal: string(4000, 1) }, ["action"]), "goal.control", metadata.goal),
@@ -87,10 +91,11 @@ function definitions() {
     definition("mecha_pr", "Mecha pull request", "Read pull request status.", action(["status"], { pullRequest: { type: "integer", minimum: 1, maximum: 1000000000 } }, ["action", "pullRequest"]), "ops.pr_status"),
     definition("mecha_git", "Mecha git", "Read task git status.", action(["status"], { task: task }, ["action", "task"]), "ops.git_status"),
     definition("mecha_router", "Mecha router", "Read or control fixed router operations.", action(["health", "retry", "dismiss"], { messageId: task }), "router.control"),
+    definition("web_search", "Web search", "Search the web and return source links from the managed search provider.", closed({ query: string(4000, 1), freshness: { type: "string", maxLength: 16, enum: ["live", "cached", "indexed"] }, maxResults: { type: "integer", minimum: 1, maximum: 10 } }, ["query"]), "web.search", metadata.web_search, true),
   ].sort((left, right) => Buffer.compare(Buffer.from(left.capability_id), Buffer.from(right.capability_id)));
 }
 
-const desired = { protocol: "mecha.tools/v1", revision: 1, tools: definitions() };
+const desired = { protocol: "mecha.tools/v1", revision: 2, tools: definitions() };
 const rendered = `${JSON.stringify(desired, null, 2)}\n`;
 if (process.argv.includes("--check")) {
   const existing = readFileSync(output, "utf8");

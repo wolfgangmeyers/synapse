@@ -60,10 +60,10 @@ async function createRegistry() {
   return {
     protocol: "mecha.phase1-acceptance-contract/v1",
     schema,
-    required_fork_head: "06ed583c720ed0fe6d6cc099b26eeb384795ea39",
+    required_fork_head: "5b362aaa6b65204ace95c62b5089b6ad5a801b4a",
     required_pi_version: "0.85.0",
     artifact_directory: "/tmp/mecha-rpc-acceptance/<mecha-developer-head>/<run-id>",
-    required_prompts: { hidden: ["mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1"], legacy: ["goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"] },
+    required_prompts: { hidden: ["mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1"], legacy: ["goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"] },
     required_custom_message_types: ["mecha.tools.accepted.v1", "mecha.tools.rejected.v1", "mecha.control.request.v1", "mecha.control.result.v1", "mecha.mailbox.appended.v1", "mecha.policy.applied.v1", "mecha.child.snapshot.v1", "mecha.child.delta.v1"],
     required_artifacts: ["stock-pi-0.85-parent-commands.json", "stock-pi-0.85-command-registration-failures.json", "stock-pi-0.85-supplemental-collision.json", "stock-pi-0.85-real-child.json", "stock-pi-0.85-custom-message-types.json", "stock-pi-0.85-ac090-child-factory-lifecycle.json", "stock-pi-0.85-lifecycle-generations.json", "stock-pi-0.85-fresh-generation.json"],
     phase2_exclusions: ["router dispatch and persistence", "managed HTTP and authentication", "mailbox recovery", "browser acceptance and release gates"],

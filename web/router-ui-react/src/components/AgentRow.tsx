@@ -24,11 +24,14 @@ function initial(id: string): string { return id.trim().charAt(0).toUpperCase() 
 export function AgentRow({ agent, selected = false, expanded = false, reminderCount = 0, arrival, onSelect, onGoal, onReminders, onToggleSubagents, onOpenArrival, onDismissArrival }: AgentRowProps): ReactElement {
   const working = agent.activity_state === "active";
   const compacting = agent.activity_state === "compacting";
-  const hasSubagents = agent.source === "router-managed" ? (agent.managed_children?.length ?? 0) > 0 : (agent.subagent_count ?? agent.subagents?.length ?? 0) > 0;
-  // The managed child list remains independently useful while its parent
-  // compacts: it can show a child still working or compacting. Legacy agent
-  // cards retain their compacting-only presentation.
-  const showSubagentBadge = hasSubagents && (!compacting || agent.source === "router-managed");
+  const managed = agent.source === "router-managed";
+  const managedChildCount = managed ? agent.managed_children?.length ?? 0 : 0;
+  const subagentListID = `agent-row-subagents-${agent.agent_id}`;
+  const hasSubagents = managed ? managedChildCount > 0 : (agent.subagent_count ?? agent.subagents?.length ?? 0) > 0;
+  // A managed parent can retain source-fenced, interrupted child records after
+  // restart. Keep its expander available so a clinician can see that recovery
+  // state even when none of those children is still actively running.
+  const showSubagentBadge = hasSubagents && (agent.source === "router-managed" || !compacting);
   const hasSignals = showSubagentBadge || arrival !== undefined;
   const hasGoal = agent.goal_state?.enabled || agent.goal?.enabled;
   const hasReminders = reminderCount > 0;
@@ -45,7 +48,7 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
           <strong>{humanName(agent.agent_id)}</strong><small className="agent-source">{agent.source === "router-managed" ? "RPC" : "tmux"}</small>
         </span>
         {hasSignals ? <span className="agent-row-signals" onClick={(event) => event.stopPropagation()}>
-          {showSubagentBadge ? <SubagentBadge count={agent.subagent_count} subagents={agent.subagents} expanded={expanded} listId={`agent-row-subagents-${agent.agent_id}`} onToggle={() => onToggleSubagents?.(agent.agent_id)} /> : null}
+          {showSubagentBadge ? <SubagentBadge count={managed ? managedChildCount : agent.subagent_count} subagents={managed ? [] : agent.subagents} expanded={expanded} listId={subagentListID} externalDisclosure={managed} onToggle={() => onToggleSubagents?.(agent.agent_id)} /> : null}
           {arrival ? <ArrivalIndicator arrival={arrival} onOpen={onOpenArrival} onDismiss={onDismissArrival} /> : null}
         </span> : null}
         {compacting ? <span className="compacting-indicator"><span className="compacting-dot" aria-hidden="true" />Compacting</span> : null}
@@ -57,6 +60,6 @@ export function AgentRow({ agent, selected = false, expanded = false, reminderCo
       {hasReminders && onReminders ? <button type="button" className="reminder-row-indicator" title="Add reminder" aria-label="Add reminder" onClick={(event) => { stopActionPropagation(event); onReminders(agent.agent_id); }} onKeyDown={stopActionPropagation}><i className="fa-solid fa-clock" aria-hidden="true" /></button> : null}
     </div> : null}
     {expanded && agent.source === "router-managed" && agent.managed_children_recovery === "reconstructing" ? <span className="managed-child-recovery">Reconstructing child state</span> : null}
-    {expanded && agent.source === "router-managed" ? <ManagedChildList agentId={agent.agent_id} children={agent.managed_children ?? []} /> : null}
+    {expanded && managed ? <ManagedChildList agentId={agent.agent_id} children={agent.managed_children ?? []} id={subagentListID} /> : null}
   </div>;
 }

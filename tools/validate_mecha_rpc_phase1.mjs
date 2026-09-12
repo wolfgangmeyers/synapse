@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 const ROOT = resolve(import.meta.dirname, "..");
 const FORK_ROOT = resolve(ROOT, "../pi-packages");
 const CONTRACT_PATH = join(ROOT, "tests/fixtures/mecha-rpc/acceptance-evidence-v1.json");
-const EXPECTED_FORK_HEAD = "06ed583c720ed0fe6d6cc099b26eeb384795ea39";
+const EXPECTED_FORK_HEAD = "5b362aaa6b65204ace95c62b5089b6ad5a801b4a";
 
 function utcNow() {
   return new Date().toISOString();
