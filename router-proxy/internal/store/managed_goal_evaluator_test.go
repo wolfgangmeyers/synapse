@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,16 +40,30 @@ func TestMigration039AddsEvaluatorStateToAReleased038Store(t *testing.T) {
 	migrations := DefaultMigrations()
 	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "039_managed_goal_evaluator_state")]})
 	require.NoError(t, err)
+	legacy := ManagedAgentRecord{AgentID: "legacy-goal", Name: "legacy-goal", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: "legacy-session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
+	launch := ManagedOperation{OperationID: "legacy-goal-launch", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "legacy-goal-launch", CanonicalBodyHash: testManifestHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+	require.NoError(t, before.ReserveManagedLaunch(ctx, legacy, launch))
+	_, err = before.db.Exec(`UPDATE managed_agent_policies SET desired_revision=4,applied_revision=4,goal_enabled=1,goal_text='finish legacy work',projection_state='applied',evaluator_state='evaluating',evaluator_attempts=7,not_done_wakeups=19,last_settled_sequence=42 WHERE agent_id=?`, legacy.AgentID)
+	require.NoError(t, err)
 	require.NoError(t, before.Close())
 
 	after, err := Open(ctx, path, Options{})
 	require.NoError(t, err)
 	defer after.Close()
 	var columns, applied int
-	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('managed_agent_policies') WHERE name IN ('last_outcome','rearm_activity_count')`).Scan(&columns))
-	require.Equal(t, 2, columns)
+	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('managed_agent_policies') WHERE name IN ('last_outcome','rearm_activity_count','evaluator_lease_until')`).Scan(&columns))
+	require.Equal(t, 3, columns)
 	require.NoError(t, after.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='039_managed_goal_evaluator_state'`).Scan(&applied))
 	require.Equal(t, 1, applied)
+	upgraded, err := after.ManagedGoalPolicyFor(ctx, legacy.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "finish legacy work", upgraded.Config.Goal)
+	require.Equal(t, "evaluating", upgraded.EvaluatorState)
+	require.EqualValues(t, 19, upgraded.NotDoneWakeups)
+	require.EqualValues(t, 42, upgraded.LastSettledSequence)
+	require.Empty(t, upgraded.LastOutcome)
+	require.Zero(t, upgraded.RearmActivityCount)
+	require.Empty(t, upgraded.EvaluatorLeaseUntil)
 }
 
 func TestManagedGoalEvaluationOnlyClaimsASettledBoundaryOnce(t *testing.T) {
@@ -128,6 +143,107 @@ func TestManagedGoalEvaluationWaitsForChildrenAndCompaction(t *testing.T) {
 	require.True(t, claimed)
 }
 
+func TestManagedGoalSnoozeRejectsAStaleFenceAndPreservesItsFirstDeadline(t *testing.T) {
+	ctx := context.Background()
+	durable, fence, clock := readyManagedGoalEvaluatorFixture(t)
+	stale := fence
+	stale.ProcessIncarnation = "old-incarnation"
+
+	policy, snoozed, err := durable.SnoozeManagedGoalPolicy(ctx, stale)
+	require.NoError(t, err)
+	require.False(t, snoozed)
+	require.Nil(t, policy)
+
+	policy, snoozed, err = durable.SnoozeManagedGoalPolicy(ctx, fence)
+	require.NoError(t, err)
+	require.True(t, snoozed)
+	firstDeadline := policy.SnoozedUntil
+	require.NotEmpty(t, firstDeadline)
+	require.NoError(t, clock.Advance(time.Second))
+
+	policy, snoozed, err = durable.SnoozeManagedGoalPolicy(ctx, fence)
+	require.NoError(t, err)
+	require.False(t, snoozed)
+	require.Nil(t, policy)
+	stored, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, firstDeadline, stored.SnoozedUntil)
+}
+
+func TestManagedGoalClaimRecoversAnExpiredDurableLease(t *testing.T) {
+	ctx := context.Background()
+	durable, fence, clock := readyManagedGoalEvaluatorFixture(t)
+
+	_, claimed, err := durable.ClaimManagedGoalEvaluation(ctx, fence, 10)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, durable.Close())
+
+	reopened, err := Open(ctx, durable.path, Options{Clock: clock})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	require.NoError(t, clock.Advance(managedGoalEvaluationLease+time.Millisecond))
+	policy, claimed, err := reopened.ClaimManagedGoalEvaluation(ctx, fence, 11)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Equal(t, "evaluating", policy.EvaluatorState)
+}
+
+func TestManagedGoalClaimAndRearmAreAtomic(t *testing.T) {
+	ctx := context.Background()
+	durable, fence, _ := readyManagedGoalEvaluatorFixture(t)
+
+	var claims int
+	var resultsMu sync.Mutex
+	var claimWG sync.WaitGroup
+	startClaims := make(chan struct{})
+	for worker := 0; worker < 16; worker++ {
+		claimWG.Add(1)
+		go func() {
+			defer claimWG.Done()
+			<-startClaims
+			_, claimed, err := durable.ClaimManagedGoalEvaluation(ctx, fence, 10)
+			require.NoError(t, err)
+			if claimed {
+				resultsMu.Lock()
+				claims++
+				resultsMu.Unlock()
+			}
+		}()
+	}
+	close(startClaims)
+	claimWG.Wait()
+	require.Equal(t, 1, claims)
+
+	_, err := durable.db.Exec(`UPDATE managed_agent_policies SET evaluator_state='scheduled',not_done_wakeups=1000,rearm_activity_count=0 WHERE agent_id=?`, fence.AgentID)
+	require.NoError(t, err)
+	var rearms int
+	var rearmWG sync.WaitGroup
+	startRearms := make(chan struct{})
+	for worker := 0; worker < 16; worker++ {
+		rearmWG.Add(1)
+		go func() {
+			defer rearmWG.Done()
+			<-startRearms
+			_, rearmed, err := durable.RecordManagedGoalMeaningfulActivity(ctx, fence)
+			require.NoError(t, err)
+			if rearmed {
+				resultsMu.Lock()
+				rearms++
+				resultsMu.Unlock()
+			}
+		}()
+	}
+	close(startRearms)
+	rearmWG.Wait()
+	require.Equal(t, 1, rearms)
+	policy, err := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", policy.EvaluatorState)
+	require.Zero(t, policy.NotDoneWakeups)
+	require.Zero(t, policy.RearmActivityCount)
+}
+
 func TestManagedGoalSnoozeAndRearmAreDurable(t *testing.T) {
 	ctx := context.Background()
 	durable, fence, clock := readyManagedGoalEvaluatorFixture(t)
@@ -158,6 +274,13 @@ func TestManagedGoalSnoozeAndRearmAreDurable(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1000, policy.NotDoneWakeups)
 	require.Equal(t, "scheduled", policy.EvaluatorState)
+	policy, due, err = durable.WakeSnoozedManagedGoalPolicy(ctx, fence)
+	require.NoError(t, err)
+	require.False(t, due)
+	require.Nil(t, policy)
+	_, claimed, err = durable.ClaimManagedGoalEvaluation(ctx, fence, 1_011)
+	require.NoError(t, err)
+	require.False(t, claimed, "the NOT_DONE bound must survive a scheduled wake attempt")
 	for index := 0; index < 2; index++ {
 		policy, rearmed, activityErr := durable.RecordManagedGoalMeaningfulActivity(ctx, fence)
 		require.NoError(t, activityErr)
