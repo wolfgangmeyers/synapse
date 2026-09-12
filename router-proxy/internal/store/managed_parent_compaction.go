@@ -168,6 +168,30 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 	return updated, err
 }
 
+// ManagedParentCompactionHistoryEntry returns the one redacted Complete card
+// written for a known native Pi transition. The manager uses it only to wake
+// live subscribers after the same durable transaction has committed.
+func (s *Store) ManagedParentCompactionHistoryEntry(ctx context.Context, fence ManagedRuntimeFence, event ManagedParentCompactionEvent) (ManagedHistoryEntry, error) {
+	if !validManagedRuntimeFence(fence) || !validManagedParentCompactionEvent(event) {
+		return ManagedHistoryEntry{}, errors.New("managed parent compaction history lookup is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ManagedHistoryEntry{}, errors.New("store is closed")
+	}
+	var sequence int64
+	var presentation sql.NullString
+	entry := ManagedHistoryEntry{AgentID: fence.AgentID}
+	err := s.db.QueryRowContext(ctx, `SELECT sequence,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key=?`, managedParentCompactionHistoryKey(fence, event)).Scan(&sequence, &entry.At, &entry.Level, &entry.Message, &presentation)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	entry.ID = fmt.Sprintf("complete:%d", sequence)
+	entry.Presentation = managedHistoryPresentation(presentation.String)
+	return entry, nil
+}
+
 // managedParentProjectedActivity keeps compaction visible while Pi is paused,
 // then returns the actual parent-turn state when compaction ends.
 func managedParentProjectedActivity(compacting, active bool) string {

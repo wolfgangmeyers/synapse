@@ -78,6 +78,7 @@ test("protocol inventories stay closed and exact", () => {
     "mecha-mailbox-deliver-v1",
     "mecha-policy-apply-v1",
     "mecha-child-snapshot-v1",
+    "mecha-post-compaction-notification-v1",
   ]);
   assert.deepEqual(LEGACY_COMMAND_NAMES, [
     "goal",

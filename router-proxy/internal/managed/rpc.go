@@ -103,6 +103,14 @@ type ParentCompactionRPC interface {
 	SetParentCompactionEventHandler(func(map[string]any))
 }
 
+// NativeCompactionRPC is intentionally private to the managed root-control
+// bridge. It invokes Pi's typed compact RPC command, which is the only path
+// that can produce the native compaction lifecycle events used by the UI.
+type NativeCompactionRPC interface {
+	Compact(context.Context, string) error
+	PostCompactionNotification(context.Context, map[string]any) error
+}
+
 // ParentActivityRPC receives Pi's native parent-turn start and settled events.
 // The router uses it for the durable managed-agent activity projection; prompt
 // acceptance itself is not evidence that Pi started work.
@@ -337,6 +345,13 @@ func (c *rpcClient) readLoop() {
 				c.mu.Unlock()
 				continue
 			}
+			if isPostCompactionNotificationEvent(raw) {
+				// This visible Pi handoff is intentionally not a router receipt.
+				// Keeping it out of the bounded readiness backlog prevents repeated
+				// successful compactions from exhausting an unrelated control path.
+				c.mu.Unlock()
+				continue
+			}
 			if token := c.directMailbox; token != nil {
 				if result, handled := c.classifyDirectMailboxEvent(raw, token); handled {
 					c.sendDirectMailboxResultLocked(token, result)
@@ -348,13 +363,17 @@ func (c *rpcClient) readLoop() {
 					continue
 				}
 			}
-			if parentActivityCandidate {
+			if parentActivityCandidate && c.settlementToken == nil && parentActivityCallback != nil {
 				c.mu.Unlock()
 				if parentActivityCallback != nil {
 					go parentActivityCallback(parentActivity)
 				}
 				continue
 			}
+			// A controlled restart owns its agent_settled receipt. Keep that
+			// native event in the bounded backlog until the settlement waiter
+			// consumes it. A client without a parent-activity subscriber retains
+			// the event too, preserving the restart waiter's stale-event proof.
 			if len(c.backlog) == 128 {
 				c.terminalizeLocked(ErrReadinessBacklogFull)
 				terminal = true
@@ -366,6 +385,9 @@ func (c *rpcClient) readLoop() {
 		c.mu.Unlock()
 		if terminal {
 			return
+		}
+		if parentActivityCallback != nil {
+			go parentActivityCallback(parentActivity)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -476,14 +498,41 @@ func (c *rpcClient) Abort(ctx context.Context) error {
 	return validateAbortResponse(value)
 }
 
+// Compact calls Pi's native RPC command instead of synthesizing a context
+// transition. Pi emits compaction_start and compaction_end on the same stdout
+// stream, so the manager can persist the genuine lifecycle cards.
+func (c *rpcClient) Compact(ctx context.Context, customInstructions string) error {
+	values := map[string]any{}
+	if customInstructions != "" {
+		values["customInstructions"] = customInstructions
+	}
+	value, err := c.call(ctx, "compact", values)
+	if err != nil {
+		return err
+	}
+	return validateSuccessfulCommandResponse(value, "compact")
+}
+
+func (c *rpcClient) PostCompactionNotification(ctx context.Context, envelope map[string]any) error {
+	value, _, err := c.privateCommand(ctx, "mecha-post-compaction-notification-v1", envelope)
+	if err != nil {
+		return err
+	}
+	return validateSuccessfulCommandResponse(value, "prompt")
+}
+
 func validateAbortResponse(value map[string]any) error {
+	return validateSuccessfulCommandResponse(value, "abort")
+}
+
+func validateSuccessfulCommandResponse(value map[string]any, commandName string) error {
 	if value == nil {
 		return ErrAbortResponseMalformed
 	}
 	typ, typeOK := value["type"].(string)
 	command, commandOK := value["command"].(string)
 	success, successOK := value["success"].(bool)
-	if !typeOK || typ != "response" || !commandOK || command != "abort" || !successOK {
+	if !typeOK || typ != "response" || !commandOK || command != commandName || !successOK {
 		return ErrAbortResponseMalformed
 	}
 	if !success {
@@ -1184,6 +1233,14 @@ func classifyParentActivityEvent(event map[string]any, sequence uint64) (map[str
 		return nil, true
 	}
 	return normalized, true
+}
+
+func isPostCompactionNotificationEvent(event map[string]any) bool {
+	message := nestedMessage(event)
+	if message == nil {
+		message = event
+	}
+	return message["customType"] == "mecha.post_compaction.v1"
 }
 
 func isRootControlResultEvent(event map[string]any) bool {

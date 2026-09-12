@@ -678,6 +678,37 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
     },
   });
 
+  // The router invokes this only after Pi's native compact command has
+  // resolved. Keeping the note in Pi makes it a real post-compaction handoff,
+  // rather than a router-side imitation that can survive a failed compaction.
+  queueCommand("mecha-post-compaction-notification-v1", {
+    description: "Reserved managed post-compaction notification command.",
+    async handler(argumentsText, context) {
+      const envelope = decodeHiddenEnvelope(argumentsText);
+      if (!isRecord(envelope) || Object.keys(envelope).length !== 5
+        || envelope.protocol !== "mecha.post-compaction/v1"
+        || typeof envelope.notification !== "string"
+        || Buffer.byteLength(envelope.notification, "utf8") === 0
+        || Buffer.byteLength(envelope.notification, "utf8") > 2_000
+        || childBridge.isChildSession(context)) {
+        throw new TypeError("Managed post-compaction notification is invalid.");
+      }
+      requireCurrentRuntime(envelope, generation, epoch, acceptedHash);
+      await pi.sendMessage({
+        customType: "mecha.post_compaction.v1",
+        content: envelope.notification,
+        display: true,
+        details: {
+          protocol: envelope.protocol,
+          runtime_generation: generation,
+          session_epoch: epoch,
+          manifest_sha256: acceptedHash ?? "",
+        },
+      }, { deliverAs: "followUp", triggerTurn: true });
+      return { notified: true };
+    },
+  });
+
   const registerRootControlTestCommand = (): void => {
     if (rootControlTestCommand === undefined) return;
     queueCommand(rootControlTestCommand, {

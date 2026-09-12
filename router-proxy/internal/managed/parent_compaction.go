@@ -24,8 +24,10 @@ func (m *Manager) handleParentCompactionEvent(binding *managedBinding, event map
 		return
 	}
 	m.startManagedTask(func() {
-		binding.lane.serial.Lock()
-		defer binding.lane.serial.Unlock()
+		// The root-control lane can be waiting for Pi's compact RPC to return.
+		// Native lifecycle events must not wait behind that caller or the UI sees
+		// both cards only after compaction finishes. The fenced store transition
+		// already rejects stale or out-of-order source sequences.
 		fence := bindingFence(binding.agentID, binding)
 		if !m.liveBindingForFence(m.runCtx, binding, fence) {
 			return
@@ -36,13 +38,13 @@ func (m *Manager) handleParentCompactionEvent(binding *managedBinding, event map
 			return
 		}
 		outcome, _ := event["outcome"].(string)
-		updated, err := m.store.ApplyManagedParentCompaction(context.Background(), fence, store.ManagedParentCompactionEvent{
-			Sequence: sequence,
-			State:    state,
-			Outcome:  outcome,
-		})
+		transition := store.ManagedParentCompactionEvent{Sequence: sequence, State: state, Outcome: outcome}
+		updated, err := m.store.ApplyManagedParentCompaction(context.Background(), fence, transition)
 		if err == nil && updated {
 			m.publishProjection()
+			if entry, historyErr := m.store.ManagedParentCompactionHistoryEntry(context.Background(), fence, transition); historyErr == nil {
+				m.publishCompleteHistory(entry)
+			}
 		}
 	})
 }

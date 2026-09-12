@@ -176,20 +176,77 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 		if err != nil {
 			return
 		}
-		result, err := handler.Execute(ctx, invocation)
+		result, err := m.executeRootControlHandler(ctx, binding, handler, invocation, false)
 		m.finishRootControlHandler(ctx, binding, handler, claim, result, err, false)
 	case "executing", "side_effect_committed":
 		claim, err := m.store.RecoverManagedControlHandler(ctx, row.RequestID, owner, fence)
 		if err != nil {
 			return
 		}
-		result, err := handler.Reconcile(ctx, invocation)
+		result, err := m.executeRootControlHandler(ctx, binding, handler, invocation, true)
 		m.finishRootControlHandler(ctx, binding, handler, claim, result, err, claim.Request.State == "side_effect_committed")
 	case "completed":
 		m.appendRootControlResult(ctx, binding, *row)
 	case "append_pending", "awaiting_append":
 		m.reconcileRootControlAppend(ctx, binding, *row)
 	}
+}
+
+// executeRootControlHandler keeps context.compact on Pi's typed RPC boundary.
+// The Python root-control adapter can retain process-local settings, but it
+// cannot produce a Pi compaction or its native lifecycle events. A recovered
+// uncertain compact is deliberately not replayed: duplicating a completed
+// compaction would discard a second span of conversation history.
+func (m *Manager) executeRootControlHandler(ctx context.Context, binding *managedBinding, handler RootControlHandler, invocation RootControlInvocation, reconcile bool) (RootControlHandlerResult, error) {
+	if invocation.OperationID != "context.control" {
+		if reconcile {
+			return handler.Reconcile(ctx, invocation)
+		}
+		return handler.Execute(ctx, invocation)
+	}
+	arguments, ok := invocation.Arguments.(map[string]any)
+	if !ok || arguments["action"] != "compact" {
+		if reconcile {
+			return handler.Reconcile(ctx, invocation)
+		}
+		return handler.Execute(ctx, invocation)
+	}
+	if reconcile {
+		return RootControlHandlerResult{}, errors.New("native Pi compaction outcome is unknown after recovery")
+	}
+	compact, ok := binding.rpc.(NativeCompactionRPC)
+	if !ok {
+		return RootControlHandlerResult{}, errors.New("managed Pi does not support native compaction")
+	}
+	instructions := ""
+	if value, present := arguments["customInstructions"]; present {
+		text, textOK := value.(string)
+		if !textOK {
+			return RootControlHandlerResult{}, errors.New("managed compaction instructions are invalid")
+		}
+		instructions = text
+	}
+	if err := compact.Compact(ctx, instructions); err != nil {
+		return RootControlHandlerResult{}, err
+	}
+	details := map[string]any{"action": "compact", "native_compaction": true}
+	if value, present := arguments["postCompactionNotification"]; present {
+		note, textOK := value.(string)
+		if !textOK {
+			return RootControlHandlerResult{}, errors.New("managed post-compaction notification is invalid")
+		}
+		if note != "" {
+			// Notification delivery is a post-success convenience. The completed
+			// compaction remains truthful even if Pi cannot append that handoff.
+			envelope := map[string]any{"protocol": "mecha.post-compaction/v1", "notification": note, "runtime_generation": invocation.Fence.RuntimeGeneration, "session_epoch": invocation.Fence.SessionEpoch, "manifest_sha256": invocation.Fence.ManifestHash}
+			if err := compact.PostCompactionNotification(ctx, envelope); err != nil {
+				details["post_compaction_notification"] = "unavailable"
+			} else {
+				details["post_compaction_notification"] = "delivered"
+			}
+		}
+	}
+	return RootControlHandlerResult{Status: "ok", Content: "Pi context compacted.", Details: details}, nil
 }
 
 func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managedBinding, _ RootControlHandler, claim *store.ManagedControlHandlerClaim, result RootControlHandlerResult, executeErr error, alreadyCommitted bool) {

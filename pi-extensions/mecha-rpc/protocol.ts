@@ -9,6 +9,7 @@ export const HIDDEN_COMMAND_NAMES = Object.freeze([
   "mecha-mailbox-deliver-v1",
   "mecha-policy-apply-v1",
   "mecha-child-snapshot-v1",
+  "mecha-post-compaction-notification-v1",
 ] as const);
 
 export const LEGACY_COMMAND_NAMES = Object.freeze([

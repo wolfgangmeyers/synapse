@@ -99,7 +99,7 @@ describe("direct UI-live transport", () => {
     vi.useRealTimers();
   });
 
-  it("rejects duplicate agent snapshots and non-contiguous child snapshots before applying them", () => {
+  it("accepts authoritative agent snapshot repairs and rejects non-contiguous child snapshots", () => {
     vi.useFakeTimers();
     const sockets: UILiveSocket[] = [];
     const frames: unknown[] = [];
@@ -123,7 +123,8 @@ describe("direct UI-live transport", () => {
     expect(sockets).toHaveLength(2);
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 9, generated_at: "2030-01-01T00:00:01.000Z", agents: [agent] }) });
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 9, generated_at: "2030-01-01T00:00:01.000Z", agents: [agent] }) });
-    expect(recoveries).toHaveBeenCalledTimes(2);
+    expect(recoveries).toHaveBeenCalledTimes(1);
+    expect(frames).toHaveLength(4);
     client.close();
     vi.useRealTimers();
   });
