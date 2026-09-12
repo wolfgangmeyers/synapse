@@ -42,6 +42,9 @@ func (m *Manager) handleParentActivityEvent(binding *managedBinding, event map[s
 		})
 		if err == nil && updated {
 			m.publishProjection()
+			if state == "idle" {
+				m.evaluateManagedGoalAtSettled(binding, fence, sequence)
+			}
 		}
 	})
 }
