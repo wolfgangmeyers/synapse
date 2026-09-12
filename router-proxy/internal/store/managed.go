@@ -4137,10 +4137,8 @@ func (s *Store) reserveRecipientSourceTx(ctx context.Context, recipient, kind, o
 	}
 	if existing.State == "retired" {
 		// Keep the source row stable because immutable snapshots reference it.
-		// The terminated managed owner cannot reclaim its own retired route.
-		if existing.SourceKind == "managed" && existing.OwnerIdentity == retiredManagedRecipientOwner(owner) {
-			return &RecipientSourceConflictError{Recipient: recipient}
-		}
+		// A fully terminated managed agent may relaunch with the same identity;
+		// snapshots retain their original source details independently.
 		_, err = s.db.ExecContext(ctx, `UPDATE recipient_sources
 			SET source_kind=?,owner_identity=?,state='reserved',conflict_source_kind=NULL,conflict_owner_identity=NULL,updated_at=?
 			WHERE recipient_name=? AND state='retired'`, kind, owner, formatTimestamp(s.clock.Now()), recipient)

@@ -189,6 +189,48 @@ describe("App integration", () => {
     await waitFor(() => expect(storage.getItem(MANAGED_RECENT_FOLDERS_KEY)).toBe(JSON.stringify(["/allowed/project", ...recentFolders.slice(0, 9)])));
   });
 
+  it("keeps launch values visible when the router reports a name collision", async () => {
+    const storage = new MemoryStorage();
+    const user = (await import("@testing-library/user-event")).default.setup();
+    const timestamp = "2030-01-01T00:00:00.000Z";
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) return jsonResponse({ agents: [] });
+      if (url.endsWith("/v1/capabilities")) return jsonResponse({ managed_v1: true });
+      if (url.endsWith("/v1/managed-agents")) {
+        if (init?.method === "POST") return jsonResponse({ error: { code: "NAME_IN_USE", message: "That name is in use by an active or launching agent. Choose another name or wait for it to stop." } }, 409);
+        return jsonResponse({ generated_at: timestamp, projection_version: 1, agents: [] });
+      }
+      if (url.endsWith("/v1/models")) return jsonResponse({ auth_revision: 0, default_model: null, models: [{ provider: "openai-codex", id: "gpt-5.6-luna", name: "GPT-5.6 Luna", available: true }] });
+      if (url.includes("/v1/history?")) return jsonResponse({ view: new URL(url).searchParams.get("view"), entries: [], next_before: null });
+      if (url.endsWith("/v1/provider-auth")) return jsonResponse({ auth_revision: 0, providers: [
+        { provider: "openai-codex", label: "ChatGPT", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "google", label: "Google", authenticated: false, status: "signed_out", updated_at: timestamp },
+        { provider: "cursor", label: "Cursor", authenticated: false, status: "signed_out", updated_at: timestamp },
+      ] });
+      if (url.endsWith("/v1/reminders")) return jsonResponse({ reminders: [] });
+      if (url.endsWith("/v1/prompt-templates")) return jsonResponse({ prompt_templates: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const webSocketFactory = (): WebSocketLike => {
+      const socket = new AppSocket();
+      queueMicrotask(() => { socket.readyState = 1; socket.emit("open", {}); });
+      return socket;
+    };
+
+    render(<App routerUrl="http://isolated-router.test:43123" agentId="web-ui" storage={storage} transportOptions={{ fetchImpl, webSocketFactory }} />);
+    await user.click(await screen.findByRole("button", { name: "Managed actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Launch managed agent" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "managed-alpha" } });
+    fireEvent.change(screen.getByLabelText("Working folder"), { target: { value: "/allowed/project" } });
+    await user.click(screen.getByRole("button", { name: "Launch" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("That name is in use by an active or launching agent. Choose another name or wait for it to stop.");
+    expect(screen.getByLabelText("Name")).toHaveValue("managed-alpha");
+    expect(screen.getByLabelText("Working folder")).toHaveValue("/allowed/project");
+  });
+
   it("requires an explicit router URL and does not contact a default router", () => {
     const fetchImpl = vi.fn();
     render(<App transportOptions={{ fetchImpl }} />);
