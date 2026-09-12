@@ -46,7 +46,7 @@ describe("Complete timeline entry", () => {
       <CompleteTimelineEntry entry={{ id: "complete:child-compaction", agent_id: "managed-worker", at, message: "Child compaction failed", presentation: { kind: "compaction", child_label: "Child", outcome: "failed" } }} />
     </>);
     expect(screen.getByText("Context compacted")).toBeInTheDocument();
-    expect(screen.getByText("Child interrupted — outcome unknown")).toBeInTheDocument();
+    expect(screen.getByText("Subagent interrupted — outcome unknown")).toBeInTheDocument();
     expect(screen.getByText("Child compaction failed")).toBeInTheDocument();
     expect(container.querySelector(".fa-arrow-right")).not.toBeInTheDocument();
     expect(container.querySelector(".fa-compress")).toBeInTheDocument();
