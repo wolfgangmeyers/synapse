@@ -8,6 +8,8 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
+var errManagedControlsUnavailable = errors.New("managed agent is not ready for controls")
+
 // DirectRootControl executes a closed, manifest-backed root operation for the
 // active managed process. Direct Web UI controls use the same host handler as
 // a Pi tool request, while the HTTP request ID gives the host adapter its
@@ -20,7 +22,7 @@ func (m *Manager) DirectRootControl(ctx context.Context, agentID, requestID, ope
 	binding.rootControlSerial.Lock()
 	defer binding.rootControlSerial.Unlock()
 	if !m.rootBindingCurrent(ctx, binding, fence) {
-		return RootControlHandlerResult{}, errors.New("managed agent is not ready for controls")
+		return RootControlHandlerResult{}, errManagedControlsUnavailable
 	}
 	tool, found := m.manifestToolForOperation(operationID)
 	if !found || !validDirectRootArguments(tool, arguments) {
@@ -82,7 +84,7 @@ func (m *Manager) SetManagedInlineTools(ctx context.Context, agentID string, ena
 	binding.serial.Lock()
 	defer binding.serial.Unlock()
 	if !m.rootBindingCurrent(ctx, binding, fence) {
-		return errors.New("managed agent is not ready for controls")
+		return errManagedControlsUnavailable
 	}
 	desired, err := m.store.LoadManagedDesiredPolicy(ctx, agentID)
 	if err != nil {
@@ -119,13 +121,36 @@ func (m *Manager) currentDirectControlBinding(ctx context.Context, agentID strin
 	closed := m.closed
 	m.mu.Unlock()
 	if closed || binding == nil {
-		return nil, store.ManagedRuntimeFence{}, errors.New("managed agent is not ready for controls")
+		return nil, store.ManagedRuntimeFence{}, errManagedControlsUnavailable
 	}
 	fence := bindingFence(agentID, binding)
+	if directControlOwnershipLost(m.processOps.Probe(binding.identity).State) {
+		m.reconcileLostDirectControlBinding(ctx, binding, fence)
+		return nil, store.ManagedRuntimeFence{}, errManagedControlsUnavailable
+	}
 	if !m.rootBindingCurrent(ctx, binding, fence) {
-		return nil, store.ManagedRuntimeFence{}, errors.New("managed agent is not ready for controls")
+		return nil, store.ManagedRuntimeFence{}, errManagedControlsUnavailable
 	}
 	return binding, fence, nil
+}
+
+func directControlOwnershipLost(state ProcessProbeState) bool {
+	return state == ProcessAbsent || state == ProcessPresent
+}
+
+// reconcileLostDirectControlBinding treats an absent group or a dead leader
+// with remaining descendants as a hard exit only while this exact ready fence
+// still owns the durable row. The lane makes a racing Wait callback a no-op.
+func (m *Manager) reconcileLostDirectControlBinding(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) {
+	if binding == nil || binding.lane == nil {
+		return
+	}
+	binding.lane.serial.Lock()
+	defer binding.lane.serial.Unlock()
+	if !m.runningBindingCurrent(ctx, binding, fence) || !directControlOwnershipLost(m.processOps.Probe(binding.identity).State) {
+		return
+	}
+	m.recordReadyBindingProcessExitInLane(binding, fence, "The managed process is no longer available.")
 }
 
 func validDirectRootArguments(tool ManifestTool, arguments map[string]any) bool {

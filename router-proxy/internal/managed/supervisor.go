@@ -557,31 +557,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		binding.serial.Lock()
 		waitErr := binding.waitErr
 		binding.serial.Unlock()
-		binding.serial.Lock()
-		terminating := binding.lifecycleAction == "terminate"
-		binding.serial.Unlock()
-		if terminating {
-			// Termination owns the durable tombstone and exact group proof. A
-			// cooperative Abort exit must not rewrite it as a generic failure.
-			return
-		}
-		if m.recordLifecycleRestartExit(binding) {
-			return
-		}
-		if m.recordRestartExit(binding) {
-			return
-		}
-		if m.isClosed() {
-			_ = m.store.MarkManagedStopped(context.Background(), agent.AgentID)
-		} else {
-			// A hard parent exit cannot carry a trustworthy child terminal event.
-			// Reconcile an in-flight native parent compaction before the public
-			// failure transition, then archive every live child under this exact
-			// fence so the replacement snapshot has an honest recovery boundary.
-			_, _ = m.store.ReconcileManagedParentCompaction(context.Background(), fence, false)
-			_, _ = m.store.RecordManagedParentProcessLost(context.Background(), fence)
-			_ = m.store.MarkManagedFailed(context.Background(), agent.AgentID, "PROCESS_EXITED", sanitizeError(waitErr))
-		}
+		m.recordReadyBindingProcessExitInLane(binding, fence, sanitizeError(waitErr))
 	case <-ctx.Done():
 		// Lifecycle-specific shutdown owners acquire the lane themselves. The
 		// generic fallback below acquires it only after they decline ownership.
@@ -612,6 +588,69 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 		}
 	}
 }
+
+// runningBindingCurrent confirms the immutable binding owns the currently
+// running durable row without using a process liveness check. It is used only
+// after a caller has independently proved a process-exit boundary.
+func (m *Manager) runningBindingCurrent(ctx context.Context, binding *managedBinding, fence store.ManagedRuntimeFence) bool {
+	if binding == nil || binding.agentID != fence.AgentID || !sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
+		return false
+	}
+	binding.serial.Lock()
+	usable := !binding.reaped && binding.process != nil && binding.rpc != nil && binding.process.Identity() == binding.identity
+	binding.serial.Unlock()
+	if !usable {
+		return false
+	}
+	m.mu.Lock()
+	current := m.bindings[fence.AgentID] == binding
+	m.mu.Unlock()
+	if !current {
+		return false
+	}
+	agent, err := m.store.ManagedAgent(ctx, fence.AgentID)
+	return err == nil && agent.DesiredState == "running" && agent.LifecycleState == "running" && sameBindingFence(storedAgentFence(agent), fence)
+}
+
+// recordReadyBindingProcessExitInLane is shared by the process waiter and the
+// control-plane reconciliation path. The lane serializes them, so only the
+// first proof of a hard process loss can archive child state, fail the row,
+// clear the binding, and notify the UI.
+func (m *Manager) recordReadyBindingProcessExitInLane(binding *managedBinding, fence store.ManagedRuntimeFence, message string) {
+	if binding == nil || !sameBindingFence(bindingFence(fence.AgentID, binding), fence) {
+		return
+	}
+	binding.serial.Lock()
+	terminating := binding.lifecycleAction == "terminate"
+	binding.serial.Unlock()
+	if terminating {
+		// Termination owns the durable tombstone and exact group proof. A
+		// cooperative Abort exit must not rewrite it as a generic failure.
+		return
+	}
+	if m.recordLifecycleRestartExit(binding) || m.recordRestartExit(binding) {
+		return
+	}
+	if !m.runningBindingCurrent(context.Background(), binding, fence) {
+		return
+	}
+	if m.isClosed() {
+		_ = m.store.MarkManagedStopped(context.Background(), binding.agentID)
+		return
+	}
+	// A hard parent exit cannot carry a trustworthy child terminal event.
+	// Reconcile an in-flight native parent compaction before the public failure
+	// transition, then archive every live child under this exact fence.
+	_, _ = m.store.ReconcileManagedParentCompaction(context.Background(), fence, false)
+	_, _ = m.store.RecordManagedParentProcessLost(context.Background(), fence)
+	_ = m.store.MarkManagedFailed(context.Background(), binding.agentID, "PROCESS_EXITED", message)
+	binding.serial.Lock()
+	binding.reaped = true
+	binding.serial.Unlock()
+	m.clearBinding(binding)
+	m.publishProjection()
+}
+
 func (m *Manager) fail(agentID, code, message string) {
 	_ = m.store.MarkManagedFailed(context.Background(), agentID, code, message)
 	if operation, err := m.findOperationForAgent(agentID); err == nil && operation != nil {

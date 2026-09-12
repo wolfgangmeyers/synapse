@@ -61,7 +61,7 @@ func readUILiveFrame(t *testing.T, conn *websocket.Conn) map[string]any {
 
 func reserveUILiveAgent(t *testing.T, durable *store.Store, id string) {
 	t.Helper()
-	require.NoError(t, durable.ReserveManagedLaunch(context.Background(), store.ManagedAgentRecord{AgentID: id, Name: id, SlotHeld: true, Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}, store.ManagedOperation{OperationID: id + "-operation", Method: http.MethodPost, CanonicalPath: "/v1/managed-agents", RequestID: id + "-request", CanonicalBodyHash: strings.Repeat("b", 64), ResponseStatus: http.StatusAccepted, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}))
+	require.NoError(t, durable.ReserveManagedLaunch(context.Background(), store.ManagedAgentRecord{AgentID: id, Name: id, SlotHeld: true, Cwd: "/tmp", SelectedModel: store.ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: id + "-session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}, store.ManagedOperation{OperationID: id + "-operation", Method: http.MethodPost, CanonicalPath: "/v1/managed-agents", RequestID: id + "-request", CanonicalBodyHash: strings.Repeat("b", 64), ResponseStatus: http.StatusAccepted, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}))
 }
 
 func TestUILiveIsDirectAndStartsWithRedactedSnapshot(t *testing.T) {
@@ -114,6 +114,40 @@ func TestUILiveIsDirectAndStartsWithRedactedSnapshot(t *testing.T) {
 	delta := readUILiveFrame(t, first)
 	require.Equal(t, "managed_agent_delta", delta["type"])
 	require.Equal(t, frame["projection_version"], delta["base_version"])
+}
+
+func TestUILiveReportsProcessLossAsFailedDelta(t *testing.T) {
+	router, durable, server := newUILiveTestRouter(t)
+	ctx := context.Background()
+	reserveUILiveAgent(t, durable, "lost-agent")
+	require.NoError(t, durable.UpdateManagedAgentStarting(ctx, "lost-agent", "lost-agent-session", store.ProcessIdentityRecord{PID: 501, StartMarker: "lost-marker", Incarnation: "lost-incarnation"}, "lost-generation"))
+	fence := store.ManagedRuntimeFence{AgentID: "lost-agent", PiSessionID: "lost-agent-session", SessionEpoch: 1, ProcessPID: 501, ProcessStartMarker: "lost-marker", ProcessIncarnation: "lost-incarnation", RuntimeGeneration: "lost-generation", ManifestRevision: 1, ManifestHash: strings.Repeat("a", 64)}
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, fence, store.DefaultManagedReadinessPolicy()))
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, store.ManagedChildSnapshot{SnapshotID: "lost-snapshot", OwnerSessionID: fence.PiSessionID, Sequence: 0, Canonical: []byte(`{"owner_session_id":"lost-agent-session","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"lost-snapshot"}`), SHA256: strings.Repeat("a", 64)}))
+	require.NoError(t, durable.MarkManagedReadyFromSources(ctx, fence))
+
+	live := dialUILive(t, server, "")
+	defer live.Close(websocket.StatusNormalClosure, "done")
+	initial := readUILiveFrame(t, live)
+	require.Equal(t, "managed_agents_snapshot", initial["type"])
+	require.Equal(t, "managed_children_snapshot", readUILiveFrame(t, live)["type"])
+
+	updated, err := durable.RecordManagedParentProcessLost(ctx, fence)
+	require.NoError(t, err)
+	require.True(t, updated)
+	require.NoError(t, durable.MarkManagedFailed(ctx, fence.AgentID, "PROCESS_EXITED", "The managed process is no longer available."))
+	router.uiLive.publish(ctx)
+
+	delta := readUILiveFrame(t, live)
+	require.Equal(t, "managed_agent_delta", delta["type"])
+	require.Equal(t, initial["projection_version"], delta["base_version"])
+	changes, ok := delta["changes"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "failed", changes["lifecycle_state"])
+	require.Equal(t, false, changes["accepting_prompts"])
+	errorView, ok := changes["last_error"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "PROCESS_EXITED", errorView["code"])
 }
 
 func TestUILiveTransitionUsesSnapshotForVersionGapsAndRemovalForOneRecord(t *testing.T) {

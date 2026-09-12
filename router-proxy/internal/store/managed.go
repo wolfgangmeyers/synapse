@@ -2717,8 +2717,13 @@ func (s *Store) RecordManagedParentProcessLost(ctx context.Context, fence Manage
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE rowid NOT IN (SELECT rowid FROM managed_child_recoveries ORDER BY updated_at DESC, rowid DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
 			return err
 		}
-		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
-			return err
+		// An empty snapshot has no child projection to retract. Let the following
+		// terminal agent state use the one public version, so UI-live can send its
+		// normal contiguous failed-agent delta.
+		if len(runs) > 0 {
+			if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+				return err
+			}
 		}
 		updated = true
 		return nil
