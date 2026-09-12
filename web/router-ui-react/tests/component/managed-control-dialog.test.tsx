@@ -9,7 +9,7 @@ const agent = { agent_id: "managed-alpha", source: "router-managed" as const, cw
 function renderDialog(overrides: Partial<Parameters<typeof ManagedControlDialog>[0]> = {}) {
   const onAction = vi.fn(async () => undefined);
   const onConfirmTerminationChange = vi.fn();
-  render(<ManagedControlDialog open agent={agent} onClose={() => undefined} onAction={onAction} confirmTermination={false} onConfirmTerminationChange={onConfirmTerminationChange} {...overrides} />);
+  render(<ManagedControlDialog open agent={agent} onClose={() => undefined} onAction={onAction} onGoal={() => undefined} onReminders={() => undefined} onInlineTools={() => undefined} confirmTermination={false} onConfirmTerminationChange={onConfirmTerminationChange} {...overrides} />);
   return { onAction, onConfirmTerminationChange };
 }
 
@@ -29,17 +29,38 @@ describe("ManagedControlDialog", () => {
     expect(onAction).toHaveBeenCalledWith("managed-alpha", "restart");
   });
 
+  it("keeps lifecycle, goal, reminders, and inline tools in one managed-agent panel", async () => {
+    const user = userEvent.setup();
+    const onGoal = vi.fn();
+    const onReminders = vi.fn();
+    const onInlineTools = vi.fn();
+    render(<ManagedControlDialog open agent={agent} onClose={() => undefined} onAction={async () => undefined} confirmTermination={false} onConfirmTerminationChange={() => undefined} onGoal={onGoal} onReminders={onReminders} onInlineTools={onInlineTools} />);
+
+    const dialog = screen.getByRole("dialog", { name: "Manage managed-alpha" });
+    expect(dialog).toHaveTextContent("Current status");
+    expect(screen.getByRole("button", { name: "Set goal" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manage reminders" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Inline tool settings" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Set goal" }));
+    await user.click(screen.getByRole("button", { name: "Manage reminders" }));
+    await user.click(screen.getByRole("button", { name: "Inline tool settings" }));
+    expect(onGoal).toHaveBeenCalledOnce();
+    expect(onReminders).toHaveBeenCalledOnce();
+    expect(onInlineTools).toHaveBeenCalledOnce();
+  });
+
   it("requires confirmation before terminating", async () => {
     const user = userEvent.setup();
     const onConfirmTerminationChange = vi.fn();
     const onAction = vi.fn(async () => undefined);
-    const { rerender } = render(<ManagedControlDialog open agent={agent} onClose={() => undefined} onAction={onAction} confirmTermination={false} onConfirmTerminationChange={onConfirmTerminationChange} />);
+    const { rerender } = render(<ManagedControlDialog open agent={agent} onClose={() => undefined} onAction={onAction} onGoal={() => undefined} onReminders={() => undefined} onInlineTools={() => undefined} confirmTermination={false} onConfirmTerminationChange={onConfirmTerminationChange} />);
 
     await user.click(screen.getByRole("button", { name: "Terminate" }));
     expect(onAction).not.toHaveBeenCalled();
     expect(onConfirmTerminationChange).toHaveBeenCalledWith(true);
 
-    rerender(<ManagedControlDialog open agent={agent} onClose={() => undefined} onAction={onAction} confirmTermination onConfirmTerminationChange={onConfirmTerminationChange} />);
+    rerender(<ManagedControlDialog open agent={agent} onClose={() => undefined} onAction={onAction} onGoal={() => undefined} onReminders={() => undefined} onInlineTools={() => undefined} confirmTermination onConfirmTerminationChange={onConfirmTerminationChange} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Terminate managed-alpha?");
     await user.click(screen.getByRole("button", { name: "Terminate agent" }));
     expect(onAction).toHaveBeenCalledWith("managed-alpha", "terminate");

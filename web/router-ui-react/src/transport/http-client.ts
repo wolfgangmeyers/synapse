@@ -2,7 +2,7 @@ import { normalizeRouterUrl } from "../persistence/settings-repository";
 import { secureUuid } from "../platform/secure-uuid";
 import { httpRoutes } from "../protocol/manifest";
 import { isAgentId, isConversationMessage, isManagedAgent, isManagedChildrenProjection, isManagedCompleteHistoryEntry, isManagedHistoryEntry, isModelSummary, isRecord, isRouterUtcTimestamp } from "../protocol/guards";
-import { normalizeGoalState } from "../domain/goals";
+import { normalizeGoalState, type GoalControlSettings, type GoalState } from "../domain/goals";
 import type { Agent } from "../state/agent-projection";
 import type { HistoryMessage } from "../domain/history";
 import type { Reminder } from "../domain/reminders";
@@ -23,6 +23,8 @@ export interface ManagedOperationResponse { operation_id: string; agent?: Manage
 export interface ManagedDirectoriesResponse { path: string; parent: string; breadcrumbs?: Array<{ name: string; path: string }>; directories: Array<{ name: string; path: string }> }
 export interface ManagedChildrenResponse extends ManagedChildrenProjection {}
 export interface ManagedHistoryResponse { view: "quiet" | "complete"; entries: ManagedHistoryEntry[]; next_before: number | null }
+export interface ManagedGoalResponse { goal_state: GoalState }
+export interface ManagedInlineToolsResponse { enabled: boolean }
 export interface ProviderModel { provider: "openai-codex" | "google" | "cursor"; id: string; name: string; available: boolean }
 export interface ProviderStatus { provider: "openai-codex" | "google" | "cursor"; label: "ChatGPT" | "Google" | "Cursor"; authenticated: boolean; status: "authenticated" | "signed_out"; account_label?: string; updated_at: string; error?: string }
 export interface ProviderAuthResponse { auth_revision: number; providers: ProviderStatus[] }
@@ -222,6 +224,16 @@ function managedChildren(value: unknown): ManagedChildrenResponse {
   if (!isManagedChildrenProjection(value)) throw invalidResponse("Router returned invalid managed children", value);
   return value;
 }
+function managedGoal(value: unknown): ManagedGoalResponse {
+  const root = recordValue(value); const state = normalizeGoalState(root?.goal_state);
+  if (!root || state === undefined) throw invalidResponse("Router returned invalid managed goal state", value);
+  return { goal_state: state };
+}
+function managedInlineTools(value: unknown): ManagedInlineToolsResponse {
+  const root = recordValue(value);
+  if (!root || typeof root.enabled !== "boolean") throw invalidResponse("Router returned invalid managed inline-tool state", value);
+  return { enabled: root.enabled };
+}
 function managedDirectories(value: unknown): ManagedDirectoriesResponse {
   const root = recordValue(value);
   const breadcrumbItems = root?.breadcrumbs;
@@ -298,6 +310,10 @@ export interface RouterHttpClient {
   managedAgent(id: string): Promise<ManagedAgentResponse>;
   managedDirectories(path: string): Promise<ManagedDirectoriesResponse>;
   managedChildren(id: string): Promise<ManagedChildrenResponse>;
+  managedGoal(id: string): Promise<ManagedGoalResponse>;
+  saveManagedGoal(id: string, payload: { action: "set" | "off"; goal: string; settings: GoalControlSettings }): Promise<ManagedGoalResponse>;
+  managedInlineTools(id: string): Promise<ManagedInlineToolsResponse>;
+  saveManagedInlineTools(id: string, enabled: boolean): Promise<ManagedInlineToolsResponse>;
   managedHistory(agentId: string, view: "quiet" | "complete", options?: { before?: number; limit?: number }): Promise<ManagedHistoryResponse>;
   launchManaged(payload: { name: string; cwd: string; model?: { provider: string; id: string }; initial_instruction?: string }): Promise<ManagedOperationResponse>;
   restartManaged(id: string, model?: { provider: string; id: string }): Promise<ManagedOperationResponse>;
@@ -364,6 +380,10 @@ export function createHttpClient(routerUrl: string, fetchImpl: FetchLike = globa
     managedAgent: async (id) => managedAgent(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}`, "GET")),
     managedDirectories: async (path) => managedDirectories(await managedRequest(`/v1/managed-directories?path=${encodeURIComponent(path)}`, "GET")),
     managedChildren: async (id) => managedChildren(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/children`, "GET")),
+    managedGoal: async (id) => managedGoal(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/goal`, "GET")),
+    saveManagedGoal: async (id, payload) => managedGoal(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/goal`, "PUT", payload.action === "off" ? { action: "off", settings: payload.settings } : { action: "set", goal: payload.goal, settings: payload.settings })),
+    managedInlineTools: async (id) => managedInlineTools(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/inline-tools`, "GET")),
+    saveManagedInlineTools: async (id, enabled) => managedInlineTools(await managedRequest(`/v1/managed-agents/${encodeURIComponent(id)}/inline-tools`, "PUT", { enabled })),
     managedHistory: async (agentId, view, options = {}) => {
       const query = new URLSearchParams({ agent_id: agentId, view });
       if (options.before !== undefined) query.set("before", String(options.before));
