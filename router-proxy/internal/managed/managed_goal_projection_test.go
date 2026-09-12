@@ -15,10 +15,11 @@ const managedGoalProjectionTestManifestHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 type goalProjectionRPC struct {
 	*launchRPC
-	revision int64
-	policy   map[string]any
-	stale    bool
-	fail     bool
+	revision     int64
+	policy       map[string]any
+	stale        bool
+	fail         bool
+	directBodies chan string
 }
 
 func (r *goalProjectionRPC) ApplyPolicy(ctx context.Context, envelope map[string]any) (map[string]any, error) {
@@ -37,6 +38,23 @@ func (r *goalProjectionRPC) ApplyPolicy(ctx context.Context, envelope map[string
 		return nil, err
 	}
 	return map[string]any{"success": true, "command": "prompt"}, nil
+}
+
+func (r *goalProjectionRPC) PrepareManagedMailbox(context.Context) (string, error) {
+	return "goal-wakeup-cursor", nil
+}
+func (r *goalProjectionRPC) PromptManagedMailbox(_ context.Context, attempt store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
+	if r.directBodies != nil {
+		r.directBodies <- attempt.Message.Body
+	}
+	events := make(chan DirectMailboxEvent, 2)
+	events <- DirectMailboxEvent{Receipt: &DirectMailboxReceipt{EntryIdentity: "goal-wakeup-receipt"}}
+	events <- DirectMailboxEvent{Settled: true}
+	close(events)
+	return events, nil
+}
+func (r *goalProjectionRPC) RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
+	return DirectMailboxRecovery{}, nil
 }
 
 func (r *goalProjectionRPC) WaitForPolicyApplied(ctx context.Context, generation string, epoch int64) (map[string]any, error) {
@@ -92,6 +110,41 @@ func readyGoalProjectionFixture(t *testing.T) (*Manager, *store.Store, *managedB
 	manager.bindings[fence.AgentID] = binding
 	t.Cleanup(func() { _ = manager.Close(context.Background()); _ = durable.Close() })
 	return manager, durable, binding, fence, rpc
+}
+
+func TestManagedGoalEvaluatorCompletesSettledBoundaryBeforeSourceBackedWakeup(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	rpc.directBodies = make(chan string, 1)
+	manager.goalEvaluator = func(context.Context, store.ManagedGoalPolicy) (string, error) {
+		return store.ManagedGoalEvaluationNotDone, nil
+	}
+	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{
+		RequestID: "123e4567-e89b-42d3-a456-426614174000", OperationID: "goal.control",
+		Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence,
+	})
+	require.NoError(t, err)
+
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(1), "state": "idle"})
+	require.Eventually(t, func() bool {
+		policy, lookupErr := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)
+		return lookupErr == nil && policy.LastOutcome == store.ManagedGoalEvaluationNotDone && policy.NotDoneWakeups == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	select {
+	case body := <-rpc.directBodies:
+		require.Equal(t, "NOT_DONE: Review finish the migration and take the next concrete action now.", body)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for source-backed managed goal wakeup")
+	}
+
+	// The same settled source sequence is rejected by durable claim state, so a
+	// receipt/delivery retry cannot create a timer-style NOT_DONE loop.
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(1), "state": "idle"})
+	select {
+	case body := <-rpc.directBodies:
+		t.Fatalf("duplicate settled boundary woke goal again: %s", body)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestManagedGoalDirectControlPersistsSharedSettingsBeforeProjection(t *testing.T) {

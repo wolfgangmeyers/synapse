@@ -74,6 +74,9 @@ type ManagerOptions struct {
 	// durable IDs only; production leaves it nil and uses the S3 restart bridge.
 	RestartAllDispatcher              RestartAllDispatcher
 	RestartAllDispatchFailureRecorder RestartAllDispatchFailureRecorder
+	// GoalEvaluator supplies the runtime's model-backed settled-goal verdict.
+	// Store transitions remain authoritative when it is absent or fails.
+	GoalEvaluator ManagedGoalEvaluator
 	// RootControlHandlers is the concrete owner set for the closed 16-operation
 	// registry. Nil retains safe correlated unavailable results until the host
 	// wires its real supervisor-service adapters.
@@ -182,6 +185,7 @@ type Manager struct {
 	projectionPublisher                        func()
 	completeHistoryPublisher                   CompleteHistoryPublisher
 	directReplyPublisher                       DirectReplyPublisher
+	goalEvaluator                              ManagedGoalEvaluator
 	artifacts                                  *sessionArtifactOwner
 	runCtx                                     context.Context
 	cancel                                     context.CancelFunc
@@ -240,6 +244,10 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	if ids == nil {
 		ids = managerIDs{}
 	}
+	goalEvaluator := options.GoalEvaluator
+	if goalEvaluator == nil {
+		goalEvaluator = defaultManagedGoalEvaluator
+	}
 	processFactory := options.ProcessFactory
 	if processFactory == nil {
 		processFactory = DefaultProcessFactory()
@@ -265,7 +273,7 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		deadlineFactory = context.WithTimeout
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, runCtx: runCtx, cancel: cancel}
+	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, goalEvaluator: goalEvaluator, rootControlHandlers: rootHandlers, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
 	return manager, nil
 }
