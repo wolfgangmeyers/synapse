@@ -50,6 +50,14 @@ func managedRootControlCandidateDigests(t *testing.T, root string) (string, map[
 	fileDigests := make(map[string]string, len(managedRootControlCandidatePaths))
 	for _, relative := range managedRootControlCandidatePaths {
 		contents, err := os.ReadFile(filepath.Join(root, relative))
+		if os.IsNotExist(err) {
+			// The release removes this source path; keep that absence in the
+			// candidate identity instead of silently omitting it from S4 proof.
+			fileDigests[relative] = "deleted"
+			_, err = fmt.Fprintf(hash, "%s\x00deleted\n", relative)
+			require.NoError(t, err)
+			continue
+		}
 		require.NoError(t, err)
 		sum := sha256.Sum256(contents)
 		fileDigests[relative] = hex.EncodeToString(sum[:])

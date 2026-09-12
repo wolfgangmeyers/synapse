@@ -33,6 +33,7 @@ test("managed release runner uses the router-built UI and visible child selectio
   assert.match(runner, /parent_selected/);
   assert.match(runner, /child_visible/);
   assert.match(runner, /startIsolatedBcbBrowser/);
+  assert.match(runner, /agent_role: "agent", client_type: "phase3-acceptance"/);
   assert.doesNotMatch(runner, /startVite|startLoopbackGateway|window\.open|System Events/);
 });
 

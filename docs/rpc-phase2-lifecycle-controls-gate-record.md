@@ -152,3 +152,9 @@ The Pi gate also names its source repository and commit, package version, built 
 - Acceptance decision: accepted for G4 on the current direction. This accepts only the private exact-entry and explicit-ID append prerequisite.
 
 No migration 027, root handler, lifecycle route, P3/P4 work, or Robot Review is accepted by this record.
+
+### Current managed-runtime compatibility pin — 2026-09-11
+
+- The current managed-worker release target uses clean, pushed `wolfgangmeyers/pi-packages` `main` commit `5b362aaa6b65204ace95c62b5089b6ad5a801b4a`, tree `9037681d57db3910588f28b00bd72a5de810cf53`.
+- `5b362aaa` descends from the historical G4 checkout. It makes child resource loading honor the parent `--no-extensions` boundary while retaining the owner-captured inline factory snapshot. This prevents ambient agent-directory extensions from registering in native children.
+- `/private/tmp/rpc-phase2-pi-g4-source-lock.json`, the acceptance registry, native installed-Pi guard, Phase 1 validator, and Browser Console Bridge release runner all pin this same commit and tree. The G4 entries above remain historical evidence for `06ed583c`.

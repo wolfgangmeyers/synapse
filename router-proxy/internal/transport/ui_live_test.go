@@ -125,17 +125,11 @@ func TestUILiveTransitionUsesSnapshotForVersionGapsAndRemovalForOneRecord(t *tes
 	require.Equal(t, "managed_agents_snapshot", gap["type"])
 }
 
-func TestManagedLifecycleHistoryFactsOnlyUseAllowlistedLifecycleChanges(t *testing.T) {
-	prior := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "starting", "pi_session_id": "private"}, "gone": {"lifecycle_state": "stopped"}}}
-	current := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "running", "pi_session_id": "still-private"}, "beta": {"lifecycle_state": "starting"}}}
+func TestManagedLifecycleHistoryFactsSuppressGenericLifecycleProgress(t *testing.T) {
+	prior := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "starting", "activity_state": "starting", "pi_session_id": "private"}, "gone": {"lifecycle_state": "stopped"}}}
+	current := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "running", "activity_state": "idle", "pi_session_id": "still-private"}, "beta": {"lifecycle_state": "starting"}}}
 	facts := managedLifecycleHistoryFacts(prior, current)
-	require.Equal(t, []managedLifecycleHistoryFact{
-		{agentID: "alpha", message: "State changed", eventKey: "lifecycle:alpha:0:state", presentation: &store.ManagedHistoryPresentation{Kind: "state", From: "Starting", To: "Running"}},
-		{agentID: "beta", message: "Starting agent", eventKey: "lifecycle:beta:0:entered", presentation: &store.ManagedHistoryPresentation{Kind: "lifecycle"}},
-	}, facts)
-	for _, fact := range facts {
-		require.NotContains(t, fact.message, "private")
-	}
+	require.Empty(t, facts)
 }
 
 func TestManagedLifecycleHistoryFactsRecordsASelectedModelChange(t *testing.T) {

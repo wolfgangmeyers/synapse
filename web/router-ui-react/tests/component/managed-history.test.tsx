@@ -17,10 +17,14 @@ function ConversationModes(): ReactElement {
 describe("Selected-agent conversation modes", () => {
   it("keeps Quiet as the conversation and makes Complete include messages plus activity", async () => {
     const user = userEvent.setup();
+    render(<Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} conversationView="complete" messages={[]} activityEntries={[{ id: "ordinary-progress", agent_id: "managed-worker", message: "State changed", presentation: { kind: "state", from: "Starting", to: "Running" } }]} />);
+    expect(screen.queryByText("State changed")).not.toBeInTheDocument();
+    cleanup();
+
     render(<ConversationModes />);
 
     const quiet = screen.getByRole("tab", { name: "Quiet messages" });
-    const complete = screen.getByRole("tab", { name: "Complete: messages + activity" });
+    const complete = screen.getByRole("tab", { name: "Complete messages and activity" });
     expect(quiet).toHaveAttribute("aria-selected", "true");
     expect(quiet).toHaveAttribute("aria-controls", "conversation-view-panel");
     expect(screen.getByText("Conversation message")).toBeInTheDocument();
@@ -69,18 +73,16 @@ describe("Selected-agent conversation modes", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Unavailable: Managed process exited before readiness");
   });
 
-  it("shows managed controls and terminating progress in the selected-agent header", async () => {
+  it("shows managed controls and terminating progress without a raw State popup action", async () => {
     const user = userEvent.setup();
     const onManageManaged = vi.fn();
-    const onManagedState = vi.fn();
     const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "terminated", lifecycle_state: "terminating", activity_state: "active", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: null };
 
-    render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "active", managed_agent: managedAgent }} onManageManaged={onManageManaged} onManagedState={onManagedState} />);
+    render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "active", managed_agent: managedAgent }} onManageManaged={onManageManaged} />);
 
     expect(screen.getByRole("status")).toHaveTextContent("Terminating…");
-    await user.click(screen.getByRole("button", { name: "Manage" }));
-    await user.click(screen.getByRole("button", { name: "State" }));
+    await user.click(screen.getByRole("button", { name: "Manage worker" }));
     expect(onManageManaged).toHaveBeenCalledOnce();
-    expect(onManagedState).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
   });
 });

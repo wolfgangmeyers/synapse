@@ -1,7 +1,7 @@
 {
   "protocol": "mecha.phase1-acceptance-contract/v1",
   "schema": "mecha.rpc.acceptance-evidence/v1",
-  "required_fork_head": "06ed583c720ed0fe6d6cc099b26eeb384795ea39",
+  "required_fork_head": "5b362aaa6b65204ace95c62b5089b6ad5a801b4a",
   "required_pi_version": "0.85.0",
   "artifact_directory": "/tmp/mecha-rpc-acceptance/<mecha-developer-head>/<run-id>",
   "required_prompts": {
@@ -11,7 +11,8 @@
       "mecha-control-result-v1",
       "mecha-mailbox-deliver-v1",
       "mecha-policy-apply-v1",
-      "mecha-child-snapshot-v1"
+      "mecha-child-snapshot-v1",
+      "mecha-post-compaction-notification-v1"
     ],
     "legacy": [
       "goal",
@@ -53,7 +54,7 @@
   ],
   "generated_from": {
     "path": "RPC_SPEC.html",
-    "sha256": "b7b2754b5b5662e42db82b796e5f8de0968650975083ed48be6147132bb629e6",
+    "sha256": "0f32ea5d60aeada2723afc90fc5ae96dea74292893a1809283e4d013ca10a19a",
     "selection": "tr#ac-001 through tr#ac-090"
   },
   "criteria": [

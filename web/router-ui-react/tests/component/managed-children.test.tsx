@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRow } from "../../src/components/AgentRow";
 import { ManagedChildList } from "../../src/components/ManagedChildList";
 afterEach(cleanup);
@@ -27,5 +27,30 @@ describe("ManagedChildList", () => {
     expect(card).not.toBeNull();
     if (card === null) throw new Error("managed child card is missing");
     expect(card).toContainElement(list);
+  });
+
+  it("counts every retained managed child so completed work remains expandable", () => {
+    const completed = { ...children[0]!, id: "child-completed", task_id: "task-completed", run_id: "run-completed", description: "Finished check", status: "completed" as const, compaction_state: "none" as const, compaction: { state: "idle" as const, count: 0 }, duration_ms: 1000 };
+    render(<AgentRow agent={{ agent_id: "managed-alpha", source: "router-managed", activity_state: "idle", subagent_count: 1, subagents: [{ id: "child-1", description: "Prepare a long but bounded report" }, { id: completed.id, description: completed.description }], managed_children: [children[0]!, completed] }} expanded />);
+
+    expect(screen.getByRole("group", { name: "2 subagents" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Children for managed-alpha" })).toHaveTextContent("Finished check");
+  });
+
+  it("keeps retained interrupted children reachable through the managed disclosure", () => {
+    const recovered = { ...children[1]!, description: "Interrupted child" };
+    const onToggleSubagents = vi.fn();
+    const agent = { agent_id: "managed-recovery", source: "router-managed" as const, activity_state: "idle" as const, subagent_count: 0, subagents: [], managed_children_recovery: "reconstructing" as const, managed_children: [recovered] };
+    const { rerender } = render(<AgentRow agent={agent} onToggleSubagents={onToggleSubagents} />);
+
+    const disclosure = screen.getByRole("button", { name: "1 subagent" });
+    expect(disclosure).toHaveAttribute("aria-controls", "agent-row-subagents-managed-recovery");
+    fireEvent.click(disclosure);
+    expect(onToggleSubagents).toHaveBeenCalledWith("managed-recovery");
+
+    rerender(<AgentRow agent={agent} expanded onToggleSubagents={onToggleSubagents} />);
+    expect(screen.getByRole("group", { name: "1 subagent" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Children for managed-recovery" })).toHaveAttribute("id", "agent-row-subagents-managed-recovery");
+    expect(screen.getByText("Interrupted · outcome unknown")).toBeInTheDocument();
   });
 });

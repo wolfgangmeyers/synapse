@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -85,6 +86,7 @@ var rootControlOperationIdentity = map[string]struct{ capability, name string }{
 	"ops.state":                {"mecha_state", "mecha_state"},
 	"ops.verification_handoff": {"mecha_verification_handoff", "mecha_verification_handoff"},
 	"ops.worker":               {"mecha_worker", "mecha_worker"},
+	"web.search":               {"web_search", ""},
 }
 
 func NewRootControlHandlerRegistry(manifest Manifest, handlers []RootControlHandler) (*RootControlHandlerRegistry, error) {
@@ -94,7 +96,7 @@ func NewRootControlHandlerRegistry(manifest Manifest, handlers []RootControlHand
 	byOperation := map[string]ManifestTool{}
 	for _, tool := range manifest.Tools {
 		expected, found := rootControlOperationIdentity[tool.OperationID]
-		if !found || expected.capability != tool.CapabilityID || expected.name != tool.Name || tool.DefinitionID == "" || tool.DefinitionSHA256 == "" || tool.Parameters == nil {
+		if !found || expected.capability != tool.CapabilityID || !rootControlToolNameMatches(expected, tool) || tool.DefinitionID == "" || tool.DefinitionSHA256 == "" || tool.Parameters == nil {
 			return nil, fmt.Errorf("root control manifest identity is invalid for %s", tool.Name)
 		}
 		if _, duplicate := byOperation[tool.OperationID]; duplicate {
@@ -126,6 +128,16 @@ func NewRootControlHandlerRegistry(manifest Manifest, handlers []RootControlHand
 	return registry, nil
 }
 
+func rootControlToolNameMatches(expected struct{ capability, name string }, tool ManifestTool) bool {
+	if expected.name != "" {
+		return tool.Name == expected.name
+	}
+	// Supplemental capabilities are immutable-definition names. The current
+	// web search bridge is the only such root capability, so never accept a
+	// short or caller-chosen alias at this trust boundary.
+	return tool.Name == tool.CapabilityID+"__"+tool.DefinitionSHA256 && strings.HasPrefix(tool.Name, expected.capability+"__")
+}
+
 func (r *RootControlHandlerRegistry) Handler(tool ManifestTool) (RootControlHandler, bool) {
 	if r == nil {
 		return nil, false
@@ -151,7 +163,7 @@ func (h operationRootControlHandler) Reconcile(ctx context.Context, invocation R
 	return h.executor.ReconcileRootControl(ctx, h.identity, invocation)
 }
 
-// NewOperationalRootControlHandlers creates the closed concrete 16-operation
+// NewOperationalRootControlHandlers creates the closed concrete 17-operation
 // owner set used by the router host. mail.parent remains a dedicated child-only
 // handler; all other entries delegate through the correlation-aware host seam.
 func NewOperationalRootControlHandlers(manifest Manifest, executor RootControlOperationExecutor) ([]RootControlHandler, error) {

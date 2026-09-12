@@ -10,6 +10,7 @@ than invoke an uncertain supervisor action a second time.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -18,8 +19,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from html.parser import HTMLParser
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 try:
@@ -122,6 +125,145 @@ def invoke_script(name: str, arguments: list[str]) -> dict[str, Any]:
     return result("ok", output, {"operation": name})
 
 
+class BingResultParser(HTMLParser):
+    """Extract the small, public result subset that can safely cross to Pi."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._current: dict[str, str] | None = None
+        self._heading_depth = 0
+        self._capture: str | None = None
+        self._text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {name: value or "" for name, value in attrs}
+        classes = set(values.get("class", "").split())
+        if tag == "li" and "b_algo" in classes:
+            self._current = {"title": "", "href": "", "snippet": ""}
+        if self._current is None:
+            return
+        if tag == "h2":
+            self._heading_depth += 1
+        elif tag == "a" and self._heading_depth > 0 and not self._current["href"]:
+            self._current["href"] = values.get("href", "")
+            self._capture = "title"
+            self._text = []
+        elif tag in {"div", "p"} and "b_caption" in classes:
+            self._capture = "snippet"
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._current is None:
+            return
+        if self._capture == "title" and tag == "a":
+            self._current["title"] = " ".join("".join(self._text).split())
+            self._capture = None
+            self._text = []
+        elif self._capture == "snippet" and tag in {"div", "p"}:
+            self._current["snippet"] = " ".join("".join(self._text).split())
+            self._capture = None
+            self._text = []
+        if tag == "h2" and self._heading_depth > 0:
+            self._heading_depth -= 1
+        elif tag == "li":
+            if self._current["title"] and self._current["href"]:
+                self.results.append(self._current)
+            self._current = None
+            self._heading_depth = 0
+            self._capture = None
+            self._text = []
+
+
+def managed_search_url(value: str) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 2_048:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    if parsed.hostname == "www.bing.com" and parsed.path == "/ck/a":
+        target = unquote(parse_qs(parsed.query).get("u", [""])[0])
+        if target.startswith("a1"):
+            try:
+                target = base64.urlsafe_b64decode(target[2:] + "=" * (-len(target[2:]) % 4)).decode("utf-8")
+            except (UnicodeDecodeError, ValueError):
+                return None
+        return managed_search_url(target)
+    return value
+
+
+def managed_search_endpoint() -> str:
+    configured = os.environ.get("MECHA_MANAGED_WEB_SEARCH_ENDPOINT")
+    if configured is None:
+        return "https://www.bing.com/search"
+    parsed = urlparse(configured)
+    # The configured endpoint is a host-owned test/deployment setting, not an
+    # agent argument. Permit only the fixed public provider or a loopback fake.
+    if parsed.scheme not in {"http", "https"} or parsed.path != "/search" or parsed.query or parsed.fragment or parsed.username or parsed.password:
+        raise RuntimeError("managed web search endpoint is invalid")
+    if parsed.hostname not in {"www.bing.com", "127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("managed web search endpoint is invalid")
+    return configured
+
+
+def managed_web_search(arguments: dict[str, Any]) -> dict[str, Any]:
+    query = text(arguments.get("query"), "query")
+    freshness = arguments.get("freshness", "cached")
+    if freshness not in {"live", "cached", "indexed"}:
+        raise ValueError("freshness is invalid")
+    maximum = arguments.get("maxResults", 5)
+    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1 or maximum > 10:
+        raise ValueError("maxResults is invalid")
+    endpoint = managed_search_endpoint()
+    separator = "&" if "?" in endpoint else "?"
+    request = Request(f"{endpoint}{separator}q={quote(query)}", headers={"User-Agent": "Mozilla/5.0 (compatible; MechaSearch/1.0)"})
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw = response.read(512 * 1024 + 1)
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError("managed web search is unavailable") from exc
+    if len(raw) > 512 * 1024:
+        raise RuntimeError("managed web search response is too large")
+    try:
+        document = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("managed web search response is invalid") from exc
+    parser = BingResultParser()
+    parser.feed(document)
+    parser.close()
+    sources: list[dict[str, str]] = []
+    for candidate in parser.results:
+        url = managed_search_url(candidate["href"])
+        title = candidate["title"][:512]
+        snippet = candidate["snippet"][:2_000]
+        if url is None or not title:
+            continue
+        proposed = [*sources, {"title": title, "url": url, "snippet": snippet}]
+        lines = [f"Found {len(proposed)} source-backed web result{'s' if len(proposed) != 1 else ''}."]
+        for index, source in enumerate(proposed, start=1):
+            lines.append(f"{index}. {source['title']}\n{source['url']}" + (f"\n{source['snippet']}" if source["snippet"] else ""))
+        content = "\n\n".join(lines)
+        details = {"provider": "bing", "freshness": freshness, "sources": proposed}
+        # The control-result envelope also contains correlation fields. Reserve
+        # a little space so linked source details cannot make that envelope
+        # exceed the shared 16 KiB result boundary.
+        if len(content.encode("utf-8")) + len(canonical(details).encode("utf-8")) > MAX_OUTPUT_BYTES - 512:
+            break
+        sources = proposed
+        if len(sources) >= maximum:
+            break
+    if not sources:
+        raise RuntimeError("managed web search returned no source results")
+    lines = [f"Found {len(sources)} source-backed web result{'s' if len(sources) != 1 else ''}."]
+    for index, source in enumerate(sources, start=1):
+        lines.append(f"{index}. {source['title']}\n{source['url']}" + (f"\n{source['snippet']}" if source["snippet"] else ""))
+    return result("ok", "\n\n".join(lines), {"provider": "bing", "freshness": freshness, "sources": sources})
+
+
 def request_router(path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
     base = os.environ.get("MECHA_ROUTER_URL", "http://127.0.0.1:8765").rstrip("/")
     data = None if payload is None else canonical(payload).encode("utf-8")
@@ -204,6 +346,8 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
         return invoke_script("pr_status.py", [str(number), "--json"])
     if operation == "ops.git_status":
         return invoke_script("git_task_status.py", ["--task", identifier(arguments.get("task"), "task"), "--json"])
+    if operation == "web.search":
+        return managed_web_search(arguments)
     if operation == "mail.send":
         # The router validates this control request against its durable, fenced
         # authorization before it can enter quiet history. It is provenance,

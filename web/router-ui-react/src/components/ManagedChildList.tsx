@@ -21,9 +21,9 @@ function displayedChildStatus(child: ManagedChild): string {
   return child.recovery.state === "interrupted_unknown" ? "Interrupted · outcome unknown" : child.status;
 }
 
-export function ManagedChildList({ agentId, children }: { agentId: string; children: ManagedChild[] }): ReactElement | null {
+export function ManagedChildList({ agentId, children, id }: { agentId: string; children: ManagedChild[]; id?: string }): ReactElement | null {
   if (children.length === 0) return null;
-  return <ul className="managed-child-list" aria-label={`Children for ${agentId}`}>{children.map((child) => {
+  return <ul id={id} className="managed-child-list" aria-label={`Children for ${agentId}`}>{children.map((child) => {
     const timing = childTiming(child);
     const model = child.model === undefined ? undefined : child.model.name || `${child.model.provider}/${child.model.id}`;
     const recovery = childRecovery(child);

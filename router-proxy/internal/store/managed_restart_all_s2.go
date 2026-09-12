@@ -73,6 +73,13 @@ func restartAllEmptyBodyHash() string {
 	return hex.EncodeToString(sum[:])
 }
 
+func managedInstalledToolCount(manifestRevision int) int {
+	if manifestRevision >= 2 {
+		return 17
+	}
+	return 16
+}
+
 func restartAllPublicAgent(agent *ManagedAgentRecord) map[string]any {
 	if agent == nil {
 		return nil
@@ -82,7 +89,7 @@ func restartAllPublicAgent(agent *ManagedAgentRecord) map[string]any {
 		"model":         map[string]any{"provider": agent.SelectedModel.Provider, "id": agent.SelectedModel.ID},
 		"desired_state": agent.DesiredState, "lifecycle_state": agent.LifecycleState, "activity_state": agent.ActivityState,
 		"accepting_prompts": agent.AcceptingPrompts,
-		"manifest":          map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": 16},
+		"manifest":          map[string]any{"revision": agent.ManifestRevision, "sha256": agent.ManifestHash, "installed_tool_count": managedInstalledToolCount(agent.ManifestRevision)},
 		"created_at":        agent.CreatedAt, "started_at": nil, "updated_at": agent.UpdatedAt, "last_error": nil,
 	}
 	if agent.StartedAt != "" {

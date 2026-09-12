@@ -83,7 +83,7 @@ func (r *launchRPC) GetActiveTools(context.Context) ([]string, error) {
 	if r.active != nil {
 		return append([]string{}, r.active...), nil
 	}
-	return append(append([]string{}, fixedSubagentsTools...), baselineManagedNames...), nil
+	return append(append([]string{}, fixedSubagentsTools...), managedCurrentToolNames...), nil
 }
 func (r *launchRPC) readinessFailure(step string) error {
 	if r.failAt == step {

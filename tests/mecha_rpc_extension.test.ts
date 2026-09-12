@@ -72,7 +72,7 @@ function supplementalManifest(base: RecordValue): RecordValue {
     definition_id: `def_${definitionSha}`,
     definition_sha256: definitionSha,
   });
-  desired.revision = 2;
+  desired.revision = Number(desired.revision) + 1;
   return desired;
 }
 
@@ -122,15 +122,15 @@ test("accepted receipt reports the runtime active tools and manifest revision", 
   const receipt = current.sent.at(-1)!;
   assert.equal(receipt.message.customType, "mecha.tools.accepted.v1");
   const details = receipt.message.details as RecordValue;
-  assert.equal(details.manifest_revision, 1);
+  assert.equal(details.manifest_revision, 2);
   assert.deepEqual(details.active_tools, [...current.pi.getActiveTools!()].sort());
-  assert.equal((details.active_tools as unknown[]).length, 16);
+  assert.equal((details.active_tools as unknown[]).length, 17);
 });
 
 test("bootstrap is atomic before model tools exist and a raw coercive tool call fails before control traffic", async () => {
   const current = fixture();
   await bootstrap(current);
-  assert.equal(current.tools.size, 16);
+  assert.equal(current.tools.size, 17);
   const receipt = current.sent.at(-1)!;
   assert.equal(receipt.message.customType, "mecha.tools.accepted.v1");
 
@@ -408,7 +408,7 @@ test("an accepted parent manifest installs one owner-bound child factory before 
     await childHandlers.get("session_start")!({}, {
       sessionManager: { getSessionId: () => "child-session", getHeader: () => ({ parentSession: "root-session" }) },
     });
-    assert.equal(childTools.size, 16);
+    assert.equal(childTools.size, 17);
     assert.deepEqual(new Set(childTools.keys()), new Set((manifest().tools as Array<RecordValue>).map((tool) => tool.name)));
     assert.equal(childCommands.has("goal"), false, "the child tool must not be shadowed by a legacy command");
     assert.equal(childCommands.has("mecha-bootstrap-v1"), true);
@@ -436,7 +436,7 @@ test("an accepted parent manifest installs one owner-bound child factory before 
     await freshChildHandlers.get("session_start")!({}, {
       sessionManager: { getSessionId: () => "fresh-child-session", getHeader: () => ({ parentSession: "root-session" }) },
     });
-    assert.equal(freshChildTools.size, 17);
+    assert.equal(freshChildTools.size, 18);
 
     parent.handlers.get("session_shutdown")!({}, parent.context);
     assert.equal(factoryDisposals, 2, "parent shutdown releases its remaining owner-bound factory");
@@ -543,7 +543,7 @@ test("full and supplemental installation retain bounded accepted and rejected de
   const command = current.commands.get("mecha-bootstrap-v1")!;
   await command.handler(encodeHiddenEnvelope(full), current.context);
   await command.handler(encodeHiddenEnvelope(full), current.context);
-  assert.equal(current.tools.size, 16, "accepted full replay must not register a second manifest");
+  assert.equal(current.tools.size, 17, "accepted full replay must not register a second manifest");
   assert.equal(current.sent.filter(({ message }) => message.customType === "mecha.tools.accepted.v1").length, 2);
 
   const supplemental = supplementalManifest(manifest());
@@ -556,7 +556,7 @@ test("full and supplemental installation retain bounded accepted and rejected de
   const supplementalCommand = current.commands.get("mecha-install-tools-v1")!;
   await supplementalCommand.handler(encodeHiddenEnvelope(supplementalEnvelope), current.context);
   await supplementalCommand.handler(encodeHiddenEnvelope(supplementalEnvelope), current.context);
-  assert.equal(current.tools.size, 17, "accepted supplemental replay must not register the new name twice");
+  assert.equal(current.tools.size, 18, "accepted supplemental replay must not register the new name twice");
 
   const invalidFull = { ...bootstrapEnvelope(current, deliveryId(3)), unexpected: true };
   await assert.rejects(async () => command.handler(encodeHiddenEnvelope(invalidFull), current.context));
@@ -570,16 +570,16 @@ test("full and supplemental installation retain bounded accepted and rejected de
   const rejectedSupplemental = current.sent.at(-1)!.message;
   await assert.rejects(async () => supplementalCommand.handler(encodeHiddenEnvelope(invalidSupplemental), current.context));
   assert.deepEqual(current.sent.at(-1)!.message, rejectedSupplemental, "rejected supplemental replay must return its original receipt");
-  assert.equal(current.tools.size, 17);
+  assert.equal(current.tools.size, 18);
 
   for (let index = 5; index < 133; index++) {
     const rejected = { ...bootstrapEnvelope(current, deliveryId(index)), unexpected: true };
     await assert.rejects(async () => command.handler(encodeHiddenEnvelope(rejected), current.context));
   }
   await assert.rejects(async () => command.handler(encodeHiddenEnvelope(full), current.context));
-  assert.equal(current.tools.size, 17, "receipt eviction must not change accepted runtime state");
+  assert.equal(current.tools.size, 18, "receipt eviction must not change accepted runtime state");
 
   current.handlers.get("session_shutdown")!({}, current.context);
   await assert.rejects(async () => command.handler(encodeHiddenEnvelope(supplementalEnvelope), current.context));
-  assert.equal(current.tools.size, 17, "shutdown clears receipts but cannot revive a terminated registry");
+  assert.equal(current.tools.size, 18, "shutdown clears receipts but cannot revive a terminated registry");
 });
