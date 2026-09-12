@@ -14,6 +14,7 @@ import {
   stopRouterProcess,
 } from "../support/isolated-go-router.mjs";
 import { startIsolatedBcbBrowser } from "./bcb-runner.mjs";
+import { terminateManagedTestAgents } from "../support/managed-agent-cleanup.mjs";
 
 const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -427,7 +428,10 @@ process.on("SIGTERM", () => { clearInterval(renewal); socket.close(1000, "phase3
   };
 }
 
-async function launchManagedFromDedicatedBcbTab(bcb, tab, router, name, instruction) {
+async function launchManagedFromDedicatedBcbTab(bcb, tab, router, managedAgentIDs, name, instruction) {
+  // Register before the request so finally cleanup owns a partially launched
+  // agent even if browser-side verification fails immediately afterward.
+  managedAgentIDs.add(name);
   const payload = { name, cwd: router.cwd, model: { provider: "mecha-router-test", id: "managed-rpc-release" }, initial_instruction: instruction };
   const response = await execBrowser(bcb, tab, `(async () => { const response = await fetch('/v1/managed-agents', { method: 'POST', headers: { 'content-type': 'application/json', 'X-Request-ID': crypto.randomUUID() }, body: ${JSON.stringify(JSON.stringify(payload))} }); const body = await response.json().catch(() => ({})); return { status: response.status, body }; })()`);
   if (response?.status !== 202) fail(`BCB launch of ${name} failed: ${JSON.stringify(response)}`);
@@ -756,6 +760,9 @@ export async function runManagedRpcRelease() {
   let tab;
   let isolatedRestartRecovery;
   let authSentinel = "";
+  // These are the only managed agents this proof is allowed to terminate.
+  // Never enumerate router rows here: a release check must not touch user agents.
+  const managedTestAgentIDs = new Set();
   try {
     const candidate = await step("candidate-identity", async () => initialCandidate);
     report.candidate = candidate;
@@ -837,6 +844,9 @@ export async function runManagedRpcRelease() {
     });
 
     await step("launch-real-managed-pi", async () => {
+      // Register before browser submission so a failed UI assertion cannot leak
+      // an accepted launch request.
+      managedTestAgentIDs.add(CHILD_AGENT);
       await execBrowser(bcb, tab, "(() => { const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Launch managed agent'); if (!(button instanceof HTMLButtonElement)) throw new Error('Launch managed agent button missing'); button.click(); return true; })()");
       await waitFor(async () => (await execBrowser(bcb, tab, "Boolean(document.querySelector('.managed-agent-dialog form'))")) ? true : undefined, "managed launch dialog");
       await execBrowser(bcb, tab, "(() => { const button = document.querySelector('.managed-agent-dialog .model-current'); if (!(button instanceof HTMLButtonElement) || button.textContent?.trim() !== 'Use router default') throw new Error('router default model trigger missing'); button.click(); return true; })()");
@@ -1027,7 +1037,7 @@ export async function runManagedRpcRelease() {
 
     await step("hard-kill-live-child-recovery", async () => {
       const agentID = "hard-kill-parent";
-      const launch = await launchManagedFromDedicatedBcbTab(bcb, tab, router, agentID, "Spawn two live children for the hard-exit acceptance fixture.");
+      const launch = await launchManagedFromDedicatedBcbTab(bcb, tab, router, managedTestAgentIDs, agentID, "Spawn two live children for the hard-exit acceptance fixture.");
       const before = await waitFor(async () => {
         const [children, agent] = await Promise.all([
           fetch(`${router.httpUrl}/v1/managed-agents/${agentID}/children`).then((response) => response.ok ? response.json() : undefined),
@@ -1085,14 +1095,44 @@ export async function runManagedRpcRelease() {
     throw error;
   } finally {
     const cleanup = [];
+    let cleanupFailure;
+    try {
+      if (router && managedTestAgentIDs.size > 0) {
+        const managedAgents = await terminateManagedTestAgents({
+          baseUrl: router.httpUrl,
+          agentIDs: managedTestAgentIDs,
+          assertProcessAbsent: ({ agentID, processPID }) => {
+            if (!Number.isInteger(processPID) || processPID < 2) return { checked: false };
+            try {
+              process.kill(processPID, 0);
+            } catch (error) {
+              if (error?.code === "ESRCH") return { checked: true, process_pid: processPID, absent: true };
+              throw error;
+            }
+            throw new Error(`managed agent ${agentID} process ${processPID} survived durable removal`);
+          },
+        });
+        cleanup.push({ managed_test_agents: managedAgents });
+      }
+    } catch (error) {
+      cleanup.push({ managed_test_agents_error: String(error) });
+      cleanupFailure = error;
+    }
     try { if (controlledBrowser) { await controlledBrowser.close(); cleanup.push({ isolated_bcb_browser_stopped: true }); } } catch (error) { cleanup.push({ isolated_bcb_browser_stop_error: String(error) }); }
     try { if (router) await stopRouterProcess(router); } catch (error) { cleanup.push({ router: String(error) }); }
     try { if (tmuxPeer) cleanup.push({ canonical_tmux_peer: await tmuxPeer.stop() }); } catch (error) { cleanup.push({ canonical_tmux_peer: String(error) }); }
     try { if (provider) await provider.close(); } catch (error) { cleanup.push({ provider: String(error) }); }
     if (root) await rm(root, { recursive: true, force: true });
     report.cleanup = cleanup;
+    if (cleanupFailure) {
+      report.result = "cleanup_failed";
+      report.error = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
+    }
     report.finished_at = new Date().toISOString();
     await write("REPORT.json", report);
+    // Do not certify a release run that left its explicitly-owned test agent
+    // behind, even when the proof itself otherwise passed.
+    if (cleanupFailure) throw cleanupFailure;
   }
   return report;
 }
