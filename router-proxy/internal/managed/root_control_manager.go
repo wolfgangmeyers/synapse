@@ -198,6 +198,15 @@ func (m *Manager) resumeRootControl(ctx context.Context, binding *managedBinding
 // uncertain compact is deliberately not replayed: duplicating a completed
 // compaction would discard a second span of conversation history.
 func (m *Manager) executeRootControlHandler(ctx context.Context, binding *managedBinding, handler RootControlHandler, invocation RootControlInvocation, reconcile bool) (RootControlHandlerResult, error) {
+	if invocation.OperationID == "policy.inline_allowance" {
+		if reconcile {
+			// Allowances are deliberately process-local and never restored from a
+			// stale request. A recovered handler has no retained raw arguments, so
+			// it must not guess a new credit grant.
+			return RootControlHandlerResult{}, errors.New("inline allowance outcome is unknown after recovery")
+		}
+		return m.executeManagedInlineAllowance(ctx, binding, invocation)
+	}
 	if invocation.OperationID != "context.control" {
 		if reconcile {
 			return handler.Reconcile(ctx, invocation)
