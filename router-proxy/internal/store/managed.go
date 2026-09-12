@@ -2725,7 +2725,42 @@ func managedChildHistoryKey(fence ManagedRuntimeFence, parentEntryID, taskID, ru
 	return "child:" + hex.EncodeToString(sum[:])
 }
 
-func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string, changedFields []string) (*ManagedHistoryPresentation, string) {
+type managedChildHistoryDisplay struct {
+	Label   string
+	Summary string
+}
+
+func managedChildHistoryDisplayFromSnapshot(snapshot map[string]any, delta ManagedChildDelta, lifecycleState string) managedChildHistoryDisplay {
+	runs, _ := snapshot["runs"].([]any)
+	for _, value := range runs {
+		run, _ := value.(map[string]any)
+		if run == nil || run["parent_entry_id"] != delta.ParentEntryID || run["task_id"] != delta.TaskID || run["run_id"] != delta.RunID {
+			continue
+		}
+		display := managedChildHistoryDisplay{}
+		if label, _ := run["description"].(string); managedHistoryText(label, 512, false) {
+			display.Label = label
+		}
+		outcome := map[string]string{"completed": "Completed", "error": "Failed", "aborted": "Stopped", "stopped": "Stopped"}[lifecycleState]
+		if durationMS, ok := run["duration_ms"].(float64); outcome != "" && ok && durationMS >= 0 && durationMS <= float64((24*time.Hour)/time.Millisecond) {
+			duration := time.Duration(durationMS) * time.Millisecond
+			if duration >= time.Second {
+				seconds := duration.Round(time.Second) / time.Second
+				unit := "seconds"
+				if seconds == 1 {
+					unit = "second"
+				}
+				display.Summary = fmt.Sprintf("%s in %d %s", outcome, seconds, unit)
+			} else {
+				display.Summary = outcome
+			}
+		}
+		return display
+	}
+	return managedChildHistoryDisplay{}
+}
+
+func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string, changedFields []string, display managedChildHistoryDisplay) (*ManagedHistoryPresentation, string) {
 	for _, field := range changedFields {
 		if field == "compaction:compacting" {
 			return &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "compacting"}, "Child compacting"
@@ -2746,13 +2781,13 @@ func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string,
 		return &ManagedHistoryPresentation{Kind: "recovery", ChildState: "confirmed", Outcome: "success"}, "Child status confirmed"
 	}
 	labels := map[string]string{
-		"queued": "Child queued", "running": "Child started", "completed": "Child completed", "steered": "Child redirected", "aborted": "Child aborted", "stopped": "Child stopped", "error": "Child failed",
+		"queued": "Child queued", "running": "Child started", "completed": "Subagent finished", "steered": "Child redirected", "aborted": "Subagent stopped", "stopped": "Subagent stopped", "error": "Subagent failed",
 	}
 	label, found := labels[lifecycleState]
 	if !found {
 		return &ManagedHistoryPresentation{Kind: "child", Outcome: "unknown"}, "Child updated"
 	}
-	return &ManagedHistoryPresentation{Kind: "child", ChildState: lifecycleState, Outcome: "success"}, label
+	return &ManagedHistoryPresentation{Kind: "child", ChildState: lifecycleState, Outcome: "success", ChildLabel: display.Label, Summary: display.Summary}, label
 }
 
 // recordManagedChildHistoryTx is the authoritative complete-history writer for
@@ -2760,11 +2795,15 @@ func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string,
 // record in the same transaction as the source projection, so retries and UI
 // projection publication cannot create a second lifecycle entry.
 func (s *Store) recordManagedChildHistoryTx(ctx context.Context, fence ManagedRuntimeFence, parentEntryID, taskID, runID string, sequence int64, kind, lifecycleState, recoveryState, recoveryCause string, changedFields []string) (ManagedHistoryEntry, error) {
+	return s.recordManagedChildHistoryWithDisplayTx(ctx, fence, parentEntryID, taskID, runID, sequence, kind, lifecycleState, recoveryState, recoveryCause, changedFields, managedChildHistoryDisplay{})
+}
+
+func (s *Store) recordManagedChildHistoryWithDisplayTx(ctx context.Context, fence ManagedRuntimeFence, parentEntryID, taskID, runID string, sequence int64, kind, lifecycleState, recoveryState, recoveryCause string, changedFields []string, display managedChildHistoryDisplay) (ManagedHistoryEntry, error) {
 	if !validManagedRuntimeFence(fence) || parentEntryID == "" || taskID == "" || runID == "" || sequence < 0 || (kind != "transition" && kind != "recovery") || (recoveryState != "confirmed" && recoveryState != "interrupted_unknown") || (recoveryState == "confirmed" && recoveryCause != "") || (recoveryState == "interrupted_unknown" && recoveryCause != "snapshot_omitted" && recoveryCause != "parent_process_lost" && recoveryCause != "session_changed") {
 		return ManagedHistoryEntry{}, errors.New("managed child history is invalid")
 	}
 	key := managedChildHistoryKey(fence, parentEntryID, taskID, runID, sequence, kind, recoveryState, recoveryCause, changedFields)
-	presentation, message := managedChildHistoryPresentation(kind, lifecycleState, recoveryState, changedFields)
+	presentation, message := managedChildHistoryPresentation(kind, lifecycleState, recoveryState, changedFields, display)
 	var existingSequence int64
 	var existingAt, existingLevel, existingMessage string
 	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message FROM managed_child_transitions t JOIN managed_complete_history h ON h.sequence=t.complete_sequence WHERE t.event_key=?`, key).Scan(&existingSequence, &existingAt, &existingLevel, &existingMessage)
@@ -3099,7 +3138,7 @@ func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntime
 		if err != nil {
 			return err
 		}
-		if _, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", managedChildHistoryFields(next, delta)); err != nil {
+		if _, err := s.recordManagedChildHistoryWithDisplayTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", managedChildHistoryFields(next, delta), managedChildHistoryDisplayFromSnapshot(next, delta, state)); err != nil {
 			return err
 		}
 		if err := s.confirmManagedChildRecoveryForDeltaTx(ctx, fence, delta, state); err != nil {

@@ -38,19 +38,16 @@ function childVisual(presentation: ManagedHistoryPresentation): CompleteTimeline
   const state = presentation.child_state;
   const recovery = presentation.kind === "recovery";
   const labels: Record<string, string> = {
-    queued: "Child queued",
-    running: "Child started",
-    completed: "Child completed",
-    steered: "Child redirected",
-    aborted: "Child aborted",
-    stopped: "Child stopped",
-    error: "Child failed",
-    confirmed: "Child status confirmed",
-    interrupted_unknown: "Child interrupted — outcome unknown",
+    completed: "Subagent finished",
+    aborted: "Subagent stopped",
+    stopped: "Subagent stopped",
+    error: "Subagent failed",
+    interrupted_unknown: "Subagent interrupted — outcome unknown",
   };
-  const label = labels[state ?? ""] ?? (recovery ? "Child recovery" : "Child updated");
+  const label = labels[state ?? ""] ?? (recovery ? "Subagent recovery" : "Subagent updated");
+  const detail = [presentation.child_label, presentation.summary].filter((value): value is string => value !== undefined && value !== "").join(" · ");
   const tone: CompleteTimelineTone = state === "error" ? "danger" : state === "interrupted_unknown" ? "amber" : recovery ? "teal" : "blue";
-  return { icon: recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project", tone, label, ...(presentation.child_label ? { detail: presentation.child_label } : {}), isHighValue: recovery || ["completed", "aborted", "stopped", "error", "interrupted_unknown"].includes(state ?? "") };
+  return { icon: recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project", tone, label, ...(detail ? { detail } : {}), isHighValue: recovery || ["completed", "aborted", "stopped", "error", "interrupted_unknown"].includes(state ?? "") };
 }
 
 function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {

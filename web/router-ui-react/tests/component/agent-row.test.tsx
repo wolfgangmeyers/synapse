@@ -45,7 +45,7 @@ describe("AgentRow", () => {
 
     const goal = screen.getByRole("button", { name: "Set goal" });
     const reminders = screen.getByRole("button", { name: "Add reminder" });
-    expect(goal.closest(".agent-row-select")).toBeNull();
+    expect(goal.closest(".agent-name-line")).not.toBeNull();
     await user.click(goal);
     reminders.focus();
     await user.keyboard("{Enter}");
@@ -90,11 +90,11 @@ describe("AgentRow", () => {
     expect(screen.queryByText("Run tests")).not.toBeInTheDocument();
   });
 
-  it("keeps managed children available while the parent compacts", () => {
-    render(<AgentRow agent={{ agent_id: "managed-build", source: "router-managed", activity_state: "compacting", subagent_count: 1, subagents: [{ id: "child-1", description: "Run the focused check" }], managed_children: [{ id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed", cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running", compaction_state: "compacting", compaction: { state: "compacting", count: 1 } }] }} expanded />);
+  it("uses the same compacting presentation for managed and tmux parents", () => {
+    render(<AgentRow agent={{ agent_id: "managed-build", source: "router-managed", activity_state: "compacting", managed_children: [{ id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed", cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running", compaction_state: "compacting", compaction: { state: "compacting", count: 1 } }] }} expanded />);
     expect(screen.getByText("Compacting")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "1 subagent" })).toBeInTheDocument();
-    expect(screen.getByRole("list", { name: "Children for managed-build" })).toHaveTextContent("compacting");
+    expect(screen.queryByRole("button", { name: "1 subagent" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Run the focused check")).not.toBeInTheDocument();
   });
 
   it("shows a count-only subagent badge without an expand control", () => {
@@ -104,18 +104,32 @@ describe("AgentRow", () => {
     expect(screen.queryByRole("button", { name: "2 subagents" })).not.toBeInTheDocument();
   });
 
-  it("labels managed rows as RPC and leaves their controls in the selected-agent header", () => {
-    render(<AgentRow agent={{ agent_id: "managed-build", source: "router-managed", activity_state: "idle", subagent_count: 1, subagents: [{ id: "child-1", description: "Run the focused check" }], managed_children: [{ id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed", cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running", compaction_state: "none", compaction: { state: "idle", count: 0 } }] }} expanded />);
+  it("keeps a tmux goal indicator in the name row when an expanded child disclosure grows the card", () => {
+    render(<AgentRow agent={{ agent_id: "rpc", activity_state: "idle", goal: { enabled: true, goal: "goal" }, subagent_count: 1, subagents: [{ id: "child-1", description: "Unify RPC subagent UX" }] }} expanded onGoal={vi.fn()} />);
 
-    const children = screen.getByRole("list", { name: "Children for managed-build" });
-    const row = children.parentElement;
+    const row = screen.getByLabelText("Rpc (rpc)").closest(".agent-row");
+    const goal = screen.getByRole("button", { name: "Set goal" });
+    expect(row).not.toBeNull();
+    expect(goal.closest(".agent-name-line")).not.toBeNull();
+    expect(goal.closest(".agent-row-actions")).toBeNull();
+    expect(row).toContainElement(screen.getByRole("group", { name: "1 subagent" }));
+  });
+
+  it("uses the tmux subagent badge and inline child rows for RPC", () => {
+    const child = { id: "child-1", parent_entry_id: "entry-1", task_id: "task-1", run_id: "run-1", sequence: 1, recovery: { state: "confirmed" as const, cause: null, observed_at: "2030-01-01T00:00:00Z" }, description: "Run the focused check", status: "running" as const, compaction_state: "none" as const, compaction: { state: "idle" as const, count: 0 } };
+    const { container } = render(<><AgentRow agent={{ agent_id: "same-parent", activity_state: "idle", subagent_count: 1, subagents: [{ id: child.id, description: child.description }] }} expanded /><AgentRow agent={{ agent_id: "same-parent", source: "router-managed", activity_state: "idle", managed_children: [child] }} expanded /></>);
+
+    const [tmuxRow, rpcRow] = Array.from(container.querySelectorAll(".agent-row"));
+    expect(tmuxRow).toBeDefined();
+    expect(rpcRow).toBeDefined();
+    const tmuxBadge = tmuxRow?.querySelector(".subagent-indicator");
+    const rpcBadge = rpcRow?.querySelector(".subagent-indicator");
+    expect(tmuxBadge?.outerHTML).toBe(rpcBadge?.outerHTML);
+    expect(rpcBadge).toHaveTextContent("Run the focused check");
+    expect(rpcRow?.querySelector(".managed-child-list")).toBeNull();
     expect(screen.getByText("RPC")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Manage" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
-    expect(row).not.toBeNull();
-    if (row === null) throw new Error("managed child list is not contained by its card");
-    expect(row).toHaveClass("expanded");
-    expect(children).toHaveClass("managed-child-list");
   });
 
   it("shows working and subagent state accessibly", () => {

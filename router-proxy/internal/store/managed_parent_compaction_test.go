@@ -32,6 +32,40 @@ func TestReconcileManagedParentCompactionNeverCallsMissingEndSuccess(t *testing.
 	require.Equal(t, "reconciled_unknown", outcome)
 }
 
+func TestTerminalChildHistoryNamesItsWorkAndDuration(t *testing.T) {
+	delta := ManagedChildDelta{ParentEntryID: "entry", TaskID: "task", RunID: "run"}
+	snapshot := map[string]any{"runs": []any{map[string]any{"parent_entry_id": "entry", "task_id": "task", "run_id": "run", "description": "Wait twenty seconds", "duration_ms": float64(20_000)}}}
+	display := managedChildHistoryDisplayFromSnapshot(snapshot, delta, "completed")
+	presentation, message := managedChildHistoryPresentation("transition", "completed", "confirmed", []string{"lifecycle_state"}, display)
+
+	require.Equal(t, "Subagent finished", message)
+	require.Equal(t, "Wait twenty seconds", presentation.ChildLabel)
+	require.Equal(t, "Completed in 20 seconds", presentation.Summary)
+}
+
+func TestManagedDirectPromptActivityIsImmediateAndClearsWithoutChangingNativeSequence(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+
+	updated, err := durable.SetManagedDirectPromptActivity(ctx, fence, true)
+	require.NoError(t, err)
+	require.True(t, updated)
+	agent, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState)
+
+	updated, err = durable.SetManagedDirectPromptActivity(ctx, fence, false)
+	require.NoError(t, err)
+	require.True(t, updated)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
+
+	updated, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 1, State: "active"})
+	require.NoError(t, err)
+	require.True(t, updated, "the direct affordance must not consume a native event sequence")
+}
+
 func TestManagedParentActivityTracksNativeTurnsWithoutOverridingCompaction(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyParentCompactionFixture(t)

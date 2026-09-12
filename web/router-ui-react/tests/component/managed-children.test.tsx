@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRow } from "../../src/components/AgentRow";
 import { ManagedChildList } from "../../src/components/ManagedChildList";
@@ -19,38 +19,30 @@ describe("ManagedChildList", () => {
     expect(screen.getByText(/Status interrupted: the parent process ended before this child was confirmed/)).toBeInTheDocument();
   });
 
-  it("keeps an expanded managed child list in its parent card", () => {
-    render(<AgentRow agent={{ agent_id: "managed-alpha", source: "router-managed", activity_state: "idle", subagent_count: 1, subagents: [{ id: "child-1", description: "Prepare a long but bounded report" }], managed_children: [children[0]!] }} expanded />);
+  it("reuses the shared inline disclosure inside its parent card", () => {
+    render(<AgentRow agent={{ agent_id: "managed-alpha", source: "router-managed", activity_state: "idle", managed_children: [children[0]!] }} expanded />);
 
     const card = screen.getByLabelText("Managed Alpha (managed-alpha)").closest(".agent-row");
-    const list = screen.getByRole("list", { name: "Children for managed-alpha" });
+    const badge = screen.getByRole("group", { name: "1 subagent" });
     expect(card).not.toBeNull();
-    if (card === null) throw new Error("managed child card is missing");
-    expect(card).toContainElement(list);
+    expect(card).toContainElement(badge);
+    expect(badge).toHaveTextContent("Prepare a long but bounded report");
+    expect(card?.querySelector(".managed-child-list")).toBeNull();
   });
 
-  it("counts every retained managed child so completed work remains expandable", () => {
+  it("removes terminal managed children from the live disclosure", () => {
     const completed = { ...children[0]!, id: "child-completed", task_id: "task-completed", run_id: "run-completed", description: "Finished check", status: "completed" as const, compaction_state: "none" as const, compaction: { state: "idle" as const, count: 0 }, duration_ms: 1000 };
-    render(<AgentRow agent={{ agent_id: "managed-alpha", source: "router-managed", activity_state: "idle", subagent_count: 1, subagents: [{ id: "child-1", description: "Prepare a long but bounded report" }, { id: completed.id, description: completed.description }], managed_children: [children[0]!, completed] }} expanded />);
+    render(<AgentRow agent={{ agent_id: "managed-alpha", source: "router-managed", activity_state: "idle", managed_children: [completed] }} expanded />);
 
-    expect(screen.getByRole("group", { name: "2 subagents" })).toBeInTheDocument();
-    expect(screen.getByRole("list", { name: "Children for managed-alpha" })).toHaveTextContent("Finished check");
+    expect(screen.queryByText("Finished check")).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /subagent/ })).not.toBeInTheDocument();
   });
 
-  it("keeps retained interrupted children reachable through the managed disclosure", () => {
+  it("does not present recovered interrupted children as live work", () => {
     const recovered = { ...children[1]!, description: "Interrupted child" };
-    const onToggleSubagents = vi.fn();
-    const agent = { agent_id: "managed-recovery", source: "router-managed" as const, activity_state: "idle" as const, subagent_count: 0, subagents: [], managed_children_recovery: "reconstructing" as const, managed_children: [recovered] };
-    const { rerender } = render(<AgentRow agent={agent} onToggleSubagents={onToggleSubagents} />);
+    render(<AgentRow agent={{ agent_id: "managed-recovery", source: "router-managed", activity_state: "idle", managed_children: [recovered] }} expanded onToggleSubagents={vi.fn()} />);
 
-    const disclosure = screen.getByRole("button", { name: "1 subagent" });
-    expect(disclosure).toHaveAttribute("aria-controls", "agent-row-subagents-managed-recovery");
-    fireEvent.click(disclosure);
-    expect(onToggleSubagents).toHaveBeenCalledWith("managed-recovery");
-
-    rerender(<AgentRow agent={agent} expanded onToggleSubagents={onToggleSubagents} />);
-    expect(screen.getByRole("group", { name: "1 subagent" })).toBeInTheDocument();
-    expect(screen.getByRole("list", { name: "Children for managed-recovery" })).toHaveAttribute("id", "agent-row-subagents-managed-recovery");
-    expect(screen.getByText("Interrupted · outcome unknown")).toBeInTheDocument();
+    expect(screen.queryByText("Interrupted child")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /subagent/ })).not.toBeInTheDocument();
   });
 });

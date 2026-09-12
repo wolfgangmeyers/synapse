@@ -2055,11 +2055,30 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_failed", "")
 			return
 		}
+		// The command has been accepted by the managed RPC writer. Show the same
+		// immediate working affordance as tmux while Pi begins its turn; native
+		// parent events will take over as soon as they arrive.
+		directPromptActive := false
+		if _, activityErr := m.store.SetManagedDirectPromptActivity(context.Background(), fence, true); activityErr != nil {
+			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_activity_persistence_failed", "")
+		} else {
+			directPromptActive = true
+		}
+		clearDirectPromptActivity := func() {
+			if !directPromptActive {
+				return
+			}
+			directPromptActive = false
+			if _, activityErr := m.store.SetManagedDirectPromptActivity(context.Background(), fence, false); activityErr != nil {
+				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_activity_clear_failed", "")
+			}
+		}
 		var acknowledged bool
 		for {
 			select {
 			case event, open := <-events:
 				if !open {
+					clearDirectPromptActivity()
 					cancelTurn()
 					cancelReceipt()
 					if !acknowledged {
@@ -2076,6 +2095,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					current := m.liveBindingForFence(context.Background(), binding, fence)
 					binding.serial.Unlock()
 					if !current {
+						clearDirectPromptActivity()
 						cancelTurn()
 						cancelReceipt()
 						m.releaseManagedDirect(*attempt, "stale_fence", "")
@@ -2083,6 +2103,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					}
 					if m.beforeDirectAcknowledge != nil {
 						if err := m.beforeDirectAcknowledge(context.Background(), *attempt); err != nil {
+							clearDirectPromptActivity()
 							cancelTurn()
 							cancelReceipt()
 							_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "acknowledgment_interrupted", "")
@@ -2090,6 +2111,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 						}
 					}
 					if !m.acknowledgeManagedDirect(*attempt, event.Receipt.EntryIdentity) {
+						clearDirectPromptActivity()
 						cancelTurn()
 						cancelReceipt()
 						return
@@ -2099,9 +2121,11 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					receiptDone = nil
 				}
 				if acknowledged && event.Reply != nil {
+					clearDirectPromptActivity()
 					m.publishDirectReply(*attempt, *event.Reply)
 				}
 				if acknowledged && event.Settled {
+					clearDirectPromptActivity()
 					cancelTurn()
 					for range events {
 					}
@@ -2109,12 +2133,14 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 				}
 			case <-receiptDone:
 				if !acknowledged {
+					clearDirectPromptActivity()
 					cancelTurn()
 					m.releaseManagedDirect(*attempt, "receipt_timeout", "")
 					_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_timeout", "")
 				}
 				return
 			case <-m.runCtx.Done():
+				clearDirectPromptActivity()
 				cancelTurn()
 				cancelReceipt()
 				return

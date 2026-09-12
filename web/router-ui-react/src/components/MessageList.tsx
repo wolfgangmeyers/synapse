@@ -34,10 +34,12 @@ function activitySequence(entry: ManagedHistoryEntry): number {
 }
 
 function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry): boolean {
-  // Older routers may have already persisted normal lifecycle/activity progress
-  // before the server-side publisher stopped emitting it. Keep it available to
-  // diagnostics, but do not let a retained progress row regress the user view.
-  return entry.presentation?.kind !== "lifecycle" && entry.presentation?.kind !== "state";
+  // Complete is an outcome timeline, not a live progress log. Old routers may
+  // retain child queued/started/redirected rows, so hide those alongside normal
+  // lifecycle state while retaining a terminal child result or failure.
+  if (entry.presentation?.kind === "lifecycle" || entry.presentation?.kind === "state") return false;
+  if (entry.presentation?.kind !== "child") return true;
+  return ["completed", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
 }
 
 function dateLabel(timestamp: number): string | undefined {

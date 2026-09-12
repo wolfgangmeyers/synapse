@@ -163,6 +163,38 @@ func (r *failingDirectRPC) directPromptCount() int {
 	return r.directPrompts
 }
 
+type holdingDirectRPC struct {
+	launchRPC
+	prompted chan struct{}
+	events   chan DirectMailboxEvent
+	once     sync.Once
+}
+
+func (r *holdingDirectRPC) PrepareManagedMailbox(context.Context) (string, error) {
+	return "holding-cursor", nil
+}
+func (r *holdingDirectRPC) PromptManagedMailbox(context.Context, store.ManagedDirectAttempt) (<-chan DirectMailboxEvent, error) {
+	r.once.Do(func() { close(r.prompted) })
+	return r.events, nil
+}
+func (r *holdingDirectRPC) RecoverManagedMailbox(context.Context, store.ManagedDirectAttempt) (DirectMailboxRecovery, error) {
+	return DirectMailboxRecovery{}, nil
+}
+
+type holdingDirectFactory struct {
+	process *launchProcess
+	rpc     *holdingDirectRPC
+}
+
+func (f holdingDirectFactory) Start(_ context.Context, spec CommandSpec) (Process, error) {
+	f.rpc.session = spec.SessionID
+	return f.process, nil
+}
+
+type holdingDirectRPCFactory struct{ rpc *holdingDirectRPC }
+
+func (f holdingDirectRPCFactory) Open(context.Context, Process) (RPC, error) { return f.rpc, nil }
+
 type replyingDirectRPC struct {
 	launchRPC
 }
@@ -241,6 +273,55 @@ func readyFailingDirectManager(t *testing.T) (*Manager, *store.Store, string, *f
 	time.Sleep(25 * time.Millisecond)
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })
 	return manager, durable, path, rpc
+}
+
+func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
+	ctx := context.Background()
+	durable, err := store.Open(ctx, filepath.Join(t.TempDir(), "router.db"), store.Options{})
+	require.NoError(t, err)
+	defer durable.Close()
+	manifest, _, err := LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
+	require.NoError(t, err)
+	root := t.TempDir()
+	process := &launchProcess{identity: ProcessIdentity{PID: 995, StartMarker: "holding-start", Incarnation: "holding-incarnation"}, stopped: make(chan struct{})}
+	rpc := &holdingDirectRPC{launchRPC: launchRPC{active: expectedManagedActiveTools(manifest)}, prompted: make(chan struct{}), events: make(chan DirectMailboxEvent, 3)}
+	manager, err := NewManager(ManagerOptions{
+		Store: durable, Config: Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest,
+		ProcessFactory: holdingDirectFactory{process: process, rpc: rpc}, RPCFactory: holdingDirectRPCFactory{rpc: rpc},
+		CatalogSource:              CatalogFromModels(Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}),
+		ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true },
+	})
+	require.NoError(t, err)
+	defer manager.Close(context.Background())
+	_, err = manager.Launch(ctx, LaunchRequest{Name: "holding-agent", Cwd: root, RequestID: "holding-launch"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "holding-agent")
+		return readErr == nil && agent.AcceptingPrompts
+	}, time.Second, time.Millisecond)
+	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "holding-message", From: "sender", To: "holding-agent", Body: "work", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	require.NoError(t, err)
+	_, err = durable.ResolveMessageTarget(ctx, "holding-message")
+	require.NoError(t, err)
+	manager.OfferDirect("holding-agent")
+	select {
+	case <-rpc.prompted:
+	case <-time.After(time.Second):
+		t.Fatal("managed direct prompt was not submitted")
+	}
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "holding-agent")
+		return readErr == nil && agent.ActivityState == "active"
+	}, time.Second, time.Millisecond)
+
+	rpc.events <- DirectMailboxEvent{Receipt: &DirectMailboxReceipt{EntryIdentity: "holding-append"}}
+	rpc.events <- DirectMailboxEvent{Reply: &DirectMailboxReply{EntryIdentity: "holding-reply", Body: "done"}}
+	rpc.events <- DirectMailboxEvent{Settled: true}
+	close(rpc.events)
+	require.Eventually(t, func() bool {
+		agent, readErr := durable.ManagedAgent(ctx, "holding-agent")
+		return readErr == nil && agent.ActivityState == "idle"
+	}, time.Second, time.Millisecond)
 }
 
 func TestManagedDirectReplyPublishesAfterAppendAndBeforeNextOffer(t *testing.T) {
