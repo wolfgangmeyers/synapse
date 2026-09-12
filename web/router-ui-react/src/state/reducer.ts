@@ -4,7 +4,7 @@ import { matchesActiveScope, type RouterScope } from "./scopes";
 import type { Arrival } from "../domain/arrivals";
 import type { HistoryMessage } from "../domain/history";
 import { createInitialState, type AppState, type PendingControl } from "./app-state";
-import type { ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
+import type { GoalState, ManagedAgent, ManagedChildrenProjection, ManagedHistoryEntry } from "../protocol/types";
 
 export type AppAction =
   | { type: "scope/reset"; scope: RouterScope }
@@ -14,6 +14,7 @@ export type AppAction =
   | { type: "managed/snapshot"; scope: RouterScope; version: number; agents: ManagedAgent[] }
   | { type: "managed/delta"; scope: RouterScope; version: number; baseVersion: number; agent: ManagedAgent }
   | { type: "managed/removed"; scope: RouterScope; version: number; baseVersion: number; agentId: string }
+  | { type: "managed/goal-state"; scope: RouterScope; agentId: string; goalState: GoalState }
   | { type: "managed/children"; scope: RouterScope; children: ManagedChildrenProjection[]; version?: number }
   | { type: "managed/recover"; scope: RouterScope }
   | { type: "managed/history"; scope: RouterScope; view: "quiet" | "complete"; entry: ManagedHistoryEntry }
@@ -36,6 +37,13 @@ export type AppAction =
   | { type: "reminder-lock/set"; scope: RouterScope; key: string; locked: boolean };
 
 function scoped(state: AppState, action: { scope?: RouterScope }): boolean { return !action.scope || matchesActiveScope({ ...action.scope, type: "agents" }, state); }
+function retainManagedGoalStates(incoming: ManagedAgent[], current: ManagedAgent[] = []): ManagedAgent[] {
+  const prior = new Map(current.map((agent) => [agent.agent_id, agent.goal_state]));
+  return incoming.map((agent) => {
+    const goalState = prior.get(agent.agent_id);
+    return agent.goal_state === undefined && goalState !== undefined ? { ...agent, goal_state: goalState } : agent;
+  });
+}
 function cloneMaps(state: AppState): AppState { return { ...state, pendingControls: new Map(state.pendingControls), pendingLifecycle: new Map(state.pendingLifecycle ?? []), arrivals: new Map(state.arrivals), expandedSubagents: new Set(state.expandedSubagents), reminderLocks: new Map(state.reminderLocks), modelProjections: new Map(state.modelProjections) }; }
 export function reducer(state: AppState, action: AppAction): AppState {
   if (action.type === "scope/reset") {
@@ -61,12 +69,17 @@ export function reducer(state: AppState, action: AppAction): AppState {
       const { managedProjectionVersion: _discardedVersion, managedChildrenProjectionVersion: _discardedChildrenVersion, ...withoutProjectionVersion } = state;
       return { ...withoutProjectionVersion, managedAvailable: false, managedAgents: [], managedChildren: {}, managedHistory: {} };
     }
-    case "managed/snapshot": return { ...state, managedAvailable: true, managedProjectionVersion: action.version, managedAgents: action.agents };
+    case "managed/snapshot": return { ...state, managedAvailable: true, managedProjectionVersion: action.version, managedAgents: retainManagedGoalStates(action.agents, state.managedAgents) };
     case "managed/delta": {
       if (state.managedProjectionVersion !== action.baseVersion || action.version !== action.baseVersion + 1) return state;
       const agents = state.managedAgents ?? [];
       const existing = agents.some((agent) => agent.agent_id === action.agent.agent_id);
-      return { ...state, managedProjectionVersion: action.version, managedAgents: existing ? agents.map((agent) => agent.agent_id === action.agent.agent_id ? action.agent : agent) : [...agents, action.agent] };
+      return { ...state, managedProjectionVersion: action.version, managedAgents: existing ? retainManagedGoalStates(agents.map((agent) => agent.agent_id === action.agent.agent_id ? action.agent : agent), agents) : [...agents, action.agent] };
+    }
+    case "managed/goal-state": {
+      const agents = state.managedAgents ?? [];
+      if (!agents.some((agent) => agent.agent_id === action.agentId)) return state;
+      return { ...state, managedAgents: agents.map((agent) => agent.agent_id === action.agentId ? { ...agent, goal_state: action.goalState } : agent) };
     }
     case "managed/removed": {
       if (state.managedProjectionVersion !== action.baseVersion || action.version !== action.baseVersion + 1) return state;

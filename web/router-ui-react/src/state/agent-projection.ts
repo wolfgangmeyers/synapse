@@ -39,7 +39,7 @@ export function mergeAgentSources(tmux: Agent[], managed: ManagedAgent[], manage
     // Interrupted rows remain available through the disclosure, but are not
     // advertised as active children while their outcome is unknown.
     const activeChildCount = children.filter((child) => child.recovery.state === "confirmed" && (child.status === "queued" || child.status === "running")).length;
-    return { agent_id: agent.agent_id, source: "router-managed", managed_agent: agent, managed_children: children, managed_children_recovery: managedChildren[agent.agent_id]?.recovery_state ?? "reconstructing", activity_state: managedActivity(agent.activity_state), current_model: agent.model, subagent_count: activeChildCount, subagents: children.flatMap((child) => child.description === undefined ? [] : [{ id: child.id, description: child.description, ...(child.status === "unknown" ? {} : { status: child.status }) }]), model_catalog_total_count: 0, model_catalog_truncated: false };
+    return { agent_id: agent.agent_id, source: "router-managed", managed_agent: agent, ...(agent.goal_state === undefined ? {} : { goal_state: agent.goal_state }), managed_children: children, managed_children_recovery: managedChildren[agent.agent_id]?.recovery_state ?? "reconstructing", activity_state: managedActivity(agent.activity_state), current_model: agent.model, subagent_count: activeChildCount, subagents: children.flatMap((child) => child.description === undefined ? [] : [{ id: child.id, description: child.description, ...(child.status === "unknown" ? {} : { status: child.status }) }]), model_catalog_total_count: 0, model_catalog_truncated: false };
   });
   return [...tmux, ...managedRows].sort((left, right) => left.agent_id.localeCompare(right.agent_id));
 }

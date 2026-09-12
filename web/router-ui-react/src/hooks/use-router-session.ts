@@ -9,6 +9,7 @@ import type { AppAction } from "../state/reducer";
 import type { Agent } from "../state/agent-projection";
 import { createRouterTransport, type RouterTransport, type RouterTransportOptions, type TransportEvent } from "../transport/router-transport";
 import { createUILiveClient, type UILiveClient } from "../transport/ui-live-client";
+import { loadManagedGoalProjection } from "../transport/managed-goal-projection";
 import type { WebSocketFactory } from "../transport/websocket-client";
 import type { ProviderAuthPromptFrame, ProviderAuthStateFrame } from "../protocol/types";
 
@@ -34,6 +35,11 @@ function peerFor(message: { from?: string; to?: string }, owner: string): string
   if (message.from === owner) return message.to;
   if (message.to === owner) return message.from;
   return undefined;
+}
+function refreshManagedGoalProjection(transport: RouterTransport, dispatch: Dispatch<AppAction>, scope: RouterScope, agents: import("../protocol/types").ManagedAgent[]): void {
+  void loadManagedGoalProjection(transport.http, agents).then((goals) => {
+    for (const { agentId, goalState } of goals) dispatch({ type: "managed/goal-state", scope, agentId, goalState });
+  });
 }
 function eventAction(event: TransportEvent, scope: RouterScope): Parameters<typeof reducer>[1] | undefined {
   if (event.type === "status") return { type: "connection/status", status: event.status === "connected" ? "connected" : event.status === "connecting" ? "connecting" : event.status === "reconnecting" ? "reconnecting" : event.status === "error" ? "error" : "disconnected", generation: event.identity.generation, instanceId: event.identity.instanceId, leaseId: event.identity.leaseId };
@@ -68,8 +74,13 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     ...(options.uiLiveWebSocketFactory === undefined ? {} : { webSocketFactory: options.uiLiveWebSocketFactory }),
     onFrame: (frame) => {
       const currentScope = scopeRef.current;
-      if (frame.type === "managed_agents_snapshot") dispatch({ type: "managed/snapshot", scope: currentScope, version: frame.projection_version, agents: frame.agents });
-      else if (frame.type === "managed_agent_delta") dispatch({ type: "managed/delta", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agent: frame.changes });
+      if (frame.type === "managed_agents_snapshot") {
+        dispatch({ type: "managed/snapshot", scope: currentScope, version: frame.projection_version, agents: frame.agents });
+        refreshManagedGoalProjection(transport, dispatch, currentScope, frame.agents);
+      } else if (frame.type === "managed_agent_delta") {
+        dispatch({ type: "managed/delta", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agent: frame.changes });
+        refreshManagedGoalProjection(transport, dispatch, currentScope, [frame.changes]);
+      }
       else if (frame.type === "managed_agent_removed") dispatch({ type: "managed/removed", scope: currentScope, version: frame.projection_version, baseVersion: frame.base_version, agentId: frame.agent_id });
       else if (frame.type === "managed_children_snapshot") dispatch({ type: "managed/children", scope: currentScope, version: frame.lifecycle_version, children: frame.children });
       else if (frame.type === "history_entry") dispatch({ type: "managed/history", scope: currentScope, view: frame.view, entry: frame.entry });
@@ -77,7 +88,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
     },
     onRecovery: () => dispatch({ type: "managed/recover", scope: scopeRef.current }),
     onError: (error) => uiLiveErrorRef.current?.(error),
-  }), [scope.routerUrl, options.uiLiveWebSocketFactory]);
+  }), [scope.routerUrl, options.uiLiveWebSocketFactory, transport]);
   useEffect(() => {
     let active = true;
     const startManagedSurface = async (): Promise<void> => {
@@ -92,6 +103,7 @@ export function useRouterSession(options: RouterSessionOptions): RouterSession {
         const snapshot = await transport.http.managedAgents();
         if (!active) return;
         dispatch({ type: "managed/snapshot", scope, version: snapshot.projection_version, agents: snapshot.agents });
+        refreshManagedGoalProjection(transport, dispatch, scope, snapshot.agents);
         const children = await Promise.all(snapshot.agents.map((agent) => transport.http.managedChildren(agent.agent_id)));
         if (!active) return;
         dispatch({ type: "managed/children", scope, children });
