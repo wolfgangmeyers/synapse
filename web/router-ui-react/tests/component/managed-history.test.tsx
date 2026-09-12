@@ -67,18 +67,20 @@ describe("Selected-agent conversation modes", () => {
     expect(container.querySelector(".timeline-live-region")).toHaveTextContent("Subagent failed");
   });
 
-  it("keeps one named terminal subagent outcome while hiding lifecycle chatter", () => {
+  it("keeps named terminal subagent outcomes while hiding lifecycle chatter", () => {
     render(<MessageList messages={[]} peerId="managed-worker" activityEntries={[
       { id: "complete:1", agent_id: "managed-worker", message: "Child queued", presentation: { kind: "child", child_state: "queued" } },
       { id: "complete:2", agent_id: "managed-worker", message: "Child started", presentation: { kind: "child", child_state: "running" } },
-      { id: "complete:3", agent_id: "managed-worker", message: "Child redirected", presentation: { kind: "child", child_state: "steered" } },
+      { id: "complete:3", agent_id: "managed-worker", message: "Child wrapped up", presentation: { kind: "child", child_state: "steered", child_label: "Delay fifteen seconds", summary: "Wrapped up in 15 seconds" } },
       { id: "complete:4", agent_id: "managed-worker", message: "Child completed", presentation: { kind: "child", child_state: "completed", child_label: "Wait twenty seconds", summary: "Completed in 20 seconds" } },
     ]} />);
 
     expect(screen.queryByText("Child queued")).not.toBeInTheDocument();
     expect(screen.queryByText("Child started")).not.toBeInTheDocument();
-    expect(screen.queryByText("Child redirected")).not.toBeInTheDocument();
+    expect(screen.queryByText("Child wrapped up")).not.toBeInTheDocument();
     expect(screen.queryByText("Child completed")).not.toBeInTheDocument();
+    expect(screen.getByText("Subagent wrapped up")).toBeInTheDocument();
+    expect(screen.getByText("Delay fifteen seconds · Wrapped up in 15 seconds")).toBeInTheDocument();
     expect(screen.getByText("Subagent finished")).toBeInTheDocument();
     expect(screen.getByText("Wait twenty seconds · Completed in 20 seconds")).toBeInTheDocument();
   });

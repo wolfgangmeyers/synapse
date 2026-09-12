@@ -2063,6 +2063,10 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 			_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_activity_persistence_failed", "")
 		} else {
 			directPromptActive = true
+			// A direct mailbox command has no tmux activity frame to wake WebUI.
+			// Publish the committed projection now, before waiting for Pi's native
+			// turn event, so the working indicator changes with accepted delivery.
+			m.publishProjection()
 		}
 		clearDirectPromptActivity := func() {
 			if !directPromptActive {
@@ -2071,6 +2075,8 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 			directPromptActive = false
 			if _, activityErr := m.store.SetManagedDirectPromptActivity(context.Background(), fence, false); activityErr != nil {
 				_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "prompt_activity_clear_failed", "")
+			} else {
+				m.publishProjection()
 			}
 		}
 		var acknowledged bool

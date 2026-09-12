@@ -64,6 +64,23 @@ func TestManagedDirectPromptActivityIsImmediateAndClearsWithoutChangingNativeSeq
 	updated, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 1, State: "active"})
 	require.NoError(t, err)
 	require.True(t, updated, "the direct affordance must not consume a native event sequence")
+
+	updated, err = durable.SetManagedDirectPromptActivity(ctx, fence, true)
+	require.NoError(t, err)
+	require.True(t, updated)
+	updated, err = durable.SetManagedDirectPromptActivity(ctx, fence, false)
+	require.NoError(t, err)
+	require.True(t, updated)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", agent.ActivityState, "clearing a direct reply must preserve an already-active native turn")
+
+	updated, err = durable.ApplyManagedParentActivity(ctx, fence, ManagedParentActivityEvent{Sequence: 2, State: "idle"})
+	require.NoError(t, err)
+	require.True(t, updated)
+	agent, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", agent.ActivityState)
 }
 
 func TestManagedParentActivityTracksNativeTurnsWithoutOverridingCompaction(t *testing.T) {

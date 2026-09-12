@@ -39,6 +39,7 @@ function childVisual(presentation: ManagedHistoryPresentation): CompleteTimeline
   const recovery = presentation.kind === "recovery";
   const labels: Record<string, string> = {
     completed: "Subagent finished",
+    steered: "Subagent wrapped up",
     aborted: "Subagent stopped",
     stopped: "Subagent stopped",
     error: "Subagent failed",
@@ -46,8 +47,8 @@ function childVisual(presentation: ManagedHistoryPresentation): CompleteTimeline
   };
   const label = labels[state ?? ""] ?? (recovery ? "Subagent recovery" : "Subagent updated");
   const detail = [presentation.child_label, presentation.summary].filter((value): value is string => value !== undefined && value !== "").join(" · ");
-  const tone: CompleteTimelineTone = state === "error" ? "danger" : state === "interrupted_unknown" ? "amber" : recovery ? "teal" : "blue";
-  return { icon: recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project", tone, label, ...(detail ? { detail } : {}), isHighValue: recovery || ["completed", "aborted", "stopped", "error", "interrupted_unknown"].includes(state ?? "") };
+  const tone: CompleteTimelineTone = state === "error" ? "danger" : state === "steered" || state === "interrupted_unknown" ? "amber" : recovery ? "teal" : "blue";
+  return { icon: recovery ? "fa-solid fa-rotate" : "fa-solid fa-diagram-project", tone, label, ...(detail ? { detail } : {}), isHighValue: recovery || ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(state ?? "") };
 }
 
 function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {

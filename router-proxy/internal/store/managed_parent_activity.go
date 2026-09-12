@@ -32,10 +32,10 @@ func (s *Store) SetManagedDirectPromptActivity(ctx context.Context, fence Manage
 	}
 	updated := false
 	err := s.runImmediate(ctx, func() error {
-		var compacting int
-		err := s.db.QueryRowContext(ctx, `SELECT compacting FROM managed_parent_compaction_state
+		var compacting, nativeActive int
+		err := s.db.QueryRowContext(ctx, `SELECT compacting,active FROM managed_parent_compaction_state
 			WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_incarnation=? AND runtime_generation=?`,
-			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&compacting)
+			fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration).Scan(&compacting, &nativeActive)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -46,7 +46,10 @@ func (s *Store) SetManagedDirectPromptActivity(ctx context.Context, fence Manage
 			}
 			return err
 		}
-		activity := managedParentProjectedActivity(compacting != 0, active)
+		// A final reply can arrive before Pi's agent_settled event. Clearing the
+		// direct-delivery affordance must reveal that native activity again rather
+		// than briefly marking an still-running turn idle.
+		activity := managedParentProjectedActivity(compacting != 0, active || nativeActive != 0)
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET activity_state=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='running' AND activity_state IN ('active','idle','compacting')`, append([]any{activity, formatTimestamp(s.clock.Now())}, managedFenceValues(fence)...)...)
 		if err != nil {
 			return err

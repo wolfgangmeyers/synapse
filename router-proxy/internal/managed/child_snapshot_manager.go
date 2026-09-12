@@ -80,6 +80,12 @@ func (m *Manager) handleChildDeltaEvent(binding *managedBinding, delta map[strin
 		updated, err := m.store.ApplyManagedChildDelta(context.Background(), fence, candidate)
 		if err == nil && updated {
 			m.publishProjection()
+			// The snapshot wakeup keeps the live child disclosure current. Publish
+			// this exact durable fact too: a terminal child is no longer live work,
+			// so Complete must not depend on a later history poll to show its result.
+			if entry, historyErr := m.store.ManagedChildHistoryEntryForDelta(context.Background(), fence, candidate); historyErr == nil {
+				m.publishCompleteHistory(entry)
+			}
 		}
 	})
 }
