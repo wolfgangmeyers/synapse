@@ -73,8 +73,11 @@ function compactionVisual(presentation: ManagedHistoryPresentation): CompleteTim
 }
 
 export function completeTimelineVisual(entry: ManagedHistoryEntry): CompleteTimelineVisual {
-  const presentation = entry.presentation;
-  if (presentation === undefined) return { icon: "fa-solid fa-circle-info", tone: entry.level === "error" ? "danger" : "blue", label: entry.level === "error" ? "Agent error" : "Agent activity", ...(entry.message ? { detail: entry.message } : {}), isHighValue: entry.level === "error" };
+  // A current router always supplies presentation. This conservative local
+  // synthesis keeps an older router payload readable without reviving the
+  // former generic “Agent activity” legacy card.
+  const presentation = entry.presentation ?? { kind: entry.level === "error" ? "error" as const : "message" as const, outcome: entry.level === "error" ? "error" as const : "success" as const };
+  if (presentation.kind === "message") return { icon: "fa-solid fa-circle-check", tone: presentation.outcome === "error" ? "danger" : "blue", label: entry.message || "Recorded activity", ...(presentation.summary ? { detail: presentation.summary } : {}), isHighValue: presentation.outcome === "error" };
   if (presentation.kind === "tool") return toolVisual(presentation);
   if (presentation.kind === "child" || presentation.kind === "recovery") return childVisual(presentation);
   if (presentation.kind === "compaction") return compactionVisual(presentation);
@@ -100,7 +103,7 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const time = formattedTime(entry);
   const error = entry.presentation?.error;
   const accessibleName = [visual.label, visual.detail, time.title].filter((value): value is string => value !== undefined && value !== "").join(". ");
-  return <article className={`activity-entry activity-entry--${visual.tone}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? "legacy"} aria-label={accessibleName || visual.label}>
+  return <article className={`activity-entry activity-entry--${visual.tone}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
     <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
     <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
   </article>;

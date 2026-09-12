@@ -87,7 +87,7 @@ func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T)
 	require.NoError(t, durable.CompleteManagedTermination(ctx, action.ActionID))
 	var completeHistory int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id=?`, agent.AgentID).Scan(&completeHistory))
-	require.Zero(t, completeHistory, "a replacement agent must not inherit the prior Complete timeline")
+	require.Equal(t, 1, completeHistory, "termination keeps the capped audit row under the closed incarnation")
 
 	replacement := agent
 	replacement.PiSessionID = ""
@@ -105,6 +105,9 @@ func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T)
 	replacementOperationID := lifecycleUUID(952)
 	replacementOperation := ManagedOperation{OperationID: replacementOperationID, Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: replacementOperationID, CanonicalBodyHash: testManifestHash, State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
 	require.NoError(t, durable.ReserveManagedLaunch(ctx, replacement, replacementOperation))
+	page, err := durable.ManagedHistoryPage(ctx, replacement.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Empty(t, page.Entries, "a replacement agent must not inherit the prior Complete timeline")
 
 	source, err := durable.RecipientSource(ctx, agent.Name)
 	require.NoError(t, err)

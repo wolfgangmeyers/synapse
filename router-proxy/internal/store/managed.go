@@ -666,6 +666,9 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 			}
 			return err
 		}
+		if err := s.reserveManagedHistoryBoundaryTx(ctx, agent.AgentID, operation.OperationID, agent.CreatedAt); err != nil {
+			return err
+		}
 		if err := s.reserveRecipientSourceTx(ctx, agent.Name, "managed", agent.AgentID); err != nil {
 			// Forward-migration fixtures deliberately stop before 026. Production
 			// Open applies it before a managed launch can be reserved.
@@ -1131,16 +1134,17 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_control_requests WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
-		// Complete belongs to the managed agent's private operational record. Its
-		// history and source-fenced child state must leave with the agent rather
-		// than remain visible if the name is reused.
+		// Live child and compaction projections belong to the running agent and
+		// leave with it. Complete rows remain in the capped audit ledger under the
+		// closed incarnation; the next launch receives a new history boundary.
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_parent_compaction_state WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE agent_id=?`, action.AgentID); err != nil {
+		terminatedAt := formatTimestamp(s.clock.Now())
+		if err := s.closeManagedHistoryBoundaryTx(ctx, action.AgentID, terminatedAt); err != nil {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM goal_control_revision_history WHERE agent_id=?`, action.AgentID); err != nil {
@@ -1193,11 +1197,10 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		if err := s.completeManagedTerminationFault("before_terminalize"); err != nil {
 			return err
 		}
-		now := formatTimestamp(s.clock.Now())
-		if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET state='succeeded',stage='complete',terminal_code='TERMINATED',terminal_message='managed agent terminated',retryable=0,completed_at=?,updated_at=?,recovery_owner=NULL,recovery_claimed_at=NULL WHERE action_id=? AND state='cleanup' AND stage='durable_write'`, now, now, actionID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_lifecycle_actions SET state='succeeded',stage='complete',terminal_code='TERMINATED',terminal_message='managed agent terminated',retryable=0,completed_at=?,updated_at=?,recovery_owner=NULL,recovery_claimed_at=NULL WHERE action_id=? AND state='cleanup' AND stage='durable_write'`, terminatedAt, terminatedAt, actionID); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='TERMINATED',terminal_message='managed agent terminated' WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), actionID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code='TERMINATED',terminal_message='managed agent terminated' WHERE operation_id=? AND state='pending'`, terminatedAt, formatTimestamp(s.clock.Now().Add(24*time.Hour)), actionID); err != nil {
 			return err
 		}
 		_, err = s.bumpManagedProjectionVersion(ctx)

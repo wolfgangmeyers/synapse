@@ -119,6 +119,30 @@ func TestRPCClientDoesNotBacklogPostCompactionNotifications(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
+func TestRPCClientDeliversOnlyValidatedPostCompactionNotification(t *testing.T) {
+	stdoutReader, stdoutWriter := io.Pipe()
+	client := NewRPCClient(io.Discard, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	received := make(chan map[string]any, 1)
+	client.SetParentCompactionNotificationHandler(func(event map[string]any) { received <- event })
+	// Partial frames and wrong bindings are never terminal notification facts.
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_start", "message": map[string]any{"customType": "mecha.post_compaction.v1", "display": true}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.post_compaction.v1", "display": true, "details": map[string]any{"protocol": "wrong"}}}))
+	require.NoError(t, writeRPC(stdoutWriter, map[string]any{"type": "message_end", "message": map[string]any{"customType": "mecha.post_compaction.v1", "display": true, "content": "COMPACTION-CERT-DONE", "details": map[string]any{"protocol": "mecha.post-compaction/v1", "runtime_generation": "generation", "session_epoch": 2, "manifest_sha256": strings.Repeat("a", 64)}}}))
+	select {
+	case event := <-received:
+		require.Equal(t, int64(3), event["sequence"])
+		require.Equal(t, "generation", event["runtime_generation"])
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the validated post-compaction notification")
+	}
+	select {
+	case extra := <-received:
+		t.Fatalf("unexpected notification: %#v", extra)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 func TestManagedDirectReceiptRequiresMatchingAppendMarker(t *testing.T) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()

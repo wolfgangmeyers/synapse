@@ -22,6 +22,13 @@ describe("Complete timeline entry", () => {
     expect(container.querySelector(`.${tone}`)).toBeInTheDocument();
   });
 
+  it("renders an old unstructured payload as a named activity, not the generic legacy card", () => {
+    const { container } = render(<CompleteTimelineEntry entry={{ id: "complete:legacy", agent_id: "managed-worker", at, message: "Legacy activity" }} />);
+    expect(screen.getByText("Legacy activity")).toBeInTheDocument();
+    expect(screen.queryByText("Agent activity")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-event-kind='message']")).toBeInTheDocument();
+  });
+
   it("keeps a failed tool recognizable and exposes no unsafe detail affordance", () => {
     const { container } = render(<CompleteTimelineEntry entry={{ id: "complete:failed", agent_id: "managed-worker", at, message: "Bash failed", presentation: { kind: "tool", tool_name: "bash", outcome: "error", error: { code: "PROCESS_EXITED", retryable: true, detail_available: false } } }} />);
     expect(screen.getByText("Bash failed")).toBeInTheDocument();

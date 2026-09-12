@@ -107,6 +107,18 @@ func TestManagedHistoryProjectsClosedPresentationMetadata(t *testing.T) {
 	require.Error(t, err, "raw process output cannot become Complete history")
 }
 
+func TestManagedHistorySynthesizesStructuredPresentationForLegacyRows(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+	_, err := durable.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,NULL)`, "legacy-worker", "managed_parent_compaction", "info", "Context compacted", "2030-01-01T00:00:00.000Z", "legacy-compaction")
+	require.NoError(t, err)
+
+	page, err := durable.ManagedHistoryPage(ctx, "legacy-worker", "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, &ManagedHistoryPresentation{Kind: "compaction", Outcome: "completed"}, page.Entries[0].Presentation)
+}
+
 func TestManagedHistoryRejectsInvalidInputs(t *testing.T) {
 	durable := openTestStore(t)
 	_, err := durable.AppendManagedCompleteHistory(context.Background(), "worker", "", "info", "message")

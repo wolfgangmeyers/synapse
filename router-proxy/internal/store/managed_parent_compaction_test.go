@@ -65,6 +65,31 @@ func TestManagedParentActivityTracksNativeTurnsWithoutOverridingCompaction(t *te
 	require.False(t, updated, "a delayed start cannot reactivate a settled later stream state")
 }
 
+func TestManagedParentCompactionNotificationRequiresCompletedTransitionAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readyParentCompactionFixture(t)
+
+	_, created, err := durable.RecordManagedParentCompactionNotification(ctx, fence, 1)
+	require.Error(t, err)
+	require.False(t, created)
+	_, err = durable.ApplyManagedParentCompaction(ctx, fence, ManagedParentCompactionEvent{Sequence: 1, State: "compacting"})
+	require.NoError(t, err)
+	_, err = durable.ApplyManagedParentCompaction(ctx, fence, ManagedParentCompactionEvent{Sequence: 2, State: "idle", Outcome: "completed"})
+	require.NoError(t, err)
+	entry, created, err := durable.RecordManagedParentCompactionNotification(ctx, fence, 3)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, "Post-compaction notification delivered", entry.Message)
+	require.Equal(t, &ManagedHistoryPresentation{Kind: "message", Outcome: "success", Summary: "Post-compaction handoff delivered."}, entry.Presentation)
+	_, created, err = durable.RecordManagedParentCompactionNotification(ctx, fence, 3)
+	require.NoError(t, err)
+	require.False(t, created)
+
+	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, "Post-compaction notification delivered", page.Entries[0].Message)
+}
+
 func TestManagedParentCompactionPreservesExactOutcomesAndFencesDelayedEvents(t *testing.T) {
 	ctx := context.Background()
 	durable, fence := readyParentCompactionFixture(t)

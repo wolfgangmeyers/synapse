@@ -108,6 +108,108 @@ func managedHistoryPresentation(value string) *ManagedHistoryPresentation {
 	return &presentation
 }
 
+// defaultManagedHistoryPresentation gives historical and generic producers a
+// closed display fact. It intentionally derives only from already-redacted
+// category/level metadata, never from operational payloads or raw failures.
+func defaultManagedHistoryPresentation(category, level, message string) *ManagedHistoryPresentation {
+	presentation := &ManagedHistoryPresentation{Kind: "message", Outcome: "success"}
+	if level == "error" {
+		return &ManagedHistoryPresentation{Kind: "error", Outcome: "error", Summary: "The operation could not be completed.", Error: &ManagedHistoryError{Code: "OPERATION_FAILED", Retryable: false, DetailAvailable: false}}
+	}
+	switch category {
+	case "managed_parent_compaction":
+		outcome := "compacting"
+		switch message {
+		case "Context compacted":
+			outcome = "completed"
+		case "Context compaction failed":
+			outcome = "failed"
+		case "Context compaction interrupted — outcome unknown":
+			outcome = "reconciled_unknown"
+		}
+		return &ManagedHistoryPresentation{Kind: "compaction", Outcome: outcome}
+	case "managed_child":
+		return &ManagedHistoryPresentation{Kind: "child", Outcome: "success"}
+	case "managed_lifecycle":
+		return &ManagedHistoryPresentation{Kind: "lifecycle", Outcome: "success"}
+	case "managed_control":
+		return &ManagedHistoryPresentation{Kind: "tool", Outcome: "success"}
+	case "reminder":
+		return &ManagedHistoryPresentation{Kind: "reminder", Outcome: "success"}
+	case "delivery":
+		return &ManagedHistoryPresentation{Kind: "error", Outcome: "error", Summary: "The message could not be delivered.", Error: &ManagedHistoryError{Code: "DELIVERY_FAILED", Retryable: false, DetailAvailable: false}}
+	default:
+		return presentation
+	}
+}
+
+func effectiveManagedHistoryPresentation(category, level, message, stored string) *ManagedHistoryPresentation {
+	if presentation := managedHistoryPresentation(stored); presentation != nil {
+		return presentation
+	}
+	return defaultManagedHistoryPresentation(category, level, message)
+}
+
+// reserveManagedHistoryBoundaryTx starts one new default-history window for a
+// launch while retaining earlier capped rows as internal audit evidence.
+func (s *Store) reserveManagedHistoryBoundaryTx(ctx context.Context, agentID, incarnationID, createdAt string) error {
+	if !isLifecycleText(agentID) || incarnationID == "" || createdAt == "" {
+		return errors.New("managed history boundary is invalid")
+	}
+	var sequence int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM managed_complete_history`).Scan(&sequence); err != nil {
+		// Focused migration fixtures can include the managed-agent shape without
+		// the later Complete table. Their boundary remains valid at sequence 0.
+		if !strings.Contains(err.Error(), "no such table: managed_complete_history") {
+			return err
+		}
+		sequence = 0
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_history_incarnations(incarnation_id,agent_id,start_sequence,created_at) VALUES (?,?,?,?)`, incarnationID, agentID, sequence, createdAt); err != nil {
+		if strings.Contains(err.Error(), "no such table: managed_history_incarnations") {
+			return nil
+		}
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO managed_history_boundaries(agent_id,incarnation_id,start_sequence,created_at) VALUES (?,?,?,?)`, agentID, incarnationID, sequence, createdAt)
+	if strings.Contains(fmt.Sprint(err), "no such table: managed_history_boundaries") {
+		return nil
+	}
+	return err
+}
+
+func (s *Store) closeManagedHistoryBoundaryTx(ctx context.Context, agentID, closedAt string) error {
+	if !isLifecycleText(agentID) || closedAt == "" {
+		return errors.New("managed history boundary is invalid")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE managed_history_incarnations SET closed_at=? WHERE incarnation_id=(SELECT incarnation_id FROM managed_history_boundaries WHERE agent_id=?) AND closed_at IS NULL`, closedAt, agentID)
+	return err
+}
+
+// managedHistoryBoundaryTx returns the active launch window. A historic
+// incarnation without an active boundary is intentionally invisible through
+// the default agent endpoint. Rows from before this migration remain readable
+// only when no managed incarnation has ever been recorded for that name.
+func (s *Store) managedHistoryBoundaryTx(ctx context.Context, agentID string) (int64, bool, error) {
+	var sequence int64
+	err := s.db.QueryRowContext(ctx, `SELECT start_sequence FROM managed_history_boundaries WHERE agent_id=?`, agentID).Scan(&sequence)
+	if err == nil {
+		return sequence, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
+	}
+	var historic int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM managed_history_incarnations WHERE agent_id=? LIMIT 1`, agentID).Scan(&historic)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, true, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return 0, false, nil
+}
+
 // AppendManagedCompleteHistory records a bounded, already-redacted operational
 // fact. Producers that have a canonical event type should use the presentation
 // overload so the UI never guesses semantics from the message string.
@@ -126,6 +228,9 @@ func (s *Store) RecordManagedCompleteHistoryWithPresentation(ctx context.Context
 	if ctx == nil || !isLifecycleText(agentID) || category == "" || level == "" || !managedHistoryText(message, 512, false) || len(category) > 64 || len(level) > 32 || len(eventKey) > 200 || !utf8.ValidString(category) || !utf8.ValidString(level) || !utf8.ValidString(eventKey) {
 		return ManagedHistoryEntry{}, errors.New("managed history entry is invalid")
 	}
+	if presentation == nil {
+		presentation = defaultManagedHistoryPresentation(category, level, message)
+	}
 	presentationJSON, err := managedHistoryPresentationJSON(presentation)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
@@ -134,12 +239,13 @@ func (s *Store) RecordManagedCompleteHistoryWithPresentation(ctx context.Context
 	err = s.runImmediate(ctx, func() error {
 		if eventKey != "" {
 			var sequence int64
+			var storedCategory string
 			var storedPresentation sql.NullString
-			err := s.db.QueryRowContext(ctx, `SELECT sequence,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key = ?`, eventKey).Scan(&sequence, &entry.At, &entry.Level, &entry.Message, &storedPresentation)
+			err := s.db.QueryRowContext(ctx, `SELECT sequence,category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE event_key = ?`, eventKey).Scan(&sequence, &storedCategory, &entry.At, &entry.Level, &entry.Message, &storedPresentation)
 			if err == nil {
 				entry.ID = fmt.Sprintf("complete:%d", sequence)
 				entry.AgentID = agentID
-				entry.Presentation = managedHistoryPresentation(storedPresentation.String)
+				entry.Presentation = effectiveManagedHistoryPresentation(storedCategory, entry.Level, entry.Message, storedPresentation.String)
 				return nil
 			}
 			if !errors.Is(err, sql.ErrNoRows) {
@@ -179,12 +285,23 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	page := ManagedHistoryPage{View: view, Entries: []ManagedHistoryEntry{}}
 	var rows *sql.Rows
 	var err error
+	startSequence := int64(0)
+	if view == "complete" {
+		var active bool
+		startSequence, active, err = s.managedHistoryBoundaryTx(ctx, agentID)
+		if err != nil {
+			return ManagedHistoryPage{}, err
+		}
+		if !active {
+			return page, nil
+		}
+	}
 	if view == "quiet" {
 		rows, err = s.db.QueryContext(ctx, `SELECT ?,conversation_sequence,message_id,recorded_at,body,NULL FROM conversation_messages WHERE quiet_eligible = 1 AND (sender=? OR recipient=?) AND (? = 0 OR conversation_sequence < ?) ORDER BY conversation_sequence DESC LIMIT ?`, agentID, agentID, agentID, before, before, limit+1)
 	} else {
 		// Message rows are rendered from the selected conversation. Hide legacy
 		// transport bookkeeping so Complete stays a meaningful operational feed.
-		rows, err = s.db.QueryContext(ctx, `SELECT agent_id,sequence,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE agent_id=? AND category NOT IN ('managed_http','message') AND (? = 0 OR sequence < ?) ORDER BY sequence DESC LIMIT ?`, agentID, before, before, limit+1)
+		rows, err = s.db.QueryContext(ctx, `SELECT agent_id,sequence,category,occurred_at,level,message,COALESCE(presentation_json,'') FROM managed_complete_history WHERE agent_id=? AND sequence>? AND category NOT IN ('managed_http','message') AND (? = 0 OR sequence < ?) ORDER BY sequence DESC LIMIT ?`, agentID, startSequence, before, before, limit+1)
 	}
 	if err != nil {
 		return ManagedHistoryPage{}, err
@@ -193,10 +310,16 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 	var lastReturnedSequence int64
 	for rows.Next() {
 		var sequence int64
-		var entryAgentID, first, second, message string
+		var entryAgentID, first, second, message, category string
 		var presentation sql.NullString
-		if err := rows.Scan(&entryAgentID, &sequence, &first, &second, &message, &presentation); err != nil {
-			return ManagedHistoryPage{}, err
+		var scanErr error
+		if view == "quiet" {
+			scanErr = rows.Scan(&entryAgentID, &sequence, &first, &second, &message, &presentation)
+		} else {
+			scanErr = rows.Scan(&entryAgentID, &sequence, &category, &first, &second, &message, &presentation)
+		}
+		if scanErr != nil {
+			return ManagedHistoryPage{}, scanErr
 		}
 		if len(page.Entries) == limit {
 			next := lastReturnedSequence
@@ -206,7 +329,7 @@ func (s *Store) ManagedHistoryPage(ctx context.Context, agentID, view string, be
 		if view == "quiet" {
 			page.Entries = append(page.Entries, ManagedHistoryEntry{ID: first, AgentID: entryAgentID, At: second, Level: "message", Message: message})
 		} else {
-			page.Entries = append(page.Entries, ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: entryAgentID, At: first, Level: second, Message: message, Presentation: managedHistoryPresentation(presentation.String)})
+			page.Entries = append(page.Entries, ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: entryAgentID, At: first, Level: second, Message: message, Presentation: effectiveManagedHistoryPresentation(category, second, message, presentation.String)})
 		}
 		lastReturnedSequence = sequence
 	}

@@ -103,6 +103,13 @@ type ParentCompactionRPC interface {
 	SetParentCompactionEventHandler(func(map[string]any))
 }
 
+// ParentCompactionNotificationRPC receives the persisted visible handoff Pi
+// emits after a successful native compaction. It is separate from the root
+// control response, which only proves that Pi accepted the hidden command.
+type ParentCompactionNotificationRPC interface {
+	SetParentCompactionNotificationHandler(func(map[string]any))
+}
+
 // NativeCompactionRPC is intentionally private to the managed root-control
 // bridge. It invokes Pi's typed compact RPC command, which is the only path
 // that can produce the native compaction lifecycle events used by the UI.
@@ -218,20 +225,21 @@ type rpcClient struct {
 	// The matcher is owned under mu. Responses never occupy this bounded FIFO.
 	// A terminal error lives separately so a retained notification can never
 	// satisfy a readiness wait after EOF, close, or process failure.
-	eventSequence           uint64
-	backlog                 []receiptNotification
-	terminal                error
-	notified                chan struct{}
-	bootstrapWatermark      *uint64
-	policyWatermark         *uint64
-	snapshotWatermark       *uint64
-	settlementToken         *restartSettlementToken
-	directMailbox           *directMailboxToken
-	rootControlHandler      func(RootControlEvent)
-	childDeltaHandler       func(map[string]any)
-	parentCompactionHandler func(map[string]any)
-	parentActivityHandler   func(map[string]any)
-	rootResult              *rootResultToken
+	eventSequence                       uint64
+	backlog                             []receiptNotification
+	terminal                            error
+	notified                            chan struct{}
+	bootstrapWatermark                  *uint64
+	policyWatermark                     *uint64
+	snapshotWatermark                   *uint64
+	settlementToken                     *restartSettlementToken
+	directMailbox                       *directMailboxToken
+	rootControlHandler                  func(RootControlEvent)
+	childDeltaHandler                   func(map[string]any)
+	parentCompactionHandler             func(map[string]any)
+	parentCompactionNotificationHandler func(map[string]any)
+	parentActivityHandler               func(map[string]any)
+	rootResult                          *rootResultToken
 
 	closeOnce sync.Once
 	closeErr  error
@@ -283,6 +291,8 @@ func (c *rpcClient) readLoop() {
 		var childDelta map[string]any
 		var parentCompactionCallback func(map[string]any)
 		var parentCompaction map[string]any
+		var parentCompactionNotificationCallback func(map[string]any)
+		var parentCompactionNotification map[string]any
 		var parentActivityCallback func(map[string]any)
 		var parentActivity map[string]any
 		var parentActivityCandidate bool
@@ -320,7 +330,20 @@ func (c *rpcClient) readLoop() {
 				}
 				c.mu.Unlock()
 				if parentCompactionCallback != nil {
-					go parentCompactionCallback(parentCompaction)
+					// Persist this stream boundary before later EOF/process-loss work
+					// can reconcile it. The callback only performs a fenced SQLite
+					// transaction and publishes after it commits.
+					parentCompactionCallback(parentCompaction)
+				}
+				continue
+			}
+			if event, candidate := classifyParentCompactionNotificationEvent(raw, c.eventSequence); candidate {
+				if event != nil && c.parentCompactionNotificationHandler != nil {
+					parentCompactionNotificationCallback, parentCompactionNotification = c.parentCompactionNotificationHandler, event
+				}
+				c.mu.Unlock()
+				if parentCompactionNotificationCallback != nil {
+					parentCompactionNotificationCallback(parentCompactionNotification)
 				}
 				continue
 			}
@@ -346,9 +369,8 @@ func (c *rpcClient) readLoop() {
 				continue
 			}
 			if isPostCompactionNotificationEvent(raw) {
-				// This visible Pi handoff is intentionally not a router receipt.
-				// Keeping it out of the bounded readiness backlog prevents repeated
-				// successful compactions from exhausting an unrelated control path.
+				// A malformed post-compaction notification is neither a readiness
+				// receipt nor a history fact. Keep it out of the bounded backlog.
 				c.mu.Unlock()
 				continue
 			}
@@ -1243,6 +1265,33 @@ func isPostCompactionNotificationEvent(event map[string]any) bool {
 	return message["customType"] == "mecha.post_compaction.v1"
 }
 
+// classifyParentCompactionNotificationEvent admits only Pi's durable visible
+// handoff receipt. Its runtime binding fields are rechecked by the manager;
+// content stays out of the event because it is user-authored notification text.
+func classifyParentCompactionNotificationEvent(event map[string]any, sequence uint64) (map[string]any, bool) {
+	if event["type"] != "message_end" {
+		return nil, false
+	}
+	message := nestedMessage(event)
+	if message == nil || message["customType"] != "mecha.post_compaction.v1" {
+		return nil, false
+	}
+	if message["display"] != true || sequence == 0 || sequence > uint64(readinessMaxSafeInteger) {
+		return nil, true
+	}
+	details := receiptDetails(message)
+	if details == nil || exactKeys(details, "protocol", "runtime_generation", "session_epoch", "manifest_sha256") != nil || details["protocol"] != "mecha.post-compaction/v1" {
+		return nil, true
+	}
+	generation, generationOK := readinessBoundedString(details["runtime_generation"], readinessMaxJSONStringBytes, false)
+	epoch, epochOK := readinessInteger(details["session_epoch"])
+	manifest, manifestOK := rootControlSHA(details["manifest_sha256"])
+	if !generationOK || !epochOK || epoch < 1 || !manifestOK {
+		return nil, true
+	}
+	return map[string]any{"sequence": int64(sequence), "runtime_generation": generation, "session_epoch": epoch, "manifest_sha256": manifest}, true
+}
+
 func isRootControlResultEvent(event map[string]any) bool {
 	message := nestedMessage(event)
 	// Pi's live stdout receipt is a message_end frame, whereas get_entry and
@@ -1273,6 +1322,12 @@ func (c *rpcClient) SetChildDeltaEventHandler(handler func(map[string]any)) {
 func (c *rpcClient) SetParentCompactionEventHandler(handler func(map[string]any)) {
 	c.mu.Lock()
 	c.parentCompactionHandler = handler
+	c.mu.Unlock()
+}
+
+func (c *rpcClient) SetParentCompactionNotificationHandler(handler func(map[string]any)) {
+	c.mu.Lock()
+	c.parentCompactionNotificationHandler = handler
 	c.mu.Unlock()
 }
 
