@@ -63,7 +63,7 @@ func readyInlineAllowanceFixture(t *testing.T) (*Manager, *managedBinding, store
 
 	rpc := &inlineAllowanceRPC{launchRPC: &launchRPC{session: fence.PiSessionID, active: expectedManagedActiveTools(manifest)}}
 	process := &launchProcess{identity: ProcessIdentity{PID: fence.ProcessPID, StartMarker: fence.ProcessStartMarker, Incarnation: fence.ProcessIncarnation}, stopped: make(chan struct{})}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{Enabled: false}, Manifest: manifest, ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{Enabled: false}, Manifest: manifest, ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: directControlProbeOps{state: ProcessOwned}})
 	require.NoError(t, err)
 	binding := &managedBinding{agentID: fence.AgentID, lane: &managedAgentLane{}, process: process, rpc: rpc, identity: process.identity, sessionID: fence.PiSessionID, sessionEpoch: fence.SessionEpoch, runtimeGeneration: fence.RuntimeGeneration, manifestRevision: fence.ManifestRevision, manifestHash: fence.ManifestHash}
 	manager.bindings[fence.AgentID] = binding
@@ -181,7 +181,7 @@ func readyNativeInlineAllowanceFixture(t *testing.T) (*Manager, *managedBinding,
 	stdoutReader, stdoutWriter := io.Pipe()
 	rpc := &nativeInlineAllowanceRPC{rpcClient: NewRPCClient(stdinWriter, stdoutReader, func() error { return stdoutWriter.Close() }).(*rpcClient)}
 	process := &launchProcess{identity: ProcessIdentity{PID: fence.ProcessPID, StartMarker: fence.ProcessStartMarker, Incarnation: fence.ProcessIncarnation}, stopped: make(chan struct{})}
-	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{Enabled: false}, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("123e4567-e89b-42d3-a456-426614174012", "123e4567-e89b-42d3-a456-426614174013", "123e4567-e89b-42d3-a456-426614174014"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }})
+	manager, err := NewManager(ManagerOptions{Store: durable, Config: Config{Enabled: false}, Manifest: manifest, IDSource: deterministic.NewSequenceIDSource("123e4567-e89b-42d3-a456-426614174012", "123e4567-e89b-42d3-a456-426614174013", "123e4567-e89b-42d3-a456-426614174014"), ProcessGroupLeaderVerifier: func(ProcessIdentity) bool { return true }, ProcessGroupOps: directControlProbeOps{state: ProcessOwned}})
 	require.NoError(t, err)
 	binding := &managedBinding{agentID: fence.AgentID, lane: &managedAgentLane{}, process: process, rpc: rpc, identity: process.identity, sessionID: fence.PiSessionID, sessionEpoch: fence.SessionEpoch, runtimeGeneration: fence.RuntimeGeneration, manifestRevision: fence.ManifestRevision, manifestHash: fence.ManifestHash}
 	manager.bindings[fence.AgentID] = binding
