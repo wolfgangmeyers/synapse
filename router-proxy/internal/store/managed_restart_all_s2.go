@@ -89,7 +89,7 @@ func restartAllPublicAgent(agent *ManagedAgentRecord) map[string]any {
 		result["started_at"] = agent.StartedAt
 	}
 	if agent.LastErrorCode != "" {
-		result["last_error"] = map[string]any{"code": agent.LastErrorCode, "message": agent.LastErrorMessage, "at": agent.LastErrorAt}
+		result["last_error"] = map[string]any{"code": agent.LastErrorCode, "message": RedactedManagedDiagnostic(agent.LastErrorMessage), "at": agent.LastErrorAt}
 	}
 	return result
 }

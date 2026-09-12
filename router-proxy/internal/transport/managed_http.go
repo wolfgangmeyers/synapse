@@ -277,7 +277,7 @@ func (r *Router) handleProviderAuthAction(w http.ResponseWriter, req *http.Reque
 		if errors.Is(err, managed.ErrProviderAuthBusy) {
 			failure = &managedHTTPError{409, "PROVIDER_AUTH_BUSY", "Another provider sign-in is already in progress"}
 		}
-		failureBody, _ := json.Marshal(map[string]any{"error": map[string]any{"code": failure.code, "message": failure.message, "details": map[string]any{}}, "request_id": requestID})
+		failureBody, _ := json.Marshal(r.managedErrorPayload(req, failure))
 		_ = r.store.ReplaceManagedOperationResponse(req.Context(), requestID, failure.status, map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, failureBody)
 		r.writeManagedError(w, req, failure)
 		return
@@ -348,7 +348,7 @@ func (r *Router) handleProviderAuthPromptResponse(w http.ResponseWriter, req *ht
 	}
 	if err := r.providerAuth.Respond(req.Context(), operationID, promptID, value); err != nil {
 		failure := &managedHTTPError{409, "PROMPT_UNAVAILABLE", "Provider sign-in prompt is no longer available"}
-		failureBody, _ := json.Marshal(map[string]any{"error": map[string]any{"code": failure.code, "message": failure.message, "details": map[string]any{}}, "request_id": requestID})
+		failureBody, _ := json.Marshal(r.managedErrorPayload(req, failure))
 		_ = r.store.ReplaceManagedOperationResponse(req.Context(), requestID, failure.status, map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, failureBody)
 		r.writeManagedError(w, req, failure)
 		return
@@ -1127,7 +1127,7 @@ func (r *Router) writeManagedError(w http.ResponseWriter, req *http.Request, err
 	if requestID := requestIDFromRequest(req); requestID != nil {
 		headers["X-Request-ID"] = requestID.(string)
 	}
-	r.writeManagedJSON(w, req, candidate.status, map[string]any{"error": map[string]any{"code": candidate.code, "message": candidate.message, "details": map[string]any{}}, "request_id": requestIDFromRequest(req)}, headers)
+	r.writeManagedJSON(w, req, candidate.status, r.managedErrorPayload(req, candidate), headers)
 }
 func requestIDFromRequest(req *http.Request) any {
 	value := req.Header.Get("X-Request-ID")

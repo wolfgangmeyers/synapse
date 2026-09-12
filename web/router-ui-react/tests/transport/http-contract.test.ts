@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createHttpClient, HttpRequestError } from "../../src/transport/http-client";
+import { createHttpClient, HttpRequestError, managedRequestErrorMessage } from "../../src/transport/http-client";
 import { httpRoutes } from "../../src/protocol/manifest";
 
 function response(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -22,6 +22,21 @@ describe("direct HTTP transport", () => {
     const fetchImpl = vi.fn(async () => response({ error: { code: "queue_full", message: "full" } }, 429, { "x-correlation-id": "corr-1" }));
     await expect(createHttpClient("http://router.test", fetchImpl).health()).rejects.toMatchObject({ code: "queue_full", status: 429, correlationId: "corr-1", message: "full" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps safe managed diagnostics without losing the typed router code", async () => {
+    const requestId = "123e4567-e89b-42d3-a456-426614174001";
+    const fetchImpl = vi.fn(async () => response({ request_id: requestId, error: { code: "CONFLICT", message: "A managed lifecycle operation is already in progress", details: { operation: "managed_agent_restart", agent_id: "managed-alpha", request_id: requestId, state: "operation_in_progress", fence: "preserved", cause: "managed_lifecycle_operation_in_progress" } } }, 409));
+    let failure: unknown;
+    try {
+      await createHttpClient("http://router.test", fetchImpl).restartManaged("managed-alpha");
+    } catch (cause) {
+      failure = cause;
+    }
+    expect(failure).toBeInstanceOf(HttpRequestError);
+    expect(failure).toMatchObject({ code: "CONFLICT", status: 409, diagnostic: { operation: "managed_agent_restart", agentId: "managed-alpha", requestId, state: "operation_in_progress", fence: "preserved", cause: "managed_lifecycle_operation_in_progress" } });
+    expect(managedRequestErrorMessage(failure, "restart failed")).toContain(`Request: ${requestId}`);
+    expect(managedRequestErrorMessage(failure, "restart failed")).toContain("Fence: preserved");
   });
 
   it("keeps the complete manifest route inventory and can issue origin preflight", async () => {

@@ -18,6 +18,11 @@ describe("Sidebar", () => {
     expect(onSelect).toHaveBeenCalledWith("tmux:alpha.bot");
   });
 
+  it("shows a safe live-update recovery message", () => {
+    render(<Sidebar routerLabel="local" connection="connected" agents={[]} managedStatus="Live managed-worker updates could not be applied. The router will retry. (Code: UI_LIVE_CONNECTION_FAILED)" />);
+    expect(screen.getByRole("status")).toHaveTextContent("UI_LIVE_CONNECTION_FAILED");
+  });
+
   it("keeps managed actions in an accessible menu beside the connection badge", async () => {
     const user = userEvent.setup();
     const onLaunchManaged = vi.fn();
