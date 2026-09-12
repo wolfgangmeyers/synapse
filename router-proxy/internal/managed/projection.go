@@ -25,10 +25,9 @@ func PublicAgent(agent *store.ManagedAgentRecord) map[string]any {
 		result["started_at"] = agent.StartedAt
 	}
 	if agent.LastErrorCode != "" {
-		// The browser needs the stable code, not raw process diagnostics. Older
-		// durable rows may predate current redaction rules, so do not make their
-		// text a browser-visible field at all.
-		result["last_error"] = map[string]any{"code": agent.LastErrorCode, "message": "Managed worker reported an operational error", "at": agent.LastErrorAt}
+		// Durable rows can outlive a redaction change. Sanitize the bounded local
+		// cause again at the public boundary before the Web UI can render it.
+		result["last_error"] = map[string]any{"code": agent.LastErrorCode, "message": store.RedactedManagedDiagnostic(agent.LastErrorMessage), "at": agent.LastErrorAt}
 	}
 	return result
 }

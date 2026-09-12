@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createUILiveClient } from "../../src/transport/ui-live-client";
+import { createUILiveClient, UILiveTransportError, uiLiveErrorMessage } from "../../src/transport/ui-live-client";
 import type { SocketEvent, WebSocketLike } from "../../src/transport/websocket-client";
 
 const agent = {
@@ -74,6 +74,27 @@ describe("direct UI-live transport", () => {
     expect(sockets).toHaveLength(2);
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 4, generated_at: "2030-01-01T00:00:00.000Z", agents: [agent] }) });
     expect(frames).toHaveLength(1);
+    client.close();
+    vi.useRealTimers();
+  });
+
+  it("maps a failed live connection to safe retry diagnostics", () => {
+    vi.useFakeTimers();
+    const sockets: UILiveSocket[] = [];
+    const errors: Error[] = [];
+    const client = createUILiveClient({
+      routerUrl: "http://router.test",
+      retryDelayMs: 1,
+      webSocketFactory: () => { const socket = new UILiveSocket(); sockets.push(socket); return socket; },
+      onFrame: () => undefined,
+      onError: (error) => errors.push(error),
+    });
+    client.connect();
+    sockets[0]?.emit("error", {});
+    const error = errors[0];
+    expect(error).toBeInstanceOf(UILiveTransportError);
+    expect(error).toMatchObject({ code: "UI_LIVE_CONNECTION_FAILED", operation: "ui_live_connect", state: "reconnecting", fence: "not_checked", cause: "websocket_transport_failed" });
+    if (error !== undefined) expect(uiLiveErrorMessage(error)).toContain("Cause: websocket_transport_failed");
     client.close();
     vi.useRealTimers();
   });

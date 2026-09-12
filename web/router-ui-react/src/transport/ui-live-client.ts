@@ -19,6 +19,25 @@ export interface UILiveClient {
   close(): void;
 }
 
+export class UILiveTransportError extends Error {
+  readonly code: "UI_LIVE_CONNECTION_FAILED" | "UI_LIVE_PROTOCOL_INVALID";
+  readonly operation = "ui_live_connect";
+  readonly state = "reconnecting";
+  readonly fence = "not_checked";
+  override readonly cause: string;
+  constructor(code: "UI_LIVE_CONNECTION_FAILED" | "UI_LIVE_PROTOCOL_INVALID", cause: string) {
+    super("Live managed-worker updates could not be applied. The router will retry.");
+    this.name = "UILiveTransportError";
+    this.code = code;
+    this.cause = cause;
+  }
+}
+
+export function uiLiveErrorMessage(error: Error): string {
+  if (!(error instanceof UILiveTransportError)) return "Live managed-worker updates could not be applied. The router will retry.";
+  return `${error.message} (Code: ${error.code} · Operation: ${error.operation} · State: ${error.state} · Fence: ${error.fence} · Cause: ${error.cause})`;
+}
+
 function directUILiveURL(routerUrl: string): string {
   const url = new URL("/v1/ui-live", normalizeRouterUrl(routerUrl));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -65,43 +84,44 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
     active?.close(1000, "projection recovery");
     scheduleReconnect();
   };
+  const protocolError = (cause: string): UILiveTransportError => new UILiveTransportError("UI_LIVE_PROTOCOL_INVALID", cause);
   const onMessage = (data: unknown): void => {
-    if (typeof data !== "string") { recover(new Error("UI-live frame is not text")); return; }
+    if (typeof data !== "string") { recover(protocolError("frame_not_text")); return; }
     let raw: unknown;
-    try { raw = JSON.parse(data); } catch { recover(new Error("UI-live frame is not JSON")); return; }
-    if (!isUILiveFrame(raw)) { recover(new Error("UI-live frame is invalid")); return; }
-    if (!agentSnapshotAccepted && raw.type !== "managed_agents_snapshot") { recover(new Error("UI-live frame arrived before agent snapshot")); return; }
+    try { raw = JSON.parse(data); } catch { recover(protocolError("frame_not_json")); return; }
+    if (!isUILiveFrame(raw)) { recover(protocolError("frame_invalid")); return; }
+    if (!agentSnapshotAccepted && raw.type !== "managed_agents_snapshot") { recover(protocolError("snapshot_missing")); return; }
     if (raw.type === "managed_agents_snapshot") {
       // A connection has exactly one authoritative opening agent snapshot.
       // A duplicate/regressed replacement can hide a missed delta, so reconnect.
-      if (agentSnapshotAccepted) { recover(new Error("UI-live duplicate agent snapshot")); return; }
+      if (agentSnapshotAccepted) { recover(protocolError("snapshot_duplicate")); return; }
       version = raw.projection_version;
       agentSnapshotAccepted = true;
       options.onFrame(raw);
       return;
     }
     if (raw.type === "managed_agent_delta" || raw.type === "managed_agent_removed") {
-      if (!agentSnapshotAccepted || version === undefined || raw.base_version !== version || raw.projection_version !== version + 1) { recover(new Error("UI-live projection version gap")); return; }
+      if (!agentSnapshotAccepted || version === undefined || raw.base_version !== version || raw.projection_version !== version + 1) { recover(protocolError("projection_version_gap")); return; }
       version = raw.projection_version;
       options.onFrame(raw);
       return;
     }
     if (raw.type === "managed_children_snapshot") {
-      if (!agentSnapshotAccepted) { recover(new Error("UI-live child snapshot arrived before agent snapshot")); return; }
+      if (!agentSnapshotAccepted) { recover(protocolError("child_snapshot_before_agent_snapshot")); return; }
       if (!childSnapshotAccepted) {
         childrenVersion = raw.lifecycle_version;
         childSnapshotAccepted = true;
         options.onFrame(raw);
         return;
       }
-      if (childrenVersion === undefined || raw.lifecycle_version !== childrenVersion + 1) { recover(new Error("UI-live child projection version gap")); return; }
+      if (childrenVersion === undefined || raw.lifecycle_version !== childrenVersion + 1) { recover(protocolError("child_projection_version_gap")); return; }
       childrenVersion = raw.lifecycle_version;
       options.onFrame(raw);
       return;
     }
     // History and future P4 provider frames carry a projection version but do
     // not mutate the managed-agent projection. Never let them advance it.
-    if (version !== undefined && raw.projection_version < version) { recover(new Error("UI-live projection version regressed")); return; }
+    if (version !== undefined && raw.projection_version < version) { recover(protocolError("projection_version_regressed")); return; }
     options.onFrame(raw);
   };
   const connect = (): void => {
@@ -117,7 +137,7 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
       options.onRecovery?.();
       scheduleReconnect();
     });
-    candidate.addEventListener("error", () => recover(new Error("UI-live connection failed")));
+    candidate.addEventListener("error", () => recover(new UILiveTransportError("UI_LIVE_CONNECTION_FAILED", "websocket_transport_failed")));
   };
   return {
     url,

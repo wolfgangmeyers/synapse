@@ -41,9 +41,9 @@ describe("Selected-agent conversation modes", () => {
   });
 
   it("reports a failed managed agent in the selected-agent header", () => {
-    const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "failed", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_STOP_FAILED", message: "Managed worker reported an operational error", at: "2030-01-01T00:01:00.000Z" } };
+    const managedAgent = { agent_id: "managed-worker", source: "router-managed" as const, cwd: "/tmp/managed-worker", model: { provider: "openai-codex", id: "gpt-5.6-luna" }, desired_state: "running", lifecycle_state: "failed", activity_state: "failed", accepting_prompts: false, manifest: { revision: 1, sha256: "a".repeat(64), installed_tool_count: 1 }, created_at: "2030-01-01T00:00:00.000Z", started_at: "2030-01-01T00:00:00.000Z", updated_at: "2030-01-01T00:00:00.000Z", last_error: { code: "PROCESS_STOP_FAILED", message: "Managed process exited before readiness", at: "2030-01-01T00:01:00.000Z" } };
     render(<Conversation peer={{ agent_id: managedAgent.agent_id, source: "router-managed", activity_state: "failed", managed_agent: managedAgent }} />);
-    expect(screen.getByRole("status")).toHaveTextContent("Unavailable: Managed worker reported an operational error");
+    expect(screen.getByRole("status")).toHaveTextContent("Unavailable: Managed process exited before readiness");
   });
 
   it("shows managed controls and terminating progress in the selected-agent header", async () => {

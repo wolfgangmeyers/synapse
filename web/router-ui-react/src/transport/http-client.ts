@@ -30,18 +30,33 @@ export interface ModelsResponse { auth_revision: number; models: ProviderModel[]
 export interface DefaultModelResponse { operation_id: string; default_model: { provider: string; id: string; name?: string } | null; effective_fallback: ProviderModel }
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+// Managed routes expose only stable, non-secret troubleshooting facts. Unknown
+// fields are intentionally discarded so a malformed router response cannot add
+// arbitrary text to a user-visible error.
+export interface RouterErrorDiagnostic {
+  operation?: string;
+  agentId?: string;
+  runId?: string;
+  requestId?: string;
+  state?: string;
+  fence?: string;
+  cause?: string;
+}
+
 export class HttpRequestError extends Error {
   readonly status: number;
   readonly code: string;
   readonly correlationId?: string;
+  readonly diagnostic?: RouterErrorDiagnostic;
   readonly body: unknown;
-  constructor(status: number, code: string, message: string, body: unknown, correlationId?: string) {
+  constructor(status: number, code: string, message: string, body: unknown, correlationId?: string, diagnostic?: RouterErrorDiagnostic) {
     super(message);
     this.name = "HttpRequestError";
     this.status = status;
     this.code = code;
     this.body = body;
     if (correlationId !== undefined && correlationId !== "") this.correlationId = correlationId;
+    if (diagnostic !== undefined) this.diagnostic = diagnostic;
   }
 }
 
@@ -120,11 +135,39 @@ export function resolveHttpEndpoint(routerUrl: string, path: string): URL {
   return endpoint;
 }
 
+function routerErrorDiagnostic(value: unknown, requestId: unknown): RouterErrorDiagnostic | undefined {
+  const details = recordValue(value);
+  const result: RouterErrorDiagnostic = {};
+  const copy = (key: keyof RouterErrorDiagnostic, source: unknown, maximum = 128): void => { if (nonEmptyString(source) && source.length <= maximum) result[key] = source; };
+  copy("operation", details?.operation);
+  if (isAgentId(details?.agent_id)) result.agentId = details.agent_id;
+  copy("runId", details?.run_id);
+  copy("requestId", details?.request_id);
+  if (result.requestId === undefined) copy("requestId", requestId);
+  copy("state", details?.state, 64);
+  copy("fence", details?.fence, 64);
+  copy("cause", details?.cause, 256);
+  return Object.keys(result).length === 0 ? undefined : result;
+}
 function responseError(body: unknown, status: number, correlationId: string | null): HttpRequestError {
   const root = recordValue(body); const detail = recordValue(root?.error);
   const code = stringValue(detail?.code) ?? stringValue(root?.code) ?? `http_${status}`;
   const message = stringValue(detail?.message) ?? stringValue(root?.message) ?? `Router request failed (${status})`;
-  return new HttpRequestError(status, code, message, body, correlationId ?? undefined);
+  return new HttpRequestError(status, code, message, body, correlationId ?? undefined, routerErrorDiagnostic(detail?.details, root?.request_id));
+}
+
+export function managedRequestErrorMessage(cause: unknown, fallback: string): string {
+  if (!(cause instanceof HttpRequestError)) return cause instanceof Error ? cause.message : fallback;
+  const facts: string[] = [`Code: ${cause.code}`];
+  const diagnostic = cause.diagnostic;
+  if (diagnostic?.operation) facts.push(`Operation: ${diagnostic.operation}`);
+  if (diagnostic?.agentId) facts.push(`Agent: ${diagnostic.agentId}`);
+  if (diagnostic?.runId) facts.push(`Run: ${diagnostic.runId}`);
+  if (diagnostic?.requestId ?? cause.correlationId) facts.push(`Request: ${diagnostic?.requestId ?? cause.correlationId}`);
+  if (diagnostic?.state) facts.push(`State: ${diagnostic.state}`);
+  if (diagnostic?.fence) facts.push(`Fence: ${diagnostic.fence}`);
+  if (diagnostic?.cause) facts.push(`Cause: ${diagnostic.cause}`);
+  return `${cause.message} (${facts.join(" · ")})`;
 }
 async function jsonBody(response: Response): Promise<unknown> {
   const text = await response.text();
