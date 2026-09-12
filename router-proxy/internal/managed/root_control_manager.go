@@ -207,6 +207,14 @@ func (m *Manager) executeRootControlHandler(ctx context.Context, binding *manage
 		}
 		return m.executeManagedInlineAllowance(ctx, binding, invocation)
 	}
+	if invocation.OperationID == "goal.control" {
+		if reconcile {
+			// The desired revision is the idempotency boundary. A recovered handler
+			// never creates a second revision for the same root request.
+			return m.managedGoalStatus(ctx, invocation.Fence.AgentID)
+		}
+		return m.executeManagedGoalControl(ctx, binding, invocation)
+	}
 	if invocation.OperationID != "context.control" {
 		if reconcile {
 			return handler.Reconcile(ctx, invocation)

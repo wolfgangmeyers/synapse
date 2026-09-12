@@ -1,5 +1,14 @@
 import type { JsonRecord } from "./manifest.js";
 
+export type ManagedGoalControlProjection = {
+  action: "set" | "off";
+  controlId: string;
+  targetInstanceId: string;
+  revision: number;
+  goal?: string;
+  settings: JsonRecord;
+};
+
 export type ManagedPolicyProjection = {
   inlineEnabled: boolean;
   inlineCredits: Readonly<Record<string, number>>;
@@ -7,6 +16,7 @@ export type ManagedPolicyProjection = {
   settledEnabled: boolean;
   goalLockEnabled: boolean;
   compactionDeferred: boolean;
+  goalControl?: ManagedGoalControlProjection;
 };
 
 const EMPTY_POLICY: ManagedPolicyProjection = {
@@ -26,6 +36,21 @@ function boundedBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function validGoalSettings(settings: JsonRecord): boolean {
+  const keys = ["goalLockEnabled", "snoozeEnabled", "snoozeDurationMs", "snoozeTurnLimit", "snoozeBudgetCapMs", "snoozeRefillYieldMs", "snoozeRefillElapsedMs"];
+  const positiveInteger = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+  const optionalPositiveInteger = (value: unknown) => value === null || positiveInteger(value);
+  return Object.keys(settings).length === keys.length && keys.every((key) => Object.hasOwn(settings, key))
+    && typeof settings.goalLockEnabled === "boolean"
+    && typeof settings.snoozeEnabled === "boolean"
+    && positiveInteger(settings.snoozeDurationMs)
+    && optionalPositiveInteger(settings.snoozeTurnLimit)
+    && optionalPositiveInteger(settings.snoozeBudgetCapMs)
+    && positiveInteger(settings.snoozeRefillYieldMs)
+    && positiveInteger(settings.snoozeRefillElapsedMs)
+    && (settings.snoozeTurnLimit === null || (typeof settings.snoozeTurnLimit === "number" && settings.snoozeTurnLimit <= 20));
+}
+
 function closedRecord(value: unknown, allowed: readonly string[], label: string): JsonRecord {
   if (!isRecord(value) || Object.keys(value).some((key) => !allowed.includes(key))) {
     throw new TypeError(`Managed ${label} projection is invalid`);
@@ -40,7 +65,7 @@ export function createPolicyBridge() {
   return {
     apply(value: unknown): ManagedPolicyProjection {
       if (!isRecord(value)) throw new TypeError("Managed policy projection must be an object");
-      const allowed = new Set(["inline", "recall", "settled", "goal_lock", "compaction"]);
+      const allowed = new Set(["inline", "recall", "settled", "goal_lock", "compaction", "goal"]);
       if (Object.keys(value).some((key) => !allowed.has(key))) throw new TypeError("Managed policy projection has unsupported fields");
       const inline = value.inline === undefined ? {} : closedRecord(value.inline, ["enabled", "credits"], "inline");
       const creditsRaw = inline.credits === undefined ? {} : closedRecord(inline.credits, ["bash", "edit", "write"], "inline credits");
@@ -57,6 +82,25 @@ export function createPolicyBridge() {
       const settled = value.settled === undefined ? {} : closedRecord(value.settled, ["enabled"], "settled");
       const goalLock = value.goal_lock === undefined ? {} : closedRecord(value.goal_lock, ["enabled"], "goal lock");
       const compaction = value.compaction === undefined ? {} : closedRecord(value.compaction, ["deferred"], "compaction");
+      let goalControl: ManagedGoalControlProjection | undefined;
+      if (value.goal !== undefined) {
+        const goal = closedRecord(value.goal, ["action", "control_id", "target_instance_id", "revision", "goal", "settings"], "goal");
+        const action = goal.action;
+        const controlId = goal.control_id;
+        const targetInstanceId = goal.target_instance_id;
+        const revision = goal.revision;
+        const settings = goal.settings;
+        if ((action !== "set" && action !== "off") || typeof controlId !== "string" || controlId.length === 0
+          || typeof targetInstanceId !== "string" || targetInstanceId.length === 0
+          || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1
+          || !isRecord(settings) || !validGoalSettings(settings)) throw new TypeError("Managed goal projection is invalid");
+        const goalText = typeof goal.goal === "string" ? goal.goal : undefined;
+        if (action === "set" && (goalText === undefined || goalText.trim().length === 0 || Buffer.byteLength(goalText, "utf8") > 4_000)) {
+          throw new TypeError("Managed goal projection is invalid");
+        }
+        if (action === "off" && goal.goal !== undefined) throw new TypeError("Managed goal projection is invalid");
+        goalControl = { action, controlId, targetInstanceId, revision, ...(goalText === undefined ? {} : { goal: goalText }), settings: structuredClone(settings) };
+      }
       policy = Object.freeze({
         inlineEnabled: boundedBoolean(inline.enabled, false),
         inlineCredits: Object.freeze(credits),
@@ -64,6 +108,7 @@ export function createPolicyBridge() {
         settledEnabled: boundedBoolean(settled.enabled, false),
         goalLockEnabled: boundedBoolean(goalLock.enabled, false),
         compactionDeferred: boundedBoolean(compaction.deferred, false),
+        ...(goalControl === undefined ? {} : { goalControl }),
       });
       return policy;
     },

@@ -2,10 +2,34 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestManagedGoalPolicyStopsRetryingAfterItsBound(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	require.NoError(t, durable.ConfirmManagedPolicyApplied(ctx, fence, DefaultManagedReadinessPolicy()))
+	snapshot := ManagedChildSnapshot{SnapshotID: "goal-retry-snapshot", OwnerSessionID: fence.PiSessionID, Sequence: 0, Canonical: []byte(`{"owner_session_id":"session","protocol":"mecha.children/v1","runs":[],"sequence":0,"snapshot_id":"goal-retry-snapshot"}`), SHA256: testManifestHash}
+	require.NoError(t, durable.ConfirmManagedChildSnapshot(ctx, fence, snapshot))
+	require.NoError(t, durable.MarkManagedReadyFromSources(ctx, fence))
+	policy, err := durable.UpdateManagedGoalPolicy(ctx, fence, ManagedGoalConfig{Enabled: true, Goal: "finish the migration", Settings: DefaultManagedGoalSettings()})
+	require.NoError(t, err)
+	for attempt := 0; attempt < managedGoalMaxProjectionAttempts; attempt++ {
+		policy, err = durable.MarkManagedGoalPolicyProjectionFailure(ctx, fence, policy.DesiredRevision, "GOAL_PROJECTION_FAILED", "projection unavailable", "2026-09-08T00:00:01.000Z")
+		require.NoError(t, err)
+		require.NotNil(t, policy)
+	}
+	require.Equal(t, managedGoalProjectionFailed, policy.ProjectionState)
+	require.Equal(t, managedGoalMaxProjectionAttempts, policy.ProjectionAttempts)
+	policy, err = durable.MarkManagedGoalPolicyProjectionFailure(ctx, fence, policy.DesiredRevision, "GOAL_PROJECTION_FAILED", "projection unavailable", "2026-09-08T00:00:01.000Z")
+	require.NoError(t, err)
+	require.Nil(t, policy)
+	_, err = durable.PendingManagedGoalPolicyForFence(ctx, fence)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+}
 
 func TestManagedGoalPolicyCommitsDesiredRevisionAndRejectsStaleAcknowledgement(t *testing.T) {
 	ctx := context.Background()

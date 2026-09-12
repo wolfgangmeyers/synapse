@@ -404,7 +404,7 @@ function validateAvailability(value: unknown): void {
 
 function validatePolicyApplied(value: unknown): void {
   if (!isRecord(value)) protocolError("policy application details are invalid");
-  assertExactKeys(value, ["inline_enabled", "inline_credits", "recall_content", "settled_enabled", "goal_lock_enabled", "compaction_deferred"]);
+  assertExactKeys(value, ["inline_enabled", "inline_credits", "recall_content", "settled_enabled", "goal_lock_enabled", "compaction_deferred"], ["goal_revision"]);
   if (typeof value.inline_enabled !== "boolean" || typeof value.settled_enabled !== "boolean"
     || typeof value.goal_lock_enabled !== "boolean" || typeof value.compaction_deferred !== "boolean") {
     protocolError("policy application flags are invalid");
@@ -415,6 +415,9 @@ function validatePolicyApplied(value: unknown): void {
     if (typeof credit !== "number" || !Number.isSafeInteger(credit) || credit < 0 || credit > 5) protocolError("policy application credit is invalid");
   }
   boundedString(value.recall_content, "policy application recall", 24_000, true);
+  if (value.goal_revision !== undefined && (typeof value.goal_revision !== "number" || !Number.isSafeInteger(value.goal_revision) || value.goal_revision < 1)) {
+    protocolError("policy application goal revision is invalid");
+  }
 }
 
 /** Validates the exact hidden custom-message vocabulary before Pi persists it. */

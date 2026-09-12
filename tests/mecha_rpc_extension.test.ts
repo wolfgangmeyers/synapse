@@ -30,7 +30,14 @@ function fixture(
     registerTool(tool: RecordValue) { tools.set(String(tool.name), tool); },
     registerCommand(name: string, command: Command) { commands.set(name, command); },
     on(name: string, handler: (event: RecordValue, context: RecordValue) => unknown) { handlers.set(name, handler); },
-    events: { on(name: string, listener: (event: RecordValue) => void) { events.set(name, listener); } },
+    events: {
+      on(name: string, listener: (event: RecordValue) => void) { events.set(name, listener); },
+      emit(name: string, event: unknown) {
+        if (event !== null && typeof event === "object" && !Array.isArray(event)) {
+          events.get(name)?.(event as RecordValue);
+        }
+      },
+    },
     sendMessage(message: RecordValue, options?: RecordValue) {
       sent.push({ message, options });
       const entryId = options?.entryId;
@@ -98,6 +105,46 @@ test("the extension preflights all 16 command names and registers no Mailbox bri
   ]);
   assert.equal(current.commands.has("mecha-mailbox"), false);
   assert.equal(current.tools.size, 0);
+});
+
+test("a managed goal policy waits for the local goal receipt before it acknowledges the revision", async () => {
+  const current = fixture();
+  current.events.set("goal:control-request", (request) => {
+    const respond = request.respond;
+    assert.equal(typeof respond, "function");
+    if (typeof respond === "function") respond({ accepted: true, revision: request.revision });
+  });
+  await current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()),
+    policy: {
+      goal: {
+        action: "set", control_id: "goal-control", target_instance_id: "goal-agent", revision: 1, goal: "finish the migration",
+        settings: { goalLockEnabled: false, snoozeEnabled: true, snoozeDurationMs: 60_000, snoozeTurnLimit: null, snoozeBudgetCapMs: null, snoozeRefillYieldMs: 30_000, snoozeRefillElapsedMs: 60_000 },
+      },
+    },
+  }), current.context);
+  const receipt = current.sent.find(({ message }) => message.customType === "mecha.policy.applied.v1");
+  assert.deepEqual(receipt?.message.details, {
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    applied: {
+      inline_enabled: false, inline_credits: {}, recall_content: "", settled_enabled: false,
+      goal_lock_enabled: false, compaction_deferred: false, goal_revision: 1,
+    },
+  });
+});
+
+test("a managed goal policy rejects malformed goal settings before it calls the local goal extension", async () => {
+  const current = fixture();
+  let calls = 0;
+  current.events.set("goal:control-request", () => { calls += 1; });
+  await assert.rejects(() => current.commands.get("mecha-policy-apply-v1")!.handler(encodeHiddenEnvelope({
+    protocol: "mecha.policy/v1", runtime_generation: "123e4567-e89b-42d3-a456-426614174000", session_epoch: 1,
+    manifest_sha256: current.extension.hashManifest(manifest()),
+    policy: { goal: { action: "set", control_id: "goal-control", target_instance_id: "goal-agent", revision: 1, goal: "finish the migration", settings: {} } },
+  }), current.context));
+  assert.equal(calls, 0);
+  assert.equal(current.sent.some(({ message }) => message.customType === "mecha.policy.applied.v1"), false);
 });
 
 test("every legacy command preserves raw input and root or child availability in one typed request", async () => {

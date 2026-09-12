@@ -544,6 +544,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	binding.lifecycleAction = ""
 	binding.serial.Unlock()
 	m.recoverManagedDirectAttemptsAsync(agent.AgentID)
+	m.recoverManagedGoalProjection(binding)
 	// Readiness is the end of launch's synchronous ownership. Process exit and
 	// shutdown callbacks reacquire this lane before they inspect or mutate the
 	// binding, so termination cannot interleave a late launch callback.

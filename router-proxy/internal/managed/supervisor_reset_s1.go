@@ -465,6 +465,7 @@ func (m *Manager) startResetTargetInLane(actionID string, source store.ManagedRu
 		candidate.lifecycleAction = ""
 		candidate.serial.Unlock()
 		m.recoverManagedDirectAttemptsAsync(candidate.agentID)
+		m.recoverManagedGoalProjection(candidate)
 		m.watchReadyRestartTarget(candidate)
 	}
 }

@@ -223,9 +223,9 @@ func (s *Store) MarkManagedGoalPolicyProjectionFailure(ctx context.Context, fenc
 	var result *ManagedGoalPolicy
 	err := s.runImmediate(ctx, func() error {
 		now := formatTimestamp(s.clock.Now())
-		args := []any{managedGoalMaxProjectionAttempts, managedGoalMaxProjectionAttempts, nullIfEmpty(retryAt), code, message, now, now, fence.AgentID, revision}
+		args := []any{managedGoalMaxProjectionAttempts, managedGoalMaxProjectionAttempts, nullIfEmpty(retryAt), code, message, now, now, fence.AgentID, revision, managedGoalMaxProjectionAttempts}
 		args = append(args, managedFenceValues(fence)...)
-		update, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET projection_attempts=projection_attempts+1,projection_state=CASE WHEN projection_attempts+1>=? THEN 'failed' ELSE 'pending' END,next_projection_at=CASE WHEN projection_attempts+1>=? THEN NULL ELSE ? END,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE agent_id=? AND desired_revision=? AND applied_revision<desired_revision AND projection_state IN ('pending','failed') AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, args...)
+		update, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET projection_attempts=projection_attempts+1,projection_state=CASE WHEN projection_attempts+1>=? THEN 'failed' ELSE 'pending' END,next_projection_at=CASE WHEN projection_attempts+1>=? THEN NULL ELSE ? END,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE agent_id=? AND desired_revision=? AND applied_revision<desired_revision AND projection_state IN ('pending','failed') AND projection_attempts<? AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, args...)
 		if err != nil {
 			return err
 		}
@@ -251,5 +251,5 @@ func (s *Store) PendingManagedGoalPolicyForFence(ctx context.Context, fence Mana
 	if s.closed {
 		return nil, errors.New("store is closed")
 	}
-	return scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=? AND desired_revision>applied_revision AND projection_state IN ('pending','failed') AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, append([]any{fence.AgentID}, managedFenceValues(fence)...)...))
+	return scanManagedGoalPolicy(s.db.QueryRowContext(ctx, `SELECT `+managedGoalPolicyColumns+` FROM managed_agent_policies WHERE agent_id=? AND desired_revision>applied_revision AND projection_state IN ('pending','failed') AND projection_attempts<? AND EXISTS(SELECT 1 FROM managed_agents WHERE `+managedFenceWhere("managed_agents.")+` AND desired_state='running' AND lifecycle_state='running')`, append([]any{fence.AgentID, managedGoalMaxProjectionAttempts}, managedFenceValues(fence)...)...))
 }
