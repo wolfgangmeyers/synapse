@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
@@ -376,11 +378,15 @@ func boundedRootError(err error) string {
 	if err == nil {
 		return ""
 	}
-	text := err.Error()
-	if len(text) > 2_000 {
-		return text[:2_000]
+	text := strings.ToValidUTF8(err.Error(), "�")
+	if len(text) <= 2_000 {
+		return text
 	}
-	return text
+	limit := 2_000
+	for limit > 0 && !utf8.RuneStart(text[limit]) {
+		limit--
+	}
+	return text[:limit]
 }
 
 func (m *Manager) appendRootControlResult(ctx context.Context, binding *managedBinding, row store.ManagedControlRequest) {
