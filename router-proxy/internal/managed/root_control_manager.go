@@ -272,9 +272,16 @@ func (m *Manager) finishRootControlHandler(ctx context.Context, binding *managed
 	}
 	fence := bindingFence(binding.agentID, binding)
 	if executeErr != nil {
-		_ = m.store.FailManagedControl(ctx, claim.Request.RequestID, claim.Owner, fence, "HANDLER_FAILED", boundedRootError(executeErr))
-		m.recordRootControlHistory(ctx, binding.agentID, claim.Request.ToolName, "error", claim.Request.RequestID)
-		return
+		// A handler failure is still a terminal answer to the dynamic invocation.
+		// Leaving it as a failed ledger row strands Pi's pending request forever,
+		// even though the caller must be told that no credit was granted.
+		result = RootControlHandlerResult{
+			Status:       "error",
+			Content:      "The managed control operation could not be completed.",
+			Details:      map[string]any{},
+			ErrorCode:    "HANDLER_FAILED",
+			ErrorMessage: boundedRootError(executeErr),
+		}
 	}
 	if result.Details == nil {
 		result.Details = map[string]any{}

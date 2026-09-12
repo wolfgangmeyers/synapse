@@ -2,6 +2,7 @@ package managed
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -60,6 +61,31 @@ func readyInlineAllowanceFixture(t *testing.T) (*Manager, *managedBinding, store
 	manager.bindings[fence.AgentID] = binding
 	t.Cleanup(func() { _ = manager.Close(context.Background()); _ = durable.Close() })
 	return manager, binding, fence, rpc
+}
+
+func TestHandlerFailureCompletesDynamicInlineAllowanceRequest(t *testing.T) {
+	ctx := context.Background()
+	manager, binding, fence, _ := readyInlineAllowanceFixture(t)
+	requestID := "123e4567-e89b-42d3-a456-426614174005"
+	reservation, err := manager.store.ReserveManagedControlRequest(ctx, store.ManagedControlRequestInput{
+		RequestID: requestID, ResultID: "123e4567-e89b-42d3-a456-426614174006", AgentID: fence.AgentID,
+		ToolCallID: "call-inline", CapabilityID: "mecha_request_inline_tool_allowance", ToolName: "mecha_request_inline_tool_allowance",
+		DefinitionID: "def_" + managedInlineAllowanceTestManifestHash, OperationID: "policy.inline_allowance",
+		CanonicalArgumentsSHA256: managedInlineAllowanceTestManifestHash, RequestFingerprint: managedInlineAllowanceTestManifestHash,
+		Fence: fence, ReceivedAt: "2026-09-12T00:00:00.000Z",
+	})
+	require.NoError(t, err)
+	claim, err := manager.store.ClaimManagedControlHandler(ctx, requestID, "123e4567-e89b-42d3-a456-426614174007", fence)
+	require.NoError(t, err)
+
+	manager.finishRootControlHandler(ctx, binding, nil, claim, RootControlHandlerResult{}, errors.New("managed inline tools are disabled"), false)
+
+	completed, err := manager.store.ManagedControlRequest(ctx, reservation.RequestID)
+	require.NoError(t, err)
+	require.Equal(t, "completed", completed.State)
+	require.Equal(t, "error", completed.ResultStatus)
+	require.Equal(t, "HANDLER_FAILED", completed.ErrorCode)
+	require.Equal(t, "The managed control operation could not be completed.", completed.ResultContent)
 }
 
 func TestManagedInlineAllowanceProjectsRequestedCreditBeforeSuccess(t *testing.T) {
