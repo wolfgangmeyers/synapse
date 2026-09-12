@@ -299,6 +299,8 @@ func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "holding-agent")
 		return readErr == nil && agent.AcceptingPrompts
 	}, time.Second, time.Millisecond)
+	projectionPublications := make(chan struct{}, 2)
+	manager.SetProjectionPublisher(func() { projectionPublications <- struct{}{} })
 	_, err = durable.Enqueue(ctx, protocol.Envelope{ID: "holding-message", From: "sender", To: "holding-agent", Body: "work", CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
 	require.NoError(t, err)
 	_, err = durable.ResolveMessageTarget(ctx, "holding-message")
@@ -313,6 +315,11 @@ func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "holding-agent")
 		return readErr == nil && agent.ActivityState == "active"
 	}, time.Second, time.Millisecond)
+	select {
+	case <-projectionPublications:
+	case <-time.After(time.Second):
+		t.Fatal("accepted direct prompt did not publish its working projection")
+	}
 
 	rpc.events <- DirectMailboxEvent{Receipt: &DirectMailboxReceipt{EntryIdentity: "holding-append"}}
 	rpc.events <- DirectMailboxEvent{Reply: &DirectMailboxReply{EntryIdentity: "holding-reply", Body: "done"}}
@@ -322,6 +329,11 @@ func TestManagedDirectPromptShowsWorkingUntilReply(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "holding-agent")
 		return readErr == nil && agent.ActivityState == "idle"
 	}, time.Second, time.Millisecond)
+	select {
+	case <-projectionPublications:
+	case <-time.After(time.Second):
+		t.Fatal("completed direct prompt did not publish its cleared projection")
+	}
 }
 
 func TestManagedDirectReplyPublishesAfterAppendAndBeforeNextOffer(t *testing.T) {

@@ -112,30 +112,46 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	require.NotEmpty(t, complete.Entries)
 	require.Equal(t, "Child compacting", complete.Entries[0].Message)
 	require.Equal(t, &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "compacting"}, complete.Entries[0].Presentation)
-	updated, err = durable.ApplyManagedChildDelta(ctx, fence, ManagedChildDelta{OwnerSessionID: "other-session", Sequence: 3, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}})
+
+	// The RPC reader intentionally keeps live JSON integers as json.Number.
+	// Terminal history must retain that duration instead of only working after a
+	// stored snapshot has been decoded back into float64.
+	terminal := ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 3, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "steered", "finished_at": "2026-01-01T00:00:20Z", "duration_ms": json.Number("20000")}}
+	updated, err = durable.ApplyManagedChildDelta(ctx, fence, terminal)
+	require.NoError(t, err)
+	require.True(t, updated)
+	complete, err = durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, "Subagent wrapped up", complete.Entries[0].Message)
+	require.Equal(t, &ManagedHistoryPresentation{Kind: "child", ChildState: "steered", Outcome: "success", ChildLabel: "Child", Summary: "Wrapped up in 20 seconds"}, complete.Entries[0].Presentation)
+	published, err := durable.ManagedChildHistoryEntryForDelta(ctx, fence, terminal)
+	require.NoError(t, err)
+	require.Equal(t, complete.Entries[0], published)
+
+	updated, err = durable.ApplyManagedChildDelta(ctx, fence, ManagedChildDelta{OwnerSessionID: "other-session", Sequence: 4, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}})
 	require.NoError(t, err)
 	require.False(t, updated, "a different owner session cannot update the current snapshot")
 	stale := fence
 	stale.RuntimeGeneration = "stale-generation"
-	updated, err = durable.ApplyManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 3, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}})
+	updated, err = durable.ApplyManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 4, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}})
 	require.NoError(t, err)
 	require.False(t, updated, "a replaced process cannot overwrite the current child view")
 	source, err := durable.ManagedReadinessSource(ctx, fence.AgentID)
 	require.NoError(t, err)
-	require.EqualValues(t, 2, source.Snapshot.Sequence)
+	require.EqualValues(t, 3, source.Snapshot.Sequence)
 	var stored map[string]any
 	require.NoError(t, json.Unmarshal(source.Snapshot.Canonical, &stored))
 	runs := stored["runs"].([]any)
 	require.Len(t, runs, 1)
-	require.Equal(t, "running", runs[0].(map[string]any)["lifecycle_state"])
+	require.Equal(t, "steered", runs[0].(map[string]any)["lifecycle_state"])
 	require.Equal(t, "compacting", runs[0].(map[string]any)["compaction"].(map[string]any)["state"])
 	// Retries and rejected owners are retained once in complete history but do
 	// not alter the source snapshot or enter quiet history.
 	var staleHistory int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=? AND details_json LIKE '%stale%'`, fence.AgentID).Scan(&staleHistory))
 	require.Equal(t, 2, staleHistory)
-	require.NoError(t, durable.RecordStaleManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 3, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}}, "parent_fence_replaced"))
-	require.NoError(t, durable.RecordStaleManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 3, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}}, "parent_fence_replaced"))
+	require.NoError(t, durable.RecordStaleManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 4, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}}, "parent_fence_replaced"))
+	require.NoError(t, durable.RecordStaleManagedChildDelta(ctx, stale, ManagedChildDelta{OwnerSessionID: fence.PiSessionID, Sequence: 4, TaskID: "task", RunID: "run", ParentEntryID: "entry", Changes: map[string]any{"lifecycle_state": "completed"}}, "parent_fence_replaced"))
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=? AND details_json LIKE '%parent_fence_replaced%'`, fence.AgentID).Scan(&staleHistory))
 	require.Equal(t, 1, staleHistory)
 
@@ -145,7 +161,7 @@ func TestManagedChildDeltaRequiresCurrentFenceAndSequence(t *testing.T) {
 	var transitionCount, completeCount int
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_child_transitions WHERE agent_id=?`, fence.AgentID).Scan(&transitionCount))
 	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id=? AND category='managed_child'`, fence.AgentID).Scan(&completeCount))
-	require.Equal(t, 5, transitionCount)
+	require.Equal(t, 6, transitionCount)
 	require.Equal(t, transitionCount, completeCount)
 }
 

@@ -39,7 +39,7 @@ function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry): boolean {
   // lifecycle state while retaining a terminal child result or failure.
   if (entry.presentation?.kind === "lifecycle" || entry.presentation?.kind === "state") return false;
   if (entry.presentation?.kind !== "child") return true;
-  return ["completed", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
+  return ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
 }
 
 function dateLabel(timestamp: number): string | undefined {

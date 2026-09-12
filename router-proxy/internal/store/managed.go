@@ -2741,9 +2741,8 @@ func managedChildHistoryDisplayFromSnapshot(snapshot map[string]any, delta Manag
 		if label, _ := run["description"].(string); managedHistoryText(label, 512, false) {
 			display.Label = label
 		}
-		outcome := map[string]string{"completed": "Completed", "error": "Failed", "aborted": "Stopped", "stopped": "Stopped"}[lifecycleState]
-		if durationMS, ok := run["duration_ms"].(float64); outcome != "" && ok && durationMS >= 0 && durationMS <= float64((24*time.Hour)/time.Millisecond) {
-			duration := time.Duration(durationMS) * time.Millisecond
+		outcome := map[string]string{"completed": "Completed", "steered": "Wrapped up", "error": "Failed", "aborted": "Stopped", "stopped": "Stopped"}[lifecycleState]
+		if duration, ok := managedChildHistoryDuration(run["duration_ms"]); outcome != "" && ok {
 			if duration >= time.Second {
 				seconds := duration.Round(time.Second) / time.Second
 				unit := "seconds"
@@ -2758,6 +2757,37 @@ func managedChildHistoryDisplayFromSnapshot(snapshot map[string]any, delta Manag
 		return display
 	}
 	return managedChildHistoryDisplay{}
+}
+
+// managedChildHistoryDuration accepts the two representations that can reach
+// this boundary. Stored snapshots decode to float64, while live Pi RPC events
+// retain json.Number so their integer precision is never silently lost.
+func managedChildHistoryDuration(value any) (time.Duration, bool) {
+	const maxDuration = 24 * time.Hour
+	var milliseconds int64
+	switch candidate := value.(type) {
+	case float64:
+		if candidate < 0 || candidate > float64(maxDuration/time.Millisecond) || candidate != float64(int64(candidate)) {
+			return 0, false
+		}
+		milliseconds = int64(candidate)
+	case json.Number:
+		parsed, err := candidate.Int64()
+		if err != nil {
+			return 0, false
+		}
+		milliseconds = parsed
+	case int64:
+		milliseconds = candidate
+	case int:
+		milliseconds = int64(candidate)
+	default:
+		return 0, false
+	}
+	if milliseconds < 0 || milliseconds > int64(maxDuration/time.Millisecond) {
+		return 0, false
+	}
+	return time.Duration(milliseconds) * time.Millisecond, true
 }
 
 func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string, changedFields []string, display managedChildHistoryDisplay) (*ManagedHistoryPresentation, string) {
@@ -2781,7 +2811,7 @@ func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string,
 		return &ManagedHistoryPresentation{Kind: "recovery", ChildState: "confirmed", Outcome: "success"}, "Child status confirmed"
 	}
 	labels := map[string]string{
-		"queued": "Child queued", "running": "Child started", "completed": "Subagent finished", "steered": "Child redirected", "aborted": "Subagent stopped", "stopped": "Subagent stopped", "error": "Subagent failed",
+		"queued": "Child queued", "running": "Child started", "completed": "Subagent finished", "steered": "Subagent wrapped up", "aborted": "Subagent stopped", "stopped": "Subagent stopped", "error": "Subagent failed",
 	}
 	label, found := labels[lifecycleState]
 	if !found {
@@ -3082,6 +3112,40 @@ func (s *Store) RecordStaleManagedChildDelta(ctx context.Context, fence ManagedR
 		_, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", []string{"stale", reason})
 		return err
 	})
+}
+
+// ManagedChildHistoryEntryForDelta returns the one redacted timeline fact
+// accepted with a child delta. It is intentionally keyed by the durable child
+// transition rather than by the latest page entry, so concurrent activity
+// cannot make the live browser receive the wrong outcome.
+func (s *Store) ManagedChildHistoryEntryForDelta(ctx context.Context, fence ManagedRuntimeFence, delta ManagedChildDelta) (ManagedHistoryEntry, error) {
+	if ctx == nil || !validManagedRuntimeFence(fence) || !validManagedChildDelta(delta) {
+		return ManagedHistoryEntry{}, errors.New("managed child history lookup is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ManagedHistoryEntry{}, errors.New("store is closed")
+	}
+	var entry ManagedHistoryEntry
+	var sequence int64
+	var presentation sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message,COALESCE(h.presentation_json,'')
+		FROM managed_child_transitions t
+		JOIN managed_complete_history h ON h.sequence=t.complete_sequence
+		WHERE t.agent_id=? AND t.pi_session_id=? AND t.session_epoch=? AND t.process_incarnation=? AND t.runtime_generation=?
+			AND t.parent_entry_id=? AND t.task_id=? AND t.run_id=? AND t.source_sequence=?
+			AND t.kind='transition' AND t.recovery_state='confirmed'`,
+		fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration,
+		delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence,
+	).Scan(&sequence, &entry.At, &entry.Level, &entry.Message, &presentation)
+	if err != nil {
+		return ManagedHistoryEntry{}, err
+	}
+	entry.ID = fmt.Sprintf("complete:%d", sequence)
+	entry.AgentID = fence.AgentID
+	entry.Presentation = effectiveManagedHistoryPresentation("managed_child", entry.Level, entry.Message, presentation.String)
+	return entry, nil
 }
 
 func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntimeFence, delta ManagedChildDelta) (bool, error) {
