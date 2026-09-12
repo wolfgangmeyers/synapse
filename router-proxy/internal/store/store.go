@@ -233,10 +233,37 @@ func Open(ctx context.Context, databasePath string, options Options) (*Store, er
 	if err := store.applyMigrations(ctx, migrations); err != nil {
 		return closeOnError(err)
 	}
+	if err := store.backfillClosedManagedHistoryIncarnations(ctx); err != nil {
+		return closeOnError(err)
+	}
 	if err := chmodStateFiles(databasePath); err != nil {
 		return closeOnError(err)
 	}
 	return store, nil
+}
+
+// backfillClosedManagedHistoryIncarnations runs after all migrations because
+// focused old-schema migration fixtures intentionally omit the Complete table.
+// It marks already-removed agent names audit-only without changing their rows.
+func (s *Store) backfillClosedManagedHistoryIncarnations(ctx context.Context) error {
+	var historyExists, incarnationsExist int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='managed_complete_history'`).Scan(&historyExists); err != nil {
+		return err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='managed_history_incarnations'`).Scan(&incarnationsExist); err != nil {
+		return err
+	}
+	if historyExists == 0 || incarnationsExist == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO managed_history_incarnations(incarnation_id,agent_id,start_sequence,created_at,closed_at)
+		SELECT 'legacy-closed:' || history.agent_id, history.agent_id, 0, MIN(history.occurred_at), MIN(history.occurred_at)
+		FROM managed_complete_history AS history
+		WHERE history.agent_id IS NOT NULL
+		  AND history.agent_id NOT IN (SELECT agent_id FROM managed_agents)
+		  AND NOT EXISTS (SELECT 1 FROM managed_history_incarnations AS incarnation WHERE incarnation.agent_id=history.agent_id)
+		GROUP BY history.agent_id`)
+	return err
 }
 
 // Close closes the database and reapplies state-file permissions first.

@@ -363,7 +363,7 @@ func TestManagedDirectReleasePersistenceFailureRetriesWithoutStranding(t *testin
 			return false
 		}
 		for _, entry := range history.Entries {
-			if entry.Message == "Managed message delivery was not confirmed" {
+			if entry.Message == "Message delivery failed" {
 				return true
 			}
 		}

@@ -56,7 +56,7 @@ func (r managedTestRPC) GetState(context.Context) (map[string]any, error) {
 	return map[string]any{"sessionId": *r.session}, nil
 }
 func (r managedTestRPC) GetCommands(context.Context) ([]string, error) {
-	return []string{"mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"}, nil
+	return []string{"mecha-bootstrap-v1", "mecha-install-tools-v1", "mecha-control-result-v1", "mecha-mailbox-deliver-v1", "mecha-policy-apply-v1", "mecha-child-snapshot-v1", "mecha-post-compaction-notification-v1", "goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"}, nil
 }
 func (r managedTestRPC) Bootstrap(context.Context, map[string]any) error { return nil }
 func (r managedTestRPC) WaitForReceipt(context.Context, string, string, int, int64, string) error {

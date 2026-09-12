@@ -505,6 +505,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.installRootControlReceiver(binding)
 	m.installChildDeltaReceiver(binding)
 	m.installParentCompactionReceiver(binding)
+	m.installParentCompactionNotificationReceiver(binding)
 	m.installParentActivityReceiver(binding)
 	binding.serial.Lock()
 	if !m.liveBindingForFence(durableCtx, binding, fence) {
@@ -1155,6 +1156,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	m.installRootControlReceiver(target)
 	m.installChildDeltaReceiver(target)
 	m.installParentCompactionReceiver(target)
+	m.installParentCompactionNotificationReceiver(target)
 	m.installParentActivityReceiver(target)
 	target.serial.Lock()
 	target.lifecycleAction = ""
