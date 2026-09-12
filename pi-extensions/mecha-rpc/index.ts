@@ -47,7 +47,12 @@ type PiApi = {
   sendMessage(message: ExplicitHiddenMessage, options: ExplicitHiddenMessageOptions): Promise<ExplicitCustomMessageAppendOutcome>;
   sendMessage(message: JsonRecord, options?: JsonRecord): void | Promise<void>;
   on(name: string, handler: (event: JsonRecord, context: CommandContext) => unknown): void;
-  events?: { on?: (name: string, handler: (event: JsonRecord) => void) => void };
+  events?: {
+    on?: (name: string, handler: (event: JsonRecord) => void) => void;
+    // The goal extension's local control event carries a runtime context and
+    // response callback. It is intentionally outside the JSON router protocol.
+    emit?: (name: string, event: unknown) => void;
+  };
 };
 
 
@@ -655,10 +660,17 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
 
   queueCommand("mecha-policy-apply-v1", {
     description: "Reserved managed policy projection command.",
-    async handler(argumentsText) {
+    async handler(argumentsText, context) {
       const envelope = validatePolicyApplyEnvelope(decodeHiddenEnvelope(argumentsText));
       requireCurrentRuntime(envelope, generation, epoch, acceptedHash);
       const projection = policyBridge.apply(envelope.policy);
+      if (projection.goalControl !== undefined) {
+        let response: unknown;
+        pi.events?.emit?.("goal:control-request", { ...projection.goalControl, context, respond: (value: unknown) => { response = value; } });
+        if (!isRecord(response) || response.accepted !== true || response.revision !== projection.goalControl.revision) {
+          throw new TypeError("Managed goal projection was not accepted.");
+        }
+      }
       await sendHiddenCustomMessage(pi, "mecha.policy.applied.v1", "Managed policy applied.", {
         protocol: "mecha.policy/v1", runtime_generation: generation, session_epoch: epoch,
         applied: {
@@ -668,6 +680,7 @@ export function createMechaRpcExtension(pi: PiApi, options: MechaRpcOptions = {}
           settled_enabled: projection.settledEnabled,
           goal_lock_enabled: projection.goalLockEnabled,
           compaction_deferred: projection.compactionDeferred,
+          ...(projection.goalControl === undefined ? {} : { goal_revision: projection.goalControl.revision }),
         },
       }, { triggerTurn: false });
       return projection;
