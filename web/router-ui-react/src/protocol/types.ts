@@ -859,6 +859,7 @@ export interface ManagedAgent {
   started_at: RouterTimestamp | null;
   updated_at: RouterTimestamp;
   last_error: ManagedError | null;
+  goal_state?: GoalState;
 }
 // Child telemetry is intentionally separate from PublicAgent. It has its own
 // managed lifecycle path, so a future PublicAgent field cannot accidentally
