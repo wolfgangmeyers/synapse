@@ -31,8 +31,8 @@ func (m *Manager) handleRootControlEvent(binding *managedBinding, event RootCont
 		return
 	}
 	go func() {
-		binding.lane.serial.Lock()
-		defer binding.lane.serial.Unlock()
+		binding.rootControlSerial.Lock()
+		defer binding.rootControlSerial.Unlock()
 		ctx, cancel := context.WithTimeout(m.runCtx, 45*time.Second)
 		defer cancel()
 		m.admitAndRunRootControl(ctx, binding, event)
@@ -59,8 +59,8 @@ func (m *Manager) admitAndRunRootControl(ctx context.Context, binding *managedBi
 		return
 	}
 	fingerprint := sha256.Sum256(fingerprintBytes)
-	// A result UUID is generated once on first admission. This agent lane
-	// serializes event delivery, so a duplicate observes the stored identity.
+	// A result UUID is generated once on first admission. The root-control
+	// serializer orders duplicate control events without blocking direct work.
 	resultID := ""
 	existing, lookupErr := m.store.ManagedControlRequest(ctx, event.RequestID)
 	if lookupErr == nil {
@@ -127,8 +127,8 @@ func (m *Manager) recoverRootControls(binding *managedBinding) {
 	if binding == nil {
 		return
 	}
-	binding.lane.serial.Lock()
-	defer binding.lane.serial.Unlock()
+	binding.rootControlSerial.Lock()
+	defer binding.rootControlSerial.Unlock()
 	ctx, cancel := context.WithTimeout(m.runCtx, 45*time.Second)
 	defer cancel()
 	fence := bindingFence(binding.agentID, binding)
@@ -403,15 +403,11 @@ func (m *Manager) appendRootControlResult(ctx context.Context, binding *managedB
 	if err := m.store.MarkManagedControlAppendSubmitted(ctx, row.RequestID, owner, claim.Request.AppendAttempt, fence); err != nil {
 		return
 	}
-	// Pi has already acknowledged the private command at this point. Probe the
-	// one reserved explicit entry before waiting for an optional stdout receipt:
-	// some installed Pi builds persist the entry without replaying that custom
-	// frame through the RPC stream. The exact lookup is the durable receipt.
-	entry, lookupErr := rpc.GetRootControlEntry(ctx, row.ResultEntryID)
-	if lookupErr == nil && validRootControlEntry(entry, row) {
-		_ = m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: owner, EntryIdentity: row.ResultEntryID, Attempt: claim.Request.AppendAttempt, Fence: fence})
-		return
-	}
+	// Stock Pi assigns its own persisted entry ID even when the command requests
+	// a deterministic one. Its stdout receipt still carries the complete fenced
+	// result envelope, so accept that exact event instead of retrying a result
+	// the user has already received. Builds that do not emit it retain the
+	// reserved-ID lookup in the timeout recovery path below.
 	deadline, cancel := context.WithTimeout(ctx, rootControlAppendTimeout)
 	defer cancel()
 	for {
@@ -424,12 +420,8 @@ func (m *Manager) appendRootControlResult(ctx context.Context, binding *managedB
 			if !validRootControlReceipt(receipt.Event, row, receipt.Watermark, token.Watermark()) {
 				continue
 			}
-			entry, err := rpc.GetRootControlEntry(deadline, row.ResultEntryID)
-			if err != nil || !validRootControlEntry(entry, row) {
-				m.reconcileRootControlAppend(ctx, binding, claim.Request)
-				return
-			}
-			_ = m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: owner, EntryIdentity: row.ResultEntryID, Attempt: claim.Request.AppendAttempt, Fence: fence})
+			entryIdentity := rootControlReceiptEntryIdentity(receipt.Event, row)
+			_ = m.store.DeliverManagedControlReceipt(ctx, store.ManagedControlReceipt{RequestID: row.RequestID, AppendOwner: owner, EntryIdentity: entryIdentity, Attempt: claim.Request.AppendAttempt, Fence: fence})
 			return
 		case <-deadline.Done():
 			m.reconcileRootControlAppend(ctx, binding, claim.Request)
@@ -486,8 +478,8 @@ func (m *Manager) retryRootControlAppend(ctx context.Context, binding *managedBi
 		case <-m.runCtx.Done():
 			return
 		case <-timer.C:
-			binding.lane.serial.Lock()
-			defer binding.lane.serial.Unlock()
+			binding.rootControlSerial.Lock()
+			defer binding.rootControlSerial.Unlock()
 			if m.rootBindingCurrent(m.runCtx, binding, fence) {
 				m.resumeRootControl(m.runCtx, binding, requestID, nil)
 			}
@@ -496,26 +488,53 @@ func (m *Manager) retryRootControlAppend(ctx context.Context, binding *managedBi
 }
 
 func validRootControlReceipt(event map[string]any, row store.ManagedControlRequest, watermark, armed uint64) bool {
-	return watermark > armed && isRootControlResultEvent(event) && validRootControlEntry(event, row)
+	return watermark > armed && validRootControlResult(event, row, false)
+}
+
+func rootControlReceiptEntryIdentity(event map[string]any, row store.ManagedControlRequest) string {
+	message := nestedMessage(event)
+	for _, candidate := range []map[string]any{event, message} {
+		if candidate == nil {
+			continue
+		}
+		// Pi's stdout receipt uses entryId; persisted records carry id. Keep the
+		// real opaque identity for the durable delivery receipt in either shape.
+		for _, key := range []string{"entryId", "entry_id", "id"} {
+			entryID, ok := candidate[key].(string)
+			if ok && entryID != "" {
+				return entryID
+			}
+		}
+	}
+	// Some installed Pi versions stream only the authenticated custom envelope.
+	// Its result ID is immutable, fenced, and payload-bound, so it remains a
+	// durable receipt identity when Pi omits an entry identity altogether.
+	return "root-result:" + row.ResultID
 }
 
 func validRootControlEntry(entry map[string]any, row store.ManagedControlRequest) bool {
+	return validRootControlResult(entry, row, true)
+}
+
+// validRootControlResult authenticates a root result from either Pi transport.
+// Recovery can demand the reserved entry ID; the live receipt cannot because
+// stock Pi persists a fresh opaque ID despite receiving the requested one.
+func validRootControlResult(entry map[string]any, row store.ManagedControlRequest, requireReservedEntryID bool) bool {
 	if entry == nil {
 		return false
 	}
 	message := nestedMessage(entry)
-	// get_entry returns the persisted entry directly, while the stdout receipt
-	// wraps that same entry in a message_end frame. Validate the identical
-	// explicit-ID payload in either documented transport shape.
 	if message == nil {
 		message = entry
 	}
-	id, idOK := entry["id"].(string)
-	if !idOK && message != nil {
-		id, idOK = message["id"].(string)
-	}
-	if !idOK || id != row.ResultEntryID {
-		return false
+	if requireReservedEntryID {
+		id, idOK := entry["id"].(string)
+		if !idOK {
+			id, idOK = message["id"].(string)
+		}
+		if !idOK || id != row.ResultEntryID {
+			return false
+		}
 	}
 	if message == nil || message["customType"] != "mecha.control.result.v1" || message["display"] != false || message["content"] != row.ResultContent {
 		return false

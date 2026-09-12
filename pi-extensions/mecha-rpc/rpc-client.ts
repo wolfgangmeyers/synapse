@@ -12,7 +12,7 @@ export type ExplicitHiddenMessage = {
   details: JsonRecord;
 };
 
-export type ExplicitHiddenMessageOptions = { triggerTurn: false; entryId: string; deliverAs?: never };
+export type ExplicitHiddenMessageOptions = { triggerTurn: boolean; entryId: string; deliverAs?: "followUp" };
 
 type PiLike = {
   sendMessage(message: ExplicitHiddenMessage, options: ExplicitHiddenMessageOptions): Promise<ExplicitCustomMessageAppendOutcome>;
@@ -79,10 +79,11 @@ export async function sendHiddenCustomMessageWithEntryId(
   content: string,
   details: JsonRecord,
   entryId: string,
+  options: { deliverAs?: "followUp"; triggerTurn: boolean } = { triggerTurn: false },
 ): Promise<ExplicitCustomMessageAppendOutcome> {
   validateCustomMessageDetails(customType, details);
   return await pi.sendMessage(
     { customType, content, display: false, details },
-    { triggerTurn: false, entryId },
+    { ...(options.deliverAs === undefined ? {} : { deliverAs: options.deliverAs }), triggerTurn: options.triggerTurn, entryId },
   );
 }

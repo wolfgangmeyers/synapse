@@ -156,7 +156,7 @@ test("bootstrap is atomic before model tools exist and a raw coercive tool call 
   const completion = current.sent.at(-1)!;
   assert.equal(completion.message.customType, "mecha.control.result.v1");
   assert.equal(completion.message.display, false);
-  assert.deepEqual(completion.options, { triggerTurn: false, entryId: `mcr1_${resultId.replaceAll("-", "")}` });
+  assert.deepEqual(completion.options, { deliverAs: "followUp", triggerTurn: true, entryId: `mcr1_${resultId.replaceAll("-", "")}` });
   assert.deepEqual(Object.keys(completion.message.details as RecordValue).sort(), ["details", "manifest_sha256", "protocol", "request_id", "result_id", "runtime_generation", "status", "target_session_epoch"]);
   assert.equal(JSON.stringify(completion.message).includes("mcr1_"), false);
   await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope({
@@ -183,7 +183,7 @@ test("a root result accepts an already_present explicit Pi outcome before consum
   const response = await current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context);
   assert.deepEqual(response, { kind: "already_present", result_id: payload.result_id });
   const resultCall = current.sent.at(-1)!;
-  assert.deepEqual(resultCall.options, { triggerTurn: false, entryId: `mcr1_${payload.result_id.replaceAll("-", "")}` });
+  assert.deepEqual(resultCall.options, { deliverAs: "followUp", triggerTurn: true, entryId: `mcr1_${payload.result_id.replaceAll("-", "")}` });
   await assert.rejects(async () => current.commands.get("mecha-control-result-v1")!.handler(encodeHiddenEnvelope(payload), current.context));
 });
 
