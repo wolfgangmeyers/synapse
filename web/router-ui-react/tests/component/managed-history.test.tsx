@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useState, type ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Conversation } from "../../src/components/Conversation";
+import { MessageList } from "../../src/components/MessageList";
 import type { ConversationView } from "../../src/components/ConversationHeader";
 
 afterEach(cleanup);
@@ -38,6 +39,28 @@ describe("Selected-agent conversation modes", () => {
     expect(screen.getByText("Conversation message")).toBeInTheDocument();
     expect(screen.queryByText("Managed worker restarted")).not.toBeInTheDocument();
     expect(screen.queryByText("Managed worker activity without a timestamp")).not.toBeInTheDocument();
+  });
+
+  it("marks mail by the selected managed agent's transport direction without creating activity duplicates", () => {
+    const { container } = render(<Conversation peer={{ agent_id: "managed-worker", activity_state: "idle" }} ownerId="supervisor" conversationView="complete" messages={[
+      { id: "received", from: "supervisor", to: "managed-worker", body: "Please start", created_at: "2030-01-01T10:00:00.000Z" },
+      { id: "sent", from: "managed-worker", to: "supervisor", body: "Started", created_at: "2030-01-01T10:01:00.000Z" },
+    ]} activityEntries={[]} />);
+    expect(screen.getByText("Received message")).toBeInTheDocument();
+    expect(screen.getByText("Sent message")).toBeInTheDocument();
+    expect(container.querySelector(".message-transport--received .fa-envelope")).toBeInTheDocument();
+    expect(container.querySelector(".message-transport--sent .fa-paper-plane")).toBeInTheDocument();
+    expect(container.querySelectorAll("[data-activity-id]")).toHaveLength(0);
+  });
+
+  it("does not announce retained Complete history after the selected agent changes", () => {
+    const retained = { id: "complete:1", agent_id: "managed-worker", at: "2030-01-01T10:00:00.000Z", message: "Bash failed", presentation: { kind: "tool" as const, tool_name: "bash", outcome: "error" as const } };
+    const { container, rerender } = render(<MessageList messages={[]} peerId="managed-worker" activityEntries={[retained]} activityHistoryReady={false} />);
+    rerender(<MessageList messages={[]} peerId="managed-worker" activityEntries={[retained]} activityHistoryReady />);
+    expect(container.querySelector(".timeline-live-region")).toHaveTextContent("");
+
+    rerender(<MessageList messages={[]} peerId="managed-worker" activityEntries={[retained, { ...retained, id: "complete:2", message: "Child failed", presentation: { kind: "child", child_state: "error" } }]} activityHistoryReady />);
+    expect(container.querySelector(".timeline-live-region")).toHaveTextContent("Child failed");
   });
 
   it("reports a failed managed agent in the selected-agent header", () => {

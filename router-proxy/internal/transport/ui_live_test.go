@@ -121,13 +121,19 @@ func TestManagedLifecycleHistoryFactsOnlyUseAllowlistedLifecycleChanges(t *testi
 	current := &uiLiveProjection{agents: map[string]map[string]any{"alpha": {"lifecycle_state": "running", "pi_session_id": "still-private"}, "beta": {"lifecycle_state": "starting"}}}
 	facts := managedLifecycleHistoryFacts(prior, current)
 	require.Equal(t, []managedLifecycleHistoryFact{
-		{agentID: "alpha", message: "Managed worker changed from starting to running"},
-		{agentID: "beta", message: "Managed worker entered starting"},
-		{agentID: "gone", message: "Managed worker was removed"},
+		{agentID: "alpha", message: "State changed", eventKey: "lifecycle:alpha:0:state", presentation: &store.ManagedHistoryPresentation{Kind: "state", From: "Starting", To: "Running"}},
+		{agentID: "beta", message: "Starting agent", eventKey: "lifecycle:beta:0:entered", presentation: &store.ManagedHistoryPresentation{Kind: "lifecycle"}},
 	}, facts)
 	for _, fact := range facts {
 		require.NotContains(t, fact.message, "private")
 	}
+}
+
+func TestManagedLifecycleHistoryFactsRecordsASelectedModelChange(t *testing.T) {
+	prior := &uiLiveProjection{version: 4, agents: map[string]map[string]any{"alpha": {"lifecycle_state": "running", "activity_state": "idle", "model": map[string]any{"provider": "openai-codex", "id": "gpt-5.6-terra"}}}}
+	current := &uiLiveProjection{version: 5, agents: map[string]map[string]any{"alpha": {"lifecycle_state": "running", "activity_state": "idle", "model": map[string]any{"provider": "google", "id": "gemini-2.5-pro"}}}}
+	facts := managedLifecycleHistoryFacts(prior, current)
+	require.Equal(t, []managedLifecycleHistoryFact{{agentID: "alpha", message: "Model changed", eventKey: "model:alpha:5", presentation: &store.ManagedHistoryPresentation{Kind: "model", Outcome: "success", Summary: "Google · gemini-2.5-pro"}}}, facts)
 }
 
 func TestManagedDirectoryBrowserListsOnlyContainedFolders(t *testing.T) {

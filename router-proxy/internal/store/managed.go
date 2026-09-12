@@ -1131,6 +1131,18 @@ func (s *Store) CompleteManagedTermination(ctx context.Context, actionID string)
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_control_requests WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
+		// Complete belongs to the managed agent's private operational record. Its
+		// history and source-fenced child state must leave with the agent rather
+		// than remain visible if the name is reused.
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_child_recoveries WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_parent_compaction_state WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE agent_id=?`, action.AgentID); err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM goal_control_revision_history WHERE agent_id=?`, action.AgentID); err != nil {
 			return err
 		}
@@ -2710,6 +2722,36 @@ func managedChildHistoryKey(fence ManagedRuntimeFence, parentEntryID, taskID, ru
 	return "child:" + hex.EncodeToString(sum[:])
 }
 
+func managedChildHistoryPresentation(kind, lifecycleState, recoveryState string, changedFields []string) (*ManagedHistoryPresentation, string) {
+	for _, field := range changedFields {
+		if field == "compaction:compacting" {
+			return &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "compacting"}, "Child compacting"
+		}
+		switch field {
+		case "compaction:completed":
+			return &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "completed"}, "Child context compacted"
+		case "compaction:failed":
+			return &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "failed"}, "Child compaction failed"
+		case "compaction:aborted", "compaction:reconciled_unknown", "reconciled_unknown":
+			return &ManagedHistoryPresentation{Kind: "compaction", ChildLabel: "Child", Outcome: "reconciled_unknown"}, "Child compaction interrupted — outcome unknown"
+		}
+	}
+	if kind == "recovery" {
+		if recoveryState == "interrupted_unknown" {
+			return &ManagedHistoryPresentation{Kind: "recovery", ChildState: "interrupted_unknown", Outcome: "unknown"}, "Child interrupted — outcome unknown"
+		}
+		return &ManagedHistoryPresentation{Kind: "recovery", ChildState: "confirmed", Outcome: "success"}, "Child status confirmed"
+	}
+	labels := map[string]string{
+		"queued": "Child queued", "running": "Child started", "completed": "Child completed", "steered": "Child redirected", "aborted": "Child aborted", "stopped": "Child stopped", "error": "Child failed",
+	}
+	label, found := labels[lifecycleState]
+	if !found {
+		return &ManagedHistoryPresentation{Kind: "child", Outcome: "unknown"}, "Child updated"
+	}
+	return &ManagedHistoryPresentation{Kind: "child", ChildState: lifecycleState, Outcome: "success"}, label
+}
+
 // recordManagedChildHistoryTx is the authoritative complete-history writer for
 // child transitions. It commits the visible row and its fenced, bounded audit
 // record in the same transaction as the source projection, so retries and UI
@@ -2719,11 +2761,12 @@ func (s *Store) recordManagedChildHistoryTx(ctx context.Context, fence ManagedRu
 		return ManagedHistoryEntry{}, errors.New("managed child history is invalid")
 	}
 	key := managedChildHistoryKey(fence, parentEntryID, taskID, runID, sequence, kind, recoveryState, recoveryCause, changedFields)
+	presentation, message := managedChildHistoryPresentation(kind, lifecycleState, recoveryState, changedFields)
 	var existingSequence int64
 	var existingAt, existingLevel, existingMessage string
 	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message FROM managed_child_transitions t JOIN managed_complete_history h ON h.sequence=t.complete_sequence WHERE t.event_key=?`, key).Scan(&existingSequence, &existingAt, &existingLevel, &existingMessage)
 	if err == nil {
-		return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", existingSequence), At: existingAt, Level: existingLevel, Message: existingMessage}, nil
+		return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", existingSequence), At: existingAt, Level: existingLevel, Message: existingMessage, Presentation: presentation}, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return ManagedHistoryEntry{}, err
@@ -2748,12 +2791,12 @@ func (s *Store) recordManagedChildHistoryTx(ctx context.Context, fence ManagedRu
 	if err != nil || len(detailsJSON) < 2 || len(detailsJSON) > 8192 {
 		return ManagedHistoryEntry{}, errors.New("managed child history details are invalid")
 	}
-	message := "Managed child transition recorded"
-	if kind == "recovery" && recoveryState == "interrupted_unknown" {
-		message = "Managed child recovery is interrupted and unknown"
+	presentationJSON, presentationErr := managedHistoryPresentationJSON(presentation)
+	if presentationErr != nil {
+		return ManagedHistoryEntry{}, presentationErr
 	}
 	occurredAt := formatTimestamp(s.clock.Now())
-	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key) VALUES (?,?,?,?,?,?)`, fence.AgentID, "managed_child", "info", message, occurredAt, key)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,?)`, fence.AgentID, "managed_child", "info", message, occurredAt, key, presentationJSON)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
@@ -2769,7 +2812,7 @@ func (s *Store) recordManagedChildHistoryTx(ctx context.Context, fence ManagedRu
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM managed_complete_history WHERE sequence NOT IN (SELECT sequence FROM managed_complete_history ORDER BY sequence DESC LIMIT ?)`, maxManagedHistoryEntries); err != nil {
 		return ManagedHistoryEntry{}, err
 	}
-	return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", completeSequence), At: occurredAt, Level: "info", Message: message}, nil
+	return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", completeSequence), At: occurredAt, Level: "info", Message: message, Presentation: presentation}, nil
 }
 
 func readinessSourceFenceWhere() string {
@@ -3053,7 +3096,7 @@ func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntime
 		if err != nil {
 			return err
 		}
-		if _, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", managedChildChangedFields(delta.Changes)); err != nil {
+		if _, err := s.recordManagedChildHistoryTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", managedChildHistoryFields(next, delta)); err != nil {
 			return err
 		}
 		if err := s.confirmManagedChildRecoveryForDeltaTx(ctx, fence, delta, state); err != nil {
@@ -3072,6 +3115,35 @@ func managedChildChangedFields(changes map[string]any) []string {
 		fields = append(fields, field)
 	}
 	sort.Strings(fields)
+	return fields
+}
+
+// managedChildHistoryFields keeps the structured compaction outcome attached
+// to the same accepted child transition. The browser receives the normalized
+// result, never the child delta, task IDs, or private source fence.
+func managedChildHistoryFields(snapshot map[string]any, delta ManagedChildDelta) []string {
+	fields := managedChildChangedFields(delta.Changes)
+	if _, changed := delta.Changes["compaction"]; !changed {
+		return fields
+	}
+	runs, _ := snapshot["runs"].([]any)
+	for _, value := range runs {
+		run, _ := value.(map[string]any)
+		if run == nil || run["parent_entry_id"] != delta.ParentEntryID || run["task_id"] != delta.TaskID || run["run_id"] != delta.RunID {
+			continue
+		}
+		compaction, _ := run["compaction"].(map[string]any)
+		if compaction == nil {
+			return fields
+		}
+		if state, _ := compaction["state"].(string); state == "compacting" {
+			return append(fields, "compaction:compacting")
+		}
+		if outcome, _ := compaction["last_outcome"].(string); outcome == "completed" || outcome == "failed" || outcome == "aborted" || outcome == "reconciled_unknown" {
+			return append(fields, "compaction:"+outcome)
+		}
+		return fields
+	}
 	return fields
 }
 

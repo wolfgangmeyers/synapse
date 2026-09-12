@@ -81,8 +81,13 @@ func TestManagedTerminationRetryResumesItsExactCleanupStage(t *testing.T) {
 
 func TestConfirmedTerminationImmediatelyReleasesTheNameForRelaunch(t *testing.T) {
 	durable, ctx, agent, action := terminationActionAtDurableWrite(t)
+	_, err := durable.RecordManagedCompleteHistory(ctx, agent.AgentID, "managed_control", "info", "Updated goal", "termination-history")
+	require.NoError(t, err)
 	require.NoError(t, durable.RetireManagedRecipientSourceForTermination(ctx, agent.AgentID, agent.Name))
 	require.NoError(t, durable.CompleteManagedTermination(ctx, action.ActionID))
+	var completeHistory int
+	require.NoError(t, durable.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_complete_history WHERE agent_id=?`, agent.AgentID).Scan(&completeHistory))
+	require.Zero(t, completeHistory, "a replacement agent must not inherit the prior Complete timeline")
 
 	replacement := agent
 	replacement.PiSessionID = ""

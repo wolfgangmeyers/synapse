@@ -6,6 +6,8 @@ import {
   isInlineToolControlResultFrame,
   isInlineToolStateFrame,
   isManagedAgent,
+  isManagedCompleteHistoryEntry,
+  isManagedHistoryEntry,
   isUILiveFrame,
   isRouterUtcTimestamp,
   isModelControlResultFrame,
@@ -89,6 +91,15 @@ describe("protocol guards", () => {
     expect(isRouterUtcTimestamp("2026-09-09T09:48:28.4142040030Z")).toBe(false);
     expect(isManagedAgent(managedAgent)).toBe(true);
     expect(isManagedAgent({ ...managedAgent, updated_at: "2026-09-09T09:48:28.4142040030Z" })).toBe(false);
+  });
+
+  it("accepts only closed, redacted Complete history metadata", () => {
+    const entry = { id: "complete:1", agent_id: "managed-alpha", at: "2026-09-09T09:48:28Z", level: "info", message: "Ran bash", presentation: { kind: "tool", tool_name: "functions.bash", outcome: "success", summary: "Completed successfully" } };
+    expect(isManagedHistoryEntry(entry)).toBe(true);
+    expect(isManagedHistoryEntry({ ...entry, presentation: { ...entry.presentation, summary: "stdout: private output" } })).toBe(false);
+    expect(isManagedHistoryEntry({ ...entry, presentation: { ...entry.presentation, tool_name: "bash --private-argument" } })).toBe(false);
+    expect(isManagedCompleteHistoryEntry({ ...entry, message: "token=private" })).toBe(false);
+    expect(isManagedHistoryEntry({ ...entry, message: "token=ordinary-message-content" })).toBe(true);
   });
 
   it("accepts only bounded provider-auth live frames", () => {

@@ -126,11 +126,24 @@ func (s *Store) ApplyManagedParentCompaction(ctx context.Context, fence ManagedR
 			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
 		}
 		key := managedParentCompactionHistoryKey(fence, event)
-		message := "Managed parent compaction started"
+		message := "Compacting context"
+		outcome := "compacting"
 		if event.State == "idle" {
-			message = "Managed parent compaction " + event.Outcome
+			outcome = event.Outcome
+			switch event.Outcome {
+			case "completed":
+				message = "Context compacted"
+			case "failed":
+				message = "Context compaction failed"
+			default:
+				message = "Context compaction interrupted — outcome unknown"
+			}
 		}
-		result, err = s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key) VALUES (?,?,?,?,?,?)`, fence.AgentID, "managed_parent_compaction", "info", message, now, key)
+		presentationJSON, presentationErr := managedHistoryPresentationJSON(&ManagedHistoryPresentation{Kind: "compaction", Outcome: outcome})
+		if presentationErr != nil {
+			return presentationErr
+		}
+		result, err = s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,?)`, fence.AgentID, "managed_parent_compaction", "info", message, now, key, presentationJSON)
 		if err != nil {
 			return err
 		}
