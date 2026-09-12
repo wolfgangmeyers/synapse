@@ -36,7 +36,7 @@ import type { ImageInput } from "./domain/images";
 import type { SavedRouter } from "./domain/router-manager";
 import { promptTemplateUpdatePayload, type PromptTemplate } from "./domain/prompt-templates";
 import { runPromptTemplateImport, type PromptTemplateImportProgress, type PromptTemplateImportResult } from "./domain/prompt-template-import";
-import { goalErrorMessage, type GoalControlSettings } from "./domain/goals";
+import { DEFAULT_GOAL_STATE, goalErrorMessage, type GoalControlSettings, type GoalState } from "./domain/goals";
 import { withAbsoluteAttachmentUrls } from "./transport/attachment-urls";
 import { createHistoryThumbnail } from "./domain/images";
 import { cacheKeyForAttachment, saveCachedImage } from "./persistence/history-repository";
@@ -215,6 +215,8 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
   const [managedHeaderModelError, setManagedHeaderModelError] = useState<string>();
   const [managedRecentFolders, setManagedRecentFolders] = useState(() => loadManagedRecentFolders(storage));
   const [managedTerminationConfirmation, setManagedTerminationConfirmation] = useState(false);
+  const [managedGoalState, setManagedGoalState] = useState<GoalState>();
+  const [managedInlineToolsEnabled, setManagedInlineToolsEnabled] = useState<boolean>();
   const [goalError, setGoalError] = useState<string>();
   const [reminderStatus, setReminderStatus] = useState<string>();
   const [goalControlAvailable, setGoalControlAvailable] = useState(false);
@@ -269,7 +271,7 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     const persistedPeer = selectedPeerFor(settings, activeUrl, resolvedAgentId) || undefined;
     setSelectedPeer((current) => prior.routerUrl === activeUrl ? current ?? persistedPeer : persistedPeer);
     previousScope.current = scope;
-    setExpanded(new Set()); setDialog(undefined); setProviderPrompt(undefined); setArrivalAgent(undefined); setManagedAgentID(undefined); setManagedError(undefined); setManagedLiveError(undefined); setManagedPending(false); setManagedTerminationConfirmation(false); setGoalError(undefined); setReminderStatus(undefined);
+    setExpanded(new Set()); setDialog(undefined); setProviderPrompt(undefined); setArrivalAgent(undefined); setManagedAgentID(undefined); setManagedError(undefined); setManagedLiveError(undefined); setManagedPending(false); setManagedTerminationConfirmation(false); setManagedGoalState(undefined); setManagedInlineToolsEnabled(undefined); setGoalError(undefined); setReminderStatus(undefined);
     setGoalControlAvailable(false); setInlineToolControlAvailable(false); setInlineToolError(undefined); setTemplatesLoaded(false); setPromptImportProgress(undefined); setTemplateToUse(undefined); setPromptReturnDialog(undefined); setDialogAfterClose(undefined); setReminderTemplateToUse(undefined); setReminderSelection(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); setComposerSelection(undefined);
     templateListGeneration.current += 1;
     templateListDirty.current = true;
@@ -577,6 +579,47 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     catch (cause) { setManagedError(managedRequestErrorMessage(cause, "Managed action could not be completed.")); }
     finally { setManagedPending(false); }
   };
+  const openManagedGoal = (): void => {
+    if (selectedManagedAgent === undefined) return;
+    setManagedPending(true); setManagedError(undefined); setGoalError(undefined);
+    void session.transport.http.managedGoal(selectedManagedAgent.agent_id).then((result) => {
+      setManagedGoalState(result.goal_state); setDialog("goal");
+    }).catch((cause: unknown) => {
+      setManagedError(managedRequestErrorMessage(cause, "Managed goal could not be loaded."));
+    }).finally(() => setManagedPending(false));
+  };
+  const saveManagedGoal = (payload: { action: "set" | "off"; goal: string; settings: GoalControlSettings }): void => {
+    if (selectedManagedAgent === undefined) return;
+    setManagedPending(true); setGoalError(undefined);
+    void session.transport.http.saveManagedGoal(selectedManagedAgent.agent_id, payload).then((result) => {
+      setManagedGoalState(result.goal_state); setDialog(undefined);
+    }).catch((cause: unknown) => {
+      setGoalError(managedRequestErrorMessage(cause, "Managed goal could not be saved."));
+    }).finally(() => setManagedPending(false));
+  };
+  const openManagedInlineTools = (): void => {
+    if (selectedManagedAgent === undefined) return;
+    setManagedPending(true); setManagedError(undefined); setInlineToolError(undefined);
+    void session.transport.http.managedInlineTools(selectedManagedAgent.agent_id).then((result) => {
+      setManagedInlineToolsEnabled(result.enabled); setDialog("inline-tools");
+    }).catch((cause: unknown) => {
+      setManagedError(managedRequestErrorMessage(cause, "Managed inline-tool settings could not be loaded."));
+    }).finally(() => setManagedPending(false));
+  };
+  const saveManagedInlineTools = (enabled: boolean): void => {
+    if (selectedManagedAgent === undefined) return;
+    setManagedPending(true); setInlineToolError(undefined);
+    void session.transport.http.saveManagedInlineTools(selectedManagedAgent.agent_id, enabled).then((result) => {
+      setManagedInlineToolsEnabled(result.enabled); setDialog(undefined);
+    }).catch((cause: unknown) => {
+      setInlineToolError(managedRequestErrorMessage(cause, "Managed inline-tool settings could not be saved."));
+    }).finally(() => setManagedPending(false));
+  };
+  const openManagedReminders = (): void => {
+    if (selectedManagedAgent === undefined) return;
+    setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false });
+    setReminderStatus(undefined); setDialog("reminders");
+  };
   const restartAllManaged = (): void => { setManagedPending(true); setManagedError(undefined); void session.transport.http.restartAllManaged().then(refreshManaged).catch((cause: unknown) => setManagedError(managedRequestErrorMessage(cause, "Managed agents could not be restarted."))).finally(() => setManagedPending(false)); };
   const toggleSubagents = (id: string): void => {
     setExpanded((current) => {
@@ -593,12 +636,12 @@ function ConfiguredAppContent({ routerUrl, bootstrapRouterUrl, agentId: requeste
     />
     <RouterManagerDialog open={dialog === "routers"} routers={settings.routers.map((url) => ({ url, ...(settings.aliases[url] ? { alias: settings.aliases[url] } : {}), agentId: settings.agentIds[url] ?? (url === activeUrl ? resolvedAgentId : requestedAgentId ?? "wolfgang") }))} activeUrl={activeUrl} defaultAgentId={requestedAgentId ?? "wolfgang"} onClose={() => setDialog(undefined)} onSave={saveRouter} onSelect={selectRouter} onRemove={removeRouter} onProviderSettings={() => setDialog("provider-settings")} />
     <ProviderAuthDialog open={dialog === "provider-settings"} client={session.transport.http} refreshKey={providerRefresh} {...(providerPrompt ? { prompt: providerPrompt } : {})} onClose={() => setDialog(undefined)} onPromptHandled={() => setProviderPrompt(undefined)} />
-    {selectedLegacyPeer && selectedAgent ? <InlineToolSettingsDialog open={dialog === "inline-tools"} peer={selectedLegacyPeer} enabled={selectedAgent.inline_tool_enabled === true} capabilityAvailable={inlineToolControlAvailable && selectedAgent.inline_tool_control_available === true} pending={pendingInlineToolControl} {...(inlineToolError ? { error: inlineToolError } : {})} onClose={() => { setDialog(undefined); setInlineToolError(undefined); }} onSave={saveInlineToolSettings} /> : null}
-    {selectedLegacyPeer && selectedAgent ? <GoalEditorDialog open={dialog === "goal"} peer={selectedLegacyPeer} {...(selectedAgent.goal_state ? { goalState: selectedAgent.goal_state } : {})} capabilityAvailable={goalControlAvailable && session.transport.goalControlAvailable} pending={pendingGoalControl} {...(goalError ? { error: goalError } : {})} onClose={() => { setDialog(undefined); }} onSave={saveGoal} /> : null}
-    {selectedLegacyPeer ? <ReminderDialog open={dialog === "reminders"} peer={selectedLegacyPeer} creator={resolvedAgentId} reminders={session.state.reminders} locks={Object.fromEntries(session.state.reminderLocks)} pendingIds={pendingReminderIds} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={lockReminder} /> : null}
+    {selectedLegacyPeer && selectedAgent ? <InlineToolSettingsDialog open={dialog === "inline-tools"} peer={selectedLegacyPeer} enabled={selectedAgent.inline_tool_enabled === true} capabilityAvailable={inlineToolControlAvailable && selectedAgent.inline_tool_control_available === true} pending={pendingInlineToolControl} {...(inlineToolError ? { error: inlineToolError } : {})} onClose={() => { setDialog(undefined); setInlineToolError(undefined); }} onSave={saveInlineToolSettings} /> : selectedManagedAgent ? <InlineToolSettingsDialog open={dialog === "inline-tools"} peer={selectedManagedAgent.agent_id} enabled={managedInlineToolsEnabled === true} capabilityAvailable={selectedManagedAgent.accepting_prompts} pending={managedPending} {...(inlineToolError ? { error: inlineToolError } : {})} onClose={() => { setDialog(undefined); setInlineToolError(undefined); }} onSave={saveManagedInlineTools} /> : null}
+    {selectedLegacyPeer && selectedAgent ? <GoalEditorDialog open={dialog === "goal"} peer={selectedLegacyPeer} {...(selectedAgent.goal_state ? { goalState: selectedAgent.goal_state } : {})} capabilityAvailable={goalControlAvailable && session.transport.goalControlAvailable} pending={pendingGoalControl} {...(goalError ? { error: goalError } : {})} onClose={() => { setDialog(undefined); }} onSave={saveGoal} /> : selectedManagedAgent ? <GoalEditorDialog open={dialog === "goal"} peer={selectedManagedAgent.agent_id} goalState={managedGoalState ?? DEFAULT_GOAL_STATE} capabilityAvailable={selectedManagedAgent.accepting_prompts} pending={managedPending} {...(goalError ? { error: goalError } : {})} onClose={() => { setDialog(undefined); }} onSave={saveManagedGoal} /> : null}
+    {selectedLegacyPeer ? <ReminderDialog open={dialog === "reminders"} peer={selectedLegacyPeer} creator={resolvedAgentId} reminders={session.state.reminders} locks={Object.fromEntries(session.state.reminderLocks)} pendingIds={pendingReminderIds} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={lockReminder} /> : selectedManagedAgent ? <ReminderDialog open={dialog === "reminders"} peer={selectedManagedAgent.agent_id} creator={resolvedAgentId} reminders={session.state.reminders} locks={{}} pendingIds={new Set()} templates={session.state.templates} templatesLoaded={templatesLoaded} dialogState={reminderDialogState} onDialogStateChange={setReminderDialogState} onUseTemplate={useReminderTemplate} onManageTemplates={() => { setReminderTemplateToUse(undefined); setPromptReturnDialog("reminders"); setDialog("prompts"); }} {...(reminderStatus ? { status: reminderStatus } : {})} onClose={() => { setDialog(undefined); setReminderDialogState({ mode: "list", subject: "", body: "", delay: 1, recurring: false, lockAfterCreate: false }); }} onCreate={(payload, lock) => createReminder(payload, lock)} onUpdate={(id, payload) => updateReminder(id, payload)} onDelete={(id) => deleteReminder(id)} onLock={() => setReminderStatus("Reminder locking is not available for managed agents.")} /> : null}
     <PromptTemplateDialog open={dialog === "prompts"} templates={session.state.templates} loaded={templatesLoaded} {...(promptImportProgress === undefined ? {} : { importProgress: promptImportProgress })} {...(reminderTemplateToUse ? { templateToUse: reminderTemplateToUse } : templateToUse ? { templateToUse } : {})} {...(reminderTemplateToUse && reminderSelection ? { selection: reminderSelection } : !reminderTemplateToUse && composerSelection ? { selection: composerSelection } : {})} onClose={closePromptTemplateDialog} onClosed={reopenDialogAfterPromptClose} onSave={(template) => saveTemplate(template)} onDelete={(id) => deleteTemplate(id)} onImport={(items, overwrite) => importTemplates(items, overwrite)} onInsert={(value, selection) => { if (reminderTemplateToUse) insertReminderTemplate(value, selection); else insertTemplate(value, selection); }} />
     <ArrivalDialog open={dialog === "arrival"} {...(arrivalForDialog ? { arrival: arrivalForDialog } : {})} uiAgentId={resolvedAgentId} onClose={() => setDialog(undefined)} onDismiss={(id) => session.dispatch({ type: "arrival/remove", scope, agent: id })} />
-    {selectedManagedAgent ? <ManagedControlDialog open={dialog === "managed"} agent={selectedManagedAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} confirmTermination={managedTerminationConfirmation} onConfirmTerminationChange={setManagedTerminationConfirmation} onClose={() => { setDialog(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); }} onAction={manageAction} /> : <ManagedAgentDialog open={dialog === "managed"} recentFolders={managedRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} />}
+    {selectedManagedAgent ? <ManagedControlDialog open={dialog === "managed"} agent={selectedManagedAgent} pending={managedPending} {...(managedError ? { error: managedError } : {})} confirmTermination={managedTerminationConfirmation} onConfirmTerminationChange={setManagedTerminationConfirmation} onClose={() => { setDialog(undefined); setManagedError(undefined); setManagedTerminationConfirmation(false); }} onAction={manageAction} onGoal={openManagedGoal} onReminders={openManagedReminders} onInlineTools={openManagedInlineTools} /> : <ManagedAgentDialog open={dialog === "managed"} recentFolders={managedRecentFolders} pending={managedPending} {...(managedError ? { error: managedError } : {})} onClose={() => { setDialog(undefined); setManagedError(undefined); }} onLaunch={launchManaged} onAction={manageAction} onListDirectories={(path) => session.transport.http.managedDirectories(path)} onModels={session.transport.http.models} />}
   </>;
 }
 

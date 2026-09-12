@@ -361,12 +361,44 @@ def execute_supervisor(operation: str, arguments: dict[str, Any], agent_id: str,
             return request_router("/v1/health")
         message_id = identifier(arguments.get("messageId"), "messageId")
         return request_router("/v1/messages/" + message_id + ("/retry" if action == "retry" else ""), "POST" if action == "retry" else "DELETE")
-    # The remaining process-local controls have no external supervisor script.
-    # They are still real root operations: retain the most recent per-agent
-    # setting under the request-id idempotency boundary for a later host bridge.
+    # Goal state is router-managed durable product state even though the small
+    # host adapter carries it between current managed process instances. Keep a
+    # stable read projection so the Web UI can reopen the shared goal editor.
     scoped = settings.setdefault(agent_id, {})
     if not isinstance(scoped, dict):
         raise RuntimeError("managed root control settings are invalid")
+    if operation == "goal.control":
+        default_settings = {
+            "goal_lock_enabled": False,
+            "snooze_enabled": True,
+            "snooze_duration_ms": 60_000,
+            "snooze_turn_limit": None,
+            "snooze_budget_cap_ms": None,
+            "snooze_refill_yield_ms": 30_000,
+            "snooze_refill_elapsed_ms": 60_000,
+        }
+        current = scoped.get(operation)
+        if not isinstance(current, dict):
+            current = {"enabled": False, "goal": "", **default_settings}
+        else:
+            current = {**default_settings, **current}
+        supplied_settings = arguments.get("settings")
+        if supplied_settings is not None:
+            if not isinstance(supplied_settings, dict) or set(supplied_settings) != set(default_settings):
+                raise ValueError("goal settings are invalid")
+            current.update(supplied_settings)
+        if action == "set":
+            current.update({"enabled": True, "goal": text(arguments.get("goal"), "goal")})
+            scoped[operation] = current
+        elif action == "off":
+            current.update({"enabled": False, "goal": ""})
+            scoped[operation] = current
+        elif action != "status":
+            raise ValueError("goal action is invalid")
+        return result("ok", "Managed goal updated." if action != "status" else "Managed goal loaded.", {"goal_state": current})
+    # The remaining process-local controls have no external supervisor script.
+    # They are still real root operations: retain the most recent per-agent
+    # setting under the request-id idempotency boundary for a later host bridge.
     scoped[operation] = arguments
     return result("ok", "Managed root control updated.", {"operation": operation, "action": action})
 

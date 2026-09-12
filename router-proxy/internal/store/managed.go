@@ -2896,6 +2896,30 @@ func readinessSourceFenceArgs(fence ManagedRuntimeFence) []any {
 		fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash}
 }
 
+// UpdateManagedDesiredPolicy persists a new router-owned runtime policy for
+// the current process fence. It intentionally leaves the last applied receipt
+// intact until Pi confirms the replacement projection.
+func (s *Store) UpdateManagedDesiredPolicy(ctx context.Context, fence ManagedRuntimeFence, policy ManagedDesiredPolicy) error {
+	if !validManagedRuntimeFence(fence) || len(policy.Canonical) < 2 || len(policy.Canonical) > 32768 || !managedSHA256RE.MatchString(policy.SHA256) {
+		return errors.New("managed desired policy is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		args := append([]any{policy.Canonical, policy.SHA256}, readinessSourceFenceArgs(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET desired_policy_canonical = ?, desired_policy_sha256 = ? WHERE `+readinessSourceFenceWhere(), args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+		}
+		return nil
+	})
+}
+
 func (s *Store) ConfirmManagedPolicyApplied(ctx context.Context, fence ManagedRuntimeFence, policy ManagedDesiredPolicy) error {
 	if !validManagedRuntimeFence(fence) || len(policy.Canonical) < 2 || len(policy.Canonical) > 32768 || !managedSHA256RE.MatchString(policy.SHA256) {
 		return errors.New("managed policy confirmation is invalid")
@@ -2904,6 +2928,31 @@ func (s *Store) ConfirmManagedPolicyApplied(ctx context.Context, fence ManagedRu
 		args := append([]any{policy.Canonical, policy.SHA256, formatTimestamp(s.clock.Now())}, readinessSourceFenceArgs(fence)...)
 		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET applied_policy_canonical = ?, applied_policy_sha256 = ?, policy_confirmed_at = ? WHERE `+readinessSourceFenceWhere()+`
 			AND snapshot_id IS NULL AND snapshot_owner_session_id IS NULL AND snapshot_sequence IS NULL AND snapshot_canonical IS NULL AND snapshot_sha256 IS NULL AND snapshot_confirmed_at IS NULL`, args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
+		}
+		return nil
+	})
+}
+
+// ConfirmManagedRuntimePolicyApplied records a policy confirmation after the
+// process has completed its initial readiness snapshot. The startup-specific
+// confirmation above deliberately rejects that state; an interactive policy
+// change must retain the already-authoritative child snapshot.
+func (s *Store) ConfirmManagedRuntimePolicyApplied(ctx context.Context, fence ManagedRuntimeFence, policy ManagedDesiredPolicy) error {
+	if !validManagedRuntimeFence(fence) || len(policy.Canonical) < 2 || len(policy.Canonical) > 32768 || !managedSHA256RE.MatchString(policy.SHA256) {
+		return errors.New("managed runtime policy confirmation is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		args := append([]any{policy.Canonical, policy.SHA256, formatTimestamp(s.clock.Now())}, readinessSourceFenceArgs(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_readiness_sources SET applied_policy_canonical = ?, applied_policy_sha256 = ?, policy_confirmed_at = ? WHERE `+readinessSourceFenceWhere(), args...)
 		if err != nil {
 			return err
 		}

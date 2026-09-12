@@ -21,6 +21,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestManagedGoalSettingsAcceptsOnlyTheSharedEditorShape(t *testing.T) {
+	valid := map[string]json.RawMessage{"settings": json.RawMessage(`{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":120000,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)}
+	settings, err := managedGoalSettings(valid)
+	require.NoError(t, err)
+	require.Equal(t, true, settings["goal_lock_enabled"])
+	require.Equal(t, int64(120000), settings["snooze_duration_ms"])
+	require.Nil(t, settings["snooze_turn_limit"])
+
+	_, err = managedGoalSettings(map[string]json.RawMessage{"settings": json.RawMessage(`{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":0,"snooze_turn_limit":null,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)})
+	require.Error(t, err)
+	_, err = managedGoalSettings(map[string]json.RawMessage{"settings": json.RawMessage(`{"goal_lock_enabled":true,"snooze_enabled":true,"snooze_duration_ms":60000,"snooze_turn_limit":21,"snooze_budget_cap_ms":null,"snooze_refill_yield_ms":30000,"snooze_refill_elapsed_ms":60000}`)})
+	require.Error(t, err)
+}
+
+func TestManagedGoalStateKeepsDurableSharedEditorSettings(t *testing.T) {
+	state := managedGoalState(map[string]any{"goal_state": map[string]any{"enabled": false, "goal": "stale text", "goal_lock_enabled": true, "snooze_duration_ms": int64(120000)}})
+	require.False(t, state["enabled"].(bool))
+	require.Equal(t, "", state["goal"])
+	require.Equal(t, true, state["goal_lock_enabled"])
+	require.Equal(t, int64(120000), state["snooze_duration_ms"])
+}
+
 func newManagedHTTPTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	durable, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), store.Options{})

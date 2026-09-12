@@ -92,6 +92,18 @@ func (r *Router) handleManagedHTTP(w http.ResponseWriter, req *http.Request) boo
 	case req.Method == http.MethodPost && managedRestartPath(req.URL.Path) != "":
 		r.handleManagedRestart(w, req, managedRestartPath(req.URL.Path))
 		return true
+	case req.Method == http.MethodGet && managedGoalPath(req.URL.Path) != "":
+		r.handleManagedGoalGET(w, req, managedGoalPath(req.URL.Path))
+		return true
+	case req.Method == http.MethodPut && managedGoalPath(req.URL.Path) != "":
+		r.handleManagedGoalPUT(w, req, managedGoalPath(req.URL.Path))
+		return true
+	case req.Method == http.MethodGet && managedInlineToolsPath(req.URL.Path) != "":
+		r.handleManagedInlineToolsGET(w, req, managedInlineToolsPath(req.URL.Path))
+		return true
+	case req.Method == http.MethodPut && managedInlineToolsPath(req.URL.Path) != "":
+		r.handleManagedInlineToolsPUT(w, req, managedInlineToolsPath(req.URL.Path))
+		return true
 	case req.Method == http.MethodDelete && managedTerminatePath(req.URL.Path) != "":
 		r.handleManagedTerminate(w, req, managedTerminatePath(req.URL.Path))
 		return true
@@ -1099,6 +1111,230 @@ func (r *Router) handleManagedAgentGET(w http.ResponseWriter, req *http.Request)
 	}
 	r.writeManagedJSON(w, req, 200, managed.ProjectionEnvelope(snapshot), nil)
 }
+func managedGoalPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/goal") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/goal")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func managedInlineToolsPath(path string) string {
+	const prefix = "/v1/managed-agents/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/inline-tools") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/inline-tools")
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+func managedGoalState(details map[string]any) map[string]any {
+	state, _ := details["goal_state"].(map[string]any)
+	enabled, _ := state["enabled"].(bool)
+	goal, _ := state["goal"].(string)
+	if !enabled {
+		goal = ""
+	}
+	result := map[string]any{
+		"enabled": enabled, "goal": goal,
+		"goal_lock_enabled": false, "snooze_enabled": true, "snooze_duration_ms": int64(60000),
+		"snooze_turn_limit": nil, "snooze_budget_cap_ms": nil,
+		"snooze_refill_yield_ms": int64(30000), "snooze_refill_elapsed_ms": int64(60000),
+		"outcome_counts": map[string]any{"COMPLETED": 0, "NOT_DONE": 0},
+	}
+	for _, key := range []string{"goal_lock_enabled", "snooze_enabled", "snooze_duration_ms", "snooze_turn_limit", "snooze_budget_cap_ms", "snooze_refill_yield_ms", "snooze_refill_elapsed_ms"} {
+		if value, found := state[key]; found {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+func managedGoalSettings(payload map[string]json.RawMessage) (map[string]any, error) {
+	raw, found := payload["settings"]
+	if !found {
+		return nil, nil
+	}
+	var values map[string]json.RawMessage
+	if json.Unmarshal(raw, &values) != nil || len(values) != 7 {
+		return nil, errors.New("managed goal settings are invalid")
+	}
+	readBoolean := func(name string) (bool, bool) {
+		var value bool
+		return value, json.Unmarshal(values[name], &value) == nil
+	}
+	readPositive := func(name string) (int64, bool) {
+		var value int64
+		return value, json.Unmarshal(values[name], &value) == nil && value > 0
+	}
+	readNullablePositive := func(name string) (any, bool) {
+		if bytes.Equal(bytes.TrimSpace(values[name]), []byte("null")) {
+			return nil, true
+		}
+		value, ok := readPositive(name)
+		return value, ok
+	}
+	goalLock, lockOK := readBoolean("goal_lock_enabled")
+	snooze, snoozeOK := readBoolean("snooze_enabled")
+	duration, durationOK := readPositive("snooze_duration_ms")
+	turnLimit, turnLimitOK := readNullablePositive("snooze_turn_limit")
+	if number, ok := turnLimit.(int64); ok && number > 20 {
+		turnLimitOK = false
+	}
+	budget, budgetOK := readNullablePositive("snooze_budget_cap_ms")
+	yield, yieldOK := readPositive("snooze_refill_yield_ms")
+	elapsed, elapsedOK := readPositive("snooze_refill_elapsed_ms")
+	if !lockOK || !snoozeOK || !durationOK || !turnLimitOK || !budgetOK || !yieldOK || !elapsedOK {
+		return nil, errors.New("managed goal settings are invalid")
+	}
+	return map[string]any{"goal_lock_enabled": goalLock, "snooze_enabled": snooze, "snooze_duration_ms": duration, "snooze_turn_limit": turnLimit, "snooze_budget_cap_ms": budget, "snooze_refill_yield_ms": yield, "snooze_refill_elapsed_ms": elapsed}, nil
+}
+
+func (r *Router) handleManagedGoalGET(w http.ResponseWriter, req *http.Request, agentID string) {
+	result, err := r.managed.DirectRootControl(req.Context(), agentID, "", "goal.control", map[string]any{"action": "status"})
+	if err != nil || result.Status != "ok" {
+		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed agent goal controls are not ready"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"goal_state": managedGoalState(result.Details)}, nil)
+}
+
+func (r *Router) handleManagedGoalPUT(w http.ResponseWriter, req *http.Request, agentID string) {
+	requestID := req.Header.Get("X-Request-ID")
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 16*1024, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	if len(payload) < 1 || len(payload) > 3 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	action, actionErr := managedString(payload, "action", true)
+	goal, goalErr := managedString(payload, "goal", false)
+	settings, settingsErr := managedGoalSettings(payload)
+	setFieldCount := 2
+	if settings != nil {
+		setFieldCount++
+	}
+	offFieldCount := 1
+	if settings != nil {
+		offFieldCount++
+	}
+	if actionErr != nil || goalErr != nil || settingsErr != nil || (action != "set" && action != "off") || (action == "set" && (len(payload) != setFieldCount || goal == "" || len([]byte(goal)) > 4000)) || (action == "off" && len(payload) != offFieldCount) {
+		r.writeManagedError(w, req, &managedHTTPError{422, "VALIDATION_FAILED", "Managed goal is invalid"})
+		return
+	}
+	canonicalPath := req.URL.Path
+	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
+	if existing, lookupErr := r.store.FindManagedOperation(req.Context(), req.Method, requestID); lookupErr == nil {
+		if existing.CanonicalPath != canonicalPath || existing.CanonicalBodyHash != hex.EncodeToString(bodyHash[:]) {
+			r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
+			return
+		}
+		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+		return
+	} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
+		return
+	}
+	arguments := map[string]any{"action": action}
+	if action == "set" {
+		arguments["goal"] = goal
+	}
+	if settings != nil {
+		arguments["settings"] = settings
+	}
+	result, controlErr := r.managed.DirectRootControl(req.Context(), agentID, requestID, "goal.control", arguments)
+	if controlErr != nil || result.Status != "ok" {
+		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed goal could not be updated"})
+		return
+	}
+	body, _ := json.Marshal(map[string]any{"goal_state": managedGoalState(result.Details)})
+	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, ResponseBody: body}
+	if err := r.store.PutManagedOperation(req.Context(), operation); err != nil {
+		var conflict *store.ManagedIdempotencyConflictError
+		if errors.As(err, &conflict) {
+			r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+			return
+		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Managed goal could not be saved"})
+		return
+	}
+	r.writeManagedRaw(w, req, http.StatusOK, operation.ResponseHeaders, body)
+}
+
+func (r *Router) handleManagedInlineToolsGET(w http.ResponseWriter, req *http.Request, agentID string) {
+	enabled, err := r.managed.ManagedInlineToolsEnabled(req.Context(), agentID)
+	if err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{404, "AGENT_NOT_FOUND", "Managed agent was not found"})
+		return
+	}
+	r.writeManagedJSON(w, req, http.StatusOK, map[string]any{"enabled": enabled}, nil)
+}
+
+func (r *Router) handleManagedInlineToolsPUT(w http.ResponseWriter, req *http.Request, agentID string) {
+	requestID := req.Header.Get("X-Request-ID")
+	if !canonicalUUID(requestID) {
+		r.writeManagedError(w, req, &managedHTTPError{400, "INVALID_REQUEST_ID", "X-Request-ID must be a canonical UUID"})
+		return
+	}
+	payload, _, err := decodeManagedObject(req, 1024, true)
+	if err != nil {
+		r.writeManagedError(w, req, err)
+		return
+	}
+	if len(payload) != 1 {
+		r.writeManagedError(w, req, &managedHTTPError{400, "UNKNOWN_FIELD", "Request contains an unknown field"})
+		return
+	}
+	var enabled bool
+	if raw, found := payload["enabled"]; !found || json.Unmarshal(raw, &enabled) != nil {
+		r.writeManagedError(w, req, &managedHTTPError{422, "VALIDATION_FAILED", "Managed inline-tool setting is invalid"})
+		return
+	}
+	canonicalPath := req.URL.Path
+	bodyHash := sha256.Sum256(canonicalManagedBody(payload))
+	if existing, lookupErr := r.store.FindManagedOperation(req.Context(), req.Method, requestID); lookupErr == nil {
+		if existing.CanonicalPath != canonicalPath || existing.CanonicalBodyHash != hex.EncodeToString(bodyHash[:]) {
+			r.writeManagedError(w, req, &managedHTTPError{409, "IDEMPOTENCY_CONFLICT", "Request ID belongs to a different request"})
+			return
+		}
+		r.writeManagedRaw(w, req, existing.ResponseStatus, existing.ResponseHeaders, existing.ResponseBody)
+		return
+	} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Router could not read the operation"})
+		return
+	}
+	if err := r.managed.SetManagedInlineTools(req.Context(), agentID, enabled); err != nil {
+		r.writeManagedError(w, req, &managedHTTPError{409, "AGENT_NOT_READY", "Managed inline-tool settings could not be updated"})
+		return
+	}
+	body, _ := json.Marshal(map[string]any{"enabled": enabled})
+	operation := store.ManagedOperation{OperationID: requestID, Method: req.Method, CanonicalPath: canonicalPath, RequestID: requestID, CanonicalBodyHash: hex.EncodeToString(bodyHash[:]), State: "terminal", ResponseStatus: http.StatusOK, ResponseHeaders: map[string]string{"Content-Type": "application/json; charset=utf-8", "X-Request-ID": requestID}, ResponseBody: body}
+	if err := r.store.PutManagedOperation(req.Context(), operation); err != nil {
+		var conflict *store.ManagedIdempotencyConflictError
+		if errors.As(err, &conflict) {
+			r.replayManagedOperation(w, req, requestID, canonicalPath, hex.EncodeToString(bodyHash[:]))
+			return
+		}
+		r.writeManagedError(w, req, &managedHTTPError{500, "INTERNAL", "Managed inline-tool settings could not be saved"})
+		return
+	}
+	r.writeManagedRaw(w, req, http.StatusOK, operation.ResponseHeaders, body)
+}
+
 func (r *Router) writeManagedRaw(w http.ResponseWriter, req *http.Request, status int, headers map[string]string, body []byte) {
 	w.Header().Set("Cache-Control", "no-store")
 	for key, value := range headers {

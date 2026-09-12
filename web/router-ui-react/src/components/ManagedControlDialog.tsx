@@ -9,18 +9,29 @@ export interface ManagedControlDialogProps {
   error?: string;
   onClose(): void;
   onAction(agentId: string, action: "restart" | "reset" | "terminate"): Promise<void>;
+  onGoal(): void;
+  onReminders(): void;
+  onInlineTools(): void;
   confirmTermination: boolean;
   onConfirmTerminationChange(open: boolean): void;
 }
 
-export function ManagedControlDialog({ open, agent, pending = false, error, onClose, onAction, confirmTermination, onConfirmTerminationChange }: ManagedControlDialogProps): ReactElement {
+export function ManagedControlDialog({ open, agent, pending = false, error, onClose, onAction, onGoal, onReminders, onInlineTools, confirmTermination, onConfirmTerminationChange }: ManagedControlDialogProps): ReactElement {
   const runAction = (action: "restart" | "reset" | "terminate"): void => { void onAction(agent.agent_id, action); };
 
-  return <DialogShell open={open} title={`Manage ${agent.agent_id}`} titleId="managed-control-dialog-title" description="Restart, reset, or stop this managed agent." onClose={onClose} closeLabel="Close managed agent controls" className="message-dialog managed-control-dialog">
+  return <DialogShell open={open} title={`Manage ${agent.agent_id}`} titleId="managed-control-dialog-title" description="Manage this agent's work controls or lifecycle." onClose={onClose} closeLabel="Close managed agent controls" className="message-dialog managed-control-dialog">
     <div className="managed-control-body">
       <section className="managed-control-summary" aria-label="Managed agent status">
         <p className="managed-control-summary-label">Current status</p>
         <p><strong>{agent.lifecycle_state}</strong><span aria-hidden="true"> · </span>{agent.activity_state}</p>
+      </section>
+      <section className="managed-control-settings" aria-label={`Settings for ${agent.agent_id}`}>
+        <p className="managed-control-summary-label">Work controls</p>
+        <div className="dialog-actions managed-control-actions">
+          <button type="button" disabled={pending} onClick={onGoal}>Set goal</button>
+          <button type="button" className="secondary" disabled={pending} onClick={onReminders}>Manage reminders</button>
+          <button type="button" className="secondary" disabled={pending} onClick={onInlineTools}>Inline tool settings</button>
+        </div>
       </section>
       <div className="dialog-actions managed-control-actions" aria-label={`Actions for ${agent.agent_id}`}>
         <button type="button" disabled={pending} onClick={() => runAction("restart")}>Restart</button>
