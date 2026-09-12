@@ -2127,7 +2127,8 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					receiptDone = nil
 				}
 				if acknowledged && event.Reply != nil {
-					clearDirectPromptActivity()
+					// A reply can arrive before its native settled boundary. Keep the
+					// direct-prompt affordance visible until the actual turn settles.
 					m.publishDirectReply(*attempt, *event.Reply)
 				}
 				if acknowledged && event.Settled {
