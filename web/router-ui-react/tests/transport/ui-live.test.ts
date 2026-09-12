@@ -99,7 +99,7 @@ describe("direct UI-live transport", () => {
     vi.useRealTimers();
   });
 
-  it("accepts authoritative agent snapshot repairs and rejects non-contiguous child snapshots", () => {
+  it("accepts authoritative agent and child snapshot repairs while rejecting regressions", () => {
     vi.useFakeTimers();
     const sockets: UILiveSocket[] = [];
     const frames: unknown[] = [];
@@ -117,14 +117,16 @@ describe("direct UI-live transport", () => {
     sockets[0]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 7, generated_at: "2030-01-01T00:00:00.000Z", agents: [agent] }) });
     sockets[0]?.emit("message", { data: JSON.stringify(childSnapshot(7)) });
     sockets[0]?.emit("message", { data: JSON.stringify(childSnapshot(9)) });
-    expect(frames).toHaveLength(2);
+    expect(frames).toHaveLength(3);
+    expect(recoveries).not.toHaveBeenCalled();
+    sockets[0]?.emit("message", { data: JSON.stringify(childSnapshot(8)) });
     expect(recoveries).toHaveBeenCalledTimes(1);
     vi.runAllTimers();
     expect(sockets).toHaveLength(2);
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 9, generated_at: "2030-01-01T00:00:01.000Z", agents: [agent] }) });
     sockets[1]?.emit("message", { data: JSON.stringify({ type: "managed_agents_snapshot", protocol: "mecha.web/v1", projection_version: 9, generated_at: "2030-01-01T00:00:01.000Z", agents: [agent] }) });
     expect(recoveries).toHaveBeenCalledTimes(1);
-    expect(frames).toHaveLength(4);
+    expect(frames).toHaveLength(5);
     client.close();
     vi.useRealTimers();
   });

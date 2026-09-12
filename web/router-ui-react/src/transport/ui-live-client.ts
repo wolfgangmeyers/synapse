@@ -115,7 +115,10 @@ export function createUILiveClient(options: UILiveClientOptions): UILiveClient {
         options.onFrame(raw);
         return;
       }
-      if (childrenVersion === undefined || raw.lifecycle_version !== childrenVersion + 1) { recover(protocolError("child_projection_version_gap")); return; }
+      // Child frames are authoritative full projections, not deltas. A polling
+      // publish can safely skip an intermediate global version, so accept an
+      // equal or newer snapshot and reconnect only if it regresses.
+      if (childrenVersion === undefined || raw.lifecycle_version < childrenVersion) { recover(protocolError("child_projection_version_regressed")); return; }
       childrenVersion = raw.lifecycle_version;
       options.onFrame(raw);
       return;
