@@ -1,8 +1,10 @@
 package managed
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -153,4 +155,206 @@ func TestRedactedStderrRedactsLocalPathsAcrossDiagnosticEncodings(t *testing.T) 
 func TestProcessFactoryRejectsAnUnspecifiedSessionLaunchMode(t *testing.T) {
 	_, err := DefaultProcessFactory().Start(context.Background(), CommandSpec{PiExecutable: "/bin/true", SessionRoot: t.TempDir(), SessionID: "session", Cwd: t.TempDir()})
 	require.Error(t, err)
+}
+
+type processHandshake struct {
+	process *execProcess
+	status  *os.File
+	control *os.File
+	reader  *bufio.Reader
+}
+
+func startHandshakeProcess(t *testing.T, script string) processHandshake {
+	t.Helper()
+	status, statusWriter, err := os.Pipe()
+	require.NoError(t, err)
+	controlReader, control, err := os.Pipe()
+	require.NoError(t, err)
+	command := exec.Command("/bin/sh", "-c", script)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.ExtraFiles = []*os.File{statusWriter, controlReader}
+	stdin, err := command.StdinPipe()
+	require.NoError(t, err)
+	stdout, err := command.StdoutPipe()
+	require.NoError(t, err)
+	stderr, err := command.StderrPipe()
+	require.NoError(t, err)
+	require.NoError(t, command.Start())
+	require.NoError(t, statusWriter.Close())
+	require.NoError(t, controlReader.Close())
+	marker, err := processStartMarker(command.Process.Pid)
+	require.NoError(t, err)
+	tail := newManagedStderrTail()
+	go tail.drain(stderr)
+	process := &execProcess{
+		cmd: command, stdin: stdin, stdout: stdout, stderr: stderr, stderrTail: tail,
+		identity: ProcessIdentity{PID: command.Process.Pid, StartMarker: marker, Incarnation: "test-incarnation"},
+		waitDone: make(chan struct{}),
+	}
+	handshake := processHandshake{process: process, status: status, control: control, reader: bufio.NewReader(status)}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = process.Wait()
+		_ = status.Close()
+		_ = control.Close()
+	})
+	return handshake
+}
+
+func requireHandshake(t *testing.T, reader *bufio.Reader, expected string) {
+	t.Helper()
+	line, err := reader.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, expected, strings.TrimSpace(line))
+}
+
+func requireHandshakeSet(t *testing.T, reader *bufio.Reader, expected ...string) {
+	t.Helper()
+	seen := make(map[string]bool, len(expected))
+	for range expected {
+		line, err := reader.ReadString('\n')
+		require.NoError(t, err)
+		seen[strings.TrimSpace(line)] = true
+	}
+	for _, value := range expected {
+		require.True(t, seen[value], "missing handshake %q", value)
+	}
+}
+
+func TestExecProcessStopRequiresCompleteGroupAbsence(t *testing.T) {
+	handshake := startHandshakeProcess(t, `(printf 'desc-ready\n' >&3; trap 'printf "desc-term\n" >&3; exit 0' TERM; while :; do sleep 30; done) & child=$!; trap 'printf "leader-term\n" >&3; exit 0' TERM; printf 'leader-ready\n' >&3; wait "$child"`)
+	requireHandshakeSet(t, handshake.reader, "desc-ready", "leader-ready")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, handshake.process.Stop(ctx))
+	requireHandshakeSet(t, handshake.reader, "desc-term", "leader-term")
+	require.Equal(t, ProcessAbsent, DefaultProcessGroupOps().Probe(handshake.process.identity).State)
+}
+
+func TestExecProcessStopRetryAfterDeadlineDoesNotSignalLeaderlessGroup(t *testing.T) {
+	handshake := startHandshakeProcess(t, `(trap '' TERM HUP; printf 'desc-ready\n' >&3; IFS= read release <&4; printf 'desc-exit\n' >&3; exit 0) & child=$!; trap 'printf "leader-term\n" >&3; exit 0' TERM; printf 'leader-ready\n' >&3; wait "$child"`)
+	requireHandshakeSet(t, handshake.reader, "desc-ready", "leader-ready")
+
+	short, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	firstErr := handshake.process.Stop(short)
+	cancel()
+	var cleanupErr *ProcessCleanupError
+	require.ErrorAs(t, firstErr, &cleanupErr)
+	requireHandshake(t, handshake.reader, "leader-term")
+
+	long, cancel := context.WithTimeout(context.Background(), time.Second)
+	secondErr := handshake.process.Stop(long)
+	cancel()
+	cleanupErr = nil
+	require.ErrorAs(t, secondErr, &cleanupErr)
+	require.Equal(t, ProcessPresent, cleanupErr.State)
+	_, err := handshake.control.Write([]byte("release\n"))
+	require.NoError(t, err)
+	requireHandshake(t, handshake.reader, "desc-exit")
+	// The descendant's exit handshake is the deterministic proof that the
+	// leaderless group eventually drained after Stop correctly refused a signal.
+}
+
+func TestExecProcessStopDoesNotSignalUnownedGroup(t *testing.T) {
+	handshake := startHandshakeProcess(t, `printf 'ready\n' >&3; IFS= read release <&4; printf 'exit\n' >&3`)
+	requireHandshake(t, handshake.reader, "ready")
+	identity := handshake.process.identity
+
+	handshake.process.identity.StartMarker = "different-start"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	err := handshake.process.Stop(ctx)
+	cancel()
+	var cleanupErr *ProcessCleanupError
+	require.ErrorAs(t, err, &cleanupErr)
+	require.Equal(t, ProcessMismatch, cleanupErr.State)
+	require.Equal(t, ProcessOwned, DefaultProcessGroupOps().Probe(identity).State)
+
+	handshake.process.identity = ProcessIdentity{PID: identity.PID, Incarnation: identity.Incarnation}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	err = handshake.process.Stop(ctx)
+	cancel()
+	cleanupErr = nil
+	require.ErrorAs(t, err, &cleanupErr)
+	require.Equal(t, ProcessUnknown, cleanupErr.State)
+	require.Equal(t, ProcessOwned, DefaultProcessGroupOps().Probe(identity).State)
+
+	_, err = handshake.control.Write([]byte("release\n"))
+	require.NoError(t, err)
+	requireHandshake(t, handshake.reader, "exit")
+}
+
+func TestExecProcessStopEscalatesSIGKILLForBackgroundCaller(t *testing.T) {
+	handshake := startHandshakeProcess(t, `trap 'printf "term-ignored\n" >&3' TERM; printf 'ready\n' >&3; while :; do sleep 30; done`)
+	requireHandshake(t, handshake.reader, "ready")
+
+	started := time.Now()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- handshake.process.Stop(context.Background()) }()
+	requireHandshake(t, handshake.reader, "term-ignored")
+	select {
+	case <-handshake.process.waitDone:
+		t.Fatal("process exited after SIGTERM instead of waiting for escalation")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(processStopInternalGrace + time.Second):
+		t.Fatal("background stop exceeded its internal bound")
+	}
+	require.GreaterOrEqual(t, time.Since(started), processStopInternalGrace/3)
+	require.Equal(t, ProcessAbsent, DefaultProcessGroupOps().Probe(handshake.process.identity).State)
+	select {
+	case <-handshake.process.waitDone:
+	default:
+		t.Fatal("process waiter did not complete")
+	}
+	require.ErrorIs(t, syscall.Kill(-handshake.process.identity.PID, 0), syscall.ESRCH)
+}
+
+func TestProcessStopContextHonorsEarlierCallerDeadline(t *testing.T) {
+	caller, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	callerDeadline, ok := caller.Deadline()
+	require.True(t, ok)
+
+	stopCtx, stopCancel := processStopContext(caller)
+	defer stopCancel()
+	stopDeadline, ok := stopCtx.Deadline()
+	require.True(t, ok)
+	require.LessOrEqual(t, stopDeadline, callerDeadline)
+	require.Less(t, stopDeadline.Sub(time.Now()), processStopInternalGrace)
+	<-stopCtx.Done()
+	require.ErrorIs(t, stopCtx.Err(), context.DeadlineExceeded)
+}
+
+func TestExecProcessStopSerializesConcurrentAttempts(t *testing.T) {
+	handshake := startHandshakeProcess(t, `(trap '' TERM HUP; printf 'desc-ready\n' >&3; IFS= read release <&4; printf 'desc-exit\n' >&3; exit 0) & child=$!; trap 'printf "leader-term\n" >&3; exit 0' TERM; printf 'leader-ready\n' >&3; wait "$child"`)
+	requireHandshakeSet(t, handshake.reader, "desc-ready", "leader-ready")
+	firstDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		firstDone <- handshake.process.Stop(ctx)
+		cancel()
+	}()
+	requireHandshake(t, handshake.reader, "leader-term")
+
+	secondDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		secondDone <- handshake.process.Stop(ctx)
+		cancel()
+	}()
+	firstErr := <-firstDone
+	var cleanupErr *ProcessCleanupError
+	require.ErrorAs(t, firstErr, &cleanupErr)
+	_, err := handshake.control.Write([]byte("release\n"))
+	require.NoError(t, err)
+	requireHandshake(t, handshake.reader, "desc-exit")
+	secondErr := <-secondDone
+	cleanupErr = nil
+	require.ErrorAs(t, secondErr, &cleanupErr)
+	require.Equal(t, ProcessPresent, cleanupErr.State)
 }
