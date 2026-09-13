@@ -148,6 +148,8 @@ func TestManagedRootRecoveryTransitionsAreFencedWriteOnceAndRetained(t *testing.
 	require.Equal(t, 1, counted.UnexpectedExitCount)
 	require.NoError(t, durable.AdvanceManagedRootRecovery(ctx, action.ActionID, "claimed", "reaping"))
 	require.NoError(t, durable.AdvanceManagedRootRecovery(ctx, action.ActionID, "reaping", "stopped"))
+	require.Error(t, durable.InstallManagedRootRecoveryTarget(ctx, action.ActionID, ManagedProcessIdentity{PID: 72, StartMarker: "start-2", Incarnation: "inc-2"}, "target-1"))
+	require.NoError(t, durable.BeginManagedRootRecoveryTarget(ctx, action.ActionID, "target-1"))
 	require.NoError(t, durable.InstallManagedRootRecoveryTarget(ctx, action.ActionID, ManagedProcessIdentity{PID: 72, StartMarker: "start-2", Incarnation: "inc-2"}, "target-1"))
 	target := fence
 	target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation, target.RuntimeGeneration = 72, "start-2", "inc-2", "target-1"
@@ -237,4 +239,19 @@ func TestManagedRootRecoveryRejectsMutationOfOldFence(t *testing.T) {
 	require.NoError(t, durable.FailManagedRootRecovery(ctx, action.ActionID, "ORPHAN_IDENTITY_UNSAFE", "unsafe process identity"))
 	err = durable.AdvanceManagedRootRecovery(ctx, action.ActionID, "claimed", "reaping")
 	require.Error(t, err)
+}
+
+func TestManagedRootRecoveryInterruptsOnlyTheOldFence(t *testing.T) {
+	durable := openTestStore(t)
+	ctx := context.Background()
+	fence := seedManagedRootRecoveryAgent(t, durable)
+	require.NoError(t, durable.InterruptManagedControlRequests(ctx, fence))
+	require.NoError(t, durable.InterruptManagedGoalEvaluation(ctx, fence))
+	fresh := fence
+	fresh.ProcessPID = 72
+	fresh.ProcessStartMarker = "fresh-start"
+	fresh.ProcessIncarnation = "fresh-inc"
+	fresh.RuntimeGeneration = "fresh-runtime"
+	require.NoError(t, durable.InterruptManagedControlRequests(ctx, fresh))
+	require.NoError(t, durable.InterruptManagedGoalEvaluation(ctx, fresh))
 }

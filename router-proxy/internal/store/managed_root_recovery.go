@@ -325,6 +325,36 @@ type ManagedProcessIdentity struct {
 	StartMarker, Incarnation string
 }
 
+// BeginManagedRootRecoveryTarget reserves the one external start boundary.
+// The starting stage with no target identity means a process may be created by
+// the current owner; a later router must fail closed instead of starting twice.
+func (s *Store) BeginManagedRootRecoveryTarget(ctx context.Context, actionID, targetGeneration string) error {
+	if actionID == "" || targetGeneration == "" {
+		return errors.New("managed root recovery target reservation is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		action, err := managedRootRecoveryActionForIDTx(ctx, s.db, actionID)
+		if err != nil {
+			return err
+		}
+		if action.TargetRuntimeGeneration != targetGeneration {
+			return errors.New("managed root recovery target is immutable")
+		}
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET stage='starting',updated_at=? WHERE action_id=? AND target_runtime_generation=? AND stage='stopped' AND target_process_pid IS NULL AND `+managedRootRecoveryFenceWhere(action), append([]any{formatTimestamp(s.clock.Now()), actionID, targetGeneration}, managedRootRecoveryFenceArgs(action)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return errors.New("managed root recovery target is stale")
+		}
+		return nil
+	})
+}
+
 func (s *Store) InstallManagedRootRecoveryTarget(ctx context.Context, actionID string, identity ManagedProcessIdentity, targetGeneration string) error {
 	if actionID == "" || identity.PID <= 0 || identity.StartMarker == "" || identity.Incarnation == "" || targetGeneration == "" {
 		return errors.New("managed root recovery target identity is invalid")
@@ -339,7 +369,7 @@ func (s *Store) InstallManagedRootRecoveryTarget(ctx context.Context, actionID s
 		}
 		args := []any{identity.PID, identity.StartMarker, identity.Incarnation, formatTimestamp(s.clock.Now()), actionID, targetGeneration}
 		args = append(args, managedRootRecoveryFenceArgs(action)...)
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET target_process_pid=?,target_process_start_marker=?,target_process_incarnation=?,stage='starting',updated_at=? WHERE action_id=? AND target_runtime_generation=? AND stage='stopped' AND target_process_pid IS NULL AND `+managedRootRecoveryFenceWhere(action), args...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET target_process_pid=?,target_process_start_marker=?,target_process_incarnation=?,stage='starting',updated_at=? WHERE action_id=? AND target_runtime_generation=? AND stage='starting' AND target_process_pid IS NULL AND `+managedRootRecoveryFenceWhere(action), args...)
 		if err != nil {
 			return err
 		}
@@ -382,6 +412,9 @@ func (s *Store) InstallManagedRootRecoveryFence(ctx context.Context, old, target
 			}
 			return errors.New("managed root recovery action is stale")
 		}
+		if err := s.rollManagedReadinessSourceFenceTx(ctx, target); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -404,6 +437,63 @@ func (s *Store) CompleteManagedRootRecovery(ctx context.Context, agentID string,
 			return errors.New("managed root recovery target is stale")
 		}
 		return nil
+	})
+}
+
+// CompleteManagedRootRecoveryReady is the recovery-only admission boundary.
+// It publishes the new runtime, opens prompt admission, activates recipients,
+// and retains the recovery claim in one transaction after all source receipts.
+func (s *Store) CompleteManagedRootRecoveryReady(ctx context.Context, agentID string, target ManagedRuntimeFence) error {
+	if !validManagedRuntimeFence(target) || agentID == "" || target.AgentID != agentID {
+		return errors.New("managed root recovery completion is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		action, err := managedRootRecoveryActionForIDTx(ctx, s.db, managedRootRecoveryActionID(agentID, ManagedRuntimeFence{
+			AgentID: agentID, PiSessionID: target.PiSessionID, SessionEpoch: target.SessionEpoch,
+			ProcessPID: target.ProcessPID, ProcessStartMarker: target.ProcessStartMarker,
+			ProcessIncarnation: target.ProcessIncarnation, RuntimeGeneration: target.RuntimeGeneration,
+			ManifestRevision: target.ManifestRevision, ManifestHash: target.ManifestHash,
+		}))
+		if err != nil {
+			// The action ID is based on the old fence, so locate the one active
+			// target claim by its immutable target identity.
+			action, err = managedRootRecoveryActionQuery(ctx, s.db, `WHERE agent_id=? AND target_runtime_generation=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=? AND stage='starting' LIMIT 1`, agentID, target.RuntimeGeneration, target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation)
+		}
+		if err != nil || action.Stage != "starting" {
+			return errors.New("managed root recovery target is stale")
+		}
+		if err := s.managedReadinessSourcesConfirmedForFenceTx(ctx, target); err != nil {
+			return err
+		}
+		now := formatTimestamp(s.clock.Now())
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,started_at=COALESCE(started_at,?),updated_at=? WHERE desired_state='running' AND lifecycle_state='starting' AND accepting_prompts=0 AND slot_held=1 AND `+managedFenceWhere(""), append([]any{now, now}, managedFenceValues(target)...)...)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return &ManagedReadinessSourceStaleError{AgentID: agentID}
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state='active',updated_at=? WHERE source_kind='managed' AND owner_identity=? AND state='reserved'`, now, agentID); err != nil {
+			return err
+		}
+		if err := s.reconcileMessageTargetsTx(ctx); err != nil {
+			return err
+		}
+		result, err = s.db.ExecContext(ctx, `UPDATE managed_root_recovery_actions SET stage='ready',updated_at=?,expires_at=?,failure_code=NULL,failure_message=NULL WHERE action_id=? AND stage='starting' AND target_runtime_generation=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=?`, now, formatTimestamp(s.clock.Now().Add(managedRootRecoveryRetention)), action.ActionID, target.RuntimeGeneration, target.ProcessPID, target.ProcessStartMarker, target.ProcessIncarnation)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return errors.New("managed root recovery target is stale")
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
 	})
 }
 
@@ -456,6 +546,40 @@ func (s *Store) FailManagedRootRecovery(ctx context.Context, actionID, code, mes
 // PruneManagedRootRecovery removes only expired terminal rows. Active actions
 // remain available for restart recovery and completed actions remain retained
 // for diagnostics for the same bounded period as other managed operations.
+// InterruptManagedControlRequests closes only nonterminal root-control work
+// owned by an exact lost runtime. A replacement cannot safely resume it with a
+// new fence because its handler may have crossed an external side-effect edge.
+func (s *Store) InterruptManagedControlRequests(ctx context.Context, fence ManagedRuntimeFence) error {
+	if ctx == nil || !validManagedRuntimeFence(fence) {
+		return errors.New("managed control interruption fence is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		args := append([]any{now}, managedFenceValues(fence)...)
+		_, err := s.db.ExecContext(ctx, `UPDATE managed_control_requests SET state='failed',terminal_at=?,error_code='PARENT_PROCESS_LOST',error_detail=NULL,retryable=0,next_append_at=NULL WHERE state NOT IN ('delivered','failed','cancelled') AND `+managedControlFenceWhere(), args...)
+		return err
+	})
+}
+
+// InterruptManagedGoalEvaluation abandons evaluator and snooze state that was
+// claimed by an exact lost runtime. The wakeup row remains fence-bound, so a
+// replacement cannot deliver it as new work.
+func (s *Store) InterruptManagedGoalEvaluation(ctx context.Context, fence ManagedRuntimeFence) error {
+	if ctx == nil || !validManagedRuntimeFence(fence) {
+		return errors.New("managed goal interruption fence is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		args := []any{now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration}
+		_, err := s.db.ExecContext(ctx, `UPDATE managed_agent_policies SET evaluator_state='idle',evaluator_lease_until=NULL,evaluator_reason='evaluation interrupted',next_wakeup_at=NULL,snoozed_until=NULL,snooze_pi_session_id=NULL,snooze_session_epoch=NULL,snooze_process_pid=NULL,snooze_process_start_marker=NULL,snooze_process_incarnation=NULL,snooze_runtime_generation=NULL,updated_at=? WHERE agent_id=? AND ((evaluator_state='evaluating' AND evaluator_pi_session_id=? AND evaluator_session_epoch=? AND evaluator_process_pid=? AND evaluator_process_start_marker=? AND evaluator_process_incarnation=? AND evaluator_runtime_generation=?) OR (evaluator_state='snoozed' AND snooze_pi_session_id=? AND snooze_session_epoch=? AND snooze_process_pid=? AND snooze_process_start_marker=? AND snooze_process_incarnation=? AND snooze_runtime_generation=?))`, args...)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `DELETE FROM managed_goal_activity WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=?`, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration)
+		return err
+	})
+}
+
 func (s *Store) PruneManagedRootRecovery(ctx context.Context) (int, error) {
 	var removed int
 	err := s.runImmediate(ctx, func() error {

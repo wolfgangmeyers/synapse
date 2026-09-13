@@ -3662,11 +3662,13 @@ func (s *Store) MarkManagedReadyFromSources(ctx context.Context, fence ManagedRu
 			return err
 		}
 		where := `agent_id=? AND lifecycle_state='starting' AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=?`
+		args := []any{fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash}
 		if hasLink {
-			where += ` AND launch_operation_id IS NOT NULL AND EXISTS (SELECT 1 FROM managed_http_operations WHERE operation_id=managed_agents.launch_operation_id AND state='pending')`
+			where += ` AND (launch_operation_id IS NOT NULL AND EXISTS (SELECT 1 FROM managed_http_operations WHERE operation_id=managed_agents.launch_operation_id AND state='pending') OR EXISTS (SELECT 1 FROM managed_root_recovery_actions WHERE agent_id=managed_agents.agent_id AND stage='starting' AND target_runtime_generation=? AND target_process_pid=? AND target_process_start_marker=? AND target_process_incarnation=?))`
+			args = append(args, fence.RuntimeGeneration, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation)
 		}
 		now := formatTimestamp(s.clock.Now())
-		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,started_at=COALESCE(started_at,?),updated_at=? WHERE `+where, now, now, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessPID, fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fence.ManifestRevision, fence.ManifestHash)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,started_at=COALESCE(started_at,?),updated_at=? WHERE `+where, append([]any{now, now}, args...)...)
 		if err != nil {
 			return err
 		}
