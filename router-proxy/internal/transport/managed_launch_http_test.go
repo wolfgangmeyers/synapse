@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -92,12 +91,7 @@ func TestManagedLaunchReplayHasOneReservationWithoutCredentials(t *testing.T) {
 	require.NoError(t, err)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
-	names := make([]string, 0, len(manifest.Tools)+3)
-	names = append(names, "subagent", "get_subagent_result", "steer_subagent")
-	for _, tool := range manifest.Tools {
-		names = append(names, tool.Name)
-	}
-	sort.Strings(names)
+	names := expectedManagedActiveToolsForTransportTest(manifest)
 	process := &managedTestProcess{identity: managed.ProcessIdentity{PID: 4321, StartMarker: "start", Incarnation: "incarnation"}, stopped: make(chan struct{})}
 	sessionID := ""
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: managedTestProcessFactory{process: process, session: &sessionID}, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &sessionID, active: names}}, CatalogSource: managed.StoreCatalogSource{Store: durable}, ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
@@ -136,4 +130,12 @@ func TestManagedLaunchReplayHasOneReservationWithoutCredentials(t *testing.T) {
 		agent, readErr := durable.ManagedAgent(ctx, "alpha")
 		return readErr == nil && agent.LifecycleState == "running"
 	}, time.Second, time.Millisecond)
+
+	agents, err := durable.ManagedAgents(ctx)
+	require.NoError(t, err)
+	require.Len(t, agents, 1)
+	operation, err := durable.FindManagedOperation(ctx, http.MethodPost, requestID)
+	require.NoError(t, err)
+	require.Equal(t, agents[0].LaunchOperationID, operation.OperationID)
+	require.NotContains(t, string(operation.ResponseBody), "credential")
 }

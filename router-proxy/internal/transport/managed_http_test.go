@@ -303,12 +303,15 @@ type replayProcess struct {
 }
 
 type replayProcessFactory struct {
-	release chan struct{}
-	mu      sync.Mutex
-	count   int
+	release     chan struct{}
+	started     chan struct{}
+	startedOnce sync.Once
+	mu          sync.Mutex
+	count       int
 }
 
 func (f *replayProcessFactory) Start(_ context.Context, spec managed.CommandSpec) (managed.Process, error) {
+	f.startedOnce.Do(func() { close(f.started) })
 	f.mu.Lock()
 	f.count++
 	process := &replayProcess{managedTestProcess: &managedTestProcess{identity: managed.ProcessIdentity{PID: 5000 + f.count, StartMarker: spec.SessionID, Incarnation: spec.SessionID}, stopped: make(chan struct{})}, session: spec.SessionID}
@@ -397,6 +400,16 @@ func managedLegacyCommandsForTest() []string {
 	return []string{"goal", "goal-lock", "goal-snooze", "goal-snooze-turn-limit", "goal-snooze-budget", "goal-snooze-budget-refill", "mecha-parent-message", "inline-tools", "mecha-reply"}
 }
 
+func expectedManagedActiveToolsForTransportTest(manifest managed.Manifest) []string {
+	active := make([]string, 0, len(manifest.Tools)+7)
+	active = append(active, "read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent")
+	for _, tool := range manifest.Tools {
+		active = append(active, tool.Name)
+	}
+	sort.Strings(active)
+	return active
+}
+
 func TestLaunchReplayLifecycleUsesOneWorkerWideOperation(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -404,13 +417,8 @@ func TestLaunchReplayLifecycleUsesOneWorkerWideOperation(t *testing.T) {
 	require.NoError(t, err)
 	manifest, _, err := managed.LoadManifest(filepath.Join("..", "..", "..", "router", "contract", "managed-tools-v1.json"))
 	require.NoError(t, err)
-	active := make([]string, 0, len(manifest.Tools)+3)
-	active = append(active, "subagent", "get_subagent_result", "steer_subagent")
-	for _, tool := range manifest.Tools {
-		active = append(active, tool.Name)
-	}
-	sort.Strings(active)
-	processFactory := &replayProcessFactory{release: make(chan struct{})}
+	active := expectedManagedActiveToolsForTransportTest(manifest)
+	processFactory := &replayProcessFactory{release: make(chan struct{}), started: make(chan struct{})}
 	rpcFactory := &replayRPCFactory{active: active}
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: managed.Config{AllowedWorkingDirectoryRoots: []string{root}}, Manifest: manifest, ProcessFactory: processFactory, RPCFactory: rpcFactory, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }})
 	require.NoError(t, err)
@@ -434,6 +442,14 @@ func TestLaunchReplayLifecycleUsesOneWorkerWideOperation(t *testing.T) {
 	alphaBody := `{"name":"alpha","cwd":"` + root + `"}`
 	alphaStatus, alphaResponse, alphaHeaders := request("123e4567-e89b-42d3-a456-426614174081", alphaBody)
 	require.Equal(t, http.StatusAccepted, alphaStatus)
+	require.Eventually(t, func() bool {
+		select {
+		case <-processFactory.started:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
 	pendingStatus, pendingResponse, pendingHeaders := request("123e4567-e89b-42d3-a456-426614174081", alphaBody)
 	require.Equal(t, alphaStatus, pendingStatus)
 	require.Equal(t, alphaResponse, pendingResponse)
