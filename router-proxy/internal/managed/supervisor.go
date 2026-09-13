@@ -657,6 +657,7 @@ func (m *Manager) recordReadyBindingProcessExitInLane(binding *managedBinding, f
 	// transition, then archive every live child under this exact fence.
 	_, _ = m.store.ReconcileManagedParentCompaction(context.Background(), fence, false)
 	m.interruptBuiltinToolInvocations(binding, fence)
+	_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 	_, _ = m.store.RecordManagedParentProcessLost(context.Background(), fence)
 	_ = m.store.MarkManagedFailed(context.Background(), binding.agentID, "PROCESS_EXITED", message)
 	binding.serial.Lock()
@@ -1129,6 +1130,7 @@ func (m *Manager) executePreparedRestartInLane(binding *managedBinding, oldFence
 		return
 	}
 	m.interruptBuiltinToolInvocations(binding, oldFence)
+	_ = m.store.InterruptManagedParentWork(context.Background(), oldFence)
 	if err := m.store.MarkManagedRestartOldStopped(context.Background(), oldFence, operationID); err != nil {
 		return
 	}
@@ -1264,6 +1266,7 @@ func (m *Manager) watchReadyRestartTarget(target *managedBinding) {
 			// stage. The ordinary ready-target watcher must not overwrite that
 			// fenced lifecycle work with an unfenced PROCESS_EXITED failure.
 			if !m.isClosed() && !lifecycleOwned {
+				_ = m.store.InterruptManagedParentWork(context.Background(), bindingFence(target.agentID, target))
 				_ = m.store.MarkManagedFailed(context.Background(), target.agentID, "PROCESS_EXITED", sanitizeError(waitErr))
 			}
 			m.clearBinding(target)
@@ -1438,6 +1441,7 @@ func (m *Manager) shutdownRestartBinding(ctx context.Context, binding *managedBi
 			return finish(m.store.RecordManagedRestartFailure(context.Background(), fence, transition.OperationID, "RESTART_STOP_FAILED", "restart process stop did not complete"))
 		}
 		m.interruptBuiltinToolInvocations(binding, fence)
+		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 		if err := m.store.MarkManagedRestartOldStopped(context.Background(), fence, transition.OperationID); err != nil {
 			return finish(err)
 		}
@@ -1824,6 +1828,7 @@ func (m *Manager) recoverManagedRestartTransitionInLane(ctx context.Context, age
 		probe := m.processOps.Probe(oldFenceIdentity(transition.Fence))
 		switch probe.State {
 		case ProcessAbsent:
+			_ = m.store.InterruptManagedParentWork(context.Background(), transition.Fence)
 			if m.store.RecoverManagedRestartOldGone(context.Background(), transition.Fence, transition.OperationID) == nil {
 				stopped, readErr := m.store.ManagedRestartTransition(context.Background(), agentID)
 				if readErr == nil {
@@ -1837,6 +1842,7 @@ func (m *Manager) recoverManagedRestartTransitionInLane(ctx context.Context, age
 		}
 	case "stopping":
 		if m.reapRestartGroup(context.Background(), oldFenceIdentity(transition.Fence), nil) {
+			_ = m.store.InterruptManagedParentWork(context.Background(), transition.Fence)
 			if m.store.MarkManagedRestartOldStopped(context.Background(), transition.Fence, transition.OperationID) == nil {
 				stopped, readErr := m.store.ManagedRestartTransition(context.Background(), agentID)
 				if readErr == nil {
@@ -2166,6 +2172,8 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 					if !acknowledged {
 						m.releaseManagedDirect(*attempt, "receipt_stream_closed", "")
 						_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "receipt_stream_closed", "")
+					} else {
+						_ = m.store.InterruptManagedParentTurn(context.Background(), *attempt)
 					}
 					return
 				}
@@ -2188,6 +2196,7 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 							clearDirectPromptActivity()
 							cancelTurn()
 							cancelReceipt()
+							m.releaseManagedDirect(*attempt, "acknowledgment_interrupted", "")
 							_ = m.store.RecordManagedDirectDiagnostic(context.Background(), agentID, attempt.MessageID, attempt.AttemptNumber, "acknowledgment_interrupted", "")
 							return
 						}
@@ -2233,6 +2242,37 @@ func (m *Manager) dispatchDirectInLane(agentID string) {
 		// The lane is intentionally one-at-a-time. A burst gets one fixed Pi
 		// command per original ordinary row, then the next oldest row.
 	}
+}
+
+func (m *Manager) scheduleManagedFinalDeliveryRetry(agentID string) {
+	due, ok, err := m.store.NextManagedFinalDeliveryRetry(context.Background(), agentID)
+	if err != nil || !ok {
+		return
+	}
+	delay := due.Sub(m.clock.Now())
+	if delay < 0 {
+		delay = 0
+	}
+	m.startManagedTask(func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if binding, ok := m.bindingFor(agentID); ok {
+				binding.serial.Lock()
+				fence := bindingFence(agentID, binding)
+				live := m.liveBindingForFence(context.Background(), binding, fence)
+				binding.serial.Unlock()
+				if live {
+					deliveries, _ := m.store.PendingManagedFinalDeliveries(context.Background(), fence)
+					for _, delivery := range deliveries {
+						m.publishManagedFinalDelivery(delivery)
+					}
+				}
+			}
+		case <-m.runCtx.Done():
+		}
+	})
 }
 
 func (m *Manager) scheduleDirectRetry(agentID string) {
@@ -2308,9 +2348,11 @@ func (m *Manager) recoverManagedDirectAttemptsForAgent(ctx context.Context, agen
 	// A router restart can happen after source persistence but before the
 	// conversation enqueue acknowledgement. Replay the deterministic source
 	// through the ordinary publisher; it remains pending on any new failure.
-	if deliveries, deliveryErr := m.store.PendingManagedFinalDeliveries(ctx, currentFence); deliveryErr == nil {
-		for _, delivery := range deliveries {
-			m.publishDirectReply(delivery.Attempt, DirectMailboxReply{EntryIdentity: delivery.EntryID, Body: delivery.Body})
+	if m.store.RecoverManagedFinalDeliveries(ctx, currentFence) == nil {
+		if deliveries, deliveryErr := m.store.PendingManagedFinalDeliveries(ctx, currentFence); deliveryErr == nil {
+			for _, delivery := range deliveries {
+				m.publishManagedFinalDelivery(delivery)
+			}
 		}
 	}
 	for _, attempt := range attempts {
@@ -2417,6 +2459,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		fence := bindingFence(binding.agentID, binding)
 		binding.serial.Unlock()
 		m.interruptBuiltinToolInvocations(binding, fence)
+		_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 		if rpc != nil {
 			_ = rpc.Close()
 		}

@@ -1409,13 +1409,16 @@ func (s *Store) ReleaseManagedDirect(ctx context.Context, attempt ManagedDirectA
 		if !changed {
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
+		if err := interruptManagedParentWorkTx(ctx, s.db, attempt.Fence, nowText); err != nil {
+			return err
+		}
 		if terminal {
 			if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {
 				return err
 			}
 			return s.rearmFailedReminder(ctx, attempt.MessageID, nowText)
 		}
-		return nil
+		return s.recomputeManagedParentActivityTx(ctx, attempt.Fence)
 	})
 	return terminal, err
 }
@@ -1453,7 +1456,13 @@ func (s *Store) ReleaseManagedDirectRecovery(ctx context.Context, attempt Manage
 		if !changed {
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
+		if err := interruptManagedParentWorkTx(ctx, s.db, attempt.Fence, nowText); err != nil {
+			return err
+		}
 		if !terminal {
+			// The original fence is no longer live, so its parent projection cannot
+			// be updated. The exact work row is terminal and a replacement starts
+			// a new independent source if the ordinary message is retried.
 			return nil
 		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE messages SET state='dead_letter' WHERE id=? AND state='queued'`, attempt.MessageID); err != nil {

@@ -120,8 +120,8 @@ func (s *Store) ApplyManagedParentActivity(ctx context.Context, fence ManagedRun
 			// Native settled is the authoritative turn boundary. Keep an already
 			// queued final source active, but otherwise make the direct work a
 			// non-active settled row that can be retained or completed safely.
-			if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='settled',settled_at=? WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=?
-				AND (state='pending_turn' OR (state='final_delivery_pending' AND NOT EXISTS (SELECT 1 FROM managed_parent_final_deliveries d WHERE d.work_id=managed_parent_work.work_id AND d.state='pending')))`, append([]any{now}, managedFenceValues(fence)...)...); err != nil {
+			if _, err := s.db.ExecContext(ctx, `UPDATE managed_parent_work SET state='settled',settled_at=?,terminal_at=COALESCE(terminal_at,?) WHERE agent_id=? AND pi_session_id=? AND session_epoch=? AND process_pid=? AND process_start_marker=? AND process_incarnation=? AND runtime_generation=? AND manifest_revision=? AND manifest_hash=?
+				AND (state='pending_turn' OR (state='final_delivery_pending' AND NOT EXISTS (SELECT 1 FROM managed_parent_final_deliveries d WHERE d.work_id=managed_parent_work.work_id AND d.state IN ('pending','delivering'))))`, append([]any{now, now}, managedFenceValues(fence)...)...); err != nil {
 				return err
 			}
 		}

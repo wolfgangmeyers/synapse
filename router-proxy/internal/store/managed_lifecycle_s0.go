@@ -780,6 +780,12 @@ func (s *Store) ReserveManagedControlRequest(ctx context.Context, input ManagedC
 		}
 		_, err = s.db.ExecContext(ctx, `INSERT INTO managed_control_requests (request_id,result_id,agent_id,tool_call_id,capability_id,tool_name,definition_id,operation_id,context_kind,canonical_arguments_sha256,request_fingerprint,state,pi_session_id,session_epoch,process_pid,process_start_marker,process_incarnation,runtime_generation,manifest_revision,manifest_hash,received_at) VALUES (?,?,?,?,?,?,?,?, 'root',?,?, 'received',?,?,?,?,?,?,?,?,?)`, input.RequestID, input.ResultID, input.AgentID, input.ToolCallID, input.CapabilityID, input.ToolName, input.DefinitionID, input.OperationID, input.CanonicalArgumentsSHA256, input.RequestFingerprint, input.Fence.PiSessionID, input.Fence.SessionEpoch, input.Fence.ProcessPID, input.Fence.ProcessStartMarker, input.Fence.ProcessIncarnation, input.Fence.RuntimeGeneration, input.Fence.ManifestRevision, input.Fence.ManifestHash, input.ReceivedAt)
 		if err == nil {
+			if err = s.recomputeManagedParentActivityTx(ctx, input.Fence); err != nil {
+				return err
+			}
+			if _, err = s.bumpManagedProjectionVersion(ctx); err != nil {
+				return err
+			}
 			reservation = ManagedControlReservation{RequestID: input.RequestID}
 		}
 		return err

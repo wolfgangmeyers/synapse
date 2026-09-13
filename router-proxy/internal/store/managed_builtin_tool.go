@@ -138,6 +138,12 @@ func (s *Store) BeginManagedBuiltinInvocation(ctx context.Context, fence Managed
 			return err
 		}
 		entry = ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", sequence), AgentID: fence.AgentID, At: now, Level: level, Message: message, Presentation: presentation}
+		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
+			return err
+		}
+		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+			return err
+		}
 		created = true
 		return nil
 	})
@@ -206,6 +212,12 @@ func (s *Store) FinishManagedBuiltinInvocation(ctx context.Context, fence Manage
 			return err
 		}
 		entry.At = occurredAt
+		if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
+			return err
+		}
+		if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+			return err
+		}
 		changed = true
 		return nil
 	})
@@ -262,6 +274,14 @@ func (s *Store) InterruptActiveManagedBuiltinInvocations(ctx context.Context, fe
 				return err
 			}
 			entries = append(entries, ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", item.sequence), AgentID: fence.AgentID, At: at, Level: level, Message: message, Presentation: presentation})
+		}
+		if len(activeRows) > 0 && managedParentFenceCurrentTx(ctx, s.db, fence) {
+			if err := s.recomputeManagedParentActivityTx(ctx, fence); err != nil {
+				return err
+			}
+			if _, err := s.bumpManagedProjectionVersion(ctx); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
