@@ -89,9 +89,9 @@ func TestManagedLifecycleComposedBehavioralGate(t *testing.T) {
 	const resetArtifact = "123e4567-e89b-42d3-a456-426614174007"
 
 	processes := []*restartExecutionProcess{
-		{identity: ProcessIdentity{PID: 8101, StartMarker: sourceSession, Incarnation: "source-incarnation"}, input: &restartExecutionInput{}, done: make(chan struct{})},
-		{identity: ProcessIdentity{PID: 8102, StartMarker: "restart-marker", Incarnation: "restart-incarnation"}, input: &restartExecutionInput{}, done: make(chan struct{})},
-		{identity: ProcessIdentity{PID: 8103, StartMarker: "reset-marker", Incarnation: "reset-incarnation"}, input: &restartExecutionInput{}, done: make(chan struct{})},
+		{identity: ProcessIdentity{PID: 8101, StartMarker: sourceSession, Incarnation: "source-incarnation"}, input: &restartExecutionInput{}, done: make(chan struct{}), waitEntered: make(chan struct{}), waitRelease: make(chan struct{}), waitReturned: make(chan struct{})},
+		{identity: ProcessIdentity{PID: 8102, StartMarker: "restart-marker", Incarnation: "restart-incarnation"}, input: &restartExecutionInput{}, done: make(chan struct{}), waitEntered: make(chan struct{}), waitRelease: make(chan struct{}), waitReturned: make(chan struct{})},
+		{identity: ProcessIdentity{PID: 8103, StartMarker: "reset-marker", Incarnation: "reset-incarnation"}, input: &restartExecutionInput{}, done: make(chan struct{}), waitEntered: make(chan struct{}), waitRelease: make(chan struct{}), waitReturned: make(chan struct{})},
 	}
 	rpcs := []*composedLifecycleRPC{
 		{restartExecutionRPC: restartExecutionRPC{active: active, sessionFile: sourceFile, settled: make(chan struct{})}},
@@ -147,6 +147,8 @@ func TestManagedLifecycleComposedBehavioralGate(t *testing.T) {
 	firstRestart, err := manager.ReserveRestart(ctx, RestartRequest{AgentID: "composed-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/composed-agent/restart", RequestID: "123e4567-e89b-42d3-a456-426614174011", CanonicalBodyHash: strings.Repeat("a", 64)})
 	require.NoError(t, err)
 	require.NotNil(t, firstRestart.Operation)
+	awaitPlannedExitCallback(t, processes[0].waitEntered)
+	restartPolicy := snapshotCrashPolicy(t, durable, ctx, "composed-agent")
 	select {
 	case <-rpcs[0].settled:
 	case <-time.After(time.Second):
@@ -162,6 +164,8 @@ func TestManagedLifecycleComposedBehavioralGate(t *testing.T) {
 	require.Equal(t, beforeRestart.SessionEpoch, afterRestart.SessionEpoch)
 	require.NotEqual(t, oldFence, storedAgentFence(afterRestart))
 	requireManagedParentTerminalForTest(t, databasePath, sourceAttempt, "interrupted", "interrupted")
+	releasePlannedExitCallback(t, processes[0].waitRelease, processes[0].waitReturned)
+	assertCrashPolicyUnchanged(t, durable, ctx, "composed-agent", restartPolicy)
 	require.Equal(t, 1, rpcs[0].settleCalls)
 	require.Zero(t, processes[0].stopCalls, "lifecycle-owned restart uses the controlled group reaper instead of Process.Stop")
 	assertComposedStaleFence(t, durable, manager, oldBinding, oldFence, "123e4567-e89b-42d3-a456-426614174012")
@@ -174,6 +178,8 @@ func TestManagedLifecycleComposedBehavioralGate(t *testing.T) {
 	reset, err := manager.Reset(ctx, ResetRequest{AgentID: "composed-agent", Method: "POST", CanonicalPath: "/v1/managed-agents/composed-agent/reset", RequestID: "123e4567-e89b-42d3-a456-426614174013", CanonicalBodyHash: strings.Repeat("c", 64)})
 	require.NoError(t, err)
 	require.NotNil(t, reset.Operation)
+	awaitPlannedExitCallback(t, processes[1].waitEntered)
+	resetPolicy := snapshotCrashPolicy(t, durable, ctx, "composed-agent")
 	select {
 	case <-rpcs[1].settled:
 	case <-time.After(time.Second):
@@ -188,6 +194,8 @@ func TestManagedLifecycleComposedBehavioralGate(t *testing.T) {
 	requireManagedParentTerminalForTest(t, databasePath, resetAttempt, "interrupted", "interrupted")
 	require.Zero(t, rpcs[2].promptCalls, "reset never replays the launch-only initial prompt")
 	close(resetCleanupRelease)
+	releasePlannedExitCallback(t, processes[1].waitRelease, processes[1].waitReturned)
+	assertCrashPolicyUnchanged(t, durable, ctx, "composed-agent", resetPolicy)
 	require.Eventually(t, func() bool {
 		action, actionErr := durable.ManagedLifecycleAction(ctx, reset.Operation.OperationID)
 		agent, agentErr := durable.ManagedAgent(ctx, "composed-agent")
@@ -200,6 +208,10 @@ func TestManagedLifecycleComposedBehavioralGate(t *testing.T) {
 	terminationRequest := TerminateRequest{AgentID: "composed-agent", Method: "DELETE", CanonicalPath: "/v1/managed-agents/composed-agent", RequestID: "123e4567-e89b-42d3-a456-426614174016", CanonicalBodyHash: strings.Repeat("d", 64)}
 	_, err = manager.Terminate(ctx, terminationRequest)
 	require.NoError(t, err)
+	awaitPlannedExitCallback(t, processes[2].waitEntered)
+	terminationPolicy := snapshotCrashPolicy(t, durable, ctx, "composed-agent")
+	releasePlannedExitCallback(t, processes[2].waitRelease, processes[2].waitReturned)
+	assertCrashPolicyUnchanged(t, durable, ctx, "composed-agent", terminationPolicy)
 	require.Eventually(t, func() bool {
 		action, actionErr := durable.ManagedLifecycleAction(ctx, terminationRequest.RequestID)
 		agent, agentErr := durable.ManagedAgent(ctx, "composed-agent")
@@ -225,6 +237,47 @@ func TestManagedLifecycleComposedBehavioralGate(t *testing.T) {
 	require.Equal(t, 3, factory.startCount())
 	require.Equal(t, 3, signalCount(ops))
 	assertComposedStaleFence(t, durable, manager, currentBinding, currentFence, "123e4567-e89b-42d3-a456-426614174018")
+}
+
+type crashPolicySnapshot struct {
+	CrashTimes []string
+	RetryAt    string
+	ReadySince string
+	ErrorCode  string
+}
+
+func snapshotCrashPolicy(t *testing.T, durable *store.Store, ctx context.Context, agentID string) crashPolicySnapshot {
+	t.Helper()
+	recovery, err := durable.ManagedCrashRecovery(ctx, agentID)
+	require.NoError(t, err)
+	agent, err := durable.ManagedAgent(ctx, agentID)
+	require.NoError(t, err)
+	return crashPolicySnapshot{CrashTimes: append([]string(nil), recovery.CrashTimes...), RetryAt: recovery.RetryAt, ReadySince: recovery.ReadySince, ErrorCode: agent.LastErrorCode}
+}
+
+func assertCrashPolicyUnchanged(t *testing.T, durable *store.Store, ctx context.Context, agentID string, before crashPolicySnapshot) {
+	t.Helper()
+	after := snapshotCrashPolicy(t, durable, ctx, agentID)
+	require.Equal(t, before, after, "planned process-exit callback must not change crash policy")
+}
+
+func awaitPlannedExitCallback(t *testing.T, entered <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("planned process-exit callback did not reach its barrier")
+	}
+}
+
+func releasePlannedExitCallback(t *testing.T, release, returned chan struct{}) {
+	t.Helper()
+	close(release)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("planned process-exit callback did not complete")
+	}
 }
 
 func setManagedActivityActive(t *testing.T, databasePath, agentID string) {
