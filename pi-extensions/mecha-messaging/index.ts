@@ -95,6 +95,8 @@ export { runRecallEvaluator, validateRecallChoice } from "./recall-evaluator.js"
 
 const MAILBOX_SEND_RATE_LIMIT_COUNT = 6;
 const MAILBOX_SEND_RATE_LIMIT_WINDOW_MS = 60_000;
+const MAILBOX_MESSAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAILBOX_ACCEPTED_STATES = new Set(["queued", "leased", "injection_requested", "acknowledged", "delivered"]);
 const CHILD_SESSION_IDS = Symbol.for("mecha.mailbox-v2.child-session-ids");
 const MAX_GOAL_CHARS = 4_000;
 const GOAL_OUTCOME_KEYS = ["COMPLETED", "NOT_DONE"];
@@ -225,6 +227,19 @@ function errorName<T>(error: T): string {
 
 function errorCode<T>(error: T): string | undefined {
   return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+function validateMailboxSendResult(value: unknown): { id: string; state: string } {
+  if (!isRecord(value)) throw new Error("invalid mailbox reply result");
+  const { id, state } = value;
+  if (typeof id !== "string" || id.length === 0 || id.length > 128 || !MAILBOX_MESSAGE_ID_PATTERN.test(id)) {
+    throw new Error("invalid mailbox reply result: message ID");
+  }
+  if (typeof state !== "string" || !MAILBOX_ACCEPTED_STATES.has(state)) {
+    if (typeof state === "string") throw new Error(`Mailbox reply was not accepted (state: ${state}).`);
+    throw new Error("invalid mailbox reply result: state");
+  }
+  return { id, state };
 }
 
 function isServiceRegistry(value: object | JsonValue | undefined): value is ServiceRegistry {
@@ -1008,9 +1023,9 @@ export function createMechaMessagingExtension(pi: PiRuntime, {
           throw startupError ?? new Error("Mailbox v2 is not initialized");
         }
         const reservation = reserveMailboxSend(mailboxSenderForSession(toolContext), recipient);
-        let sent;
+        let sent: { id: string; state: string };
         try {
-          sent = await mailboxClient.sendReply({ to: recipient, body, ...(subject === undefined ? {} : { subject }) });
+          sent = validateMailboxSendResult(await mailboxClient.sendReply({ to: recipient, body, ...(subject === undefined ? {} : { subject }) }));
         } catch (error) {
           rollbackMailboxSend(reservation);
           throw error;
