@@ -22,14 +22,18 @@ function titleCase(value: string): string {
 
 function toolVisual(presentation: ManagedHistoryPresentation): CompleteTimelineVisual {
   const toolName = normalizedToolName(presentation.tool_name);
-  const failed = presentation.outcome === "error";
+  const failed = presentation.outcome === "error" || presentation.outcome === "failed";
+  const interrupted = presentation.outcome === "interrupted";
+  const active = presentation.outcome === "active";
   const unknown = presentation.outcome === "warning" || presentation.outcome === "unknown";
-  const tone: CompleteTimelineTone = failed ? "danger" : unknown ? "amber" : toolName === "bash" ? "teal" : toolName === "goal" ? "purple" : toolName === "reminder" ? "yellow" : "blue";
+  const tone: CompleteTimelineTone = failed || interrupted ? "danger" : unknown ? "amber" : toolName === "bash" ? "teal" : toolName === "goal" ? "purple" : toolName === "reminder" ? "yellow" : "blue";
   const icon = toolName === "bash" ? "fa-solid fa-terminal" : toolName === "goal" ? "fa-solid fa-flag" : toolName === "reminder" ? "fa-solid fa-clock" : "fa-solid fa-wrench";
-  if (failed) {
-    const label = toolName === "bash" ? "Bash failed" : toolName === "goal" ? "Goal update failed" : toolName === "reminder" ? "Reminder failed" : toolName === undefined ? "Tool failed" : `${titleCase(toolName)} failed`;
+  if (failed || interrupted) {
+    const outcome = interrupted ? "interrupted" : "failed";
+    const label = toolName === undefined ? `Tool ${outcome}` : `${titleCase(toolName)} ${outcome}`;
     return { icon, tone, label, detail: presentation.summary ?? "The operation could not be completed.", isHighValue: true };
   }
+  if (active) return { icon, tone, label: toolName === undefined ? "Running tool" : `Running ${toolName}`, isHighValue: false };
   const label = toolName === "bash" ? "Ran bash" : toolName === "goal" ? "Updated goal" : toolName === "reminder" ? "Scheduled reminder" : toolName === undefined ? "Ran tool" : `Ran ${toolName}`;
   return { icon, tone, label, detail: presentation.summary ?? "Completed successfully", isHighValue: false };
 }
@@ -101,7 +105,8 @@ export function CompleteTimelineEntry({ entry }: { entry: ManagedHistoryEntry })
   const time = formattedTime(entry);
   const error = entry.presentation?.error;
   const accessibleName = [visual.label, visual.detail, time.title].filter((value): value is string => value !== undefined && value !== "").join(". ");
-  return <article className={`activity-entry activity-entry--${visual.tone}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
+  const active = entry.presentation?.kind === "tool" && entry.presentation.outcome === "active";
+  return <article className={`activity-entry activity-entry--${visual.tone}${active ? " activity-entry--active" : ""}`} data-activity-id={entry.id} data-event-kind={entry.presentation?.kind ?? (entry.level === "error" ? "error" : "message")} aria-label={accessibleName || visual.label}>
     <i className={`activity-entry-icon ${visual.icon}`} aria-hidden="true" />
     <div className="activity-entry-content"><div className="activity-entry-label"><strong>{visual.label}</strong>{time.dateTime && time.label ? <time dateTime={time.dateTime} title={time.title}>{time.label}</time> : null}</div>{visual.detail ? <p>{visual.detail}</p> : null}{error?.detail_available === false ? <small className="activity-entry-no-detail">No additional safe details available.</small> : null}</div>
   </article>;
