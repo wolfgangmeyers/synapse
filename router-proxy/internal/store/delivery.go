@@ -1351,12 +1351,43 @@ func (s *Store) AcknowledgeManagedDirectRecovered(ctx context.Context, attempt M
 			}
 			return &ManagedDirectNotActiveError{MessageID: attempt.MessageID, AttemptNumber: attempt.AttemptNumber}
 		}
+		ownsLinkedReminder, err := s.recoveredAttemptOwnsLinkedReminderTx(ctx, attempt)
+		if err != nil {
+			return err
+		}
+		if !ownsLinkedReminder {
+			return nil
+		}
 		if err := s.completeLinkedReminder(ctx, attempt.MessageID); err != nil {
 			return err
 		}
 		_, err = s.db.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, attempt.MessageID)
 		return err
 	})
+}
+
+// recoveredAttemptOwnsLinkedReminderTx keeps an old recovered attempt from
+// completing a recurring occurrence that has already moved to a replacement
+// recipient. The attempt itself was settled above; only the linked reminder and
+// message need this ownership check. A same-recipient runtime restart remains
+// allowed to settle its old occurrence, including while that recipient is
+// unavailable.
+func (s *Store) recoveredAttemptOwnsLinkedReminderTx(ctx context.Context, attempt ManagedDirectAttempt) (bool, error) {
+	var targetKind, targetOwner, sourceKind, sourceOwner string
+	err := s.db.QueryRowContext(ctx, `SELECT target.source_kind,target.owner_identity,COALESCE(source.source_kind,''),COALESCE(source.owner_identity,'')
+		FROM reminders reminder
+		JOIN message_target_snapshots target ON target.message_id=reminder.linked_message_id
+		LEFT JOIN recipient_sources source ON source.recipient_name=reminder.target
+		WHERE reminder.linked_message_id=? AND reminder.interval_ms IS NOT NULL
+			AND reminder.state IN ('scheduled','message_queued')
+		LIMIT 1`, attempt.MessageID).Scan(&targetKind, &targetOwner, &sourceKind, &sourceOwner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return targetKind == "managed" && targetOwner == attempt.Fence.AgentID && sourceKind == "managed" && sourceOwner == attempt.Fence.AgentID, nil
 }
 
 func directRetryDelay(attempt int) time.Duration {
