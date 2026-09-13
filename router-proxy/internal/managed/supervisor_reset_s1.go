@@ -338,6 +338,7 @@ func (m *Manager) executeResetInLane(sourceBinding *managedBinding, actionID str
 		_ = m.store.FailManagedReset(context.Background(), actionID, "RESET_PROCESS_IDENTITY_UNSAFE", false, source)
 		return
 	}
+	m.interruptBuiltinToolInvocations(sourceBinding, source)
 	if err := m.store.MarkManagedResetSourceStopped(context.Background(), actionID, source); err != nil {
 		return
 	}
@@ -457,6 +458,7 @@ func (m *Manager) startResetTargetInLane(actionID string, source store.ManagedRu
 	m.installParentCompactionNotificationReceiver(candidate)
 	m.installParentActivityReceiver(candidate)
 	m.installQualifiedGoalActivityReceiver(candidate)
+	m.installBuiltinToolLifecycleReceiver(candidate)
 	candidate.serial.Lock()
 	candidate.lifecycleAction = "reset"
 	candidate.serial.Unlock()

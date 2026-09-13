@@ -74,7 +74,7 @@ func validManagedHistoryPresentation(value *ManagedHistoryPresentation) bool {
 	if value.ToolName != "" && strings.ContainsAny(value.ToolName, " \t\r\n\x00") {
 		return false
 	}
-	if value.Outcome != "" && !map[string]bool{"success": true, "warning": true, "error": true, "unknown": true, "compacting": true, "completed": true, "failed": true, "aborted": true, "reconciled_unknown": true}[value.Outcome] {
+	if value.Outcome != "" && !map[string]bool{"active": true, "success": true, "warning": true, "error": true, "unknown": true, "compacting": true, "completed": true, "failed": true, "interrupted": true, "aborted": true, "reconciled_unknown": true}[value.Outcome] {
 		return false
 	}
 	if value.ChildState != "" && !map[string]bool{"queued": true, "running": true, "completed": true, "steered": true, "aborted": true, "stopped": true, "error": true, "confirmed": true, "interrupted_unknown": true}[value.ChildState] {

@@ -127,27 +127,29 @@ type managedBinding struct {
 	serial  sync.Mutex
 	// Root controls can resolve an active direct turn. Keep their append path
 	// ordered without blocking the direct-delivery lane that needs that result.
-	rootControlSerial    sync.Mutex
-	preparationWG        sync.WaitGroup
-	process              Process
-	rpc                  RPC
-	operationID          string
-	lifecycleAction      string
-	identity             ProcessIdentity
-	sessionID            string
-	sessionEpoch         int64
-	runtimeGeneration    string
-	manifestRevision     int
-	manifestHash         string
-	parentCompacting     *bool
-	reaped               bool
-	token                string
-	waitDone             <-chan error
-	waitSignal           <-chan struct{}
-	waitErr              error
-	restartExecutionDone bool
-	restartShutdownDone  bool
-	restartShutdownError error
+	rootControlSerial     sync.Mutex
+	builtinToolSerial     sync.Mutex
+	builtinToolOrphanEnds map[string]builtinToolOrphanEnd
+	preparationWG         sync.WaitGroup
+	process               Process
+	rpc                   RPC
+	operationID           string
+	lifecycleAction       string
+	identity              ProcessIdentity
+	sessionID             string
+	sessionEpoch          int64
+	runtimeGeneration     string
+	manifestRevision      int
+	manifestHash          string
+	parentCompacting      *bool
+	reaped                bool
+	token                 string
+	waitDone              <-chan error
+	waitSignal            <-chan struct{}
+	waitErr               error
+	restartExecutionDone  bool
+	restartShutdownDone   bool
+	restartShutdownError  error
 }
 
 type Manager struct {
@@ -267,6 +269,11 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	runCtx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{store: options.Store, config: config, manifest: manifest, processFactory: processFactory, rpcFactory: rpcFactory, catalog: catalog, clock: clock, ids: ids, processes: map[string]Process{}, rpcs: map[string]RPC{}, operationIDs: map[string]string{}, bindings: map[string]*managedBinding{}, lanes: map[string]*managedAgentLane{}, groupLeader: groupLeader, processOps: processOps, preparationDeadline: deadlineFactory, preparationHook: options.RestartPreparationHook, beforeDirectAcknowledge: options.BeforeManagedDirectAcknowledge, beforeManagedDirectRecovery: options.BeforeManagedDirectRecovery, beforeResetOldArtifactCleanup: options.BeforeManagedResetOldArtifactCleanup, afterResetTargetStartBeforeBind: options.AfterManagedResetTargetStartBeforeBind, afterLifecycleRestartTargetStartBeforeBind: options.AfterManagedLifecycleRestartTargetStartBeforeBind, beforeManagedLaunchStart: options.BeforeManagedLaunchStart, beforeTerminationArtifactCleanup: options.BeforeManagedTerminationArtifactCleanup, restartAllDispatcher: options.RestartAllDispatcher, restartAllDispatchFailureRecorder: options.RestartAllDispatchFailureRecorder, rootControlHandlers: rootHandlers, runCtx: runCtx, cancel: cancel}
 	manager.artifacts = newSessionArtifactOwner(options.Store, config.SessionRoot, ids, clock.Now)
+	// A router restart cannot reconstruct gaps in a prior Pi stdout pipe. Close
+	// every surviving active builtin row before any manager can expose history.
+	if err := options.Store.InterruptAllManagedBuiltinInvocations(context.Background()); err != nil {
+		return nil, err
+	}
 	return manager, nil
 }
 
@@ -523,6 +530,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.installParentCompactionNotificationReceiver(binding)
 	m.installParentActivityReceiver(binding)
 	m.installQualifiedGoalActivityReceiver(binding)
+	m.installBuiltinToolLifecycleReceiver(binding)
 	binding.serial.Lock()
 	if !m.liveBindingForFence(durableCtx, binding, fence) {
 		binding.serial.Unlock()
@@ -643,6 +651,7 @@ func (m *Manager) recordReadyBindingProcessExitInLane(binding *managedBinding, f
 	// Reconcile an in-flight native parent compaction before the public failure
 	// transition, then archive every live child under this exact fence.
 	_, _ = m.store.ReconcileManagedParentCompaction(context.Background(), fence, false)
+	m.interruptBuiltinToolInvocations(binding, fence)
 	_, _ = m.store.RecordManagedParentProcessLost(context.Background(), fence)
 	_ = m.store.MarkManagedFailed(context.Background(), binding.agentID, "PROCESS_EXITED", message)
 	binding.serial.Lock()
@@ -1114,6 +1123,7 @@ func (m *Manager) executePreparedRestartInLane(binding *managedBinding, oldFence
 		_ = m.store.RecordManagedRestartFailure(context.Background(), oldFence, operationID, "RESTART_STOP_FAILED", "restart process stop did not complete")
 		return
 	}
+	m.interruptBuiltinToolInvocations(binding, oldFence)
 	if err := m.store.MarkManagedRestartOldStopped(context.Background(), oldFence, operationID); err != nil {
 		return
 	}
@@ -1215,6 +1225,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	m.installParentCompactionNotificationReceiver(target)
 	m.installParentActivityReceiver(target)
 	m.installQualifiedGoalActivityReceiver(target)
+	m.installBuiltinToolLifecycleReceiver(target)
 	target.serial.Lock()
 	target.lifecycleAction = ""
 	target.serial.Unlock()
@@ -1421,6 +1432,7 @@ func (m *Manager) shutdownRestartBinding(ctx context.Context, binding *managedBi
 		if !m.reapRestartGroup(context.Background(), oldFenceIdentity(fence), waitDone) {
 			return finish(m.store.RecordManagedRestartFailure(context.Background(), fence, transition.OperationID, "RESTART_STOP_FAILED", "restart process stop did not complete"))
 		}
+		m.interruptBuiltinToolInvocations(binding, fence)
 		if err := m.store.MarkManagedRestartOldStopped(context.Background(), fence, transition.OperationID); err != nil {
 			return finish(err)
 		}
@@ -2388,7 +2400,9 @@ func (m *Manager) Close(ctx context.Context) error {
 		}
 		binding.serial.Lock()
 		rpc, process := binding.rpc, binding.process
+		fence := bindingFence(binding.agentID, binding)
 		binding.serial.Unlock()
+		m.interruptBuiltinToolInvocations(binding, fence)
 		if rpc != nil {
 			_ = rpc.Close()
 		}
