@@ -2,6 +2,7 @@ package managed
 
 import (
 	"encoding/json"
+	"maps"
 	"math"
 	"strings"
 	"testing"
@@ -87,6 +88,37 @@ func defaultDesiredPolicyValue() map[string]any {
 	}
 }
 
+func TestNormalizeAppliedPolicyReceiptAcceptsRetainedGoalProjectionAndIgnoresAdditiveFields(t *testing.T) {
+	// This is the applied object captured from the V21 managed session. The
+	// extension adds goal_revision after a goal is projected; the router only
+	// persists the policy fields it owns.
+	retained := map[string]any{
+		"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "",
+		"settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false,
+		"goal_revision": int64(1), "future_extension_field": map[string]any{"enabled": true},
+	}
+
+	normalized, err := normalizeAppliedPolicyReceipt(retained)
+	require.NoError(t, err)
+	require.Equal(t, defaultDesiredPolicyValue(), normalized)
+
+	for _, malformed := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"missing required field", func(value map[string]any) { delete(value, "goal_lock_enabled") }},
+		{"wrong required field type", func(value map[string]any) { value["inline_enabled"] = "false" }},
+		{"wrong required credits type", func(value map[string]any) { value["inline_credits"] = []any{} }},
+	} {
+		t.Run(malformed.name, func(t *testing.T) {
+			value := maps.Clone(retained)
+			malformed.mutate(value)
+			_, err := normalizeAppliedPolicyReceipt(value)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestReadinessPolicyNormalizersRejectClosedShapeFailures(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -141,7 +173,6 @@ func TestReadinessPolicyNormalizersRejectClosedShapeFailures(t *testing.T) {
 	require.NoError(t, err)
 	for _, malformed := range []map[string]any{
 		{"inline_enabled": false},
-		{"inline_enabled": false, "inline_credits": map[string]any{}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false, "extra": true},
 		{"inline_enabled": false, "inline_credits": map[string]any{"bash": -1}, "recall_content": "", "settled_enabled": false, "goal_lock_enabled": false, "compaction_deferred": false},
 	} {
 		_, err := normalizeAppliedPolicyReceipt(malformed)
