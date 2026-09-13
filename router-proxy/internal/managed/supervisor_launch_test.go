@@ -395,11 +395,17 @@ func TestManagerRecordsConfirmedPreReadinessEOFAsSafeProcessExit(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		agent, readErr := durable.ManagedAgent(ctx, "eof-exit")
-		return readErr == nil && agent.LifecycleState == "failed"
+		return readErr == nil && agent.ActivityState == "stopped"
 	}, time.Second, time.Millisecond)
 	agent, err := durable.ManagedAgent(ctx, "eof-exit")
 	require.NoError(t, err)
+	require.Equal(t, "running", agent.LifecycleState)
+	require.False(t, agent.AcceptingPrompts)
 	require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
+	retry, err := durable.ManagedCrashRecovery(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Len(t, retry.CrashTimes, 1)
+	require.NotEmpty(t, retry.RetryAt)
 	require.Contains(t, agent.LastErrorMessage, "code 17")
 	for _, forbidden := range []string{"do-not-retain", "/private/router/session.json"} {
 		require.NotContains(t, agent.LastErrorMessage, forbidden)
@@ -526,11 +532,17 @@ func TestManagerRecordsPrePublishedZeroExitAsProcessExit(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		agent, readErr := durable.ManagedAgent(ctx, "zero-eof")
-		return readErr == nil && agent.LifecycleState == "failed"
+		return readErr == nil && agent.ActivityState == "stopped"
 	}, time.Second, time.Millisecond)
 	agent, err := durable.ManagedAgent(ctx, "zero-eof")
 	require.NoError(t, err)
+	require.Equal(t, "running", agent.LifecycleState)
+	require.False(t, agent.AcceptingPrompts)
 	require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
+	retry, err := durable.ManagedCrashRecovery(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.Len(t, retry.CrashTimes, 1)
+	require.NotEmpty(t, retry.RetryAt)
 	require.NotContains(t, agent.LastErrorMessage, "EOF")
 	require.Equal(t, 1, process.Stops())
 	require.Equal(t, 1, process.Waits())

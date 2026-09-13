@@ -72,12 +72,21 @@ func validManagedProvider(value string) bool { return managedProviderNames[value
 // process details are deliberately kept in this type and omitted by the
 // transport projection.
 type ManagedCrashRecoveryState struct {
-	RetryAt string
+	RetryAt    string
+	CrashTimes []string
+	ReadySince string
 }
 
 type ManagedCrashRecoveryDecision struct {
-	RetryAt string
+	RetryAt    string
+	CrashCount int
+	CrashLoop  bool
 }
+
+const (
+	managedCrashWindow  = 120 * time.Second
+	managedHealthyReset = 10 * time.Minute
+)
 
 type ManagedAgentRecord struct {
 	AgentID                   string
@@ -3738,7 +3747,7 @@ func (s *Store) MarkManagedReady(ctx context.Context, agentID string) error {
 	})
 }
 
-// ManagedCrashRecovery returns the durable first-retry state for one agent.
+// ManagedCrashRecovery returns the durable crash-policy state for one agent.
 func (s *Store) ManagedCrashRecovery(ctx context.Context, agentID string) (*ManagedCrashRecoveryState, error) {
 	if ctx == nil || agentID == "" {
 		return nil, errors.New("managed crash recovery identity is invalid")
@@ -3773,7 +3782,7 @@ func (s *Store) ManagedCrashRecoveryDue(ctx context.Context, agentID string) (bo
 // RecordManagedUnexpectedExit persists the one-second first-retry deadline and
 // leaves the desired-running agent stopped for cold recovery. The unique agent
 // row makes duplicate exit callbacks idempotent.
-func (s *Store) RecordManagedUnexpectedExit(ctx context.Context, fence ManagedRuntimeFence, operationID, message string) (ManagedCrashRecoveryDecision, error) {
+func (s *Store) recordManagedUnexpectedExitFirstSlice(ctx context.Context, fence ManagedRuntimeFence, operationID, message string) (ManagedCrashRecoveryDecision, error) {
 	if !validManagedRuntimeFence(fence) || message == "" {
 		return ManagedCrashRecoveryDecision{}, errors.New("managed unexpected exit is invalid")
 	}
@@ -3835,8 +3844,33 @@ func ensureManagedCrashRecoveryTx(ctx context.Context, db *sql.DB, agentID, upda
 
 func managedCrashRecoveryQuery(ctx context.Context, db *sql.DB, agentID string) (*ManagedCrashRecoveryState, error) {
 	var state ManagedCrashRecoveryState
-	err := db.QueryRowContext(ctx, `SELECT COALESCE(retry_at,'') FROM managed_crash_recovery WHERE agent_id=?`, agentID).Scan(&state.RetryAt)
-	return &state, err
+	var historyJSON string
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(retry_at,''),crash_history,COALESCE(ready_since,'') FROM managed_crash_recovery WHERE agent_id=?`, agentID).Scan(&state.RetryAt, &historyJSON, &state.ReadySince)
+	if err != nil {
+		return &state, err
+	}
+	if err := json.Unmarshal([]byte(historyJSON), &state.CrashTimes); err != nil {
+		return &state, errors.New("managed crash history is invalid")
+	}
+	return &state, nil
+}
+
+// ClearManagedCrashHistory is used by explicit restart/reset controls. It is
+// separate from readiness: a healthy runtime needs ten continuous minutes.
+func (s *Store) ClearManagedCrashHistory(ctx context.Context, agentID string) error {
+	if agentID == "" {
+		return errors.New("managed crash recovery identity is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		if err := ensureManagedCrashRecoveryTx(ctx, s.db, agentID, formatTimestamp(s.clock.Now())); err != nil {
+			if strings.Contains(err.Error(), "no such table: managed_crash_recovery") {
+				return nil
+			}
+			return err
+		}
+		_, err := s.db.ExecContext(ctx, `UPDATE managed_crash_recovery SET retry_at=NULL,crash_history='[]',ready_since=NULL,updated_at=? WHERE agent_id=?`, formatTimestamp(s.clock.Now()), agentID)
+		return err
+	})
 }
 
 func terminalizeManagedCrashOperationTx(ctx context.Context, db *sql.DB, operationID, now, code, message string) error {
@@ -3854,7 +3888,7 @@ func markManagedCrashReadyTx(ctx context.Context, db *sql.DB, agentID, now strin
 		}
 		return err
 	}
-	_, err := db.ExecContext(ctx, `UPDATE managed_crash_recovery SET retry_at=NULL,updated_at=? WHERE agent_id=?`, now, agentID)
+	_, err := db.ExecContext(ctx, `UPDATE managed_crash_recovery SET retry_at=NULL,ready_since=?,updated_at=? WHERE agent_id=?`, now, now, agentID)
 	return err
 }
 

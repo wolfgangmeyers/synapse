@@ -163,6 +163,9 @@ func (m *Manager) Reset(ctx context.Context, request ResetRequest) (ResetResult,
 	if admission.Replayed {
 		return ResetResult{Operation: admission.Operation, Replayed: true}, nil
 	}
+	if err := m.store.ClearManagedCrashHistory(ctx, request.AgentID); err != nil {
+		return ResetResult{}, err
+	}
 	if binding != nil {
 		binding.serial.Lock()
 		if !m.liveBindingForFence(context.Background(), binding, liveFence) {
