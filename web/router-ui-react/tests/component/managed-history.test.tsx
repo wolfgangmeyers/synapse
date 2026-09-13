@@ -67,7 +67,7 @@ describe("Selected-agent conversation modes", () => {
     expect(container.querySelector(".timeline-live-region")).toHaveTextContent("Subagent failed");
   });
 
-  it("keeps named terminal subagent outcomes while hiding lifecycle chatter", () => {
+  it("keeps running and terminal subagent outcomes while hiding queued chatter", () => {
     render(<MessageList messages={[]} peerId="managed-worker" activityEntries={[
       { id: "complete:1", agent_id: "managed-worker", message: "Child queued", presentation: { kind: "child", child_state: "queued" } },
       { id: "complete:2", agent_id: "managed-worker", message: "Child started", presentation: { kind: "child", child_state: "running" } },
@@ -76,7 +76,7 @@ describe("Selected-agent conversation modes", () => {
     ]} />);
 
     expect(screen.queryByText("Child queued")).not.toBeInTheDocument();
-    expect(screen.queryByText("Child started")).not.toBeInTheDocument();
+    expect(screen.getByText("Subagent updated")).toBeInTheDocument();
     expect(screen.queryByText("Child wrapped up")).not.toBeInTheDocument();
     expect(screen.queryByText("Child completed")).not.toBeInTheDocument();
     expect(screen.getByText("Subagent wrapped up")).toBeInTheDocument();

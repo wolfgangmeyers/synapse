@@ -2803,9 +2803,27 @@ func (s *Store) RecordManagedParentProcessLost(ctx context.Context, fence Manage
 }
 
 func managedChildHistoryKey(fence ManagedRuntimeFence, parentEntryID, taskID, runID string, sequence int64, kind, recoveryState, recoveryCause string, changedFields []string) string {
-	identity := strings.Join([]string{fence.AgentID, fence.PiSessionID, fmt.Sprint(fence.SessionEpoch), fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, fmt.Sprint(sequence), kind, recoveryState, recoveryCause, strings.Join(changedFields, ",")}, "\x00")
+	identity := strings.Join([]string{fence.AgentID, fence.PiSessionID, fmt.Sprint(fence.SessionEpoch), fmt.Sprint(fence.ProcessPID), fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fmt.Sprint(fence.ManifestRevision), fence.ManifestHash, parentEntryID, taskID, runID, fmt.Sprint(sequence), kind, recoveryState, recoveryCause, strings.Join(changedFields, ",")}, "\x00")
 	sum := sha256.Sum256([]byte(identity))
-	return "child:" + hex.EncodeToString(sum[:])
+	return "child-transition:" + hex.EncodeToString(sum[:])
+}
+
+// A child run owns one Complete entry for its whole lifetime. The source
+// sequence remains in managed_child_transitions for audit and replay, while
+// this key keeps the visible row's sequence and timeline position unchanged.
+func managedChildInvocationHistoryKey(fence ManagedRuntimeFence, parentEntryID, taskID, runID string) string {
+	identity := strings.Join([]string{fence.AgentID, fence.PiSessionID, fmt.Sprint(fence.SessionEpoch), fmt.Sprint(fence.ProcessPID), fence.ProcessStartMarker, fence.ProcessIncarnation, fence.RuntimeGeneration, fmt.Sprint(fence.ManifestRevision), fence.ManifestHash, parentEntryID, taskID, runID, "invocation"}, "\x00")
+	sum := sha256.Sum256([]byte(identity))
+	return "child-invocation:" + hex.EncodeToString(sum[:])
+}
+
+func hasManagedChildStaleField(changedFields []string) bool {
+	for _, field := range changedFields {
+		if field == "stale" || strings.HasPrefix(field, "stale:") {
+			return true
+		}
+	}
+	return false
 }
 
 type managedChildHistoryDisplay struct {
@@ -2915,11 +2933,11 @@ func (s *Store) recordManagedChildHistoryWithDisplayTx(ctx context.Context, fenc
 	if !validManagedRuntimeFence(fence) || parentEntryID == "" || taskID == "" || runID == "" || sequence < 0 || (kind != "transition" && kind != "recovery") || (recoveryState != "confirmed" && recoveryState != "interrupted_unknown") || (recoveryState == "confirmed" && recoveryCause != "") || (recoveryState == "interrupted_unknown" && recoveryCause != "snapshot_omitted" && recoveryCause != "parent_process_lost" && recoveryCause != "session_changed") {
 		return ManagedHistoryEntry{}, errors.New("managed child history is invalid")
 	}
-	key := managedChildHistoryKey(fence, parentEntryID, taskID, runID, sequence, kind, recoveryState, recoveryCause, changedFields)
+	transitionKey := managedChildHistoryKey(fence, parentEntryID, taskID, runID, sequence, kind, recoveryState, recoveryCause, changedFields)
 	presentation, message := managedChildHistoryPresentation(kind, lifecycleState, recoveryState, changedFields, display)
 	var existingSequence int64
 	var existingAt, existingLevel, existingMessage string
-	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message FROM managed_child_transitions t JOIN managed_complete_history h ON h.sequence=t.complete_sequence WHERE t.event_key=?`, key).Scan(&existingSequence, &existingAt, &existingLevel, &existingMessage)
+	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message FROM managed_child_transitions t JOIN managed_complete_history h ON h.sequence=t.complete_sequence WHERE t.event_key=?`, transitionKey).Scan(&existingSequence, &existingAt, &existingLevel, &existingMessage)
 	if err == nil {
 		return ManagedHistoryEntry{ID: fmt.Sprintf("complete:%d", existingSequence), At: existingAt, Level: existingLevel, Message: existingMessage, Presentation: presentation}, nil
 	}
@@ -2951,16 +2969,28 @@ func (s *Store) recordManagedChildHistoryWithDisplayTx(ctx context.Context, fenc
 		return ManagedHistoryEntry{}, presentationErr
 	}
 	occurredAt := formatTimestamp(s.clock.Now())
-	result, err := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,?)`, fence.AgentID, "managed_child", "info", message, occurredAt, key, presentationJSON)
-	if err != nil {
-		return ManagedHistoryEntry{}, err
+	historyKey := transitionKey
+	if !hasManagedChildStaleField(changedFields) {
+		historyKey = managedChildInvocationHistoryKey(fence, parentEntryID, taskID, runID)
 	}
-	completeSequence, err := result.LastInsertId()
-	if err != nil {
-		return ManagedHistoryEntry{}, err
+	var completeSequence int64
+	historyErr := s.db.QueryRowContext(ctx, `SELECT sequence FROM managed_complete_history WHERE event_key=?`, historyKey).Scan(&completeSequence)
+	if errors.Is(historyErr, sql.ErrNoRows) {
+		result, insertErr := s.db.ExecContext(ctx, `INSERT INTO managed_complete_history(agent_id,category,level,message,occurred_at,event_key,presentation_json) VALUES (?,?,?,?,?,?,?)`, fence.AgentID, "managed_child", "info", message, occurredAt, historyKey, presentationJSON)
+		if insertErr != nil {
+			return ManagedHistoryEntry{}, insertErr
+		}
+		completeSequence, insertErr = result.LastInsertId()
+		if insertErr != nil {
+			return ManagedHistoryEntry{}, insertErr
+		}
+	} else if historyErr != nil {
+		return ManagedHistoryEntry{}, historyErr
+	} else if _, historyErr = s.db.ExecContext(ctx, `UPDATE managed_complete_history SET level=?,message=?,presentation_json=? WHERE sequence=?`, "info", message, presentationJSON, completeSequence); historyErr != nil {
+		return ManagedHistoryEntry{}, historyErr
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO managed_child_transitions(event_key,complete_sequence,agent_id,pi_session_id,session_epoch,process_incarnation,runtime_generation,parent_entry_id,task_id,run_id,source_sequence,kind,lifecycle_state,recovery_state,recovery_cause,details_json,occurred_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, key, completeSequence, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, kind, lifecycleState, recoveryState, nullableString(recoveryCause), string(detailsJSON), occurredAt)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, transitionKey, completeSequence, fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration, parentEntryID, taskID, runID, sequence, kind, lifecycleState, recoveryState, nullableString(recoveryCause), string(detailsJSON), occurredAt)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
@@ -3262,15 +3292,11 @@ func (s *Store) ManagedChildHistoryEntryForDelta(ctx context.Context, fence Mana
 	var entry ManagedHistoryEntry
 	var sequence int64
 	var presentation sql.NullString
+	transitionKey := managedChildHistoryKey(fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", "confirmed", "", managedChildHistoryFieldsForDelta(delta))
 	err := s.db.QueryRowContext(ctx, `SELECT h.sequence,h.occurred_at,h.level,h.message,COALESCE(h.presentation_json,'')
 		FROM managed_child_transitions t
 		JOIN managed_complete_history h ON h.sequence=t.complete_sequence
-		WHERE t.agent_id=? AND t.pi_session_id=? AND t.session_epoch=? AND t.process_incarnation=? AND t.runtime_generation=?
-			AND t.parent_entry_id=? AND t.task_id=? AND t.run_id=? AND t.source_sequence=?
-			AND t.kind='transition' AND t.recovery_state='confirmed'`,
-		fence.AgentID, fence.PiSessionID, fence.SessionEpoch, fence.ProcessIncarnation, fence.RuntimeGeneration,
-		delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence,
-	).Scan(&sequence, &entry.At, &entry.Level, &entry.Message, &presentation)
+		WHERE t.event_key=? AND t.kind='transition' AND t.recovery_state='confirmed'`, transitionKey).Scan(&sequence, &entry.At, &entry.Level, &entry.Message, &presentation)
 	if err != nil {
 		return ManagedHistoryEntry{}, err
 	}
@@ -3460,7 +3486,7 @@ func (s *Store) ApplyManagedChildDelta(ctx context.Context, fence ManagedRuntime
 		if err != nil {
 			return err
 		}
-		if _, err := s.recordManagedChildHistoryWithDisplayTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", managedChildHistoryFields(next, delta), managedChildHistoryDisplayFromSnapshot(next, delta, state)); err != nil {
+		if _, err := s.recordManagedChildHistoryWithDisplayTx(ctx, fence, delta.ParentEntryID, delta.TaskID, delta.RunID, delta.Sequence, "transition", state, "confirmed", "", managedChildHistoryFieldsForDelta(delta), managedChildHistoryDisplayFromSnapshot(next, delta, state)); err != nil {
 			return err
 		}
 		if err := s.confirmManagedChildRecoveryForDeltaTx(ctx, fence, delta, state); err != nil {
@@ -3523,6 +3549,25 @@ func managedChildChangedFields(changes map[string]any) []string {
 		fields = append(fields, field)
 	}
 	sort.Strings(fields)
+	return fields
+}
+
+// managedChildHistoryFieldsForDelta derives the same public transition fields
+// from the source event that ApplyManagedChildDelta records after merging it.
+// Keeping this derivation deterministic lets the exact full-fence audit key be
+// used when the live history entry is published.
+func managedChildHistoryFieldsForDelta(delta ManagedChildDelta) []string {
+	fields := managedChildChangedFields(delta.Changes)
+	compaction, _ := delta.Changes["compaction"].(map[string]any)
+	if compaction == nil {
+		return fields
+	}
+	if state, _ := compaction["state"].(string); state == "compacting" {
+		return append(fields, "compaction:compacting")
+	}
+	if outcome, _ := compaction["last_outcome"].(string); outcome == "completed" || outcome == "failed" || outcome == "aborted" || outcome == "reconciled_unknown" {
+		return append(fields, "compaction:"+outcome)
+	}
 	return fields
 }
 

@@ -39,7 +39,10 @@ function isMeaningfulCompleteActivity(entry: ManagedHistoryEntry): boolean {
   // lifecycle state while retaining a terminal child result or failure.
   if (entry.presentation?.kind === "lifecycle" || entry.presentation?.kind === "state") return false;
   if (entry.presentation?.kind !== "child") return true;
-  return ["completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
+  // A running child owns the same Complete row that later receives compaction
+  // and terminal updates. Keep that row mounted so React preserves its stable
+  // key and DOM position throughout the child run.
+  return ["running", "completed", "steered", "aborted", "stopped", "error", "interrupted_unknown"].includes(entry.presentation.child_state ?? "");
 }
 
 function dateLabel(timestamp: number): string | undefined {

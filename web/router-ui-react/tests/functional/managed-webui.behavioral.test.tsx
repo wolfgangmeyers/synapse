@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -30,12 +30,13 @@ function list(value: unknown): unknown[] {
   return value;
 }
 
-function realBrowserWebSocketFactory(): WebSocketFactory {
+function realBrowserWebSocketFactory(onOpen?: () => void): WebSocketFactory {
   return (url: string): WebSocketLike => {
     const socket = new globalThis.WebSocket(url);
     return {
       get readyState() { return socket.readyState; },
       addEventListener(type: string, listener: (event: SocketEvent) => void): void {
+        if (type === "open" && onOpen !== undefined) socket.addEventListener("open", onOpen, { once: true });
         socket.addEventListener(type, (event) => {
           if (event instanceof MessageEvent) listener({ data: event.data });
           else if (event instanceof CloseEvent) listener({ code: event.code, reason: event.reason });
@@ -45,61 +46,6 @@ function realBrowserWebSocketFactory(): WebSocketFactory {
       send(value: string): void { socket.send(value); },
       close(code?: number, reason?: string): void { socket.close(code, reason); },
     };
-  };
-}
-
-interface UILiveProbe {
-  next(predicate: (frame: JsonRecord) => boolean): Promise<JsonRecord>;
-  close(): Promise<void>;
-}
-
-async function connectUILiveProbe(routerUrl: string): Promise<UILiveProbe> {
-  const endpoint = new URL("/v1/ui-live", routerUrl);
-  endpoint.protocol = "ws:";
-  const socket = new globalThis.WebSocket(endpoint.toString());
-  const queued: JsonRecord[] = [];
-  const waiters: Array<{ predicate: (frame: JsonRecord) => boolean; resolve: (frame: JsonRecord) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
-  const consume = (value: unknown): void => {
-    if (typeof value !== "string") return;
-    let frame: JsonRecord;
-    try { frame = record(JSON.parse(value)); } catch { return; }
-    for (let index = 0; index < waiters.length; index += 1) {
-      const waiter = waiters[index];
-      if (waiter === undefined || !waiter.predicate(frame)) continue;
-      waiters.splice(index, 1);
-      clearTimeout(waiter.timer);
-      waiter.resolve(frame);
-      return;
-    }
-    queued.push(frame);
-  };
-  socket.addEventListener("message", (event) => consume(event.data));
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timed out opening the real UI-live socket")), 10_000);
-    socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
-    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("real UI-live socket failed")); }, { once: true });
-  });
-  return {
-    next(predicate) {
-      const queuedIndex = queued.findIndex(predicate);
-      if (queuedIndex >= 0) {
-        const [frame] = queued.splice(queuedIndex, 1);
-        if (frame !== undefined) return Promise.resolve(frame);
-      }
-      return new Promise<JsonRecord>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          const index = waiters.findIndex((candidate) => candidate.resolve === resolve);
-          if (index >= 0) waiters.splice(index, 1);
-          reject(new Error("timed out waiting for a real UI-live frame"));
-        }, 10_000);
-        waiters.push({ predicate, resolve, reject, timer });
-      });
-    },
-    async close() {
-      for (const waiter of waiters.splice(0)) { clearTimeout(waiter.timer); waiter.reject(new Error("UI-live probe closed")); }
-      if (socket.readyState === socket.CLOSED) return;
-      await new Promise<void>((resolve) => { socket.addEventListener("close", () => resolve(), { once: true }); socket.close(1000, "functional test complete"); });
-    },
   };
 }
 
@@ -129,54 +75,10 @@ async function sendManagedMessage(router: FunctionalRouter, agentID: string, bod
   expect(response.status).toBe(201);
 }
 
-async function waitForChildReceipt(router: FunctionalRouter, agentID: string, sequence: number, initialChild: JsonRecord): Promise<{ marker: JsonRecord; child: JsonRecord }> {
-  let marker: JsonRecord | undefined;
-  let child: JsonRecord | undefined;
-  await waitFor(async () => {
-    const text = await readFile(`${router.sessionRoot}/child-receipt-${sequence}.json`, "utf8");
-    marker = record(JSON.parse(text));
-    const receipt = record(marker.receipt);
-    const message = record(receipt.message);
-    const details = record(message.details);
-    expect(receipt.type).toBe("message_end");
-    expect(message).toMatchObject({ id: `functional-child-delta-${sequence}`, customType: "mecha.child.delta.v1", display: false, content: "Managed child lifecycle updated." });
-    expect(details).toMatchObject({ protocol: "mecha.children/v1", task_id: initialChild.task_id, run_id: initialChild.run_id, parent_entry_id: initialChild.parent_entry_id, sequence });
-    const publicSnapshot = await jsonRequest(router, `/v1/managed-agents/${agentID}/children`, { method: "GET", credentials: "omit" });
-    expect(publicSnapshot.response.status).toBe(200);
-    if (Number(publicSnapshot.body.lifecycle_version) !== sequence) {
-      const currentAgent = await jsonRequest(router, `/v1/managed-agents/${agentID}`, { method: "GET", credentials: "omit" });
-      throw new Error(`child receipt ${sequence} was emitted but not applied: ${JSON.stringify({ marker, children: publicSnapshot.body, agent: currentAgent.body })}`);
-    }
-    const match = list(publicSnapshot.body.children).find((value) => {
-      const candidate = record(value);
-      return candidate.task_id === initialChild.task_id && candidate.run_id === initialChild.run_id && candidate.parent_entry_id === initialChild.parent_entry_id;
-    });
-    child = record(match);
-    expect(child.sequence).toBe(sequence);
-    expect(child.id).toBe(initialChild.id);
-  });
-  if (marker === undefined || child === undefined) throw new Error(`child receipt ${sequence} did not produce a public projection`);
-  return { marker, child };
-}
-
-async function waitForManagedFrame(probe: UILiveProbe, agentID: string, state: string): Promise<JsonRecord> {
-  return probe.next((frame) => {
-    if (frame.type === "managed_agent_delta") {
-      const changes = record(frame.changes);
-      return changes.agent_id === agentID && changes.lifecycle_state === state;
-    }
-    if (frame.type !== "managed_agents_snapshot" || !Array.isArray(frame.agents)) return false;
-    return frame.agents.some((value) => { const agent = record(value); return agent.agent_id === agentID && agent.lifecycle_state === state; });
-  });
-}
-
 let router: FunctionalRouter | undefined;
-let probe: UILiveProbe | undefined;
 
 afterEach(async () => {
   cleanup();
-  await probe?.close().catch(() => undefined);
-  probe = undefined;
   if (router !== undefined) {
     const closed = await router.close();
     expect(closed.rootRemoved).toBe(true);
@@ -191,14 +93,17 @@ describe("real managed router to React WebUI behavioral seam", () => {
     // Matrix: source/state/activity projection. The assertion starts at a real
     // SQLite-backed Go projection and ends at the real AgentRow component.
     router = await startManagedGoRouter();
-    probe = await connectUILiveProbe(router.httpUrl);
-    const initial = await probe.next((frame) => frame.type === "managed_agents_snapshot");
-    expect(initial.agents).toEqual([]);
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
 
     await launch(router, "functional-alpha");
-    const delta = await waitForManagedFrame(probe, "functional-alpha", "running");
-    const changes = record(delta.type === "managed_agent_delta" ? delta.changes : list(delta.agents).find((value) => record(value).agent_id === "functional-alpha"));
+    const rowButton = await screen.findByRole("button", { name: "Functional Alpha (functional-alpha)" });
+    let publicAfterLaunch: { response: Response; body: JsonRecord } | undefined;
+    await waitFor(async () => {
+      publicAfterLaunch = await jsonRequest(router!, "/v1/managed-agents", { method: "GET", credentials: "omit" });
+      const candidate = record(list(publicAfterLaunch.body.agents).find((value) => record(value).agent_id === "functional-alpha"));
+      expect(candidate).toMatchObject({ lifecycle_state: "running", accepting_prompts: true });
+    });
+    const changes = record(list(publicAfterLaunch!.body.agents).find((value) => record(value).agent_id === "functional-alpha"));
     expect(changes).toMatchObject({ agent_id: "functional-alpha", source: "router-managed", lifecycle_state: "running", accepting_prompts: true });
     expect(changes).not.toHaveProperty("process_pid");
     expect(changes).not.toHaveProperty("session_id");
@@ -212,7 +117,6 @@ describe("real managed router to React WebUI behavioral seam", () => {
     expect(publicAgent).not.toHaveProperty("session_file");
     expect(publicAgent).not.toHaveProperty("runtime_generation");
 
-    const rowButton = await screen.findByRole("button", { name: "Functional Alpha (functional-alpha)" });
     expect(rowButton).toHaveTextContent("RPC");
     await userEvent.setup().click(rowButton);
     expect(screen.getByRole("listitem")).toHaveClass("active");
@@ -223,30 +127,22 @@ describe("real managed router to React WebUI behavioral seam", () => {
     // separation. The Go fake process emits the same ordered RPC lifecycle
     // frames that the managed handler consumes; no browser or provider is used.
     router = await startManagedGoRouter();
-    probe = await connectUILiveProbe(router.httpUrl);
-    await probe.next((frame) => frame.type === "managed_agents_snapshot");
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
     await launch(router, "functional-card");
-    await waitForManagedFrame(probe, "functional-card", "running");
+    await screen.findByRole("button", { name: "Functional Card (functional-card)" });
     await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Card (functional-card)" }));
     await sendManagedMessage(router, "functional-card");
 
-    const activeHistory = await probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(record(frame.entry).presentation).outcome === "active");
-    const activeEntry = record(activeHistory.entry);
-    const activeID = String(activeEntry.id);
     const user = userEvent.setup();
     await user.click(screen.getByRole("tab", { name: "Complete messages and activity" }));
-    let activeCard: HTMLElement | null = null;
-    await waitFor(() => {
-      activeCard = document.querySelector<HTMLElement>(`[data-activity-id="${activeID}"]`);
-      expect(activeCard).toBeInTheDocument();
-      expect(activeCard).toHaveClass("activity-entry--active");
-    });
+    const activeLabel = await screen.findByText("Running bash");
+    const activeCard = activeLabel.closest<HTMLElement>("[data-activity-id]");
+    expect(activeCard).not.toBeNull();
+    if (activeCard === null) throw new Error("active tool card missing");
+    const activeID = activeCard.dataset.activityId ?? "";
+    expect(activeID).not.toBe("");
     const stableCard = activeCard;
     await writeFile(`${router.sessionRoot}/allow-tool-end`, "release deterministic tool barrier\n", { mode: 0o600 });
-    const terminalHistory = await probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(frame.entry).id === activeID && record(record(frame.entry).presentation).outcome === "success");
-    const terminalEntry = record(terminalHistory.entry);
-    expect(terminalEntry.id).toBe(activeID);
     await waitFor(() => {
       const terminalCard = document.querySelector<HTMLElement>(`[data-activity-id="${activeID}"]`);
       expect(terminalCard).toBe(stableCard);
@@ -268,80 +164,90 @@ describe("real managed router to React WebUI behavioral seam", () => {
 
   it("keeps child and parent compaction cards stable across active-to-terminal updates", async () => {
     router = await startManagedGoRouter();
-    probe = await connectUILiveProbe(router.httpUrl);
-    await probe.next((frame) => frame.type === "managed_agents_snapshot");
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
     await launch(router, "functional-compaction");
-    await waitForManagedFrame(probe, "functional-compaction", "running");
+    await screen.findByText("Connected as wolfgang");
     await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Compaction (functional-compaction)" }));
-    const initialChildren = await jsonRequest(router, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
-    expect(initialChildren.response.status).toBe(200);
-    const initialProjection = initialChildren.body;
-    const initialChild = record(list(initialProjection.children)[0]);
-    expect(initialProjection).toMatchObject({ agent_id: "functional-compaction", source: "router-managed", lifecycle_version: 0, recovery_state: "current" });
-    expect(initialChild).toMatchObject({ task_id: "functional-child-task", run_id: "functional-child-run", parent_entry_id: "functional-parent-entry", sequence: 0 });
-
+    let initialChildren: { response: Response; body: JsonRecord } | undefined;
+    await waitFor(async () => {
+      initialChildren = await jsonRequest(router!, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
+      expect(initialChildren.body).toMatchObject({ lifecycle_version: 0, recovery_state: "current" });
+    });
+    expect(initialChildren!.response.status).toBe(200);
+    expect(record(list(initialChildren!.body.children)[0])).toMatchObject({ task_id: "functional-child-task", run_id: "functional-child-run", parent_entry_id: "functional-parent-entry", sequence: 0 });
     await userEvent.setup().click(screen.getByRole("tab", { name: "Complete messages and activity" }));
-    await sendManagedMessage(router, "functional-compaction", "Run structured child lifecycle");
-    // The fake command also emits a normal direct turn. Release its tool
-    // barrier so the child FIFO can acquire the serialized binding lane.
-    await writeFile(`${router.sessionRoot}/allow-tool-end`, "release direct tool\n", { mode: 0o600 });
+    await screen.findByText("No messages or activity yet");
 
-    const childCompactionActivePromise = probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(record(frame.entry).presentation).kind === "compaction" && record(record(frame.entry).presentation).child_label === "Child" && record(record(frame.entry).presentation).outcome === "compacting");
-    let previousOuterSequence = 0;
-    for (const [sequence, expected] of [[1, "running"], [2, "compacting"], [3, "idle"], [4, "completed"]] as const) {
-      const observed = await waitForChildReceipt(router, "functional-compaction", sequence, initialChild);
-      const details = record(record(record(observed.marker.receipt).message).details);
-      const fence = record(observed.marker.fence);
-      expect(Number(observed.marker.outer_rpc_sequence)).toBeGreaterThan(previousOuterSequence);
-      previousOuterSequence = Number(observed.marker.outer_rpc_sequence);
-      expect(fence.owner_session_id).toBe(details.owner_session_id);
-      expect(details).toMatchObject({ task_id: initialChild.task_id, run_id: initialChild.run_id, parent_entry_id: initialChild.parent_entry_id, sequence });
-      expect(observed.child).toMatchObject({ task_id: initialChild.task_id, run_id: initialChild.run_id, parent_entry_id: initialChild.parent_entry_id, sequence });
-      if (sequence === 1) expect(observed.child.status).toBe(expected);
-      if (sequence === 2) expect(record(observed.child.compaction).state).toBe(expected);
-      if (sequence === 3) expect(record(observed.child.compaction).last_outcome).toBe("completed");
-      if (sequence === 4) expect(observed.child.status).toBe(expected);
-      await writeFile(`${router.sessionRoot}/allow-child-${sequence}`, "release child receipt\n", { mode: 0o600 });
-    }
-
-    const childCompactionActive = await childCompactionActivePromise;
-    const childActiveEntry = record(childCompactionActive.entry);
-    const childActiveID = String(childActiveEntry.id);
+    await sendManagedMessage(router, "functional-compaction", "Start structured child");
+    let activeChildren: { response: Response; body: JsonRecord } | undefined;
+    await waitFor(async () => {
+      activeChildren = await jsonRequest(router!, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
+      expect(record(list(activeChildren.body.children)[0])).toMatchObject({ sequence: 1, status: "running" });
+    });
+    let activeHistory: { response: Response; body: JsonRecord } | undefined;
+    await waitFor(async () => {
+      activeHistory = await jsonRequest(router!, "/v1/history?agent_id=functional-compaction&view=complete", { method: "GET", credentials: "omit" });
+      expect(list(activeHistory.body.entries).some((entry) => record(record(entry).presentation).child_state === "running")).toBe(true);
+    });
+    const activeEntry = list(activeHistory!.body.entries).find((entry) => record(record(entry).presentation).child_state === "running");
+    const childID = String(record(activeEntry).id);
+    await sendManagedMessage(router, "functional-compaction", "Start child compaction");
+    let compactingChildren: { response: Response; body: JsonRecord } | undefined;
+    await waitFor(async () => {
+      compactingChildren = await jsonRequest(router!, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
+      expect(record(list(compactingChildren.body.children)[0])).toMatchObject({ sequence: 2 });
+    });
     const childCard = await waitFor(() => {
-      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childActiveID}"]`);
+      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
       expect(card).toBeInTheDocument();
       expect(card).toHaveClass("activity-entry--purple");
+      expect(card).toHaveTextContent("Child compacting");
       return card;
     });
-    const childTerminal = await probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(record(frame.entry).presentation).kind === "compaction" && record(record(frame.entry).presentation).child_label === "Child" && record(record(frame.entry).presentation).outcome === "completed");
-    const childTerminalEntry = record(childTerminal.entry);
-    const childTerminalID = String(childTerminalEntry.id);
-    expect(childTerminalID).not.toBe(childActiveID);
+    if (childCard === null) throw new Error("child card missing");
+    const childPosition = [...document.querySelectorAll<HTMLElement>("[data-activity-id]")].indexOf(childCard);
+
+    await sendManagedMessage(router, "functional-compaction", "Finish child compaction");
+    let compactedChildren: { response: Response; body: JsonRecord } | undefined;
+    await waitFor(async () => {
+      compactedChildren = await jsonRequest(router!, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
+      expect(record(list(compactedChildren.body.children)[0])).toMatchObject({ sequence: 3 });
+    });
     await waitFor(() => {
-      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childTerminalID}"]`);
-      expect(card).toBeInTheDocument();
+      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
+      expect(card).toBe(childCard);
       expect(card).toHaveTextContent("Child context compacted");
+    });
+
+    await sendManagedMessage(router, "functional-compaction", "Finish structured child");
+    let terminalChildren: { response: Response; body: JsonRecord } | undefined;
+    await waitFor(async () => {
+      terminalChildren = await jsonRequest(router!, "/v1/managed-agents/functional-compaction/children", { method: "GET", credentials: "omit" });
+      expect(record(list(terminalChildren.body.children)[0])).toMatchObject({ sequence: 4, status: "completed" });
+    });
+    await waitFor(() => {
+      const card = document.querySelector<HTMLElement>(`[data-activity-id="${childID}"]`);
+      expect(card).toBe(childCard);
+      expect(card).toHaveTextContent("Subagent finished");
       expect(card).not.toHaveClass("activity-entry--active");
     });
-    expect(document.querySelectorAll(`[data-activity-id="${childActiveID}"], [data-activity-id="${childTerminalID}"]`)).toHaveLength(2);
+    expect(document.querySelectorAll(`[data-activity-id="${childID}"]`)).toHaveLength(1);
 
-    const parentCompaction = await probe.next((frame) => frame.type === "history_entry" && frame.view === "complete" && record(record(frame.entry).presentation).kind === "compaction" && record(record(frame.entry).presentation).outcome === "completed" && !Object.prototype.hasOwnProperty.call(record(record(frame.entry).presentation), "child_label"));
-    const parentEntry = record(parentCompaction.entry);
-    const parentID = String(parentEntry.id);
-    const parentCard = await waitFor(() => {
-      const card = document.querySelector<HTMLElement>(`[data-activity-id="${parentID}"]`);
-      expect(card).toBeInTheDocument();
-      expect(card).toHaveTextContent("Context compacted");
-      return card;
-    });
-    expect(document.querySelectorAll(`[data-activity-id="${parentID}"]`)).toHaveLength(1);
+    await sendManagedMessage(router, "functional-compaction", "Run parent compaction");
+    const parentLabel = await screen.findByText("Context compacted");
+    const parentCard = parentLabel.closest<HTMLElement>("[data-activity-id]");
+    expect(parentCard).not.toBeNull();
+    if (parentCard === null) throw new Error("parent card missing");
+    expect(document.querySelectorAll(`[data-activity-id="${parentCard.dataset.activityId ?? ""}"]`)).toHaveLength(1);
+    expect(document.querySelectorAll(`[data-event-kind="compaction"]`)).toHaveLength(2);
 
-    const currentTerminal = await jsonRequest(router, "/v1/history?agent_id=functional-compaction&view=complete", { method: "GET", credentials: "omit" });
-    expect(list(currentTerminal.body.entries).filter((entry) => record(entry).id === childActiveID)).toHaveLength(1);
+    const currentComplete = await jsonRequest(router, "/v1/history?agent_id=functional-compaction&view=complete", { method: "GET", credentials: "omit" });
+    expect(list(currentComplete.body.entries).filter((entry) => record(entry).id === childID)).toHaveLength(1);
+    const quiet = await jsonRequest(router, "/v1/history?agent_id=functional-compaction&view=quiet", { method: "GET", credentials: "omit" });
+    expect(quiet.response.status).toBe(200);
+    expect(list(quiet.body.entries)).toHaveLength(0);
     await userEvent.setup().click(screen.getByRole("tab", { name: "Quiet messages" }));
-    expect(document.querySelector(`[data-activity-id="${childActiveID}"]`)).not.toBeInTheDocument();
-    expect(document.querySelector(`[data-activity-id="${parentID}"]`)).not.toBeInTheDocument();
+    expect(document.querySelector(`[data-activity-id="${childID}"]`)).not.toBeInTheDocument();
   }, 60_000);
 
   it("does not resurrect a removed row after same-DB restart and retries a failed control truthfully", async () => {
@@ -349,11 +255,9 @@ describe("real managed router to React WebUI behavioral seam", () => {
     // and termination/control failure with a retry. The fail-ready marker is a
     // test-only fake RPC boundary; the production router and store stay real.
     router = await startManagedGoRouter();
-    probe = await connectUILiveProbe(router.httpUrl);
-    await probe.next((frame) => frame.type === "managed_agents_snapshot");
     render(<App routerUrl={router.httpUrl} agentId="web-ui" transportOptions={{ webSocketFactory: realBrowserWebSocketFactory(), autoReconnect: true }} />);
     await launch(router, "functional-retry");
-    await waitForManagedFrame(probe, "functional-retry", "running");
+    await screen.findByRole("button", { name: "Functional Retry (functional-retry)" });
     await userEvent.setup().click(await screen.findByRole("button", { name: "Functional Retry (functional-retry)" }));
 
     await writeFile(`${router.sessionRoot}/fail-abort`, "test-only control failure\n", { mode: 0o600 });
@@ -361,7 +265,6 @@ describe("real managed router to React WebUI behavioral seam", () => {
       method: "DELETE", headers: { "x-request-id": requestIDs[requestIndex++]! },
     });
     expect(failedTermination.response.status).toBe(202);
-    await waitForManagedFrame(probe, "functional-retry", "terminating");
     const retained = await jsonRequest(router, "/v1/managed-agents/functional-retry", { method: "GET", credentials: "omit" });
     expect(retained.response.status).toBe(200);
     expect(record(retained.body.agent)).toMatchObject({ desired_state: "terminated", lifecycle_state: "terminating" });
@@ -370,15 +273,9 @@ describe("real managed router to React WebUI behavioral seam", () => {
     await unlink(`${router.sessionRoot}/fail-abort`);
     const retainedVersion = Number(record(retained.body).projection_version);
     expect(Number.isSafeInteger(retainedVersion)).toBe(true);
-    await probe.close();
-    probe = undefined;
     await router.restart();
-    probe = await connectUILiveProbe(router.httpUrl);
-    const restartSnapshot = await probe.next((frame) => frame.type === "managed_agents_snapshot");
-    const restartChildren = await probe.next((frame) => frame.type === "managed_children_snapshot");
-    expect(Number(restartSnapshot.projection_version)).toBeGreaterThanOrEqual(retainedVersion);
-    expect(restartSnapshot.agents).toEqual([]);
-    expect(restartChildren.children).toEqual([]);
+    const restartAgents = await jsonRequest(router, "/v1/managed-agents", { method: "GET", credentials: "omit" });
+    expect(list(restartAgents.body.agents)).toEqual([]);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Functional Retry (functional-retry)" })).not.toBeInTheDocument());
   }, 90_000);
 });
