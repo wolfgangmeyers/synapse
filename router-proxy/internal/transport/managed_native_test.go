@@ -737,6 +737,7 @@ type listenRecoveryProcessOps struct {
 	mu      sync.Mutex
 	states  map[int]managed.ProcessProbeState
 	closed  []managed.ProcessIdentity
+	waited  []managed.ProcessIdentity
 	signals []managed.ProcessIdentity
 }
 
@@ -760,6 +761,7 @@ func (o *listenRecoveryProcessOps) SignalVerifiedProcessGroup(identity managed.P
 func (o *listenRecoveryProcessOps) WaitForProcessGroupEmpty(_ context.Context, identity managed.ProcessIdentity, _ <-chan error) managed.ProcessProbe {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.waited = append(o.waited, identity)
 	o.states[identity.PID] = managed.ProcessAbsent
 	return managed.ProcessProbe{State: managed.ProcessAbsent}
 }
@@ -795,7 +797,7 @@ func seedListenColdAgent(t *testing.T, durable *store.Store, config managed.Conf
 }
 
 func expectedManagedActiveToolsForTransport(manifest managed.Manifest) []string {
-	active := []string{"subagent", "get_subagent_result", "steer_subagent"}
+	active := []string{"read", "bash", "edit", "write", "subagent", "get_subagent_result", "steer_subagent"}
 	for _, tool := range manifest.Tools {
 		active = append(active, tool.Name)
 	}
@@ -825,11 +827,11 @@ func TestListenColdRecoveryGlobalStoreFailureCleansPriorBindings(t *testing.T) {
 	_, err = faultDB.Exec(`CREATE TRIGGER reject_second_recovery BEFORE UPDATE OF stage ON managed_root_recovery_actions WHEN NEW.agent_id='second' AND OLD.stage='reaping' AND NEW.stage='stopped' BEGIN SELECT RAISE(FAIL, 'injected global store failure'); END`)
 	require.NoError(t, err)
 
-	factory := &listenRecoveryFactory{processes: []*managedTestProcess{
-		{identity: managed.ProcessIdentity{PID: 9201, StartMarker: "target-first", Incarnation: "target-first-inc"}, stopped: make(chan struct{})},
-		{identity: managed.ProcessIdentity{PID: 9202, StartMarker: "target-second", Incarnation: "target-second-inc"}, stopped: make(chan struct{})},
-	}}
-	ops := &listenRecoveryProcessOps{states: map[int]managed.ProcessProbeState{9101: managed.ProcessAbsent, 9102: managed.ProcessAbsent, 9201: managed.ProcessOwned, 9202: managed.ProcessOwned}}
+	firstTarget := &managedTestProcess{identity: managed.ProcessIdentity{PID: 9201, StartMarker: "target-first", Incarnation: "target-first-inc"}, stopped: make(chan struct{})}
+	secondTarget := &managedTestProcess{identity: managed.ProcessIdentity{PID: 9202, StartMarker: "target-second", Incarnation: "target-second-inc"}, stopped: make(chan struct{})}
+	firstRetryTarget := &managedTestProcess{identity: managed.ProcessIdentity{PID: 9203, StartMarker: "target-first-retry", Incarnation: "target-first-retry-inc"}, stopped: make(chan struct{})}
+	factory := &listenRecoveryFactory{processes: []*managedTestProcess{firstTarget, firstRetryTarget, secondTarget}}
+	ops := &listenRecoveryProcessOps{states: map[int]managed.ProcessProbeState{9101: managed.ProcessAbsent, 9102: managed.ProcessAbsent, 9201: managed.ProcessOwned, 9202: managed.ProcessOwned, 9203: managed.ProcessOwned}}
 	manager, err := managed.NewManager(managed.ManagerOptions{Store: durable, Config: config, Manifest: manifest, ProcessFactory: factory, RPCFactory: managedTestRPCFactory{rpc: managedTestRPC{session: &factory.session, active: expectedManagedActiveToolsForTransport(manifest)}}, CatalogSource: managed.CatalogFromModels(managed.Model{Provider: "openai-codex", ID: "gpt-5.6-terra", Available: true}), ProcessGroupLeaderVerifier: func(managed.ProcessIdentity) bool { return true }, ProcessGroupOps: ops})
 	require.NoError(t, err)
 	router, err := New(Options{Store: durable, Host: "127.0.0.1", Port: 0, Managed: manager})
@@ -838,12 +840,36 @@ func TestListenColdRecoveryGlobalStoreFailureCleansPriorBindings(t *testing.T) {
 	require.ErrorContains(t, listenErr, "injected global store failure")
 	require.Nil(t, router.listener)
 	select {
-	case <-factory.processes[0].stopped:
+	case <-firstTarget.stopped:
 	case <-time.After(time.Second):
 		t.Fatal("first recovered process was not stopped after startup failure")
 	}
-	managerProcesses := manager
-	_ = managerProcesses
+	require.Error(t, manager.AdmitPrompt(ctx, "first", "must be rejected after failed startup"))
+	ops.mu.Lock()
+	require.Equal(t, []managed.ProcessIdentity{firstTarget.identity}, ops.closed)
+	require.Equal(t, []managed.ProcessIdentity{firstTarget.identity}, ops.waited)
+	require.Equal(t, managed.ProcessAbsent, ops.states[firstTarget.identity.PID])
+	require.Equal(t, managed.ProcessOwned, ops.states[secondTarget.identity.PID])
+	ops.mu.Unlock()
+
+	_, err = faultDB.Exec("DROP TRIGGER reject_second_recovery")
+	require.NoError(t, err)
+	require.NoError(t, router.Listen(ctx))
+	require.Equal(t, 3, factory.next)
+	require.NoError(t, manager.AdmitPrompt(ctx, "first", "retry must use the new binding"))
+	firstAgent, err := manager.Agent(ctx, "first")
+	require.NoError(t, err)
+	require.Equal(t, firstRetryTarget.identity.PID, firstAgent.ProcessPID)
+	secondAgent, err := manager.Agent(ctx, "second")
+	require.NoError(t, err)
+	require.Equal(t, secondTarget.identity.PID, secondAgent.ProcessPID)
+	ops.mu.Lock()
+	require.Equal(t, managed.ProcessAbsent, ops.states[firstTarget.identity.PID])
+	require.Equal(t, managed.ProcessOwned, ops.states[firstRetryTarget.identity.PID])
+	require.Equal(t, managed.ProcessOwned, ops.states[secondTarget.identity.PID])
+	require.Equal(t, []managed.ProcessIdentity{firstTarget.identity}, ops.waited)
+	require.Empty(t, ops.signals)
+	ops.mu.Unlock()
 }
 
 func TestListenRecoversManagedRestartTransitionsBeforeBind(t *testing.T) {
