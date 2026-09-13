@@ -8,12 +8,9 @@ import (
 	"github.com/reflexivity/mecha-developer/router-proxy/internal/store"
 )
 
-// managedGoalActivity is an immutable router-side fact. The router only
-// counts successful real work: a non-control root tool or a native child launch.
-type managedGoalActivity struct {
-	Kind string
-	ID   string
-}
+// managedGoalActivity preserves the local source spelling while the store owns
+// its durable full-fence identity and duplicate rejection.
+type managedGoalActivity = store.ManagedGoalActivity
 
 func (m *Manager) executeManagedGoalSnooze(ctx context.Context, binding *managedBinding, invocation RootControlInvocation) (RootControlHandlerResult, error) {
 	arguments, ok := invocation.Arguments.(map[string]any)
@@ -47,7 +44,7 @@ func (m *Manager) scheduleManagedGoalSnoozeWakeup(binding *managedBinding, fence
 				return
 			}
 			policy, err := m.store.ManagedGoalPolicyFor(context.Background(), fence.AgentID)
-			if err != nil || policy.EvaluatorState != "snoozed" || policy.SnoozedUntil == "" {
+			if err != nil || policy.EvaluatorState != "snoozed" || policy.SnoozedUntil == "" || !store.ManagedGoalSnoozeFenceMatches(policy, fence) {
 				return
 			}
 			due, err := time.Parse(time.RFC3339Nano, policy.SnoozedUntil)
@@ -91,8 +88,28 @@ func (m *Manager) wakeSnoozedGoalInLane(binding *managedBinding, fence store.Man
 	}
 }
 
+// installQualifiedGoalActivityReceiver leaves native builtin completion dormant
+// until C4 provides a stable completion identity on the existing Pi telemetry
+// stream. It does not infer success from agent_settled or introduce another
+// telemetry channel.
+func (m *Manager) installQualifiedGoalActivityReceiver(binding *managedBinding) {
+	if binding == nil {
+		return
+	}
+	rpc, ok := binding.rpc.(QualifiedGoalActivityRPC)
+	if !ok {
+		return
+	}
+	rpc.SetQualifiedGoalActivityEventHandler(func(activity store.ManagedGoalActivity) {
+		binding.serial.Lock()
+		fence := bindingFence(binding.agentID, binding)
+		binding.serial.Unlock()
+		m.recordManagedGoalActivity(binding, fence, activity)
+	})
+}
+
 func (m *Manager) recordManagedGoalActivity(binding *managedBinding, fence store.ManagedRuntimeFence, activity managedGoalActivity) {
-	if binding == nil || activity.ID == "" || (activity.Kind != "tool" && activity.Kind != "child") {
+	if binding == nil || activity.ID == "" || (activity.Kind != "tool" && activity.Kind != "child" && activity.Kind != "builtin") {
 		return
 	}
 	m.startManagedTask(func() {
@@ -101,7 +118,7 @@ func (m *Manager) recordManagedGoalActivity(binding *managedBinding, fence store
 		if !m.liveBindingForFence(m.runCtx, binding, fence) {
 			return
 		}
-		policy, rearmed, err := m.store.RecordManagedGoalMeaningfulActivity(context.Background(), fence)
+		policy, rearmed, err := m.store.RecordManagedGoalMeaningfulActivity(context.Background(), fence, activity)
 		if err == nil && policy != nil && rearmed {
 			m.publishProjection()
 		}

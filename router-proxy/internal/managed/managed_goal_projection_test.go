@@ -23,6 +23,7 @@ type goalProjectionRPC struct {
 	fail         bool
 	directBodies chan string
 	evaluation   func(context.Context, store.ManagedGoalPolicy) (string, string, error)
+	activity     func(store.ManagedGoalActivity)
 }
 
 func (r *goalProjectionRPC) ApplyPolicy(ctx context.Context, envelope map[string]any) (map[string]any, error) {
@@ -41,6 +42,10 @@ func (r *goalProjectionRPC) ApplyPolicy(ctx context.Context, envelope map[string
 		return nil, err
 	}
 	return map[string]any{"success": true, "command": "prompt"}, nil
+}
+
+func (r *goalProjectionRPC) SetQualifiedGoalActivityEventHandler(handler func(store.ManagedGoalActivity)) {
+	r.activity = handler
 }
 
 func (r *goalProjectionRPC) PrepareManagedMailbox(context.Context) (string, error) {
@@ -245,14 +250,11 @@ func TestManagedGoalSnoozeSchedulesOneFencedOrdinaryWakeup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "snoozed", policy.EvaluatorState)
 
-	time.Sleep(5 * time.Millisecond)
-	manager.wakeSnoozedGoalInLane(binding, fence)
-	manager.wakeSnoozedGoalInLane(binding, fence)
 	select {
 	case body := <-rpc.directBodies:
 		require.Equal(t, "NOT_DONE: Review finish the migration and take the next concrete action now.", body)
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for snooze wakeup")
+		t.Fatal("timed out waiting for timer-backed snooze wakeup")
 	}
 	select {
 	case body := <-rpc.directBodies:
@@ -263,7 +265,9 @@ func TestManagedGoalSnoozeSchedulesOneFencedOrdinaryWakeup(t *testing.T) {
 
 func TestManagedGoalMeaningfulActivityRearmsOnlyQualifiedEvents(t *testing.T) {
 	ctx := context.Background()
-	manager, durable, binding, fence, _ := readyGoalProjectionFixture(t)
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	manager.installQualifiedGoalActivityReceiver(binding)
+	require.NotNil(t, rpc.activity)
 	_, err := manager.executeManagedGoalControl(ctx, binding, RootControlInvocation{RequestID: "123e4567-e89b-42d3-a456-426614174013", OperationID: "goal.control", Arguments: map[string]any{"action": "set", "goal": "finish the migration"}, Fence: fence})
 	require.NoError(t, err)
 	for sequence := int64(1); sequence <= 1_000; sequence++ {
@@ -286,7 +290,7 @@ func TestManagedGoalMeaningfulActivityRearmsOnlyQualifiedEvents(t *testing.T) {
 		return lookupErr == nil && policy.EvaluatorState == "idle"
 	}, 50*time.Millisecond, 5*time.Millisecond)
 	for index := 0; index < 3; index++ {
-		manager.recordManagedGoalActivity(binding, fence, managedGoalActivity{Kind: "tool", ID: fmt.Sprintf("tool-%d", index)})
+		rpc.activity(store.ManagedGoalActivity{Kind: "builtin", ID: fmt.Sprintf("builtin-%d", index)})
 	}
 	require.Eventually(t, func() bool {
 		policy, lookupErr := durable.ManagedGoalPolicyFor(ctx, fence.AgentID)

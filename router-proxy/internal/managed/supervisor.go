@@ -522,6 +522,7 @@ func (m *Manager) start(ctx context.Context, agent store.ManagedAgentRecord, req
 	m.installParentCompactionReceiver(binding)
 	m.installParentCompactionNotificationReceiver(binding)
 	m.installParentActivityReceiver(binding)
+	m.installQualifiedGoalActivityReceiver(binding)
 	binding.serial.Lock()
 	if !m.liveBindingForFence(durableCtx, binding, fence) {
 		binding.serial.Unlock()
@@ -1213,6 +1214,7 @@ func (m *Manager) startRestartTargetInLane(transition *store.ManagedRestartTrans
 	m.installParentCompactionReceiver(target)
 	m.installParentCompactionNotificationReceiver(target)
 	m.installParentActivityReceiver(target)
+	m.installQualifiedGoalActivityReceiver(target)
 	target.serial.Lock()
 	target.lifecycleAction = ""
 	target.serial.Unlock()
