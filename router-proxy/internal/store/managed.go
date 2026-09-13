@@ -19,6 +19,7 @@ import (
 var ErrManagedChildDeltaGap = errors.New("managed child delta sequence gap")
 var ErrManagedChildDeltaConflict = errors.New("managed child delta conflicts with current sequence")
 var ErrManagedChildSnapshotConflict = errors.New("managed child snapshot conflicts with current sequence")
+var ErrManagedCrashRecoveryUnavailable = errors.New("managed crash recovery table is unavailable")
 
 var managedIdentifierRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var managedRecipientRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -70,6 +71,14 @@ func validManagedProvider(value string) bool { return managedProviderNames[value
 // ManagedAgentRecord is the internal durable managed-agent row. Private
 // process details are deliberately kept in this type and omitted by the
 // transport projection.
+type ManagedCrashRecoveryState struct {
+	RetryAt string
+}
+
+type ManagedCrashRecoveryDecision struct {
+	RetryAt string
+}
+
 type ManagedAgentRecord struct {
 	AgentID                   string
 	Name                      string
@@ -674,6 +683,11 @@ func (s *Store) ReserveManagedLaunchWithLimit(ctx context.Context, agent Managed
 		}
 		if agent.LaunchRecipe != nil {
 			if err := s.putManagedLaunchRecipeTx(ctx, *agent.LaunchRecipe, agent.AgentID, agent.CreatedAt); err != nil {
+				return err
+			}
+		}
+		if err := ensureManagedCrashRecoveryTx(ctx, s.db, agent.AgentID, agent.UpdatedAt); err != nil {
+			if !strings.Contains(err.Error(), "no such table: managed_crash_recovery") {
 				return err
 			}
 		}
@@ -3679,6 +3693,9 @@ func (s *Store) MarkManagedReadyFromSources(ctx context.Context, fence ManagedRu
 		if changed != 1 {
 			return &ManagedReadinessSourceStaleError{AgentID: fence.AgentID}
 		}
+		if err := markManagedCrashReadyTx(ctx, s.db, fence.AgentID, now, s.clock.Now()); err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE recipient_sources SET state = 'active', updated_at = ?
 			WHERE source_kind = 'managed' AND owner_identity = ? AND state = 'reserved'`, now, fence.AgentID); err != nil {
 			return err
@@ -3713,9 +3730,132 @@ func (s *Store) MarkManagedReady(ctx context.Context, agentID string) error {
 			}
 			return &ManagedReadinessSourceStaleError{AgentID: agentID}
 		}
+		if err := markManagedCrashReadyTx(ctx, s.db, agentID, now, s.clock.Now()); err != nil {
+			return err
+		}
 		_, err = s.bumpManagedProjectionVersion(ctx)
 		return err
 	})
+}
+
+// ManagedCrashRecovery returns the durable first-retry state for one agent.
+func (s *Store) ManagedCrashRecovery(ctx context.Context, agentID string) (*ManagedCrashRecoveryState, error) {
+	if ctx == nil || agentID == "" {
+		return nil, errors.New("managed crash recovery identity is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
+	state, err := managedCrashRecoveryQuery(ctx, s.db, agentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &ManagedCrashRecoveryState{}, nil
+	}
+	if err != nil && strings.Contains(err.Error(), "no such table: managed_crash_recovery") {
+		return nil, nil
+	}
+	return state, err
+}
+
+func (s *Store) ManagedCrashRecoveryDue(ctx context.Context, agentID string) (bool, error) {
+	state, err := s.ManagedCrashRecovery(ctx, agentID)
+	if err != nil || state == nil || state.RetryAt == "" {
+		return err == nil, err
+	}
+	due := parseTimestamp(state.RetryAt)
+	if due.IsZero() {
+		return true, nil
+	}
+	return !s.clock.Now().Before(due), nil
+}
+
+// RecordManagedUnexpectedExit persists the one-second first-retry deadline and
+// leaves the desired-running agent stopped for cold recovery. The unique agent
+// row makes duplicate exit callbacks idempotent.
+func (s *Store) RecordManagedUnexpectedExit(ctx context.Context, fence ManagedRuntimeFence, operationID, message string) (ManagedCrashRecoveryDecision, error) {
+	if !validManagedRuntimeFence(fence) || message == "" {
+		return ManagedCrashRecoveryDecision{}, errors.New("managed unexpected exit is invalid")
+	}
+	message = RedactedManagedDiagnostic(message)
+	decision := ManagedCrashRecoveryDecision{}
+	err := s.runImmediate(ctx, func() error {
+		if err := ensureManagedCrashRecoveryTx(ctx, s.db, fence.AgentID, formatTimestamp(s.clock.Now())); err != nil {
+			if strings.Contains(err.Error(), "no such table: managed_crash_recovery") {
+				return ErrManagedCrashRecoveryUnavailable
+			}
+			return err
+		}
+		var activity, retryAt string
+		if err := s.db.QueryRowContext(ctx, `SELECT activity_state FROM managed_agents WHERE `+managedFenceWhere("")+` AND desired_state='running'`, managedFenceValues(fence)...).Scan(&activity); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return &ManagedRestartStaleError{AgentID: fence.AgentID}
+			}
+			return err
+		}
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(retry_at,'') FROM managed_crash_recovery WHERE agent_id=?`, fence.AgentID).Scan(&retryAt); err != nil {
+			return err
+		}
+		if retryAt != "" && activity == "stopped" {
+			decision.RetryAt = retryAt
+			return nil
+		}
+		now := s.clock.Now()
+		nowText := formatTimestamp(now)
+		retry := formatTimestamp(now.Add(time.Second))
+		if _, err := s.db.ExecContext(ctx, `UPDATE managed_crash_recovery SET retry_at=?,updated_at=? WHERE agent_id=?`, retry, nowText, fence.AgentID); err != nil {
+			return err
+		}
+		args := append([]any{"PROCESS_EXITED", message, nowText, nowText}, managedFenceValues(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='stopped',accepting_prompts=0,slot_held=1,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state IN ('starting','running')`, args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			if err != nil {
+				return err
+			}
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		if err := terminalizeManagedCrashOperationTx(ctx, s.db, operationID, nowText, "PROCESS_EXITED", message); err != nil {
+			return err
+		}
+		decision.RetryAt = retry
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+	return decision, err
+}
+
+func ensureManagedCrashRecoveryTx(ctx context.Context, db *sql.DB, agentID, updatedAt string) error {
+	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO managed_crash_recovery(agent_id,updated_at) VALUES(?,?)`, agentID, updatedAt)
+	return err
+}
+
+func managedCrashRecoveryQuery(ctx context.Context, db *sql.DB, agentID string) (*ManagedCrashRecoveryState, error) {
+	var state ManagedCrashRecoveryState
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(retry_at,'') FROM managed_crash_recovery WHERE agent_id=?`, agentID).Scan(&state.RetryAt)
+	return &state, err
+}
+
+func terminalizeManagedCrashOperationTx(ctx context.Context, db *sql.DB, operationID, now, code, message string) error {
+	if operationID == "" {
+		return nil
+	}
+	_, err := db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code=?,terminal_message=? WHERE operation_id=? AND state='pending'`, now, formatTimestamp(parseTimestamp(now).Add(24*time.Hour)), code, message, operationID)
+	return err
+}
+
+func markManagedCrashReadyTx(ctx context.Context, db *sql.DB, agentID, now string, _ time.Time) error {
+	if err := ensureManagedCrashRecoveryTx(ctx, db, agentID, now); err != nil {
+		if strings.Contains(err.Error(), "no such table: managed_crash_recovery") {
+			return nil
+		}
+		return err
+	}
+	_, err := db.ExecContext(ctx, `UPDATE managed_crash_recovery SET retry_at=NULL,updated_at=? WHERE agent_id=?`, now, agentID)
+	return err
 }
 
 func (s *Store) MarkManagedFailed(ctx context.Context, agentID, code, message string) error {

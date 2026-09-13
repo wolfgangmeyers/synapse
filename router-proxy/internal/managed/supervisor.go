@@ -789,13 +789,26 @@ func (m *Manager) recordReadyBindingProcessExitInLane(binding *managedBinding, f
 		return
 	}
 	// A hard parent exit cannot carry a trustworthy child terminal event.
-	// Reconcile an in-flight native parent compaction before the public failure
-	// transition, then archive every live child under this exact fence.
+	// Reconcile an in-flight native parent compaction before persisting the
+	// bounded retry, then archive every live child under this exact fence.
 	_, _ = m.store.ReconcileManagedParentCompaction(context.Background(), fence, false)
 	m.interruptBuiltinToolInvocations(binding, fence)
 	_ = m.store.InterruptManagedParentWork(context.Background(), fence)
 	_, _ = m.store.RecordManagedParentProcessLost(context.Background(), fence)
-	_ = m.store.MarkManagedFailed(context.Background(), binding.agentID, "PROCESS_EXITED", message)
+	if _, err := m.store.RecordManagedUnexpectedExit(context.Background(), fence, binding.operationID, message); err != nil {
+		// Old focused schemas have no crash-recovery table. Keep their existing
+		// terminal behavior while current production schemas use the retry row.
+		if errors.Is(err, store.ErrManagedCrashRecoveryUnavailable) {
+			_ = m.store.MarkManagedFailed(context.Background(), binding.agentID, "PROCESS_EXITED", message)
+		} else {
+			// Preserve the exact binding when a current-schema write fails. A
+			// later reconciliation can retry without losing the runtime fence.
+			binding.serial.Lock()
+			binding.retainBinding = true
+			binding.serial.Unlock()
+			return
+		}
+	}
 	binding.serial.Lock()
 	binding.reaped = true
 	binding.serial.Unlock()

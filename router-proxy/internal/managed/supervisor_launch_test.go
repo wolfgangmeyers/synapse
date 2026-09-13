@@ -788,11 +788,14 @@ func TestManagerMarksReapedManagedProcessFailed(t *testing.T) {
 	for {
 		agent, readErr := durable.ManagedAgent(ctx, "reaped")
 		require.NoError(t, readErr)
-		if agent.LifecycleState == "failed" {
-			require.Equal(t, "failed", agent.ActivityState)
+		if agent.ActivityState == "stopped" {
+			require.Equal(t, "running", agent.LifecycleState)
 			require.Equal(t, "PROCESS_EXITED", agent.LastErrorCode)
 			require.False(t, agent.AcceptingPrompts)
-			require.False(t, agent.SlotHeld)
+			require.True(t, agent.SlotHeld)
+			retry, retryErr := durable.ManagedCrashRecovery(ctx, agent.AgentID)
+			require.NoError(t, retryErr)
+			require.NotEmpty(t, retry.RetryAt)
 			break
 		}
 		if time.Now().After(deadline) {
