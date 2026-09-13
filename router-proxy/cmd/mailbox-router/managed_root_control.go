@@ -21,7 +21,7 @@ const managedRootControlRunner = "managed_root_control.py"
 // directory; it receives a request ID and full fence so it can reconcile a
 // prior external action instead of replaying an uncertain mutation.
 type mailboxRouterRootControlExecutor struct {
-	python, toolsDir, managedHome string
+	python, toolsDir, managedHome, routerURL string
 }
 
 type managedRootControlRunnerRequest struct {
@@ -51,7 +51,10 @@ type managedRootControlRunnerResult struct {
 	Details                                  map[string]any
 }
 
-func newMailboxRouterRootControlExecutor(managedHome string) (mailboxRouterRootControlExecutor, error) {
+func newMailboxRouterRootControlExecutor(config managed.Config) (mailboxRouterRootControlExecutor, error) {
+	if err := managed.ValidateManagedRouterURL(config.RouterURL); err != nil {
+		return mailboxRouterRootControlExecutor{}, fmt.Errorf("managed root control router URL: %w", err)
+	}
 	toolsDir, err := supervisorToolsDirectory()
 	if err != nil {
 		return mailboxRouterRootControlExecutor{}, err
@@ -60,13 +63,14 @@ func newMailboxRouterRootControlExecutor(managedHome string) (mailboxRouterRootC
 	if python == "" {
 		python = "python3"
 	}
+	managedHome := config.ManagedHome
 	if configured := os.Getenv("MECHA_MANAGED_ROOT_CONTROL_HOME"); configured != "" {
 		managedHome = configured
 	}
 	if managedHome == "" {
 		return mailboxRouterRootControlExecutor{}, errors.New("managed root control home is required")
 	}
-	return mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: managedHome}, nil
+	return mailboxRouterRootControlExecutor{python: python, toolsDir: toolsDir, managedHome: managedHome, routerURL: config.RouterURL}, nil
 }
 
 func supervisorToolsDirectory() (string, error) {
@@ -113,7 +117,11 @@ func (e mailboxRouterRootControlExecutor) run(ctx context.Context, mode string, 
 	if err != nil {
 		return managed.RootControlHandlerResult{}, err
 	}
+	if err := managed.ValidateManagedRouterURL(e.routerURL); err != nil {
+		return managed.RootControlHandlerResult{}, fmt.Errorf("managed root control router URL: %w", err)
+	}
 	command := exec.CommandContext(ctx, e.python, filepath.Join(e.toolsDir, managedRootControlRunner), mode, "--home", e.managedHome)
+	command.Env = managedRootControlEnvironment(e.routerURL)
 	command.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
@@ -138,6 +146,16 @@ func (e mailboxRouterRootControlExecutor) run(ctx context.Context, mode string, 
 		return managed.RootControlHandlerResult{}, errors.New("managed root control runner returned an incomplete error")
 	}
 	return managed.RootControlHandlerResult{Status: result.Status, Content: result.Content, Details: result.Details, ErrorCode: result.ErrorCode, ErrorMessage: result.ErrorMessage}, nil
+}
+
+func managedRootControlEnvironment(routerURL string) []string {
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "MECHA_ROUTER_URL=") {
+			environment = append(environment, value)
+		}
+	}
+	return append(environment, "MECHA_ROUTER_URL="+routerURL)
 }
 
 func truncateRootControlDetail(value string) string {

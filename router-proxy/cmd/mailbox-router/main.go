@@ -170,7 +170,7 @@ func main() {
 			_ = durable.Close()
 			log.Fatal(manifestErr)
 		}
-		rootExecutor, rootErr := newMailboxRouterRootControlExecutor(options.managed.ManagedHome)
+		rootExecutor, rootErr := newMailboxRouterRootControlExecutor(options.managed)
 		if rootErr != nil {
 			_, _ = attachmentsStore.Sweep(nil)
 			_ = durable.Close()
