@@ -316,6 +316,13 @@ func (s *Store) ReserveManagedReset(ctx context.Context, reservation ManagedRese
 				return &ManagedResetConflictError{AgentID: reservation.AgentID}
 			}
 		}
+		now := formatTimestamp(s.clock.Now())
+		// Explicit reset admission is the reset boundary for crash policy. Keep
+		// the clear in this transaction so a failed write cannot strand an
+		// admitted lifecycle action that replay would only return unchanged.
+		if err := s.clearManagedCrashHistoryTx(ctx, s.db, reservation.AgentID, now); err != nil {
+			return err
+		}
 		if err := insertManagedOperation(ctx, s.db, reservation.Operation); err != nil {
 			return err
 		}
@@ -323,7 +330,6 @@ func (s *Store) ReserveManagedReset(ctx context.Context, reservation ManagedRese
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO managed_lifecycle_actions (action_id,operation_id,agent_id,kind,source,parent_action_id,retry_of,execution_owner,state,stage,source_pi_session_id,source_session_epoch,source_process_pid,source_process_start_marker,source_process_incarnation,source_runtime_generation,source_manifest_revision,source_manifest_hash,target_pi_session_id,target_session_epoch,target_process_pid,target_process_start_marker,target_process_incarnation,target_runtime_generation,target_manifest_revision,target_manifest_hash,planned_target_runtime_generation,target_artifact_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, resetActionInsertArgs(input)...); err != nil {
 			return err
 		}
-		now := formatTimestamp(s.clock.Now())
 		if err := s.cancelManagedControlRequestsTx(ctx, reservation.AgentID, "CANCELLED_BY_RESET", now); err != nil {
 			return err
 		}

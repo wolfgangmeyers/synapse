@@ -144,10 +144,16 @@ func (s *Store) ReserveManagedLifecycleRestart(ctx context.Context, reservation 
 				return &ManagedLifecycleConflictError{AgentID: reservation.AgentID}
 			}
 		}
+		now := formatTimestamp(s.clock.Now())
+		// Explicit restart admission is the reset boundary for crash policy. Keep
+		// the clear in this transaction so a failed write cannot strand an
+		// admitted lifecycle action that replay would only return unchanged.
+		if err := s.clearManagedCrashHistoryTx(ctx, s.db, reservation.AgentID, now); err != nil {
+			return err
+		}
 		if err := insertManagedOperation(ctx, s.db, reservation.Operation); err != nil {
 			return err
 		}
-		now := formatTimestamp(s.clock.Now())
 		args := []any{reservation.Operation.OperationID, reservation.Operation.OperationID, reservation.AgentID, "restart", reservation.Source, nullIfEmpty(reservation.ParentActionID), nil, "lifecycle", "admitted", "admission"}
 		args = append(args, lifecycleFenceValues(&reservation.SourceFence)...)
 		args = append(args, lifecycleFenceValues(nil)...)

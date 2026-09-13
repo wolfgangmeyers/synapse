@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -84,24 +83,49 @@ func TestManagedCrashPolicyBehavioralMatrix(t *testing.T) {
 	}
 }
 
-func TestManagedCrashPolicyMigration047Preserves046Rows(t *testing.T) {
+func TestManagedCrashPolicyMigration047ConvertsOnlyPending046Crash(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "router.db")
 	migrations := DefaultMigrations()
 	before, err := Open(ctx, path, Options{Migrations: migrations[:migrationIndex(t, migrations, "047_managed_crash_policy")]})
 	require.NoError(t, err)
-	agent := ManagedAgentRecord{AgentID: "legacy-crash", Name: "legacy-crash", SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "running", ActivityState: "idle", PiSessionID: "session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
-	op := ManagedOperation{OperationID: "legacy-crash-op", Method: "POST", CanonicalPath: "/v1/managed-agents", RequestID: "legacy-crash-op", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
-	require.NoError(t, before.ReserveManagedLaunch(ctx, agent, op))
+
+	seed := func(agentID string) {
+		agent := ManagedAgentRecord{AgentID: agentID, Name: agentID, SlotHeld: true, Cwd: "/tmp", SelectedModel: ManagedModel{Provider: "openai-codex", ID: "gpt-5.6-terra"}, DesiredState: "running", LifecycleState: "starting", ActivityState: "starting", PiSessionID: agentID + "-session", SessionEpoch: 1, ManifestRevision: 1, ManifestHash: testManifestHash}
+		op := ManagedOperation{OperationID: agentID + "-op", Method: "POST", CanonicalPath: "/v1/managed-agents/" + agentID, RequestID: agentID + "-op", CanonicalBodyHash: "body", State: "pending", ResponseStatus: 202, ResponseHeaders: map[string]string{}, ResponseBody: []byte(`{}`)}
+		require.NoError(t, before.ReserveManagedLaunch(ctx, agent, op))
+	}
+	seed("legacy-pending")
+	seed("legacy-planned")
+	seed("legacy-idle")
+	retryAt := "2026-09-13T12:00:01.000Z"
+	_, err = before.db.Exec(`UPDATE managed_agents SET lifecycle_state='running',activity_state='stopped',accepting_prompts=0,slot_held=1,last_error_code='PROCESS_EXITED',last_error_message='unexpected',last_error_at=?,updated_at=? WHERE agent_id='legacy-pending'`, "2026-09-13T12:00:00.000Z", retryAt)
+	require.NoError(t, err)
+	_, err = before.db.Exec(`UPDATE managed_agents SET lifecycle_state='restarting',activity_state='stopped',accepting_prompts=0,slot_held=1,last_error_code='PROCESS_STOP_FAILED',last_error_message='planned',last_error_at=?,updated_at=? WHERE agent_id='legacy-planned'`, "2026-09-13T12:00:00.000Z", retryAt)
+	require.NoError(t, err)
+	_, err = before.db.Exec(`UPDATE managed_agents SET lifecycle_state='running',activity_state='idle',accepting_prompts=1,slot_held=1,last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,updated_at=? WHERE agent_id='legacy-idle'`, retryAt)
+	require.NoError(t, err)
+	for _, agentID := range []string{"legacy-pending", "legacy-planned", "legacy-idle"} {
+		_, err = before.db.Exec(`UPDATE managed_crash_recovery SET retry_at=? WHERE agent_id=?`, retryAt, agentID)
+		require.NoError(t, err)
+	}
 	require.NoError(t, before.Close())
+
 	after, err := Open(ctx, path, Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, after.Close()) })
-	var history string
-	var readySince sql.NullString
-	require.NoError(t, after.db.QueryRow(`SELECT crash_history,ready_since FROM managed_crash_recovery WHERE agent_id=?`, agent.AgentID).Scan(&history, &readySince))
-	require.Equal(t, "[]", history)
-	require.False(t, readySince.Valid)
+	for _, test := range []struct {
+		agentID string
+		history string
+	}{
+		{agentID: "legacy-pending", history: `["2026-09-13T12:00:00.000Z"]`},
+		{agentID: "legacy-planned", history: "[]"},
+		{agentID: "legacy-idle", history: "[]"},
+	} {
+		var history string
+		require.NoError(t, after.db.QueryRow(`SELECT crash_history FROM managed_crash_recovery WHERE agent_id=?`, test.agentID).Scan(&history))
+		require.Equal(t, test.history, history, test.agentID)
+	}
 }
 
 func TestManagedStartupCrashPolicyCountsFirstSecondAndThirdExit(t *testing.T) {
