@@ -272,9 +272,11 @@ func TestManagedRecurringReminderFiresOnceAcrossConcurrentSchedulersAndRetainsAf
 	}
 	require.Len(t, attempts, 1)
 	require.Len(t, outcomes, 1)
-	var messages, directAttempts int
+	var messages, conversationMessages, directAttempts int
 	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=?`, "reminder-managed-concurrent-0").Scan(&messages))
 	require.Equal(t, 1, messages)
+	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM conversation_messages WHERE message_id=?`, "reminder-managed-concurrent-0").Scan(&conversationMessages))
+	require.Equal(t, 1, conversationMessages)
 	snapshot, err := store.ResolveMessageTarget(ctx, outcomes[0].Message.ID)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
@@ -287,6 +289,9 @@ func TestManagedRecurringReminderFiresOnceAcrossConcurrentSchedulersAndRetainsAf
 	require.NoError(t, store.AcknowledgeManagedDirect(ctx, *direct, "delivery-receipt", true))
 	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM managed_direct_delivery_attempts WHERE message_id=?`, direct.MessageID).Scan(&directAttempts))
 	require.Zero(t, directAttempts)
+	var remainingMessages int
+	require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=?`, direct.MessageID).Scan(&remainingMessages))
+	require.Zero(t, remainingMessages)
 	reminder, err := store.ReminderFor(ctx, request.ID)
 	require.NoError(t, err)
 	require.Equal(t, "scheduled", reminder.State)

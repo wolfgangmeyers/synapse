@@ -98,7 +98,18 @@ func TestRecoverManagedRootColdStartResumesExactSessionAndPublishesAfterReadines
 	action, err := durable.ManagedRootRecoveryAction(ctx, old.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, "ready", action.Stage)
+	require.Equal(t, oldFence.ProcessPID, action.OldProcessPID)
+	require.Equal(t, oldFence.ProcessStartMarker, action.OldProcessStartMarker)
 	require.Equal(t, oldFence.ProcessIncarnation, action.OldProcessIncarnation)
+	require.Equal(t, oldFence.RuntimeGeneration, action.OldRuntimeGeneration)
+	require.Equal(t, 902, action.TargetProcessPID)
+	require.Equal(t, "new-start", action.TargetProcessStartMarker)
+	require.Equal(t, "new-inc", action.TargetProcessIncarnation)
+	require.Equal(t, "target-runtime", action.TargetRuntimeGeneration)
+	require.NotEqual(t, action.OldProcessPID, action.TargetProcessPID)
+	require.NotEqual(t, action.OldProcessStartMarker, action.TargetProcessStartMarker)
+	require.NotEqual(t, action.OldProcessIncarnation, action.TargetProcessIncarnation)
+	require.NotEqual(t, action.OldRuntimeGeneration, action.TargetRuntimeGeneration)
 }
 
 func TestRecoverManagedRootColdStartDoesNotStartAfterReadyTargetOnSecondRouter(t *testing.T) {
