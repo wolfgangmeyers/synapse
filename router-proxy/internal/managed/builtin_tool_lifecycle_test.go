@@ -56,6 +56,15 @@ func (r *builtinLifecycleReceiverRPC) SetBuiltinToolLifecycleEventHandler(handle
 	r.handler = handler
 }
 
+type builtinLifecycleTerminalReceiverRPC struct {
+	*builtinLifecycleReceiverRPC
+	terminalHandler func(error)
+}
+
+func (r *builtinLifecycleTerminalReceiverRPC) SetRPCReaderTerminalHandler(handler func(error)) {
+	r.terminalHandler = handler
+}
+
 func TestBuiltinToolLifecycleCreatesOneEntryAndBuffersEndBeforeStart(t *testing.T) {
 	ctx := context.Background()
 	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
@@ -80,6 +89,50 @@ func TestBuiltinToolLifecycleCreatesOneEntryAndBuffersEndBeforeStart(t *testing.
 	page, err = durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
 	require.NoError(t, err)
 	require.Len(t, page.Entries, 1, "duplicate terminal frames must not create a second Complete entry")
+}
+
+func TestBuiltinToolLifecycleReaderEOFInterruptsExactFenceAndRejectsLateEnd(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	bridge := &builtinLifecycleTerminalReceiverRPC{builtinLifecycleReceiverRPC: &builtinLifecycleReceiverRPC{goalProjectionRPC: rpc}}
+	binding.rpc = bridge
+	manager.installBuiltinToolLifecycleReceiver(binding)
+	require.NotNil(t, bridge.handler)
+	require.NotNil(t, bridge.terminalHandler)
+
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "start", ToolCallID: "call-1", ToolName: "write", Watermark: 1})
+	bridge.terminalHandler(io.EOF)
+
+	require.Eventually(t, func() bool {
+		page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+		return err == nil && len(page.Entries) == 1 && page.Entries[0].Presentation.Outcome == "interrupted"
+	}, time.Second, time.Millisecond)
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "end", ToolCallID: "call-1", ToolName: "write", Watermark: 2})
+	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, "interrupted", page.Entries[0].Presentation.Outcome)
+}
+
+func TestBuiltinToolLifecycleSettledInterruptsAndRejectsLateEnd(t *testing.T) {
+	ctx := context.Background()
+	manager, durable, binding, fence, rpc := readyGoalProjectionFixture(t)
+	bridge := &builtinLifecycleReceiverRPC{goalProjectionRPC: rpc}
+	binding.rpc = bridge
+	manager.installBuiltinToolLifecycleReceiver(binding)
+	require.NotNil(t, bridge.handler)
+
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "start", ToolCallID: "call-1", ToolName: "read", Watermark: 1})
+	manager.handleParentActivityEvent(binding, map[string]any{"sequence": int64(1), "state": "idle"})
+	require.Eventually(t, func() bool {
+		page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+		return err == nil && len(page.Entries) == 1 && page.Entries[0].Presentation.Outcome == "interrupted"
+	}, time.Second, time.Millisecond)
+	bridge.handler(BuiltinToolLifecycleEvent{Phase: "end", ToolCallID: "call-1", ToolName: "read", Watermark: 2})
+	page, err := durable.ManagedHistoryPage(ctx, fence.AgentID, "complete", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Entries, 1)
+	require.Equal(t, "interrupted", page.Entries[0].Presentation.Outcome)
 }
 
 func TestBuiltinToolLifecycleInterruptsExactCurrentBinding(t *testing.T) {

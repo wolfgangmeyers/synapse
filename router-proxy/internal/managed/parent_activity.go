@@ -24,6 +24,14 @@ func (m *Manager) handleParentActivityEvent(binding *managedBinding, event map[s
 	if binding == nil {
 		return
 	}
+	// This runs in Pi stdout order before a following terminal tool frame can
+	// claim success. The later asynchronous activity projection remains
+	// unchanged; this is only the missing-telemetry fallback for builtins.
+	_, sequenceOK := readinessInteger(event["sequence"])
+	state, stateOK := event["state"].(string)
+	if sequenceOK && stateOK && state == "idle" {
+		m.reconcileBuiltinToolTelemetryMissing(binding)
+	}
 	m.startManagedTask(func() {
 		binding.lane.serial.Lock()
 		defer binding.lane.serial.Unlock()

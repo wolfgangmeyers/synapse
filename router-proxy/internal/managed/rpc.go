@@ -149,6 +149,13 @@ type BuiltinToolLifecycleRPC interface {
 	SetBuiltinToolLifecycleEventHandler(func(BuiltinToolLifecycleEvent))
 }
 
+// RPCReaderTerminalRPC reports a terminal stdout reader failure. It is not a
+// process-exit signal: callers may reconcile telemetry without changing the
+// process lifecycle.
+type RPCReaderTerminalRPC interface {
+	SetRPCReaderTerminalHandler(func(error))
+}
+
 // QualifiedGoalActivityRPC remains the existing general qualified-activity
 // seam. Native builtin completion uses it only after its terminal lifecycle
 // transition commits, with the durable Complete entry ID as its identity.
@@ -283,6 +290,8 @@ type rpcClient struct {
 	parentCompactionNotificationHandler func(map[string]any)
 	parentActivityHandler               func(map[string]any)
 	builtinToolLifecycleHandler         func(BuiltinToolLifecycleEvent)
+	readerTerminalHandler               func(error)
+	readerTerminal                      error
 	suppressNextEvaluatorSettled        bool
 	rootResult                          *rootResultToken
 
@@ -302,13 +311,13 @@ func (c *rpcClient) readLoop() {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) > MaxRPCLineBytes {
-			c.terminalize(errors.New("RPC line exceeds 1 MiB"))
+			c.readerTerminalize(errors.New("RPC line exceeds 1 MiB"))
 			return
 		}
 		decoded, err := strictJSON(line)
 		raw, ok := decoded.(map[string]any)
 		if err != nil || !ok {
-			c.terminalize(errors.New("Pi emitted malformed RPC JSON"))
+			c.readerTerminalize(errors.New("Pi emitted malformed RPC JSON"))
 			return
 		}
 		if id, ok := raw["id"].(string); ok {
@@ -465,16 +474,14 @@ func (c *rpcClient) readLoop() {
 					c.signalLocked()
 					c.mu.Unlock()
 					if parentActivityCallback != nil {
-						go parentActivityCallback(parentActivity)
+						parentActivityCallback(parentActivity)
 					}
 					continue
 				}
 			}
 			if parentActivityCandidate && c.settlementToken == nil && parentActivityCallback != nil {
 				c.mu.Unlock()
-				if parentActivityCallback != nil {
-					go parentActivityCallback(parentActivity)
-				}
+				parentActivityCallback(parentActivity)
 				continue
 			}
 			// A controlled restart owns its agent_settled receipt. Keep that
@@ -494,13 +501,13 @@ func (c *rpcClient) readLoop() {
 			return
 		}
 		if parentActivityCallback != nil {
-			go parentActivityCallback(parentActivity)
+			parentActivityCallback(parentActivity)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		c.terminalize(err)
+		c.readerTerminalize(err)
 	} else {
-		c.terminalize(io.EOF)
+		c.readerTerminalize(io.EOF)
 	}
 }
 
@@ -511,6 +518,25 @@ func (c *rpcClient) signalLocked() {
 	}
 }
 func (c *rpcClient) terminalize(err error) { c.mu.Lock(); c.terminalizeLocked(err); c.mu.Unlock() }
+
+// readerTerminalize is deliberately separate from Close: EOF says the Pi
+// telemetry stream ended, but an intentional client close is not evidence
+// about the still-owned process.
+func (c *rpcClient) readerTerminalize(err error) {
+	c.mu.Lock()
+	if c.terminal != nil {
+		c.mu.Unlock()
+		return
+	}
+	c.readerTerminal = err
+	c.terminalizeLocked(err)
+	handler := c.readerTerminalHandler
+	c.mu.Unlock()
+	if handler != nil {
+		handler(err)
+	}
+}
+
 func (c *rpcClient) terminalizeLocked(err error) {
 	if c.terminal != nil {
 		return
@@ -1599,6 +1625,16 @@ func (c *rpcClient) SetParentActivityEventHandler(handler func(map[string]any)) 
 	c.mu.Lock()
 	c.parentActivityHandler = handler
 	c.mu.Unlock()
+}
+
+func (c *rpcClient) SetRPCReaderTerminalHandler(handler func(error)) {
+	c.mu.Lock()
+	c.readerTerminalHandler = handler
+	terminal := c.readerTerminal
+	c.mu.Unlock()
+	if handler != nil && terminal != nil {
+		handler(terminal)
+	}
 }
 
 func (c *rpcClient) ArmRootControlResult(requestID, entryID string) (RootControlAppendToken, error) {
