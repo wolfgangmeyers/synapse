@@ -73,11 +73,22 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		if agent == nil {
 			continue
 		}
-		cleanupOnly, cleanupErr := m.cleanupFailedColdRecoveryTarget(ctx, agent.AgentID)
+		cleanupOnly, cleanupErr := m.cleanupFailedProcessStopAgent(ctx, agent)
+		if cleanupErr != nil {
+			var stale *store.ManagedRestartStaleError
+			if !errors.As(cleanupErr, &stale) {
+				return cleanupErr
+			}
+			continue
+		}
+		if cleanupOnly || agent.DesiredState != "running" {
+			continue
+		}
+		cleanupOnly, cleanupErr = m.cleanupFailedColdRecoveryTarget(ctx, agent.AgentID)
 		if cleanupErr != nil {
 			return cleanupErr
 		}
-		if cleanupOnly || agent.DesiredState != "running" {
+		if cleanupOnly {
 			continue
 		}
 		if _, bound := m.bindingFor(agent.AgentID); bound {
@@ -100,6 +111,37 @@ func (m *Manager) RecoverManagedRootColdStarts(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// cleanupFailedProcessStopAgent handles only a failed desired-running row
+// whose exact old process identity is retained for cleanup. Unsafe probes stay
+// retained so a later owner can retry without signalling another process.
+func (m *Manager) cleanupFailedProcessStopAgent(ctx context.Context, agent *store.ManagedAgentRecord) (bool, error) {
+	if agent == nil || agent.DesiredState != "running" || agent.LifecycleState != "failed" || agent.LastErrorCode != "PROCESS_STOP_FAILED" {
+		return false, nil
+	}
+	fence := storedAgentFence(agent)
+	if !validRestartFence(fence) {
+		return true, nil
+	}
+	identity := oldFenceIdentity(fence)
+	switch m.processOps.Probe(identity).State {
+	case ProcessAbsent:
+	case ProcessOwned:
+		if !m.reapRestartGroup(ctx, identity, nil) {
+			return true, nil
+		}
+	default:
+		return true, nil
+	}
+	if err := m.store.PrepareManagedFailedProcessStopRecovery(ctx, fence); err != nil {
+		return true, err
+	}
+	agent.LifecycleState = "running"
+	agent.ActivityState = "stopped"
+	agent.AcceptingPrompts = false
+	agent.SlotHeld = true
+	return false, nil
 }
 
 // cleanupFailedColdRecoveryTarget is a cleanup-only startup pass. A failed

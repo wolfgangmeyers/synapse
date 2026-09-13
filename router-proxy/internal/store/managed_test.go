@@ -203,6 +203,37 @@ func TestRecordManagedPreReadinessProcessExitUsesExactFenceAndKeepsLaunchReceipt
 	require.Equal(t, before+1, after)
 }
 
+func TestMarkManagedFailedForFenceRetainsIdentityAndRejectsStaleFence(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	require.NoError(t, durable.MarkManagedFailedForFence(ctx, fence, "PROCESS_STOP_FAILED", "stop failed"))
+	stored, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, fence.ProcessPID, stored.ProcessPID)
+	require.Equal(t, "PROCESS_STOP_FAILED", stored.LastErrorCode)
+	stale := fence
+	stale.ProcessIncarnation = "replacement"
+	require.ErrorAs(t, durable.MarkManagedFailedForFence(ctx, stale, "PROCESS_STOP_FAILED", "stale"), new(*ManagedRestartStaleError))
+	require.NoError(t, durable.PrepareManagedFailedProcessStopRecovery(ctx, fence))
+	stored, err = durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "running", stored.LifecycleState)
+	require.Equal(t, "stopped", stored.ActivityState)
+	require.False(t, stored.AcceptingPrompts)
+	require.True(t, stored.SlotHeld)
+}
+
+func TestMarkManagedFailedForFenceAndOperationIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	durable, fence := readinessSourceFixture(t)
+	require.Error(t, durable.MarkManagedFailedForFenceAndOperation(ctx, fence, "missing-operation", "PROCESS_STOP_FAILED", "stop failed"))
+	stored, err := durable.ManagedAgent(ctx, fence.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "starting", stored.LifecycleState)
+	require.Equal(t, "starting", stored.ActivityState)
+	require.True(t, stored.SlotHeld)
+}
+
 func TestMarkManagedStoppedClearsLiveProjectionAndSlot(t *testing.T) {
 	ctx := context.Background()
 	durable, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"), Options{})

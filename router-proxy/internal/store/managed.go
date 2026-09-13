@@ -3740,6 +3740,86 @@ func (s *Store) MarkManagedFailed(ctx context.Context, agentID, code, message st
 	})
 }
 
+// MarkManagedFailedForFence records a failure only for the exact runtime that
+// observed it. The identity remains available for a later cleanup retry.
+func (s *Store) MarkManagedFailedForFence(ctx context.Context, fence ManagedRuntimeFence, code, message string) error {
+	return s.markManagedFailedForFence(ctx, fence, "", code, message)
+}
+
+// MarkManagedFailedForFenceAndOperation records the fenced agent failure and
+// terminalizes its launch operation in one immediate transaction. A failed
+// operation write rolls back the agent transition, so a starting row retains
+// its owner until both durable records agree.
+func (s *Store) MarkManagedFailedForFenceAndOperation(ctx context.Context, fence ManagedRuntimeFence, operationID, code, message string) error {
+	return s.markManagedFailedForFence(ctx, fence, operationID, code, message)
+}
+
+func (s *Store) markManagedFailedForFence(ctx context.Context, fence ManagedRuntimeFence, operationID, code, message string) error {
+	if !validManagedRuntimeFence(fence) || code == "" || message == "" {
+		return errors.New("managed fenced failure is invalid")
+	}
+	if len(code) > 128 {
+		code = code[:128]
+	}
+	message = RedactedManagedDiagnostic(message)
+	if len(message) > 2000 {
+		message = message[:2000]
+	}
+	return s.runImmediate(ctx, func() error {
+		now := formatTimestamp(s.clock.Now())
+		args := append([]any{code, message, now, now}, managedFenceValues(fence)...)
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='failed',activity_state='failed',accepting_prompts=0,slot_held=0,last_error_code=?,last_error_message=?,last_error_at=?,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state!='failed'`, args...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		if operationID != "" {
+			result, err = s.db.ExecContext(ctx, `UPDATE managed_http_operations SET state='terminal',terminal_at=?,expires_at=?,terminal_code=?,terminal_message=? WHERE operation_id=? AND state='pending'`, now, formatTimestamp(s.clock.Now().Add(24*time.Hour)), code, message, operationID)
+			if err != nil {
+				return err
+			}
+			changed, err = result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				return errors.New("managed launch operation is not pending")
+			}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
+// PrepareManagedFailedProcessStopRecovery makes an exact failed cleanup fence
+// eligible for the existing cold recovery path after process absence is proven.
+func (s *Store) PrepareManagedFailedProcessStopRecovery(ctx context.Context, fence ManagedRuntimeFence) error {
+	if !validManagedRuntimeFence(fence) {
+		return errors.New("managed process recovery fence is invalid")
+	}
+	return s.runImmediate(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, `UPDATE managed_agents SET lifecycle_state='running',activity_state='stopped',accepting_prompts=0,slot_held=1,updated_at=? WHERE `+managedFenceWhere("")+` AND desired_state='running' AND lifecycle_state='failed' AND last_error_code='PROCESS_STOP_FAILED'`, append([]any{formatTimestamp(s.clock.Now())}, managedFenceValues(fence)...)...)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return &ManagedRestartStaleError{AgentID: fence.AgentID}
+		}
+		_, err = s.bumpManagedProjectionVersion(ctx)
+		return err
+	})
+}
+
 // MarkManagedStopped records a planned process stop while retaining the
 // desired-running record for later recovery. The row must stop advertising a
 // live process as soon as its owned process has been reaped.
