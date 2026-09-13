@@ -252,6 +252,12 @@ func (o *nativeLifecycleRecordingOps) SignalVerifiedProcessGroup(identity manage
 	o.mu.Unlock()
 	return o.base.SignalVerifiedProcessGroup(identity, signal)
 }
+func (o *nativeLifecycleRecordingOps) SignalVerifiedProcessGroupAfterLeaderExit(identity managed.ProcessIdentity) error {
+	o.mu.Lock()
+	o.signals = append(o.signals, identity)
+	o.mu.Unlock()
+	return o.base.SignalVerifiedProcessGroupAfterLeaderExit(identity)
+}
 func (o *nativeLifecycleRecordingOps) WaitForProcessGroupEmpty(ctx context.Context, identity managed.ProcessIdentity, done <-chan error) managed.ProcessProbe {
 	return o.base.WaitForProcessGroupEmpty(ctx, identity, done)
 }
@@ -753,6 +759,12 @@ func (o *listenRecoveryProcessOps) CloseProcessInput(process managed.Process) er
 	return nil
 }
 func (o *listenRecoveryProcessOps) SignalVerifiedProcessGroup(identity managed.ProcessIdentity, _ syscall.Signal) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.signals = append(o.signals, identity)
+	return nil
+}
+func (o *listenRecoveryProcessOps) SignalVerifiedProcessGroupAfterLeaderExit(identity managed.ProcessIdentity) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.signals = append(o.signals, identity)

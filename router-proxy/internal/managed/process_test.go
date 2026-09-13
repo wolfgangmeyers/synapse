@@ -239,21 +239,16 @@ func TestExecProcessStopRetryAfterDeadlineDoesNotSignalLeaderlessGroup(t *testin
 	short, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	firstErr := handshake.process.Stop(short)
 	cancel()
-	var cleanupErr *ProcessCleanupError
-	require.ErrorAs(t, firstErr, &cleanupErr)
+	require.NoError(t, firstErr)
 	requireHandshake(t, handshake.reader, "leader-term")
+	require.Equal(t, ProcessAbsent, DefaultProcessGroupOps().Probe(handshake.process.identity).State)
 
+	// A later Stop call can observe the already-absent group, but it cannot
+	// inherit the first call's TERM proof to signal a leaderless group.
 	long, cancel := context.WithTimeout(context.Background(), time.Second)
 	secondErr := handshake.process.Stop(long)
 	cancel()
-	cleanupErr = nil
-	require.ErrorAs(t, secondErr, &cleanupErr)
-	require.Equal(t, ProcessPresent, cleanupErr.State)
-	_, err := handshake.control.Write([]byte("release\n"))
-	require.NoError(t, err)
-	requireHandshake(t, handshake.reader, "desc-exit")
-	// The descendant's exit handshake is the deterministic proof that the
-	// leaderless group eventually drained after Stop correctly refused a signal.
+	require.NoError(t, secondErr)
 }
 
 func TestExecProcessStopDoesNotSignalUnownedGroup(t *testing.T) {
@@ -348,13 +343,8 @@ func TestExecProcessStopSerializesConcurrentAttempts(t *testing.T) {
 		cancel()
 	}()
 	firstErr := <-firstDone
-	var cleanupErr *ProcessCleanupError
-	require.ErrorAs(t, firstErr, &cleanupErr)
-	_, err := handshake.control.Write([]byte("release\n"))
-	require.NoError(t, err)
-	requireHandshake(t, handshake.reader, "desc-exit")
+	require.NoError(t, firstErr)
+	require.Equal(t, ProcessAbsent, DefaultProcessGroupOps().Probe(handshake.process.identity).State)
 	secondErr := <-secondDone
-	cleanupErr = nil
-	require.ErrorAs(t, secondErr, &cleanupErr)
-	require.Equal(t, ProcessPresent, cleanupErr.State)
+	require.NoError(t, secondErr)
 }

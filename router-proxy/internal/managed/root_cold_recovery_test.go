@@ -46,6 +46,12 @@ func (o *coldRecoveryOps) SignalVerifiedProcessGroup(identity ProcessIdentity, _
 	o.signals = append(o.signals, identity)
 	return nil
 }
+func (o *coldRecoveryOps) SignalVerifiedProcessGroupAfterLeaderExit(identity ProcessIdentity) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.signals = append(o.signals, identity)
+	return nil
+}
 func (o *coldRecoveryOps) WaitForProcessGroupEmpty(_ context.Context, identity ProcessIdentity, _ <-chan error) ProcessProbe {
 	o.mu.Lock()
 	defer o.mu.Unlock()

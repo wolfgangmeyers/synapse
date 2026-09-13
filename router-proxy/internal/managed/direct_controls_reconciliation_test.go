@@ -18,6 +18,9 @@ func (directControlProbeOps) CloseProcessInput(Process) error { return nil }
 func (directControlProbeOps) SignalVerifiedProcessGroup(ProcessIdentity, syscall.Signal) error {
 	return nil
 }
+func (directControlProbeOps) SignalVerifiedProcessGroupAfterLeaderExit(ProcessIdentity) error {
+	return nil
+}
 func (ops directControlProbeOps) WaitForProcessGroupEmpty(context.Context, ProcessIdentity, <-chan error) ProcessProbe {
 	return ProcessProbe{State: ops.state}
 }

@@ -156,6 +156,10 @@ type ProcessGroupOps interface {
 	Probe(ProcessIdentity) ProcessProbe
 	CloseProcessInput(Process) error
 	SignalVerifiedProcessGroup(ProcessIdentity, syscall.Signal) error
+	// SignalVerifiedProcessGroupAfterLeaderExit escalates a group whose leader
+	// was already proven owned and terminated during this stop attempt. It may
+	// signal only a still-present leaderless group, never a mismatched target.
+	SignalVerifiedProcessGroupAfterLeaderExit(ProcessIdentity) error
 	WaitForProcessGroupEmpty(context.Context, ProcessIdentity, <-chan error) ProcessProbe
 }
 
@@ -241,6 +245,8 @@ type execProcess struct {
 	waitResult     chan error
 	stopGateOnce   sync.Once
 	stopGate       chan struct{}
+	stopStateMu    sync.Mutex
+	termSent       bool
 }
 
 func (p *execProcess) Identity() ProcessIdentity { return p.identity }
@@ -292,7 +298,18 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	if err := stopCtx.Err(); err != nil {
 		return newProcessCleanupError("stop context ended before probing", ProcessUnknown, err)
 	}
+	p.stopStateMu.Lock()
+	termSent := p.termSent
+	p.stopStateMu.Unlock()
 	probe := ops.Probe(p.identity)
+	if termSent {
+		if probe.State == ProcessAbsent {
+			return p.awaitProcessWait(stopCtx, p.startWaiter(), probe.State)
+		}
+		// A later Stop call cannot inherit the prior call's TERM proof. This
+		// keeps a leaderless ProcessPresent result from authorizing a new KILL.
+		return newProcessCleanupError("process cleanup requires the original stop attempt", probe.State, nil)
+	}
 	if err := stopCtx.Err(); err != nil {
 		return newProcessCleanupError("stop context ended after probing", probe.State, err)
 	}
@@ -308,6 +325,9 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	if err := signalProcessGroupWithContext(stopCtx, ops, p.identity, syscall.SIGTERM); err != nil {
 		return err
 	}
+	p.stopStateMu.Lock()
+	p.termSent = true
+	p.stopStateMu.Unlock()
 	done := p.startWaiter()
 
 	graceCtx, cancel := processGraceContext(stopCtx)
@@ -319,10 +339,21 @@ func (p *execProcess) Stop(ctx context.Context) error {
 	if err := stopCtx.Err(); err != nil {
 		return newProcessCleanupError("stop context ended before escalation", probe.State, err)
 	}
-	// Re-probe immediately before escalation. ProcessPresent means the leader
-	// is gone and the stored identity cannot authorize a group signal.
-	if err := signalProcessGroupWithContext(stopCtx, ops, p.identity, syscall.SIGKILL); err != nil {
-		return err
+	// The TERM sent under this invocation's Owned proof authorizes escalation.
+	// A leaderless ProcessPresent result cannot be re-proven as Owned, so use
+	// the explicit continuation seam. A still-live leader keeps the ordinary
+	// Owned signal path used by the existing bounded stop contract.
+	switch probe.State {
+	case ProcessOwned:
+		if err := signalProcessGroupWithContext(stopCtx, ops, p.identity, syscall.SIGKILL); err != nil {
+			return err
+		}
+	case ProcessPresent:
+		if err := signalProcessGroupAfterLeaderExitWithContext(stopCtx, ops, p.identity); err != nil {
+			return err
+		}
+	default:
+		return newProcessCleanupError("process identity is not owned for escalation", probe.State, nil)
 	}
 	probe = ops.WaitForProcessGroupEmpty(stopCtx, p.identity, done)
 	if probe.State != ProcessAbsent {
@@ -362,6 +393,16 @@ func processGraceContext(ctx context.Context) (context.Context, context.CancelFu
 	// Background callers still get an escalation bound, while cancellation is
 	// always inherited from the caller and the final wait uses that same context.
 	return context.WithTimeout(ctx, processStopInternalGrace)
+}
+
+func signalProcessGroupAfterLeaderExitWithContext(ctx context.Context, ops ProcessGroupOps, identity ProcessIdentity) error {
+	if err := ctx.Err(); err != nil {
+		return newProcessCleanupError("stop context ended before leaderless escalation", ProcessPresent, err)
+	}
+	if err := ops.SignalVerifiedProcessGroupAfterLeaderExit(identity); err != nil {
+		return newProcessCleanupError("leaderless process group signal failed", ProcessPresent, err)
+	}
+	return nil
 }
 
 func signalProcessGroupWithContext(ctx context.Context, ops ProcessGroupOps, identity ProcessIdentity, signal syscall.Signal) error {
@@ -456,6 +497,22 @@ func (ops defaultProcessGroupOps) SignalVerifiedProcessGroup(identity ProcessIde
 		return errors.New("managed process identity is not owned")
 	}
 	return signalOwnedProcessGroup(identity.PID, signal)
+}
+
+func (ops defaultProcessGroupOps) SignalVerifiedProcessGroupAfterLeaderExit(identity ProcessIdentity) error {
+	if ValidateIdentity(identity) != nil {
+		return errors.New("managed process identity is incomplete")
+	}
+	probe := ops.Probe(identity)
+	if probe.State == ProcessAbsent {
+		// The group can disappear between the bounded wait and this re-probe.
+		// That is already successful cleanup and must not become an error.
+		return nil
+	}
+	if probe.State != ProcessPresent {
+		return errors.New("managed process group is not a verified leaderless group")
+	}
+	return signalOwnedProcessGroup(identity.PID, syscall.SIGKILL)
 }
 
 func (ops defaultProcessGroupOps) WaitForProcessGroupEmpty(ctx context.Context, identity ProcessIdentity, leaderDone <-chan error) ProcessProbe {

@@ -81,6 +81,12 @@ func (o *resetProcessOps) SignalVerifiedProcessGroup(identity ProcessIdentity, _
 	o.signals = append(o.signals, identity)
 	return nil
 }
+func (o *resetProcessOps) SignalVerifiedProcessGroupAfterLeaderExit(identity ProcessIdentity) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.signals = append(o.signals, identity)
+	return nil
+}
 
 func (o *resetProcessOps) waitCount(pid int) int {
 	o.mu.Lock()
